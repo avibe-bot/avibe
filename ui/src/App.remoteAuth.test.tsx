@@ -187,6 +187,151 @@ describe('AuthGuard boot from the last confirmed outcome', () => {
     consoleError.mockRestore();
   });
 
+  describe('in the iPhone App, an instance that cannot be reached', () => {
+    const nativeBridge = {
+      contract: 1, platform: 'ios', shellVersion: 'test', capabilities: {},
+      call: vi.fn(), on: vi.fn(() => () => undefined),
+    };
+    const owner = { ...member, instance_role: 'owner' as const, capabilities: OWNER_INSTANCE_CAPABILITIES };
+    const SetupRoute = () => <div>setup wizard</div>;
+    const mountRoutes = () => render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/setup" element={<SetupRoute />} />
+          <Route path="/*" element={<AuthGuard><div>protected shell</div></AuthGuard>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const inTheApp = () => {
+      Object.defineProperty(window, 'avibeNative', { value: nativeBridge, configurable: true });
+    };
+    afterEach(() => {
+      Reflect.deleteProperty(window, 'avibeNative');
+      api.getAuthSession.mockReset();
+      api.getConfig.mockReset();
+    });
+
+    // The App shows the instance's last page from its cache; a check that
+    // cannot reach the instance (no network, a timeout, a 5xx such as a down
+    // tunnel's 530) is no answer, so the replayed shell stays and is checked
+    // again when the network comes back, never torn down to setup.
+    it.each([
+      ['no network', new TypeError('Failed to fetch')],
+      ['a down tunnel (530)', Object.assign(new Error('Request failed: /api/session (530)'), { status: 530 })],
+      ['a server error (503)', Object.assign(new Error('Request failed: /api/session (503)'), { status: 503 })],
+    ])('AUTH-SETUP-187 keeps the replayed shell on %s and checks again on reconnect', async (_name, failure) => {
+      await confirmOnce();
+      inTheApp();
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      api.getAuthSession.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
+      mountRoutes();
+      await act(async () => undefined);
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      expect(screen.queryByText('setup wizard')).toBeNull();
+      expect(readBootSession()).not.toBeNull();
+      const reads = api.getAuthSession.mock.calls.length;
+
+      api.getAuthSession.mockResolvedValueOnce(member);
+      await act(async () => { window.dispatchEvent(new Event('online')); });
+      await act(async () => undefined);
+      expect(api.getAuthSession.mock.calls.length).toBe(reads + 1);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      expect(screen.queryByText('setup wizard')).toBeNull();
+      consoleError.mockRestore();
+    });
+
+    it('AUTH-SETUP-188 keeps the owner\'s replayed shell when only the setup check could not reach the instance', async () => {
+      api.getAuthSession.mockResolvedValueOnce(owner);
+      api.getConfig.mockResolvedValueOnce({ mode: 'self_host', setup_state: { needs_setup: false } });
+      const first = mountRoutes();
+      expect(await screen.findByText('protected shell')).toBeTruthy();
+      first.unmount();
+      expect(readBootSession()).not.toBeNull();
+
+      inTheApp();
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // The session answers; the config read never reaches the instance.
+      api.getAuthSession.mockResolvedValue(owner);
+      api.getConfig.mockRejectedValueOnce(
+        Object.assign(new Error('Request failed: /api/config (530)'), { status: 530 }),
+      );
+      mountRoutes();
+      await act(async () => undefined);
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      expect(screen.queryByText('setup wizard')).toBeNull();
+      consoleError.mockRestore();
+    });
+
+    it('AUTH-SETUP-188 keeps the owner\'s shell across repeated unreachable checks, and answers a refusal already received', async () => {
+      api.getAuthSession.mockResolvedValueOnce(owner);
+      api.getConfig.mockResolvedValueOnce({ mode: 'self_host', setup_state: { needs_setup: false } });
+      const first = mountRoutes();
+      expect(await screen.findByText('protected shell')).toBeTruthy();
+      first.unmount();
+
+      inTheApp();
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const down = Object.assign(new Error('Request failed: /api/config (530)'), { status: 530 });
+      // The session answers, then the config read and the retried session
+      // read both cannot reach the instance; and again on the recheck.
+      api.getAuthSession
+        .mockResolvedValueOnce(owner).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce(owner).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      api.getConfig.mockRejectedValueOnce(down).mockRejectedValueOnce(down);
+      const app = mountRoutes();
+      await act(async () => undefined);
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      await act(async () => { window.dispatchEvent(new Event('online')); });
+      await act(async () => undefined);
+      await act(async () => undefined);
+      expect(screen.getByText('protected shell')).toBeTruthy();
+      expect(screen.queryByText('setup wizard')).toBeNull();
+      app.unmount();
+
+      // A refusal already received is answered, even if the retry then
+      // cannot reach the instance.
+      await confirmOnce();
+      api.getAuthSession.mockReset();
+      api.getConfig.mockReset();
+      api.getAuthSession.mockResolvedValueOnce(owner).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+      api.getConfig.mockRejectedValueOnce(Object.assign(new Error('Request failed: /api/config (404)'), { status: 404 }));
+      mountRoutes();
+      expect(await screen.findByText('setup wizard')).toBeTruthy();
+      consoleError.mockRestore();
+    });
+
+    it('AUTH-SETUP-189 still goes to setup in a browser, without a replayed shell, and on a definite refusal', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const failure = new TypeError('Failed to fetch');
+
+      // A browser: unchanged.
+      await confirmOnce();
+      api.getAuthSession.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
+      const browser = mountRoutes();
+      expect(await screen.findByText('setup wizard')).toBeTruthy();
+      browser.unmount();
+
+      // The App with no replayed shell (no confirmed outcome): unchanged.
+      window.localStorage.clear();
+      inTheApp();
+      api.getAuthSession.mockRejectedValueOnce(failure).mockRejectedValueOnce(failure);
+      const fresh = mountRoutes();
+      expect(await screen.findByText('setup wizard')).toBeTruthy();
+      fresh.unmount();
+
+      // The App, the instance answering that the owner's config is missing.
+      await confirmOnce();
+      api.getAuthSession.mockResolvedValue(owner);
+      api.getConfig.mockRejectedValue(Object.assign(new Error('Request failed: /api/config (404)'), { status: 404 }));
+      mountRoutes();
+      expect(await screen.findByText('setup wizard')).toBeTruthy();
+      consoleError.mockRestore();
+    });
+  });
+
   it('AUTH-SETUP-142 boots only until the session expires: its reported expiry, else not for a remote session', () => {
     const day = 24 * 60 * 60 * 1000;
     const nowSeconds = () => Math.floor(Date.now() / 1000);

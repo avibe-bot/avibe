@@ -147,7 +147,7 @@ interface AvibeNative {
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
-| [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number, closure: number}`. Read-only, no parameters. | `direct.transportChanged({preferred, sequence, closure})` |
+| [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number, closure: number}`, and for the selected instance's host, for diagnosis, `path` (`"relay" \| "ipv4" \| "ipv6" \| null`) and `attempts` (the last five: offered and local candidate counts by family, and the result; no address or identity). Read-only, no parameters. Version 2 adds `direct.handover()` → `{closed, kept, skipped?}`, no parameters (remote-direct-ios.md section 7). | `direct.transportChanged({preferred, sequence, closure})` |
 
 Phase 0a PR 2 implements this v1 subset:
 

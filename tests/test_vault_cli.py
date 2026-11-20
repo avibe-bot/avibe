@@ -878,6 +878,94 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     assert payload["request"]["status"] == "pending"
 
 
+@pytest.mark.parametrize("tier", ["protected", "standard"])
+def test_an_agent_withdraws_only_its_own_pending_request(tier, capfd, monkeypatch):
+    """3.2.8: an Agent withdraws a pending request of its own Session, in either tier; another Session
+    cannot, a request no longer pending stays, and an approval pressed after the withdrawal fails closed."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="OOPS_KEY", protection=tier, sealed=_sealed(tier))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+    assert cli.cmd_vault_remove(cli.build_parser().parse_args(["vault", "remove", "OOPS_KEY"])) == 0
+    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
+
+    def withdraw(session_id):
+        monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+        return cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))
+
+    assert withdraw("ses_other") == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+
+    assert withdraw("ses_cli") == 0
+    assert json.loads(capfd.readouterr().out)["status"] == "expired"
+    with cli._open_vault_engine().begin() as conn:
+        row = conn.execute(
+            vault_service.vault_requests.select().where(vault_service.vault_requests.c.id == request_id)
+        ).mappings().one()
+        assert (row["status"], row["callback_status"]) == ("expired", "skipped")
+        assert vault_service.list_requests(conn, status="pending") == []
+        # The user's Approve a moment later is refused, and nothing is deleted.
+        with pytest.raises(vault_service.InvalidRequestError):
+            vault_service.approve_delete_request(conn, request_id)
+        assert vault_service.get_secret_meta(conn, "OOPS_KEY")["name"] == "OOPS_KEY"
+
+    assert withdraw("ses_cli") == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_pending"
+
+
+def test_a_request_made_for_another_session_is_that_sessions_to_withdraw(capfd, monkeypatch):
+    """A request made with --session-id belongs to that Session (its card and outcome are there); the
+    Session that typed the command and every other one is refused, as is a request with no Session."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("p"))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+    args = cli.build_parser().parse_args(["vault", "access", "PROTECTED_KEY", "--session-id", "ses_target", "--no-callback"])
+    assert cli.cmd_vault_access(args) == 0
+    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
+
+    def withdraw(session_id):
+        if session_id is None:
+            monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+        else:
+            monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+        return cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))
+
+    for other in ("ses_cli", "ses_other", None):
+        assert withdraw(other) == 1
+        assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+    assert withdraw("ses_target") == 0
+    assert json.loads(capfd.readouterr().out)["status"] == "expired"
+
+
+def test_withdraw_reads_the_session_as_the_card_and_callback_do_and_commits_an_overdue_expiry(capfd, monkeypatch):
+    """A request the Web intake recorded only in its delivery belongs to that Session too; one already past its
+    deadline is not withdrawn, but its expiry is committed as any overdue request's is."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("p"))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_web")
+    ids = []
+    for _ in range(2):
+        assert cli.cmd_vault_access(cli.build_parser().parse_args(["vault", "access", "PROTECTED_KEY", "--no-callback"])) == 0
+        ids.append(json.loads(capfd.readouterr().out)["request"]["id"])
+    delivery_only, overdue = ids
+    table = vault_service.vault_requests
+    with cli._open_vault_engine().begin() as conn:
+        # The shape the Web intake writes when only ``delivery.session_id`` is given.
+        # A legacy empty container where the Session would be reads as none, as the card and callback read it.
+        conn.execute(table.update().where(table.c.id == delivery_only).values(
+            requester=json.dumps({"source": "web", "session_id": []})))
+        conn.execute(table.update().where(table.c.id == overdue).values(expires_at="2000-01-01T00:00:00+00:00"))
+
+    withdraw = lambda request_id: cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))  # noqa: E731
+    assert withdraw(delivery_only) == 0
+    capfd.readouterr()
+
+    assert withdraw(overdue) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_pending"
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(table.select().where(table.c.id == overdue)).mappings().one()
+        assert (row["status"], row["callback_status"]) == ("expired", "pending")
+
+
 def test_access_non_requestable_standard_secret_keeps_not_grantable_code(capfd):
     _create_standard_secret("STANDARD_KEY")
     assert cli.cmd_vault_access(_ns(name="STANDARD_KEY")) == 1

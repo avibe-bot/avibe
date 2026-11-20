@@ -874,6 +874,9 @@ const KEY_PREFIXES = [
  * `resolvesIn`, so a stem whose family exists resolves and never reaches here.
  */
 const NON_KEY_LITERALS = [
+  // Mobile request operations / native bridge method, never translation keys.
+  'health.connect',
+  'health.refresh',
   // Monaco theme tokens and editor actions. Read by the editor, never by i18next.
   'editor.action.selectAll',
   'editor.background',
@@ -925,6 +928,7 @@ const NON_KEY_LITERALS = [
   'app.showInstances',
   'auth.signInWithProvider',
   'auth.signInWithPasskey',
+  'auth.providers',
   'auth.requestOtp',
   'auth.signInWithPassword',
   'auth.verifyOtp',
@@ -933,6 +937,7 @@ const NON_KEY_LITERALS = [
   'badge.set',
   // A native capability key; the shell advertises it beside the method names.
   'c1.share_draft',
+  'direct.handover',
   'direct.status',
   'direct.transportChanged',
   'haptics.impact',
@@ -953,6 +958,10 @@ const NON_KEY_LITERALS = [
   'share.present',
   'viewport.setOuterScrollLocked',
   'voice.permission',
+  'voice.capture',
+  'voice.capturePrepare',
+  'voice.captureStart',
+  'voice.captureStop',
 
   // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
   // so the server's own message shows when the client has no copy for the code.

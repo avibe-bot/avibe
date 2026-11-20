@@ -350,6 +350,29 @@ def is_bot_session(conn: Connection, session_id: Any) -> bool:
     return conn.execute(select(agents.c.id).where(_bot_handle_column() == handle).limit(1)).first() is not None
 
 
+def is_reserved_bot_session(conn: Connection, session_id: Any) -> bool:
+    """Whether a Bot's Session is still reserved: ``ses_main``, or a Bot record whose Agent was not deleted.
+
+    Archive refuses a reserved one, since a removed Bot reconnects to its Session. Once its Agent is deleted no Bot
+    can, so its Session can be archived; it stays a Bot's Session (``is_bot_session``), hidden as before.
+    """
+
+    from storage.models import agents
+
+    if not is_bot_session(conn, session_id):
+        return False
+    text = str(session_id)
+    if text == MAIN_BOT_SESSION_ID:
+        return True
+    handle = text[len(BOT_SESSION_ID_PREFIX):]
+    return (
+        conn.execute(
+            select(agents.c.id).where(_bot_handle_column() == handle, agents.c.archived_at.is_(None)).limit(1)
+        ).first()
+        is not None
+    )
+
+
 def session_is_runtime_owned(*, session_id: Any, visibility: Any = None) -> bool:
     """Whether the RUNTIME owns this session, i.e. it accepts no user turn.
 

@@ -47,6 +47,11 @@ own. A Session has none of these; a Bot has all three.
   change backend.
 - Removing the Bot role keeps its Session and directory, hidden everywhere;
   setting it again reconnects them.
+- Deleting a removed Bot's Agent ends the Bot: no Bot can reconnect to its
+  Session, so the owner's deletion (Web or `vibe agent remove`) then archives
+  it through the Session's own archive lifecycle (3.2.8), and one left over
+  from an earlier deletion can be archived like any other. It stays hidden.
+  The directory is kept, as it is someone's memory.
 - While an Agent is a Bot it cannot be archived, deleted, renamed, or moved to
   another backend.
 - Phase 1 Bots are owner-only, as `ses_main` is: other members see no Bot area
@@ -460,6 +465,15 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
   writes while the Bot is working, it answers them first; and a message to
   the user waits for the next one unless it changes what they will do or
   decide. These sit in "Handing out work".
+- Research and models (owner-approved wording, 2026-11-19): a search, or
+  anything that needs sources or a comparison, is not one read and goes to a
+  Session; and when a Bot starts a Session it always passes `--model`, and
+  `--reasoning-effort` whenever that model offers one, choosing from
+  `vibe agent models <agent>`. Scoped the same day because the CLI refuses
+  both flags with `--session-id` and `--bot`, and refuses any effort for a
+  model that offers none. A behaviour check had found the
+  main Bot doing sourced research itself in 2 of 2 runs and sending a brief
+  without `--model` in 1 of 2.
 - The main Bot's own section keeps only what is the main Bot's: the user's
   first point of contact who sees everything, talking things through and
   deciding with the user, a lead Session per lasting Project, suggesting a Bot
@@ -610,11 +624,13 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
   question is indistinguishable from a new A→B request and re-arms the pair, so
   A can receive a notice if B then stays quiet. Avoiding that would require the
   reply attribution this rule intentionally excludes.
-- When B is idle and no pending input, open delegate, armed Watch, or pending
-  Task will wake B, Avibe sends A one Harness read receipt: its header says
-  `read receipt from @<bot:handle>` for a Bot or `read receipt from #<id> "<title>"`
-  for an ordinary Session, and its body says B handled the message without writing
-  back, includes the full last reply up to the existing final-reply cap, and gives
+- When the Turn that took A's message has ended and B has no pending input or
+  live Turn, Avibe sends A one Harness read receipt, even if B armed a Watch or
+  Task or delegated onward (those used to hold it back for hours; 11-15 stall
+  retro): its header says `read receipt from @<bot:handle>` for a Bot or
+  `read receipt from #<id> "<title>"` for an ordinary Session, and its body says
+  the dispatched Turn ended without writing back, includes that Turn's last reply
+  (not B's latest one) up to the existing final-reply cap, and gives
   a `vibe data query` pointer for anything longer. It gives a follow-up command
   only if A was waiting on it. This pure notice costs its sender
   one wake-up, usually answered silently. A visible Session asking its user
@@ -693,7 +709,7 @@ Agent rules:
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
 - Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session.
 - `--model` and `--reasoning-effort` set the model of the new Session a run creates (a blank new Session or a fork), and that Session keeps it; they are not valid with `--session-id`. With `--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session only when the requested Agent backend matches the source Session backend.
-- If a dispatched Session handles your message without writing back, Avibe sends a read receipt with its last reply once it is idle with no pending work; a run that does not complete still reports immediately.
+- If a dispatched Session handles your message without writing back, Avibe sends one read receipt with the last reply of the Turn that took it once that Turn ends with no input pending, even if it armed a Task or Watch or delegated onward (two such dispatches that end together get one receipt, with the later reply); a run that does not complete still reports immediately.
 - Add `--no-reply` to an existing `--session-id` or `--bot` message that needs no answer or read receipt; not with `--sync` or a new/forked Session.
 - `--sync` changes waiting behavior, not session identity: runs are async by default; synchronous runs wait for the result and are still recorded in `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
@@ -767,9 +783,9 @@ complete is still reported (D4, D14). Successful callbacks are retired.
 
 ```markdown
 ## Handing out work
-You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that needs getting done goes to a Session, in a Project that fits how long the matter will last. When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it yourself. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer to a Session. Follow each matter through to the end. When the user writes while you are working, answer them before anything else. Before sending them a message, ask whether it changes what they will do or decide; if not, keep it for your next message.
+You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that needs getting done goes to a Session, in a Project that fits how long the matter will last. When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it yourself. A search, or anything that needs sources or a comparison, is not one read; hand it to a Session. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer to a Session. Follow each matter through to the end. When the user writes while you are working, answer them before anything else. Before sending them a message, ask whether it changes what they will do or decide; if not, keep it for your next message.
 
-`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. In a brief, say what the Session may decide without you. Give it a model that suits the work with `--model` and `--reasoning-effort`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. In a brief, say what the Session may decide without you. When you start a Session, always pass `--model`, and `--reasoning-effort` whenever that model offers one, choosing from `vibe agent models <agent>`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
 The Sessions you dispatch are told how to report; if one handles your message without writing back, Avibe sends you a read receipt with its last reply, and following up is yours when you were waiting on it. A run that fails, is canceled, or is interrupted still sends an immediate notice. Use `--no-reply` for informational work that needs neither a delegation nor a receipt. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
 ```

@@ -207,6 +207,37 @@ scenarios:
     layer: contract
     backend: web
     test: ui/src/context/ApiContext.bootSession.test.tsx::AUTH-SETUP-143 forgets the boot session and refuses a late guard check that would record it again
+  - id: AUTH-SETUP-187
+    name: In the native App, a replayed shell stays when the session check cannot reach the instance, and is checked again on reconnect
+    status: covered
+    kind: retry
+    layer: contract
+    backend: web
+    test:
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on no network and checks again on reconnect
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on a down tunnel (530) and checks again on reconnect
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on a server error (503) and checks again on reconnect
+    reason: >-
+      The App may show the instance's last page from its cache; no network, a
+      timeout or a 5xx (a down tunnel's 530) on the read and its retry is no
+      answer, so the provisional shell and the boot session stay and the next
+      reconnect reads the session once more.
+  - id: AUTH-SETUP-188
+    name: In the native App, an owner's replayed shell stays when only the setup check cannot reach the instance, across repeated checks
+    status: covered
+    kind: retry
+    layer: contract
+    backend: web
+    test:
+      - "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-188 keeps the owner's replayed shell when only the setup check could not reach the instance"
+      - "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-188 keeps the owner's shell across repeated unreachable checks, and answers a refusal already received"
+  - id: AUTH-SETUP-189
+    name: Setup still follows from an answer, and nothing changes in a browser or without a replayed shell
+    status: covered
+    kind: negative_path
+    layer: contract
+    backend: web
+    test: ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-189 still goes to setup in a browser, without a replayed shell, and on a definite refusal
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
@@ -1427,8 +1458,9 @@ scenarios:
       so trying again reads it without a second sheet or verify; a sign-out
       while that read is out publishes nothing and never reads the store again,
       and a verify avibe.bot does not accept retires it. Welcome offers passkey
-      sign-in only when the signed-out session answer carries passkey: true
-      (passkey_login_enabled, read with #3945's mobile_providers). XCTest owns the native side
+      sign-in only when avibe.bot's latest answer carries passkey: true
+      (passkey_login_enabled, from the same read as mobile_providers and kept
+      with that last-known list, in signed-out answers and auth.providers). XCTest owns the native side
       (MobileOnboardingTests, and the WebKit fixture-server tests for the
       options, verify and cancel scripts in MobileAuthTransportIntegrationTests);
       the catalog citation checker does not collect Swift XCTest. Production's
@@ -1436,6 +1468,14 @@ scenarios:
       checks.
     owning_layer: iOS XCTest plus physical-device acceptance
     partial_evidence:
-      covers: the page side, offering exactly the ways a signed-out answer names, and email alone when it names none
+      covers: the page side, offering exactly the ways an answer names, email alone before any read, and the last ones kept when an answer names none
       test: "ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-185 not read"
+  - id: AUTH-SETUP-186
+    name: A personal unshared instance pairs a fake health device with route-scoped credentials and local-only reads
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: mobile
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
+    reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
 next_priority: []

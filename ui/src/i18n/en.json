@@ -3146,7 +3146,14 @@
       "certificate": "Certificate valid until {{date}}",
       "detail": "{{certificate}} · {{page}}",
       "pageDirect": "This page's live connection: direct",
-      "pageOther": "This page's live connection: not direct"
+      "pageOther": "This page's live connection: not direct",
+      "device": "This device's direct path: {{state}}",
+      "deviceWithPath": "This device's direct path: {{state}} · {{path}}",
+      "deviceInUse": "in use",
+      "deviceOn": "on",
+      "pathRelay": "relay",
+      "pathIpv4": "direct IPv4",
+      "pathIpv6": "direct IPv6"
     }
   },
   "models": {
@@ -3214,6 +3221,7 @@
   "errors": {
     "sandbox_integrity_failed": "Protected Vault was not opened because its security code could not be verified. Check your connection and update Avibe, then retry. Do not bypass verification or recreate your passkey.",
     "sandbox_unreachable": "The network is too slow; the secure code didn’t finish loading.",
+    "sandbox_offline": "This device is offline; the secure code couldn’t load. Connect to the internet, then retry.",
     "sandbox_build_mismatch": "The protected Vault sandbox does not match this Avibe release. Update Avibe or contact support; your existing secrets and passkey are unchanged.",
     "sandbox_entry_unavailable": "Protected Vault cannot run from this address or browser context. Use a compatible browser at your HTTPS avibe.bot address via Settings → Remote Access, or localhost / 127.0.0.1 on the computer running Avibe.",
     "sandbox_browser_unavailable": "Protected Vault needs a secure browser context with Web Crypto. Open Avibe directly in an up-to-date compatible browser, not inside another page or embedded browser.",
@@ -5690,6 +5698,11 @@
       "vaultDeleteApproved": "Deletion approved — secret deleted",
       "vaultDeleteDenied": "Deletion denied",
       "vaultDeleteExpired": "Deletion request expired",
+      "turnCarry": {
+        "stopped": "The user stopped the previous Turn. The messages below arrived during it. Do not resume the stopped work unless one of them asks for it.",
+        "failed": "The previous Turn failed before handling the messages below.",
+        "failed_user": "The previous Turn failed before answering the user's last message and before handling the messages below."
+      },
       "agentFallback": "agent"
     },
     "citation": {
@@ -6601,7 +6614,7 @@
       "generateHint": "Next you get 12 words; write them down, then tap 3 of them to check.",
       "generateInfo": "Best for a new wallet your Agents use. avault on this computer keeps the seed encrypted; Avibe won’t show the words again after saving.",
       "importHint": "Each word is checked as you paste, and account #0’s addresses show so you can compare before creating.",
-      "importInfo": "Bring one over from MetaMask, Phantom and others: 12 or 24 English words, with an optional BIP39 passphrase. The phrase stays on this computer and never reaches a chat or a model.",
+      "importInfo": "Bring one over from MetaMask, Phantom and others: 12 or 24 English words, with an optional passphrase. The phrase stays on this computer and never reaches a chat or a model.",
       "protectedUnsupported": "Protected seed phrase wallets are still to come; choose Standard for now.",
       "generateCta": "Generate the words",
       "importCta": "Import wallet",
@@ -6652,7 +6665,7 @@
         "checksum": "All {{count}} words are valid, but together they fail the checksum.",
         "checksumHint": "Usually one word was copied as another valid word, or two are swapped. Compare each word with your original.",
         "count": "A phrase has 12, 15, 18, 21 or 24 words; this one has {{count}}.",
-        "passphrase": "BIP39 passphrase (optional)",
+        "passphrase": "Passphrase (optional)",
         "passphraseFolded": "Most wallets don’t use one",
         "passphraseHint": "Only if your old wallet used one. A wrong passphrase gives no error, just different addresses, so check them below.",
         "previewTitle": "Compare with your old wallet’s first account",
@@ -7851,5 +7864,51 @@
     "provider": {
       "continueInBrowser": "Continue in your browser to finish signing in."
     }
+  },
+  "health": {
+    "title": {
+      "connect": "Connect health data",
+      "refresh": "Update health data"
+    },
+    "authorize": "Authorize on iPhone",
+    "opening": "Opening authorization…",
+    "loading": "Loading request…",
+    "loadError": "The request status is unavailable. Please try opening this page again later.",
+    "readOnly": "Read-only. Nothing is written to the Health app.",
+    "status": {
+      "waiting": "Waiting for iPhone",
+      "claimed": "In progress",
+      "succeeded": "Sync complete",
+      "connected": "Connected",
+      "declined": "Declined",
+      "failed": "Didn’t finish",
+      "expired": "Request expired",
+      "canceled": "Canceled",
+      "needsUpdate": "Update Avibe"
+    },
+    "note": {
+      "authorize": "Read-only. Nothing is written to the Health app.",
+      "waiting": "Open this request in Avibe on your iPhone to continue.",
+      "claimed": "In progress. Return to the conversation for the result.",
+      "succeeded": "This sync is complete.",
+      "connected": "Your Health connection is set up. Return to the conversation for the sync result.",
+      "declined": "You declined this connection request. You can request it again in the conversation.",
+      "failed": "This request did not finish. You can ask again in the conversation later.",
+      "expired": "This request has expired. Ask for a new one in the conversation.",
+      "canceled": "This request was canceled.",
+      "needsUpdate": "This iPhone’s Avibe does not support health data. Update Avibe first."
+    },
+    "landing": {
+      "authorize": "Read this iPhone’s steps, activity, workouts and sleep, and sync them to this instance. Next, choose access in Avibe and iOS.",
+      "openConversations": "Open conversations"
+    },
+    "metric": {
+      "steps": "Steps",
+      "activity": "Activity",
+      "workouts": "Workouts",
+      "sleep": "Sleep"
+    },
+    "metricSeparator": ", ",
+    "waitingRefresh": "Waiting for your iPhone to process this request."
   }
 }

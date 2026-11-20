@@ -3146,7 +3146,14 @@
       "certificate": "证书有效期至 {{date}}",
       "detail": "{{certificate}} · {{page}}",
       "pageDirect": "本页当前连接：直连",
-      "pageOther": "本页当前连接：未走直连"
+      "pageOther": "本页当前连接：未走直连",
+      "device": "本设备直连：{{state}}",
+      "deviceWithPath": "本设备直连：{{state}} · {{path}}",
+      "deviceInUse": "使用中",
+      "deviceOn": "已开启",
+      "pathRelay": "中继",
+      "pathIpv4": "直连 IPv4",
+      "pathIpv6": "直连 IPv6"
     }
   },
   "models": {
@@ -3214,6 +3221,7 @@
   "errors": {
     "sandbox_integrity_failed": "无法验证受保护保险库的安全代码，已阻止打开。请检查网络并更新 Avibe 后重试，不要绕过验证或重新创建通行密钥。",
     "sandbox_unreachable": "网络太慢，安全代码没有加载完。",
+    "sandbox_offline": "这台设备没有联网，安全代码无法加载。联网后再重试。",
     "sandbox_build_mismatch": "受保护保险库沙箱与当前 Avibe 版本不匹配。请更新 Avibe 或联系支持；现有密钥和通行密钥未改变。",
     "sandbox_entry_unavailable": "当前地址或浏览器环境无法使用受保护的 Vault。请使用兼容的浏览器，通过「设置 → 远程访问」提供的 HTTPS avibe.bot 地址打开，或在运行 Avibe 的电脑上使用 localhost / 127.0.0.1。",
     "sandbox_browser_unavailable": "受保护的 Vault 需要具备 Web Crypto 的安全浏览器环境。请在最新的兼容浏览器中直接打开 Avibe，而不是在其他网页或内嵌浏览器中打开。",
@@ -5690,6 +5698,11 @@
       "vaultDeleteApproved": "删除已批准，密钥已删除",
       "vaultDeleteDenied": "删除已拒绝",
       "vaultDeleteExpired": "删除申请已过期",
+      "turnCarry": {
+        "stopped": "用户停止了上一轮。下面的消息是在那一轮进行时收到的。除非其中有消息这样要求，否则不要继续已停止的工作。",
+        "failed": "上一轮在处理下面的消息之前失败了。",
+        "failed_user": "上一轮还没回答用户的上一条消息，也没处理下面的消息，就失败了。"
+      },
       "agentFallback": "智能体"
     },
     "citation": {
@@ -6601,7 +6614,7 @@
       "generateHint": "下一步生成 12 个词，抄下来后点 3 个词核对。",
       "generateInfo": "推荐给 Agent 用的新钱包。种子由这台电脑上的 avault 加密保存；保存后 Avibe 不会再显示这些词。",
       "importHint": "粘贴后逐词检查，并显示账户 #0 的地址，可以先核对再创建。",
-      "importInfo": "从 MetaMask、Phantom 等钱包搬过来：12 或 24 个英文单词，可选 BIP39 密码。助记词只在这台电脑上处理，不会进入聊天或模型。",
+      "importInfo": "从 MetaMask、Phantom 等钱包搬过来：12 或 24 个英文单词，可选 Passphrase。助记词只在这台电脑上处理，不会进入聊天或模型。",
       "protectedUnsupported": "保护档的助记词钱包还在做，现在请选标准档。",
       "generateCta": "生成助记词",
       "importCta": "导入钱包",
@@ -6652,7 +6665,7 @@
         "checksum": "{{count}} 个词都对得上词表，但合在一起校验不通过。",
         "checksumHint": "通常是某个词抄成了另一个有效的词，或两个词顺序颠倒。请逐个对照原件。",
         "count": "助记词应是 12、15、18、21 或 24 个词，现在是 {{count}} 个。",
-        "passphrase": "BIP39 密码（passphrase，可选）",
+        "passphrase": "Passphrase（可选）",
         "passphraseFolded": "大多数钱包没有设置",
         "passphraseHint": "只有原钱包设置过才填。填错不会报错，只会得到另一组地址，所以请对照下面的地址。",
         "previewTitle": "和原钱包的第一个账户核对",
@@ -7851,5 +7864,51 @@
     "provider": {
       "continueInBrowser": "请在浏览器中完成登录。"
     }
+  },
+  "health": {
+    "title": {
+      "connect": "连接健康数据",
+      "refresh": "更新健康数据"
+    },
+    "authorize": "在 iPhone 上授权",
+    "opening": "正在打开授权…",
+    "loading": "正在读取请求…",
+    "loadError": "暂时无法获取请求状态。请稍后重新打开此页面。",
+    "readOnly": "只读取，不写入健康 App。",
+    "status": {
+      "waiting": "等待 iPhone",
+      "claimed": "处理中",
+      "succeeded": "同步已完成",
+      "connected": "已连接",
+      "declined": "已拒绝",
+      "failed": "未完成",
+      "expired": "请求已过期",
+      "canceled": "已取消",
+      "needsUpdate": "需要更新 Avibe"
+    },
+    "note": {
+      "authorize": "只读取，不写入健康 App。",
+      "waiting": "请在 iPhone 上的 Avibe 中打开此请求并继续。",
+      "claimed": "正在处理，请回到会话查看结果。",
+      "succeeded": "本次同步已完成。",
+      "connected": "健康连接已建立。请回到会话查看同步结果。",
+      "declined": "你拒绝了这次连接请求。可以在会话里重新发起。",
+      "failed": "这次请求未完成。你可以稍后在会话里重新查询。",
+      "expired": "这个请求已过期。请在会话里重新发起。",
+      "canceled": "这个请求已取消。",
+      "needsUpdate": "这台 iPhone 上的 Avibe 版本不支持健康数据，请先更新 Avibe。"
+    },
+    "landing": {
+      "authorize": "读取这台 iPhone 的步数、活动、锻炼和睡眠，并同步到当前实例。接下来在 Avibe 和 iOS 中选择授权。",
+      "openConversations": "打开会话列表"
+    },
+    "metric": {
+      "steps": "步数",
+      "activity": "活动",
+      "workouts": "锻炼",
+      "sleep": "睡眠"
+    },
+    "metricSeparator": "、",
+    "waitingRefresh": "等待 iPhone 处理这个请求。"
   }
 }

@@ -441,4 +441,54 @@ describe('native direct closure watermark', () => {
     next.emit(status(6));
     expect(newHandler).toHaveBeenCalledTimes(1);
   });
+
+  it('tells preference changes in sequence order, and a resume read while direct', async () => {
+    const shell = installShell();
+    const native = await load();
+    const seen: string[] = [];
+    native.onNativeDirectPreference((preferred) => seen.push(preferred));
+    await shell.answer(0, status(0, 0));
+    expect(seen).toEqual(['tunnel']);
+    shell.emit(status(0, 2, 'direct'));
+    shell.emit(status(0, 1, 'tunnel'));
+    shell.emit(status(0, 3, 'direct'));
+    expect(seen).toEqual(['tunnel', 'direct']);
+    expect(native.nativeDirectPreference()).toBe('direct');
+    hideAndShow();
+    await shell.answer(1, status(0, 3, 'direct'));
+    expect(seen).toEqual(['tunnel', 'direct', 'direct']);
+  });
+
+  it('asks for a hand-over only with direct version 2, and reads its answer', async () => {
+    installShell({ direct: 1 });
+    let native = await load();
+    expect(native.nativeDirectHandoverAvailable()).toBe(false);
+    expect(await native.nativeDirectHandover()).toBeNull();
+
+    const shell = installShell({ direct: 2 });
+    shell.call.mockImplementation((method: string) =>
+      Promise.resolve(method === 'direct.handover' ? { closed: 2, kept: 1 } : null),
+    );
+    native = await load();
+    expect(native.nativeDirectHandoverAvailable()).toBe(true);
+    expect(await native.nativeDirectHandover()).toEqual({ closed: 2, kept: 1 });
+    shell.call.mockImplementation(() => Promise.resolve({ closed: 0, kept: 0, skipped: 'other_documents' }));
+    expect(await native.nativeDirectHandover()).toEqual({ closed: 0, kept: 0, skipped: 'other_documents' });
+    shell.call.mockImplementation(() => Promise.resolve({ closed: -1, kept: 0 }));
+    expect(await native.nativeDirectHandover()).toBeNull();
+  });
+
+  it('reads the App path for display, and nothing it does not know', async () => {
+    const shell = installShell();
+    shell.call.mockImplementation(() =>
+      Promise.resolve({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6', attempts: [] }),
+    );
+    let native = await load();
+    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: 'ipv6' });
+    shell.call.mockImplementation(() => Promise.resolve({ preferred: 'direct', sequence: 1, closure: 0, path: '10.0.0.1' }));
+    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: null });
+    Reflect.deleteProperty(window, 'avibeNative');
+    native = await load();
+    expect(await native.readNativeDirectPath()).toBeNull();
+  });
 });

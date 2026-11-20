@@ -49,6 +49,20 @@ and Web resizing cannot both run.
   older than that question) is refused with a native alert saying to update the
   instance. Any other page, such as a Show Page opened on its own under
   `/show/` or `/p/`, is refused without that alert.
+- On a cold start the App may show the instance's last page from its own
+  cache (stored per store, account and origin, at most a day old). A cached page
+  whose bytes carry `<meta name="avibe-cached-shell" content="1">` comes from a
+  Web UI that keeps its shell while the instance cannot be reached, behind a
+  replayable outcome; when the loaded page also sets
+  `data-avibe-replayed-shell="1"` on its root element (it replays one, and is not
+  at its setup fallback), the App uncovers it with the progress line while
+  connecting. Any other cached page stays covered until the instance answers.
+  When avibe.bot lists the instance offline, only such an uncovered page keeps
+  the open (whether the answer comes before or after it is uncovered): it stays
+  with the row 「实例不在线，显示的是上次的内容」 / "Instance offline. Showing your
+  last content." offering Retry and Switch instance, and connects by itself
+  when the instance answers it. A launch opens an instance listed offline only
+  for such a page; otherwise the App shows the instance list, as before.
 - Google, GitHub and Apple authorization are intercepted with an alert whose
   「去登录」 / "Go to sign-in" reads the session: the instance page asked
   avibe.bot to sign in, so the App's avibe.bot session has lapsed, and the
@@ -250,6 +264,7 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.subscribe({vapidPublicKey, forceResubscribe?: boolean})` | `{endpoint, keys: {p256dh, auth}}`; `forceResubscribe` requests a concrete replacement even when one matching active registration exists; the Web UI submits this subscription through the existing instance API |
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
+| `voiceCapture: 1` | `voice.capturePrepare()`, `voice.captureStart({take})`, `voice.captureStop({take})` | The in-App hold's microphone, instance document only (`NativeHoldCapture.swift`). Prepare sets the audio session's category and starts nothing; start activates it and answers `{sampleRate: 16000, activateMs, engineMs}` once the input runs, or fails `permission`, `busy` or with the step; `take` is 1–64 letters, digits, `-` or `_`. Audio arrives as `avibe:native:voice.capture` events `{take, pcm}` (base64 Int16 little-endian mono, the first at once, then about 100 ms each), and the take's end as `{take, ended: true, reason?}` after its last audio. The App ends a take itself when it goes to the background, its page goes, or the system interrupts or changes the input |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 | `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
 
@@ -312,10 +327,11 @@ The provider also offers "Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") fr
 iOS 18, which is why the deployment target is iOS 17.4
 (`AppShortcutsBuilder.buildLimitedAvailability`). Its intent,
 `SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
-process without bringing the App to the front (`supportedModes`
-`[.background, .foreground(.dynamic)]` from iOS 26), and Apple requires a Live
-Activity for as long as it records. It is also a `LiveActivityIntent`, the
-documented way for an App that is not in front to start a Live Activity.
+process (`supportedModes` `[.background, .foreground(.dynamic)]` from iOS 26),
+and Apple requires a Live Activity for as long as it records. It is also a
+`LiveActivityIntent`: only then may it start its island from the background.
+A starting press tries the background first; if that is refused, Avibe comes forward
+(below).
 `UIBackgroundModes` declares `audio`, which Apple requires to keep recording
 once the App is in the background (`AVAudioSession.Category.record`); the
 other Info.plist addition is `NSSupportsLiveActivities`. The background audio mode is
@@ -333,14 +349,21 @@ the main Bot acts on the user's computer.
   App's process. A take ends by itself after five minutes, is discarded under
   0.6 seconds, and is sent as far as it got when the microphone is
   interrupted.
-- Before the microphone opens, `VoiceCaptureController` reads the selected
-  instance's `GET /api/asr/status` and records only when `consent` is
-  `granted`. A missing `consent` field is an Avibe from before the voice
-  consent question: nothing is recorded, and the Live Activity asks to update
-  Avibe. `null` or `declined`, no sign-in, no microphone permission, or Live
-  Activities turned off bring the App to the main Bot's conversation, where
-  the Web UI asks. A later `403 voice_consent_required` stops the take and
-  keeps nothing.
+- Once recording has begun, `VoiceCaptureController` reads the selected
+  instance's `GET /api/asr/status`; nothing is transcribed or sent unless
+  `consent` is `granted`. A missing `consent` field is an Avibe from before
+  the voice consent question: the take is discarded and the Live Activity
+  asks to update Avibe. `null` or `declined` discards the take; in front the
+  App opens the main Bot's conversation, where the Web UI asks, and in the
+  background the island says so. An unreachable instance is not a no: it is
+  asked again when the take is sent, and if still unreachable the take is
+  kept on the phone, unsent, for Retry, which asks again. No
+  sign-in, no microphone permission, or Live Activities turned off bring the
+  App to the main Bot's conversation before anything records. A later
+  `403 voice_consent_required` stops the take and keeps nothing. The take's
+  file lives in `Caches/VoiceCapture` (excluded from backup, the default
+  protection class) until it is sent or discarded; leftovers are deleted at
+  launch.
 - The take is sent as `POST /api/asr/transcribe` (the whole AAC take), then
   `GET /api/sessions/main` and `POST /api/sessions/<id>/messages` with
   `metadata.input = "voice"`. The reply arrives as the instance's usual
@@ -357,11 +380,69 @@ the main Bot acts on the user's computer.
   one starts a new take. A listening or sending Live Activity also goes stale
   on its own 90 seconds past the five-minute cap, and a stale one is drawn as
   interrupted, so no timer runs on for a take nobody holds.
+- A starting press makes exactly one background try: the island, then a
+  mixable session (`.playAndRecord` with `.mixWithOthers` and
+  `.duckOthers`) as the first and only activation, then the recorder. Two
+  public projects record from the background on an iPhone 17 this way, each
+  press a process the press launched (legato `spikes/ios-keyboard/FINDINGS.md`,
+  oliv `ios/docs/TESTING.md`): iOS lets such a process start audio once; a
+  second start in it, or a non-mixable first activation, is refused. The
+  owner's 38.1 presses were all in a warm process after an exclusive try
+  (`!int`, then `!pla`). If the try is refused and the intent can bring
+  Avibe forward (iOS 26), its island goes at once and Avibe records in
+  front as soon as it is active (`.record`); only then come a haptic and the
+  line 正在录音，再长按一次操作按钮发送. A press that waits more than 30 s to come
+  forward never records. A stop press (or the island's Send) runs in the
+  background and sends without coming forward. The intent stays an
+  `AudioRecordingIntent` and a `LiveActivityIntent` (without the latter the
+  island is refused from the background).
+- No word is lost to the instance's round trip: the instance is asked
+  about voice input once recording has begun. Until it says yes the audio
+  stays on the phone; a no, an older Avibe or voice input being unavailable
+  stops the take and discards it unsent, said in the App (in front) or on
+  the island. A stop before the answer waits for it. The message carries how
+  it recorded (`0` in the background, `3` in front, with the refused
+  background try), the press's process facts (`pid=`, `start=`, `age=`,
+  `byPress=` and `cold` when this press launched the process within 2 s and
+  it was never shown, `scene=`, `presses=` that started a take, `session=`,
+  `launch=`, `prevEnd=`, and `bgTries=` background activations this process
+  made before), whether another App was playing audio and where sound goes,
+  in `metadata.capture_attempt`, for example
+  `3 [background warm pid=812 start=1795104000 age=95.2 byPress=0 scene=1 presses=2 session=0 launch=background prevEnd=- otherAudio=0 silenceHint=0 out=Speaker bgTries=2] (0 sessionActivate 561015905)`.
+  `metadata.capture_timing` gives each step's milliseconds from the press (its reservation, after the leftover check):
+  `island=`, `session=`, `record=`, `audio=` (the recorder's first audio, or `none` if it stopped without), and
+  for a press that came forward `refused=`, `front=`, `frontIsland=`,
+  `frontSession=`, `frontRecord=`.
+- The microphone permission is checked before anything else; a missing one
+  brings Avibe forward. If the audio session or the recorder then refuses to
+  start, or the take's file or the Live Activity cannot be made, the user is
+  told 录音没能开始 with the step where it stopped (准备录音文件, 设置音频会话,
+  激活音频会话, 启动录音器, 启动实时活动) and the error as given (the system's
+  number, or an ActivityKit error's type and case), never the permission
+  line. The line is posted once as a notification that stays in Notification
+  Center (thread `voice-capture`; tapping it only opens Avibe), which needs
+  notification permission. It also shows on the island, except for
+  启动实时活动, where no island exists and the alert Avibe shows on coming
+  forward carries it. A run within a second of a start
+  that failed and said so does nothing, so a press the system runs twice
+  shows one notice.
 - If the system will not start the Live Activity, nothing is recorded. When
   "Talk to Main Bot" has to bring Avibe forward, an alert says why.
 - An account sign-out or change (`AppModel.prepareForAccountTransition`)
-  stops and discards any take, releases its WebView, and makes a start still
-  waiting on the instance give up.
+  stops and discards any take, releases its WebView, and makes a press still
+  coming forward give up.
+- Variant (a), behind a hidden switch that is off by default: once a take
+  recorded in the background has been sent (its message accepted, its audio
+  deleted), the process ends about a second later (held as a background task
+  so the wait runs then; a wait that ran late is skipped), so the next press
+  is a process launched for it (legato and oliv do the same; Apple's QA1561
+  discourages ending an App, so it stays off unless the owner turns it on).
+  It never ends a process that was ever shown, while Avibe is in front, with
+  a take under way, or with health sync or push work in flight; the decision
+  goes into the next press's `capture_attempt` (`prevEnd=`). The switch is
+  not in Settings and not discoverable: in a TestFlight or development build,
+  opening `avibe-diagnostics://voice/end-after-background?on=1` (or `on=0`)
+  sets it; an App Store build ignores the URL.
 - `VoiceCaptureInstanceClient` makes these requests as the signed-in user
   without the runtime WebView: a hidden `WKWebView` on the account's own
   named store (the selection and store identifier the account coordinator
@@ -553,6 +634,19 @@ surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `app.openPage`, and the closed `app.openExternal` allowlist (the two install
 guides and avibe.bot's Account security page). Instance documents, child
 windows, Show Pages, and iframes do not receive these handlers.
+
+### Sheet appearance
+
+The instance and account sheets over a live instance take the instance page's
+colour scheme (`AppModel.runtimePageColorScheme`, the scheme the page reports
+for the status bar), and the system's until the page reports one. The sheet's
+controller and its presented container get the matching
+`overrideUserInterfaceStyle`, so WebKit gives the bundled page that
+`prefers-color-scheme` and the grabber and corners match. Until the bundled
+page paints, the WebView is transparent over the page's own `--background`
+(`MobileOnboardingViewController.pageBackground`), so the sheet slides in in
+its final colour rather than WebKit's white. The bundled page still loads when
+the sheet has appeared; no preloading.
 
 ### avibe.bot pages in the App
 
@@ -874,16 +968,24 @@ email as the one primary action and shows the three as one row of marks
 (provisional until its independent security agreement); the App's side is
 below.
 
-- Welcome shows only the ways in avibe.bot offers the App now, from one read
-  of `GET /api/config/auth` by the hidden transport (without cookies): the
-  providers in `mobile_providers` (known names once each, in the App's
-  order; a missing or malformed list means none) and passkey sign-in
-  (`passkey_login_enabled` exactly `true`; every iOS the App runs on has the
-  passkey sheet). Native adds them to a signed-out session answer as
-  `providers` and `passkey` when the read answers within 2 s. An answer
-  without them offers email alone (#3946; #3945 kept the page's last list).
-  So the App can ship before the broker serves a provider, and each way in
-  appears when avibe.bot enables it.
+- Welcome shows only the providers avibe.bot advertises for the App now:
+  `mobile_providers` in `GET /api/config/auth`, read fresh by the hidden
+  transport (without cookies) and added natively to a signed-out session
+  answer as `providers` when it answers within 2 s (known names once each,
+  in the App's order; a missing or malformed list means none). An answer
+  without it leaves the page's last list, which starts empty: email alone.
+  The App keeps the last list avibe.bot answered (memory and `UserDefaults`,
+  an enum list, not per account) and refreshes it whenever an account page
+  appears, signed in or not; a signed-out answer whose read is slower than
+  2 s carries that last list instead, so Welcome after sign-out or on a cold
+  start shows the row at once. Welcome also asks `auth.providers` (no
+  arguments; refused in sheets) when it appears and when the App returns to
+  the foreground on it, and replaces the row in place with the answer. The
+  same read carries passkey sign-in (`passkey_login_enabled` exactly `true`;
+  every iOS the App runs on has the passkey sheet): it is kept with the list
+  and answered beside it as `passkey`, in signed-out answers and in
+  `auth.providers`. So the App can ship before the broker serves a provider,
+  and each way in appears when avibe.bot enables it.
 - Passkey sign-in with no email first is the closed `auth.signInWithPasskey`
   (no arguments; the sheet forbids it), apart from the second-factor
   `auth.verifyPasskey`. The coordinator runs avibe.bot's primary passkey
@@ -1325,6 +1427,46 @@ the Apple Developer account and replace `IOS_APP_STORE_PROFILE_BASE64`; the
 workflow refuses an expired profile, or one without Associated Domains, before
 it builds. The profile was last regenerated on 2026-11-07, after Associated
 Domains was enabled.
+
+## Apple Health
+
+The instance conversation and encrypted health-request notifications are the
+entry points. The configured instance main frame can call
+`health.connect({requestId, pairingCode})`; native consent names the destination,
+read-only data groups, automatic synchronization, Agent/model access, and how to
+stop. Its response contains only `state`. Every other `health.*` bridge method
+is unsupported, including on Show pages. Health data never returns through the
+WebView bridge or notification service extension.
+
+The main app reads steps, activity, workouts and sleep. It backfills 30 days
+and refreshes the most recent eight calendar days on foreground activation and
+HealthKit observer delivery. Sleep uses the local 18:00 boundary and interval
+unions. Empty results do not identify denied HealthKit read permission. Device
+credentials and the random installation identifier use private, nonsynchronizing
+ThisDeviceOnly Keychain items. Logout deletes the credential, stops observation,
+cancels uploads and removes local sync state; the non-authenticating installation
+identifier remains for repeat-pairing identification.
+
+The protected, backup-excluded outbox uses monotonic persisted sequence numbers
+and one background URLSession upload at a time. Payload and execution dependencies
+commit together. An upload acknowledgement removes the outbox reference and
+releases its value-free request result in one state write. A reclaimed request
+uses its recorded result with the new lease token rather than querying again;
+an interrupted query without a durable payload is resumed. Redirects and cookies
+are disabled for device requests. Revocation or loss of instance eligibility
+clears the connection; invalid payloads and unsupported contracts suspend sync
+until a new explicit connection. Retry-After applies to device requests.
+
+Both HealthKit entitlements and the localized read-purpose description belong
+only to the main app. The archive checker requires boolean grants and rejects
+HealthKit entitlements on extensions and any Health write-purpose description.
+For this Health sync feature, the main app's privacy manifest declares Health data
+as linked, not used for tracking, and for app functionality, and the archive
+checker requires exactly that declaration.
+Changing Apple App ID capabilities or provisioning profiles, signing an archive,
+physical-device validation and TestFlight distribution require separate owner
+approval. Unsigned simulator builds and synthetic-data tests do not establish
+physical-device authorization, locked-device access, or background wake latency.
 
 ## Sharing a Show from the iPhone App
 

@@ -124,6 +124,7 @@ enum MobileBridgeMethod: String, CaseIterable {
     case authSignInWithProvider = "auth.signInWithProvider"
     /// Passkey sign-in with no email first; not the second-factor `auth.verifyPasskey`.
     case authSignInWithPasskey = "auth.signInWithPasskey"
+    case authProviders = "auth.providers"
     case sessionRefresh = "session.refresh"
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
@@ -325,7 +326,8 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                          .authVerifySecondFactor,
                          .authVerifyPasskey,
                          .authSignInWithProvider,
-                         .authSignInWithPasskey:
+                         .authSignInWithPasskey,
+                         .authProviders:
                         throw MobileAccountError.forbidden
                     default:
                         break
@@ -381,6 +383,18 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         code: code
                     )
                     reply(replyHandler, result: await self.sessionResult(state))
+                case .authProviders:
+                    guard request.params.isEmpty else {
+                        throw MobileAccountError.invalidRequest
+                    }
+                    // Welcome asks when it appears and when the App returns to
+                    // the foreground on it; the answer updates its row in place.
+                    var result: [String: Any] = [:]
+                    if let methods = await coordinator.signInMethods(within: 10) {
+                        result["providers"] = methods.providers.map(\.rawValue)
+                        result["passkey"] = methods.passkey
+                    }
+                    reply(replyHandler, result: result)
                 case .authSignInWithProvider:
                     guard
                         request.params.count == 1,
@@ -495,16 +509,16 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
 
     /// A session answer for the page. A signed-in account that this generation's provider
     /// sign-in created carries `new_account: true`, a hint for the empty state only. A
-    /// signed-out answer carries `providers` and `passkey`, the ways in avibe.bot offers the App
-    /// now, when they could be read within 2 s; Welcome shows only those, and email alone when
-    /// the answer names none.
+    /// signed-out answer carries `providers` and `passkey`, the ways in avibe.bot offers the App:
+    /// read now when that answers within 2 s, otherwise the last ones it advertised; Welcome
+    /// shows only those.
     private func sessionResult(_ state: MobileSessionState) async -> Any {
         var object = state.jsonObject
         switch state {
         case .signedIn where coordinator.accountWasJustCreated:
             object["new_account"] = true
         case .signedOut:
-            // Only what the server answered in time; an answer without it offers email alone.
+            // What the server answered in time, otherwise the last it advertised.
             if let methods = await coordinator.signInMethods(within: 2) {
                 object["providers"] = methods.providers.map(\.rawValue)
                 object["passkey"] = methods.passkey
@@ -616,9 +630,54 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// A sheet over an instance takes that page's scheme; `nil` follows the
+    /// system. WebKit gives the page the matching `prefers-color-scheme`.
+    var pageColorScheme: PageColorScheme? {
+        didSet {
+            guard pageColorScheme != oldValue else { return }
+            applyColorScheme()
+        }
+    }
+
+    /// The bundled pages' own `--background` (ui/src/index.css), so the
+    /// view shows the page's colour before its first paint instead of
+    /// WebKit's white.
+    static let pageBackground = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 8 / 255, green: 8 / 255, blue: 18 / 255, alpha: 1)
+            : UIColor(red: 244 / 255, green: 246 / 255, blue: 251 / 255, alpha: 1)
+    }
+
+    private func applyColorScheme() {
+        let style: UIUserInterfaceStyle
+        switch pageColorScheme {
+        case .light: style = .light
+        case .dark: style = .dark
+        case nil: style = .unspecified
+        }
+        overrideUserInterfaceStyle = style
+        // In a sheet the grabber and corners belong to the presented
+        // controller, so it takes the same appearance; until this page is in
+        // the hierarchy there is no presentation to ask.
+        guard startScreen.isSheet, parent != nil || presentingViewController != nil else {
+            return
+        }
+        if let presented = presentationController?.presentedViewController
+            ?? parent?.presentationController?.presentedViewController
+        {
+            presented.overrideUserInterfaceStyle = style
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = Self.pageBackground
+        // Transparent until the page paints, so the sheet slides in with the
+        // page's colour rather than WebKit's white.
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        applyColorScheme()
         view.addSubview(webView)
         // The pages change screens in place, not in the WebView's history,
         // so WebKit's own back swipe has nothing to go back to. A swipe in
@@ -659,6 +718,13 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         super.viewSafeAreaInsetsDidChange()
         keyboardViewportLayoutController?
             .refreshForContainerGeometryChange()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // The presentation exists now; the sheet's chrome takes the scheme
+        // before it slides in.
+        applyColorScheme()
     }
 
     override func viewDidAppear(_ animated: Bool) {

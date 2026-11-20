@@ -17,7 +17,7 @@ import { isNewerClientState, type DesktopClientAction, type DesktopClientReply, 
 import en from '@/i18n/en.json';
 import { mobileSignInAdapter } from '@/mobile/signInAdapter';
 import type { MobileSessionState } from '@/mobile/bridge';
-import { mobileSignInMethods } from '@/mobile/useSignInMethods';
+import { advertisedSignInMethods, EMAIL_ONLY } from '@/mobile/useSignInMethods';
 
 import { SignInChrome, type SignInFrameProps } from './chromeContext';
 import { useOperationOwner } from './operationOwner';
@@ -132,12 +132,12 @@ const iosFrame = ({ children, back }: SignInFrameProps) => (
 function IosHost({ resetSignal }: { resetSignal: number }) {
   const owner = useOperationOwner<SignInBusyAction>();
   const [signedIn, setSignedIn] = useState(false);
-  // As the App's page does: the ways in come from the latest signed-out answer.
+  // As the App's page does: the ways in come from the latest signed-out answer that names them.
   const [answer, setAnswer] = useState<MobileSessionState>({ status: 'signedOut' });
   useEffect(() => {
     void window.avibeMobile?.call<MobileSessionState>('session.bootstrap').then(setAnswer);
   }, []);
-  const methods = mobileSignInMethods(answer);
+  const methods = (answer.status === 'signedOut' ? advertisedSignInMethods(answer) : null) ?? EMAIL_ONLY;
   const flow = useSignInFlow<Awaited<ReturnType<typeof mobileSignInAdapter.verifyCode>>['session'], never>({
     adapter: mobileSignInAdapter,
     methods,

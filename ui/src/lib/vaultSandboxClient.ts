@@ -356,10 +356,13 @@ function failIntegrity(message: string): never {
   throw new VaultSandboxError('sandbox_integrity_failed', message);
 }
 
-/** The release could not be downloaded in time, or at all (a slow or lost connection). Nothing was
- *  verified or opened; trying again verifies afresh. Never used for a byte or identity mismatch. */
+/** The release could not be downloaded in time, or at all. Nothing was verified or opened; trying
+ *  again verifies afresh. A device the browser reports offline is `sandbox_offline`, so it is not told
+ *  its network is slow; any other failure (slow, lost or blocked) is `sandbox_unreachable`. Never used
+ *  for a byte or identity mismatch. */
 function failUnreachable(message: string): never {
-  throw new VaultSandboxError('sandbox_unreachable', message, true);
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  throw new VaultSandboxError(offline ? 'sandbox_offline' : 'sandbox_unreachable', message, true);
 }
 
 /** The pinned resources the verified document itself loads under browser-enforced SRI (its script
@@ -376,7 +379,8 @@ const SRI_LOADED_RESOURCE_PATHS: ReadonlySet<string> = new Set(
  * hashing every byte against the pin. Hash the manifest bytes too; redirects,
  * CORS/parse/identity failures are never an invitation to trust a mutable endpoint
  * or downgrade protected custody. A download that fails or runs out of time is
- * `sandbox_unreachable` (retryable), never reported as a mismatch. */
+ * `sandbox_unreachable`, or `sandbox_offline` when the browser reports the device offline (both
+ * retryable), never reported as a mismatch. */
 export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise<void> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();

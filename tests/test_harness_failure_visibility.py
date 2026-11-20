@@ -4439,6 +4439,7 @@ def test_a_wedged_notice_delivery_does_not_stall_the_store_watch(tmp_path: Path)
     service._running = True
     service._notice_drain_task = None
     service._drain_recovered_activity_outputs = _recovered_outputs
+    service._request_mobile_probe = lambda *, periodic: None
     # Held steady so the tick's conditional half (reconcile, request/callback drains)
     # stays out of the way: the subject is the UNCONDITIONAL passes after the drain.
     service.store.maybe_reload = lambda: False

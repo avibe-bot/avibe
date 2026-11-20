@@ -4397,9 +4397,11 @@ def test_agent_run_send_now_steers_its_content_without_promoting_fifo(monkeypatc
     controller.session_turns._steer.assert_awaited_once()
     assert controller.session_turns._steer.await_args.args[1].text == "apply the correction"
     assert seen == [("original work", SOURCE_HUMAN)]
+    # The Turn the correction steered into ended without handling it (the test cancels
+    # its runner), so the correction is carried to the next Turn once (#4010).
     with engine.connect() as conn:
         assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
-            "older queued input"
+            "older queued input", "apply the correction",
         ]
     stored = request_store.get_run(request.id)
     assert stored is not None
@@ -4896,7 +4898,12 @@ def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
     assert all(result.delivery_owner_transferred is True for result in results)
     assert seen == ["original work"]
     with engine.connect() as conn:
-        assert message_deliveries.list_queued(conn, session_id) == []
+        # Both steered into a Turn that ended without handling them (the test cancels
+        # its runner): each is carried to the next Turn once, in FIFO order (#4010).
+        carried = message_deliveries.list_queued(conn, session_id)
+        assert [message_deliveries.turn_carry(message_deliveries.get_delivery(conn, row["id"])) is not None
+                for row in carried] == [True, True]
+        assert len({row["id"] for row in carried}) == 2
     for request, expected_status in zip(
         requests,
         ("accepted", "accepted"),
@@ -9318,3 +9325,82 @@ def test_a_delivery_outcome_projection_retries_when_another_writer_holds_sqlite(
         "status": delivery_status if released else "admitted",
         "target_was_busy": True,
     }
+
+
+@pytest.mark.parametrize("intent", ["queue", "send_now"])
+def test_resubmitting_a_carried_agent_run_answers_with_its_carry(monkeypatch, tmp_path, intent):
+    """PR #4010: a failed or stopped Turn carried ``agent_run:R`` on. Replaying R's
+    submission finds R's first Delivery by native identity, but R lives on in its carry;
+    "duplicate" would let the executor settle R while the carry is still queued."""
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_runs
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    run_id = "run_carried"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn, platform="avibe", scope_type="project", native_id="proj_carry_dup", now="2026-11-20T00:00:00Z"
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(conn, scope_id=scope_id, agent_backend="claude", agent_name="worker")
+        session_id = session["id"]
+        work = _reserve_submission(conn, scope_id=scope_id, session_id=session_id, text="long work")
+        report = _reserve_submission(
+            conn, scope_id=scope_id, session_id=session_id, text="report", author="harness", source="harness",
+            message_type="harness", native_message_id=f"agent_run:{run_id}",
+        )
+        # As production admission records it: a legacy send-now replay must not re-admit the carry.
+        report = message_deliveries.cas_delivery(
+            conn, report["id"], expected_version=report["version"], expected_states=("reserved",),
+            values={"state": "queued"}, history_event={"kind": "admission", "context": {}},
+        )
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.claim_start_batch(
+            conn, turn_id=turn_id, session_id=session_id, backend="claude", deliveries=[work], dispatch_text="long work",
+        )
+        turn = message_deliveries.get_turn(conn, turn_id)
+        message_deliveries.bind_native_start(
+            conn, turn_id, expected_version=turn["version"], runtime_key="rk", runtime_turn_id="rt", native_turn_id="nt",
+        )
+        message_deliveries.materialize_start_acceptance(conn, turn_id=turn_id, evidence={})
+        attempt = message_deliveries.new_attempt_id()
+        assert message_deliveries.open_steer_attempt(
+            conn, report["id"], expected_version=report["version"], turn_id=turn_id, attempt_id=attempt,
+            expected_native_turn_id="nt",
+        )
+        assert message_deliveries.materialize_steer_acceptance(
+            conn, leader_delivery_id=report["id"], expected_attempt_id=attempt, turn_id=turn_id, evidence={},
+        )
+        now = "2026-11-20T00:00:01Z"
+        conn.execute(agent_runs.insert().values(
+            id=run_id, run_type="agent_run", status="running", session_id=session_id, delivery_id=report["id"],
+            cancel_requested=0, created_at=now, updated_at=now, metadata_json="{}",
+        ))
+        message_deliveries.terminalize_turn(
+            conn, turn_id, outcome="canceled", settled_by="stopped", evidence_kind="terminal_result",
+        )
+        carry = message_deliveries.list_queued(conn, session_id)[0]
+        assert conn.execute(select(agent_runs.c.delivery_id).where(agent_runs.c.id == run_id)).scalar_one() == carry["id"]
+
+    async def _explode_dispatch_turn(*args, **kwargs):
+        raise AssertionError("a replayed carried Run must not start a Turn")
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _explode_dispatch_turn)
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench", channel_id=session_id, platform="avibe", message_id=f"agent_run:{run_id}",
+        platform_specific={"task_trigger_kind": "agent_run", "task_execution_id": run_id},
+    )
+    kwargs = {"delivery_intent": "send_now"} if intent == "send_now" else {}
+    result = asyncio.run(controller.session_turn_gate.submit_scheduled(session_id, ctx, "report", **kwargs))
+    assert result != "duplicate"
+    assert result.delivery_owner_transferred is True
+    assert result.delivery_status == "queued"
+    with engine.connect() as conn:
+        assert message_deliveries.get_delivery(conn, carry["id"])["state"] == "queued"

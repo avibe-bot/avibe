@@ -331,10 +331,12 @@ final class WebViewFactory {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let healthConnect: HealthConnectAction
     private let showShare = ShowShareCoordinator.shared
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
+    private let directHandover: DirectHandoverProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -376,6 +378,8 @@ final class WebViewFactory {
         instanceID: instanceID,
         deviceID: deviceID,
         directStatus: directStatus,
+        directHandover: directHandover,
+        healthConnect: healthConnect,
         showShare: showShare,
         pushStatus: { [weak self] vapidPublicKey, origin in
             guard let coordinator = self?.pushCoordinator else {
@@ -440,6 +444,8 @@ final class WebViewFactory {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        directHandover: DirectHandoverProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
@@ -472,6 +478,8 @@ final class WebViewFactory {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.directHandover = directHandover
+        self.healthConnect = healthConnect
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
@@ -499,6 +507,7 @@ final class WebViewFactory {
         outerScrollLockControllers[ObjectIdentifier(webView)] =
             OuterScrollLockController(webView: webView)
         FormAccessoryBar.hide(in: webView)
+        DirectWebViewRegistry.shared.register(webView)
         return webView
     }
 
@@ -622,6 +631,30 @@ final class WebViewController: UIViewController {
     private let didFinishLoading: () -> Void
     private let didFailLoading: () -> Void
     private let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
+    /// The instance's last page (`RuntimePageCache`): shown at once on the
+    /// first load, and refreshed after each live load.
+    private let pageCache: RuntimePageCacheAccess?
+    /// A page shown from the cache reached its instance.
+    private let cachedPageConnected: () -> Void
+    private let cachedPageKeepsShell: () -> Void
+    /// The page shown from the cache is uncovered (it keeps its shell while
+    /// the instance cannot be reached): a live navigation from it leaves it
+    /// only once a document replaces it.
+    private var cachedPageUncovered = false
+    /// The cached navigation in flight or shown, until a live one starts.
+    private var cachedNavigation: WKNavigation?
+    /// Whether the primary WebView has had a live document of the instance.
+    private var hasLoadedLive = false
+    /// The cache serves only a runtime's first load (not a reload after the
+    /// web content process ended).
+    private var hasUsedCache = false
+    /// The page shown from the cache, to compare with the instance's own
+    /// once it answers.
+    private var shownCachedPage: RuntimeCachedPage?
+    /// The live navigation response's headers, for the capture after it.
+    private var liveDocumentHeaders: [String: String]?
+    private var cachedPageProbe: Task<Void, Never>?
+    private static let pageCacheWorld = WKContentWorld.world(name: "avibe-page-cache")
     private let accountFallbackVisibilityChanged: (Bool) -> Void
     private let pageColorSchemeChanged: (PageColorScheme?) -> Void
     private var reportedPageColorScheme: PageColorScheme?
@@ -639,9 +672,11 @@ final class WebViewController: UIViewController {
     /// The App's own sign-in screen, for a Google, GitHub or Apple sign-in tapped inside the page.
     private let showSignIn: () -> Void
     private let instanceName: () -> String?
+    private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
+    private let directHandover: DirectHandoverProvider?
     /// Whether this runtime's WebView may be loaded now; `nil` without a
     /// direct transport, which loads as before.
     private let directLoadGate: DirectLoadGateProvider?
@@ -739,6 +774,11 @@ final class WebViewController: UIViewController {
                 return self.deviceID()
             },
             directStatus: directStatus,
+            directHandover: directHandover,
+            healthConnect: { [weak self] requestID, pairingCode, origin in
+                guard let self, !self.isInvalidatedForAccountTransition else { return "failed" }
+                return await self.healthConnect(requestID, pairingCode, origin)
+            },
             pushOpenedAck: { [weak self] id, origin in
                 self?.pushOpenedAck(id, origin) ?? false
             },
@@ -833,6 +873,8 @@ final class WebViewController: UIViewController {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        directHandover: DirectHandoverProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -852,6 +894,9 @@ final class WebViewController: UIViewController {
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void = { _ in },
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
+        pageCache: RuntimePageCacheAccess? = nil,
+        cachedPageConnected: @escaping () -> Void = {},
+        cachedPageKeepsShell: @escaping () -> Void = {},
         didStartLoading: @escaping () -> Void,
         didFinishLoading: @escaping () -> Void,
         didFailLoading: @escaping () -> Void
@@ -867,6 +912,8 @@ final class WebViewController: UIViewController {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.directHandover = directHandover
+        self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
@@ -884,6 +931,9 @@ final class WebViewController: UIViewController {
         self.didFinishLoading = didFinishLoading
         self.didFailLoading = didFailLoading
         self.runtimeNavigationChanged = runtimeNavigationChanged
+        self.pageCache = pageCache
+        self.cachedPageConnected = cachedPageConnected
+        self.cachedPageKeepsShell = cachedPageKeepsShell
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -929,6 +979,12 @@ final class WebViewController: UIViewController {
             self,
             selector: #selector(resetOuterScrollPosition),
             name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(askCachedPageInstanceAgain),
+            name: UIApplication.willEnterForegroundNotification,
             object: nil
         )
         NotificationCenter.default.addObserver(
@@ -1015,12 +1071,283 @@ final class WebViewController: UIViewController {
         switch directLoadGate?() ?? .open {
         case .open:
             hasPendingAutoLoad = false
+            if !hasLoadedLive, !hasUsedCache, loadCachedPage() {
+                return
+            }
             retainedWebView?.load(URLRequest(url: instanceOrigin.url))
         case .held:
             hasPendingAutoLoad = true
         case .fault:
             hasPendingAutoLoad = false
         }
+    }
+
+    /// Shows the instance's last page from the cache, as the instance served
+    /// it (its status, headers and bytes), at the instance's own URL. The
+    /// page is live to touch; `probeCachedPage` then waits for the instance
+    /// to answer. False when there is no usable page.
+    private func loadCachedPage() -> Bool {
+        guard
+            let webView = retainedWebView,
+            let page = pageCache?.load(),
+            WebOrigin(url: page.url, requiresHTTPS: false) == instanceOrigin,
+            let response = page.response()
+        else {
+            return false
+        }
+        hasUsedCache = true
+        shownCachedPage = page
+        var request = URLRequest(url: instanceOrigin.url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        cachedNavigation = webView.loadSimulatedRequest(
+            request,
+            response: HTTPURLResponse(
+                url: instanceOrigin.url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: page.headers
+            ) ?? response,
+            responseData: page.body
+        )
+        return cachedNavigation != nil
+    }
+
+    /// Asks the instance once, from the cached page's own origin and
+    /// cookies, for its session. A signed-in answer uncovers the page. Any
+    /// other outcome (sign-in needed, or no answer) loads the instance live,
+    /// which signs in natively as any first load does, or waits for the
+    /// instance as before. The page stays covered throughout.
+    /// `uncovered`: the page is already shown uncovered (asking again).
+    private func probeCachedPage(uncovered: Bool = false) {
+        cachedPageProbe?.cancel()
+        guard retainedWebView != nil else { return }
+        // A page whose bytes declare that they keep their shell while the
+        // instance cannot be reached, and whose Web UI says it does now (it
+        // is behind a replayable outcome), is uncovered: its instance is
+        // asked until it answers, and the page itself waits out an outage.
+        // Any other cached page stays covered and is asked once.
+        let marked = shownCachedPage?.keepsShell == true
+        cachedPageProbe = Task { @MainActor [weak self] in
+            var keepsShell = uncovered
+            if !uncovered, marked, await self?.cachedPageDeclaresReplayedShell() == true {
+                guard !Task.isCancelled, let self, self.cachedNavigation != nil else { return }
+                keepsShell = true
+                self.cachedPageUncovered = true
+                self.cachedPageKeepsShell()
+            }
+            // Every 3 s while the open's budget runs (a minute), then
+            // doubling up to 30 s; a return to the foreground asks at once
+            // (`askCachedPageInstanceAgain`).
+            var interval: Duration = .seconds(3)
+            var waited: Duration = .zero
+            while !Task.isCancelled {
+                let answer = await self?.askCachedPageInstance(keepsShell: keepsShell)
+                guard let answer, !Task.isCancelled else { return }
+                if answer == 0, keepsShell {
+                    // Not reachable yet: the page stays; ask again. Nothing
+                    // is held across the wait.
+                    do { try await Task.sleep(for: interval) } catch { return }
+                    waited += interval
+                    if waited >= .seconds(60) {
+                        interval = min(interval * 2, .seconds(30))
+                    }
+                    continue
+                }
+                guard let self, self.cachedNavigation != nil else { return }
+                switch answer {
+                case 1:
+                    // Connected: from here, navigations are the ordinary
+                    // live ones.
+                    self.cachedPageUncovered = false
+                    if let webView = self.retainedWebView {
+                        self.cachedPageConnected()
+                        self.checkCachedPageIsCurrent(in: webView)
+                    }
+                    return
+                default:
+                    // Sign-in needed, the Web UI's own setup fallback, or
+                    // (covered) no answer: a live load, through the
+                    // direct-path load gate as every load the shell starts.
+                    // A covered Web UI cannot wait out an unreachable
+                    // instance (its own session read would send it to
+                    // setup), so it is used only when its instance answers
+                    // at once; otherwise the open goes on as before this
+                    // cache existed.
+                    self.cachedNavigation = nil
+                    self.cachedPageUncovered = false
+                    self.hasLoadedLive = true
+                    // From an uncovered page this replaces it as a restart
+                    // does: covered at once, with a fresh budget, and its
+                    // failure shown.
+                    self.runtimeNavigationChanged(
+                        RuntimeNavigationEvent(
+                            stage: keepsShell ? .restarting : .started,
+                            destination: .instance
+                        )
+                    )
+                    self.loadConfiguredInstance()
+                    return
+                }
+            }
+        }
+    }
+
+    /// Back in the foreground with an uncovered cached page still waiting
+    /// for its instance: ask now, then on the usual schedule.
+    @objc private func askCachedPageInstanceAgain() {
+        guard cachedPageUncovered, cachedNavigation != nil, !isInvalidatedForAccountTransition else {
+            return
+        }
+        probeCachedPage(uncovered: true)
+    }
+
+    private func leaveCachedPage() {
+        cachedNavigation = nil
+        cachedPageUncovered = false
+        cachedPageProbe?.cancel()
+        cachedPageProbe = nil
+    }
+
+    /// Whether the cached page's Web UI keeps its shell while the instance
+    /// cannot be reached: `data-avibe-replayed-shell` on its root element,
+    /// set before its first render when it replays a confirmed outcome
+    /// (ui/src/lib/bootSession.ts), and not at its setup fallback.
+    private func cachedPageDeclaresReplayedShell() async -> Bool {
+        guard cachedNavigation != nil, let webView = retainedWebView else { return false }
+        let declared = try? await webView.callAsyncJavaScript(
+            """
+            return document.documentElement.dataset.avibeReplayedShell === '1'
+              && location.pathname !== '/setup';
+            """,
+            contentWorld: Self.pageCacheWorld
+        ) as? Bool
+        return declared == true
+    }
+
+    /// One question to the instance from the cached page. 1: it answered
+    /// for a signed-in reader. 2: it answered that sign-in is needed. 3: the
+    /// page went to its setup fallback (it had no session to keep). 0: no
+    /// answer. nil: the page is gone.
+    private func askCachedPageInstance(keepsShell: Bool) async -> Int? {
+        guard cachedNavigation != nil, let webView = retainedWebView else { return nil }
+        let answer = try? await webView.callAsyncJavaScript(
+            """
+            // Under the cover nothing the user does can move the page: a
+            // moved path is the Web UI's own redirect (for example to setup
+            // after its session read failed). An uncovered page is the
+            // user's to move, except to the setup fallback, which a page
+            // without a session to keep falls to and never leaves.
+            if (keepsShell) {
+              if (location.pathname === '/setup') return 3;
+            } else if (location.pathname !== '/') {
+              return 0;
+            }
+            try {
+              const response = await fetch('/api/session', {
+                cache: 'no-store', credentials: 'same-origin'
+              });
+              if (response.status === 401 || response.status === 403) return 2;
+              if (!response.ok) return 0;
+              const session = await response.json().catch(() => null);
+              if (session && session.authenticated === false) return 2;
+              return 1;
+            } catch (error) {
+              return 0;
+            }
+            """,
+            arguments: ["keepsShell": keepsShell],
+            contentWorld: Self.pageCacheWorld
+        ) as? Int
+        return answer ?? 0
+    }
+
+    /// After a live load of the instance's root document: the page fetches
+    /// its own URL once more, and that response is kept only if its status
+    /// is 200 and every security header equals the live navigation
+    /// response's (`RuntimePageCapture`). Off the critical path.
+    private func capturePage(in webView: WKWebView) {
+        guard
+            let pageCache,
+            let live = liveDocumentHeaders,
+            let url = webView.url,
+            WebOrigin(url: url, requiresHTTPS: false) == instanceOrigin,
+            url.path.isEmpty || url.path == "/"
+        else {
+            return
+        }
+        liveDocumentHeaders = nil
+        Task { @MainActor [weak self, weak webView] in
+            guard let webView, let self else { return }
+            let result = try? await self.fetchOwnResponse(in: webView)
+            guard
+                !self.isInvalidatedForAccountTransition,
+                let result,
+                let page = RuntimePageCapture.capture(
+                    url: self.instanceOrigin.url,
+                    live: live,
+                    status: result.status,
+                    fetched: result.headers,
+                    body: result.body
+                )
+            else {
+                return
+            }
+            pageCache.store(page)
+        }
+    }
+
+    /// Once the instance answered for a cached page: its response to the same
+    /// URL now. Anything different from what was shown (bytes, status or a
+    /// security header) drops the entry, so the next launch loads live and
+    /// captures the current page.
+    private func checkCachedPageIsCurrent(in webView: WKWebView) {
+        guard let shown = shownCachedPage, let pageCache else { return }
+        Task { @MainActor [weak self, weak webView] in
+            guard let webView, let self else { return }
+            guard let fresh = try? await self.fetchOwnResponse(in: webView) else { return }
+            guard !self.isInvalidatedForAccountTransition else { return }
+            if !RuntimePageCapture.matches(
+                shown, status: fresh.status, fetched: fresh.headers, body: fresh.body
+            ) {
+                pageCache.remove()
+            }
+        }
+    }
+
+    /// The instance's response to its root URL, fetched from the page's own
+    /// origin and cookies in an isolated world: status, headers and bytes.
+    private func fetchOwnResponse(
+        in webView: WKWebView
+    ) async throws -> (status: Int, headers: [String: String], body: Data)? {
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const response = await fetch(url, {
+              cache: 'no-store', credentials: 'same-origin'
+            });
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            let binary = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+              binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            }
+            return {
+              status: response.status,
+              headers: Object.fromEntries(response.headers.entries()),
+              body: btoa(binary)
+            };
+            """,
+            arguments: ["url": instanceOrigin.url.absoluteString],
+            contentWorld: Self.pageCacheWorld
+        ) as? [String: Any]
+        guard
+            let result,
+            let status = result["status"] as? Int,
+            let headers = result["headers"] as? [String: String],
+            let encoded = result["body"] as? String,
+            let body = Data(base64Encoded: encoded)
+        else {
+            return nil
+        }
+        return (status, headers, body)
     }
 
     /// The load gate may have changed. A held automatic load is decided
@@ -1326,7 +1653,13 @@ final class WebViewController: UIViewController {
                 + popupRecords.values.map(\.webView)
         )
         isInvalidatedForAccountTransition = true
+        // An in-App hold's take ends with the account's page.
+        if let retainedWebView { NativeHoldCapture.shared.stop(webView: retainedWebView) }
         hasPendingAutoLoad = false
+        cachedPageProbe?.cancel()
+        cachedPageProbe = nil
+        cachedNavigation = nil
+        cachedPageUncovered = false
         primaryNavigationInProgress = false
         blockedBackForwardNavigation = false
         accountFallbackWorkItem?.cancel()
@@ -1532,8 +1865,12 @@ final class WebViewController: UIViewController {
         accountFallbackWorkItem?.cancel()
         accountFallbackWorkItem = nil
         accountFallbackVisibilityChanged(false)
-        primaryLoadFailed = true
-        updatePageColorScheme()
+        // A live navigation from an uncovered cached page that failed before
+        // replacing it leaves that page as it was.
+        if !cachedPageUncovered {
+            primaryLoadFailed = true
+            updatePageColorScheme()
+        }
         didFailLoading()
         runtimeNavigationChanged(
             RuntimeNavigationEvent(
@@ -2159,6 +2496,25 @@ extension WebViewController: WKNavigationDelegate {
             for: webView,
             isMainFrame: isPrimaryMainFrame
         )
+        // An uncovered cached page has finished loading, so a response now
+        // is a live navigation's.
+        if isPrimaryMainFrame, cachedNavigation == nil || cachedPageUncovered {
+            // A live document of the instance: its headers, for the capture
+            // after it loads.
+            if
+                let http = navigationResponse.response as? HTTPURLResponse,
+                http.statusCode == 200,
+                let url = http.url,
+                WebOrigin(url: url, requiresHTTPS: false) == instanceOrigin
+            {
+                liveDocumentHeaders = Dictionary(
+                    http.allHeaderFields.map { ("\($0.key)", "\($0.value)") },
+                    uniquingKeysWith: { first, _ in first }
+                )
+            } else {
+                liveDocumentHeaders = nil
+            }
+        }
         guard
             isAttachment(navigationResponse.response) || !navigationResponse.canShowMIMEType
         else {
@@ -2260,6 +2616,11 @@ extension WebViewController: WKNavigationDelegate {
         }
         cancelPendingDialogs(for: webView)
         if isPrimaryWebView(webView) {
+            if navigation !== cachedNavigation, !cachedPageUncovered {
+                // A live navigation: the covered cached page is leaving. An
+                // uncovered one stays until a document replaces it.
+                leaveCachedPage()
+            }
             systemScheduleNavigationEpoch += 1
             preparePrimaryNavigationSettlement(for: webView, isMainFrame: true)
             primaryWebContentTerminationHandled = false
@@ -2273,7 +2634,8 @@ extension WebViewController: WKNavigationDelegate {
                 RuntimeNavigationEvent(
                     stage: .started,
                     destination: primaryNavigationDestination
-                        ?? runtimeDestination(in: webView)
+                        ?? runtimeDestination(in: webView),
+                    fromCache: navigation != nil && navigation === cachedNavigation
                 )
             )
             didStartLoading()
@@ -2284,8 +2646,14 @@ extension WebViewController: WKNavigationDelegate {
         guard acceptsRuntimeCallback(from: webView) else {
             return
         }
+        // A new document: the one that held a take is gone.
+        NativeHoldCapture.shared.stop(webView: webView)
         retainedWebViewFactory?.resetForNavigationCommit(in: webView)
         if isPrimaryWebView(webView) {
+            if navigation !== cachedNavigation, cachedNavigation != nil {
+                // A live document replaced the cached page.
+                leaveCachedPage()
+            }
             if let url = webView.url {
                 primaryNavigationDestination = navigationPolicy.destination(
                     for: url
@@ -2294,7 +2662,8 @@ extension WebViewController: WKNavigationDelegate {
             runtimeNavigationChanged(
                 RuntimeNavigationEvent(
                     stage: .committed,
-                    destination: runtimeDestination(in: webView)
+                    destination: runtimeDestination(in: webView),
+                    fromCache: navigation != nil && navigation === cachedNavigation
                 )
             )
             blockedBackForwardNavigation = false
@@ -2323,12 +2692,22 @@ extension WebViewController: WKNavigationDelegate {
         primaryNavigationInProgress = false
         updateBackNavigationGesture(in: webView)
         scheduleAccountFallbackIfNeeded()
+        let fromCache = navigation != nil && navigation === cachedNavigation
+        if !fromCache,
+           webView.url.flatMap({ WebOrigin(url: $0, requiresHTTPS: false) }) == instanceOrigin {
+            hasLoadedLive = true
+            capturePage(in: webView)
+        }
         runtimeNavigationChanged(
             RuntimeNavigationEvent(
                 stage: .finished,
-                destination: runtimeDestination(in: webView)
+                destination: runtimeDestination(in: webView),
+                fromCache: fromCache
             )
         )
+        if fromCache {
+            probeCachedPage()
+        }
         didFinishLoading()
     }
 
@@ -2375,6 +2754,8 @@ extension WebViewController: WKNavigationDelegate {
         guard acceptsRuntimeCallback(from: webView) else {
             return
         }
+        // The page that held the take is gone: nothing can stop it but us.
+        NativeHoldCapture.shared.stop(webView: webView)
         cancelPendingDialogs(for: webView)
         if isPrimaryWebView(webView) {
             guard !primaryWebContentTerminationHandled else {
@@ -2382,6 +2763,15 @@ extension WebViewController: WKNavigationDelegate {
             }
             primaryWebContentTerminationHandled = true
             primaryNavigationInProgress = false
+            // The cached page went with its process. One shown uncovered
+            // (its shell waits out an unreachable instance) is shown again,
+            // so a process ended in the background brings back the same
+            // page, not a live load of an instance that may be offline.
+            let showsCachedPageAgain = cachedPageUncovered
+            leaveCachedPage()
+            if showsCachedPageAgain {
+                hasUsedCache = false
+            }
             discardAllPopups(animated: false)
             reportPrimaryNavigationSettlement(
                 RuntimeNavigationEvent(

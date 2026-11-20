@@ -706,7 +706,7 @@ export const UserList: React.FC = () => {
         </div>
 
         {/* User cards (ui/design: settings/direct-messages/default) */}
-        <div className="flex-1 space-y-3 overflow-y-auto">
+        <div className="flex-1 space-y-3 overflow-y-auto p-px">
           {visibleUsers.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-surface-3/60 p-8 text-center text-[13px] text-muted">
               {searchQuery ? t('userList.noUsersForSearch') : t('userList.noUsers')}

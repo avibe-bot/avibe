@@ -114,12 +114,17 @@ class AsyncioByteStream:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._reader = reader
         self._writer = writer
+        self.bytes_read = 0
+        self.bytes_written = 0
 
     async def read(self, max_bytes: int) -> bytes:
-        return await self._reader.read(max_bytes)
+        data = await self._reader.read(max_bytes)
+        self.bytes_read += len(data)
+        return data
 
     async def write(self, data: bytes) -> None:
         self._writer.write(data)
+        self.bytes_written += len(data)  # queued locally, not proof of remote receipt
         await self._writer.drain()
 
     async def close_write(self) -> None:

@@ -58,13 +58,24 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
         const rect = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
         const tools = node.firstElementChild!.getBoundingClientRect();
         const row = rect('[data-sidebar-status-row]');
-        return { dot: rect('[data-status-indicator]').x, tools: tools.x,
+        const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
+        const label = node.querySelector('[data-account-label]')!;
+        const probe = document.createElement('span'); probe.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:middle';
+        label.prepend(probe); const xMiddle = probe.getBoundingClientRect().top; probe.remove();
+        const dot = rect('[data-status-indicator]');
+        return { dot: dot.x, centring: dot.top + dot.height / 2 - xMiddle, tools: tools.x, trigger: rect('[data-account-trigger]').x,
+          inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
           labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
           versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
           above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
       });
-      expect(measurements.dot).toBe(16);
+      // The trigger's edge is flush with the tools above; its dot sits inside its own inset, never on the hover wash's edge.
       expect(measurements.tools).toBe(16);
+      expect(measurements.trigger).toBe(measurements.tools);
+      expect(measurements.inset).toBeGreaterThanOrEqual(16);
+      expect(measurements.dot - measurements.trigger).toBe(measurements.inset);
+      // Centred on the label's lowercase letters, not on its line box.
+      expect(Math.abs(measurements.centring)).toBeLessThanOrEqual(0.5);
       expect(measurements.labelGap).toBeGreaterThanOrEqual(0);
       expect(measurements.labelGap).toBeLessThanOrEqual(8);
       await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
@@ -150,12 +161,14 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await expect(chip).toHaveText(`v${state.desktop.version}`);
     const geometry = await row.evaluate((node) => {
       const box = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
-      return { left: box('[data-status-indicator]').left,
+      const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
+      return { left: box('[data-account-trigger]').left, dot: box('[data-status-indicator]').left - box('[data-account-trigger]').left,
+        inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
         gap: box('[data-account-label]').left - box('[data-status-indicator]').right,
         right: box('[data-version-chip]').right - node.getBoundingClientRect().right,
         bottom: innerHeight - node.getBoundingClientRect().bottom };
     });
-    expect(geometry.left).toBe(16); expect(geometry.gap).toBeGreaterThanOrEqual(0);
+    expect(geometry.left).toBe(16); expect(geometry.inset).toBeGreaterThanOrEqual(16); expect(geometry.dot).toBe(geometry.inset); expect(geometry.gap).toBeGreaterThanOrEqual(0);
     expect(geometry.gap).toBeLessThanOrEqual(8); expect(geometry.right).toBe(0); expect(geometry.bottom).toBe(8);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('remote-bottom-row.png') });
     await chip.click();
@@ -297,6 +310,7 @@ for (const lang of ['en', 'zh'] as const) test(`feedback2 inline failure, disabl
   const state = clientState(); signIn(state);
   state.catalog.instances[0].name = '工作室 Studio — a long name for the shared research and product development computer';
   state.catalog.instances[1].owner_email = 'a-very-long-shared-account-name-for-the-research-team@example.test';
+  state.catalog.instances[1].name = 'avibe-e2e-driver';
   const requests = await installBridge(page, state, { selectError: 'instance_upgrade_required' });
   await page.goto(`${ACCOUNT}?view=instances`);
   const row = page.locator('[data-instance-id="studio"]');
@@ -308,6 +322,24 @@ for (const lang of ['en', 'zh'] as const) test(`feedback2 inline failure, disabl
   const offline = page.locator('[data-instance-id="team"]');
   await expect(offline.getByRole('button')).toBeDisabled();
   await expect(offline).toContainText(lang === 'en' ? 'Offline' : '离线');
+  // ui/design: desktop/status-dots — grey for offline, green kept on a failed open, and the dot centred
+  // on the letters of the name's first line: the cap-height middle for an ideograph-led name (wrapped
+  // here), the x-height middle for a Latin one. Each anchor is measured off the name's own baseline.
+  await expect(offline.locator('[data-status-indicator]')).toHaveClass(/bg-muted/);
+  await expect(row.locator('[data-status-indicator]')).toHaveClass(/bg-mint/);
+  const centring = (locator: typeof row, align: string) => locator.evaluate((node, value) => {
+    const name = node.querySelector('[data-line-glyph] + span > span')!;
+    const probe = document.createElement('span'); probe.style.cssText = `display:inline-block;width:0;height:0;vertical-align:${value}`;
+    name.prepend(probe); const anchor = probe.getBoundingClientRect().top; probe.remove();
+    const dot = node.querySelector('[data-status-indicator]')!.getBoundingClientRect();
+    const box = name.getBoundingClientRect();
+    return { offset: dot.top + dot.height / 2 - anchor, firstLine: anchor - box.top, height: box.height, lineHeight: parseFloat(getComputedStyle(name).lineHeight) };
+  }, align);
+  const wrapped = await centring(row, 'calc(1cap / 2)');
+  expect(wrapped.height).toBeGreaterThan(wrapped.lineHeight * 1.5);
+  expect(wrapped.firstLine).toBeLessThan(wrapped.lineHeight);
+  expect(Math.abs(wrapped.offset)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs((await centring(offline, 'middle')).offset)).toBeLessThanOrEqual(0.5);
   const errorBox = await row.getByRole('alert').boundingBox();
   const rowBox = await row.boundingBox();
   expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(rowBox!.y + rowBox!.height);
@@ -459,7 +491,10 @@ for (const lang of ['en', 'zh'] as const) test(`A5 current shared snapshot and r
   await expect(row).toHaveCount(1);
   await expect(row.locator('[data-instance-icon="shared"]')).toBeVisible();
   await expect(row).toContainText(current.owner_email!);
-  await expect(row.getByRole('button')).toBeDisabled();
+  // The current row reads offline from the connection only, not from native's stale `available`.
+  if (lang === 'zh') await expect(row.getByRole('button')).toBeDisabled();
+  else await expect(row.getByRole('button')).toBeEnabled();
+  await expect(row.locator('[data-status-indicator]')).toHaveClass(lang === 'zh' ? /bg-muted/ : /bg-mint/);
   await expect(page.locator('[data-other-instances]')).not.toContainText(current.name);
   await expect(page.locator('[data-instance-id="local"]')).toContainText(lang === 'en' ? 'This computer' : '本机');
   await page.screenshot({ animations: 'disabled', path: info.outputPath('a5-current-snapshot.png') });

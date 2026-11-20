@@ -575,7 +575,7 @@ final class DirectPathAppTests: XCTestCase {
                 if failing && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
             },
             systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             if case .loading = app.route { return false }
             return true
         }
@@ -620,7 +620,7 @@ final class DirectPathAppTests: XCTestCase {
             beforeTheAppExists: {
                 self.appDefaults?.removeObject(forKey: Self.selectionKey)
             })
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             next.mobileSessionCoordinator.currentAccount?.id == "account-2"
         }
         let reopened = try XCTUnwrap(appScheduleStore)
@@ -681,7 +681,7 @@ final class DirectPathAppTests: XCTestCase {
         }
         controller.loadViewIfNeeded()
         let webView = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             (try? await webView.evaluateJavaScript(
                 "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Account and data' && !b.disabled)"
             ) as? Bool) == true
@@ -695,7 +695,7 @@ final class DirectPathAppTests: XCTestCase {
             })()
             """) as? Bool
         XCTAssertEqual(openedAccountData, true)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             (try? await webView.evaluateJavaScript(
                 "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Delete account' && !b.disabled)"
             ) as? Bool) == true
@@ -722,7 +722,7 @@ final class DirectPathAppTests: XCTestCase {
             url: app.mobileSessionCoordinator.controlPlaneURL
                 .appendingPathComponent("account/delete/done")
         ))
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             failedWrites > 0 && controller.presentedViewController == nil
         }
         try await eventually {
@@ -794,7 +794,7 @@ final class DirectPathAppTests: XCTestCase {
                     systemScheduleCheckpoint: {
                         if !durable && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
                     }, systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
-                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                     if case .loading = departing.route { return false }
                     return true
                 }
@@ -828,7 +828,7 @@ final class DirectPathAppTests: XCTestCase {
                     launchesWithInstanceOneSelected: true, beforeTheAppExists: {
                         self.appDefaults?.removeObject(forKey: Self.selectionKey)
                     })
-                try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                     if case .loading = reopened.route { return false }
                     return true
                 }
@@ -883,7 +883,7 @@ final class DirectPathAppTests: XCTestCase {
             defer { window.isHidden = true; window.rootViewController = nil }
             app.showAccountRoot()
             var account: WKWebView?
-            try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                 for page in self.bundledWebViews(in: window) {
                     if (try? await page.evaluateJavaScript(
                         "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Sign out on this device' && !b.disabled)"
@@ -899,7 +899,7 @@ final class DirectPathAppTests: XCTestCase {
                 Array.from(document.querySelectorAll('button'))
                   .find(b => b.textContent.trim() === 'Sign out on this device').click()
                 """)
-            try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
                 for page in self.bundledWebViews(in: window) {
                     if (try? await page.evaluateJavaScript(
                         "document.body.textContent.includes('Continue with email')"
@@ -934,7 +934,7 @@ final class DirectPathAppTests: XCTestCase {
         let app = try await makeApp(directTransport: nil, systemScheduleCheckpoint: {
             if failing && $0 == .beforeColdOpenSync { throw CocoaError(.fileWriteUnknown) }
         }, systemScheduleFileURL: url, launchesWithInstanceOneSelected: true)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             if case .loading = app.route { return false }
             return true
         }
@@ -951,17 +951,17 @@ final class DirectPathAppTests: XCTestCase {
                 "return document.body.textContent.includes(message);",
                 arguments: ["message": message], in: nil, contentWorld: .page) as? Bool) == true
         }
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) { await showsLocalError() }
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) { await showsLocalError() }
         let retry = """
             Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Retry').click()
             """
         _ = try await webView.evaluateJavaScript(retry)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) { await showsLocalError() }
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) { await showsLocalError() }
         XCTAssertNil(app.mobileSessionCoordinator.currentAccount)
         XCTAssertNil(app.captureSystemScheduleAdmission(origin: instance))
         failing = false
         _ = try await webView.evaluateJavaScript(retry)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             let hasInstance = (try? await webView.evaluateJavaScript(
                 "document.body.textContent.includes('One')") as? Bool) == true
             return app.mobileSessionCoordinator.currentAccount?.id == "account-1" && hasInstance
@@ -1028,7 +1028,7 @@ final class DirectPathAppTests: XCTestCase {
                 store = seeded
             }
         )
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             if case .loading = app.route { return false }
             return true
         }
@@ -2256,6 +2256,504 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(app.mayReload(runtime))
     }
 
+    /// An open whose page loaded from the cache stays covered (the loading
+    /// layer) until the instance answers for this session, which ends the
+    /// open. Without an answer the open ends as any open does: back to the
+    /// list with the timeout notice. A stored page is used for at most a
+    /// day.
+    @MainActor
+    func testACachedPageStaysCoveredUntilItsInstanceAnswers() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(directTransport: nil, runtimeOpenTiming: timing)
+        defer { app.runtimePageCache.removeAll() }
+        let runtime = try await select("instance-1", in: app)
+        let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
+
+        // Covered from the cached document's start to its load, never the
+        // uncovered `.loadingPage`.
+        for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+            app.handleRuntimeNavigation(
+                RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                attemptID: attempt.id,
+                runtime: runtime
+            )
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached, "\(stage)")
+            XCTAssertEqual(
+                BrowserOverlay(attemptPhase: try XCTUnwrap(app.runtimeOpenAttempt).phase, directFault: false),
+                .loading,
+                "\(stage)"
+            )
+        }
+        app.runtimeCachedPageConnected(attemptID: attempt.id, runtime: runtime)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
+        XCTAssertEqual(app.route, .browser(runtime))
+
+        // Opened again from the cache, and the instance never answers.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let other = try await waitForBrowser("instance-2", in: app)
+        let second = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .finished, destination: .instance, fromCache: true),
+            attemptID: second.id,
+            runtime: other
+        )
+        timing.advance(by: .seconds(60))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertEqual(app.runtimeOpenNotice?.lastPhase, .showingCached)
+
+        // A day-old page is not used, and is removed.
+        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: runtime))
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
+        app.runtimePageCache.store(
+            RuntimeCachedPage(
+                url: runtime.instance.url,
+                headers: ["Content-Type": "text/html"],
+                body: Data("<!doctype html>".utf8),
+                capturedAt: Date().addingTimeInterval(-(RuntimePageCache.maximumAge + 60))
+            ),
+            accountID: "account-1",
+            origin: origin
+        )
+        XCTAssertNil(access.load())
+        XCTAssertNil(app.runtimePageCache.page(accountID: "account-1", origin: origin))
+    }
+
+    /// A cached page is covered from its start; once it says it keeps its
+    /// shell while the instance cannot be reached it is uncovered: only the
+    /// progress line, the long-wait row, and out of time the page stays with
+    /// the "can't reach" banner and Retry (no return to the list). A late
+    /// answer ends it. A live navigation from the page leaves it on screen
+    /// until a document replaces it (a handoff, a cancel or a failure before
+    /// that changes nothing); the replacing document opens covered, with a
+    /// fresh, bounded budget. Retry opens it live, skipping the cache once.
+    @MainActor
+    func testAMarkedCachedPageShowsUncoveredAndKeepsItsContentOutOfTime() async throws {
+        let timing = RuntimeOpenManualTiming()
+        let app = try await makeApp(directTransport: nil, runtimeOpenTiming: timing)
+        defer { app.runtimePageCache.removeAll() }
+        let runtime = try await select("instance-1", in: app)
+        let attempt = try XCTUnwrap(app.runtimeOpenAttempt)
+        let cached = { (stage: RuntimeNavigationStage) in
+            RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true)
+        }
+        let live = { (stage: RuntimeNavigationStage) in
+            RuntimeNavigationEvent(stage: stage, destination: .instance)
+        }
+        func show(_ attempt: RuntimeOpenAttempt, _ runtime: MobileRuntimeContext) {
+            for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+                app.handleRuntimeNavigation(cached(stage), attemptID: attempt.id, runtime: runtime)
+            }
+            app.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: runtime)
+        }
+        for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+            app.handleRuntimeNavigation(cached(stage), attemptID: attempt.id, runtime: runtime)
+            // Covered until the page says it keeps its shell.
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached, "\(stage)")
+        }
+        app.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: runtime)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive)
+        XCTAssertEqual(
+            BrowserOverlay(attemptPhase: .showingCachedLive, directFault: false),
+            .showingCachedLive
+        )
+        // A live navigation from the page that never replaces it (a link
+        // whose response is a download, then nothing; a blocked one; one that
+        // fails): the page stays, the open keeps waiting.
+        for end in [RuntimeNavigationStage.handedOff, .cancelled, .failed] {
+            app.handleRuntimeNavigation(live(.started), attemptID: attempt.id, runtime: runtime)
+            app.handleRuntimeNavigation(live(end), attemptID: attempt.id, runtime: runtime)
+            XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive, "\(end)")
+        }
+
+        timing.advance(by: .seconds(8))
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
+        timing.advance(by: .seconds(52))
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        XCTAssertEqual(
+            BrowserOverlay(attemptPhase: .cachedUnreachable, directFault: false),
+            .cachedUnreachable
+        )
+        XCTAssertNil(app.runtimeOpenNotice)
+
+        // A late answer from the instance ends it.
+        app.runtimeCachedPageConnected(attemptID: attempt.id, runtime: runtime)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .documentLoaded)
+
+        // Out of time again; a live document replacing the page opens
+        // covered, and is bounded again: out of time, the open ends.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let other = try await waitForBrowser("instance-2", in: app)
+        let second = try XCTUnwrap(app.runtimeOpenAttempt)
+        show(second, other)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        app.handleRuntimeNavigation(live(.started), attemptID: second.id, runtime: other)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        app.handleRuntimeNavigation(live(.committed), attemptID: second.id, runtime: other)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .loadingPage)
+        XCTAssertEqual(
+            BrowserOverlay(attemptPhase: .loadingPage, directFault: false),
+            .loading
+        )
+        XCTAssertFalse(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
+        timing.advance(by: .seconds(59))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .loadingPage)
+        timing.advance(by: .seconds(1))
+        XCTAssertTrue(isOnInstancePicker(app))
+        XCTAssertEqual(app.runtimeOpenNotice?.lastPhase, .loadingPage)
+
+        // The page's process ending while out of time: the live reload is
+        // bounded as well.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        _ = try await waitForBrowser("instance-1", in: app)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let reopened = try await waitForBrowser("instance-2", in: app)
+        let restarted = try XCTUnwrap(app.runtimeOpenAttempt)
+        show(restarted, reopened)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        app.handleRuntimeNavigation(live(.restarting), attemptID: restarted.id, runtime: reopened)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
+        timing.advance(by: .seconds(60))
+        XCTAssertTrue(isOnInstancePicker(app))
+
+        // Out of time once more; Retry opens it live, skipping the cache once.
+        let access = try XCTUnwrap(app.runtimePageCacheAccess(for: reopened))
+        let page = RuntimeCachedPage(
+            url: reopened.instance.url,
+            headers: ["Content-Type": "text/html"],
+            body: Data("<!doctype html>".utf8),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+        access.store(page)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        let back = try await waitForBrowser("instance-1", in: app)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        let again = try await waitForBrowser("instance-2", in: app)
+        let third = try XCTUnwrap(app.runtimeOpenAttempt)
+        _ = back
+        show(third, again)
+        timing.advance(by: .seconds(60))
+        XCTAssertTrue(app.retryRuntimeCachedPage())
+        XCTAssertGreaterThan(try XCTUnwrap(app.runtimeOpenAttempt).id, third.id)
+        let retried = try XCTUnwrap(app.runtimePageCacheAccess(for: again))
+        XCTAssertNil(retried.load())
+        XCTAssertEqual(retried.load(), page)
+    }
+
+    /// avibe.bot listing the instance offline after an open-first decides
+    /// the same way whenever its answer arrives. A cached page that keeps its
+    /// shell offline (marked, and declaring a replayed shell) stays,
+    /// uncovered, with the offline row, before or after it was uncovered;
+    /// it connects by itself when the instance answers. With no such page
+    /// (none stored, stored unmarked, or one that does not declare a
+    /// replayed shell) the open ends at the instance list, as before.
+    /// Retry opens it again and asks avibe.bot again; Switch instance shows
+    /// the instances over the page.
+    @MainActor
+    func testAnInstanceListedOfflineKeepsOnlyACachedPageThatKeepsItsShell() async throws {
+        let listing = { (available: Bool) in
+            LocalHTTPResponse.json("""
+                {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+                {"id":"instance-1","name":"One","host":"instance-one.example",
+                 "url":"https://instance-one.example","relationship":"owner",
+                 "owner_email":"max@example.com","available":\(available)}]}
+                """)
+        }
+        enum Stored { case none, unmarked, marked }
+        enum Shown { case live, covered, uncovered }
+        enum Then { case declines, keepsShell, nothing }
+        let rows: [(name: String, stored: Stored, shown: Shown?, then: Then, stays: Bool)] = [
+            ("no cached page", .none, nil, .nothing, false),
+            ("an unmarked cached page", .unmarked, .covered, .nothing, false),
+            ("a live load started before the answer", .marked, .live, .nothing, false),
+            ("a marked page that does not declare a replayed shell", .marked, .covered, .declines, false),
+            ("answered before the uncover", .marked, .covered, .keepsShell, true),
+            ("answered after the uncover", .marked, .uncovered, .nothing, true),
+        ]
+        for row in rows {
+            // A manual clock: no time-out can end an open the rule failed to.
+            let timing = RuntimeOpenManualTiming()
+            let first = try await makeApp(directTransport: nil)
+            let selected = try await select("instance-1", in: first)
+            let defaults = try XCTUnwrap(appDefaults)
+            if row.stored != .none {
+                try XCTUnwrap(first.runtimePageCacheAccess(for: selected)).store(
+                    RuntimeCachedPage(
+                        url: selected.instance.url,
+                        headers: ["Content-Type": "text/html"],
+                        body: Data("<!doctype html>".utf8),
+                        capturedAt: Date(),
+                        keepsShellUnreachable: row.stored == .marked ? true : nil
+                    )
+                )
+            }
+
+            let session = SessionAnswerOverride()
+            let started = FixtureEvent(description: "session read: \(row.name)")
+            let release = DispatchSemaphore(value: 0)
+            session.hold(listing(false), started: started, release: release)
+            let next = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { session.response },
+                runtimeOpenTiming: timing,
+                reusingDefaults: defaults
+            )
+            defer { next.runtimePageCache.removeAll() }
+            await fulfillment(
+                of: [started.expectation],
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
+            )
+            guard case .browser(let opened) = next.route, let attempt = next.runtimeOpenAttempt else {
+                release.signal()
+                return XCTFail("The instance did not open first: \(row.name)")
+            }
+            if row.shown == .live {
+                next.handleRuntimeNavigation(
+                    RuntimeNavigationEvent(stage: .started, destination: .instance),
+                    attemptID: attempt.id,
+                    runtime: opened
+                )
+            }
+            let cached = { (stage: RuntimeNavigationStage) in
+                next.handleRuntimeNavigation(
+                    RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                    attemptID: attempt.id,
+                    runtime: opened
+                )
+            }
+            if row.shown == .covered || row.shown == .uncovered {
+                for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+                    cached(stage)
+                }
+            }
+            if row.shown == .uncovered {
+                next.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: opened)
+                XCTAssertEqual(next.runtimeOpenAttempt?.phase, .showingCachedLive, row.name)
+            }
+
+            release.signal()
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                next.mobileSessionCoordinator.currentInstances
+                    .first { $0.id == "instance-1" }?.available == false
+            }
+            // What the page says once it has loaded (the probe).
+            switch row.then {
+            case .declines:
+                // Covered, asked once without an answer: a live load.
+                XCTAssertEqual(next.route, .browser(opened), row.name)
+                next.handleRuntimeNavigation(
+                    RuntimeNavigationEvent(stage: .started, destination: .instance),
+                    attemptID: attempt.id,
+                    runtime: opened
+                )
+            case .keepsShell:
+                XCTAssertEqual(next.route, .browser(opened), row.name)
+                XCTAssertEqual(next.runtimeOpenAttempt?.phase, .showingCached, row.name)
+                next.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: opened)
+            case .nothing:
+                break
+            }
+            guard row.stays else {
+                // At once, and because the rule ended it (no time-out).
+                XCTAssertEqual(next.route, .onboarding(.instances), row.name)
+                XCTAssertEqual(next.lastRuntimeOpenTermination?.reason, .cancelled, row.name)
+                continue
+            }
+            XCTAssertEqual(next.route, .browser(opened), row.name)
+            XCTAssertEqual(next.runtimeOpenAttempt?.phase, .cachedOffline, row.name)
+            // No time-out ends it.
+            timing.advance(by: .seconds(120))
+            XCTAssertEqual(next.route, .browser(opened), row.name)
+            XCTAssertEqual(next.runtimeOpenAttempt?.phase, .cachedOffline, row.name)
+
+            if row.shown == .uncovered {
+                // Recovery: the instance answers the page; the open is done,
+                // the row goes, and later navigations are ordinary.
+                next.runtimeCachedPageConnected(attemptID: attempt.id, runtime: opened)
+                XCTAssertEqual(next.runtimeOpenAttempt?.phase, .documentLoaded, row.name)
+                XCTAssertEqual(
+                    BrowserOverlay(attemptPhase: .documentLoaded, directFault: false),
+                    .none
+                )
+                next.handleRuntimeNavigation(
+                    RuntimeNavigationEvent(stage: .started, destination: .instance),
+                    attemptID: attempt.id,
+                    runtime: opened
+                )
+                XCTAssertEqual(next.route, .browser(opened), row.name)
+                continue
+            }
+
+            // Switch instance: the instances over the page.
+            next.showInstances()
+            XCTAssertEqual(next.route, .accountOverBrowser(opened), row.name)
+            XCTAssertTrue(next.returnToRuntime(), row.name)
+
+            // Retry, still listed offline: a new open, waiting on its
+            // cached page again.
+            session.replace(with: listing(false))
+            XCTAssertTrue(next.retryOfflineCachedPage(), row.name)
+            let retried = try XCTUnwrap(next.runtimeOpenAttempt)
+            XCTAssertGreaterThan(retried.id, attempt.id, row.name)
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                next.runtimeOpenAttempt?.listedOffline == true
+            }
+            for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+                next.handleRuntimeNavigation(
+                    RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                    attemptID: retried.id,
+                    runtime: opened
+                )
+            }
+            next.runtimeCachedPageKeepsShell(attemptID: retried.id, runtime: opened)
+            XCTAssertEqual(next.runtimeOpenAttempt?.phase, .cachedOffline, row.name)
+
+            // Retry, listed online again: the open goes on as any open of a
+            // cached page, bounded.
+            session.replace(with: listing(true))
+            XCTAssertTrue(next.retryOfflineCachedPage(), row.name)
+            let online = try XCTUnwrap(next.runtimeOpenAttempt)
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                next.mobileSessionCoordinator.currentInstances
+                    .first { $0.id == "instance-1" }?.available == true
+            }
+            XCTAssertEqual(next.runtimeOpenAttempt?.listedOffline, false, row.name)
+            for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+                next.handleRuntimeNavigation(
+                    RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                    attemptID: online.id,
+                    runtime: opened
+                )
+            }
+            next.runtimeCachedPageKeepsShell(attemptID: online.id, runtime: opened)
+            XCTAssertEqual(next.runtimeOpenAttempt?.phase, .showingCachedLive, row.name)
+            timing.advance(by: .seconds(60))
+            XCTAssertEqual(next.runtimeOpenAttempt?.phase, .cachedUnreachable, row.name)
+        }
+    }
+
+    /// A launch whose last session lists the selected instance offline opens
+    /// it first only for a cached page that keeps its shell offline, and the
+    /// open starts listed offline; without one it does not open first.
+    @MainActor
+    func testALaunchOpensAnInstanceListedOfflineOnlyForItsCachedPage() async throws {
+        let offline = LocalHTTPResponse.json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-1","name":"One","host":"instance-one.example",
+             "url":"https://instance-one.example","relationship":"owner",
+             "owner_email":"max@example.com","available":false}]}
+            """)
+        for marked in [true, false] {
+            let first = try await makeApp(directTransport: nil)
+            let selected = try await select("instance-1", in: first)
+            let defaults = try XCTUnwrap(appDefaults)
+            defer { first.runtimePageCache.removeAll() }
+            try XCTUnwrap(first.runtimePageCacheAccess(for: selected)).store(
+                RuntimeCachedPage(
+                    url: selected.instance.url,
+                    headers: ["Content-Type": "text/html"],
+                    body: Data("<!doctype html>".utf8),
+                    capturedAt: Date(),
+                    keepsShellUnreachable: marked ? true : nil
+                )
+            )
+            // A launch whose session read lists it offline: the last good
+            // session now says so.
+            let second = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { offline },
+                reusingDefaults: defaults
+            )
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                second.mobileSessionCoordinator.currentInstances
+                    .first { $0.id == "instance-1" }?.available == false
+            }
+
+            // The next launch, before avibe.bot answers.
+            let session = SessionAnswerOverride()
+            let started = FixtureEvent(description: "session read, marked: \(marked)")
+            let release = DispatchSemaphore(value: 0)
+            session.hold(offline, started: started, release: release)
+            let third = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { session.response },
+                reusingDefaults: defaults
+            )
+            await fulfillment(
+                of: [started.expectation],
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
+            )
+            if marked {
+                guard case .browser(let opened) = third.route else {
+                    release.signal()
+                    return XCTFail("A launch did not open an offline instance with its cached page")
+                }
+                XCTAssertFalse(opened.instance.available)
+                // avibe.bot confirms it offline: the open waits for its page.
+                release.signal()
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    third.runtimeOpenAttempt?.listedOffline == true
+                }
+                XCTAssertEqual(third.route, .browser(opened))
+            } else {
+                XCTAssertFalse(third.route.runtime != nil, "opened without a cached page")
+                release.signal()
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    third.route == .onboarding(.instances)
+                }
+            }
+
+            // A launch with no last good session checks first: the confirmed
+            // listing opens it only for its page, and the open waits for it.
+            defaults.removeObject(forKey: "avibe.mobile.lastGoodSession")
+            let checkFirst = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { offline },
+                reusingDefaults: defaults
+            )
+            if marked {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    checkFirst.runtimeOpenAttempt?.listedOffline == true
+                }
+                guard case .browser(let opened) = checkFirst.route else {
+                    return XCTFail("A checked launch did not open an offline instance with its cached page")
+                }
+                XCTAssertFalse(opened.instance.available)
+            } else {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    checkFirst.route == .onboarding(.instances)
+                }
+                XCTAssertNil(checkFirst.runtimeOpenAttempt)
+            }
+        }
+    }
+
+    /// An account's pages are removed when it signs out.
+    @MainActor
+    func testAnAccountsCachedPagesGoWithASignOut() async throws {
+        let app = try await makeApp(directTransport: nil)
+        let runtime = try await select("instance-1", in: app)
+        let page = RuntimeCachedPage(
+            url: runtime.instance.url,
+            headers: ["Content-Type": "text/html"],
+            body: Data("<!doctype html>".utf8),
+            capturedAt: Date()
+        )
+        try XCTUnwrap(app.runtimePageCacheAccess(for: runtime)).store(page)
+        let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url)).serialized
+        // The pages of the store the account used, whatever store comes next.
+        let accountsPages = RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(runtime.websiteDataStoreID.uuidString, isDirectory: true))
+        XCTAssertEqual(accountsPages.page(accountID: "account-1", origin: origin), page)
+
+        _ = try await app.mobileSessionCoordinator.logout()
+
+        XCTAssertNil(accountsPages.page(accountID: "account-1", origin: origin))
+    }
+
     @MainActor
     func testRuntimeOpenBudgetShowsLongWaitThenTimesOutToThePickerAndCanRetry() async throws {
         let timing = RuntimeOpenManualTiming()
@@ -2747,6 +3245,8 @@ final class DirectPathAppTests: XCTestCase {
         let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
 
         timing.advance(by: .seconds(5))
+        // Before the long-wait mark an ordinary open offers no Cancel yet.
+        XCTAssertFalse(try XCTUnwrap(app.runtimeOpenAttempt).offersCancel)
         app.handleRuntimeNavigation(
             RuntimeNavigationEvent(stage: .handedOff, destination: .external),
             attemptID: attemptID,
@@ -2765,6 +3265,10 @@ final class DirectPathAppTests: XCTestCase {
             ),
             .loading
         )
+        // No timeout will end this loading layer: it offers Cancel at once,
+        // before the long-wait mark.
+        XCTAssertFalse(handedOff.isTakingLong)
+        XCTAssertTrue(handedOff.offersCancel)
 
         app.handleRuntimeNavigation(
             RuntimeNavigationEvent(stage: .restarting, destination: .external),
@@ -2787,10 +3291,12 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .connecting)
         XCTAssertNil(app.runtimeOpenAttempt?.deadline)
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).offersCancel)
 
         timing.advance(by: .seconds(120))
         XCTAssertEqual(app.route, .browser(runtime))
         XCTAssertNil(app.runtimeOpenNotice)
+        XCTAssertTrue(try XCTUnwrap(app.runtimeOpenAttempt).offersCancel)
 
         app.cancelRuntimeOpen(attemptID: attemptID)
         XCTAssertTrue(isOnInstancePicker(app))
@@ -4037,7 +4543,7 @@ final class DirectPathAppTests: XCTestCase {
         // the reopen message alone.
         let before = notifications.providerPatches.arrivals
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
         }
         try await eventually { app.route != .loading }
@@ -4094,9 +4600,11 @@ final class DirectPathAppTests: XCTestCase {
     ) async throws -> (runtime: MobileRuntimeContext, page: RuntimePage) {
         let before = arrivals ?? notifications.providerPatches.arrivals
         try open()
-        // A launch reads the session first (a restore opens only then).
+        // A launch checks the session first and restores only then, unless
+        // it opens first with the last confirmed session (a relaunch), in
+        // which case this returns at once and the check runs behind the open.
         try await waitForTheBootstrap(of: app)
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
         }
         try await eventually { app.route != .loading }
@@ -4157,6 +4665,100 @@ final class DirectPathAppTests: XCTestCase {
     // it waits until that update is in flight: the race where the update
     // starts first (from recovery, or a late view update). The update keeps
     // the selection, so the registration is accepted either way.
+
+    /// A cold start with the last good account and its selected instance on
+    /// this device opens that instance at once, while avibe.bot's answer is
+    /// still on its way: the account check runs behind the open. Its answer
+    /// then decides as a refresh does. The same account keeps the instance
+    /// open, and so does a failed check (offline opens what it can). A signed-out
+    /// session or another account closes it and leaves the account. An owed
+    /// second factor closes it but keeps the selection for after the factor.
+    @MainActor
+    func testAColdStartOpensTheLastInstanceBeforeTheAccountIsChecked() async throws {
+        let otherAccount = LocalHTTPResponse.json("""
+            {"account":{"id":"account-2","email":"other@example.com"},"instances":[
+            {"id":"instance-1","name":"One","host":"instance-one.example",
+             "url":"https://instance-one.example","relationship":"owner",
+             "owner_email":"other@example.com","available":true}]}
+            """)
+        let secondFactor = LocalHTTPResponse(
+            status: 403,
+            headers: [("Content-Type", "application/json")],
+            body: Data("""
+                {"error":"two_factor_required","email":"max@example.com",
+                 "gate":"challenge","methods":["totp"]}
+                """.utf8)
+        )
+        let rows: [(name: String, answer: LocalHTTPResponse?, staysOpen: Bool, account: String?, keepsSelection: Bool)] = [
+            ("same account", nil, true, "account-1", true),
+            ("network failure", .status(500), true, "account-1", true),
+            ("signed out", .status(401), false, nil, false),
+            ("other account", otherAccount, false, nil, false),
+            ("second factor", secondFactor, false, nil, true),
+        ]
+        for row in rows {
+            let first = try await makeApp(directTransport: nil)
+            _ = try await select("instance-1", in: first)
+            let defaults = try XCTUnwrap(appDefaults)
+
+            let session = SessionAnswerOverride()
+            let started = FixtureEvent(description: "session read: \(row.name)")
+            let release = DispatchSemaphore(value: 0)
+            session.hold(
+                row.answer ?? Self.signedInSessionAnswer,
+                started: started,
+                release: release
+            )
+            let next = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { session.response },
+                reusingDefaults: defaults
+            )
+            await fulfillment(
+                of: [started.expectation],
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
+            )
+            // avibe.bot has not answered, and the instance is already open.
+            guard case .browser(let opened) = next.route else {
+                release.signal()
+                return XCTFail("Before the account check answered, the App showed \(next.route): \(row.name)")
+            }
+            XCTAssertEqual(opened.instance.id, "instance-1", row.name)
+            XCTAssertNotNil(next.runtimeOpenAttempt, row.name)
+
+            release.signal()
+            if row.staysOpen {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    next.mobileSessionCoordinator.isCurrentRuntime(opened)
+                }
+                XCTAssertEqual(next.route, .browser(opened), row.name)
+            } else {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    next.route == .onboarding(.instances)
+                }
+                XCTAssertFalse(next.mobileSessionCoordinator.isSelectedRuntime(opened), row.name)
+            }
+            XCTAssertEqual(next.mobileSessionCoordinator.currentAccount?.id, row.account, row.name)
+            XCTAssertEqual(
+                defaults.data(forKey: Self.selectionKey) != nil,
+                row.keepsSelection,
+                row.name
+            )
+        }
+    }
+
+    /// The control plane's ordinary signed-in answer for account-1.
+    private static var signedInSessionAnswer: LocalHTTPResponse {
+        .json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-1","name":"One","host":"instance-one.example",
+             "url":"https://instance-one.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true},
+            {"id":"instance-2","name":"Two","host":"instance-two.example",
+             "url":"https://instance-two.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true}]}
+            """)
+    }
 
     @MainActor
     func testColdStartRestoresLastInstanceWithNotificationsOn() async throws {
@@ -4294,7 +4896,7 @@ final class DirectPathAppTests: XCTestCase {
         // Released until the sign-out ends: its cleanup may send one more
         // provider update, which the gate would otherwise hold.
         // Sign-out logs out through an account transport it may launch.
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.releaseAll()
             return signedOut.value
         }
@@ -4403,7 +5005,7 @@ final class DirectPathAppTests: XCTestCase {
             XCTFail("The open of \(instanceID) ended at \(app.route).")
             throw DirectTestTimeout()
         }
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > before
         }
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
@@ -4452,7 +5054,7 @@ final class DirectPathAppTests: XCTestCase {
         defer { notifications.providerPatches.releaseAll() }
         let registered = registrationsBefore ?? root.registrations.count
         try open()
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             notifications.providerPatches.arrivals > arrivals
                 && root.registrations.count > registered
         }
@@ -4571,6 +5173,14 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
+        // The transport's selection follows the browser asynchronously: wait
+        // for it rather than for a fixed time a loaded simulator may exceed.
+        try await eventually {
+            transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+        }
+        // The replaced open must never surface later either. A "never" cannot
+        // be awaited, so a short window gives a late browser or selection for
+        // instance-1 the chance to appear before the final check.
         try await Task.sleep(for: .milliseconds(300))
 
         XCTAssertEqual(browsers, ["instance-2"])
@@ -4653,7 +5263,7 @@ final class DirectPathAppTests: XCTestCase {
         // The refresh launches its own account transport first.
         await fulfillment(
             of: [fetched.expectation],
-            timeout: WebKitReadiness.standardTransportOperationSeconds
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
         )
         XCTAssertTrue(app.returnToRuntime())
         XCTAssertEqual(app.route, .browser(runtime))
@@ -4709,7 +5319,7 @@ final class DirectPathAppTests: XCTestCase {
         // The operation launches its own account transport first.
         await fulfillment(
             of: [hold.inFlight.expectation],
-            timeout: WebKitReadiness.standardTransportOperationSeconds
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
         )
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
         XCTAssertFalse(app.mobileSessionCoordinator.keepsSelectedRuntime(runtime))
@@ -4803,6 +5413,78 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.route, .browser(runtime))
         XCTAssertTrue(app.mobileSessionCoordinator.isSelectedRuntime(runtime))
         withExtendedLifetime(controller) {}
+    }
+
+    @MainActor
+    func testAHandOverActsOnlyWhileTheHostsPathIsUsableAndOnlyForTheSoleDocument() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        let target = try XCTUnwrap(transport.selections.last)
+
+        // Before the path is usable nothing is closed.
+        let early = await handover(app, instance, sole: true)
+        XCTAssertEqual(early, .skipped(.notUsable))
+
+        try await eventually {
+            if app.mobileSessionCoordinator.isCurrentRuntime(runtime) {
+                transport.report(.usable(generation: "g1"), for: target)
+            }
+            return self.directStatus(app, self.instance)?.preferred == .direct
+        }
+        // Another document of the store has the host loaded, or the App
+        // cannot tell: skipped.
+        let unknown = await handover(app, instance, sole: nil)
+        XCTAssertEqual(unknown, .skipped(.otherDocuments))
+        let shared = await handover(app, instance, sole: false)
+        XCTAssertEqual(shared, .skipped(.otherDocuments))
+        // The sole document: done, here with no public relay to close.
+        let sole = await handover(app, instance, sole: true)
+        XCTAssertEqual(sole, .done(closed: 0, kept: 0))
+        // Another host is not the selected instance's.
+        let elsewhere = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
+        let other = await handover(app, elsewhere, sole: true)
+        XCTAssertEqual(other, .skipped(.notUsable))
+
+        // Lost: not usable any more.
+        transport.report(.lost, for: target)
+        try await eventually { self.directStatus(app, self.instance)?.preferred == .tunnel }
+        let lost = await handover(app, instance, sole: true)
+        XCTAssertEqual(lost, .skipped(.notUsable))
+    }
+
+    @MainActor
+    func testTheWebViewRegistryTellsTheSoleDocumentOfAHost() async throws {
+        let registry = DirectWebViewRegistry()
+        let store = WKWebsiteDataStore.nonPersistent()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = store
+        let page = WKWebView(frame: .zero, configuration: configuration)
+        // Not registered: the App cannot tell.
+        XCTAssertNil(registry.isSoleDocument(page, host: "instance-one.example"))
+        registry.register(page)
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-one.example"), true)
+
+        // Another WebView of the same store with no page yet: cannot tell.
+        let second = WKWebViewConfiguration()
+        second.websiteDataStore = store
+        let other = WKWebView(frame: .zero, configuration: second)
+        registry.register(other)
+        XCTAssertNil(registry.isSoleDocument(page, host: "instance-one.example"))
+        other.loadHTMLString("<p>x</p>", baseURL: URL(string: "https://instance-one.example/"))
+        try await eventually { other.url != nil }
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-one.example"), false)
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-two.example"), true)
+
+        // A WebView of another store does not count.
+        let elsewhere = WKWebViewConfiguration()
+        elsewhere.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        let foreign = WKWebView(frame: .zero, configuration: elsewhere)
+        registry.register(foreign)
+        foreign.loadHTMLString("<p>y</p>", baseURL: URL(string: "https://instance-two.example/"))
+        try await eventually { foreign.url != nil }
+        XCTAssertEqual(registry.isSoleDocument(page, host: "instance-two.example"), true)
+        withExtendedLifetime((page, other, foreign)) {}
     }
 
     @MainActor
@@ -5263,13 +5945,72 @@ final class DirectPathAppTests: XCTestCase {
             #"{"capability":1,"advertised":1,"status":["direct",7,2,3],"refused":["invalid_argument","invalid_argument","invalid_argument"]}"#
         )
         XCTAssertEqual(askedFor, instance)
-        // The whole surface: one call, and nothing that takes an address,
-        // starts a probe, or accepts a rendezvous answer.
+        // The whole surface: a status, and a hand-over that takes nothing.
+        // Nothing takes an address, starts a probe, or accepts a rendezvous
+        // answer.
         XCTAssertEqual(
             NativeBridgeMethod.allCases
                 .map(\.rawValue)
                 .filter { $0.hasPrefix("direct.") },
-            ["direct.status"]
+            ["direct.status", "direct.handover"]
+        )
+    }
+
+    @MainActor
+    func testDirectHandoverIsVersionTwoTakesNoParametersAndPassesTheSoleDocument() async throws {
+        var asked: [(WebOrigin, Bool?)] = []
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in
+                    reply(DirectPathStatus(preferred: .direct, sequence: 1, closure: 0))
+                },
+                directHandover: { origin, sole, reply in
+                    asked.append((origin, sole))
+                    reply(.done(closed: 2, kept: 1))
+                }
+            )
+        )
+        DirectWebViewRegistry.shared.register(webView)
+        let loader = PageLoader()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML(
+            "<!doctype html><title>instance</title>",
+            baseURL: instance.url,
+            in: webView
+        )
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const answer = await window.avibeNative.call("direct.handover");
+            let refused = "accepted";
+            try {
+              await window.avibeNative.call("direct.handover", {host: "x"});
+            } catch (error) {
+              refused = error.code;
+            }
+            return JSON.stringify({
+              capability: window.avibeNative.capabilities.direct,
+              answer: [answer.closed, answer.kept],
+              refused
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(
+            result as? String,
+            #"{"capability":2,"answer":[2,1],"refused":"invalid_argument"}"#
+        )
+        XCTAssertEqual(asked.count, 1)
+        XCTAssertEqual(asked.first?.0, instance)
+        // Other WebViews of the shared default store may be alive in this
+        // test process; whatever the registry says is passed on unchanged.
+        XCTAssertEqual(
+            asked.first?.1,
+            DirectWebViewRegistry.shared.isSoleDocument(webView, host: instance.host)
         )
     }
 
@@ -5684,6 +6425,18 @@ final class DirectPathAppTests: XCTestCase {
         )
     }
 
+    /// What `direct.handover()` answers for `origin`, through the provider
+    /// the App gives its WebViews; nil without a direct transport.
+    @MainActor
+    private func handover(_ app: AppModel, _ origin: WebOrigin, sole: Bool?) async -> DirectHandoverOutcome? {
+        guard let provider = app.directHandoverProvider else {
+            return nil
+        }
+        return await withCheckedContinuation { continuation in
+            provider(origin, sole) { continuation.resume(returning: $0) }
+        }
+    }
+
     /// What `direct.status()` answers for `origin`, through the provider
     /// the App gives its WebViews. `nil` when it answers later or not at all.
     @MainActor
@@ -5945,7 +6698,7 @@ final class DirectPathAppTests: XCTestCase {
                 systemSchedulePlatform: systemSchedulePlatform,
                 systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
@@ -5964,7 +6717,7 @@ final class DirectPathAppTests: XCTestCase {
                 systemSchedulePlatform: systemSchedulePlatform,
                 systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
@@ -5982,7 +6735,7 @@ final class DirectPathAppTests: XCTestCase {
                 systemSchedulePlatform: systemSchedulePlatform,
                 systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming,
+                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter()
             )
@@ -6004,7 +6757,8 @@ final class DirectPathAppTests: XCTestCase {
             app,
             accountID: "account-1",
             instanceIDs: ["instance-1", "instance-2"],
-            requests: server.requests
+            requests: server.requests,
+            budget: WebKitReadiness.launchedTransportOperation
         )
         return app
     }
@@ -6053,7 +6807,7 @@ final class DirectPathAppTests: XCTestCase {
         // itself allows that the readiness and request deadlines together.
         await fulfillment(
             of: [hold.inFlight.expectation],
-            timeout: WebKitReadiness.standardTransportOperationSeconds
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
         )
         return request
     }
@@ -6167,7 +6921,7 @@ final class DirectPathAppTests: XCTestCase {
     /// gives one WebKit transport launch.
     @MainActor
     private func waitForTheBootstrap(of app: AppModel) async throws {
-        try await eventually(timeout: WebKitReadiness.standardTransportOperation) {
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             app.mobileSessionCoordinator.currentAccount?.id == "account-1"
         }
     }
@@ -6329,7 +7083,33 @@ private func nativeAccessibilityElements(
     return found
 }
 
+/// The App's own clock, with account transports whose control-plane page
+/// may take a web content launch's time on the CI simulator
+/// (`WebKitReadiness.afterWebContentLaunch`). This rides on the App's
+/// existing timing injection rather than a test-only App parameter.
+@MainActor
+private final class LaunchTolerantRuntimeOpenTiming: RuntimeOpenTiming {
+    private let clock = ContinuousRuntimeOpenTiming()
+
+    var now: Duration { clock.now }
+
+    var accountTransportDeadlines: MobileAuthTransportDeadlines {
+        WebKitReadiness.afterWebContentLaunch
+    }
+
+    func schedule(
+        after delay: Duration,
+        _ action: @escaping @MainActor () -> Void
+    ) -> any RuntimeOpenTimer {
+        clock.schedule(after: delay, action)
+    }
+}
+
 private final class RuntimeOpenManualTiming: RuntimeOpenTiming {
+    var accountTransportDeadlines: MobileAuthTransportDeadlines {
+        WebKitReadiness.afterWebContentLaunch
+    }
+
     private final class Timer: RuntimeOpenTimer {
         let id: UUID
         weak var owner: RuntimeOpenManualTiming?
@@ -7037,6 +7817,12 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // Evidence for a page WebKit ends under a test (for example at its
+        // network process's request): which page, and whether it was loading.
+        print(
+            "[iOS fixture] stage=runtime page process terminated, loading=\(webView === loadingWebView), "
+                + "host=\(webView.url?.host ?? "none")"
+        )
         guard webView === loadingWebView else { return }
         // The HTML document is gone. Do not let WebKit's fallback URL reload
         // masquerade as the requested fixture or wait for its DNS failure.
@@ -7365,7 +8151,7 @@ private final class RootViewStandIn {
             case .afterTheProviderUpdate:
                 Task { @MainActor [weak self, weak app] in
                     let deadline = ContinuousClock.now.advanced(
-                        by: WebKitReadiness.standardTransportOperation
+                        by: WebKitReadiness.launchedTransportOperation
                     )
                     while notifications.providerPatches.arrivals <= arrivals {
                         guard ContinuousClock.now < deadline else {

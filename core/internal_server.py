@@ -457,6 +457,7 @@ def create_app(
                 if existing is not None and existing["session_id"] != session_id:
                     return "duplicate"
                 if existing is not None and existing["state"] != "reserved":
+                    resolved_carry = False
                     if execution_id:
                         run_owner = conn.execute(
                             select(
@@ -467,6 +468,15 @@ def create_app(
                             .where(agent_runs.c.id == execution_id)
                             .limit(1)
                         ).mappings().first()
+                        if run_owner is not None and run_owner["delivery_id"] not in (None, existing["id"]):
+                            # A failed or stopped Turn carried this input on: the Run now
+                            # belongs to its carry, which answers for the original (#4010).
+                            current = message_deliveries.get_delivery(conn, str(run_owner["delivery_id"]))
+                            if current is not None and (
+                                message_deliveries.turn_carry(current) or {}
+                            ).get("original_id") == existing["id"]:
+                                existing = current
+                                resolved_carry = True
                         if (
                             run_owner is not None
                             and normalize_run_status(run_owner["status"])
@@ -490,6 +500,7 @@ def create_app(
                                 )
                             if (
                                 legacy_send_now
+                                and not resolved_carry
                                 and existing_state == "queued"
                                 and existing.get("priority") == "p3"
                                 and message_deliveries.delivery_has_history_event(
@@ -797,6 +808,16 @@ def create_app(
                     delivery_id,
                 )
         return submission if delivery_owner_transferred else route
+
+    @app.post("/internal/diagnostics/warm-gc-census")
+    async def _arm_warm_gc_census():
+        import os
+
+        watchdog = getattr(controller, "_loop_watchdog", None)
+        if watchdog is None:
+            raise HTTPException(status_code=503, detail="watchdog_unavailable")
+        armed = watchdog.arm_warm_census(controller)
+        return {"armed": armed, "controller_pid": os.getpid()}
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:

@@ -17,6 +17,29 @@ extension Notification.Name {
 final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
+    static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+    @MainActor static let healthSync = HealthSyncCoordinator()
+
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == HealthBackgroundUploader.identifier,
+              let uploader = Self.healthSync.backgroundUploader else { completionHandler(); return }
+        uploader.systemCompletion = completionHandler
+        uploader.reconnect()
+        Task { @MainActor in await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
+    }
+
+    /// Read when a launch or background-session resume actually runs, as
+    /// AppModel.bootstrap does; a constant would overwrite a foreground state
+    /// that an earlier resume already applied.
+    @MainActor private static var applicationIsForeground: Bool {
+        UIApplication.shared.applicationState != .background
+    }
+
     /// The tag the instance gives the test notification sent from Settings
     /// (`/api/web-push/test`); the notification service extension carries a
     /// push's tag into `threadIdentifier`.
@@ -39,9 +62,13 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     static func foregroundPresentationOptions(
         for content: UNNotificationContent
     ) -> UNNotificationPresentationOptions {
-        content.threadIdentifier == testNotificationThread
-            ? [.banner, .list, .sound]
-            : []
+        switch content.threadIdentifier {
+        case testNotificationThread: [.banner, .list, .sound]
+        // A failed voice start, posted while Avibe came forward to say why:
+        // keep it in Notification Center so its line can be sent back.
+        case VoiceCaptureFailureNotification.thread: [.list]
+        default: []
+        }
     }
 
     func application(
@@ -51,11 +78,13 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         ]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        VoiceCaptureLaunch.markLaunched()
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
             ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
+            if !Self.isRunningTests { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }
         return true
     }
@@ -98,6 +127,13 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        // A voice-capture notice only opens Avibe; it is not an instance push.
+        guard response.notification.request.content.threadIdentifier
+            != VoiceCaptureFailureNotification.thread
+        else {
+            completionHandler()
+            return
+        }
         NotificationCenter.default.post(
             name: .avibePushNotificationTapped,
             object: nil,
@@ -122,7 +158,10 @@ struct AvibeApp: App {
             engine: DirectIrohBinding(),
             fetchRendezvous: source.fetch
         )
-        let model = AppModel(directTransport: transport)
+        let model = AppModel(
+            directTransport: transport,
+            healthSync: AvibeAppDelegate.isRunningTests ? nil : AvibeAppDelegate.healthSync
+        )
         source.appModel = model
         directRendezvousSource = source
         _appModel = StateObject(wrappedValue: model)
@@ -131,7 +170,12 @@ struct AvibeApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .modifier(HealthConsentHost(health: AvibeAppDelegate.healthSync))
                 .environmentObject(appModel)
+                .onOpenURL { url in
+                    // The hidden diagnostics switch (VoiceCaptureEndSwitch).
+                    VoiceCaptureEndSwitch.handle(url)
+                }
                 .task {
                     // App Shortcuts (AppShortcuts.swift) reach the model here.
                     let appModel = appModel

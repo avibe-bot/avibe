@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
 from core.media_types import is_inline_safe_type
+from core.mobile_storage_boundary import MobileStorageBoundary, is_mobile_private_path
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,9 @@ def resolve_safe_path(raw: str) -> Path:
     """Expand and canonicalize one user-supplied absolute filesystem path."""
     expanded = _expanded_absolute_path(raw)
     try:
-        return expanded.resolve(strict=False)
+        resolved = expanded.resolve(strict=False)
+        _require_browser_path(resolved)
+        return resolved
     except (OSError, RuntimeError, ValueError) as exc:
         raise FileBrowserError("invalid_path", str(exc), 400) from exc
 
@@ -167,7 +170,18 @@ def _expanded_absolute_path(raw: str) -> Path:
     expanded = Path(os.path.expanduser(raw))
     if not expanded.is_absolute():
         raise FileBrowserError("invalid_path", "Path must be absolute", 400)
+    _require_browser_path(expanded)
     return expanded
+
+
+def _require_browser_path(path: Path, *, recursive: bool = False) -> None:
+    if is_mobile_private_path(path, include_ancestors=recursive):
+        raise FileBrowserError("permission_denied", "Permission denied", 403)
+
+
+def _require_browser_identity(info: os.stat_result, boundary: MobileStorageBoundary | None) -> None:
+    if boundary is not None and boundary.is_private_stat(info):
+        raise FileBrowserError("permission_denied", "Permission denied", 403)
 
 
 def resolve_existing_directory(raw: str) -> Path:
@@ -227,7 +241,9 @@ def _resolve_entry_path(raw: str) -> Path:
         raise NotFoundError("Parent directory not found") from exc
     except (OSError, RuntimeError, ValueError) as exc:
         raise FileBrowserError("invalid_path", str(exc), 400) from exc
-    return parent / expanded.name
+    target = parent / expanded.name
+    _require_browser_path(target)
+    return target
 
 
 def _raw_final_component(raw: str) -> str:
@@ -518,6 +534,7 @@ def _stat_existing(path: Path, *, follow_symlinks: bool = True) -> os.stat_resul
 
 
 def _require_stable_resolved_path(path: Path) -> None:
+    _require_browser_path(path)
     try:
         current = path.resolve(strict=True)
     except FileNotFoundError as exc:
@@ -607,6 +624,7 @@ def _entry_payload(entry: os.DirEntry[str]) -> dict[str, Any] | None:
 
 def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any]:
     target = _require_directory(raw_path)
+    mobile_boundary = MobileStorageBoundary()
     entries: list[dict[str, Any]] = []
     scanned_entries = 0
     truncated = False
@@ -614,6 +632,8 @@ def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any
         with os.scandir(target) as iterator:
             for entry in iterator:
                 scanned_entries += 1
+                if mobile_boundary.is_private_path(Path(entry.path)):
+                    continue
                 if not show_hidden and entry.name.startswith("."):
                     if scanned_entries > MAX_LIST_ENTRIES:
                         truncated = True
@@ -665,6 +685,7 @@ def metadata(raw_path: str) -> dict[str, Any]:
 
 def file_content(raw_path: str, *, download: bool = False, range_header: str | None = None) -> FileContent:
     path = _require_regular_file(raw_path)
+    boundary = MobileStorageBoundary()
     stat_result = _stat_existing(path)
     if stat_result.st_size > MAX_FILE_BYTES:
         raise FileBrowserError("too_large", "File is too large", 413)
@@ -677,6 +698,7 @@ def file_content(raw_path: str, *, download: bool = False, range_header: str | N
         fd = os.open(path, flags)
         try:
             stat_result = os.fstat(fd)
+            _require_browser_identity(stat_result, boundary)
             if not stat.S_ISREG(stat_result.st_mode):
                 raise FileBrowserError("not_file", "Path is not a regular file", 400)
             if stat_result.st_size > MAX_FILE_BYTES:
@@ -1134,6 +1156,8 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_path)
     name = _validate_new_name(new_name)
     target = source.with_name(name)
+    _require_browser_path(source, recursive=source.is_dir())
+    _require_browser_path(target, recursive=target.is_dir())
     same_entry = _same_entry_no_follow(source, target)
     same_directory_entry = same_entry and _same_directory_entry(source, target)
     if same_directory_entry and name == source.name:
@@ -1161,6 +1185,8 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_src)
     target = _resolve_entry_path(raw_dst)
+    _require_browser_path(source, recursive=source.is_dir())
+    _require_browser_path(target, recursive=target.is_dir())
     if source == target:
         # Moving onto itself is a no-op; never unlink-then-move (it would delete it). Kept
         # before the subtree guard below so an exact self-move stays idempotent rather than
@@ -1236,6 +1262,8 @@ def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
     """
     source = _resolve_existing_entry_path(raw_src)
     target = _resolve_entry_path(raw_dst)
+    _require_browser_path(source, recursive=source.is_dir())
+    _require_browser_path(target, recursive=target.is_dir())
     _validate_new_name(_raw_final_component(raw_dst))
     source_stat = _stat_existing(source, follow_symlinks=False)
     source_is_dir = stat.S_ISDIR(source_stat.st_mode)
@@ -1256,64 +1284,87 @@ def copy_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
         raise FileBrowserError("not_dir", "Destination parent is not a directory", 400)
     _validate_copy_target(target, source_is_dir=source_is_dir, overwrite=overwrite)
 
-    source_fd: int | None = None
-    source_link: str | None = None
-    size_cap = _copy_total_size_cap_bytes()
-    try:
-        if source_is_dir and os.name == "posix":
-            source_fd = _open_copy_directory(source, source_stat)
-            scan_fd = _open_copy_directory(".", source_stat, dir_fd=source_fd)
+    boundary = MobileStorageBoundary()
+
+    def _copy() -> dict[str, Any]:
+        with _write_lock_for(target):
+            _validate_copy_target(target, source_is_dir=source_is_dir, overwrite=overwrite)
+            stage = _stage_checked_copy(
+                source, target, source_stat, boundary, size_cap=_copy_total_size_cap_bytes(),
+            )
             try:
-                _measure_copy_directory_fd(scan_fd, size_cap)
-            finally:
-                os.close(scan_fd)
-        elif source_is_dir:
-            _measure_copy_directory_path(source, source_stat, size_cap)
-        elif source_is_file:
-            _add_copy_size(0, source_stat.st_size, size_cap)
-            source_fd = _open_copy_file(source, source_stat)
-        else:
-            source_link = os.readlink(source)
+                _publish_staged_copy(stage, target, source_is_dir=source_is_dir, overwrite=overwrite)
+            except Exception:
+                _remove_copy_stage_best_effort(stage)
+                raise
+            _fsync_dir(target.parent)
+            return {"ok": True, "path": str(target)}
 
-        def _copy() -> dict[str, Any]:
-            with _write_lock_for(target):
-                _validate_copy_target(target, source_is_dir=source_is_dir, overwrite=overwrite)
-                stage: Path | None = None
-                try:
-                    if source_is_dir:
-                        stage = _new_copy_stage_path(target)
-                        budget = [0]
-                        if source_fd is not None:
-                            copy_fd = _open_copy_directory(".", source_stat, dir_fd=source_fd)
-                            try:
-                                _copy_directory_from_fd(copy_fd, stage, budget, size_cap)
-                            finally:
-                                os.close(copy_fd)
-                        else:
-                            _copy_directory_from_path(source, source_stat, stage, budget, size_cap)
-                    elif source_is_file:
-                        stage = _new_copy_stage_path(target)
-                        assert source_fd is not None
-                        os.lseek(source_fd, 0, os.SEEK_SET)
-                        _copy_file_from_fd(source_fd, stage, source_stat, budget=[0], size_cap=size_cap)
-                    else:
-                        assert source_link is not None
-                        stage = _stage_copy_symlink(target, source_link)
-                    _publish_staged_copy(stage, target, source_is_dir=source_is_dir, overwrite=overwrite)
-                    stage = None
-                    _fsync_dir(target.parent)
-                    return {"ok": True, "path": str(target)}
-                finally:
-                    if stage is not None:
-                        _remove_copy_stage_best_effort(stage)
-
+    try:
         return _run_mutation("copy", source, _copy, dst=str(target), overwrite=overwrite)
-    except FileBrowserError:
-        raise
     except PermissionError as exc:
         raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
     except OSError as exc:
         raise FileBrowserError("fs_error", str(exc), 400) from exc
+
+
+def _stage_checked_copy(
+    source: Path, target: Path, source_stat: os.stat_result, boundary: MobileStorageBoundary,
+    *, size_cap: int | None = None, preserve_metadata: bool = False,
+) -> Path:
+    """Measure and consume with one identity snapshot, before publishing anything."""
+    source_fd: int | None = None
+    stage: Path | None = None
+    try:
+        _require_browser_identity(source_stat, boundary)
+        if stat.S_ISDIR(source_stat.st_mode):
+            if os.name == "posix":
+                source_fd = _open_copy_directory(source, source_stat, boundary=boundary)
+                scan_fd = _open_copy_directory(".", source_stat, dir_fd=source_fd, boundary=boundary)
+                try:
+                    _measure_copy_directory_fd(scan_fd, size_cap, boundary=boundary, source=source)
+                finally:
+                    os.close(scan_fd)
+            else:
+                _measure_copy_directory_path(source, source_stat, size_cap, boundary=boundary)
+            stage = _new_copy_stage_path(target)
+            if source_fd is not None:
+                copy_fd = _open_copy_directory(".", source_stat, dir_fd=source_fd, boundary=boundary)
+                try:
+                    _copy_directory_from_fd(
+                        copy_fd, stage, [0], size_cap, boundary=boundary, source=source,
+                        preserve_metadata=preserve_metadata,
+                    )
+                finally:
+                    os.close(copy_fd)
+            else:
+                _copy_directory_from_path(
+                    source, source_stat, stage, [0], size_cap, boundary=boundary,
+                    preserve_metadata=preserve_metadata,
+                )
+        elif stat.S_ISREG(source_stat.st_mode):
+            _add_copy_size(0, source_stat.st_size, size_cap)
+            source_fd = _open_copy_file(source, source_stat, boundary=boundary)
+            stage = _new_copy_stage_path(target)
+            _copy_file_from_fd(
+                source_fd, stage, source_stat, budget=[0], size_cap=size_cap, boundary=boundary,
+                preserve_metadata=preserve_metadata,
+            )
+        elif stat.S_ISLNK(source_stat.st_mode):
+            link_target = os.readlink(source)
+            _require_copy_symlink(source, link_target, boundary)
+            if not _same_copy_entry(source_stat, source.lstat()):
+                raise FileBrowserError("fs_error", "Source changed during copy", 400)
+            stage = _stage_copy_symlink(target, link_target)
+            if preserve_metadata:
+                shutil.copystat(source, stage, follow_symlinks=False)
+        else:
+            raise FileBrowserError("fs_error", "Unsupported source type", 400)
+        return stage
+    except Exception:
+        if stage is not None:
+            _remove_copy_stage_best_effort(stage)
+        raise
     finally:
         if source_fd is not None:
             os.close(source_fd)
@@ -1342,12 +1393,11 @@ def _copy_cross_fs_move_to_absent_target(
     *,
     on_target_placed: Callable[[], None] | None = None,
 ) -> None:
-    temp_target: Path | None = _reserve_backup_path(target)
+    temp_target: Path | None = None
     try:
-        if _is_dir_no_follow(source):
-            shutil.copytree(source, temp_target, symlinks=True)
-        else:
-            shutil.copy2(source, temp_target, follow_symlinks=False)
+        temp_target = _stage_checked_copy(
+            source, target, source.lstat(), MobileStorageBoundary(), preserve_metadata=True,
+        )
         _os_rename_noreplace(temp_target, target)
         temp_target = None
         created_target_stat = target.lstat()
@@ -1359,10 +1409,9 @@ def _copy_cross_fs_move_to_absent_target(
             if _can_delete_placed_target_after_source_removal_failure(source):
                 _remove_created_cross_fs_move_target(target, source, created_target_stat)
             raise
-    except Exception:
+    finally:
         if temp_target is not None:
-            _remove_path_if_exists(temp_target)
-        raise
+            _remove_copy_stage_best_effort(temp_target)
 
 
 def _reserve_backup_path(target: Path) -> Path:
@@ -1462,59 +1511,105 @@ def _same_copy_entry(expected: os.stat_result, current: os.stat_result) -> bool:
     )
 
 
-def _open_copy_directory(path: str | Path, expected: os.stat_result, *, dir_fd: int | None = None) -> int:
+def _open_copy_directory(
+    path: str | Path, expected: os.stat_result, *, dir_fd: int | None = None,
+    boundary: MobileStorageBoundary | None = None,
+) -> int:
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags, dir_fd=dir_fd)
-    current = os.fstat(fd)
-    if not stat.S_ISDIR(current.st_mode) or not _same_copy_entry(expected, current):
+    try:
+        current = os.fstat(fd)
+        _require_browser_identity(current, boundary)
+        if not stat.S_ISDIR(current.st_mode) or not _same_copy_entry(expected, current):
+            raise FileBrowserError("fs_error", "Source changed during copy", 400)
+    except Exception:
         os.close(fd)
-        raise FileBrowserError("fs_error", "Source changed during copy", 400)
+        raise
     return fd
 
 
-def _open_copy_file(path: str | Path, expected: os.stat_result, *, dir_fd: int | None = None) -> int:
+def _open_copy_file(
+    path: str | Path, expected: os.stat_result, *, dir_fd: int | None = None,
+    boundary: MobileStorageBoundary | None = None,
+) -> int:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags, dir_fd=dir_fd)
-    current = os.fstat(fd)
-    if not stat.S_ISREG(current.st_mode) or not _same_copy_entry(expected, current):
+    try:
+        current = os.fstat(fd)
+        _require_browser_identity(current, boundary)
+        if not stat.S_ISREG(current.st_mode) or not _same_copy_entry(expected, current):
+            raise FileBrowserError("fs_error", "Source changed during copy", 400)
+    except Exception:
         os.close(fd)
-        raise FileBrowserError("fs_error", "Source changed during copy", 400)
+        raise
     return fd
 
 
-def _add_copy_size(total: int, size: int, cap: int) -> int:
+def _add_copy_size(total: int, size: int, cap: int | None) -> int:
     total += size
-    if total > cap:
+    if cap is not None and total > cap:
         raise FileBrowserError("too_large", "Copy is too large", 413)
     return total
 
 
-def _measure_copy_directory_fd(dir_fd: int, cap: int) -> int:
+def _require_copy_symlink(source: Path, link_target: str, boundary: MobileStorageBoundary | None) -> None:
+    if boundary is None:
+        return
+    destination = Path(link_target)
+    if not destination.is_absolute():
+        destination = source.parent / destination
+    if boundary.is_private_path(source) or boundary.is_private_path(destination):
+        raise FileBrowserError("permission_denied", "Permission denied", 403)
+
+
+def _measure_copy_directory_fd(
+    dir_fd: int, cap: int | None, *, boundary: MobileStorageBoundary | None = None, source: Path | None = None,
+) -> int:
+    _require_browser_identity(os.fstat(dir_fd), boundary)
     total = 0
     with os.scandir(dir_fd) as entries:
         for entry in entries:
             entry_stat = entry.stat(follow_symlinks=False)
+            _require_browser_identity(entry_stat, boundary)
             if stat.S_ISREG(entry_stat.st_mode):
                 total = _add_copy_size(total, entry_stat.st_size, cap)
             elif stat.S_ISDIR(entry_stat.st_mode):
-                child_fd = _open_copy_directory(entry.name, entry_stat, dir_fd=dir_fd)
+                child_fd = _open_copy_directory(entry.name, entry_stat, dir_fd=dir_fd, boundary=boundary)
                 try:
-                    total = _add_copy_size(total, _measure_copy_directory_fd(child_fd, cap - total), cap)
+                    total = _add_copy_size(total, _measure_copy_directory_fd(
+                        child_fd, None if cap is None else cap - total, boundary=boundary,
+                        source=source / entry.name if source is not None else None,
+                    ), cap)
                 finally:
                     os.close(child_fd)
-            elif not stat.S_ISLNK(entry_stat.st_mode):
+            elif stat.S_ISLNK(entry_stat.st_mode):
+                if source is not None:
+                    _require_copy_symlink(
+                        source / entry.name, os.readlink(entry.name, dir_fd=dir_fd), boundary,
+                    )
+                try:
+                    _require_browser_identity(os.stat(entry.name, dir_fd=dir_fd), boundary)
+                except (FileNotFoundError, NotADirectoryError):
+                    pass  # Ordinary broken symlinks are copied as links.
+                except OSError as exc:
+                    if exc.errno != errno.ELOOP:
+                        raise
+            else:
                 raise FileBrowserError("fs_error", "Unsupported source type", 400)
     return total
 
 
-def _measure_copy_directory_path(source: Path, expected: os.stat_result, cap: int) -> int:
+def _measure_copy_directory_path(
+    source: Path, expected: os.stat_result, cap: int | None, *, boundary: MobileStorageBoundary | None = None,
+) -> int:
     current = source.lstat()
+    _require_browser_identity(current, boundary)
     if not stat.S_ISDIR(current.st_mode) or not _same_copy_entry(expected, current):
         raise FileBrowserError("fs_error", "Source changed during copy", 400)
     total = 0
@@ -1522,15 +1617,20 @@ def _measure_copy_directory_path(source: Path, expected: os.stat_result, cap: in
         for entry in entries:
             entry_stat = entry.stat(follow_symlinks=False)
             child = source / entry.name
+            _require_browser_identity(child.lstat(), boundary)
             if stat.S_ISREG(entry_stat.st_mode):
                 total = _add_copy_size(total, entry_stat.st_size, cap)
             elif stat.S_ISDIR(entry_stat.st_mode):
                 total = _add_copy_size(
                     total,
-                    _measure_copy_directory_path(child, entry_stat, cap - total),
+                    _measure_copy_directory_path(
+                        child, entry_stat, None if cap is None else cap - total, boundary=boundary,
+                    ),
                     cap,
                 )
-            elif not stat.S_ISLNK(entry_stat.st_mode):
+            elif stat.S_ISLNK(entry_stat.st_mode):
+                _require_copy_symlink(child, os.readlink(child), boundary)
+            else:
                 raise FileBrowserError("fs_error", "Unsupported source type", 400)
     return total
 
@@ -1550,7 +1650,10 @@ def _copy_file_from_fd(
     *,
     budget: list[int] | None = None,
     size_cap: int | None = None,
+    boundary: MobileStorageBoundary | None = None,
+    preserve_metadata: bool = False,
 ) -> None:
+    _require_browser_identity(os.fstat(source_fd), boundary)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -1572,43 +1675,81 @@ def _copy_file_from_fd(
                 os.fchmod(handle.fileno(), mode)
             else:
                 target.chmod(mode)
+            if preserve_metadata:
+                # Retain copy2's timestamps/flags/xattrs using the verified
+                # source descriptor, without reopening its path.
+                shutil.copystat(source_fd, target)
     finally:
         if target_fd >= 0:
             os.close(target_fd)
 
 
-def _copy_symlink_from_fd(source_dir_fd: int, name: str, expected: os.stat_result, target: Path) -> None:
+def _copy_symlink_from_fd(
+    source_dir_fd: int, name: str, expected: os.stat_result, target: Path, *,
+    boundary: MobileStorageBoundary | None = None, source: Path | None = None,
+    preserve_metadata: bool = False,
+) -> None:
     link_target = os.readlink(name, dir_fd=source_dir_fd)
     current = os.stat(name, dir_fd=source_dir_fd, follow_symlinks=False)
     if not stat.S_ISLNK(current.st_mode) or not _same_copy_entry(expected, current):
         raise FileBrowserError("fs_error", "Source changed during copy", 400)
+    _require_browser_identity(current, boundary)
+    if source is not None:
+        _require_copy_symlink(source / name, link_target, boundary)
+    try:
+        _require_browser_identity(os.stat(name, dir_fd=source_dir_fd), boundary)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    except OSError as exc:
+        if exc.errno != errno.ELOOP:
+            raise
     os.symlink(link_target, target)
+    if preserve_metadata and source is not None:
+        shutil.copystat(source / name, target, follow_symlinks=False)
 
 
-def _copy_directory_from_fd(dir_fd: int, target: Path, budget: list[int], size_cap: int) -> None:
+def _copy_directory_from_fd(
+    dir_fd: int, target: Path, budget: list[int], size_cap: int | None, *,
+    boundary: MobileStorageBoundary | None = None, source: Path | None = None,
+    preserve_metadata: bool = False,
+) -> None:
     directory_stat = os.fstat(dir_fd)
+    _require_browser_identity(directory_stat, boundary)
     target.mkdir(mode=0o700)
     with os.scandir(dir_fd) as entries:
         for entry in entries:
             entry_stat = entry.stat(follow_symlinks=False)
+            _require_browser_identity(entry_stat, boundary)
             child_target = target / entry.name
             if stat.S_ISDIR(entry_stat.st_mode):
-                child_fd = _open_copy_directory(entry.name, entry_stat, dir_fd=dir_fd)
+                child_fd = _open_copy_directory(entry.name, entry_stat, dir_fd=dir_fd, boundary=boundary)
                 try:
-                    _copy_directory_from_fd(child_fd, child_target, budget, size_cap)
+                    _copy_directory_from_fd(
+                        child_fd, child_target, budget, size_cap, boundary=boundary,
+                        source=source / entry.name if source is not None else None,
+                        preserve_metadata=preserve_metadata,
+                    )
                 finally:
                     os.close(child_fd)
             elif stat.S_ISREG(entry_stat.st_mode):
-                child_fd = _open_copy_file(entry.name, entry_stat, dir_fd=dir_fd)
+                child_fd = _open_copy_file(entry.name, entry_stat, dir_fd=dir_fd, boundary=boundary)
                 try:
-                    _copy_file_from_fd(child_fd, child_target, entry_stat, budget=budget, size_cap=size_cap)
+                    _copy_file_from_fd(
+                        child_fd, child_target, entry_stat, budget=budget, size_cap=size_cap, boundary=boundary,
+                        preserve_metadata=preserve_metadata,
+                    )
                 finally:
                     os.close(child_fd)
             elif stat.S_ISLNK(entry_stat.st_mode):
-                _copy_symlink_from_fd(dir_fd, entry.name, entry_stat, child_target)
+                _copy_symlink_from_fd(
+                    dir_fd, entry.name, entry_stat, child_target, boundary=boundary, source=source,
+                    preserve_metadata=preserve_metadata,
+                )
             else:
                 raise FileBrowserError("fs_error", "Unsupported source type", 400)
     target.chmod(stat.S_IMODE(directory_stat.st_mode))
+    if preserve_metadata:
+        shutil.copystat(dir_fd, target)
 
 
 def _copy_directory_from_path(
@@ -1616,9 +1757,13 @@ def _copy_directory_from_path(
     expected: os.stat_result,
     target: Path,
     budget: list[int],
-    size_cap: int,
+    size_cap: int | None,
+    *,
+    boundary: MobileStorageBoundary | None = None,
+    preserve_metadata: bool = False,
 ) -> None:
     directory_stat = source.lstat()
+    _require_browser_identity(directory_stat, boundary)
     if not stat.S_ISDIR(directory_stat.st_mode) or not _same_copy_entry(expected, directory_stat):
         raise FileBrowserError("fs_error", "Source changed during copy", 400)
     target.mkdir(mode=0o700)
@@ -1627,12 +1772,19 @@ def _copy_directory_from_path(
             entry_stat = entry.stat(follow_symlinks=False)
             child_source = source / entry.name
             child_target = target / entry.name
+            _require_browser_identity(child_source.lstat(), boundary)
             if stat.S_ISDIR(entry_stat.st_mode):
-                _copy_directory_from_path(child_source, entry_stat, child_target, budget, size_cap)
+                _copy_directory_from_path(
+                    child_source, entry_stat, child_target, budget, size_cap, boundary=boundary,
+                    preserve_metadata=preserve_metadata,
+                )
             elif stat.S_ISREG(entry_stat.st_mode):
-                child_fd = _open_copy_file(child_source, entry_stat)
+                child_fd = _open_copy_file(child_source, entry_stat, boundary=boundary)
                 try:
-                    _copy_file_from_fd(child_fd, child_target, entry_stat, budget=budget, size_cap=size_cap)
+                    _copy_file_from_fd(
+                        child_fd, child_target, entry_stat, budget=budget, size_cap=size_cap, boundary=boundary,
+                        preserve_metadata=preserve_metadata,
+                    )
                 finally:
                     os.close(child_fd)
             elif stat.S_ISLNK(entry_stat.st_mode):
@@ -1640,10 +1792,15 @@ def _copy_directory_from_path(
                 current_link = child_source.lstat()
                 if not stat.S_ISLNK(current_link.st_mode) or not _same_copy_entry(entry_stat, current_link):
                     raise FileBrowserError("fs_error", "Source changed during copy", 400)
+                _require_copy_symlink(child_source, link_target, boundary)
                 os.symlink(link_target, child_target)
+                if preserve_metadata:
+                    shutil.copystat(child_source, child_target, follow_symlinks=False)
             else:
                 raise FileBrowserError("fs_error", "Unsupported source type", 400)
     target.chmod(stat.S_IMODE(directory_stat.st_mode))
+    if preserve_metadata:
+        shutil.copystat(source, target, follow_symlinks=False)
 
 
 def _stage_copy_symlink(target: Path, link_target: str) -> Path:
@@ -1702,7 +1859,7 @@ def _remove_copy_stage_best_effort(path: Path) -> None:
     except FileNotFoundError:
         pass
     except OSError:
-        logger.debug("Failed to remove copy staging path", exc_info=True)
+        logger.warning("Failed to remove copy staging path: %s", path, exc_info=True)
 
 
 def _make_copy_tree_removable(root: Path) -> None:
@@ -2257,6 +2414,7 @@ def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
         # A filesystem root (/, or a drive root on Windows). Never deletable — a recursive
         # delete here would try to wipe everything the process can reach.
         raise FileBrowserError("invalid_path", "Refusing to delete a filesystem root", 400)
+    _require_browser_path(target, recursive=target.is_dir())
     target_stat = _stat_existing(target, follow_symlinks=False)
 
     def _delete() -> dict[str, Any]:
@@ -2436,17 +2594,20 @@ def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | Non
     # The rest of the file browser treats symlinks as no-follow / non-editable; mirror that here so
     # search/replace can't follow a link out of the opened root (e.g. a planted
     # ``secret -> ~/.ssh/id_rsa``) and surface or rewrite content outside the tree.
-    if path.is_symlink():
+    boundary = MobileStorageBoundary()
+    if path.is_symlink() or boundary.is_private_path(path):
         return None, None
     try:
-        st = path.stat()
-    except OSError:
-        return None, None
-    if not stat.S_ISREG(st.st_mode) or st.st_size > SEARCH_MAX_FILE_BYTES:
-        return None, None
-    mtime = _mtime_seconds(st)
-    try:
+        # Retain the early type/size screen: opening a FIFO just to inspect its
+        # descriptor could block. The opened object still needs its own check.
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > SEARCH_MAX_FILE_BYTES:
+            return None, None
         with open(path, "rb") as handle:
+            st = os.fstat(handle.fileno())
+            if boundary.is_private_stat(st) or not stat.S_ISREG(st.st_mode) or st.st_size > SEARCH_MAX_FILE_BYTES:
+                return None, None
+            mtime = _mtime_seconds(st)
             head = handle.read(_BINARY_SNIFF_BYTES)
             if b"\x00" in head:
                 return None, None
@@ -2467,13 +2628,17 @@ def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | Non
 def _iter_search_files(root: Path, include: list[str], exclude: list[str]):
     """Yield (path, rel_posix) for every candidate file under ``root``."""
     exclude_names = [pat for pat in exclude if "/" not in pat]
+    mobile_boundary = MobileStorageBoundary()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames if d not in SEARCH_SKIP_DIRS and not _match_globs(d, exclude_names)
+            and not mobile_boundary.is_private_path(base / d)
         )
-        base = Path(dirpath)
         for name in sorted(filenames):
             fpath = base / name
+            if mobile_boundary.is_private_path(fpath):
+                continue
             rel = fpath.relative_to(root).as_posix()
             if include and not _match_globs(rel, include):
                 continue
@@ -2645,17 +2810,21 @@ def search_names(
 
     results: list[dict[str, Any]] = []
     truncated = False
+    mobile_boundary = MobileStorageBoundary()
     # os.walk swallows per-directory errors by default, so an unreadable subtree is silently skipped
     # (the search keeps going) rather than aborting the whole walk.
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         # Prune in place: drop noise trees and (unless show_hidden) hidden dirs so os.walk never
         # descends into them. The retained dir names are still candidates to MATCH below.
+        base = Path(dirpath)
         dirnames[:] = sorted(
             d for d in dirnames if d not in SEARCH_SKIP_DIRS and (show_hidden or not d.startswith("."))
+            and not mobile_boundary.is_private_path(base / d)
         )
-        base = Path(dirpath)
         # Directories first, then files, each alphabetically — mirrors the listing's grouping.
         for name in list(dirnames) + sorted(filenames):
+            if mobile_boundary.is_private_path(base / name):
+                continue
             if not show_hidden and name.startswith("."):
                 continue
             if needle not in name.lower():

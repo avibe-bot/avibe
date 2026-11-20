@@ -1429,6 +1429,101 @@ describe('web push recovery', () => {
     expect(store.value?.endpoint).toBe('https://avibe.bot/api/push/apns/native-current');
   });
 
+  describe('after a sign-in in the iPhone App', () => {
+    // A sign-in starts from a fresh account store: no choice is stored for
+    // this instance. With iOS permission already granted, notifications turn
+    // on by themselves; otherwise, or once the user chose off, they stay off.
+    const setup = (status: Record<string, unknown>, storage = writableLocalStorage()) => {
+      const call = vi.fn(async (method: string) => {
+        if (method === 'push.status') return status;
+        if (method === 'push.subscribe') {
+          return {
+            endpoint: 'https://avibe.bot/api/push/apns/restored',
+            keys: { p256dh: 'key', auth: 'auth' },
+          };
+        }
+        throw new Error(`unexpected method ${method}`);
+      });
+      vi.stubGlobal('window', {
+        avibeNative: {
+          contract: 1,
+          platform: 'ios',
+          shellVersion: 'test',
+          capabilities: { push: 1 },
+          call,
+          on: vi.fn(() => () => undefined),
+        },
+        localStorage: storage,
+      });
+      const api = {
+        getWebPushVapidPublicKey: vi.fn(async () => ({ public_key: 'AQIDBA' })),
+        getWebPushStatus: vi.fn(async () => ({
+          current_subscription_enabled: false,
+          current_subscription_repairable: false,
+        })),
+        subscribeWebPush: vi.fn(async () => ({ ok: true, accepted: true })),
+      } as unknown as ApiContextType;
+      return { call, api };
+    };
+
+    it('turns notifications on when iOS permission is granted', async () => {
+      const { call, api } = setup({ state: 'off', revokeState: 'absent', permission: 'granted' });
+
+      await expect(reconcileWebPush(api, pendingRegistrationStore())).resolves.toMatchObject({
+        status: 'enabled',
+      });
+      expect(call).toHaveBeenCalledWith('push.subscribe', { vapidPublicKey: 'AQIDBA' });
+      expect(api.subscribeWebPush).toHaveBeenCalledWith(
+        {
+          endpoint: 'https://avibe.bot/api/push/apns/restored',
+          keys: { p256dh: 'key', auth: 'auth' },
+        },
+        'iPhone App',
+        undefined,
+        expect.any(Array),
+        undefined,
+      );
+    });
+
+    it.each([
+      ['not yet asked', { state: 'off', revokeState: 'absent', permission: 'notDetermined' }],
+      ['an older shell that does not say', { state: 'off', revokeState: 'absent' }],
+      // The shell reports a denied permission as unavailable, which never
+      // reaches the restore; the row records the rule table.
+      ['denied (reported as unavailable)', { state: 'unavailable', revokeState: 'absent', permission: 'denied' }],
+    ])('leaves them off when iOS permission is %s', async (_name, status) => {
+      const { call, api } = setup(status);
+
+      await expect(reconcileWebPush(api, pendingRegistrationStore())).resolves.toMatchObject({
+        status: 'disabled',
+      });
+      expect(call).not.toHaveBeenCalledWith('push.subscribe', expect.anything());
+      expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    });
+
+    it('restores without asking the instance about a remembered endpoint', async () => {
+      const storage = writableLocalStorage();
+      storage.setItem('vibe.webPush.endpoints', JSON.stringify(['https://avibe.bot/api/push/apns/old']));
+      const { call, api } = setup({ state: 'off', revokeState: 'absent', permission: 'granted' }, storage);
+      (api.getWebPushStatus as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('instance unreachable'));
+
+      await expect(reconcileWebPush(api, pendingRegistrationStore())).resolves.toMatchObject({
+        status: 'enabled',
+      });
+      expect(call).toHaveBeenCalledWith('push.subscribe', { vapidPublicKey: 'AQIDBA' });
+    });
+
+    it('leaves them off once the user turned them off', async () => {
+      const { call, api } = setup({ state: 'off', revokeState: 'absent', permission: 'granted' });
+
+      await expect(
+        reconcileWebPush(api, pendingRegistrationStore(), disabledIntentStore(true)),
+      ).resolves.not.toMatchObject({ status: 'enabled' });
+      expect(call).not.toHaveBeenCalledWith('push.subscribe', expect.anything());
+      expect(api.subscribeWebPush).not.toHaveBeenCalled();
+    });
+  });
+
   it('reconciles a native endpoint again after the instance disables it', async () => {
     let nativeEndpoint = 'https://avibe.bot/api/push/apns/native-old';
     const nativeSubscription = () => ({

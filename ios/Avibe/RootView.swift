@@ -55,16 +55,20 @@ struct RootView: View {
                 .ignoresSafeArea(.container, edges: .all)
             }
             if appModel.route == .loading {
+                // Never a blocking spinner: the page's skeleton, and while an
+                // open is under way the thin progress line over it.
+                if appModel.runtimeOpenAttempt != nil
+                    || appModel.mobileSessionCoordinator.hasStoredSelection
+                {
+                    RuntimeSkeleton()
+                }
                 if let attempt = appModel.runtimeOpenAttempt {
-                    RuntimeOpenProgressOverlay(
-                        attempt: attempt,
-                        cancel: {
-                            appModel.cancelRuntimeOpen(attemptID: attempt.id)
-                        }
-                    )
+                    RuntimeOpenProgress(attempt: attempt) {
+                        appModel.cancelRuntimeOpen(attemptID: attempt.id)
+                    }
                 } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // The session is being restored: the line, with no stage.
+                    RuntimeProgressLine(label: Text("runtime.loading"))
                 }
             }
             if appModel.route == .onboarding(.instances),
@@ -118,7 +122,11 @@ struct RootView: View {
             MobileOnboardingContainer(
                 coordinator: appModel.mobileSessionCoordinator,
                 startScreen: appModel.accountSheetStartScreen,
-                returnToRuntime: appModel.returnToRuntime
+                returnToRuntime: appModel.returnToRuntime,
+                // The sheet takes the instance page's appearance (the system's
+                // until the page reports one), so it does not flash or turn
+                // light over a dark page.
+                pageColorScheme: appModel.runtimePageColorScheme
             )
             .ignoresSafeArea(.container, edges: .all)
             .presentationDetents([.large])
@@ -243,6 +251,7 @@ private struct SystemScheduleConfirmationOverlay: View {
                                         .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .foregroundStyle(AvibeStyle.onAccent)
                                 .accessibilityIdentifier(
                                     "system-schedule-confirm"
                                 )
@@ -388,6 +397,8 @@ private struct BrowserScreen: View {
                         instanceID: { instance.id },
                         deviceID: { appModel.systemScheduleDeviceID },
                         directStatus: appModel.directStatusProvider,
+                        directHandover: appModel.directHandoverProvider,
+                        healthConnect: appModel.connectHealth,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,
@@ -401,10 +412,24 @@ private struct BrowserScreen: View {
                         },
                         pageColorSchemeChanged: {
                             pageColorScheme = $0
+                            appModel.runtimePageColorScheme = $0
                         },
                         runtimeNavigationChanged: { event in
                             appModel.handleRuntimeNavigation(
                                 event,
+                                attemptID: attemptID,
+                                runtime: runtime
+                            )
+                        },
+                        pageCache: appModel.runtimePageCacheAccess(for: runtime),
+                        cachedPageConnected: {
+                            appModel.runtimeCachedPageConnected(
+                                attemptID: attemptID,
+                                runtime: runtime
+                            )
+                        },
+                        cachedPageKeepsShell: {
+                            appModel.runtimeCachedPageKeepsShell(
                                 attemptID: attemptID,
                                 runtime: runtime
                             )
@@ -431,14 +456,41 @@ private struct BrowserScreen: View {
                     .ignoresSafeArea(.container, edges: [.top, .bottom])
 
                     if overlay == .loading, let attempt {
-                        RuntimeOpenProgressOverlay(
-                            attempt: attempt,
-                            cancel: {
-                                appModel.cancelRuntimeOpen(
-                                    attemptID: attempt.id
-                                )
-                            }
+                        // Until the page's document commits the WebView is
+                        // blank: its skeleton stands in. The progress line
+                        // stays until the document finishes and blocks
+                        // nothing.
+                        if attempt.phase != .loadingPage {
+                            RuntimeSkeleton()
+                        }
+                        RuntimeOpenProgress(attempt: attempt) {
+                            appModel.cancelRuntimeOpen(attemptID: attempt.id)
+                        }
+                    }
+
+                    if overlay == .showingCachedLive, let attempt {
+                        // The last page is on screen and live to touch: only
+                        // the line, and past the long-wait mark one row
+                        // saying it is the last content.
+                        CachedRuntimeOpenProgress(attempt: attempt)
+                    }
+
+                    if overlay == .cachedUnreachable, let attempt {
+                        RuntimeCachedPageTimeoutBanner(
+                            instanceName: attempt.runtime.instance.name,
+                            retry: { appModel.retryRuntimeCachedPage() }
                         )
+                        .id(attempt.id)
+                    }
+
+                    if overlay == .cachedOffline, let attempt {
+                        // avibe.bot lists the instance offline; its last
+                        // page stays, and connects by itself when it is back.
+                        RuntimeCachedPageOfflineBanner(
+                            retry: { appModel.retryOfflineCachedPage() },
+                            switchInstance: { appModel.showInstances() }
+                        )
+                        .id(attempt.id)
                     }
 
                     if overlay == .loadFailure {
@@ -472,6 +524,7 @@ private struct BrowserScreen: View {
                                     )
                                 }
                                 .buttonStyle(.borderedProminent)
+                                .foregroundStyle(AvibeStyle.onAccent)
                             }
 
                             Button("browser.other_instances") {
@@ -519,41 +572,378 @@ private struct BrowserScreen: View {
     }
 }
 
-private struct RuntimeOpenProgressOverlay: View {
+/// Avibe's colours in native chrome: the mint accent is the Web UI's
+/// `--primary` (#10b981 light, #5bffa0 dark), as the Live Activity uses;
+/// text on an accent fill is `--primary-foreground` (white light, #080812
+/// dark). White on #10b981 is the owner's accepted brand pair (2.54:1,
+/// ui/src/index.css); #080812 on #5bffa0 is 15:1.
+enum AvibeStyle {
+    static let accent = Color("AccentColor")
+    static let onAccent = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0x08 / 255, green: 0x08 / 255, blue: 0x12 / 255, alpha: 1)
+            : .white
+    })
+    /// The Workbench's top bar (instance name, account), below the status
+    /// bar: native chrome over a page stays below it.
+    static let topBarHeight: CGFloat = 44
+    /// The Workbench's bottom tab bar, above the Home indicator.
+    static let tabBarHeight: CGFloat = 56
+    /// What a page keeps at its bottom edge: the tab bar, or a chat's
+    /// composer, whichever is taller. Native banners sit above it.
+    static let bottomChromeHeight: CGFloat = 64
+    /// The open's progress line, at the top edge below the status bar.
+    static let progressLineHeight: CGFloat = 2.5
+}
+
+/// How an open that is under way shows itself at first: a thin line at the
+/// top edge, below the status bar. No text and no button, and it takes no
+/// touches; VoiceOver hears the stage once.
+struct RuntimeOpenProgressLine: View {
+    let attempt: RuntimeOpenAttempt
+
+    var body: some View {
+        let label = runtimeOpenPhaseText(
+            attempt.phase,
+            instanceName: attempt.runtime.instance.name
+        )
+        RuntimeProgressLine(label: Text(label))
+            .onAppear {
+                // Once per attempt, however many screens show its line.
+                if RuntimeOpenAnnouncements.lastAnnounced != attempt.id {
+                    RuntimeOpenAnnouncements.lastAnnounced = attempt.id
+                    AccessibilityNotification.Announcement(label).post()
+                }
+            }
+            .accessibilityIdentifier("runtime-open-progress")
+    }
+}
+
+@MainActor
+enum RuntimeOpenAnnouncements {
+    static var lastAnnounced: Int?
+}
+
+/// The thin progress line itself: Avibe green at the top edge, below the
+/// status bar. It takes no touches.
+struct RuntimeProgressLine: View {
+    let label: Text
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweeping = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            let segment = geometry.size.width * 0.3
+            ZStack(alignment: .leading) {
+                Rectangle().fill(AvibeStyle.accent.opacity(0.18))
+                if reduceMotion {
+                    Rectangle().fill(AvibeStyle.accent.opacity(0.6))
+                } else {
+                    Capsule()
+                        .fill(AvibeStyle.accent)
+                        .frame(width: segment)
+                        .offset(x: sweeping ? geometry.size.width : -segment)
+                }
+            }
+        }
+        .frame(height: AvibeStyle.progressLineHeight)
+        .clipped()
+        .frame(maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
+        .onAppear {
+            withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+                sweeping = true
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(label)
+    }
+}
+
+/// An open showing the instance's last page from the cache, uncovered: the
+/// line, and past the long-wait mark one row over the content (dismissable).
+struct CachedRuntimeOpenProgress: View {
+    let attempt: RuntimeOpenAttempt
+    @State private var dismissedAttempt: Int?
+
+    var body: some View {
+        ZStack {
+            RuntimeOpenProgressLine(attempt: attempt)
+            if attempt.isTakingLong, dismissedAttempt != attempt.id {
+                RuntimeOpenSlowBanner(
+                    showsLastContent: true,
+                    dismiss: { dismissedAttempt = attempt.id }
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: attempt.isTakingLong)
+    }
+}
+
+/// avibe.bot lists the instance offline while its last page is shown: one
+/// row where the long-wait row sits, in its style, with Retry and Switch
+/// instance. It stays until the instance answers (the open is then done).
+struct RuntimeCachedPageOfflineBanner: View {
+    let retry: () -> Void
+    let switchInstance: () -> Void
+
+    var body: some View {
+        // One line when the copy and both buttons fit; otherwise the copy
+        // in full, and the buttons below it on the right (stacked when even
+        // they do not fit side by side, at accessibility sizes).
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 10) {
+                message
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                buttons
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                message
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        Spacer(minLength: 0)
+                        buttons
+                    }
+                    VStack(alignment: .trailing, spacing: 8) {
+                        buttons
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("runtime-cached-offline")
+        .onAppear {
+            AccessibilityNotification.Announcement(
+                NSLocalizedString("runtime.open.offline.body", comment: "")
+            ).post()
+        }
+    }
+
+    private var message: some View {
+        Text("runtime.open.offline.body")
+            .font(.subheadline.weight(.semibold))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var buttons: some View {
+        Button("runtime.open.offline.retry", action: retry)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(AvibeStyle.accent)
+        Button("runtime.open.offline.switch", action: switchInstance)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(AvibeStyle.accent)
+    }
+}
+
+/// The open of a cached page ran out of time: the content stays, and one
+/// row says the instance is not reachable now, with Retry.
+struct RuntimeCachedPageTimeoutBanner: View {
+    let instanceName: String
+    let retry: () -> Void
+    @State private var dismissed = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        if !dismissed {
+            content
+        }
+    }
+
+    private var content: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    String(
+                        format: NSLocalizedString("runtime.open.cached_timeout.title.named", comment: ""),
+                        instanceName
+                    )
+                )
+                .font(.subheadline.weight(.semibold))
+                Text("runtime.open.cached_timeout.body")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("runtime.open.cached_timeout.retry", action: retry)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(AvibeStyle.accent)
+            Button(action: { dismissed = true }) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("runtime-cached-timeout")
+        .onAppear {
+            AccessibilityNotification.Announcement(
+                String(
+                    format: NSLocalizedString("runtime.open.cached_timeout.title.named", comment: ""),
+                    instanceName
+                )
+            ).post()
+        }
+    }
+}
+
+/// The open's progress while no page content shows: the line, and past the
+/// long-wait mark the banner with Cancel.
+struct RuntimeOpenProgress: View {
     let attempt: RuntimeOpenAttempt
     let cancel: () -> Void
 
     var body: some View {
-        VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.large)
-            Text(
-                runtimeOpenPhaseText(
-                    attempt.phase,
-                    instanceName: attempt.runtime.instance.name
+        ZStack {
+            RuntimeOpenProgressLine(attempt: attempt)
+            if attempt.offersCancel {
+                RuntimeOpenSlowBanner(
+                    showsLastContent: false,
+                    cancel: cancel
                 )
-            )
-                .font(.headline)
-                .multilineTextAlignment(.center)
-            if attempt.isTakingLong {
-                Text("runtime.open.long_wait")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                .transition(.opacity)
             }
-            Button("common.cancel", action: cancel)
-                .buttonStyle(.bordered)
         }
-        .padding(22)
-        .frame(maxWidth: 320)
+        .animation(.easeOut(duration: 0.2), value: attempt.offersCancel)
+        .onChange(of: attempt.offersCancel) { _, offers in
+            // Cancel is the way out now: say so.
+            if offers {
+                AccessibilityNotification.Announcement(
+                    String(localized: "runtime.open.slow")
+                ).post()
+            }
+        }
+    }
+}
+
+/// An open that has run past the long-wait mark says so in one row above
+/// the page's tab bar or composer. Over the last page's content it only
+/// says that content is shown; with nothing to show it offers Cancel, back
+/// to the instances.
+struct RuntimeOpenSlowBanner: View {
+    let showsLastContent: Bool
+    var cancel: (() -> Void)?
+    var dismiss: (() -> Void)?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        // No spinner: the progress line at the top already shows the open is
+        // under way, and the instance's name is on the page.
+        HStack(alignment: .center, spacing: 10) {
+            Text(
+                showsLastContent
+                    ? "runtime.open.slow.last_content"
+                    : "runtime.open.slow"
+            )
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let cancel {
+                Button("common.cancel", action: cancel)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(AvibeStyle.accent)
+            }
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(Text("runtime.open.timeout.dismiss"))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(
             .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
-        .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+        .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+        .padding(.horizontal, 16)
+        .padding(.bottom, AvibeStyle.bottomChromeHeight + 8)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("runtime-open-slow")
+    }
+}
+
+/// The page's shape before its first paint, with no data: a header, a few
+/// list rows, and the tab bar. Touches stop at it.
+struct RuntimeSkeleton: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Circle().frame(width: 32, height: 32)
+                RoundedRectangle(cornerRadius: 6).frame(width: 44, height: 14)
+                Spacer()
+                Circle().frame(width: 28, height: 28)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: AvibeStyle.topBarHeight)
+            .padding(.bottom, 16)
+            ForEach(0..<7, id: \.self) { index in
+                HStack(alignment: .top, spacing: 12) {
+                    Circle().frame(width: 40, height: 40)
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 5)
+                            .frame(width: index.isMultiple(of: 2) ? 150 : 110, height: 12)
+                        RoundedRectangle(cornerRadius: 5)
+                            .frame(maxWidth: index.isMultiple(of: 3) ? 220 : 260)
+                            .frame(height: 10)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            }
+            Spacer(minLength: 0)
+            HStack {
+                ForEach(0..<4, id: \.self) { _ in
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 6).frame(width: 28, height: 28)
+                    Spacer()
+                }
+            }
+            .padding(.vertical, 14)
+            .padding(.bottom, 20)
+        }
+        .foregroundStyle(Color(uiColor: .tertiarySystemFill))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.08))
-        .accessibilityIdentifier("runtime-open-progress")
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+        // It covers a page that may already be painting underneath (a
+        // sign-in redirect, a reload): taps stop here, as the old overlay's.
+        .contentShape(Rectangle())
+        .onTapGesture {}
+        .accessibilityHidden(true)
+        .accessibilityIdentifier("runtime-skeleton")
     }
 }
 
@@ -671,6 +1061,8 @@ private func runtimeOpenPhaseText(
         key = "runtime.open.phase.authenticating.named"
     case .loadingPage:
         key = "runtime.open.phase.loading_page.named"
+    case .showingCached, .showingCachedLive, .cachedUnreachable, .cachedOffline:
+        key = "runtime.open.phase.connecting.named"
     case .awaitingUser:
         key = "runtime.open.awaiting_user.title.named"
     case .documentLoaded:
@@ -695,6 +1087,8 @@ private func runtimeOpenPhaseLabel(_ phase: RuntimeOpenPhase) -> String {
         key = "runtime.open.stage.authenticating"
     case .loadingPage:
         key = "runtime.open.stage.loading_page"
+    case .showingCached, .showingCachedLive, .cachedUnreachable, .cachedOffline:
+        key = "runtime.open.stage.connecting"
     case .awaitingUser:
         key = "runtime.open.stage.awaiting_user"
     case .documentLoaded:
@@ -731,6 +1125,9 @@ private struct DirectFaultMessage: View {
 enum BrowserOverlay: Equatable {
     case none
     case loading
+    case showingCachedLive
+    case cachedUnreachable
+    case cachedOffline
     case awaitingUser
     case loadFailure
     case directFault
@@ -741,8 +1138,17 @@ enum BrowserOverlay: Equatable {
             return
         }
         switch attemptPhase {
-        case .preparingRoute, .connecting, .authenticating, .loadingPage:
+        case .preparingRoute, .connecting, .authenticating, .loadingPage,
+             .showingCached:
+            // A cached page stays covered until its instance answers,
+            // unless its shell waits out an unreachable instance.
             self = .loading
+        case .showingCachedLive:
+            self = .showingCachedLive
+        case .cachedUnreachable:
+            self = .cachedUnreachable
+        case .cachedOffline:
+            self = .cachedOffline
         case .awaitingUser:
             self = .awaitingUser
         case .failed:

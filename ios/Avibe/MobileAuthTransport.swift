@@ -84,6 +84,7 @@ final class MobileAuthTransport: NSObject, MobileAuthTransporting {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         self.webView = webView
         super.init()
+        DirectWebViewRegistry.shared.register(webView)
         webView.navigationDelegate = self
     }
 

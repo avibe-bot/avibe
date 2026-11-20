@@ -78,3 +78,44 @@ describe.each(['page', 'sheet'] as const)('instance dots in the real %s', (surfa
     expect(screen.getAllByRole('status').some((node) => node.className.includes('border-gold'))).toBe(true);
   });
 });
+
+// Max 2026-11-19 10:53: the current block follows the connection, as the Desktop's current row does.
+describe('the current block follows the connection', () => {
+  const offlineCurrent = { ...session, instances: [instance('current', { available: false }), ...session.instances.slice(1)] };
+  const rows = (extra: Partial<{ openingId: string | null; failure: { id: string; reason: 'mobileApp.sheet.openFailed' } | null }> = {}) =>
+    ({ openingId: null, expandedId: null, failure: null, onOpen: noop, ...extra });
+  const page = (props: { onBack?: () => void; rows?: ReturnType<typeof rows>; locked?: boolean } = {}) => render(<I18nextProvider i18n={i18n}>
+    <InstancesPage session={offlineCurrent} busy={null} locked={props.locked ?? false} errorKey={null} rows={props.rows ?? rows()}
+      onRefresh={noop} onAccount={noop} onAdd={noop} onReopen={noop} onBack={props.onBack} />
+  </I18nextProvider>);
+  const block = () => screen.getByRole('heading', { name: en.mobileApp.sheet.youreIn }).nextElementSibling as HTMLElement;
+  const blockDot = () => block().querySelector('[data-status-indicator]')!;
+  const live = (surface: string) => {
+    if (surface === 'sheet') render(<I18nextProvider i18n={i18n}><InstanceSheetPage session={offlineCurrent} locked={false} refreshing={false} stale={false}
+      rows={rows()} onClose={noop} onRefresh={noop} onAdd={noop} /></I18nextProvider>);
+    else page({ onBack: noop });
+  };
+  it.each(['sheet', 'page over a live instance'])('stays green and openable in the %s though the catalog says offline', (surface) => {
+    live(surface);
+    expect(blockDot().className).toContain('bg-mint');
+    expect(within(block()).getByRole('img', { name: 'Online' })).toBeTruthy();
+    expect(block().textContent).not.toContain('Offline');
+    expect(within(block()).getByRole('button').hasAttribute('disabled')).toBe(false);
+  });
+  it('is gold while reopening and grey when reopening failed, with nothing open', () => {
+    page({ rows: rows({ openingId: 'current' }), locked: true });
+    expect(blockDot().className).toContain('bg-gold');
+    cleanup();
+    render(<I18nextProvider i18n={i18n}><InstancesPage session={session} busy={null} locked={false} errorKey={null}
+      rows={rows({ failure: { id: 'current', reason: 'mobileApp.sheet.openFailed' } })} onRefresh={noop} onAccount={noop} onAdd={noop} onReopen={noop} /></I18nextProvider>);
+    expect(blockDot().className).toContain('bg-muted');
+    expect(blockDot().getAttribute('aria-hidden')).toBe('true');
+    expect(within(block()).getByRole('alert')).toBeTruthy();
+    expect(within(block()).getByRole('button', { name: 'Retry' })).toBeTruthy();
+  });
+  it('keeps the catalog word with nothing open and no attempt under way', () => {
+    page();
+    expect(blockDot().className).toContain('bg-muted');
+    expect(block().textContent).toContain('Offline');
+  });
+});

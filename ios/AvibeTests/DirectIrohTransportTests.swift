@@ -524,6 +524,56 @@ final class DirectIrohTransportTests: XCTestCase {
         )
     }
 
+    func testEachAttemptIsRecordedByFamilyAndTheLivePathIsRead() async throws {
+        let harness = Harness()
+        // A failed attempt: the endpoint is bound, its own candidates read
+        // before it closes.
+        let failed = harness.engine.prepare()
+        failed.localFamilies = DirectAddressFamilies(ipv4: 1, ipv6: 2)
+        failed.connection.resolve(harness.makeConnection(answers: [DirectIrohFakeConnection.refused]))
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID, relay: Self.relayA)
+        )
+        harness.select()
+        try await eventually("the attempt fails") { harness.scheduler.pending == [0.25] }
+        XCTAssertEqual(harness.transport.pathDiagnostics, DirectPathDiagnostics(current: nil, attempts: [
+            DirectDialAttempt(offered: DirectAddressFamilies(ipv4: 1, ipv6: 1), offeredRelay: true,
+                              local: DirectAddressFamilies(ipv4: 1, ipv6: 2), path: nil),
+        ]))
+
+        // A usable one, through the relay, later upgraded to IPv6.
+        let endpoint = harness.engine.prepare()
+        endpoint.localFamilies = DirectAddressFamilies(ipv4: 1, ipv6: 1)
+        let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        connection.selectedPath = .relay
+        endpoint.connection.resolve(connection)
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(
+                generation: "boot:1", client: harness.engine.key.endpointID, addresses: [], relay: Self.relayA
+            )
+        )
+        XCTAssertTrue(harness.scheduler.fire(0.25))
+        try await eventually("the path comes up") { harness.reports == [.usable(generation: "boot:1")] }
+        XCTAssertEqual(harness.transport.pathDiagnostics.attempts.last, DirectDialAttempt(
+            offered: DirectAddressFamilies(), offeredRelay: true,
+            local: DirectAddressFamilies(ipv4: 1, ipv6: 1), path: .relay
+        ))
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .relay)
+        connection.selectedPath = .ipv6
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .ipv6)
+        XCTAssertEqual(
+            harness.transport.pathDiagnostics.attempts.last?.jsonObject["result"] as? String,
+            "relay"
+        )
+
+        // Only the last few are kept.
+        XCTAssertLessThanOrEqual(harness.transport.pathDiagnostics.attempts.count, DirectPathDiagnostics.attemptLimit)
+
+        // The history speaks for one selection: a new one, or none, starts empty.
+        harness.transport.deselect()
+        XCTAssertEqual(harness.transport.pathDiagnostics, .empty)
+    }
+
     func testAnAnswerWithoutAKnownRelayBindsNoRelayAtAll() async throws {
         let harness = Harness()
         _ = try await harness.bringUp(

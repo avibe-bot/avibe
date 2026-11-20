@@ -3,6 +3,7 @@ export type NativeCapability =
   | 'accountPresentation'
   | 'app'
   | 'badge'
+  | 'health'
   | 'haptics'
   | 'instancePresentation'
   | 'keyboardResizesViewport'
@@ -10,7 +11,8 @@ export type NativeCapability =
   | 'push'
   | 'systemSchedule'
   | 'viewport'
-  | 'voice';
+  | 'voice'
+  | 'voiceCapture';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';
@@ -19,15 +21,19 @@ export type NativePushSubscription = {
   keys: { p256dh: string; auth: string };
 };
 export type NativePushRevokeState = 'active' | 'absent' | 'pending';
+/** iOS's notification permission for the App. Older shells don't say. */
+export type NativePushPermission = 'granted' | 'notDetermined' | 'denied';
 export type NativePushStatus =
   | {
       state: 'unavailable' | 'off';
       revokeState?: NativePushRevokeState;
       endpoint?: string;
+      permission?: NativePushPermission;
     }
   | ({
       state: 'on';
       revokeState?: NativePushRevokeState;
+      permission?: NativePushPermission;
     } & NativePushSubscription);
 
 export type NativeDirectPreference = 'tunnel' | 'direct';
@@ -274,6 +280,11 @@ export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
   return callNative<NativeAppInfo>('app', 'app.info');
 }
 
+/** Establishes a connection only; request completion comes from the instance API. */
+export async function nativeHealthConnect(params: { requestId: string; pairingCode: string }): Promise<{ state: 'connected' | 'declined' | 'failed' } | null> {
+  return callNative('health', 'health.connect', params);
+}
+
 export async function nativeSystemScheduleRequest(
   request: NativeSystemScheduleRequest,
 ): Promise<NativeSystemScheduleReceipt | null> {
@@ -468,6 +479,69 @@ export async function nativeVoicePermission(): Promise<NativeVoicePermission | n
   }
 }
 
+/** The App records a hold's take itself (ios/Avibe/NativeHoldCapture.swift): 16 kHz mono PCM. */
+export function hasNativeVoiceCapture(): boolean {
+  return hasNativeCapability('voiceCapture');
+}
+
+/** Gets the App's audio session ready for a take, without starting the microphone. */
+export async function nativeVoiceCapturePrepare(): Promise<boolean> {
+  try {
+    await callNative('voiceCapture', 'voice.capturePrepare');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type NativeVoiceCaptureStarted = {
+  sampleRate: number;
+  /** How long the App took to activate its audio session, and to start the microphone (ms). */
+  activateMs?: number;
+  engineMs?: number;
+};
+
+/** What a take's App capture says: a chunk of PCM (base64, Int16 little-endian), or its end. */
+export type NativeVoiceCaptureEvent = {
+  take: string;
+  pcm?: string;
+  ended?: boolean;
+  /** Why the App ended it, when the page did not: `interrupted`, `route`, `background`, … */
+  reason?: string;
+};
+
+/** Starts the App's microphone for `take`; rejects with the bridge's error when it does not. */
+export async function nativeVoiceCaptureStart(take: string): Promise<NativeVoiceCaptureStarted> {
+  const started = await callNative<NativeVoiceCaptureStarted>('voiceCapture', 'voice.captureStart', { take });
+  if (!started) throw { code: 'unavailable', message: 'The App cannot record.' } satisfies NativeBridgeError;
+  return started;
+}
+
+export async function nativeVoiceCaptureStop(take: string): Promise<void> {
+  try {
+    await callNative('voiceCapture', 'voice.captureStop', { take });
+  } catch {
+    // The App ends the take on its own when the page goes.
+  }
+}
+
+/** Listens to the App's capture events; null without a native shell. */
+export function onNativeVoiceCapture(handler: (event: NativeVoiceCaptureEvent) => void): (() => void) | null {
+  const native = bridge();
+  if (!native) return null;
+  return native.on('voice.capture', (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const event = payload as Partial<NativeVoiceCaptureEvent>;
+    if (typeof event.take !== 'string') return;
+    handler({
+      take: event.take,
+      ...(typeof event.pcm === 'string' ? { pcm: event.pcm } : {}),
+      ...(event.ended === true ? { ended: true } : {}),
+      ...(typeof event.reason === 'string' ? { reason: event.reason } : {}),
+    });
+  });
+}
+
 export async function nativePushStatus(
   vapidPublicKey?: string,
 ): Promise<NativePushStatus | null> {
@@ -618,6 +692,10 @@ type DirectTracker = {
   readForHidden: number;
   closureHandlers: Set<() => void>;
   stateListeners: Set<() => void>;
+  /** The latest preference, ordered by `sequence`; null before any. */
+  preferred: NativeDirectPreference | null;
+  preferredSequence: number;
+  preferenceHandlers: Set<(preferred: NativeDirectPreference) => void>;
 };
 
 // One per document: a WebView document and each child window load their own
@@ -641,6 +719,7 @@ function observeDirectStatus(
   status: NativeDirectStatus,
   fromRead: boolean,
 ): void {
+  observeDirectPreference(tracker, status, fromRead);
   if (tracker.state !== 'ready') {
     // No stream of this document is open yet: a closure only raises the
     // baseline. A valid status answer is the baseline; an event is not.
@@ -656,6 +735,29 @@ function observeDirectStatus(
   tracker.closure = status.closure;
   for (const handler of Array.from(tracker.closureHandlers)) {
     if (tracker.closureHandlers.has(handler)) handler();
+  }
+}
+
+// The preference, ordered by `sequence`. Its handlers hear every change, and
+// every status read while it is `direct` (a resume), so a hand-over skipped
+// earlier can be tried again; they decide for themselves whether to act.
+function observeDirectPreference(
+  tracker: DirectTracker,
+  status: NativeDirectStatus,
+  fromRead: boolean,
+): void {
+  if (status.sequence <= tracker.preferredSequence && tracker.preferred !== null) {
+    if (!(fromRead && tracker.preferred === 'direct')) return;
+  } else {
+    const changed = tracker.preferred !== status.preferred;
+    tracker.preferred = status.preferred;
+    tracker.preferredSequence = status.sequence;
+    if (!changed && !fromRead) return;
+  }
+  const preferred = tracker.preferred;
+  if (preferred === null) return;
+  for (const handler of Array.from(tracker.preferenceHandlers)) {
+    if (tracker.preferenceHandlers.has(handler)) handler(preferred);
   }
 }
 
@@ -712,6 +814,9 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
     readForHidden: 0,
     closureHandlers: new Set(),
     stateListeners: new Set(),
+    preferred: null,
+    preferredSequence: -1,
+    preferenceHandlers: new Set(),
   };
   directTracker = tracker;
 
@@ -806,4 +911,89 @@ export function onNativeDirectClosure(handler: () => void): () => void {
   return () => {
     tracker.closureHandlers.delete(handler);
   };
+}
+
+/**
+ * Calls `handler` with the preference whenever it changes (ordered by
+ * `sequence`), and on every status read while it is `direct`. Without the
+ * `direct` capability this never fires.
+ */
+export function onNativeDirectPreference(
+  handler: (preferred: NativeDirectPreference) => void,
+): () => void {
+  const native = directBridge();
+  if (!native) return () => undefined;
+  const tracker = directTrackerFor(native);
+  tracker.preferenceHandlers.add(handler);
+  return () => {
+    tracker.preferenceHandlers.delete(handler);
+  };
+}
+
+/** This document's latest preference, or null before any (or without `direct`). */
+export function nativeDirectPreference(): NativeDirectPreference | null {
+  const native = directBridge();
+  return native ? directTrackerFor(native).preferred : null;
+}
+
+/** The shell answers `direct.handover` (`direct` version 2). */
+export function nativeDirectHandoverAvailable(): boolean {
+  return hasNativeCapability('direct', 2);
+}
+
+export type NativeDirectHandoverResult = { closed: number; kept: number; skipped?: string };
+
+// The shell may wait up to 3 s for the connections to go quiet.
+const DIRECT_HANDOVER_WAIT_MS = 6000;
+
+/**
+ * Asks the shell to close the quiet public connections for this host, so the
+ * next connection takes the direct path (`direct.handover`). Null when
+ * unsupported, failed, or unanswered within DIRECT_HANDOVER_WAIT_MS.
+ */
+export async function nativeDirectHandover(): Promise<NativeDirectHandoverResult | null> {
+  const native = directBridge();
+  if (!native || !nativeDirectHandoverAvailable()) return null;
+  let timer: number | null = null;
+  try {
+    const answer = await Promise.race([
+      native.call<unknown>('direct.handover'),
+      new Promise<null>((resolve) => {
+        timer = window.setTimeout(() => resolve(null), DIRECT_HANDOVER_WAIT_MS);
+      }),
+    ]);
+    if (!answer || typeof answer !== 'object') return null;
+    const { closed, kept, skipped } = answer as { closed?: unknown; kept?: unknown; skipped?: unknown };
+    if (!isCounter(closed) || !isCounter(kept)) return null;
+    return typeof skipped === 'string' ? { closed, kept, skipped } : { closed, kept };
+  } catch {
+    return null;
+  } finally {
+    if (timer !== null) window.clearTimeout(timer);
+  }
+}
+
+/** The kind of path the App's own direct connection runs on. */
+export type NativeDirectPathKind = 'relay' | 'ipv4' | 'ipv6';
+
+/** For the Settings line: the preference, and the App's own path if it has one. */
+export type NativeDirectPathSnapshot = {
+  preferred: NativeDirectPreference;
+  path: NativeDirectPathKind | null;
+};
+
+/** Reads `direct.status()` once for display. Null without `direct` or on failure. */
+export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot | null> {
+  const native = directBridge();
+  if (!native) return null;
+  try {
+    const answer = await native.call<unknown>('direct.status');
+    const status = parseNativeDirectStatus(answer);
+    if (!status) return null;
+    const raw = (answer as { path?: unknown }).path;
+    const path = raw === 'relay' || raw === 'ipv4' || raw === 'ipv6' ? raw : null;
+    return { preferred: status.preferred, path };
+  } catch {
+    return null;
+  }
 }

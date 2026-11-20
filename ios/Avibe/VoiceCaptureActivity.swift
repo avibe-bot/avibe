@@ -42,7 +42,32 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         /// The system would not start the Live Activity, so nothing was
         /// recorded.
         case activityFailed
+        /// The microphone would not start recording (the audio session or
+        /// the recorder refused); `errorCode` says what the system answered.
+        case recordingFailed
         case interrupted
+    }
+
+    /// Where starting a take stopped; shown with `recordingFailed`.
+    enum Step: String, Codable, Hashable {
+        /// Creating the take's file (准备录音文件).
+        case takeFile
+        /// The audio session's category, mode and options (设置音频会话).
+        case sessionCategory
+        /// `setActive(true)` (激活音频会话).
+        case sessionActivate
+        /// Creating the recorder or `record()` (启动录音器).
+        case recorder
+        /// `Activity.request` (启动实时活动).
+        case liveActivity
+    }
+
+    /// One way of starting a take that was refused: which session
+    /// candidate (1, 2), where, and the error as shown.
+    struct Attempt: Codable, Hashable {
+        var candidate: Int
+        var step: Step
+        var error: String?
     }
 
     struct ContentState: Codable, Hashable {
@@ -55,6 +80,16 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         /// The start of what was heard, shown once sent. Bounded so the
         /// activity stays under ActivityKit's 4 KB payload.
         var heard: String?
+        /// The system's error code for `recordingFailed`, shown with it.
+        var errorCode: Int?
+        /// Where the start stopped, for `recordingFailed`.
+        var failedStep: Step?
+        /// The error as shown with `failedStep`: the system's number, or
+        /// an ActivityKit error's type and case.
+        var errorText: String?
+        /// Every refused try of one press, in order, when there was more
+        /// than one way to try.
+        var attempts: [Attempt]?
 
         static let heardLimit = 160
     }

@@ -106,6 +106,65 @@ def test_the_bot_lifecycle_over_http(client, tmp_path):
     assert again.get_json()["bot"]["session_id"] == "ses_cso"
 
 
+def test_deleting_a_removed_bots_agent_archives_its_session_over_http(client, monkeypatch):
+    """No Bot can reconnect to a deleted Agent's Session, so deleting the Agent archives it through the Session's own
+    archive lifecycle (the controller's teardown); a removed Bot whose Agent stays keeps its Session."""
+    from core.bots import BotService
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import archive_session, get_session
+    from vibe import internal_client
+
+    archived: list[str] = []
+
+    async def archive_via_controller(session_id):
+        archived.append(session_id)
+        with create_sqlite_engine().begin() as conn:
+            session = archive_session(conn, session_id)
+        return {"status_code": 200, "body": {"ok": True, "session": session}}
+
+    monkeypatch.setattr(internal_client, "archive_session", archive_via_controller)
+    with BotService() as service:
+        for name in ("Gone", "Kept"):
+            service.remove_bot(service.create_bot(display_name=name).handle)
+
+    deleted = client.delete("/api/agents/gone", headers=csrf_headers(client))
+    assert deleted.status_code == 200, deleted.get_json()
+    assert "bot_session_id" not in deleted.get_json()
+    assert deleted.get_json()["bot_session"] == {"id": "ses_gone", "archived": True}
+    assert archived == ["ses_gone"]
+    with create_sqlite_engine().connect() as conn:
+        assert get_session(conn, "ses_gone")["status"] == "archived"
+        assert get_session(conn, "ses_kept")["status"] == "active"
+
+    # A controller that commits the archive and then loses its reply: the Web answers 503, the reply says archived.
+    async def committed_then_lost(session_id):
+        with create_sqlite_engine().begin() as conn:
+            archive_session(conn, session_id)
+        raise internal_client.InternalServerTimeout("reply lost")
+
+    monkeypatch.setattr(internal_client, "archive_session", committed_then_lost)
+    cancelled = []
+
+    async def cancel_dispatch(session_id):
+        cancelled.append(session_id)
+
+    monkeypatch.setattr(internal_client, "cancel_dispatch", cancel_dispatch)
+    deleted = client.delete("/api/agents/kept", headers=csrf_headers(client))
+    assert deleted.get_json()["bot_session"] == {"id": "ses_kept", "archived": True, "vault_grants_released": False}
+    assert cancelled == ["ses_kept"]
+
+    # One the controller never reached is reported kept.
+    with BotService() as service:
+        service.remove_bot(service.create_bot(display_name="Down").handle)
+
+    async def unavailable(session_id):
+        raise internal_client.InternalServerUnavailable("down")
+
+    monkeypatch.setattr(internal_client, "archive_session", unavailable)
+    deleted = client.delete("/api/agents/down", headers=csrf_headers(client))
+    assert (deleted.status_code, deleted.get_json()["bot_session"]) == (200, {"id": "ses_down", "archived": False})
+
+
 def test_the_main_bots_avatar_is_refused_over_http_in_the_readers_language(client):
     from PIL import Image
 
@@ -235,3 +294,16 @@ def test_no_new_route_names_a_bots_agent_and_one_already_on_it_keeps_it(client, 
     # A removed Bot's Agent is an ordinary Agent again.
     assert client.delete("/api/bots/writer", headers=csrf_headers(client)).status_code == 200
     assert _route_to(client, surface, fresh, "writer").status_code == 200
+
+
+def test_an_unreadable_session_status_is_reported_unknown(client, monkeypatch):
+    """After an archive without a trusted reply, a status that cannot be read is unknown, never a failure of the
+    Agent deletion that already committed."""
+    import storage.db
+    from vibe import api
+
+    def unavailable():
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(storage.db, "create_sqlite_engine", unavailable)
+    assert api.session_is_archived("ses_gone") is None

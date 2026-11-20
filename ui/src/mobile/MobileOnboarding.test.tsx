@@ -22,6 +22,7 @@ const mobile = vi.hoisted(() => ({
   returnToInstance: vi.fn<() => Promise<null>>(),
   selectInstance: vi.fn(),
   signInWithProvider: vi.fn<(provider: string) => Promise<MobileSessionState>>(),
+  readProviders: vi.fn<() => Promise<{ providers?: ('google' | 'github' | 'apple')[]; passkey?: boolean }>>(),
   signInWithPassword: vi.fn<
     (email: string, password: string) => Promise<MobilePasswordSignInResult>
   >(),
@@ -45,6 +46,7 @@ vi.mock('./bridge', async (importOriginal) => ({
   selectMobileInstance: mobile.selectInstance,
   signInMobileWithPassword: mobile.signInWithPassword,
   signInMobileWithProvider: mobile.signInWithProvider,
+  readMobileProviders: mobile.readProviders,
   verifyMobileOtp: mobile.verifyOtp,
   verifyMobilePasskey: mobile.verifyPasskey,
   verifyMobileSecondFactor: mobile.verifySecondFactor,
@@ -142,6 +144,9 @@ const resetMobileMocks = () => {
   mobile.selectInstance.mockReset();
   mobile.signInWithPassword.mockReset();
   mobile.signInWithProvider.mockReset();
+  mobile.readProviders.mockReset();
+  // Native answered without a list (none ever read): the row stays as the session left it.
+  mobile.readProviders.mockResolvedValue({});
   mobile.signInWithProvider.mockRejectedValue({ code: 'provider_cancelled', message: 'cancelled' });
   mobile.verifyOtp.mockReset();
   mobile.verifyPasskey.mockReset();
@@ -969,8 +974,9 @@ describe('mobile onboarding', () => {
       passkey: Boolean(screen.queryByRole('button', { name: 'signIn.passkey.use' })),
     });
 
-    // Native reads avibe.bot's configuration once per signed-out answer: `providers` is the mobile
-    // broker's list, `passkey` passkey sign-in's switch. Only exact names and `true` count.
+    // A signed-out answer names native's read of avibe.bot's configuration, in time or the last
+    // one: `providers` is the mobile broker's list, `passkey` passkey sign-in's switch. Only exact
+    // names and `true` count; before any read, email alone.
     it.each([
       ['only Google', { providers: ['google'], passkey: false }, { providers: ['google'], passkey: false }],
       ['Apple off', { providers: ['google', 'github'], passkey: false }, { providers: ['google', 'github'], passkey: false }],
@@ -985,16 +991,35 @@ describe('mobile onboarding', () => {
       expect(offered()).toEqual(expected);
     });
 
-    it('AUTH-SETUP-185 coming back to Welcome offers what the new answer names, and email alone when it names none', async () => {
-      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github'] });
+    it('AUTH-SETUP-185 coming back to Welcome keeps passkey with the list when the new answer names none', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github'], passkey: true });
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: marks.github });
       mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
       fireEvent.click(screen.getByRole('button', { name: marks.github }));
-      // The account is gone by the next refresh, and that answer's read did not answer in time.
+      // The account is gone by the next refresh, and native had never read the switches it names.
       mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
       fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.instances.refresh' }));
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(offered()).toEqual({ providers: ['google', 'github'], passkey: true });
+    });
+
+    it('AUTH-SETUP-185 a read on Welcome turns passkey sign-in on and off with the list', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: marks.google });
+      expect(offered()).toEqual({ providers: ['google'], passkey: false });
+      mobile.readProviders.mockResolvedValueOnce({ providers: ['google'], passkey: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await screen.findByRole('button', { name: 'signIn.passkey.use' });
+      // An answer without the list leaves both as they are; the next list sets both.
+      mobile.readProviders.mockResolvedValueOnce({});
+      document.dispatchEvent(new Event('visibilitychange'));
+      await waitFor(() => expect(mobile.readProviders).toHaveBeenCalledTimes(3));
+      expect(offered()).toEqual({ providers: ['google'], passkey: true });
+      mobile.readProviders.mockResolvedValueOnce({ providers: [], passkey: false });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'signIn.passkey.use' })).toBeNull());
       expect(offered()).toEqual({ providers: [], passkey: false });
     });
   });
@@ -1006,7 +1031,38 @@ describe('mobile onboarding', () => {
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithApple' });
     };
 
-    it('offers only the sign-ins avibe.bot advertises, and email alone when an answer names none', async () => {
+    const marks = () => ['Google', 'GitHub', 'Apple']
+      .filter((name) => screen.queryByRole('button', { name: `mobileApp.welcome.continueWith${name}` }));
+
+    it('updates the row in place when Welcome learns a newer list, never passing through none', async () => {
+      const newer = deferred<{ providers?: ('google' | 'github' | 'apple')[] }>();
+      mobile.readProviders.mockReturnValueOnce(newer.promise);
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' });
+      expect(mobile.readProviders).toHaveBeenCalledTimes(1);
+      const seen: string[][] = [];
+      const observer = new MutationObserver(() => seen.push(marks()));
+      observer.observe(document.body, { subtree: true, childList: true });
+      newer.resolve({ providers: ['google', 'github', 'apple'] });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithApple' });
+      observer.disconnect();
+      expect(marks()).toEqual(['Google', 'GitHub', 'Apple']);
+      expect(seen.every((list) => list.length > 0)).toBe(true);
+    });
+
+    it('asks again when the App returns to the foreground on Welcome', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut' });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(marks()).toEqual([]);
+      mobile.readProviders.mockResolvedValueOnce({ providers: ['github'] });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' });
+      expect(marks()).toEqual(['GitHub']);
+    });
+
+    it('offers only the sign-ins avibe.bot advertises, and keeps them when an answer names none', async () => {
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
@@ -1019,16 +1075,15 @@ describe('mobile onboarding', () => {
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithApple' })).toBeNull();
 
-      // A signed-out answer without the list (its read did not answer in time) offers email alone
-      // (#3946, main 2026-11-18 20:50; #3945 kept the last list): sign in with GitHub, then sign
-      // out with an answer that names no providers.
+      // A signed-out answer without the list (its read did not answer in time) keeps it:
+      // sign in with GitHub, then sign out with an answer that names no providers.
       mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
       fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
       fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.title' }));
       mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
       fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.signOut' }));
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
-      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeTruthy();
     });
 
     it('AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances', async () => {
@@ -2535,6 +2590,23 @@ describe('mobile instance sheet', () => {
       fireEvent.click(back);
       await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
       expect(document.querySelector('[data-mobile-back]')).toBeNull();
+    });
+
+    it('switches instance from the sheet\'s Account to its list, whose account row leads back', async () => {
+      await openAccountRoot();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
+      await screen.findByText('mobileApp.sheet.youreIn');
+      expect(screen.getByText('Personal Avibe')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long\.address@example\.com/ }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+    });
+
+    it('offers Switch instance only on the Account the avatar\'s sheet opens on', async () => {
+      await openSheet();
+      fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long\.address@example\.com/ }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+      // Account pushed from the list has Back to it instead.
+      expect(screen.queryByRole('button', { name: 'mobileApp.account.switch' })).toBeNull();
     });
 
     it('is the sheet\'s root: Account with Close, and no Back for the edge swipe to press', async () => {

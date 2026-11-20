@@ -22,9 +22,11 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let showInstances: () -> Void
     let showSignIn: () -> Void
     let instanceName: () -> String?
+    let healthConnect: HealthConnectAction
     let instanceID: () -> String?
     let deviceID: () -> String?
     let directStatus: DirectStatusProvider?
+    let directHandover: DirectHandoverProvider?
     let directLoadGate: DirectLoadGateProvider?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -42,6 +44,9 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let accountFallbackVisibilityChanged: (Bool) -> Void
     let pageColorSchemeChanged: (PageColorScheme?) -> Void
     let runtimeNavigationChanged: (RuntimeNavigationEvent) -> Void
+    let pageCache: RuntimePageCacheAccess?
+    let cachedPageConnected: () -> Void
+    let cachedPageKeepsShell: () -> Void
     let didCreateController: (WebViewController) -> Void
     let didReleaseWebViews: (WebsiteDataStoreReleaseBarrier) -> Void
     let didStartLoading: () -> Void
@@ -60,6 +65,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
+        directHandover: DirectHandoverProvider? = nil,
+        healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -79,6 +86,9 @@ struct WebViewContainer: UIViewControllerRepresentable {
         accountFallbackVisibilityChanged: @escaping (Bool) -> Void,
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void,
         runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
+        pageCache: RuntimePageCacheAccess? = nil,
+        cachedPageConnected: @escaping () -> Void = {},
+        cachedPageKeepsShell: @escaping () -> Void = {},
         didCreateController: @escaping (WebViewController) -> Void,
         didReleaseWebViews: @escaping (WebsiteDataStoreReleaseBarrier) -> Void,
         didStartLoading: @escaping () -> Void,
@@ -96,6 +106,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.directStatus = directStatus
+        self.directHandover = directHandover
+        self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
@@ -108,6 +120,9 @@ struct WebViewContainer: UIViewControllerRepresentable {
             accountFallbackVisibilityChanged
         self.pageColorSchemeChanged = pageColorSchemeChanged
         self.runtimeNavigationChanged = runtimeNavigationChanged
+        self.pageCache = pageCache
+        self.cachedPageConnected = cachedPageConnected
+        self.cachedPageKeepsShell = cachedPageKeepsShell
         self.didCreateController = didCreateController
         self.didReleaseWebViews = didReleaseWebViews
         self.didStartLoading = didStartLoading
@@ -132,6 +147,8 @@ struct WebViewContainer: UIViewControllerRepresentable {
             instanceID: instanceID,
             deviceID: deviceID,
             directStatus: directStatus,
+            directHandover: directHandover,
+            healthConnect: healthConnect,
             directLoadGate: directLoadGate,
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
@@ -144,6 +161,9 @@ struct WebViewContainer: UIViewControllerRepresentable {
                 accountFallbackVisibilityChanged,
             pageColorSchemeChanged: pageColorSchemeChanged,
             runtimeNavigationChanged: runtimeNavigationChanged,
+            pageCache: pageCache,
+            cachedPageConnected: cachedPageConnected,
+            cachedPageKeepsShell: cachedPageKeepsShell,
             didStartLoading: didStartLoading,
             didFinishLoading: didFinishLoading,
             didFailLoading: didFailLoading

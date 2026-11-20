@@ -2,8 +2,8 @@ import AppIntents
 import Foundation
 
 /// 「和主伙伴说话」: the Action Button (or Shortcuts, Siri, Spotlight) records
-/// what the user says without bringing Avibe to the front, and sends it to
-/// the main Bot of the selected instance.
+/// what the user says and sends it to the main Bot of the selected instance:
+/// in the background when iOS allows it, else with Avibe brought forward.
 ///
 /// A run while a take is recording stops it and sends it; that is how a
 /// second long press of the Action Button ends a take. While a take is
@@ -12,15 +12,15 @@ import Foundation
 /// `AudioRecordingIntent` tells the system the App records audio; the
 /// system then requires a Live Activity for as long as it records
 /// (developer.apple.com/documentation/appintents/audiorecordingintent).
-/// It is also a `LiveActivityIntent`: an App that is not in front may start
-/// a Live Activity only from such an intent
-/// (developer.apple.com/documentation/appintents/liveactivityintent), and a
-/// press that finds no running process must still be able to.
+/// It is also a `LiveActivityIntent`: only then may it start its island
+/// from the background, warm or cold (developer.apple.com/documentation/
+/// appintents/liveactivityintent; the 11-19 sample: without it the request
+/// fails with `visibility`, as on the owner's 37.1).
 @available(iOS 18.0, *)
 struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     static let title: LocalizedStringResource = "Talk to Main Bot"
     static let description = IntentDescription(
-        "Records what you say and sends it to your main Bot without opening Avibe."
+        "Records what you say and sends it to your main Bot. Avibe may open to record."
     )
 
     /// The main Bot can act on the user's computer, so a locked phone must
@@ -28,8 +28,8 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     static let authenticationPolicy: IntentAuthenticationPolicy =
         .requiresAuthentication
 
-    /// Run in the background; come to the front only when the App is needed
-    /// (sign-in, microphone permission, voice-input consent).
+    /// Starts in the background; comes forward only when the background
+    /// try is refused (or the App must ask for something).
     @available(iOS 26.0, *)
     static var supportedModes: IntentModes {
         [.background, .foreground(.dynamic)]
@@ -38,24 +38,60 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         let controller = VoiceCaptureController.shared
-        let outcome = await controller.toggle()
-        guard case .needsApp(let reason) = outcome else {
+        // A stop, a repeated run or a leftover is handled in the background.
+        if await controller.beginPress() != nil {
             return .result()
         }
-        if #available(iOS 26.0, *),
-           systemContext.currentMode.canContinueInForeground
-        {
-            do {
-                try await continueInForeground(alwaysConfirm: false)
-                controller.openMainBotChat()
-                // Never in front without a word: say why it came forward.
-                VoiceCaptureAlert.present(reason)
-                return .result()
-            } catch {
-                // The system declined; the island says to open Avibe.
+        let press = controller.reservation
+        var canComeForward = false
+        if #available(iOS 26.0, *) {
+            canComeForward = systemContext.currentMode.canContinueInForeground
+        }
+        // One background try first (island, a mixable session, the
+        // recorder); if iOS refuses it, Avibe comes forward and records
+        // there as soon as it is active.
+        var outcome = await controller.startTake(inFront: false, foregroundFallback: canComeForward, reservation: press)
+        var inFront = false
+        let before = controller.lastFailure
+        let notices = controller.noticeCount
+        if outcome == .needsForeground || (canComeForward && outcome.isNeedsApp) {
+            if #available(iOS 26.0, *) {
+                do {
+                    try await continueInForeground(alwaysConfirm: false)
+                    inFront = true
+                    controller.markInFront(reservation: press)
+                } catch {
+                    // The system declined.
+                }
+            }
+            if outcome == .needsForeground {
+                guard inFront else {
+                    controller.foregroundUnavailable(reservation: press)
+                    return .result()
+                }
+                outcome = await controller.startTake(inFront: true, reservation: press)
             }
         }
-        controller.showNeedsApp(reason)
+        switch outcome {
+        case .started, .busy, .needsForeground:
+            break
+        case .needsApp(let reason):
+            if inFront {
+                // Never in front without a word.
+                controller.openMainBotChat()
+                VoiceCaptureAlert.present(reason, failure: controller.lastFailure)
+            } else {
+                controller.showNeedsApp(reason)
+            }
+        case .stopped:
+            // In front the island is not drawn, so say a failure here.
+            guard inFront else { break }
+            if let failure = controller.lastFailure, failure != before {
+                VoiceCaptureAlert.present(.recordingFailed, failure: failure)
+            } else if controller.noticeCount != notices, let reason = controller.lastNoticeReason {
+                VoiceCaptureAlert.present(reason)
+            }
+        }
         return .result()
     }
 }

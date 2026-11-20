@@ -105,7 +105,7 @@ class FakeSupervisor:
     @property
     def status(self):
         assert asyncio.get_running_loop() is self.loop
-        return SimpleNamespace(running=self.running, endpoint_id=self.endpoint_id, reason=self.reason)
+        return SimpleNamespace(running=self.running, endpoint_id=self.endpoint_id, reason=self.reason, connections=3, refusals=2)
 
     async def start(self):
         assert asyncio.get_running_loop() is self.loop
@@ -990,7 +990,8 @@ async def test_status_running_only_after_publication_and_no_sensitive_material(r
         await _wait(lambda: owner.status().transport_running)
         assert owner.status().state == "starting" and rv.endpoint is None
         payload = owner.status().as_dict()
-        assert set(payload) == {"enabled", "state", "reason", "certificate_not_after", "transport_running", "direct_access_allowed"}
+        assert set(payload) == {"enabled", "state", "reason", "certificate_not_after", "transport_running", "direct_access_allowed", "streams_opened", "refusals"}
+        assert (payload["streams_opened"], payload["refusals"]) == (3, 2)
         text = json.dumps(payload)
         for sensitive in ["device-secret", "alice-app", "/test/", "endpoint_id"]:
             assert sensitive not in text

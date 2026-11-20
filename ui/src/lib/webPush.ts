@@ -1292,19 +1292,29 @@ async function reconcileWebPushOnce(
         return { support, status: 'disabled' };
       }
       if (nativeState.state !== 'on') {
-        const rememberedEndpoints = await getRememberedWebPushEndpoints();
-        const rememberedEndpoint = rememberedEndpoints[0];
-        if (!rememberedEndpoint) {
-          return { support, status: 'disabled' };
-        }
-        const rememberedStatus = await api.getWebPushStatus({
-          endpoint: rememberedEndpoint,
-        });
-        if (
-          !rememberedStatus.current_subscription_enabled
-          && !rememberedStatus.current_subscription_repairable
-        ) {
-          return { support, status: 'disabled' };
+        // No choice of "off" is stored for this instance (a sign-in starts
+        // from a fresh account store) and iOS already allows Avibe's
+        // notifications: turn them on, as the user had them. Never when
+        // permission is not yet asked, so the system prompt never appears
+        // on its own.
+        const restoresByDefault = nativeState.permission === 'granted'
+          && intentState.userIntent !== 'disabled';
+        if (!restoresByDefault) {
+          // Otherwise only a remembered subscription the instance still
+          // knows is turned back on.
+          const rememberedEndpoint = (await getRememberedWebPushEndpoints())[0];
+          if (!rememberedEndpoint) {
+            return { support, status: 'disabled' };
+          }
+          const rememberedStatus = await api.getWebPushStatus({
+            endpoint: rememberedEndpoint,
+          });
+          if (
+            !rememberedStatus.current_subscription_enabled
+            && !rememberedStatus.current_subscription_repairable
+          ) {
+            return { support, status: 'disabled' };
+          }
         }
         await runIntentOperation(() => enableNativeWebPush(
           api,

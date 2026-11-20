@@ -19,14 +19,15 @@ export type MobileSessionState =
   | {
       status: 'signedOut';
       /**
-       * The sign-ins avibe.bot offers the App now (`mobile_providers` in its auth config). Native
-       * adds it to a signed-out session answer when its read answered in time; absent means this
-       * answer offers none, so Welcome shows email alone.
+       * The sign-ins avibe.bot offers the App (`mobile_providers` in its auth config): read now when
+       * that answers in time, otherwise the last list it advertised. Absent means none was ever
+       * read, and the page keeps what it had.
        */
       providers?: ('google' | 'github' | 'apple')[];
       /**
-       * Passkey sign-in with no email first: avibe.bot's `passkey_login_enabled`, read with
-       * `providers` (every iOS the App runs on has the passkey sheet). Absent or not `true` is off.
+       * Passkey sign-in with no email first: avibe.bot's `passkey_login_enabled`, from the same read
+       * as `providers` and kept with it (every iOS the App runs on has the passkey sheet). Not
+       * `true` is off.
        */
       passkey?: boolean;
     }
@@ -148,6 +149,17 @@ export const signInMobileWithPassword = (
  * `provider_unavailable`, `provider_email_unverified`, `invalid_or_expired`, `rate_limited`
  * (with `retry_after_seconds`), and `network`.
  */
+/**
+ * The sign-ins avibe.bot offers the App: read now when that answers within a few seconds,
+ * otherwise the last it advertised. `passkey` (passkey sign-in on) comes from the same read and
+ * travels with the list. Without `providers`, none was ever read.
+ */
+export const readMobileProviders = (): Promise<{
+  providers?: ('google' | 'github' | 'apple')[];
+  passkey?: boolean;
+}> =>
+  call('auth.providers');
+
 export const signInMobileWithProvider = (
   provider: 'google' | 'github' | 'apple',
 ): Promise<MobileSessionState> =>

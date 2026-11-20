@@ -1,6 +1,214 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "health.title" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect Apple Health"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接 Apple 健康"
+          }
+        }
+      }
+    },
+    "health.sync_to" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync to"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步到"
+          }
+        }
+      }
+    },
+    "health.metrics" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Steps, activity, workouts, and sleep"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "步数、活动、锻炼和睡眠"
+          }
+        }
+      }
+    },
+    "health.explanation" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe reads only the data you allow, syncs it to this personal instance, and keeps the last 30 days for your daily and weekly status. It never writes to Apple Health."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe 只读取你允许的数据，同步到这个个人实例并保留最近 30 天，用来了解你每天和每周的状态。Avibe 不会向 Apple 健康写入数据。"
+          }
+        }
+      }
+    },
+    "health.ai_disclosure" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All Agents on this instance can read synced data. Your data may be sent to the AI model services used by those Agents and saved in conversation history."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此实例内的所有 Agent 都可读取同步数据。数据可能发送给这些 Agent 使用的 AI 模型服务，并保存在会话记录中。"
+          }
+        }
+      }
+    },
+    "health.stop" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To stop, ask an Agent to disconnect Health and delete the data on this instance, or turn off access in iOS Health settings."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要停止，可以在会话里让 Agent 断开健康连接并删除实例上的数据，也可以在 iOS 健康设置里关闭读取权限。"
+          }
+        }
+      }
+    },
+    "health.single_instance" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone syncs health data to one instance at a time. Connecting replaces its previous connection."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPhone 一次只向一个实例同步健康数据，连接后会替换原来的连接。"
+          }
+        }
+      }
+    },
+    "health.allow" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow and Continue"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许并继续"
+          }
+        }
+      }
+    },
+    "health.not_now" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not Now"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不连接"
+          }
+        }
+      }
+    },
+    "health.ok" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "好"
+          }
+        }
+      }
+    },
+    "health.update_required" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This version of Avibe can't keep syncing Apple Health. Update Avibe."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 Avibe 版本无法继续同步 Apple 健康，请更新 Avibe。"
+          }
+        }
+      }
+    },
+    "health.connection_failed" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to finish connecting Apple Health. Try again from the conversation."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未能完成 Apple 健康连接，请从会话中重试。"
+          }
+        }
+      }
+    },
+    "health.cleanup_failed" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't clear Health sync data on this iPhone. Reopen Avibe and sign out again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未能清除这台 iPhone 上的健康同步信息。请重新打开 Avibe 后再退出一次。"
+          }
+        }
+      }
+    },
     "AVIBE_PUSH_FALLBACK" : {
       "localizations" : {
         "en" : {
@@ -226,6 +434,22 @@
         }
       }
     },
+    "runtime.loading" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Loading"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在加载"
+          }
+        }
+      }
+    },
     "runtime.open.awaiting_user.body" : {
       "localizations" : {
         "en" : {
@@ -258,20 +482,40 @@
         }
       }
     },
-    "runtime.open.long_wait" : {
+    "runtime.open.cached_timeout.body" : {
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This is taking longer than usual. You can cancel at any time."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "等待时间比平时更长，你可以随时取消。"
-          }
-        }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Showing what was here last" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示的是上次的内容" } }
+      }
+    },
+    "runtime.open.cached_timeout.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "runtime.open.cached_timeout.title.named" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Can't reach %@ right now" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时连不上 %@" } }
+      }
+    },
+    "runtime.open.offline.body" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Instance offline. Showing your last content." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "实例不在线，显示的是上次的内容" } }
+      }
+    },
+    "runtime.open.offline.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "runtime.open.offline.switch" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Switch instance" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "切换实例" } }
       }
     },
     "runtime.open.phase.authenticating.named" : {
@@ -366,6 +610,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在准备连接 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.slow" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Still connecting…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还在连接…"
+          }
+        }
+      }
+    },
+    "runtime.open.slow.last_content" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Still connecting. Showing what was here last."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还在连接，先显示上次的内容"
           }
         }
       }
@@ -1038,10 +1314,10 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开主伙伴" } }
       }
     },
-    "Records what you say and sends it to your main Bot without opening Avibe." : {
+    "Records what you say and sends it to your main Bot. Avibe may open to record." : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Records what you say and sends it to your main Bot without opening Avibe." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不用打开 Avibe，录下你说的话发给主伙伴。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Records what you say and sends it to your main Bot. Avibe may open to record." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "录下你说的话，发给主伙伴。可能会打开 Avibe 来录音。" } }
       }
     },
     "Send" : {

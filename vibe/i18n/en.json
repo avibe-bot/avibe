@@ -102,6 +102,9 @@
     }
   },
   "harness": {
+    "turnCarry": {
+      "exhausted": "These inputs were carried forward once and the next Turn failed too. They will not be retried automatically; send them again if they still matter: {inputs}"
+    },
     "agentInitiatedContinuation": "Agent-initiated continuation",
     "promptEcho": {
       "scheduled": "⏰ Scheduled task",
@@ -114,6 +117,9 @@
       "truncated": "… (truncated)"
     },
     "watch": {
+      "retryingNotice": "Watch {id} has been retrying for {elapsed} (last exit code: {code}). It is still running.",
+      "elapsedHours": "{hours} h {minutes} min",
+      "elapsedMinutes": "{minutes} min",
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
       "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup.",
       "unknownSupervisorFailure": "Unknown supervisor failure.",
@@ -1256,6 +1262,10 @@
     }
   },
   "turn": {
+    "retiredRoute": {
+      "model": "Model {old} is no longer in the {backend} model list, so this Session now uses {new}.",
+      "effort": "Reasoning effort {old} is no longer offered for {model}, so this Session now uses {new}."
+    },
     "interrupted": {
       "backendRefresh": "⚠️ This turn was interrupted — its Agent runtime had to be replaced while it was still running, for example by a credential migration. Send the request again if the work still needs doing.",
       "backendDisabled": "⏹ This turn was stopped because {agent} was turned off. Turn it on again in Settings, then send the request again if the work still needs doing.",
@@ -1893,5 +1903,13 @@
   "mcp_oauth_callback_success": "MCP OAuth login completed. You can close this tab.",
   "mcp_oauth_callback_failure": "MCP OAuth login could not be completed. Return to Avibe and try again.",
   "mcp_oauth_start_failure": "MCP OAuth login could not be started. Return to Avibe and try again.",
-  "mcp_oauth_start_rejected": "This MCP OAuth link must be opened from Avibe."
+  "mcp_oauth_start_rejected": "This MCP OAuth link must be opened from Avibe.",
+  "mobile": {
+    "health": {
+      "requestCreated": "Health data requested on iPhone.",
+      "connectTitle": "{name} requests access to your health data",
+      "refreshTitle": "{name} requests a health data update",
+      "notificationBody": "Open Avibe on iPhone to handle this request."
+    }
+  }
 }

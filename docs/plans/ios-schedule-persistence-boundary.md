@@ -17,8 +17,8 @@ and en/zh catalogs. The H3 repair also changes the model and the unpublished
   typed commit error. All owner, detach, record, terminal and replay paths use
   this boundary. Execution slots retain their existing effect/waiter ownership.
 - Forwarder holds both `local_state_write_failed` and `local_state_unavailable` out of terminal receipt delivery for create/cancel, preserving the device-bound sticky lease until Native can replay its authoritative result.
-- Rejected Native create/cancel calls retain their sticky lease and retry only on the existing five-second poll or page reactivation, without immediate reconciliation while admission remains unavailable.
-- Each claim has one existing API deadline covering fetch and JSON-body reading; abort releases reconciliation for the next poll without settling a Native effect.
+- Rejected Native create/cancel calls retain their sticky lease and retry only on the next claim: when the page opens, comes back to the foreground, or sees an Agent turn end or a reconnect of the event stream (the five-second poll was removed; #3967 replaces these triggers with a push), without immediate reconciliation while admission remains unavailable.
+- Each claim has one existing API deadline covering fetch and JSON-body reading; abort releases reconciliation for the next claim without settling a Native effect.
 - The store uses production file-I/O operations for reads, writes, rename and sync; fault injection overrides those operations only in tests, preserving the same commit order and errors.
 - Logout revokes immediately and decides retention from the last committed
   lifecycle. An uncommitted promotion cannot turn an in-flight item into a

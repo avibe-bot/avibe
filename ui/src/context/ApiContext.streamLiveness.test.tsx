@@ -189,6 +189,7 @@ const installDirectShell = (capabilities: Record<string, number> = { direct: 1 }
     (method: string) =>
       new Promise((resolve) => {
         if (method === 'direct.status') answers.push(resolve);
+        else if (method === 'direct.handover') resolve({ closed: 1, kept: 0 });
         else resolve(null);
       }),
   );
@@ -209,10 +210,16 @@ const installDirectShell = (capabilities: Record<string, number> = { direct: 1 }
   return {
     call,
     statusCalls: () => answers.length,
-    answer: async (index: number, closure: number, sequence = closure) => {
-      answers[index]({ preferred: 'tunnel', sequence, closure });
+    answer: async (
+      index: number,
+      closure: number,
+      sequence = closure,
+      preferred: 'tunnel' | 'direct' = 'tunnel',
+    ) => {
+      answers[index]({ preferred, sequence, closure });
       await vi.advanceTimersByTimeAsync(0);
     },
+    handovers: () => call.mock.calls.filter(([method]) => method === 'direct.handover').length,
     malformed: async (index: number) => {
       answers[index]({ preferred: 'direct' });
       await vi.advanceTimersByTimeAsync(0);
@@ -263,8 +270,13 @@ beforeEach(() => {
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
 });
 
+// A hand-over shell wraps `fetch` to count the page's requests; each case
+// starts from the original.
+const originalFetch = window.fetch;
+
 afterEach(() => {
   cleanup();
+  window.fetch = originalFetch;
   Reflect.deleteProperty(window, 'avibeNative');
   Reflect.deleteProperty(document, 'hasFocus');
   vi.unstubAllGlobals();
@@ -669,6 +681,244 @@ describe('ApiProvider workbench stream liveness', () => {
     setVisibility('visible');
     expect(shell.statusCalls()).toBe(2);
     await shell.answer(1, 0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  // The hand-over from the public path to direct (docs/plans/remote-direct-ios.md section 7).
+
+  const handoverShell = async () => {
+    const shell = installDirectShell({ direct: 2 });
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    return shell;
+  };
+
+  it('hands the stream over once when the direct path becomes usable, and only again after it went back', async () => {
+    const shell = await handoverShell();
+    const first = FakeEventSource.latest();
+
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    // Closed before the shell closes the quiet public connections, opened
+    // again after: the new stream needs a new connection.
+    expect(shell.handovers()).toBe(1);
+    expect(first.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    emitHandshake(2);
+    emitControllerLeg(true);
+
+    // Still direct: nothing more.
+    shell.emit({ preferred: 'direct', sequence: 2, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+
+    // Back to the public path and direct again at once: re-armed, but not
+    // sooner than the spacing allows, so flips cause no storm.
+    for (let sequence = 3; sequence < 13; sequence += 2) {
+      shell.emit({ preferred: 'tunnel', sequence, closure: 0 });
+      shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(shell.handovers()).toBe(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    shell.emit({ preferred: 'tunnel', sequence: 13, closure: 0 });
+    shell.emit({ preferred: 'direct', sequence: 14, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('skips the hand-over while the page uses the network, and tries again on a resume', async () => {
+    const shell = await handoverShell();
+    const first = FakeEventSource.latest();
+    const { beginPageRequest } = await import('../lib/pageConnections');
+    const done = beginPageRequest();
+
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    // A request still waiting for its answer: nothing is closed.
+    expect(shell.handovers()).toBe(0);
+    expect(first.closed).toBe(false);
+    done();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shell.handovers()).toBe(0);
+
+    // The next resume reads the status, still direct, and the page is quiet.
+    setVisibility('hidden');
+    setVisibility('visible');
+    await shell.answer(1, 0, 1, 'direct');
+    expect(shell.handovers()).toBe(1);
+    expect(first.closed).toBe(true);
+  });
+
+  it('goes public, direct, lost, public, then direct again', async () => {
+    const shell = await handoverShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    emitHandshake(2);
+    emitControllerLeg(true);
+    const onDirect = FakeEventSource.latest();
+
+    // Lost: the closure rebuilds the stream once, onto the public path.
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onDirect.closed).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(3);
+    expect(shell.handovers()).toBe(1);
+    emitHandshake(3);
+    emitControllerLeg(true);
+
+    // Usable again later: one more hand-over.
+    await vi.advanceTimersByTimeAsync(30_000);
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+    expect(FakeEventSource.instances).toHaveLength(4);
+  });
+
+  it('arms again when the shell could not move the stream', async () => {
+    const shell = await handoverShell();
+    shell.call.mockImplementation((method: string) =>
+      Promise.resolve(method === 'direct.handover' ? { closed: 0, kept: 0, skipped: 'other_documents' } : null),
+    );
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    emitHandshake(2);
+
+    // The next resume after the spacing tries again; it is still direct.
+    await vi.advanceTimersByTimeAsync(30_000);
+    shell.call.mockImplementation((method: string) =>
+      Promise.resolve(method === 'direct.handover' ? { closed: 1, kept: 0 } : null),
+    );
+    shell.emit({ preferred: 'direct', sequence: 2, closure: 0 });
+    shell.emit({ preferred: 'tunnel', sequence: 3, closure: 0 });
+    shell.emit({ preferred: 'direct', sequence: 4, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+  });
+
+  it('hands over a first stream that says it came in another way while direct is preferred', async () => {
+    const shell = installDirectShell({ direct: 2 });
+    await mountDirectPage();
+    await shell.answer(0, 0, 1, 'direct');
+    // The stream opened with the baseline; nothing happens before it says how
+    // it came in.
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(shell.handovers()).toBe(0);
+    FakeEventSource.latest().emit('connected', {
+      sub_id: 1, interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS, via: 'other',
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.instances[0].closed).toBe(true);
+  });
+
+  it('leaves a first stream alone that already came in directly', async () => {
+    const shell = installDirectShell({ direct: 2 });
+    await mountDirectPage();
+    await shell.answer(0, 0, 1, 'direct');
+    FakeEventSource.latest().emit('connected', {
+      sub_id: 1, interval_ms: WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS, via: 'direct',
+    });
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(shell.handovers()).toBe(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
+  it('does not hand over a stream that already came in directly, or while a same-origin frame is open', async () => {
+    const shell = await handoverShell();
+    const { setLiveStreamVia } = await import('../lib/liveStreamVia');
+    setLiveStreamVia('direct');
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(0);
+    setLiveStreamVia('other');
+
+    const frame = document.createElement('iframe');
+    frame.setAttribute('src', '/show/ses_x/');
+    document.body.appendChild(frame);
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 0 });
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 0 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(shell.handovers()).toBe(0);
+    frame.remove();
+  });
+
+  it('counts every same-origin fetch until its body ends', async () => {
+    const original = vi.fn(async () => new Response('done'));
+    vi.stubGlobal('fetch', original);
+    await handoverShell();
+    const { pageConnectionsQuiet } = await import('../lib/pageConnections');
+    expect(pageConnectionsQuiet()).toBe(true);
+    const pending = window.fetch('/api/slow');
+    expect(pageConnectionsQuiet()).toBe(false);
+    const response = await pending;
+    // The headers arrived; the body has not been read yet.
+    expect(pageConnectionsQuiet()).toBe(false);
+    expect(await response.text()).toBe('done');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pageConnectionsQuiet()).toBe(true);
+    // Another origin is not this page's connection.
+    void window.fetch('https://elsewhere.example/x');
+    expect(pageConnectionsQuiet()).toBe(true);
+  });
+
+  it('holds new requests while the shell closes quiet connections', async () => {
+    const original = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', original);
+    const shell = installDirectShell({ direct: 2 });
+    let answer: (value: unknown) => void = () => {};
+    const status = shell.call.getMockImplementation();
+    shell.call.mockImplementation((method: string) =>
+      method === 'direct.handover'
+        ? new Promise((resolve) => { answer = resolve; })
+        : status!(method),
+    );
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+
+    // A request started during the hand-over waits for its answer.
+    const request = window.fetch('/api/refresh');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(original).not.toHaveBeenCalled();
+    answer({ closed: 1, kept: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(original).toHaveBeenCalledTimes(1);
+    await request;
+  });
+
+  it('counts requests from the moment the provider module loads, before anything mounts', async () => {
+    const original = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', original);
+    installDirectShell({ direct: 2 });
+    vi.resetModules();
+    await import('./ApiContext');
+    const { pageConnectionsQuiet } = await import('../lib/pageConnections');
+    const early = window.fetch('/api/session');
+    expect(pageConnectionsQuiet()).toBe(false);
+    await early;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pageConnectionsQuiet()).toBe(true);
+  });
+
+  it('never hands over without direct version 2', async () => {
+    const shell = installDirectShell({ direct: 1 });
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(shell.handovers()).toBe(0);
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 

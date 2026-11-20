@@ -49,6 +49,18 @@ STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 GC_SLOW_SECONDS = 0.2
 _MAX_GC_REPORTS = 64
+# Written only at Vibey stream boundaries on the controller loop; sampled without a lock by GC.
+_active_requests = 0
+
+
+def model_stream_opened() -> None:
+    global _active_requests
+    _active_requests += 1
+
+
+def model_stream_closed() -> None:
+    global _active_requests
+    _active_requests -= 1
 
 
 class EventLoopWatchdog:
@@ -77,8 +89,28 @@ class EventLoopWatchdog:
         self._code_labels: dict[int, tuple[CodeType, tuple[str, str]]] = {}
         self._unresolved_targets = [(module, attribute) for module, attrs in _CODE_TARGETS for attribute in attrs]
         self._gc_started_at: float | None = None
-        self._gc_reports: deque[tuple[float, float, int, int, int, int]] = deque(maxlen=_MAX_GC_REPORTS)
+        self._gc_reports: deque[tuple[float, float, int, int, int, int, int, int, tuple[int, ...]]] = deque(maxlen=_MAX_GC_REPORTS)
         self._gc_callback = self._observe_gc
+        self._census: Callable[[], None] | None = None
+        self._census_due = False
+        self._census_claimed = False
+        self._watchdog_birth = self._answered_at
+        self._warm_since = None
+        self._trigger_candidates = -1
+        self._trigger_uptime = 0.0
+
+    def arm_warm_census(self, controller) -> bool:
+        # Called on the controller loop; idempotent even after the sample fires.
+        if self._census_claimed:
+            return False
+        from core.gc_census import sample_controller
+
+        self._census_claimed = True
+        self._warm_since = max(self._watchdog_birth + 7200, self._monotonic())
+        self._census = lambda: sample_controller(controller, trigger_candidates=self._trigger_candidates,
+                                                trigger_uptime_s=round(self._trigger_uptime, 3),
+                                                sample_uptime_s=round(self._monotonic() - self._watchdog_birth, 3))
+        return True
 
     def _observe_gc(self, phase: str, info: dict[str, int]) -> None:
         if phase == "start":
@@ -87,20 +119,26 @@ class EventLoopWatchdog:
             started_at, self._gc_started_at = self._gc_started_at, None
             if started_at is None:
                 return
+            if (self._census is not None and info['generation'] == 2 and _active_requests == 0
+                    and self._warm_since is not None and started_at >= self._warm_since):
+                self._trigger_candidates = info.get('candidates', -1)
+                self._trigger_uptime = self._monotonic() - self._watchdog_birth
+                self._census_due = True  # scalar signal only; no object enumeration in a collector callback
             duration = self._monotonic() - started_at
             if duration > GC_SLOW_SECONDS:
                 self._gc_reports.append((
                     time.time(), duration, info["generation"], info["collected"],
-                    info["uncollectable"], threading.get_ident(),
+                    info["uncollectable"], threading.get_ident(), info.get("candidates", -1), _active_requests,
+                    tuple(item["collections"] for item in gc.get_stats()),
                 ))
 
     def _report_gc(self) -> None:
         while self._gc_reports:
-            ended_at, duration, generation, collected, uncollectable, thread_id = self._gc_reports.popleft()
+            ended_at, duration, generation, collected, uncollectable, thread_id, candidates, active, counts = self._gc_reports.popleft()
             logger.warning(
                 "Slow garbage collection: duration_ms=%.1f generation=%d collected=%d "
-                "uncollectable=%d thread_id=%d ended_at_unix=%.6f",
-                duration * 1000, generation, collected, uncollectable, thread_id, ended_at,
+                "uncollectable=%d thread_id=%d ended_at_unix=%.6f candidates=%d active_requests=%d collections=%s",
+                duration * 1000, generation, collected, uncollectable, thread_id, ended_at, candidates, active, counts,
             )
 
     def start(self) -> None:
@@ -155,6 +193,11 @@ class EventLoopWatchdog:
                 if recovered:
                     logger.info("Event loop answered again after a %.1fs stall", answered_at - previous_silent_since)
                 self._report_gc()
+                if self._census_due and self._census is not None and not _active_requests:
+                    census, self._census = self._census, None
+                    self._census_due = False
+                    census()
+                    del census
             except Exception:
                 # Diagnostics must not end the watchdog or echo exception text,
                 # which can contain private filenames or values.

@@ -43,6 +43,14 @@ const longOthers = [
   { ...teamTest, name: 'Product research team workspace for the shared regression runs' },
   { ...win, name: 'max-win-11-parallels-virtual-machine-on-the-studio' },
 ];
+// Names that start in an ideograph centre their dot on the cap height, Latin ones on the x-height.
+const cjkCurrent = { ...max, name: '小麦的 Mac' };
+const mixedOthers = [
+  instance('studio', '工作室 Studio'),
+  driver,
+  { ...teamTest, available: true, name: '跨时区产品研发团队 — 共享回归环境与评审工作站（书房）' },
+  { ...win, name: 'max-win' },
+];
 
 function nativeFixtures(lang: 'zh' | 'en') {
   return workbenchFixtures({
@@ -95,11 +103,21 @@ const designFrames = frames([
   frame('offline-expanded', 'Offline instance with its explanation', page({ rows: rows({ expandedId: win.id }) })),
   frame('open-failed', 'Open failure retains its availability dot', page({ rows: rows({ failure: { id: feedback.id, reason: 'mobileApp.sheet.openFailed' } }) })),
   frame('stale', 'Refresh failure retains the cached list', page({ errorKey: 'mobileApp.errors.network' })),
+  frame('mixed-scripts', 'Latin- and ideograph-led names, each dot centred on its own first line', page({ session: session(cjkCurrent, mixedOthers) }), { size: SMALL }),
   frame('long-names', 'Long names wrap within the name column', page({ session: session(longCurrent, longOthers), rows: rows({ openingId: driver.id }) }), { size: SMALL }),
   frame('sheet', 'The sheet uses the same status rows', () => (
     <InstanceSheetPage session={session()} locked refreshing={false} stale={false}
       rows={rows({ openingId: preview.id })} onClose={noop} onRefresh={noop} onAdd={noop} />
   )),
+  // The current block follows the connection: over a live instance it is green whatever the catalog
+  // last said; with nothing open, gold while it reopens and grey when reopening failed.
+  frame('current-live-sheet', 'Over a live instance the catalog calls offline: the current block stays green', () => (
+    <InstanceSheetPage session={session({ ...max, available: false })} locked={false} refreshing={false} stale={false}
+      rows={rows()} onClose={noop} onRefresh={noop} onAdd={noop} />
+  )),
+  frame('current-live-page', 'The page over a live instance (Back returns to it): green whatever the catalog says', page({ session: session({ ...max, available: false }), onBack: noop })),
+  frame('current-reopening', 'Nothing open: the current block reopening is gold', page({ locked: true, rows: rows({ openingId: max.id }) })),
+  frame('current-reopen-failed', 'Nothing open: reopening failed, the current block is grey', page({ rows: rows({ failure: { id: max.id, reason: 'mobileApp.sheet.openFailed' } }) })),
 ]);
 
 export default designFrames;

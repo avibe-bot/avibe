@@ -101,6 +101,49 @@ class _Stopping(Exception):
     """Internal control-flow signal for a requested supervisor stop."""
 
 
+class _StreamLogBudget:
+    """Loop-owned minute window. A stream keeps its opening sampling decision."""
+
+    def __init__(self):
+        self.timer: asyncio.TimerHandle | None = None
+        self.sampled = self.opened = self.closed = 0
+        self.bytes_in = self.bytes_out = self.max_ms = 0
+
+    def _arm(self):
+        if self.timer is None:
+            self.timer = asyncio.get_running_loop().call_later(60, self.flush)
+
+    def open(self, ordinal):
+        self._arm()
+        if self.sampled < 20:
+            self.sampled += 1
+            logger.info("direct stream open stream=%d", ordinal)
+            return True
+        self.opened += 1
+        return False
+
+    def close(self, sampled, ordinal, duration_ms, bytes_in, bytes_out):
+        if sampled:
+            logger.info("direct stream close stream=%d duration_ms=%d bytes_in=%d bytes_out=%d",
+                        ordinal, duration_ms, bytes_in, bytes_out)
+            return
+        self._arm()  # May close in a later window than it opened.
+        self.closed += 1
+        self.bytes_in += bytes_in
+        self.bytes_out += bytes_out
+        self.max_ms = max(self.max_ms, duration_ms)
+
+    def flush(self):
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
+        if self.opened or self.closed:
+            logger.info("direct stream summary opened=%d closed=%d bytes_in=%d bytes_out=%d max_duration_ms=%d",
+                        self.opened, self.closed, self.bytes_in, self.bytes_out, self.max_ms)
+        self.sampled = self.opened = self.closed = 0
+        self.bytes_in = self.bytes_out = self.max_ms = 0
+
+
 class DirectTransportSupervisor:
     """Own the sidecar child and its loopback stream listener.
 
@@ -154,6 +197,11 @@ class DirectTransportSupervisor:
 
         self._running = False
         self._reason: str | None = "not_running"
+        self._stream_log = _StreamLogBudget()
+        self._report_window = 0.0
+        self._report_lines = self._report_skipped = 0
+        self._report_pairs: set[int] = set()
+        self._path_reports = False
         self._connections = 0
         self._refusals = 0
         self._started = False
@@ -286,10 +334,16 @@ class DirectTransportSupervisor:
             peer = self._data_header_peer(line)
             accepted = True
             self._connections += 1
-            await self._ingress.handle_stream(
-                AsyncioByteStream(reader, writer),
-                peer=peer,
-            )
+            stream_id = self._connections
+            stream = AsyncioByteStream(reader, writer)
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            sampled = self._stream_log.open(stream_id)
+            try:
+                await self._ingress.handle_stream(stream, peer=peer)
+            finally:
+                self._stream_log.close(sampled, stream_id, int((loop.time() - started) * 1000),
+                                       stream.bytes_read, stream.bytes_written)
         except (ConnectionError, OSError):
             if not accepted:
                 self._refuse_stream()
@@ -331,6 +385,8 @@ class DirectTransportSupervisor:
     async def _supervise(self) -> None:
         assert self._stop_event is not None
         next_delay = self._restart_initial_delay
+        next_warning = float("-inf")
+        suppressed = 0
         final_reason = "stopped"
         try:
             while not self._stop_event.is_set():
@@ -363,14 +419,12 @@ class DirectTransportSupervisor:
                 except FileNotFoundError:
                     reason = "executable_not_found"
                     if not self._missing_executable_logged:
-                        logger.warning("direct transport sidecar executable is unavailable: %s", self._executable)
+                        logger.warning("direct transport sidecar unavailable reason=executable_not_found exit_status=unknown")
                         self._missing_executable_logged = True
                 except (BrokenPipeError, ConnectionError, OSError):
                     reason = "control_channel_failed"
-                    logger.warning("direct transport sidecar control channel failed", exc_info=True)
                 except Exception:
                     reason = "supervisor_error"
-                    logger.exception("direct transport supervisor failed for one generation")
 
                 if self._stop_event.is_set():
                     final_reason = "stopped"
@@ -379,6 +433,17 @@ class DirectTransportSupervisor:
                 self._running = False
                 self._withdraw(reason)
                 await self._stop_process(process)
+                if not self._stop_event.is_set() and reason != "executable_not_found":
+                    now = asyncio.get_running_loop().time()
+                    if now >= next_warning:
+                        # Fatal suffixes are child-controlled; other reasons here are local constants.
+                        code = "sidecar_fatal" if reason.startswith("fatal:") else reason
+                        status = process.returncode if process is not None else None
+                        logger.warning("direct transport sidecar restarting reason=%s exit_status=%s suppressed=%d",
+                                       code, status if status is not None else "unknown", suppressed)
+                        next_warning, suppressed = now + 60, 0
+                    else:
+                        suppressed += 1
                 if self._process is process:
                     self._process = None
                 self._token = None
@@ -431,6 +496,10 @@ class DirectTransportSupervisor:
             message_type = message.get("type")
             if message_type == "ready":
                 self._handle_ready(message)
+                self._report_pairs.clear()
+                self._path_reports = message.get("path_reports_v1") is True
+                if self._path_reports:
+                    await self._write_control(process.stdin, {"type": "observe_paths_v1"})
             elif message_type == "relay_status":
                 self._handle_relay_status(message)
             elif message_type == "addresses":
@@ -521,6 +590,43 @@ class DirectTransportSupervisor:
             DirectEndpoint(self._endpoint_id, self._published_addresses, self._relay_origin, self._relay_policy),
             reason="running",
         )
+
+    def _handle_path_report(self, msg: dict[str, Any]) -> None:
+        fields = ("open", "rx_bytes", "tx_bytes", "challenge_tx", "challenge_rx", "response_tx", "response_rx")
+        def uint(value):
+            return type(value) is int and 0 <= value < 2**64
+        rows = msg.get("families")
+        if (not self._path_reports or self._endpoint_id is None or
+                set(msg) != {"type", "ordinal", "phase", "selected", "partial", "families"} or
+                msg["phase"] not in ("open", "change", "close") or
+                msg["selected"] not in ("relay", "ipv4", "ipv6", "unknown") or
+                not uint(msg["ordinal"]) or type(msg["partial"]) is not bool or
+                not isinstance(rows, list) or len(rows) != 4 or
+                any(not isinstance(row, dict) or set(row) != set(fields) or
+                    not all(uint(row[k]) for k in fields) for row in rows)):
+            raise _ProtocolError("invalid_path_report")
+        now = asyncio.get_running_loop().time()
+        if now >= self._report_window:
+            self._report_window = now + 60
+            self._report_lines = 0
+        ordinal, phase = msg["ordinal"], msg["phase"]
+        free = 60 - self._report_lines - len(self._report_pairs)
+        if phase == "open" and ordinal not in self._report_pairs and free >= 2:
+            self._report_pairs.add(ordinal)
+        elif phase == "close" and ordinal in self._report_pairs:
+            self._report_pairs.remove(ordinal)
+        elif phase == "change" and ordinal in self._report_pairs and free >= 1:
+            pass
+        else:
+            self._report_skipped += 1
+            return
+        self._report_lines += 1
+        # Construct the logged values exclusively from the fixed schema above.
+        logger.info("direct path connection=%d phase=%s selected=%s partial=%s suppressed=%d %s",
+                    msg["ordinal"], msg["phase"], msg["selected"], msg["partial"], self._report_skipped,
+                    " ".join(f"{family}.{k}={row[k]}" for family, row in
+                             zip(("relay", "ipv4", "ipv6", "unknown"), rows) for k in fields))
+        self._report_skipped = 0
 
     def _handle_peer_closed(self, message: dict[str, Any]) -> None:
         if self._endpoint_id is None:
@@ -644,8 +750,23 @@ class DirectTransportSupervisor:
         if reader is None:
             return
         try:
-            while chunk := await reader.read(4096):
-                logger.debug("direct transport sidecar: %s", chunk.decode("utf-8", "replace").rstrip())
+            # Dedicated negotiated diagnostic sideband; never echo raw stderr.
+            dropping = False
+            while True:
+                try:
+                    line = await reader.readuntil(b"\n")
+                except asyncio.LimitOverrunError as exc:
+                    await reader.readexactly(exc.consumed)
+                    dropping = True
+                    continue
+                except asyncio.IncompleteReadError:
+                    return
+                if not dropping and self._path_reports and len(line) <= CONTROL_LINE_LIMIT_BYTES:
+                    with contextlib.suppress(ValueError, UnicodeError, RecursionError, _ProtocolError):
+                        message = json.loads(line)
+                        if isinstance(message, dict) and message.get("type") == "path_report":
+                            self._handle_path_report(message)
+                dropping = False
         except (asyncio.CancelledError, ConnectionError, OSError):
             return
 
@@ -728,6 +849,7 @@ class DirectTransportSupervisor:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._stream_log.flush()
 
     def _withdraw(self, reason: str) -> None:
         self._rendezvous.set_admission_listener(None)

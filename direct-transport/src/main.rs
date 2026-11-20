@@ -1,5 +1,6 @@
 mod admission;
 mod handshake_limit;
+mod path_report;
 
 use admission::Admissions;
 use handshake_limit::{HandshakeLimit, HandshakePermit};
@@ -63,6 +64,8 @@ enum Command {
         max_streams_per_connection: u32,
         relay: Option<RelayOffer>,
     },
+    #[serde(rename = "observe_paths_v1")]
+    ObservePaths,
     #[serde(rename = "admission")]
     Admission {
         endpoint_id: String,
@@ -103,8 +106,14 @@ struct StartConfig {
 #[derive(Serialize)]
 #[serde(tag = "type")]
 enum Message<'a> {
+    #[serde(rename = "path_report")]
+    PathReport {
+        #[serde(flatten)]
+        report: path_report::Report,
+    },
     #[serde(rename = "ready")]
     Ready {
+        path_reports_v1: bool,
         protocol: u32,
         endpoint_id: String,
         addresses: Vec<String>,
@@ -124,6 +133,7 @@ enum Message<'a> {
 
 #[derive(Clone)]
 struct Control {
+    observe: Arc<std::sync::atomic::AtomicBool>,
     stdout: Arc<Mutex<tokio::io::Stdout>>,
     admissions: Admissions,
     stop: StopSignal,
@@ -133,6 +143,7 @@ struct Control {
 impl Control {
     fn new() -> Self {
         Self {
+            observe: Default::default(),
             stdout: Arc::new(Mutex::new(tokio::io::stdout())),
             admissions: Admissions::new(),
             stop: StopSignal::new(),
@@ -268,6 +279,9 @@ async fn run_control_reader<R: AsyncRead + Unpin>(mut reader: R, control: Contro
                 }
                 control.admissions.update(endpoint_id, ttl_seconds);
             }
+            Ok(Some(Command::ObservePaths)) => control
+                .observe
+                .store(true, std::sync::atomic::Ordering::Relaxed),
             Ok(None) | Ok(Some(Command::Stop)) => {
                 control.stop.stop();
                 return;
@@ -374,6 +388,7 @@ async fn handle_connection(
     incoming: Incoming,
     handshake_permit: HandshakePermit,
     control: Control,
+    reports: tokio::sync::mpsc::Sender<path_report::Report>,
     _connection_permit: tokio::sync::OwnedSemaphorePermit,
     config: Arc<StartConfig>,
 ) {
@@ -393,11 +408,36 @@ async fn handle_connection(
     let mut stream_tasks = JoinSet::new();
     let no_stream = time::sleep(NO_STREAM_TIMEOUT);
     tokio::pin!(no_stream);
+    let terminal = control
+        .observe
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| reports.clone().try_reserve_owned().ok())
+        .flatten();
+    let mut observer = terminal
+        .as_ref()
+        .map(|_| path_report::Observer::new(&connection));
+    let mut changed = false;
+    let mut next_change = Instant::now() + Duration::from_secs(1);
+    if let Some(obs) = &mut observer {
+        obs.report(&connection, "open", &reports);
+    }
     let mut reason = "connection_closed";
     loop {
         tokio::select! {
             _ = control.stop.wait() => { reason = "stopped"; break; }
             _ = &mut no_stream, if stream_tasks.is_empty() => { reason = "idle_timeout"; break; }
+            event = async { match &mut observer { Some(obs) => obs.next().await, None => std::future::pending().await } } => {
+                if let Some(event) = event {
+                    let obs = observer.as_mut().unwrap();
+                    obs.update(event);
+                    changed = true;
+                } else { break; }
+            }
+            _ = time::sleep_until(next_change), if changed => {
+                if let Some(obs) = &mut observer { obs.report(&connection, "change", &reports); }
+                changed = false;
+                next_change = Instant::now() + Duration::from_secs(1);
+            }
             incoming_stream = connection.accept_bi() => {
                 let Ok((mut send, mut recv)) = incoming_stream else { break; };
                 if !control.admissions.allows_connection(&connection) {
@@ -424,6 +464,9 @@ async fn handle_connection(
     connection.close(close_code(), reason.as_bytes());
     stream_tasks.abort_all();
     while stream_tasks.join_next().await.is_some() {}
+    if let (Some(obs), Some(slot)) = (observer, terminal) {
+        slot.send(obs.finish().await);
+    }
     control.peer_closed(&endpoint_id, reason).await;
 }
 
@@ -475,13 +518,35 @@ async fn relay_updates(
     }
 }
 
-async fn run(control: &Control) -> Result<()> {
+#[cfg(test)]
+type TestRelay = (
+    RelayMap,
+    fn(iroh::endpoint::Builder) -> iroh::endpoint::Builder,
+);
+
+async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin());
     let first = read_command(&mut stdin)
         .await?
         .ok_or(SidecarError("start_required"))?;
-    let config = Arc::new(parse_start(first)?);
-    let endpoint = endpoint_builder(config.relay.as_ref(), control.admissions.clone())
+    let config = parse_start(first)?;
+    #[cfg(test)]
+    let config = match (&fixture, config.relay.is_some()) {
+        (Some((map, _)), true) => StartConfig {
+            relay: Some(map.clone()),
+            ..config
+        },
+        (Some(_), false) => return Err(SidecarError("trial_required")),
+        (None, _) => config,
+    };
+    let config = Arc::new(config);
+    let builder = endpoint_builder(config.relay.as_ref(), control.admissions.clone());
+    #[cfg(test)]
+    let builder = match fixture {
+        Some((_, trust)) => trust(builder),
+        None => builder,
+    };
+    let endpoint = builder
         .bind()
         .await
         .map_err(|_| SidecarError("endpoint_bind_failed"))?;
@@ -490,6 +555,7 @@ async fn run(control: &Control) -> Result<()> {
     let ready_address = endpoint_watcher.get();
     if let Err(error) = control
         .emit(&Message::Ready {
+            path_reports_v1: true,
             protocol: 1,
             endpoint_id: endpoint.id().to_string(),
             addresses: endpoint_addresses(&ready_address),
@@ -543,6 +609,18 @@ async fn run(control: &Control) -> Result<()> {
     let control_task = tokio::spawn(run_control_reader(stdin, control.clone()));
     let handshake_limit = HandshakeLimit::new();
     let connection_limit = Arc::new(Semaphore::new(config.max_connections as usize));
+    let (report_tx, mut report_rx) = tokio::sync::mpsc::channel(64);
+    let report_writer = tokio::spawn(async move {
+        let mut sink = tokio::io::stderr();
+        while let Some(report) = report_rx.recv().await {
+            let mut line =
+                serde_json::to_vec(&Message::PathReport { report }).expect("numeric report");
+            line.push(b'\n');
+            if sink.write_all(&line).await.is_err() || sink.flush().await.is_err() {
+                break;
+            }
+        }
+    });
     let mut connection_tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -571,7 +649,7 @@ async fn run(control: &Control) -> Result<()> {
                     _ => { incoming.ignore(); continue; }
                 };
                 let Some(handshake_permit) = handshake_limit.acquire_source(source) else { incoming.ignore(); continue; };
-                connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), permit, Arc::clone(&config)));
+                connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), report_tx.clone(), permit, Arc::clone(&config)));
             }
         }
     }
@@ -584,6 +662,11 @@ async fn run(control: &Control) -> Result<()> {
     .await;
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
+    drop(report_tx);
+    let mut writer = report_writer;
+    if time::timeout(IO_TIMEOUT, &mut writer).await.is_err() {
+        writer.abort();
+    }
     let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
     address_task.abort();
     expiry_task.abort();
@@ -657,11 +740,18 @@ mod relay_tests {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let control = Control::new();
-    let status = match run(&control).await {
+    let status = match run(
+        &control,
+        #[cfg(test)]
+        None,
+    )
+    .await
+    {
         Ok(()) => 0,
         Err(error) => {
+            // Fatal is already reported on stdout. Stderr may be a full,
+            // undrained diagnostics pipe; do not write to it on the exit path.
             control.fatal(error).await;
-            eprintln!("fatal: {}", error.0);
             1
         }
     };

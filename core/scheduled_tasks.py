@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -142,6 +143,9 @@ from vibe import runtime
 from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+_MOBILE_PAIRED_JOB = "mobile-health-maintenance"
+_MOBILE_RECOVERY_JOB = "mobile-health-callback-recovery"
 
 _TaskStoreResult = TypeVar("_TaskStoreResult")
 
@@ -3100,6 +3104,8 @@ class TaskExecutionStore:
                 continue
             if str(run.get("request_type") or run.get("run_type") or "") != "watch":
                 continue
+            if ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY)) == "retrying":
+                continue
             status = _normalize_requested_run_status(run.get("status"))
             if status in {"queued", "running"}:
                 return run
@@ -4214,6 +4220,7 @@ class _ScheduledRuntimeWorkHandler(RuntimeWorkHandler):
 
     async def process(self, item: RuntimeWorkItem) -> bool | None:
         if self.lane is RuntimeWorkLane.TASK_DEFINITIONS:
+            self.service._request_mobile_probe(periodic=True)
             self.service.reconcile_jobs()
             return True
         if self.lane is RuntimeWorkLane.REQUESTS:
@@ -4309,6 +4316,12 @@ class ScheduledTaskService:
         # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
         # be torn down by name: cancelling the watch no longer stops it.
         self._notice_drain_task: Optional["asyncio.Task[Any]"] = None
+        self._mobile_subscription: int | None = None
+        self._mobile_probe: asyncio.Task | None = None
+        self._mobile_dirty = False
+        self._mobile_deliver = False
+        self._mobile_probe_after = 0.0
+        self._mobile_policy_check_at = 0.0
         self._job_signatures: Dict[str, tuple[Any, ...]] = {}
         # Logical Task id -> the physical APScheduler job generation. One-shot
         # job ids are unique per registration so a queued event from a replaced
@@ -5078,6 +5091,19 @@ class ScheduledTaskService:
         else:
             self._register_request_recovery()
         try:
+            from core.inbox_events import DEFINITIONS_UPDATED_EVENT, bus
+
+            loop = asyncio.get_running_loop()
+
+            def pairing_changed(event, data):
+                if event == DEFINITIONS_UPDATED_EVENT and data == {"definition_type": "mobile-health"}:
+                    # Every Health commit that may owe a continuation publishes this hint.
+                    loop.call_soon_threadsafe(functools.partial(self._request_mobile_probe, deliver=True))
+
+            # Subscribe before reading: a concurrent commit cannot fall between the two.
+            self._mobile_subscription = bus.subscribe_callback(pairing_changed)
+            # Startup also delivers what a previous process committed but never sent.
+            self._request_mobile_probe(deliver=True)
             self.scheduler.start()
         except BaseException:
             self._begin_stop()
@@ -5097,6 +5123,70 @@ class ScheduledTaskService:
             self.audit_definition_bindings()
         except Exception as exc:
             logger.error("Harness definition binding audit failed: %s", exc, exc_info=True)
+
+    def _request_mobile_probe(self, *, periodic: bool = False, deliver: bool = False) -> None:
+        # Definitions hints are best effort. Reuse the scheduler's existing reconciliation
+        # tick to recover lost IPC, without installing an idle Health timer.
+        now = time.monotonic()
+        if self._mobile_subscription is None or (periodic and now < self._mobile_probe_after):
+            return
+        self._mobile_probe_after = now + 60
+        self._mobile_dirty = True
+        self._mobile_deliver = self._mobile_deliver or deliver
+        if self._mobile_probe is None or self._mobile_probe.done():
+            self._mobile_probe = asyncio.create_task(self._reconcile_mobile_jobs())
+
+    async def _reconcile_mobile_jobs(self) -> None:
+        from storage.mobile_store import mobile_job_mode
+
+        try:
+            while self._mobile_dirty:
+                self._mobile_dirty = False
+                mode = await self._run_runtime_sync(mobile_job_mode)
+                if self._mobile_dirty:
+                    continue  # A newer commit arrived during the read.
+                for wanted, job_id, seconds in (
+                    # Delivery follows commits; these sweeps only recover what no commit announces
+                    # (time-based expiry, a crashed waiter, a lost hint) and run cleanup/eligibility.
+                    ("paired", _MOBILE_PAIRED_JOB, 60),
+                    ("callbacks", _MOBILE_RECOVERY_JOB, 60),
+                ):
+                    job = self.scheduler.get_job(job_id)
+                    if mode == wanted and job is None:
+                        self._mobile_policy_check_at = 0.0
+                        self.scheduler.add_job(
+                            self._mobile_maintenance, "interval", seconds=seconds, id=job_id,
+                            replace_existing=True, coalesce=True, max_instances=1,
+                            args=[wanted == "callbacks"],
+                            # Drain cancellations now, then retry once a minute if still owed.
+                            **({"next_run_time": datetime.now(timezone.utc)} if wanted == "callbacks" else {}),
+                        )
+                    elif mode != wanted and job is not None:
+                        self.scheduler.remove_job(job_id)
+                if self._mobile_deliver and not self._mobile_dirty:
+                    self._mobile_deliver = False
+                    if mode is not None:
+                        await self._mobile_maintenance(callbacks_only=True)
+        except Exception:
+            logger.warning("mobile maintenance code=schedule_reconcile_failed", exc_info=True)
+
+    async def _mobile_maintenance(self, callbacks_only: bool = False) -> None:
+        from core.handlers.mobile_health import maintenance_pass
+
+        now = time.monotonic()
+        check_policy = not callbacks_only and now >= self._mobile_policy_check_at
+        if check_policy:
+            self._mobile_policy_check_at = now + 60
+        try:
+            delivered = await self._run_runtime_sync(
+                maintenance_pass, self.request_store, check_eligibility=check_policy,
+            )
+            if callbacks_only:
+                self._request_mobile_probe()
+            if delivered:
+                self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+        except Exception:
+            logger.warning("mobile maintenance code=maintenance_failed")
 
     def _spawn_watch_store(self) -> None:
         self._reconcile_task = asyncio.create_task(self._watch_store())
@@ -5540,6 +5630,14 @@ class ScheduledTaskService:
         cancel_reconcile: bool = True,
     ) -> asyncio.Task[None] | None:
         self._running = False
+        if self._mobile_subscription is not None:
+            from core.inbox_events import bus
+
+            bus.unsubscribe(self._mobile_subscription)
+            self._mobile_subscription = None
+        if self._mobile_probe is not None:
+            self._mobile_probe.cancel()
+            self._mobile_probe = None
         request_recovery_stop = self._begin_runtime_work_unregistration()
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
@@ -5655,6 +5753,7 @@ class ScheduledTaskService:
                 return
             try:
                 await self._drain_recovered_activity_outputs()
+                self._request_mobile_probe(periodic=True)
                 store_changed = self.store.maybe_reload()
                 request_store_changed = self.request_store.maybe_reload()
                 should_drain = store_changed or request_store_changed or self._drain_dirty
@@ -6026,7 +6125,7 @@ class ScheduledTaskService:
             self._job_signatures[task.id] = signature
 
         for job in list(self.scheduler.get_jobs()):
-            if job.id not in desired_job_ids:
+            if job.id not in desired_job_ids and job.id not in {_MOBILE_PAIRED_JOB, _MOBILE_RECOVERY_JOB}:
                 self.scheduler.remove_job(job.id)
                 self._one_shot_job_identities.pop(job.id, None)
         for task_id in set(self._job_ids) - desired_ids:

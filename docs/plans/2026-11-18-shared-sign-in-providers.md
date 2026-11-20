@@ -10,12 +10,22 @@ its `mobile_providers` display gate, and its `new_account` hint from
 `Avibe-Account-Created`. The iPhone parts below that describe the Supabase
 route, `auth.signInMethods` and the iPhone session-read split are superseded
 and not shipped. The Desktop keeps this document's route. Both apps hand the
-shared page the same shape, `{providers, passkey}`; the iPhone reads it once
-per signed-out session answer (#3945's `providers`, plus `passkey`), and an
-answer without it offers email alone. As of 21:00 the broker is backend #376
-(open): production serves no `mobile_providers`, `Avibe-Account-Created` is
-never produced, and Apple is not implemented there, so the iPhone shows email
-(and passkey sign-in when switched on) until it ships; nothing is guessed.
+shared page the same shape, `{providers, passkey}`; on the iPhone it comes
+with signed-out session answers (#3945's `providers`, plus `passkey`). As of
+21:00 the broker is backend #376 (open): production serves no
+`mobile_providers`, `Avibe-Account-Created` is never produced, and Apple is
+not implemented there, so the iPhone shows email (and passkey sign-in when
+switched on) until it ships; nothing is guessed.
+
+**Update 2026-11-20 (main, decision A), after #4012 merged:** the iPhone
+follows #4012's model for the ways in. `passkey_login_enabled` rides on the
+same read as `mobile_providers` and is kept with that last-known list (memory
+and `UserDefaults`); signed-out answers and `auth.providers` both answer
+`providers` and `passkey`, read now when that answers in time, otherwise the
+last ones advertised. The shared page keeps what it offers when an answer
+names none, and asks again on its start step and when the App returns to the
+foreground there. This replaces the 20:50 ruling that such an answer offers
+email alone: offline or on a slow read, the iPhone keeps the last ways in.
 
 ## The route that exists
 

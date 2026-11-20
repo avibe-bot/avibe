@@ -537,8 +537,10 @@ it.each([null, undefined, 'validated'] as const)('current attribution uses only 
   expect(invoke).toHaveBeenCalledOnce();
 });
 
+// The current row reads offline from the connection only: native's `available: false` on a still
+// connected current instance neither disables it nor greys it (Max 2026-11-19 09:26).
 it.each(['available', 'offline', 'unreachable'])('keeps omitted current shared metadata display-only (%s)', async (status) => {
-  const offline = status !== 'available';
+  const offline = status === 'unreachable';
   const item = { ...states.signed_in.catalog.instances[0], relationship: 'shared', owner_email: 'owner@example.test', available: status !== 'offline' };
   const state = { ...states.signed_in, current_instance: item,
     connection: { status: status === 'unreachable' ? 'remote_unreachable' : 'remote_connected', pending: null,
@@ -551,6 +553,7 @@ it.each(['available', 'offline', 'unreachable'])('keeps omitted current shared m
   expect(current.querySelector('[data-instance-icon="shared"]')).toBeTruthy();
   expect(within(current).getByText(/owner@example.test/)).toBeTruthy();
   expect(screen.getByRole('region', { name: 'Other instances' }).querySelector(`[data-instance-id="${item.id}"]`)).toBeNull();
+  expect(within(current).getByRole('button').hasAttribute('disabled')).toBe(offline);
   if (offline) {
     const button = within(current).getByRole('button');
     expect(button.hasAttribute('disabled')).toBe(true);

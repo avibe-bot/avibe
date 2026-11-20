@@ -4,9 +4,11 @@ import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { isDesktopShell } from '../../lib/desktopShell';
 import {
+  hasNativeVoiceCapture,
   nativeHapticImpact,
   nativeHapticNotify,
   nativeHapticSelection,
+  nativeVoiceCapturePrepare,
   nativeVoicePermission,
 } from '../../lib/native';
 import { IS_APPLE } from '../../lib/platform';
@@ -256,6 +258,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   useEffect(() => {
     latest.current = options;
   });
+  // In the iOS App the App records the take (lib/nativeVoiceCapture): its audio session is set
+  // up here, with nothing started (no microphone indicator), so a hold starts at once.
+  useEffect(() => {
+    if (hasNativeVoiceCapture()) void nativeVoiceCapturePrepare();
+  }, []);
 
   const [phase, setPhase] = useState<HoldPhase>('idle');
   const [interruptReason, setInterruptReason] = useState<HoldInterruptReason | null>(null);
@@ -463,12 +470,15 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     interrupt(failureReason(current, error), heard);
   }, [end, interrupt]);
 
-  const startTake = useCallback((granted: boolean) => {
+  const startTake = useCallback((granted: boolean, pressedAt: number) => {
     const startupAsk = isDesktopShell() ? Symbol('capture-start') : null;
     if (startupAsk) permissionAsk.current = startupAsk;
     const keep = latest.current.keep?.();
     const dictation = new ShowPageVoiceDictation({
       entry: 'hold',
+      pressedAt,
+      // The App records once the microphone is allowed; its first answer is still WebKit's.
+      ...(granted && hasNativeVoiceCapture() ? { nativeCapture: true } : {}),
       before: '',
       after: '',
       context: latest.current.context?.(),
@@ -497,12 +507,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // The last take's words (kept for its toast) are not this one's.
     setText('');
     setStash('');
-    toPhase('listening');
-    impactFeedback('medium');
     setSeconds(0);
-    clock.current = setInterval(() => {
-      if (mounted.current) setSeconds(Math.floor((Date.now() - current.startedAt) / 1000));
-    }, 250);
     void dictation.done.then((words) => settle(current, words), (error: unknown) => fail(current, error));
     void dictation.start().then(() => {
       if (take.current !== current) {
@@ -513,7 +518,22 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // The take runs from here: setup time is not speech, so it cannot carry a slip past the minimum.
       current.startedAt = Date.now();
       // A release (or the system) may come before the microphone is ready.
-      if (current.ending === 'send' || current.ending === 'system') dictation.finish();
+      if (current.ending === 'send' || current.ending === 'system') {
+        dictation.finish();
+        return;
+      }
+      if (current.ending !== 'none') return;
+      // The speak-now cue (the haptic and the listening card) only now that the microphone is
+      // capturing: on an iPhone it opens about 0.5 s (p90 1 s) after the hold, and words spoken at
+      // an earlier cue were lost (11-20). Until then the press stays as it was, its ring full.
+      // Armed (released now, it cancels): no speak-now cue; the card shows once disarmed.
+      if (!armed.current) {
+        toPhase('listening');
+        impactFeedback('medium');
+      }
+      clock.current = setInterval(() => {
+        if (mounted.current) setSeconds(Math.floor((Date.now() - current.startedAt) / 1000));
+      }, 250);
     }, (error: unknown) => {
       // A macOS alert can take the press before its answer arrives. Keep that
       // answer visible only while the original asking note still owns feedback.
@@ -595,7 +615,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       );
       return;
     }
-    startTake(permission === 'granted');
+    startTake(permission === 'granted', current.startedAt);
   }, [end, startTake]);
 
   /** Release (or Esc, or the system) decides how the take ends. */
@@ -734,7 +754,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     armed.current = next;
     if (next) selectionFeedback();
     const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
-    toPhase(next ? 'armed' : heard ? 'recording' : 'listening');
+    // Before the microphone is capturing, an unarmed press stays a press (no listening card yet).
+    toPhase(next ? 'armed' : heard ? 'recording' : take.current.started ? 'listening' : 'pressing');
   }, [end, toPhase]);
 
   const onPointerUp = useCallback((event: PointerAt) => {
@@ -790,7 +811,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         // Without capture the hold still works while the pointer stays on the element.
       }
     }
-    void prewarmVoiceCapture().catch(() => undefined);
+    // The App's own capture needs no audio context of the page's.
+    if (!hasNativeVoiceCapture()) void prewarmVoiceCapture().catch(() => undefined);
     const startedAt = Date.now();
     const requested = latest.current.gesture;
     const gesture: HoldGesture = { ...HOLD_GESTURE, ...(typeof requested === 'function' ? requested(event.pointerType) : requested) };

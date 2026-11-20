@@ -450,9 +450,12 @@ is cut and ends `…[+N chars]`; the response says how many values were cut, and
 transcript or a message body: a `-[ RECORD n ]` line, then one `column: value`
 line per column. Values are printed as stored, with real newlines; a multi-line
 value starts on the line after its column name, indented two spaces, and SQL
-`NULL` prints as `(null)`. When more rows exist, the last line is
-`next_command: ...`, which keeps `--format text`. JSON stays the default, and
-errors are the JSON error envelope on stderr in both formats.
+`NULL` prints as `(null)`. A page holds 20 rows unless `--limit` says
+otherwise (at most 100). When more rows match, one line says which rows were
+shown and ends with the next page's command, which keeps `--format text`. In
+JSON, `message` says which rows were shown, and the command stays in
+`pagination.next_command`. JSON stays the default, and errors are the JSON
+error envelope on stderr in both formats.
 
 The connection is read-only: writes, schema changes, `ATTACH`, and transactions
 are refused. The schema PRAGMAs `table_list`, `table_info`, `table_xinfo`,
@@ -636,7 +639,10 @@ pending Ed25519 sign request, including durable-nonce and raw messages, not pars
 or a claim of expiry/validity. It is absent on resolved requests and other schemes.
 
 Wait for the existing callback; retrieve its result and submit the same saved
-bytes. With `--no-callback`, read `vibe vault await REQUEST_ID`. Never rerun a pending
+bytes. With `--no-callback`, read `vibe vault await REQUEST_ID`. A request made by
+mistake can be withdrawn while still pending with `vibe vault withdraw REQUEST_ID`
+(only by the Session it belongs to, the one whose conversation shows its card; its
+card leaves and a later approval is refused). Never rerun a pending
 `sign` or refresh a blockhash under old approval. Serialize operations per nonce
 account, recheck nonce/authority before submission, and reconcile signature status
 and nonce state after uncertain broadcast before preparing another payment. Even

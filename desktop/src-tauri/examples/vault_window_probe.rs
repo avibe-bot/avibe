@@ -46,7 +46,7 @@ mod probe {
     };
 
     use objc2::{
-        rc::Retained,
+        rc::{Retained, Weak},
         runtime::{AnyClass, AnyObject},
         MainThreadMarker,
     };
@@ -181,8 +181,8 @@ addEventListener('message', (event) => {
 <script>
 const log = { case: 'card-log', loadedAt: Date.now(), armedAt: null, clicks: [], keys: [], commands: [] };
 setTimeout(() => { log.armedAt = Date.now(); }, 500);
-addEventListener('click', () => log.clicks.push(Date.now()), true);
-addEventListener('keydown', (event) => { (event.metaKey ? log.commands : log.keys).push(Date.now()); event.preventDefault(); }, true);
+addEventListener('click', (event) => log.clicks.push([Date.now(), event.clientX, event.clientY]), true);
+addEventListener('keydown', (event) => { (event.metaKey ? log.commands : log.keys).push([Date.now(), event.key, event.code]); event.preventDefault(); }, true);
 addEventListener('keyup', (event) => event.preventDefault(), true);
 addEventListener('message', (event) => {
   if (event.data === 'log') fetch('/report', { method: 'POST', body: JSON.stringify(log) });
@@ -190,11 +190,26 @@ addEventListener('message', (event) => {
   if (event.data === 'log-later') setTimeout(() => fetch('/report', { method: 'POST', body: JSON.stringify(log) }), 3000);
 });
 if (location.hash === '#slow') document.write('<link rel="stylesheet" href="/slow.css">');
-if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe=' + Date.now() + '; path=/'; }, 20);
+if (location.hash.startsWith('#cookies')) {
+  setInterval(() => {
+    // The value is when the write was made, on this machine's clock.
+    document.cookie = 'probe=' + Date.now() + '; path=/';
+    try { localStorage.setItem('probe', String(Date.now())); } catch (error) {}
+  }, 20);
+  // And a sign of life the probe's server sees whatever becomes of the store.
+  setInterval(() => fetch('/alive/' + location.hash.slice(9), { method: 'POST', cache: 'no-store' }).catch(() => {}), 50);
+}
 </script>
 <body style="margin:0"><button style="position:fixed;inset:0;width:100%;height:100%">Confirm</button>"#;
 
     /// A sandbox page that reports nothing, for windows the shell must close.
+    /// A page of the sandbox origin that says what its store holds for it.
+    const STORAGE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>storage</title>
+<script>
+let stored = null;
+try { stored = localStorage.getItem('probe'); } catch (error) { stored = 'error: ' + error; }
+fetch('/report', { method: 'POST', body: JSON.stringify({ case: 'storage', stored, cookie: document.cookie }) });
+</script>"#;
     const QUIET_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>quiet</title><p>sandbox</p>"#;
 
     const ELSEWHERE_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><title>elsewhere</title>
@@ -356,6 +371,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             }
             self.open_workbench();
             self.on_main_window(|_, workbench| trace::arm(workbench));
+            trace::watch_the_main_thread(self.app.clone());
             self.reserve_and_draw();
 
             // Pointed at the sandbox, the reserved window appears once that
@@ -375,9 +391,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             if self.focus {
                 // A passkey ceremony needs the keyboard in the sandbox document.
                 self.wait_children("the shown window to be key", |children| children[0].key);
-                self.eval("probe.windows.reserved.postMessage('focus', '*')");
-                let focus = self.report("child-focus");
-                assert_eq!(focus["focused"], true, "{focus}");
+                self.the_key_windows_document_has_the_keyboard("reserved");
             }
 
             // The opener can no longer read or replace what is on screen.
@@ -663,6 +677,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             assert!(self.on_main_window(|window, _| window.isVisible()));
             self.open_workbench();
             self.on_main_window(|_, workbench| trace::arm(workbench));
+            trace::watch_the_main_thread(self.app.clone());
             self.reserve_and_draw();
 
             self.eval(&format!("probe.windows.reserved.location.replace('{sandbox}/quiet')"));
@@ -708,13 +723,27 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         /// store of its own, and later retires it. Such a Workbench opens the
         /// sandbox's window as the first one does, and however it goes (retired
         /// as the shell retires one, hidden, or closed without being hidden)
-        /// its card is closed and the card's page destroyed at that moment,
-        /// before anything else happens to its data store.
+        /// its card is closed at that moment and WebKit is asked to end the
+        /// card's page.
+        ///
+        /// The page's own process hears of that a moment later and can write
+        /// once more, also while the store is being erased or after; and the
+        /// Workbench's own page and its sandbox frame run through the erase by
+        /// design. So an empty store after the erase is not what is promised.
+        /// What is: a retired Workbench's disposable (not persistent) data is
+        /// destroyed as a whole with its web view, and the next Workbench
+        /// gets a store of its own. Checked here: the store is not
+        /// persistent; the card's page gives no sign of life later than two
+        /// seconds after the hide; once the web view is closed the app has
+        /// released the store, the web view and the card's web view; and the
+        /// next web view has a different store and finds nothing in it. A
+        /// late write is counted and said, not failed.
         fn replacement_workbenches(&mut self) {
             let sandbox = format!("http://localhost:{}", self.port);
             // The shell hides the Workbench it replaces.
             let first: &tauri::Webview = self.main.as_ref();
             first.hide().unwrap();
+            let mut hides: Vec<(&str, f64)> = Vec::new();
             for ending in ["retired", "hidden", "closed"] {
                 let port = self.port;
                 let view = self
@@ -758,17 +787,34 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 self.report("frame-ready");
 
                 // Its card keeps writing to the data store it shares with it.
-                view.eval(format!("probe.windows.card = window.open('{sandbox}/card#cookies')"))
-                    .unwrap();
+                view.eval(format!(
+                    "probe.windows.card = window.open('{sandbox}/card#cookies-{ending}')"
+                ))
+                .unwrap();
                 self.wait_children("a replacement Workbench's card", |children| {
                     children.len() == 1 && children[0].shown()
                 });
+                let (shared, persistent) = self.keep_the_card_of(&view);
+                assert!(shared, "the card does not share its replacement Workbench's data store");
                 assert!(
-                    self.keep_the_card_of(&view),
-                    "the card does not share its replacement Workbench's data store"
+                    !persistent,
+                    "a replacement Workbench's disposable data store is persistent"
                 );
+                // The card's page is running before it is retired: its server
+                // has heard from it, and its first write is in the store.
+                // Without this a card displayed within 50 ms of its script
+                // starting could be retired before it ever said anything.
+                let started = Instant::now();
+                while last_sign_of(ending).is_none() || !store_cookies(&view).iter().any(|(name, _)| name == "probe") {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "the card of a {ending} Workbench never called the server or wrote to its store"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
 
                 // A retirement begins by hiding the web view.
+                let hidden = now_ms();
                 match ending {
                     "closed" => view.close().unwrap(),
                     _ => view.hide().unwrap(),
@@ -781,37 +827,124 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     Some(false),
                     "the card's page outlived its {ending} Workbench"
                 );
-                match ending {
+                let said = match ending {
                     // The rest of a retirement, in the order of the shell's
                     // `instance_store::retire`: erase the store, read its
                     // cookies back, close the web view. The probe does not
                     // link the library, so the steps are made here.
                     "retired" => {
-                        self.erase_the_store_of(&view);
-                        // Time for a page that was still alive to write again.
+                        let erased = self.erase_the_store_of(&view);
+                        // As the shell reads them, and again after time for a
+                        // page that was still alive to write once more.
+                        let mut left = store_cookies(&view);
                         std::thread::sleep(Duration::from_millis(200));
-                        let cookies = view.cookies().expect("the erased store's cookies are read back");
-                        assert!(
-                            cookies.is_empty(),
-                            "a cookie was written to a retired Workbench's store after it was erased: {} left",
-                            cookies.len()
-                        );
+                        left.extend(store_cookies(&view));
+                        // The card's last write may have landed while the
+                        // erase ran, or after it: counted and said. (The
+                        // same name each time, so at most one is there.)
+                        let mut latest: Option<f64> = None;
+                        for (name, value) in &left {
+                            let written = value.parse::<f64>().ok().filter(|_| name == "probe");
+                            let written = written.unwrap_or_else(|| {
+                                panic!("something other than the card wrote to the retired store: {left:?}")
+                            });
+                            latest = Some(latest.map_or(written, |latest| latest.max(written)));
+                        }
                         view.close().unwrap();
                         self.on_main(|_| ());
+                        match latest {
+                            None => "; late writes left in the erased store: 0".to_owned(),
+                            Some(written) => format!(
+                                "; late writes left in the erased store: 1, made by the card's page {:.0} ms after \
+                                 the hide, {:.0} ms {} the erase completed",
+                                written - hidden,
+                                (erased - written).abs(),
+                                if written <= erased { "before" } else { "after" }
+                            ),
+                        }
                     }
                     "hidden" => {
+                        // The card's page stops. It writes every 20 ms: three
+                        // looks 40 ms apart that find the same value say so.
+                        let written = |view: &tauri::Webview| {
+                            store_cookies(view)
+                                .into_iter()
+                                .find(|(name, _)| name == "probe")
+                                .and_then(|(_, value)| value.parse::<f64>().ok())
+                        };
+                        let (mut last, mut same) = (written(&view), 0);
+                        while same < 3 {
+                            std::thread::sleep(Duration::from_millis(40));
+                            let now = written(&view);
+                            if now == last {
+                                same += 1;
+                            } else {
+                                (last, same) = (now, 0);
+                            }
+                            assert!(
+                                now_ms() - hidden < 2000.0 || same >= 3,
+                                "the card's page was still writing two seconds after its window was closed: {now:?}, \
+                                 hidden at {hidden:.0}"
+                            );
+                        }
+                        let last = last.expect("the card had written before its Workbench was hidden");
                         view.close().unwrap();
                         self.on_main(|_| ());
+                        if last <= hidden {
+                            "; its page made no write after the hide".to_owned()
+                        } else {
+                            format!("; its page made its last write {:.0} ms after the hide", last - hidden)
+                        }
                     }
-                    _ => {}
+                    _ => String::new(),
+                };
+                // The web view is closed: the app has released the store it
+                // had, with the card's web view and its own.
+                let released_after = self.the_retired_store_is_released(ending);
+                if ending == "retired" {
+                    self.the_next_workbench_finds_nothing();
                 }
+                // No sign of the card's page later than two seconds after the
+                // hide; looked for a little later than that.
+                let look_at = hidden + 2300.0;
+                std::thread::sleep(Duration::from_millis((look_at - now_ms()).max(0.0) as u64));
+                let sign = last_sign_of(ending).expect("the card said it was alive while it was up");
+                assert!(
+                    sign <= hidden + 2000.0,
+                    "the card of a {ending} Workbench was still alive {:.0} ms after the hide",
+                    sign - hidden
+                );
+                hides.push((ending, hidden));
                 println!(
-                    "vault window probe: a replacement Workbench was {ending} with a card up; the card was closed{}",
+                    "vault window probe: a replacement Workbench with a disposable (not persistent) data store was \
+                     {ending} with a card up; the card was closed{}{said}; the last sign of the card's page reached \
+                     the probe's server {}; the app had released the data store, the web view and the card's web \
+                     view {released_after:?} after the web view was closed{}",
                     if destroyed == Some(true) {
-                        " and its page destroyed at once"
+                        " and its page closed at once on the app's side"
                     } else {
-                        " (WebKit does not say whether its page is destroyed)"
+                        " (WebKit does not say whether its page is closed)"
+                    },
+                    if sign <= hidden {
+                        "before the hide".to_owned()
+                    } else {
+                        format!("{:.0} ms after the hide", sign - hidden)
+                    },
+                    if ending == "retired" {
+                        "; the next web view had a different store, not persistent either, with no cookie and no \
+                         local storage for the card's origin"
+                    } else {
+                        ""
                     }
+                );
+            }
+            // And none of the three cards has shown itself since.
+            for (ending, hidden) in hides {
+                let sign = last_sign_of(ending).expect("the card said it was alive while it was up");
+                assert!(
+                    sign <= hidden + 2000.0,
+                    "the card of a {ending} Workbench showed itself again {:.0} ms after the hide",
+                    sign - hidden
                 );
             }
             let first: &tauri::Webview = self.main.as_ref();
@@ -819,9 +952,75 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             self.on_main(|_| ());
         }
 
+        /// A retired Workbench's disposable data is destroyed as a whole: once
+        /// its web view is closed, the app has released the store, the web
+        /// view and its card's web view, and nothing holds them. (When
+        /// WebKit's own storage process then drops what the store held is
+        /// its behaviour, with no public way to look.)
+        fn the_retired_store_is_released(&self, ending: &str) -> Duration {
+            let started = Instant::now();
+            loop {
+                let left = self.on_main(|_| left_of_the_retiring());
+                if left.is_empty() {
+                    return started.elapsed();
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "a {ending} Workbench's web view was closed and these are still held: {left:?}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        /// The next Workbench gets a store of its own: the retired one is
+        /// already released when this one exists, this one is not persistent
+        /// either, and a page of the card's origin in it finds no cookie and
+        /// nothing in local storage.
+        fn the_next_workbench_finds_nothing(&mut self) {
+            let next = self
+                .main
+                .as_ref()
+                .window()
+                .add_child(
+                    tauri::webview::WebviewBuilder::new(
+                        "replacement-next",
+                        WebviewUrl::External(format!("http://localhost:{}/storage", self.port).parse().unwrap()),
+                    )
+                    .incognito(true)
+                    .on_new_window(|_url, _features| NewWindowResponse::Deny),
+                    tauri::LogicalPosition::new(0., 0.),
+                    tauri::LogicalSize::new(4000., 4000.),
+                )
+                .unwrap();
+            let storage = self.report("storage");
+            assert!(
+                storage["stored"].is_null() && storage["cookie"] == "",
+                "the next Workbench's store holds what a retired one's card wrote: {storage}"
+            );
+            let (tx, rx) = mpsc::channel();
+            next.with_webview(move |platform| {
+                // SAFETY: Tauri hands out the live web view on the main thread.
+                let persistent = unsafe {
+                    let next = Retained::retain(platform.inner().cast::<WKWebView>()).expect("the next web view");
+                    next.configuration().websiteDataStore().isPersistent()
+                };
+                let _ = tx.send((persistent, left_of_the_retiring()));
+            })
+            .unwrap();
+            let (persistent, left) = rx.recv_timeout(Duration::from_secs(10)).expect("main thread answered");
+            assert!(!persistent, "the next Workbench's data store is persistent");
+            assert!(
+                left.is_empty(),
+                "the retired store is still held beside the next one: {left:?}"
+            );
+            next.close().unwrap();
+            self.on_main(|_| ());
+        }
+
         /// Erases everything in a web view's data store, as the shell does
         /// when it retires a Workbench, and waits until WebKit says it is done.
-        fn erase_the_store_of(&self, view: &tauri::Webview) {
+        /// Returns when that was, on the clock of `now_ms`.
+        fn erase_the_store_of(&self, view: &tauri::Webview) -> f64 {
             let (tx, rx) = mpsc::channel();
             view.with_webview(move |platform| {
                 let mtm = MainThreadMarker::new().expect("main thread");
@@ -833,19 +1032,22 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     let types = objc2_web_kit::WKWebsiteDataStore::allWebsiteDataTypes(mtm);
                     let since = objc2_foundation::NSDate::dateWithTimeIntervalSince1970(0.0);
                     let erased = block2::RcBlock::new(move || {
-                        let _ = tx.send(());
+                        let _ = tx.send(now_ms());
                     });
                     store.removeDataOfTypes_modifiedSince_completionHandler(&types, &since, &erased);
                 }
             })
             .unwrap();
             rx.recv_timeout(Duration::from_secs(20))
-                .expect("the data store was erased");
+                .expect("the data store was erased")
         }
 
         /// Keeps a reference to the one card's web view for a later question,
-        /// and says whether it has the data store of `opener`.
-        fn keep_the_card_of(&self, opener: &tauri::Webview) -> bool {
+        /// and says whether it has the data store of `opener` and whether that
+        /// store is persistent. Also keeps weak
+        /// references to that store and to both web views, which hold
+        /// nothing, to ask later whether they are gone.
+        fn keep_the_card_of(&self, opener: &tauri::Webview) -> (bool, bool) {
             let (tx, rx) = mpsc::channel();
             opener
                 .with_webview(move |platform| {
@@ -862,8 +1064,13 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                             &*card.configuration().websiteDataStore(),
                             &*opener.configuration().websiteDataStore(),
                         );
+                        RETIRING.set(Some(Retiring {
+                            store: Weak::from_retained(&opener.configuration().websiteDataStore()),
+                            workbench: Weak::from_retained(&opener),
+                            card: Weak::from_retained(&card),
+                        }));
                         KEPT_CARD.set(Some(card));
-                        shared
+                        (shared, opener.configuration().websiteDataStore().isPersistent())
                     };
                     let _ = tx.send(shared);
                 })
@@ -1009,7 +1216,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         ///
         /// The card page arms itself half a second after it starts running, as
         /// the sandbox's Confirm does, and logs every click and key it gets.
-        /// Clicks and a Return key are delivered to the window the whole time,
+        /// Clicks and keys are handed to the window the whole time,
         /// through this application's own event dispatch.
         fn a_card_takes_no_input_until_it_has_been_seen(&mut self) {
             let sandbox = format!("http://localhost:{}", self.port);
@@ -1047,11 +1254,10 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
 
             // The main window, and the card with it, goes away and comes back
             // while the app stays where it is: two seconds from the return.
-            self.hide_the_main_window();
+            let leaving = Leaving::At(self.order_the_main_window_out(&input));
             self.wait_children("the card to go with the main window", |children| {
                 children.len() == 1 && !children[0].visible
             });
-            let gone = now_ms();
             std::thread::sleep(Duration::from_millis(500));
             let back = now_ms();
             self.main.show().unwrap();
@@ -1060,7 +1266,12 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             });
             std::thread::sleep(Duration::from_millis(3500));
             let log = self.card_log();
-            log.nothing_between("the card came back with the main window", gone, back + 2000.0);
+            input.nothing_handed_out_of_view_reached_the_page(
+                "the card came back with the main window",
+                &log,
+                leaving,
+                back,
+            );
             log.something_after("the card came back with the main window", back + 2000.0);
 
             // Another window of the app covers the card completely and goes
@@ -1068,6 +1279,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             // whether the card can be seen.
             let cover = self.another_window_of_the_app("other");
             let card = self.children()[0].number;
+            let leaving = Leaving::After(input.mark());
             self.on_main({
                 let cover = cover.clone();
                 move |mtm| {
@@ -1089,14 +1301,13 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 std::thread::sleep(Duration::from_millis(50));
             };
             if covered {
-                let covered = now_ms();
                 std::thread::sleep(Duration::from_millis(500));
                 let back = now_ms();
                 cover.hide().unwrap();
                 self.wait_children("the card to be uncovered", |children| !children[0].occluded);
                 std::thread::sleep(Duration::from_millis(3500));
                 let log = self.card_log();
-                log.nothing_between("the card was uncovered", covered, back + 2000.0);
+                input.nothing_handed_out_of_view_reached_the_page("the card was uncovered", &log, leaving, back);
                 log.something_after("the card was uncovered", back + 2000.0);
                 println!("vault window probe: input after the card was fully covered and uncovered checked");
             } else {
@@ -1110,15 +1321,20 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
 
             if self.focus {
                 // The user goes to another app and returns.
+                let leaving = Leaving::After(input.mark());
                 if self.go_to_another_app() {
-                    let left = now_ms();
                     std::thread::sleep(Duration::from_millis(500));
                     let back = now_ms();
                     self.activate();
                     self.wait_until_active();
                     std::thread::sleep(Duration::from_millis(3500));
                     let log = self.card_log();
-                    log.nothing_between("the user returned from another app", left, back + 2000.0);
+                    input.nothing_handed_out_of_view_reached_the_page(
+                        "the user returned from another app",
+                        &log,
+                        leaving,
+                        back,
+                    );
                     log.something_after("the user returned from another app", back + 2000.0);
                     println!("vault window probe: input after returning from another app checked");
                 } else {
@@ -1128,14 +1344,15 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 }
 
                 // The app is hidden and comes forward again.
-                let hidden = self.hide_the_app();
+                let leaving = Leaving::After(input.mark());
+                self.hide_the_app();
                 std::thread::sleep(Duration::from_millis(500));
                 let back = now_ms();
                 self.activate();
                 self.wait_until_active();
                 std::thread::sleep(Duration::from_millis(3500));
                 let log = self.card_log();
-                log.nothing_between("the app came forward again", hidden, back + 2000.0);
+                input.nothing_handed_out_of_view_reached_the_page("the app came forward again", &log, leaving, back);
                 log.something_after("the app came forward again", back + 2000.0);
             }
             let commands = self.card_log().commands.len();
@@ -1342,7 +1559,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             );
         }
 
-        /// One click, one Return key and one Command key for the card on
+        /// One click, one key and one Command key for the card on
         /// screen, dated `dated` on the uptime clock, or now.
         fn hand_the_card_input(&self, dated: Option<f64>) {
             self.on_main(move |mtm| {
@@ -1350,8 +1567,43 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     .into_iter()
                     .find(|window| window.isVisible())
                     .expect("the card is on screen");
-                deliver_input(mtm, &card, dated);
+                deliver_input(mtm, &card, dated, 0);
             });
+        }
+
+        /// A passkey ceremony needs the keyboard in the sandbox document. AppKit
+        /// says the window is key at once; WebKit tells the page's process a
+        /// moment later, so the page is asked until it says it has focus. A
+        /// displayed, key window whose document never gets it fails.
+        fn the_key_windows_document_has_the_keyboard(&mut self, name: &str) {
+            let started = Instant::now();
+            let mut asked = 0usize;
+            loop {
+                self.eval(&format!("probe.windows['{name}'].postMessage('focus', '*')"));
+                let focus = self.report("child-focus");
+                asked += 1;
+                if focus["focused"] == true {
+                    break;
+                }
+                let children = self.children();
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "a displayed window with the keyboard has a document without it, asked {asked} times in {:?}: \
+                     {focus}, {children:?}\n{}",
+                    started.elapsed(),
+                    trace::seen()
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let children = self.children();
+            assert!(children.len() == 1 && children[0].key, "{children:?}");
+            if asked > 1 {
+                println!(
+                    "vault window probe: the document of the shown window had the keyboard {:?} after its window \
+                     did, at the {asked}th asking",
+                    started.elapsed()
+                );
+            }
         }
 
         /// A card asked for right after the user arrived (`arrived` is taken
@@ -1366,10 +1618,31 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 children.len() == 1 && children[0].shown()
             });
             let displayed = now_ms();
+            // "At once" is about the shell: it must not hold a card back until
+            // the user has been there for the interval. On hosted runners
+            // WebKit has blocked the app's main thread for about five seconds
+            // while a web view or its process was being set up; time in which
+            // the main thread answered nothing is recorded, said, and not
+            // counted. A card held back with no such time recorded fails.
+            // The main thread answers in the order it was asked, and a
+            // question is put to it within 50 ms of the last answer, so one
+            // more turn of it here is behind the answer to any question that
+            // waited through a blocked stretch before the card was displayed.
+            self.on_main(|_| ());
+            let unanswered = trace::unanswered_between(arrived, displayed);
+            if unanswered > 0.0 {
+                println!(
+                    "vault window probe: {what}: the card was displayed {:.0} ms after the arrival; for {unanswered:.0} \
+                     ms of them the app's main thread did not answer, which is not counted as holding it back",
+                    displayed - arrived
+                );
+            }
             assert!(
-                displayed < arrived + 1500.0,
-                "{what}: the card was held back {} ms",
-                displayed - arrived
+                displayed - unanswered < arrived + 1500.0,
+                "{what}: the card was held back {:.0} ms ({unanswered:.0} ms of them the app's main thread did not \
+                 answer)\n{}",
+                displayed - arrived,
+                trace::seen()
             );
             std::thread::sleep(Duration::from_millis(3500));
             let log = self.card_log();
@@ -1436,43 +1709,113 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         fn card_log(&mut self) -> CardLog {
             self.eval("probe.windows.card.postMessage('log', '*')");
             let log = self.report("card-log");
-            let times = |key: &str| -> Vec<f64> {
+            // Each entry: when the page got it, and the two things that name
+            // it (a click's place; a key's character and physical key).
+            let entries = |key: &str, kind: Kind| -> Vec<Receipt> {
                 log[key]
                     .as_array()
-                    .expect("a list of times")
+                    .expect("a list of entries")
                     .iter()
-                    .map(|time| time.as_f64().expect("a time"))
+                    .map(|entry| Receipt {
+                        kind,
+                        at: entry[0].as_f64().expect("a time"),
+                        named: (entry[1].clone(), entry[2].clone()),
+                    })
+                    .collect()
+            };
+            let receipts: Vec<Receipt> = [
+                entries("clicks", Kind::Click),
+                entries("keys", Kind::Key),
+                entries("commands", Kind::Command),
+            ]
+            .concat();
+            let times = |kind: Kind| -> Vec<f64> {
+                receipts
+                    .iter()
+                    .filter(|receipt| receipt.kind == kind)
+                    .map(|receipt| receipt.at)
                     .collect()
             };
             CardLog {
                 armed_at: log["armedAt"].as_f64().expect("the card armed itself"),
-                clicks: times("clicks"),
-                keys: times("keys"),
-                commands: times("commands"),
+                clicks: times(Kind::Click),
+                keys: times(Kind::Key),
+                commands: times(Kind::Command),
+                receipts,
             }
         }
 
-        /// Delivers a click on the middle of the child window's content and a
-        /// Return key to that window every 30 ms, until stopped. The events are
-        /// made for the probe's own window and handed to its own application
-        /// object, the way AppKit hands on what the system sends it; nothing
-        /// is posted to the system.
+        /// Hands the child window a click on its content, a key and a Command
+        /// key every 30 ms, until stopped, whether or not the window is on
+        /// screen: a card that has gone away with the main window is still
+        /// handed them, which is how the probe knows the shell drops them
+        /// there. The events are made for the probe's own window and handed to
+        /// its own application object or to the window, the way AppKit hands
+        /// on what the system sends it; nothing is posted to the system.
+        ///
+        /// Each turn has a number, and its three events carry it to the page
+        /// (see `named`). The turn is recorded on the main thread as it hands
+        /// them over, with what the windows read at that moment, so a case can
+        /// tell an event handed while the card was in front of the user from
+        /// one handed after it had left, whenever the page got round to it.
         fn start_input(&self) -> InputStream {
+            use std::sync::atomic::Ordering;
+            let shared = std::sync::Arc::new(Handed::default());
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stopped = stop.clone();
             let app = self.app.clone();
+            let handed = shared.clone();
+            let main = self.main.clone();
             let thread = std::thread::spawn(move || {
-                while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = app.run_on_main_thread(|| {
+                while !stopped.load(Ordering::SeqCst) {
+                    let (handed, main) = (handed.clone(), main.clone());
+                    let _ = app.run_on_main_thread(move || {
                         let mtm = MainThreadMarker::new().expect("main thread");
-                        if let Some(window) = child_windows(mtm).into_iter().find(|window| window.isVisible()) {
-                            deliver_input(mtm, &window, None);
+                        let turn = handed.next.fetch_add(1, Ordering::SeqCst);
+                        // The one on screen, if one is; otherwise whichever
+                        // there is.
+                        let windows = child_windows(mtm);
+                        let card = windows
+                            .iter()
+                            .find(|window| window.isVisible())
+                            .or(windows.first())
+                            .cloned();
+                        handed.turns.lock().expect("the turns").push(Turn {
+                            number: turn,
+                            at: now_ms(),
+                            handed: card.is_some(),
+                            card_on_screen: card.as_ref().is_some_and(|card| card.isVisible()),
+                            // The main window may be gone at the very end.
+                            main_window_visible: main.ns_window().is_ok() && ns_window(&main).isVisible(),
+                            card_visible_to_appkit: card.as_ref().is_some_and(|card| {
+                                card.occlusionState()
+                                    .contains(objc2_app_kit::NSWindowOcclusionState::Visible)
+                            }),
+                            app_active: NSApplication::sharedApplication(mtm).isActive(),
+                        });
+                        if let Some(card) = card {
+                            deliver_input(mtm, &card, None, turn);
                         }
                     });
                     std::thread::sleep(Duration::from_millis(30));
                 }
             });
-            InputStream { stop, thread }
+            InputStream {
+                stop,
+                thread,
+                handed: shared,
+            }
+        }
+
+        /// Orders the main window out in one turn of the main thread, as the
+        /// shell's hiding it does, and returns the number of the first turn of
+        /// the input stream after that one.
+        fn order_the_main_window_out(&self, input: &InputStream) -> u64 {
+            let (main, handed) = (self.main.clone(), input.handed.clone());
+            self.on_main(move |_| {
+                ns_window(&main).orderOut(None);
+                handed.next.load(std::sync::atomic::Ordering::SeqCst)
+            })
         }
 
         /// A sandbox address that redirects elsewhere never shows anything, and
@@ -1965,6 +2308,63 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         }
         static LINES: Mutex<VecDeque<(f64, String, Option<Backtrace>)>> = Mutex::new(VecDeque::new());
         static ROUND: Mutex<Option<Counting>> = Mutex::new(None);
+        /// Stretches in which the app's main thread did not answer, as
+        /// (from, until) on the clock of `now_ms`.
+        static UNANSWERED: Mutex<Vec<(f64, f64)>> = Mutex::new(Vec::new());
+        /// Shorter than this is an ordinary busy moment and is not recorded.
+        const UNANSWERED_FROM: Duration = Duration::from_secs(1);
+
+        /// Asks the app's main thread for an answer, one question at a time,
+        /// for as long as the app runs, and records each stretch of a second
+        /// or more in which none came. The question is a closure posted to
+        /// the main thread; a thread that is blocked is not unblocked by it.
+        pub fn watch_the_main_thread(app: tauri::AppHandle) {
+            static WATCHING: AtomicBool = AtomicBool::new(false);
+            if WATCHING.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            std::thread::spawn(move || loop {
+                let (asked, asked_ms) = (Instant::now(), super::now_ms());
+                let (tx, rx) = std::sync::mpsc::channel();
+                // The stretch is recorded by the answer itself, on the main
+                // thread: whatever is posted to the main thread after this
+                // question finds it recorded.
+                let posted = app.run_on_main_thread(move || {
+                    let waited = asked.elapsed();
+                    if waited >= UNANSWERED_FROM {
+                        UNANSWERED
+                            .lock()
+                            .expect("the stretches")
+                            .push((asked_ms, asked_ms + waited.as_secs_f64() * 1000.0));
+                        note(
+                            format!(
+                                "the app's main thread did not answer for {} ms, until now",
+                                waited.as_millis()
+                            ),
+                            None,
+                        );
+                    }
+                    let _ = tx.send(());
+                });
+                if posted.is_err() || rx.recv().is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            });
+        }
+
+        /// How much of the time between two moments (on the clock of
+        /// `now_ms`) the app's main thread did not answer, in milliseconds.
+        /// A stretch is recorded when its question is answered; the caller
+        /// first lets the main thread answer what was posted before.
+        pub fn unanswered_between(from: f64, until: f64) -> f64 {
+            UNANSWERED
+                .lock()
+                .expect("the stretches")
+                .iter()
+                .map(|(began, ended)| (ended.min(until) - began.max(from)).max(0.0))
+                .sum()
+        }
 
         struct Counting {
             began: Instant,
@@ -2069,9 +2469,13 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 .iter()
                 .map(|(at, line, stack)| {
                     let since = before.replace(*at).map_or(0.0, |before: f64| at - before);
-                    let from = stack
-                        .as_ref()
-                        .map_or(String::new(), |stack| format!(", from {}", origin(stack)));
+                    // No frame of the module: AppKit is closing the window
+                    // itself, as when the user closes it; the module is told
+                    // by its delegate after this.
+                    let from = stack.as_ref().map_or(String::new(), |stack| match origin(stack) {
+                        from if from.is_empty() => ", from AppKit (the window's own close, as by the user)".to_owned(),
+                        from => format!(", from {from}"),
+                    });
                     format!("  [{at:.0}, +{since:.0} ms] {line}{from}")
                 })
                 .collect::<Vec<_>>()
@@ -2290,6 +2694,57 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         static KEPT_CARD: std::cell::RefCell<Option<Retained<WKWebView>>> = const { std::cell::RefCell::new(None) };
     }
 
+    /// When the probe's server last heard from each card that says it is
+    /// alive, by the card's name, on the clock of `now_ms`.
+    static CARD_SIGNS: std::sync::Mutex<Vec<(String, f64)>> = std::sync::Mutex::new(Vec::new());
+
+    fn last_sign_of(card: &str) -> Option<f64> {
+        CARD_SIGNS
+            .lock()
+            .expect("the signs")
+            .iter()
+            .find(|(name, _)| name == card)
+            .map(|(_, at)| *at)
+    }
+
+    struct Retiring {
+        store: Weak<objc2_web_kit::WKWebsiteDataStore>,
+        workbench: Weak<WKWebView>,
+        card: Weak<WKWebView>,
+    }
+
+    thread_local! {
+        /// The replacement Workbench being retired; main thread only.
+        static RETIRING: std::cell::RefCell<Option<Retiring>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// What of the retiring Workbench is still held by anything: its data
+    /// store, its web view, its card's web view.
+    fn left_of_the_retiring() -> Vec<&'static str> {
+        RETIRING.with_borrow(|retiring| {
+            let Some(retiring) = retiring else {
+                return Vec::new();
+            };
+            [
+                ("its data store", retiring.store.load().is_some()),
+                ("its web view", retiring.workbench.load().is_some()),
+                ("its card's web view", retiring.card.load().is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(what, held)| held.then_some(what))
+            .collect()
+        })
+    }
+
+    /// The cookies in a web view's data store, by name and value.
+    fn store_cookies(view: &tauri::Webview) -> Vec<(String, String)> {
+        view.cookies()
+            .expect("the store's cookies are read")
+            .iter()
+            .map(|cookie| (cookie.name().to_owned(), cookie.value().to_owned()))
+            .collect()
+    }
+
     /// Whether the kept card's page has been destroyed, as WebKit says it;
     /// `None` when WebKit has no word for it.
     fn kept_card_is_destroyed() -> Option<bool> {
@@ -2310,9 +2765,176 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             * 1000.0
     }
 
+    /// How an event the probe hands a card names itself to the page, so that
+    /// what the page logs can be traced to the turn that handed it over. A
+    /// click is named by its place in the page; a key by its character and by
+    /// the physical key it claims to come from. Names repeat after 6400 turns
+    /// for clicks, 676 for keys and 208 for Command keys: minutes and seconds,
+    /// where the page is at most moments behind.
+    mod named {
+        /// The letters and the virtual key code of each on an ANSI keyboard.
+        const KEYS: [(char, u16); 26] = [
+            ('a', 0x00),
+            ('b', 0x0B),
+            ('c', 0x08),
+            ('d', 0x02),
+            ('e', 0x0E),
+            ('f', 0x03),
+            ('g', 0x05),
+            ('h', 0x04),
+            ('i', 0x22),
+            ('j', 0x26),
+            ('k', 0x28),
+            ('l', 0x25),
+            ('m', 0x2E),
+            ('n', 0x2D),
+            ('o', 0x1F),
+            ('p', 0x23),
+            ('q', 0x0C),
+            ('r', 0x0F),
+            ('s', 0x01),
+            ('t', 0x11),
+            ('u', 0x20),
+            ('v', 0x09),
+            ('w', 0x0D),
+            ('x', 0x07),
+            ('y', 0x10),
+            ('z', 0x06),
+        ];
+        /// With Command: letters no menu of the app answers to.
+        const WITH_COMMAND: [char; 8] = ['j', 'k', 'u', 'y', 'i', 'b', 'd', 'l'];
+        /// Clicks land on a grid of 80 by 80 places, 4 points apart, inside
+        /// the smallest window the shell makes.
+        const PLACES: u64 = 80;
+
+        fn place(index: u64) -> f64 {
+            8.0 + 4.0 * index as f64
+        }
+
+        /// Where turn `turn` clicks, in the page's own coordinates.
+        pub fn click(turn: u64) -> (f64, f64) {
+            (place(turn % PLACES), place(turn / PLACES % PLACES))
+        }
+
+        /// The character and the key code of turn `turn`'s key.
+        pub fn key(turn: u64) -> (char, u16) {
+            (KEYS[(turn % 26) as usize].0, KEYS[(turn / 26 % 26) as usize].1)
+        }
+
+        /// The character and the key code of turn `turn`'s Command key.
+        pub fn command(turn: u64) -> (char, u16) {
+            (WITH_COMMAND[(turn % 8) as usize], KEYS[(turn / 8 % 26) as usize].1)
+        }
+
+        /// What the page calls the physical key with this key code.
+        fn code(key_code: u16) -> String {
+            let letter = KEYS
+                .iter()
+                .find(|(_, code)| *code == key_code)
+                .expect("a letter's key")
+                .0;
+            format!("Key{}", letter.to_ascii_uppercase())
+        }
+
+        /// Whether what the page logged is what turn `turn` handed over.
+        pub fn is(kind: super::Kind, turn: u64, named: &(serde_json::Value, serde_json::Value)) -> bool {
+            match kind {
+                super::Kind::Click => {
+                    let (x, y) = click(turn);
+                    let near = |logged: &serde_json::Value, place: f64| {
+                        logged.as_f64().is_some_and(|logged| (logged - place).abs() < 1.5)
+                    };
+                    near(&named.0, x) && near(&named.1, y)
+                }
+                super::Kind::Key | super::Kind::Command => {
+                    let (character, key_code) = if kind == super::Kind::Key {
+                        key(turn)
+                    } else {
+                        command(turn)
+                    };
+                    named.0.as_str() == Some(character.to_string().as_str())
+                        && named.1.as_str() == Some(code(key_code).as_str())
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Kind {
+        Click,
+        Key,
+        Command,
+    }
+
+    /// One turn of the input stream, recorded on the main thread as it hands
+    /// its events over (or finds no card on screen to hand them to).
+    #[derive(Clone, Debug)]
+    struct Turn {
+        number: u64,
+        /// On the clock of `now_ms`, just before the events are handed over.
+        at: f64,
+        /// There was a card, and it was handed the events.
+        handed: bool,
+        card_on_screen: bool,
+        main_window_visible: bool,
+        card_visible_to_appkit: bool,
+        app_active: bool,
+    }
+
+    impl Turn {
+        /// By what the probe read at that moment, the card was in front of
+        /// the user. The shell reads the same three things, and more, in the
+        /// same turn; where this is false it must drop the events.
+        fn in_view(&self) -> bool {
+            self.handed
+                && self.card_on_screen
+                && self.main_window_visible
+                && self.card_visible_to_appkit
+                && self.app_active
+        }
+    }
+
+    #[derive(Default)]
+    struct Handed {
+        next: std::sync::atomic::AtomicU64,
+        turns: std::sync::Mutex<Vec<Turn>>,
+    }
+
     struct InputStream {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
         thread: std::thread::JoinHandle<()>,
+        handed: std::sync::Arc<Handed>,
+    }
+
+    /// Where a leaving begins.
+    #[derive(Clone, Copy, Debug)]
+    enum Leaving {
+        /// At this turn exactly: the turn before it ordered the main window
+        /// out.
+        At(u64),
+        /// At the first turn from this one on that finds the card out of
+        /// view: the leaving is not the probe's own act (another app comes
+        /// forward, AppKit hides the app).
+        After(u64),
+    }
+
+    /// What became of the events around one leaving and return.
+    #[derive(Debug)]
+    struct Edge {
+        /// Events handed after the card had left and before the return, and
+        /// in the two seconds after the return.
+        handed_while_away: usize,
+        handed_after_the_return: usize,
+        /// Turns while away at which the main window read visible.
+        main_window_read_visible: usize,
+        /// Events handed while the card was still in view that the page
+        /// logged after it had left.
+        logged_after_leaving: usize,
+        /// The longest the page took to log an event after it was handed over.
+        longest_lag_ms: f64,
+        /// Events handed after the card had left and before it could take
+        /// input again that reached the page. The rule says none.
+        reached_the_page: Vec<String>,
     }
 
     impl InputStream {
@@ -2320,6 +2942,127 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
             self.thread.join().expect("the input thread ended");
         }
+
+        /// The number the next turn will have. Taken before the user is made
+        /// to leave: every turn from here on is looked at.
+        fn mark(&self) -> u64 {
+            self.handed.next.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Traces each thing the page logged to the turn that handed it over,
+        /// and says what became of the events around a leaving and the return
+        /// at `back`.
+        ///
+        /// The page logs an event when it gets round to it, which can be
+        /// after the card has left the screen for an event the shell rightly
+        /// took while the card was still there. So the question is not when
+        /// the page logged an event but when it was handed over: from the
+        /// leaving until two seconds after the return, nothing handed over
+        /// may reach the page. Something the page logged that no turn handed
+        /// over fails too.
+        fn edge(&self, what: &str, log: &CardLog, leaving: Leaving, back: f64) -> Edge {
+            let turns = self.handed.turns.lock().expect("the turns").clone();
+            let left = match leaving {
+                Leaving::At(turn) => turns.iter().find(|seen| seen.number >= turn),
+                Leaving::After(turn) => turns.iter().find(|seen| seen.number >= turn && !seen.in_view()),
+            }
+            .unwrap_or_else(|| panic!("{what}: no turn of the input stream after the card left"));
+            let away = |turn: &&Turn| turn.number >= left.number && turn.at < back;
+            let mut edge = Edge {
+                handed_while_away: 3 * turns.iter().filter(away).filter(|turn| turn.handed).count(),
+                handed_after_the_return: 3 * turns
+                    .iter()
+                    .filter(|turn| turn.handed && turn.at >= back && turn.at < back + 2000.0)
+                    .count(),
+                main_window_read_visible: turns
+                    .iter()
+                    .filter(away)
+                    .filter(|turn| turn.main_window_visible)
+                    .count(),
+                logged_after_leaving: 0,
+                longest_lag_ms: 0.0,
+                reached_the_page: Vec::new(),
+            };
+            for receipt in &log.receipts {
+                // The page's clock is this machine's, in whole milliseconds.
+                let turn = turns
+                    .iter()
+                    .rev()
+                    .find(|turn| {
+                        turn.handed
+                            && turn.at <= receipt.at + 5.0
+                            && named::is(receipt.kind, turn.number, &receipt.named)
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{what}: the page logged a {:?} named {:?} that no turn of the probe handed over",
+                            receipt.kind, receipt.named
+                        )
+                    });
+                let lag = receipt.at - turn.at;
+                edge.longest_lag_ms = edge.longest_lag_ms.max(lag);
+                if turn.number < left.number {
+                    if receipt.at > left.at {
+                        edge.logged_after_leaving += 1;
+                    }
+                } else if turn.at < back + 2000.0 {
+                    edge.reached_the_page.push(format!(
+                        "a {:?} handed to the card {:.0} ms after it left and {:.0} ms before the earliest moment \
+                         it could take input again (at hand-over: card on screen {}, main window visible {}, card \
+                         visible to AppKit {}, app active {}); the page logged it {lag:.0} ms later",
+                        receipt.kind,
+                        turn.at - left.at,
+                        back + 2000.0 - turn.at,
+                        turn.card_on_screen,
+                        turn.main_window_visible,
+                        turn.card_visible_to_appkit,
+                        turn.app_active
+                    ));
+                }
+            }
+            edge
+        }
+
+        /// See `edge`: fails if an event handed over after the card had left
+        /// reached the page, or if none was handed over then.
+        fn nothing_handed_out_of_view_reached_the_page(&self, what: &str, log: &CardLog, leaving: Leaving, back: f64) {
+            let edge = self.edge(what, log, leaving, back);
+            assert!(
+                edge.reached_the_page.is_empty(),
+                "{what}: the card received input it was handed while it could take none: {:#?}\n{edge:?}",
+                edge.reached_the_page
+            );
+            assert!(
+                edge.handed_while_away > 0 && edge.handed_after_the_return > 0,
+                "{what}: nothing was handed to the card while it could take none, so nothing is shown: {edge:?}"
+            );
+            println!(
+                "vault window probe: {what}: {} events were handed to the card while it was away and {} in the two \
+                 seconds after the return, and none reached the page; {} handed while it was still in view were \
+                 logged by the page after it had left; the page logged an event at most {:.0} ms after it was \
+                 handed over{}",
+                edge.handed_while_away,
+                edge.handed_after_the_return,
+                edge.logged_after_leaving,
+                edge.longest_lag_ms,
+                if matches!(leaving, Leaving::At(_)) {
+                    format!(
+                        "; after it was ordered out the main window read visible at {} turns",
+                        edge.main_window_read_visible
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
+
+    /// One thing the page logged: when, and the two things that name it.
+    #[derive(Clone, Debug)]
+    struct Receipt {
+        kind: Kind,
+        at: f64,
+        named: (Value, Value),
     }
 
     /// When the card armed itself, and when it received each click and key.
@@ -2330,6 +3073,8 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         keys: Vec<f64>,
         /// Keys pressed with Command, which reach a window another way.
         commands: Vec<f64>,
+        /// All of them, with their names.
+        receipts: Vec<Receipt>,
     }
 
     impl CardLog {
@@ -2368,18 +3113,24 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
         objc2_foundation::NSProcessInfo::processInfo().systemUptime()
     }
 
-    /// One click and one Return key for `window`, handed to the application.
-    fn deliver_input(mtm: MainThreadMarker, window: &NSWindow, dated: Option<f64>) {
+    /// One click, one key and one Command key for `window`, handed to the
+    /// application, each naming turn `turn` to the page (see `named`).
+    ///
+    /// A click for a window on screen goes through the application object, as
+    /// AppKit's own do. A window that is not on screen is handed it directly:
+    /// either way it arrives at the window's `sendEvent:`, which is where the
+    /// shell takes or drops it.
+    fn deliver_input(mtm: MainThreadMarker, window: &NSWindow, dated: Option<f64>, turn: u64) {
         use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
-        use objc2_foundation::{ns_string, NSPoint, NSString};
+        use objc2_foundation::{NSPoint, NSString};
         let Some(content) = window.contentView() else {
             return;
         };
         let frame = content.frame();
-        let at = NSPoint::new(
-            frame.origin.x + frame.size.width / 2.0,
-            frame.origin.y + frame.size.height / 2.0,
-        );
+        // The page counts from its top left corner, the window from its
+        // bottom left.
+        let (x, y) = named::click(turn);
+        let at = NSPoint::new(frame.origin.x + x, frame.origin.y + frame.size.height - y);
         let number = window.windowNumber();
         let nothing: Option<&AnyObject> = None;
         let app = NSApplication::sharedApplication(mtm);
@@ -2403,10 +3154,16 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     pressure: 1.0f32
                 ];
                 let event = event.expect("a mouse event");
-                let _: () = objc2::msg_send![&*app, sendEvent: &*event];
+                if window.isVisible() {
+                    let _: () = objc2::msg_send![&*app, sendEvent: &*event];
+                } else {
+                    let _: () = objc2::msg_send![window, sendEvent: &*event];
+                }
             }
+            let (character, key_code) = named::key(turn);
+            let key = NSString::from_str(&character.to_string());
+            let key: &NSString = &key;
             for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
-                let key: &NSString = ns_string!("\r");
                 let event: Option<Retained<NSEvent>> = objc2::msg_send![
                     objc2::class!(NSEvent),
                     keyEventWithType: kind,
@@ -2418,7 +3175,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                     characters: key,
                     charactersIgnoringModifiers: key,
                     isARepeat: false,
-                    keyCode: 36u16
+                    keyCode: key_code
                 ];
                 let event = event.expect("a key event");
                 // A key goes to the window it is made for, not to whichever
@@ -2427,7 +3184,9 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
             }
             // A key with Command is offered to a window as a key equivalent
             // before it is sent as an event.
-            let key: &NSString = ns_string!("j");
+            let (character, key_code) = named::command(turn);
+            let key = NSString::from_str(&character.to_string());
+            let key: &NSString = &key;
             let event: Option<Retained<NSEvent>> = objc2::msg_send![
                 objc2::class!(NSEvent),
                 keyEventWithType: NSEventType::KeyDown,
@@ -2439,7 +3198,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 characters: key,
                 charactersIgnoringModifiers: key,
                 isARepeat: false,
-                keyCode: 38u16
+                keyCode: key_code
             ];
             let event = event.expect("a command-key event");
             let _: bool = objc2::msg_send![window, performKeyEquivalent: &*event];
@@ -2608,7 +3367,7 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                         break true;
                     }
                 }
-                if request.len() > 65536 {
+                if request.len() > 4 << 20 {
                     break false;
                 }
             };
@@ -2647,11 +3406,18 @@ if (location.hash === '#cookies') setInterval(() => { document.cookie = 'probe='
                 });
                 return;
             }
+            if let Some(card) = path.strip_prefix("/alive/") {
+                let mut signs = CARD_SIGNS.lock().expect("the signs");
+                signs.retain(|(name, _)| name != card);
+                signs.push((card.to_owned(), now_ms()));
+            }
             let response = match path {
                 "/slow-window" => page(SLOW_PAGE),
                 "/stuck-window" => page(STUCK_PAGE),
                 "/quiet" => page(QUIET_PAGE),
                 "/card" => page(CARD_PAGE),
+                "/storage" => page(STORAGE_PAGE),
+                path if path.starts_with("/alive/") => page("ok"),
                 "/workbench" => page(&WORKBENCH_PAGE.replace("PORT", &port.to_string())),
                 "/frame" => page(FRAME_PAGE),
                 "/window" => page(&WINDOW_PAGE.replace("PORT", &port.to_string())),

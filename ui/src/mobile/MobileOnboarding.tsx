@@ -12,6 +12,7 @@ import {
   UserRound,
   Loader2,
   Database,
+  ArrowLeftRight,
 } from 'lucide-react';
 import {
   createContext,
@@ -44,6 +45,7 @@ import {
   refreshMobileSession,
   returnToMobileInstance,
   selectMobileInstance,
+  readMobileProviders,
   type MobileBridgeError,
   type MobileInstance,
   type MobileSessionState,
@@ -70,10 +72,10 @@ import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/s
 import { pageErrorKey, type SignInErrorKey } from '@/sign-in/errors';
 import { useOperationOwner, type OperationToken } from '@/sign-in/operationOwner';
 import { PasskeySignIn, SignInStart, WeakPasswordNotice } from '@/sign-in/screens';
-import type { SignInProvider, WeakPasswordReason } from '@/sign-in/types';
+import type { SignInMethods, SignInProvider, WeakPasswordReason } from '@/sign-in/types';
 import { type SignInBusyAction, useSignInFlow } from '@/sign-in/useSignInFlow';
 import { mobileSignInAdapter, mobileSignInStep } from './signInAdapter';
-import { mobileSignInMethods } from './useSignInMethods';
+import { advertisedSignInMethods, EMAIL_ONLY } from './useSignInMethods';
 import { AboutSection, AccountDataContent, AccountLinkRow, LicensesContent } from './LicensesPage';
 import { type AppLicenses, loadAppLicenses } from './appLicenses';
 
@@ -531,6 +533,7 @@ function InstanceListBody({
       {selected ? (
         <CurrentInstance
           instance={selected}
+          live={!current.reportsOpening}
           label={current.label(selected.name)}
           {...(current.reportsOpening ? {
             status: rowStatus(selected, rows.openingId, rows.failure),
@@ -886,6 +889,7 @@ function Account({
   onLogout,
   onLicenses,
   onAccountData,
+  onSwitchInstance,
   inSheet = false,
   showCurrent = !inSheet,
   onClose,
@@ -913,6 +917,11 @@ function Account({
   onLicenses: () => void;
   /** Account and data: the privacy policy and, at its bottom, deleting the account. */
   onAccountData: () => void;
+  /**
+   * The sheet the avatar opens on Account: a row to its instance list, for people who don't know
+   * the instance name in the header opens it (owner, 2026-11-18).
+   */
+  onSwitchInstance?: () => void;
 }) {
   const { t } = useTranslation();
   const current = session.instances.find((instance) => instance.id === session.selected_instance_id);
@@ -988,7 +997,12 @@ function Account({
           <ChevronRight className="size-4" />
         </Button>
       </section> : null}
-      <div className="mt-8">
+      {onSwitchInstance ? (
+        <div className="mt-8">
+          <AccountLinkRow icon={ArrowLeftRight} label={t('mobileApp.account.switch')} disabled={locked} onClick={onSwitchInstance} />
+        </div>
+      ) : null}
+      <div className={onSwitchInstance ? 'mt-4' : 'mt-8'}>
         <AccountLinkRow icon={Database} label={t('mobileApp.accountData.title')} disabled={locked} onClick={onAccountData} />
       </div>
       <AboutSection disabled={locked} licenses={licenses} onLicenses={onLicenses} />
@@ -1182,7 +1196,17 @@ function MobileOnboardingScreens() {
   const [screen, setScreen] = useState<Screen>('boot');
   // Bundled with the App; absent while it carries no native notices.
   const [licenses, setLicenses] = useState<AppLicenses | null>(null);
-  const [session, setSession] = useState<MobileSessionState>({ status: 'signedOut' });
+  const [session, setSessionState] = useState<MobileSessionState>({ status: 'signedOut' });
+  // The ways in avibe.bot offers the App now (#4012's list, and passkey sign-in from the same
+  // read), from the latest answer that names them; email alone until one does.
+  const [offered, setOffered] = useState<SignInMethods>(EMAIL_ONLY);
+  const setSession = useCallback((next: MobileSessionState) => {
+    if (next.status === 'signedOut') {
+      const named = advertisedSignInMethods(next);
+      if (named) setOffered(named);
+    }
+    setSessionState(next);
+  }, []);
   const [errorKey, setErrorKey] = useState<MobileErrorKey | null>(null);
   // The page native opens as a sheet over the selected instance: a ref for the first read, the
   // state for rendering. Both end only if no instance is behind the sheet any more.
@@ -1221,12 +1245,11 @@ function MobileOnboardingScreens() {
   } = owner;
 
   const signedIn = session.status === 'signedIn' ? session : null;
-  const offered = mobileSignInMethods(session);
   // The sign-in steps are the shared flow's (#3946); this page keeps the session and what follows.
   const signIn = useSignInFlow<MobileSessionState, BusyAction>({
     adapter: mobileSignInAdapter,
-    // Only the ways the latest signed-out answer names (#3945's `providers`, and `passkey`);
-    // passkey sign-in below the marks (ui/design: mobile-app/passkey/passkey-link).
+    // Only the ways avibe.bot's latest answer names (`providers` and `passkey`); passkey sign-in
+    // below the marks (ui/design: mobile-app/passkey/passkey-link).
     methods: offered,
     owner,
     onSession: (next, origin) => {
@@ -1249,6 +1272,29 @@ function MobileOnboardingScreens() {
     onOpenSecurity: () => openAccountSecurity(),
   });
   const { follow: followSignIn, reset: resetSignIn } = signIn;
+  // The start step asks again when it appears and whenever the App returns to the foreground on
+  // it, so a list avibe.bot changed, or one a slow read missed, replaces the row in place. An
+  // answer without a list keeps the row as it is.
+  const startShown = screen === 'signIn' && signIn.screen === 'start';
+  useEffect(() => {
+    if (!startShown) return undefined;
+    let live = true;
+    const ask = () => {
+      void readMobileProviders().then((answer) => {
+        const named = advertisedSignInMethods(answer);
+        if (live && named) setOffered(named);
+      }, () => {});
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') ask();
+    };
+    ask();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      live = false;
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [startShown]);
   const accountReturnScreen = useMemo(
     () => (inSheet
       ? 'sheet'
@@ -1625,6 +1671,13 @@ function MobileOnboardingScreens() {
             setScreen('accountData');
           }
         }}
+        // The avatar's sheet opens on Account; its instance list is one tap away.
+        onSwitchInstance={inSheet && accountRoot ? () => {
+          if (!isOperationLocked()) {
+            setErrorKey(null);
+            setScreen('sheet');
+          }
+        } : undefined}
       />
     );
   }

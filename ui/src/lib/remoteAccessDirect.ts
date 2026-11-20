@@ -1,6 +1,7 @@
 import type { RemoteAccessStatus } from '../context/ApiContext';
 import type { TranslationKey } from '../i18n/types';
 import type { LiveStreamVia } from './liveStreamVia';
+import type { NativeDirectPathSnapshot } from './native';
 
 // What Settings · Remote access says about direct, from current facts only: the instance's own
 // state and certificate, and how this page's live stream came in (ui/design:
@@ -47,3 +48,26 @@ export function remoteAccessDirectLines(
   return { stateKey, variant, certificateDate, pageKey };
 }
 
+/**
+ * In the App: whether its own direct path is up, and whether this page's live
+ * stream uses it (`使用中`) or not (`已开启`), with the kind of path it runs
+ * on when the App can tell. Null in a browser, and while the App's path is not
+ * up (`preferred` is not `direct`).
+ */
+export function deviceDirectLine(
+  snapshot: NativeDirectPathSnapshot | null,
+  pageVia: LiveStreamVia,
+): { stateKey: TranslationKey; pathKey: TranslationKey | null } | null {
+  if (!snapshot || snapshot.preferred !== 'direct') return null;
+  const pathKey: TranslationKey | null = snapshot.path === 'relay'
+    ? 'remoteAccess.direct.pathRelay'
+    : snapshot.path === 'ipv4'
+      ? 'remoteAccess.direct.pathIpv4'
+      : snapshot.path === 'ipv6'
+        ? 'remoteAccess.direct.pathIpv6'
+        : null;
+  return {
+    stateKey: pageVia === 'direct' ? 'remoteAccess.direct.deviceInUse' : 'remoteAccess.direct.deviceOn',
+    pathKey,
+  };
+}

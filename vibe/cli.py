@@ -6111,6 +6111,59 @@ def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskC
     )
 
 
+def _archive_deleted_bot_session(agent) -> dict:
+    """Archive the Session a deleted Agent's removed Bot left, through the service's own archive lifecycle.
+
+    No Bot can reconnect to it any more. The Agent is already deleted, so nothing here fails the command: the
+    returned payload fields say whether the Session is archived as stored, and how to finish when it is not.
+    """
+    from storage.resource_access_service import resolve_resource_access_context
+    from vibe import api, internal_client
+
+    session_id = api.deleted_bot_session_id(agent)
+    # A Bot's Session is its owner's (``docs/plans/bots.md`` D1): only the owner's deletion archives it.
+    if not session_id or not resolve_resource_access_context(None).is_instance_owner:
+        return {}
+    try:
+        result = asyncio.run(internal_client.archive_session(session_id))
+    except Exception as exc:  # noqa: BLE001 - the Agent is deleted; what is stored says what became of the Session
+        logger.warning("Archiving the Session %s of a deleted Agent had no answer: %s", session_id, exc)
+        result = None
+    body = result.get("body") if isinstance(result, dict) and isinstance(result.get("body"), dict) else {}
+    session = body.get("session") if isinstance(body.get("session"), dict) else {}
+    confirmed = isinstance(result, dict) and result.get("status_code") == 200 and session.get("status") == "archived"
+    stored = True if confirmed else api.session_is_archived(session_id)
+    if not stored:
+        return {
+            "bot_session": {"id": session_id, "archived": stored},
+            "hint": (
+                f"Its Bot's Session {session_id} may have been kept; `DELETE /api/sessions/{session_id}` on the Web "
+                "API archives it while the service runs."
+            ),
+        }
+    fields: dict = {"bot_session": {"id": session_id, "archived": True}}
+    if not confirmed:
+        fields["warnings"] = [
+            f"{session_id} is archived but its reply was lost, so Vault grants it revoked were not released from "
+            "the running agent."
+        ]
+    scopes = session.get("revoked_vault_grant_scopes") or []
+    try:
+        if scopes:
+            api.release_vault_agent_scopes(scopes, reason=f"archive_session:{session_id}")
+    except Exception as exc:  # noqa: BLE001 - the archive committed; the release is cleanup
+        logger.warning("Releasing the Vault grants of the archived Session %s failed: %s", session_id, exc)
+        fields.setdefault("warnings", []).append(
+            f"The Vault grants of {session_id} were revoked but not released from the running agent."
+        )
+    try:
+        # As the Web archive does: a Turn still running in it stops (best effort).
+        asyncio.run(internal_client.cancel_dispatch(session_id))
+    except Exception:  # noqa: BLE001 - best effort, as on the Web
+        logger.debug("Cancelling a running Turn of %s failed", session_id, exc_info=True)
+    return fields
+
+
 def cmd_agent_remove(args):
     from core.vibe_agents import AgentArchiveError, AgentReferenceRewriteError
 
@@ -6135,8 +6188,10 @@ def cmd_agent_remove(args):
             raise _agent_reference_rewrite_cli_error(exc) from exc
         if archived is None:
             raise TaskCliError(f"agent '{args.name}' not found", code="agent_not_found", details={"agent": args.name})
+        bot_session = _archive_deleted_bot_session(archived.agent)
         _print_cli_payload(
             "agent",
+            **bot_session,
             removed_agent=archived.original_name,
             archived_agent=_agent_payload(archived.agent, brief=True),
             references=archived.references,
@@ -8554,12 +8609,29 @@ def _query_records_text(result, page_fields: dict, *, rows: list[dict], cut_note
         lines.append("(0 rows)")
     if cut_note:
         lines.append(cut_note)
-    pagination = page_fields["pagination"]
-    if pagination.get("next_command"):
-        lines.append(f"next_command: {pagination['next_command']}")
-    elif page_fields.get("message"):
+    if page_fields.get("message"):
         lines.append(page_fields["message"])
     return "\n".join(lines)
+
+
+def _query_more_rows_message(result, shown: int, page_fields: dict, *, with_command: bool) -> str | None:
+    """The one line saying a page cut rows off: which rows it shows and how to read on.
+
+    Text output ends it with the next page's command; JSON keeps that command in
+    ``pagination.next_command`` alone.
+    """
+
+    pagination = page_fields["pagination"]
+    if not pagination.get("has_more"):
+        return None
+    limit = result.pagination.limit
+    first = (result.pagination.page - 1) * limit + 1
+    line = f"Rows {first}-{first + shown - 1} shown; more match."
+    if limit < MAX_PAGE_LIMIT:
+        line += f" --limit reads up to {MAX_PAGE_LIMIT} per page."
+    if not pagination.get("next_command"):
+        return f"{line} Add --page {pagination['next_page']} --limit {limit} to continue."
+    return f"{line} Next page: {pagination['next_command']}" if with_command else line
 
 
 def cmd_data_query(args):
@@ -8599,6 +8671,9 @@ def cmd_data_query(args):
             command=command,
             include_next_command=not omit_next_command,
         )
+        more = _query_more_rows_message(result, len(rows), page_fields, with_command=text_format)
+        if more:
+            page_fields["message"] = more
         if text_format:
             print(_query_records_text(result, page_fields, rows=rows, cut_note=cut_note))
             return 0
@@ -11947,6 +12022,54 @@ def cmd_vault_await(args):
         return 1
     except TaskCliError as exc:
         _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_withdraw(args):
+    """Withdraw a pending Vault request of this Session, made by mistake.
+
+    The caller is the Session running the command, never a ``--session-id`` it names, and it
+    withdraws only requests recorded under it; the user can still deny any card.
+    """
+    from vibe import api
+    from storage import vault_service
+
+    help_command = "vibe vault withdraw --help"
+    request_id = str(getattr(args, "request_id", "") or "").strip()
+    session_id = _default_session_id_from_caller(caller_context_from_env())
+    try:
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            request = vault_service.withdraw_request(conn, request_id, session_id=session_id)
+        api._publish_vaults_updated(
+            scope="request", request_id=request_id, request_status=request.get("status"),
+            secret_name=request.get("secret_name"),
+        )
+        if not request.get("withdrawn"):
+            raise vault_service.InvalidRequestError("request has expired")
+        _print_cli_payload("vault_request_withdrawn", request_id=request_id, status=request.get("status"))
+        return 0
+    except vault_service.RequestNotFoundError:
+        _print_task_error(TaskCliError(f"request '{request_id}' not found", code="request_not_found", help_command=help_command))
+        return 1
+    except vault_service.RequestNotYoursError:
+        _print_task_error(TaskCliError(
+            f"request '{request_id}' does not belong to this Session",
+            code="request_not_yours",
+            hint="A Session withdraws only its own requests; the user can deny any request on its card.",
+            help_command=help_command,
+        ))
+        return 1
+    except vault_service.InvalidRequestError as exc:
+        _print_task_error(TaskCliError(
+            f"request '{request_id}' cannot be withdrawn: {exc}",
+            code="request_not_pending",
+            help_command=help_command,
+            details={"request_id": request_id},
+        ))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
@@ -18858,6 +18981,9 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
 def build_parser():
     parser = VibeArgumentParser(prog="vibe")
     subparsers = parser.add_subparsers(dest="command")
+    from vibe.cli_mobile import add_mobile_parser
+
+    add_mobile_parser(subparsers)
     # ``vibe mcp`` is dispatched from raw argv in ``main`` (server and tool names
     # are dynamic); this entry only lists it in ``vibe --help``.
     subparsers.add_parser("mcp", help="Discover and call generated MCP server tools (vibe mcp --help)", add_help=False)
@@ -20304,6 +20430,20 @@ def build_parser():
     vault_await_parser.add_argument("--wait", type=float, default=0, metavar="SECONDS", help="Poll for a decision up to SECONDS")
     _add_json_noop(vault_await_parser)
 
+    vault_withdraw_parser = vault_subparsers.add_parser(
+        "withdraw",
+        help="Withdraw a pending Vault request of this Session, made by mistake",
+        description=(
+            "End a still-pending request of this Session (provide, access, sign or delete), in either tier. "
+            "Its card leaves the pending list and a later approval is refused. A request being signed, "
+            "decided or expired is left as it is."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault withdraw --help",
+    )
+    vault_withdraw_parser.add_argument("request_id", help="Vault request ID")
+    _add_json_noop(vault_withdraw_parser)
+
     vault_export_parser = vault_subparsers.add_parser(
         "export",
         help="(advanced) Emit 'export NAME=...' lines for eval — prefer 'run'",
@@ -21363,6 +21503,12 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
 #: later fails closed until it is classified; ``test_cli_command_admission``
 #: walks the parser so that classification cannot be forgotten silently.
 _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
+    ("mobile", "health", "status"): None,
+    ("mobile", "health", "read"): None,
+    ("mobile", "health", "connect"): None,
+    ("mobile", "health", "revoke"): None,
+    ("mobile", "requests", "show"): None,
+    ("mobile", "requests", "await"): None,
     # Public facts, unchanged: a version and an update check answer the same
     # thing to anyone, and status is not gated merely because doctor is.
     ("version",): None,
@@ -21495,6 +21641,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("vault", "access"): "editor",
     ("vault", "sign"): "editor",
     ("vault", "await"): "editor",
+    ("vault", "withdraw"): "editor",
     ("vault", "request"): "editor",
     ("vault", "inject"): "editor",
     ("vault", "export"): "editor",
@@ -21747,6 +21894,10 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(_control_command(f"schedule.{args.schedule_command}", args))
     if args.command == "skill":
         sys.exit(cmd_skill(args))
+    if args.command == "mobile":
+        from vibe.cli_mobile import cmd_mobile
+
+        sys.exit(cmd_mobile(args))
     if args.command == "computer":
         try:
             sys.exit(cmd_computer(args))
@@ -21904,6 +22055,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_vault_sign(args))
         if args.vault_command == "await":
             sys.exit(cmd_vault_await(args))
+        if args.vault_command == "withdraw":
+            sys.exit(cmd_vault_withdraw(args))
         if args.vault_command == "request":
             sys.exit(cmd_vault_request(args))
         if args.vault_command == "export":

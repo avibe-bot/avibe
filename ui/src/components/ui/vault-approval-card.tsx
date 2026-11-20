@@ -486,7 +486,8 @@ export const VaultApprovalCard: React.FC<{
           if (isVaultPasskeyFallback(err)) return;
           setError(vaultErrorMessage(t, err, t('vaults.approval.errors.failed')));
           setNeedsAvaultAuthorization(isAvaultAuthorizationRequired(err));
-          setCanRetry(typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'sandbox_unreachable');
+          const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : null;
+          setCanRetry(code === 'sandbox_unreachable' || code === 'sandbox_offline');
         })
         .finally(() => setBusy(false));
     },

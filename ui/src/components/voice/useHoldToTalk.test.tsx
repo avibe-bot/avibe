@@ -19,6 +19,8 @@ type Fake = {
     context?: unknown;
     onLevel?: (rms: number) => void;
     onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
+    nativeCapture?: boolean;
+    pressedAt?: number;
   };
   done: Promise<string>;
   resolve: (text: string) => void;
@@ -52,6 +54,8 @@ const native = vi.hoisted(() => ({
   notify: vi.fn(),
   selection: vi.fn(),
   permission: vi.fn(),
+  capture: vi.fn(() => false),
+  prepare: vi.fn(async () => true),
 }));
 
 vi.mock('../../lib/showPageVoiceDictation', () => ({
@@ -120,6 +124,8 @@ vi.mock('../../lib/native', async (importOriginal) => ({
   nativeHapticNotify: native.notify,
   nativeHapticSelection: native.selection,
   nativeVoicePermission: native.permission,
+  hasNativeVoiceCapture: native.capture,
+  nativeVoiceCapturePrepare: native.prepare,
 }));
 
 class PointerEventShim extends MouseEvent {
@@ -196,6 +202,8 @@ beforeEach(() => {
   native.notify.mockReset().mockResolvedValue(true);
   native.selection.mockReset().mockResolvedValue(true);
   native.permission.mockReset().mockResolvedValue(null);
+  native.capture.mockReset().mockReturnValue(false);
+  native.prepare.mockReset().mockResolvedValue(true);
   Object.defineProperty(navigator, 'permissions', {
     configurable: true,
     value: { query: vi.fn(async () => ({ state: pipeline.permission })) },
@@ -212,6 +220,32 @@ afterEach(() => {
 });
 
 describe('useHoldToTalk', () => {
+  it('in the iOS App, readies its microphone on entering and lets the App record an allowed hold', async () => {
+    native.capture.mockReturnValue(true);
+    native.permission.mockResolvedValue('granted');
+    const prewarm = vi.mocked((await import('../../lib/voiceRecording')).prewarmVoiceCapture);
+    prewarm.mockClear();
+    const el = await mount();
+    // Ready on entering, nothing started: no microphone indicator until a hold.
+    expect(native.prepare).toHaveBeenCalledTimes(1);
+    const pressedAt = Date.now();
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The press's start, for the trace: press to first audio is what the hold is judged by.
+    expect(pipeline.takes[0].input.pressedAt).toBe(pressedAt);
+    // The page's own audio context is not warmed for a take the App records.
+    expect(prewarm).not.toHaveBeenCalled();
+  });
+
+  it('records through the page when the App cannot', async () => {
+    native.capture.mockReturnValue(false);
+    const el = await mount();
+    expect(native.prepare).not.toHaveBeenCalled();
+    await holdFor(el);
+    expect(pipeline.takes[0].input.nativeCapture).toBeUndefined();
+  });
+
   it('treats a short press as a tap, inside the release, and opens no microphone', async () => {
     const el = await mount();
     down(el);
@@ -279,6 +313,61 @@ describe('useHoldToTalk', () => {
     expect(onTap).toHaveBeenCalledTimes(1);
     expect(pipeline.takes).toHaveLength(0);
     expect(hold.phase).toBe('idle');
+  });
+
+  // The owner (11-20): a word spoken right at the cue was lost. On his iPhone the microphone opens
+  // about 0.5 s (p90 1 s) after the hold is reached (602 takes' capture traces), so the cue that
+  // says "speak now" (the haptic and the listening card) comes only once capture has started.
+  it('gives the speak-now cue only once the microphone is capturing, not at the hold', async () => {
+    pipeline.startMs = 500;
+    const el = await mount();
+    down(el);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await flush();
+    expect(pipeline.takes).toHaveLength(1);
+    expect(hold.phase).not.toBe('listening');
+    expect(native.impact).not.toHaveBeenCalledWith('medium');
+
+    await elapse(500);
+    await flush();
+    expect(hold.phase).toBe('listening');
+    expect(native.impact).toHaveBeenCalledWith('medium');
+  });
+
+  it('gives no speak-now cue to a take armed to cancel when capture starts, and shows it once disarmed', async () => {
+    pipeline.startMs = 500;
+    const el = await mount();
+    down(el);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await flush();
+    move(el, 400);
+    expect(hold.phase).toBe('armed');
+    await elapse(500);
+    await flush();
+    expect(native.impact).not.toHaveBeenCalledWith('medium');
+    move(el, 480);
+    expect(hold.phase).toBe('listening');
+  });
+
+  it('keeps a release before the microphone is capturing a slip, not a sent take', async () => {
+    pipeline.startMs = 500;
+    const el = await mount();
+    down(el);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await flush();
+    move(el, 470);
+    expect(hold.phase).not.toBe('listening');
+    up(el);
+    await elapse(500);
+    await flush();
+    expect(send).not.toHaveBeenCalled();
+    expect(native.impact).not.toHaveBeenCalledWith('medium');
   });
 
   it('records from 200 ms, shows the live words, and sends the final text as a voice message on release', async () => {
@@ -708,7 +797,8 @@ describe('useHoldToTalk', () => {
     pipeline.startMs = 5_000;
     const el = await mount();
     await holdFor(el);
-    expect(hold.phase).toBe('listening');
+    // Waiting for the microphone: still a press, no speak-now cue yet.
+    expect(hold.phase).toBe('pressing');
     fireEvent.pointerCancel(el, { pointerId: 1 });
     expect(pipeline.takes[0].abort).toHaveBeenCalled();
     expect(hold.outcome).toBe('asking');

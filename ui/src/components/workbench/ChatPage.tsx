@@ -1,3 +1,5 @@
+import { HealthRequestCard } from '../health/HealthRequest';
+import { readHealthRequest } from '../../lib/healthRequests';
 import { desktopDragRegion } from '../../lib/desktopShell';
 import { createPortal } from 'react-dom';
 import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
@@ -73,6 +75,7 @@ import {
   harnessChipLabelKey,
   isVaultCallback,
   needsHarnessProvenanceReconcile,
+  turnCarryLabelKey,
   vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
@@ -6425,6 +6428,7 @@ export const MessageRow = memo(function MessageRow({
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
+  const turnCarryKey = isHarness ? turnCarryLabelKey(message) : null;
   const vaultStatusKey = isVaultCallback(message) ? vaultCallbackStatusKey(message) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
   const resultPresentation = useMemo(() => resultFooterParts(message), [message]);
@@ -6573,6 +6577,16 @@ export const MessageRow = memo(function MessageRow({
     );
   }
 
+  const healthRequest = isNotify && message.author === 'harness' ? readHealthRequest(message.metadata?.mobile_request) : null;
+  if (healthRequest) {
+    return <div data-message-id={message.id} className={rowClass('justify-start')}>
+      <div className="group/message flex w-full flex-col gap-1">
+        <HealthRequestCard key={healthRequest.id} request={healthRequest} readOnly={readOnly} />
+        {time}
+      </div>
+    </div>;
+  }
+
   // ----- Notify: compact gold pill, left-aligned (a status marker) -----
   if (isNotify) {
     // A notice in the workspace thread reports on another Session (ui/design: chat/workspace-notices/*).
@@ -6709,6 +6723,10 @@ export const MessageRow = memo(function MessageRow({
               )}
             </span>
           </div>
+          {turnCarryKey && (
+            // A message carried over from a Turn that failed or was stopped says so, once.
+            <span className="px-0.5 text-[11px] text-muted">{t(turnCarryKey)}</span>
+          )}
           <Button
             type="button"
             variant="ghost"

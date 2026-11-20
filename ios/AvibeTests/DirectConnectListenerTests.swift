@@ -463,6 +463,102 @@ final class DirectConnectListenerTests: XCTestCase {
         third.close()
     }
 
+    func testAHandOverClosesOnlyQuietPublicRelaysAndKeepsBusyOnesAndDirectOnes() async throws {
+        let fixture = try await makeListener()
+        let direct = LoopbackClient(port: fixture.port)
+        let directStream = try await establish(direct, fixture)
+        fixture.plans.set(direct: false)
+        let quiet = LoopbackClient(port: fixture.port)
+        let quietStream = try await establishPublic(quiet, fixture)
+        let busy = LoopbackClient(port: fixture.port)
+        let busyStream = try await establishPublic(busy, fixture)
+
+        // Both public relays go quiet; then one carries bytes again.
+        try await Task.sleep(for: .milliseconds(600))
+        try await busy.send("still")
+        try await eventually {
+            String(decoding: busyStream.written, as: UTF8.self) == "still"
+        }
+
+        let result = await fixture.listener.closeQuietRelays(
+            host: host,
+            backend: .publicOrigin,
+            quietSeconds: 0.5
+        )
+        XCTAssertEqual(result.closed, 1)
+        XCTAssertEqual(result.kept, 1)
+        try await eventually { quietStream.isCancelled }
+        XCTAssertFalse(busyStream.isCancelled)
+        // A direct relay is never a hand-over's to close, however quiet.
+        XCTAssertFalse(directStream.isCancelled)
+        // Another host's relays are not either.
+        let other = await fixture.listener.closeQuietRelays(
+            host: "other.example",
+            backend: .publicOrigin,
+            quietSeconds: 0
+        )
+        XCTAssertEqual(other.closed, 0)
+        XCTAssertEqual(other.kept, 0)
+        direct.close()
+        busy.close()
+    }
+
+    func testAHandOverWaitsOutTheCancelOfTheClosedStreamAndThenClosesTheRelay() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(direct: false)
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establishPublic(client, fixture)
+
+        // The page closes its stream and asks at once; WebKit's cancel of
+        // that stream crosses the relay just after.
+        let started = ProcessInfo.processInfo.systemUptime
+        let host = self.host
+        let listener = fixture.listener
+        let handover = Task {
+            await listener.closeQuietRelays(
+                host: host,
+                backend: .publicOrigin,
+                quietSeconds: 1,
+                waitSeconds: 3
+            )
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        try await client.send("rst")
+        try await eventually { String(decoding: stream.written, as: UTF8.self) == "rst" }
+
+        let result = await handover.value
+        XCTAssertEqual(result.closed, 1)
+        XCTAssertEqual(result.kept, 0)
+        XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - started, 1.1)
+        try await eventually { stream.isCancelled }
+    }
+
+    func testAHandOverKeepsARelayStillBusyWhenItsWaitEnds() async throws {
+        let fixture = try await makeListener()
+        fixture.plans.set(direct: false)
+        let client = LoopbackClient(port: fixture.port)
+        let stream = try await establishPublic(client, fixture)
+        let host = self.host
+        let listener = fixture.listener
+        let handover = Task {
+            await listener.closeQuietRelays(
+                host: host,
+                backend: .publicOrigin,
+                quietSeconds: 1,
+                waitSeconds: 1
+            )
+        }
+        for _ in 0..<6 {
+            try await client.send("x")
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let result = await handover.value
+        XCTAssertEqual(result.closed, 0)
+        XCTAssertEqual(result.kept, 1)
+        XCTAssertFalse(stream.isCancelled)
+        client.close()
+    }
+
     func testARelayCommittedAfterAnEventIsNotClosedByThatEventsLateClose() async throws {
         let fixture = try await makeListener()
         fixture.plans.set(generation: 5)

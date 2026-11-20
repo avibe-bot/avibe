@@ -649,7 +649,31 @@ def test_data_query_cli_omits_next_command_for_stdin_sql(monkeypatch, tmp_path, 
     payload = json.loads(capsys.readouterr().out)
     assert payload["pagination"]["has_more"] is True
     assert "next_command" not in payload["pagination"]
-    assert payload["message"] == "More records are available. Add --page to continue."
+    assert payload["message"] == (
+        "Rows 1-10 shown; more match. --limit reads up to 100 per page. Add --page 2 --limit 10 to continue."
+    )
+
+
+def test_data_query_json_says_which_rows_a_page_shows_when_it_cut_rows_off(monkeypatch, tmp_path, capsys) -> None:
+    """The default page is 20 rows; a page that cuts rows off says so, beside the command that reads on."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    SQLiteBackgroundTaskStore().close()
+    sql = "with recursive n(i) as (select 1 union all select i + 1 from n where i < 250) select i from n"
+
+    for argv, message in (
+        ([], "Rows 1-20 shown; more match. --limit reads up to 100 per page."),
+        (["--page", "2", "--limit", "500"], "Rows 101-200 shown; more match."),
+    ):
+        args = cli.build_parser().parse_args(["data", "query", "--sql", sql, *argv])
+        assert cli.cmd_data_query(args) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["message"] == message
+        assert payload["pagination"]["next_command"]
+
+    args = cli.build_parser().parse_args(["data", "query", "--sql", sql, "--page", "3", "--limit", "100"])
+    assert cli.cmd_data_query(args) == 0
+    assert "message" not in json.loads(capsys.readouterr().out)
 
 
 def test_data_query_text_prints_records_with_values_verbatim_and_pages(monkeypatch, tmp_path, capsys) -> None:
@@ -676,8 +700,9 @@ def test_data_query_text_prints_records_with_values_verbatim_and_pages(monkeypat
         "gone:",
         "n: 8",
     ]
-    label, next_command = next_line.split(": ", 1)
-    assert label == "next_command"
+    # A page that cuts rows off says so, how many it shows, and how to read on.
+    said, next_command = next_line.split(" Next page: ", 1)
+    assert said == "Rows 1-2 shown; more match. --limit reads up to 100 per page."
 
     args = cli.build_parser().parse_args(shlex.split(next_command)[1:])
     assert cli.cmd_data_query(args) == 0

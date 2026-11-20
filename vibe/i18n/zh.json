@@ -102,6 +102,9 @@
     }
   },
   "harness": {
+    "turnCarry": {
+      "exhausted": "这些输入已转交过一次，接下来那一轮也失败了。它们不会再自动重试；如果仍然需要，请重新发送：{inputs}"
+    },
     "agentInitiatedContinuation": "Agent 主动发起的续接",
     "promptEcho": {
       "scheduled": "⏰ 定时任务",
@@ -114,6 +117,9 @@
       "truncated": "…（已截断）"
     },
     "watch": {
+      "retryingNotice": "Watch {id} 已连续重试 {elapsed}（最近退出码：{code}），仍在运行。",
+      "elapsedHours": "{hours} 小时 {minutes} 分钟",
+      "elapsedMinutes": "{minutes} 分钟",
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",
       "unknownSupervisorFailure": "未知的监控进程错误。",
@@ -1256,6 +1262,10 @@
     }
   },
   "turn": {
+    "retiredRoute": {
+      "model": "模型 {old} 已不在 {backend} 的模型列表中，这个会话已改用 {new}。",
+      "effort": "{model} 已不提供推理强度 {old}，这个会话已改用 {new}。"
+    },
     "interrupted": {
       "backendRefresh": "⚠️ 本轮执行被中断——它运行期间 Agent 运行时不得不被替换（例如凭据迁移）。如果这项工作仍需完成，请重新发送请求。",
       "backendDisabled": "⏹ 本轮执行已停止，因为 {agent} 已被关闭。请在设置中重新开启它；如果这项工作仍需完成，再重新发送请求。",
@@ -1893,5 +1903,13 @@
   "mcp_oauth_callback_success": "MCP OAuth 登录已完成，可以关闭此标签页。",
   "mcp_oauth_callback_failure": "MCP OAuth 登录未完成，请返回 Avibe 重试。",
   "mcp_oauth_start_failure": "MCP OAuth 登录无法开始，请返回 Avibe 重试。",
-  "mcp_oauth_start_rejected": "请从 Avibe 中打开此 MCP OAuth 链接。"
+  "mcp_oauth_start_rejected": "请从 Avibe 中打开此 MCP OAuth 链接。",
+  "mobile": {
+    "health": {
+      "requestCreated": "已向 iPhone 发起健康数据请求。",
+      "connectTitle": "{name} 请求读取你的健康数据",
+      "refreshTitle": "{name} 请求更新健康数据",
+      "notificationBody": "请在 iPhone 上打开 Avibe 处理。"
+    }
+  }
 }

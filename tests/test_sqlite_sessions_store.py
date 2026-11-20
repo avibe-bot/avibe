@@ -2526,6 +2526,57 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
         service.close()
 
 
+def test_succeed_retired_session_route_moves_only_the_values_still_stored(tmp_path: Path) -> None:
+    """A Session moving off a retired model or effort keeps a choice the user made meanwhile: the move is
+    compare-and-set on every value it replaces."""
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        with patch(
+            "storage.sessions_service.V2Config.load",
+            return_value=SimpleNamespace(runtime=SimpleNamespace(default_cwd=str(tmp_path))),
+        ):
+            session_id = service.reserve_agent_session(
+                scope_key="avibe::project::proj_abc",
+                agent_backend="vibey",
+                session_anchor="avibe_ses1",
+                agent_name="vibey",
+            )
+        from storage.workbench_sessions_service import update_session
+
+        with service.engine.begin() as conn:
+            update_session(conn, session_id, model="gpt-6-astra", reasoning_effort="ultra")
+
+        # The user already switched the effort: nothing moves, not even the model.
+        assert not service.succeed_retired_session_route(
+            session_id, expected_route={"model": "gpt-6-astra", "agent_name": "vibey"},
+            model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("max", "high"),
+        )
+        # An effort chosen for another model than the one the row now stores does not move.
+        assert not service.succeed_retired_session_route(
+            session_id, expected_route={"model": "gpt-5.4"}, reasoning_effort=("ultra", "high")
+        )
+        # Nor one chosen for another Agent than the one the row now runs.
+        assert not service.succeed_retired_session_route(
+            session_id, expected_route={"model": "gpt-6-astra", "agent_name": "other"},
+            model=("gpt-6-astra", "gpt-6.2-astra"),
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert (row["model"], row["reasoning_effort"]) == ("gpt-6-astra", "ultra")
+
+        assert service.succeed_retired_session_route(
+            session_id, expected_route={"model": "gpt-6-astra", "agent_name": "vibey"},
+            model=("gpt-6-astra", "gpt-6.2-astra"), reasoning_effort=("ultra", "max"),
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert (row["model"], row["reasoning_effort"]) == ("gpt-6.2-astra", "max")
+        # Moved once: the same move finds nothing left to replace.
+        assert not service.succeed_retired_session_route(
+            session_id, expected_route={"model": "gpt-6-astra", "agent_name": "vibey"}, model=("gpt-6-astra", "gpt-6.2-astra")
+        )
+    finally:
+        service.close()
+
+
 def test_materialize_agent_session_route_pins_resolved_agent_identity(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -7181,6 +7232,12 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
         # ``model=None`` it passes goes to ``get_or_create_agent_session_row``,
         # i.e. the INSERT path above. Detected only by the ``**values`` heuristic.
         "bind_agent_session": "native bind: neither UPDATE sets a route column",
+        # A retired model or effort moves to its successor: compare-and-set on the stored
+        # non-empty value, so the column keeps its pin state (explicit stays explicit with the
+        # successor, inherited stays inherited); an explicit null never matches the CAS.
+        "succeed_retired_session_route": (
+            "replaces a stored non-empty value with its successor under CAS; the pin state is unchanged"
+        ),
         # Legacy-placeholder relabel: the only route column write here fills an
         # agent_backend / agent_variant that is BLANK or ``"default"`` (the branch is
         # guarded on both being in ``("", "default")``, and is reached only after the
