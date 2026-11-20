@@ -73,3 +73,19 @@ def test_an_existing_freeze_by_someone_else_is_left_alone(monkeypatch):
     w = wd.EventLoopWatchdog(SimpleNamespace())
     assert w.arm_warm_freeze() == "off"
 
+
+
+def test_a_heartbeat_answered_after_stop_does_not_freeze(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wd.gc, "freeze", lambda: calls.append("freeze"))
+    monkeypatch.setattr(wd.gc, "get_freeze_count", lambda: 0)
+    monkeypatch.setattr(wd, "_active_requests", 0)
+    w = wd.EventLoopWatchdog(SimpleNamespace(), monotonic=lambda: 10_000.0)
+    w._watchdog_birth = 0.0
+    w.arm_warm_freeze()
+    info = dict(generation=2, collected=0, uncollectable=0)
+    w._observe_gc("start", info)
+    w._observe_gc("stop", info)
+    w.stop()  # a queued answer may still run after this
+    w._answer()
+    assert not calls

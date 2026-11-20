@@ -119,10 +119,13 @@ class EventLoopWatchdog:
         """Arm the one-shot freeze of the warmed heap; idempotent, never resets the warm-up.
 
         It fires at the first natural full collection after two hours of uptime that
-        ends with no model stream open. A live Turn does not hold it back: on a busy
-        machine a Turn is almost always live. What that can strand is bounded: the
-        objects of Turns alive at that moment that later become cyclic garbage stay
-        uncollected until unfreeze or restart; nothing created afterwards is affected.
+        ends with no Vibey model stream open (the counter below; other backends'
+        gateway streams are not counted). A live Turn does not hold it back: on a busy
+        machine a Turn is almost always live. Cost: objects frozen then are never
+        collected until unfreeze or restart, and an unreachable cycle that passes
+        through a frozen object also keeps whatever it references later. That is not
+        bounded by the heap at freeze time; the field trial's memory guard and the
+        unfreeze command are the safeguard.
         """
         with self._freeze_lock:
             if self._freeze_state == "off" and not gc.get_freeze_count():
@@ -145,12 +148,13 @@ class EventLoopWatchdog:
     def _apply_warm_freeze(self) -> None:
         # On the loop thread, which alone opens and closes model streams, so the
         # stream count cannot change between this check and the freeze.
+        # No gc.get_freeze_count() here: it walks the whole permanent generation.
         with self._freeze_lock:
-            if self._freeze_state != "armed" or _active_requests or gc.get_freeze_count():
+            if self._freeze_state != "armed" or _active_requests or self._stopped.is_set():
                 return
             gc.freeze()
             self._freeze_state = "frozen"
-        logger.warning("Warm GC trial frozen: count=%d", gc.get_freeze_count())
+        logger.warning("Warm GC trial frozen")
 
     def arm_warm_census(self, controller) -> bool:
         # Called on the controller loop; idempotent even after the sample fires.
