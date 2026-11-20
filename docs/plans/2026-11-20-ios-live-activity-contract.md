@@ -60,7 +60,7 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 ### 2.3 Lifecycle owned by the App
 
-- **start:** one activity at a time, so starting first ends any other `TurnActivityAttributes` activity. Every step has a defined outcome, and `start` answers with the first refusal it meets:
+- **start:** one activity at a time, so starting first ends any other `TurnActivityAttributes` activity `.immediate` and DELETEs it best-effort with reason `replaced`, whatever the new start then answers. Every step has a defined outcome, and `start` answers with the first refusal it meets:
 
 | Step | Outcome | `start` answers |
 | --- | --- | --- |
@@ -183,10 +183,10 @@ Unix seconds are JSON integers in [1600000000, 4102444800]. The token must match
 | `GET /api/web-push/live-activities/turn?session_id=` | `200 {ok, session_id, turn: {turn_id, phase, started_at, confirmed_at}}`, `409 no_active_turn`, or `404 session_not_found` (also when the caller cannot read the session) |
 | `PUT /api/web-push/live-activities/<activity_id>` with `{session_id, turn_id, push_registration_id, activity_token}` | `200 {ok, activity}`, `409 turn_not_active` with the ended `activity`, `409 activity_conflict` (same id, different session/turn/registration), `403 registration_not_owned` (the registration is not a native relay subscription of this caller), `400 invalid_request`, or `404 session_not_found` |
 | `GET /api/web-push/live-activities/<activity_id>` | `200 {ok, activity}` or `404 not_found` |
-| `DELETE /api/web-push/live-activities/<activity_id>` with `{reason}` | `200 {ok, stopped}`. Idempotent. `reason ∈ user_stopped, dismissed, system_ended, logout, account_switch, instance_switch, disabled` |
+| `DELETE /api/web-push/live-activities/<activity_id>` with `{reason}` | `200 {ok, stopped}`. Idempotent. `reason ∈ user_stopped, dismissed, system_ended, replaced, logout, account_switch, instance_switch, disabled` |
 
 - `activity` is `{activity_id, session_id, turn_id, phase, started_at, ended_at, confirmed_at, status}`, with `status ∈ tracking, ended, stopped`.
-- Every route above can also answer `503 service_unavailable` when the controller is unreachable, as other controller-backed routes already do. The App treats it as transient: it keeps the local activity and retries on the next foreground or token update.
+- Every route above can also answer `503 service_unavailable` when the controller is unreachable, as other controller-backed routes already do. What the App does with it depends on the call, and §2.3 defines that per call: `start` fails on a `503` from `GET …/turn`; a `503` on PUT keeps the activity unregistered and retries it; a registered activity's GET changes nothing; a DELETE is not retried.
 - **Serialization:** the controller process is the single owner of tracking rows and sends. The four routes reach it over the existing internal IPC; ui_server does not write the table itself. Registration, token replacement, DELETE, and every send for one `activity_id` are serialized there, so no send uses a token or state that a later PUT or DELETE has already replaced.
 - `activity_id` is ActivityKit's `Activity.id`: 1–64 characters of `[A-Za-z0-9-]`.
 - The PUT is an upsert. The same activity with a new token replaces the token. A new activity on the same `push_registration_id` stops the previous tracking with reason `replaced`.
