@@ -1876,7 +1876,10 @@ async fn a_held_install_allows_reads_and_its_late_reply_changes_nothing() {
     assert!(select(&f, "one").await.ok);
     let fresh = update(&f);
     let revision = f.client.state().revision;
-    release.send(response(200, json!({"ok": true}), None)).ok().unwrap();
+    // The reply arrives late, or the shell already dropped the request when its
+    // generation ended (on a slow runner the reselection outlasts that check).
+    // Either way it ends stale and changes nothing.
+    let _ = release.send(response(200, json!({"ok": true}), None));
     assert_eq!(install.await.unwrap().error.unwrap().code, "stale_generation");
     assert_eq!(update(&f), fresh);
     assert_eq!(f.client.state().revision, revision);
@@ -1921,12 +1924,14 @@ async fn an_interrupted_receipt_settles_without_resending() {
         .await
     });
     sent.notified().await;
-    assert!(action(&f.client, ClientAction::Cancel).await.ok);
     // Still in flight: a read leaves it sending.
     update_reads(&f, true, offer());
     f.client.poll_instance_update(false).await;
     assert_eq!(update(&f)["request"]["phase"], "sending");
-    release.send(response(200, json!({"ok": true}), None)).ok().unwrap();
+    assert!(action(&f.client, ClientAction::Cancel).await.ok);
+    // The shell drops the request when its generation ends, or its reply
+    // arrives late; it ends stale either way.
+    let _ = release.send(response(200, json!({"ok": true}), None));
     assert_eq!(install.await.unwrap().error.unwrap().code, "stale_generation");
     let mut done = offer();
     done["current"] = json!("3.2.9");
