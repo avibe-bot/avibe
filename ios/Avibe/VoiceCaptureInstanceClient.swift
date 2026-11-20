@@ -3,12 +3,12 @@ import OSLog
 import UIKit
 import WebKit
 
-/// The direct path's load gate for an instance origin
+/// The direct path's load gate for an instance origin on a WebKit store
 /// (`DirectPathController.loadGate`), set by the App's model; `nil` without
 /// a direct transport.
 @MainActor
 enum VoiceCaptureLoadGate {
-    static var provider: ((WebOrigin) -> DirectLoadGate)?
+    static var provider: ((WebOrigin, UUID) -> DirectLoadGate)?
 }
 
 /// Where a background voice take goes: the selected instance, through the
@@ -135,7 +135,8 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         self.target = target
         self.dictationID = dictationID
         let origin = target.origin
-        self.gate = gate ?? { VoiceCaptureLoadGate.provider?(origin) ?? .open }
+        let store = target.storeIdentifier
+        self.gate = gate ?? { VoiceCaptureLoadGate.provider?(origin, store) ?? .open }
         self.isActive = isActive
         self.sleep = sleep
     }
@@ -150,19 +151,28 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     /// again (`held`), and a load issued then fails at once (39.1, 00:44Z:
     /// a take recorded in front, "can't reach your Avibe", nothing reached
     /// the instance); so in front a held gate is waited for, up to
-    /// `gateWait`. In the background the listener stays closed and WebKit
-    /// takes its normal path, as every background take has: no wait there.
+    /// `gateWait` by the clock. In the background the gate stays held for
+    /// as long as Avibe is there, so a wait could never end: the load goes
+    /// at once and rests on WebKit's own failover past the closed listener
+    /// (`allowFailover`; every background take so far got through, but it
+    /// is a safety net, not a guarantee, so a failure there stays
+    /// retryable and is never a `direct_fault`).
+    ///
+    /// Between Avibe entering the foreground (the re-bind starts) and
+    /// becoming active it reads as not active, so a load issued then does
+    /// not wait; the listener refuses it at once, and `makeReady`'s second
+    /// pass, by then in front, waits. That retry is what covers this window.
     static func settledGate(
         gate: () -> DirectLoadGate,
         isActive: () -> Bool,
         sleep: (Duration) async -> Void,
+        now: () -> ContinuousClock.Instant = { ContinuousClock.now },
         limit: Duration = gateWait,
         step: Duration = gateStep
     ) async -> DirectLoadGate {
-        var waited = Duration.zero
-        while isActive(), gate() == .held, waited < limit, !Task.isCancelled {
+        let deadline = now() + limit
+        while isActive(), gate() == .held, now() < deadline, !Task.isCancelled {
             await sleep(step)
-            waited += step
         }
         return gate()
     }

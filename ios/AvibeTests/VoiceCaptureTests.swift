@@ -1077,28 +1077,37 @@ final class VoiceCaptureTests: XCTestCase {
         // Held for three reads, then open: the load goes once it opens.
         var gates: [DirectLoadGate] = [.held, .held, .held, .open]
         var slept: [Duration] = []
+        var clock = ContinuousClock.now
+        let sleep: (Duration) async -> Void = { slept.append($0); clock += $0 }
         var settled = await Client.settledGate(
             gate: { gates.count > 1 ? gates.removeFirst() : gates[0] },
-            isActive: { true }, sleep: { slept.append($0) }
+            isActive: { true }, sleep: sleep, now: { clock }
         )
         XCTAssertEqual(settled, .open)
         XCTAssertEqual(slept, [.milliseconds(50), .milliseconds(50), .milliseconds(50)])
 
-        // Never settling: bounded at five seconds, then the load goes anyway.
+        // Never settling: five seconds by the clock, then the load goes anyway.
         slept = []
-        settled = await Client.settledGate(gate: { .held }, isActive: { true }, sleep: { slept.append($0) })
+        settled = await Client.settledGate(gate: { .held }, isActive: { true }, sleep: sleep, now: { clock })
         XCTAssertEqual(settled, .held)
         XCTAssertEqual(slept.count, 100)
-
-        // In the background the listener stays closed and WebKit takes its
-        // normal path: no wait.
+        // A busy main actor makes each step longer: still five seconds.
         slept = []
-        settled = await Client.settledGate(gate: { .held }, isActive: { false }, sleep: { slept.append($0) })
+        settled = await Client.settledGate(
+            gate: { .held }, isActive: { true },
+            sleep: { slept.append($0); clock += .milliseconds(500) }, now: { clock }
+        )
+        XCTAssertEqual(slept.count, 10)
+
+        // In the background the gate stays held as long as Avibe is there:
+        // no wait, the load goes and WebKit takes its own path.
+        slept = []
+        settled = await Client.settledGate(gate: { .held }, isActive: { false }, sleep: sleep, now: { clock })
         XCTAssertEqual(settled, .held)
         XCTAssertTrue(slept.isEmpty)
 
         // The fault is terminal: not waited for.
-        settled = await Client.settledGate(gate: { .fault }, isActive: { true }, sleep: { slept.append($0) })
+        settled = await Client.settledGate(gate: { .fault }, isActive: { true }, sleep: sleep, now: { clock })
         XCTAssertEqual(settled, .fault)
         XCTAssertTrue(slept.isEmpty)
     }

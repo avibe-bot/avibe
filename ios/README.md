@@ -481,9 +481,13 @@ the main Bot acts on the user's computer.
   (`DirectPathController.loadGate`, through `VoiceCaptureLoadGate`): in
   front a held gate (the listener closed or being bound again, right after
   Avibe comes forward) is waited for, up to 5 s, and a load that failed in
-  that window is made once more; a fault fails as `direct_fault`. In the
-  background the listener stays closed and WebKit takes its normal path, so
-  nothing waits. Each request that does not reach the instance is kept as
+  that window is made once more; a fault fails as `direct_fault`. The gate
+  is asked for the take's own store and the last runtime's host, also when
+  no runtime is shown (the instance list). In the background the gate stays
+  held for as long as Avibe is there, so nothing waits: a background take's
+  load rests on WebKit's own failover past the closed listener
+  (`allowFailover`), a safety net rather than a guarantee, so a failure
+  there stays retryable and is never `direct_fault`. Each request that does not reach the instance is kept as
   which request, where it gave up (`loadp <domain> <code>`, `load …`,
   `webcontent`, `nodoc`, `js …`, `fetch0 <error> <ms>/<deadline>`,
   `http <status>`, `direct_fault`, `gate … after <ms>`) and when, for
