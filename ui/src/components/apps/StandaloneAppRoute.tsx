@@ -2,7 +2,7 @@ import { useApi } from '../../context/ApiContext';
 import { ShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHost';
 import { showPageWindowSource, showPageWindowStatusAfterRead, showPageWindowTitle, type ShowPageWindowStatus } from './showPageWindowState';
 import { isNativeAppWindow } from '../../lib/desktopShell';
-import { useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { APP_REGISTRY, type AppId } from '../../apps/registry';
@@ -63,8 +63,10 @@ function StandaloneShowBody({ windowId, params }: { windowId: string; params: Re
   const [status, setStatus] = useState<ShowPageWindowStatus>('loading');
   const [archived, setArchived] = useState(false);
   const [revalidateVersion, setRevalidateVersion] = useState(0);
-  // The Show's title as last read or renamed: a rename and a (re)read both set it, whichever is later.
+  // The Show's title as last read or renamed. A read sets it only if no rename arrived while it was in
+  // flight: its answer may predate that rename.
   const [showTitle, setShowTitle] = useState<string | null | undefined>(undefined);
+  const renames = useRef(0);
   // The same lifecycle source as the Workbench's Show windows: archive is
   // terminal for the frame and its controls, and every (re)connect re-reads
   // the session to close the gap the event stream could not cover. A rename
@@ -74,15 +76,19 @@ function StandaloneShowBody({ windowId, params }: { windowId: string; params: Re
     onSessionActivity: (data) => {
       if (data.session_id !== sessionId) return;
       if (data.event === 'archived') setArchived(true);
-      else if (data.event === 'updated' && Object.prototype.hasOwnProperty.call(data, 'title')) setShowTitle(data.title ?? null);
+      else if (data.event === 'updated' && Object.prototype.hasOwnProperty.call(data, 'title')) {
+        renames.current += 1;
+        setShowTitle(data.title ?? null);
+      }
     },
   }), [api, sessionId]);
   useEffect(() => {
     let live = true;
+    const renamesBefore = renames.current;
     void api.getSessionResult(sessionId).then((result) => {
       if (!live) return;
       setStatus((current) => showPageWindowStatusAfterRead(current, result));
-      if (result.session) setShowTitle(result.session.title ?? null);
+      if (result.session && renames.current === renamesBefore) setShowTitle(result.session.title ?? null);
     }).catch(() => { if (live) setStatus((current) => showPageWindowStatusAfterRead(current, { status: null, session: null })); });
     return () => { live = false; };
   }, [api, revalidateVersion, sessionId]);

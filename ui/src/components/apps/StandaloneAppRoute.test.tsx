@@ -174,6 +174,20 @@ describe('a native Show window names itself after its Show', () => {
     await waitFor(() => expect(document.title).toBe('Q4 定稿'));
   });
 
+  it('keeps a rename that arrives while a read is in flight over that read\'s older title', async () => {
+    getSessionResult.mockResolvedValueOnce({ status: 200, session: { id: 'ses-1', status: 'active', title: 'Q4 漏斗看板' } });
+    renderShow('ses-1');
+    await waitFor(() => expect(document.title).toBe('Q4 漏斗看板'));
+    let answer: (value: { status: number; session: { id: string; status: string; title: string } }) => void = () => {};
+    getSessionResult.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    reconnect();
+    await waitFor(() => expect(getSessionResult).toHaveBeenCalledTimes(2));
+    emit({ event: 'updated', session_id: 'ses-1', title: 'Q4 定稿' });
+    await waitFor(() => expect(document.title).toBe('Q4 定稿'));
+    await act(async () => answer({ status: 200, session: { id: 'ses-1', status: 'active', title: 'Q4 漏斗看板' } }));
+    expect(document.title).toBe('Q4 定稿');
+  });
+
   it('uses the launcher title until the Show is read, and untitled for a Show without one', async () => {
     state.snapshot = { appId: 'showpage', sessionId: 'ses-1', title: 'Launcher name', requestId: 'r1', windowId: 'w1', source: 'dock' };
     getSessionResult.mockResolvedValueOnce({ status: 500, session: null });
