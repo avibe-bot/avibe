@@ -102,7 +102,13 @@
 //!   while the registry is held, and the reads at admission, at the commit,
 //!   at the reveal and for every event do not depend on announcements.) The
 //!   shell erases a retired Workbench's data store after hiding its web
-//!   view, so a child's page is gone before the erase starts. A web view that is not in place
+//!   view, so a child's page is closed on the app's side, and WebKit asked to
+//!   end it, before the erase is asked for. That is not the page having
+//!   stopped: its own process hears of it a moment later and can write once
+//!   more, during the erase or after it. Whatever lands is in the retired
+//!   Workbench's disposable (not persistent) store, which the app releases
+//!   when it closes the web view in the same retirement; the next Workbench
+//!   gets a store of its own. A web view that is not in place
 //!   is refused a window when it asks (`window.open` returns `null`), so a
 //!   sandbox window exists only for an opener in place: one that is not in
 //!   place cannot get one, and one that leaves its place loses those it has
@@ -915,8 +921,10 @@ unsafe extern "C-unwind" fn view_did_move_to_window(this: &AnyObject, _selector:
 
 /// A web view of the app was hidden, shown, put into a window or taken out of
 /// one. Whichever it was, every opener is read again, and the sandbox windows
-/// of one that is no longer in place are closed and their pages destroyed, at
-/// once: a retired Workbench's data store may be erased next.
+/// of one that is no longer in place are closed and their pages closed on the
+/// app's side, at once: a retired Workbench's data store may be erased next.
+/// (A page's own process can still write a moment later; see the module's
+/// header.)
 ///
 /// An announcement only ever closes. It is what makes closing prompt; whether
 /// an opener is in view is still read afresh wherever it matters, and nothing
