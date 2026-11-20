@@ -65,15 +65,20 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
         const dot = rect('[data-status-indicator]');
         return { dot: dot.x, centring: dot.top + dot.height / 2 - xMiddle, tools: tools.x, trigger: rect('[data-account-trigger]').x,
           inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
+          insetRight: parseFloat(style.borderRightWidth) + parseFloat(style.paddingRight),
+          groupLeft: rect('[data-line-glyph]').x - rect('[data-account-trigger]').x,
+          groupRight: rect('[data-account-trigger]').right - rect('[data-account-label]').right,
           labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
           versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
           above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
       });
-      // The trigger's edge is flush with the tools above; its dot sits inside its own inset, never on the hover wash's edge.
+      // The trigger's edge is flush with the tools above. Its dot and name are one group centred in the
+      // hover wash, with the same inset on both sides (Max, 2026-11-20).
       expect(measurements.tools).toBe(16);
       expect(measurements.trigger).toBe(measurements.tools);
-      expect(measurements.inset).toBeGreaterThanOrEqual(16);
-      expect(measurements.dot - measurements.trigger).toBe(measurements.inset);
+      expect(measurements.insetRight).toBe(measurements.inset);
+      expect(measurements.groupLeft).toBeGreaterThanOrEqual(measurements.inset);
+      expect(Math.abs(measurements.groupLeft - measurements.groupRight)).toBeLessThanOrEqual(1);
       // Centred on the label's lowercase letters, not on its line box.
       expect(Math.abs(measurements.centring)).toBeLessThanOrEqual(0.5);
       expect(measurements.labelGap).toBeGreaterThanOrEqual(0);
@@ -164,11 +169,16 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
       const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
       return { left: box('[data-account-trigger]').left, dot: box('[data-status-indicator]').left - box('[data-account-trigger]').left,
         inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
+        insetRight: parseFloat(style.borderRightWidth) + parseFloat(style.paddingRight),
+        groupLeft: box('[data-line-glyph]').left - box('[data-account-trigger]').left,
+        groupRight: box('[data-account-trigger]').right - box('[data-account-label]').right,
         gap: box('[data-account-label]').left - box('[data-status-indicator]').right,
         right: box('[data-version-chip]').right - node.getBoundingClientRect().right,
         bottom: innerHeight - node.getBoundingClientRect().bottom };
     });
-    expect(geometry.left).toBe(16); expect(geometry.inset).toBeGreaterThanOrEqual(16); expect(geometry.dot).toBe(geometry.inset); expect(geometry.gap).toBeGreaterThanOrEqual(0);
+    expect(geometry.left).toBe(16); expect(geometry.insetRight).toBe(geometry.inset);
+    expect(geometry.dot).toBeGreaterThanOrEqual(geometry.inset); expect(Math.abs(geometry.groupLeft - geometry.groupRight)).toBeLessThanOrEqual(1);
+    expect(geometry.gap).toBeGreaterThanOrEqual(0);
     expect(geometry.gap).toBeLessThanOrEqual(8); expect(geometry.right).toBe(0); expect(geometry.bottom).toBe(8);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('remote-bottom-row.png') });
     await chip.click();

@@ -54,6 +54,16 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await trigger.evaluate(async (node) => { await Promise.all(node.getAnimations().map((animation) => animation.finished)); });
     await expect(trigger).toHaveCSS('scale', '1');
     await page.mouse.up();
+    // The dot and the name are one group centred in the hover wash, with no hover tip (Max,
+    // 2026-11-20).
+    const gaps = await trigger.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const glyph = node.querySelector('[data-line-glyph]')!.getBoundingClientRect();
+      const label = node.querySelector('[data-account-label]')!.getBoundingClientRect();
+      return { left: glyph.left - box.left, right: box.right - label.right };
+    });
+    expect(Math.abs(gaps.left - gaps.right)).toBeLessThanOrEqual(1);
+    await expect(trigger).not.toHaveAttribute('title');
     await expect(trigger).not.toHaveAttribute('aria-expanded');
     await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
     await expect(page.locator('[data-instance-menu]')).toHaveCount(0);
