@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { RemoteAccess } from './RemoteAccess';
-import { deviceDirectLine, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import { deviceDirectLine, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
 import { setLiveStreamVia } from '../lib/liveStreamVia';
 import type { RemoteAccessStatus, TunnelQualitySnapshot } from '../context/ApiContext';
 import { InstanceAuthorizationProvider } from '../context/InstanceAuthorizationProvider';
@@ -140,16 +140,24 @@ describe('RemoteAccess direct lines', () => {
 
   it('says whether this device\'s own direct path is up, and which kind, only in the App', () => {
     expect(deviceDirectLine(null, 'direct')).toBeNull();
-    expect(deviceDirectLine({ preferred: 'tunnel', path: null }, null)).toBeNull();
-    expect(deviceDirectLine({ preferred: 'direct', path: 'relay' }, 'other')).toEqual({
+    expect(deviceDirectLine({ preferred: 'tunnel', path: null, lastConnection: null }, null)).toBeNull();
+    expect(deviceDirectLine({ preferred: 'direct', path: 'relay', lastConnection: null }, 'other')).toEqual({
       stateKey: 'remoteAccess.direct.deviceOn', pathKey: 'remoteAccess.direct.pathRelay',
     });
-    expect(deviceDirectLine({ preferred: 'direct', path: 'ipv6' }, 'direct')).toEqual({
+    expect(deviceDirectLine({ preferred: 'direct', path: 'ipv6', lastConnection: null }, 'direct')).toEqual({
       stateKey: 'remoteAccess.direct.deviceInUse', pathKey: 'remoteAccess.direct.pathIpv6',
     });
-    expect(deviceDirectLine({ preferred: 'direct', path: null }, null)).toEqual({
+    expect(deviceDirectLine({ preferred: 'direct', path: null, lastConnection: null }, null)).toEqual({
       stateKey: 'remoteAccess.direct.deviceOn', pathKey: null,
     });
+  });
+
+  it('gives the last connection race, and nothing when the App recorded none', () => {
+    expect(lastConnectionLegs(null)).toBeNull();
+    expect(lastConnectionLegs({ preferred: 'direct', path: 'ipv4', lastConnection: null })).toBeNull();
+    expect(lastConnectionLegs({
+      preferred: 'direct', path: 'ipv4', lastConnection: { direct: 42, public: 'none', winner: 'direct' },
+    })).toEqual({ direct: 42, public: 'none' });
   });
 
   it('hides the page line until a live stream has answered', () => {

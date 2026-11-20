@@ -100,6 +100,11 @@ enum DirectPathReport: Equatable, Sendable {
     /// (`remote-direct-ios.md` section 9), whichever of the two heard the
     /// background first, so its closure waits for the return.
     case lostToBackground
+    /// The usable path's connection now runs on another kind of path:
+    /// through the relay, or straight to an IPv4 or IPv6 address. Nothing
+    /// is closed; the page is told, and new connections may stay on a direct
+    /// path (section 6, stickiness).
+    case pathChanged(DirectPathKind?)
 }
 
 /// One byte stream to the instance, as the strict ingress sees it
@@ -186,6 +191,90 @@ struct DirectDialAttempt: Equatable, Sendable {
             object["local"] = local.jsonObject
         }
         return object
+    }
+}
+
+/// One CONNECT's race between the direct path and the public origin, for
+/// diagnosis: how long each took from the CONNECT's plan to being ready, or
+/// what became of it, which won, and the App's path then. Timings and
+/// families only.
+struct DirectRaceRecord: Equatable, Sendable {
+    enum Leg: Equatable, Sendable {
+        /// Not part of this race: no direct candidate, or the public origin
+        /// was never dialled.
+        case none
+        /// Ready after this many milliseconds.
+        case ready(Int)
+        case failed
+        /// A sticky direct attempt that did not answer within its bound.
+        /// No failure of the path is claimed for it.
+        case timedOut
+        /// Started, and cancelled when the other won.
+        case cancelled
+
+        var jsonValue: Any {
+            switch self {
+            case .none: return "none"
+            case .ready(let ms): return ms
+            case .failed: return "failed"
+            case .timedOut: return "timeout"
+            case .cancelled: return "cancelled"
+            }
+        }
+    }
+
+    let direct: Leg
+    let publicOrigin: Leg
+    /// `direct`, `public`, or nil when neither won.
+    let winner: DirectRelayBackend?
+    let path: DirectPathKind?
+    /// The plan went straight to the direct path (section 6, stickiness).
+    let sticky: Bool
+
+    var jsonObject: [String: Any] {
+        [
+            "direct": direct.jsonValue,
+            "public": publicOrigin.jsonValue,
+            "winner": winner.map { $0 == .direct ? "direct" : "public" } ?? "none",
+            "path": path.map { $0.rawValue as Any } ?? NSNull(),
+            "sticky": sticky,
+        ]
+    }
+}
+
+/// Committed direct relays the App closed because their path was lost (or
+/// replaced, or the App went to the background), for diagnosis: how many,
+/// and for each how long it had carried no byte when it was closed. A short
+/// time means bytes were moving, so a request was probably cut; the listener
+/// cannot see requests themselves. Counts and durations only.
+struct DirectLossRecord: Equatable, Sendable {
+    enum Cause: String, Equatable, Sendable {
+        /// The transport reported the path lost. The one cause that says a
+        /// request in flight was probably cut.
+        case lost
+        /// A newer rendezvous answer replaced the endpoint the relays ran on.
+        case generationReplaced = "generation_replaced"
+        /// The App went to the background.
+        case background
+    }
+
+    let cause: Cause
+    let relays: Int
+    /// Milliseconds since each relay's last byte, shortest first, at most
+    /// `quietLimit` of them.
+    let quietMs: [Int]
+    /// The kind of path the App's connection ran on before the loss.
+    let path: DirectPathKind?
+
+    static let quietLimit = 8
+
+    var jsonObject: [String: Any] {
+        [
+            "cause": cause.rawValue,
+            "relays": relays,
+            "last_byte_ms": quietMs,
+            "path": path.map { $0.rawValue as Any } ?? NSNull(),
+        ]
     }
 }
 

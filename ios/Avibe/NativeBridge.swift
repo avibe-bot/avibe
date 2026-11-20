@@ -66,8 +66,9 @@ struct NativeShellMetadata: Equatable {
     var capabilities: [String: Int] {
         var capabilities = Self.capabilities
         if direct {
-            // Version 2 adds `direct.handover`.
-            capabilities["direct"] = directHandover ? 2 : 1
+            // Version 2 added `direct.handover`; version 3 reports the
+            // kind of path (`path`) in the status and its events.
+            capabilities["direct"] = directHandover ? 3 : 1
         }
         return capabilities
     }

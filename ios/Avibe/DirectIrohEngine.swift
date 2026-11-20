@@ -100,10 +100,29 @@ protocol DirectIrohConnection: AnyObject, Sendable {
     /// The path selected for application data now, if the binding can
     /// tell.
     var selectedPath: DirectPathKind? { get }
+
+    /// Calls `onChange` with the selected path whenever the connection's
+    /// paths change. Nil when the binding cannot watch.
+    func watchSelectedPath(
+        _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+    ) -> (any DirectPathWatch)?
+}
+
+/// A running watch; `stop` ends it.
+protocol DirectPathWatch: Sendable {
+    func stop()
 }
 
 extension DirectIrohConnection {
     var selectedPath: DirectPathKind? {
+        nil
+    }
+
+    /// Calls `onChange` with the selected path whenever the connection's
+    /// paths change. Nil when the binding cannot watch.
+    func watchSelectedPath(
+        _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+    ) -> (any DirectPathWatch)? {
         nil
     }
 }

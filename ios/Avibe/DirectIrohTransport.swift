@@ -45,6 +45,8 @@ enum DirectIrohReport: Equatable, Sendable {
     /// The App went to the background: everything stopped, and the path is
     /// gone.
     case lostToBackground
+    /// The usable path's connection now runs on another kind of path.
+    case pathChanged(DirectPathKind?)
 }
 
 /// Fetches the rendezvous answer for a selection, natively and on that
@@ -238,6 +240,10 @@ final class DirectIrohTransport {
         /// times the path stopped being usable.
         let authority: DirectIrohAuthority
         private var streams: [WeakStream] = []
+        /// The kind of path last reported for the connection, and the watch
+        /// that reports changes.
+        var lastPath: DirectPathKind?
+        var pathWatch: (any DirectPathWatch)?
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link, authority: DirectIrohAuthority) {
             self.id = id
@@ -320,6 +326,8 @@ final class DirectIrohTransport {
         didSet {
             if oldValue !== session {
                 oldValue?.authority.revoke()
+                oldValue?.pathWatch?.stop()
+                oldValue?.pathWatch = nil
             }
         }
     }
@@ -1024,7 +1032,9 @@ final class DirectIrohTransport {
             authority: DirectIrohAuthority(deadline: accepted.deadline, clock: uptime)
         )
         self.session = session
-        recordAttempt(offer, local: link.endpoint.localFamilies, path: link.connection.selectedPath)
+        session.lastPath = link.connection.selectedPath
+        recordAttempt(offer, local: link.endpoint.localFamilies, path: session.lastPath)
+        watchPath(of: session)
         watchClose(of: session)
         stableTimer?.cancel()
         stableTimer = scheduler.schedule(after: timing.stableSeconds) { [weak self] in
@@ -1246,6 +1256,31 @@ final class DirectIrohTransport {
         self.report?(report)
     }
 
+    /// Reports each change of the kind of path the session's connection
+    /// runs on (relay, IPv4, IPv6) while the session is current and usable.
+    private func watchPath(of session: Session) {
+        let id = session.id
+        session.pathWatch = session.link.connection.watchSelectedPath { [weak self] kind in
+            Task { @MainActor [weak self] in
+                self?.pathDidChange(to: kind, session: id)
+            }
+        }
+    }
+
+    private func pathDidChange(to kind: DirectPathKind?, session id: Int) {
+        guard let session, session.id == id, session.lastPath != kind else {
+            return
+        }
+        session.lastPath = kind
+        // While the path is verified again, or after its answer ran out, the
+        // next `usable` report carries the path it then has.
+        guard session.isUsable else {
+            return
+        }
+        Self.logger.info("Direct transport: path now \(kind?.rawValue ?? "unknown", privacy: .public)")
+        emit(.pathChanged(kind))
+    }
+
     // MARK: The network and the App's lifecycle
 
     private func startNetworkWatch() {
@@ -1372,6 +1407,8 @@ extension DirectPathReport {
             self = .lost
         case .lostToBackground:
             self = .lostToBackground
+        case .pathChanged(let kind):
+            self = .pathChanged(kind)
         }
     }
 }

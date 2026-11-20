@@ -1,7 +1,7 @@
 import type { RemoteAccessStatus } from '../context/ApiContext';
 import type { TranslationKey } from '../i18n/types';
 import type { LiveStreamVia } from './liveStreamVia';
-import type { NativeDirectPathSnapshot } from './native';
+import type { NativeDirectConnection, NativeDirectPathSnapshot } from './native';
 
 // What Settings · Remote access says about direct, from current facts only: the instance's own
 // state and certificate, and how this page's live stream came in (ui/design:
@@ -70,4 +70,16 @@ export function deviceDirectLine(
     stateKey: pageVia === 'direct' ? 'remoteAccess.direct.deviceInUse' : 'remoteAccess.direct.deviceOn',
     pathKey,
   };
+}
+
+/**
+ * The last new connection's race, for the Settings line: each side's time to
+ * be ready in ms, `none` when it was not part of the race, or what became of
+ * it. Null when the App recorded none.
+ */
+export function lastConnectionLegs(
+  snapshot: NativeDirectPathSnapshot | null,
+): { direct: NativeDirectConnection['direct']; public: NativeDirectConnection['public'] } | null {
+  const last = snapshot?.lastConnection;
+  return last ? { direct: last.direct, public: last.public } : null;
 }

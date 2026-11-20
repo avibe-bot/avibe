@@ -484,11 +484,50 @@ describe('native direct closure watermark', () => {
       Promise.resolve({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6', attempts: [] }),
     );
     let native = await load();
-    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: 'ipv6' });
+    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: 'ipv6', lastConnection: null });
     shell.call.mockImplementation(() => Promise.resolve({ preferred: 'direct', sequence: 1, closure: 0, path: '10.0.0.1' }));
-    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: null });
+    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: null, lastConnection: null });
     Reflect.deleteProperty(window, 'avibeNative');
     native = await load();
     expect(await native.readNativeDirectPath()).toBeNull();
+  });
+
+  it('tells path changes with the preference, in sequence order', async () => {
+    const shell = installShell({ direct: 3 });
+    const native = await load();
+    expect(native.nativeDirectPathReported()).toBe(true);
+    const seen: string[] = [];
+    native.onNativeDirectPreference((preferred, path) => seen.push(`${preferred}:${path}`));
+    await shell.answer(0, status(0, 0));
+    shell.emit({ ...status(0, 1, 'direct'), path: 'relay' });
+    shell.emit({ ...status(0, 2, 'direct'), path: 'ipv4' });
+    // An older event cannot take the path back.
+    shell.emit({ ...status(0, 1, 'direct'), path: 'relay' });
+    // The same path again is no change.
+    shell.emit({ ...status(0, 3, 'direct'), path: 'ipv4' });
+    expect(seen).toEqual(['tunnel:null', 'direct:relay', 'direct:ipv4']);
+    expect(native.nativeDirectPathKind()).toBe('ipv4');
+    // No path is claimed once the preference is the public one.
+    shell.emit({ ...status(1, 4, 'tunnel'), path: 'ipv4' });
+    expect(native.nativeDirectPathKind()).toBeNull();
+  });
+
+  it('reads the last connection race for display', async () => {
+    const shell = installShell({ direct: 3 });
+    shell.call.mockImplementation(() => Promise.resolve({
+      preferred: 'direct', sequence: 2, closure: 0, path: 'ipv4',
+      connections: [
+        { direct: 'failed', public: 180, winner: 'public', path: 'relay', sticky: false },
+        { direct: 42, public: 'none', winner: 'direct', path: 'ipv4', sticky: true },
+      ],
+    }));
+    const native = await load();
+    expect(await native.readNativeDirectPath()).toEqual({
+      preferred: 'direct', path: 'ipv4', lastConnection: { direct: 42, public: 'none', winner: 'direct' },
+    });
+    shell.call.mockImplementation(() => Promise.resolve({
+      preferred: 'direct', sequence: 2, closure: 0, connections: [{ direct: '10.0.0.1', public: 3, winner: 'x' }],
+    }));
+    expect((await native.readNativeDirectPath())?.lastConnection).toBeNull();
   });
 });

@@ -6002,7 +6002,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(
             result as? String,
-            #"{"capability":2,"answer":[2,1],"refused":"invalid_argument"}"#
+            #"{"capability":3,"answer":[2,1],"refused":"invalid_argument"}"#
         )
         XCTAssertEqual(asked.count, 1)
         XCTAssertEqual(asked.first?.0, instance)
@@ -7455,7 +7455,13 @@ private final class RuntimePage {
             let status;
             try {
               const answer = await window.avibeNative.call("direct.status");
-              status = Object.fromEntries(Object.keys(answer).sort().map((key) => [key, answer[key]]));
+              // The status itself. What the shell adds for diagnosis depends
+              // on which connections the page happened to make by now.
+              const diagnostics = ["attempts", "connections", "losses"];
+              status = Object.fromEntries(
+                Object.keys(answer).filter((key) => !diagnostics.includes(key)).sort()
+                  .map((key) => [key, answer[key]])
+              );
             } catch (error) {
               status = error.code;
             }
@@ -7470,12 +7476,18 @@ private final class RuntimePage {
         ) as? String
     }
 
-    /// `direct.status()` as the page gets it, as JSON with sorted keys.
+    /// `direct.status()` as the page gets it, as JSON with sorted keys,
+    /// without what the shell adds for diagnosis (which depends on the
+    /// connections the page happened to make by then).
     func directStatus() async throws -> String? {
         try await webView?.callAsyncJavaScript(
             """
             const status = await window.avibeNative.call("direct.status");
-            return JSON.stringify(status, Object.keys(status).sort());
+            const diagnostics = ["attempts", "connections", "losses"];
+            return JSON.stringify(
+              status,
+              Object.keys(status).filter((key) => !diagnostics.includes(key)).sort()
+            );
             """,
             arguments: [:],
             in: nil,

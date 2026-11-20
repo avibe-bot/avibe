@@ -4,6 +4,7 @@ import type { RemoteAccessStatus, TunnelQualitySnapshot } from '@/context/ApiCon
 import { DESIGN_NOW } from '../../shell/clock';
 
 import { frames } from '../../frame';
+import { IOS_APP_CAPABILITIES } from '../../shell/fixtures';
 import { settingsConfig, settingsFixtures, settingsPage } from './fixtures';
 
 const page = settingsPage('remote-access', <RemoteAccessPage />);
@@ -65,6 +66,22 @@ const directFrame = (name: string, title: string, fixtures: ReturnType<typeof di
   { name, title, width: 390, height: 1000, status: 'shipped' as const, route, fixtures, render: page, wait: 300 }
 );
 
+// In the App (`direct` version 3), shipped with #4030: under the direct row, whether this device's
+// own direct path is up or in use and on which kind of path, and the last new connection's race
+// (each side's time to be ready, or what became of it).
+const directInApp = (
+  pageVia: 'direct' | 'other',
+  path: 'relay' | 'ipv4' | 'ipv6',
+  connection: { direct: number | string; public: number | string; winner: string },
+) => {
+  const base = directOn('running', 'published', pageVia);
+  return {
+    ...base,
+    nativeShell: { ...IOS_APP_CAPABILITIES, direct: 3 },
+    nativeDirectStatus: { preferred: 'direct', sequence: 3, closure: 0, path, connections: [connection] },
+  };
+};
+
 const designFrames = frames([
   { name: 'unpaired', title: '设置 · 远程访问 · 未配对', width: 1440, height: 900, status: 'shipped', route, fixtures: unpaired, render: page },
   { name: 'running', title: '设置 · 远程访问 · 已配对、运行中', width: 1440, height: 900, status: 'shipped', route, fixtures: paired, render: page },
@@ -73,6 +90,14 @@ const designFrames = frames([
   { name: 'phone', title: '设置 · 远程访问 · 手机', width: 390, height: 844, status: 'shipped', route, fixtures: unpaired, render: page },
   directFrame('direct-page-direct', '直连 · 已就绪（证书未过期才显示日期），本页经直连', directOn('running', 'published', 'direct')),
   directFrame('direct-page-other', '直连 · 已就绪，本页未走直连', directOn('running', 'published', 'other')),
+  directFrame('direct-app-in-use', 'App · 本设备直连使用中（直连 IPv4），最近一次连接直连 42 ms，没有拨 Cloudflare',
+    directInApp('direct', 'ipv4', { direct: 42, public: 'none', winner: 'direct' })),
+  directFrame('direct-app-relay', 'App · 本设备直连已开启（中继），本页未走直连；最近一次连接 Cloudflare 先就绪',
+    directInApp('other', 'relay', { direct: 'cancelled', public: 180, winner: 'public' })),
+  directFrame('direct-app-timeout', 'App · 最近一次连接：直连超时，改走 Cloudflare',
+    directInApp('other', 'ipv6', { direct: 'timeout', public: 1620, winner: 'public' })),
+  directFrame('direct-app-failed', 'App · 最近一次连接：直连失败，改走 Cloudflare',
+    directInApp('other', 'ipv4', { direct: 'failed', public: 95, winner: 'public' })),
   directFrame('direct-page-unknown', '直连 · 已就绪，本页连接还没报告：不显示本页这一行', directOn('running', 'published')),
   directFrame('direct-awaiting-permission', '直连 · 等待授权', directOn('waiting-permission', 'owner_not_running', 'other')),
   directFrame('direct-denied', '直连 · 未获准', directOn('waiting-permission', 'permission_denied', 'other')),
