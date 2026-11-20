@@ -60,7 +60,7 @@ The Web passes the title it already shows in the conversation header; for a Bot'
 
 ### 2.3 Lifecycle owned by the App
 
-- **start:** one activity at a time, so starting first ends any other `TurnActivityAttributes` activity (the "displaces" row below), whatever the new start then answers. Every step has a defined outcome, and `start` answers with the first refusal it meets:
+- **start:** one activity at a time. Once the first three steps below have passed, and just before `Activity.request`, the App ends any other `TurnActivityAttributes` activity (the "displaces" row below). A start refused by `disabled`, `push_unavailable`, or `GET …/turn` leaves the current activity alone; a later failure leaves no activity. Every step has a defined outcome, and `start` answers with the first refusal it meets:
 
 | Step | Outcome | `start` answers |
 | --- | --- | --- |
@@ -79,7 +79,7 @@ After `start`, each local activity is in exactly one state, persisted on the dev
 - **registered:** the instance holds its current token, because the last PUT was answered `200`;
 - **unregistered:** it has no PUT answered `200` since its last token.
 
-This table is the whole lifecycle. Every event has one row; "end" removes the activity from the device, and the App never re-creates an activity for a Turn it ended.
+This table is the whole lifecycle. Every event has one row; "end" removes the activity from the device. The App never re-creates an ended activity on its own; only the person's explicit `start` makes a new one, for the same Turn as well.
 
 | Event | Unregistered | Registered |
 | --- | --- | --- |
