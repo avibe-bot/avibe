@@ -1925,7 +1925,7 @@ async def drive_sse_stream(
                 # the wait at once and nothing is sent; a write that stalls past its bound is not waited for.
                 pending = (
                     begin_attempt(request, endpoint=endpoint, protocol=assembler.protocol)
-                    if request is not None
+                    if request is not None and not cancel.cancelled
                     else None
                 )
                 if pending is not None:

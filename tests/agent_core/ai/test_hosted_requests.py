@@ -280,3 +280,36 @@ async def test_a_stop_during_the_off_loop_encode_sends_nothing_and_ends_aborted(
 
     assert sent == []
     assert getattr(events[-1], "kind", None) == "aborted"
+
+
+async def test_a_stop_right_after_the_encode_completes_records_and_sends_nothing(monkeypatch) -> None:
+    from core.agent_core.ai import _common
+
+    request = _request("openai_chat", {"web_search": PROXY}, tools=(WEB, READ, BASH))
+    sent: list[httpx.Request] = []
+    begun: list[object] = []
+    token = CancelToken()
+    original_await = _common._await_network
+    calls = 0
+
+    async def await_then_stop(awaitable, cancel, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = await original_await(awaitable, cancel, **kwargs)
+        if calls == 1:
+            token.cancel()  # Stop lands after the encode won, before anything is recorded
+        return result
+
+    monkeypatch.setattr(_common, "_await_network", await_then_stop)
+    monkeypatch.setattr(_common, "begin_attempt", lambda *a, **k: begun.append(a) or None)
+
+    def gateway(wire: httpx.Request) -> httpx.Response:
+        sent.append(wire)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=STREAMS["openai_chat"])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        adapter = create_adapter("openai_chat", client=client, gateway=True)  # type: ignore[arg-type]
+        events = [event async for event in adapter.stream(request, token)]
+
+    assert sent == [] and begun == []
+    assert getattr(events[-1], "kind", None) == "aborted"
