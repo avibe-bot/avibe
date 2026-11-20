@@ -44,6 +44,13 @@ def _reject_constant(_name: str) -> Any:
     raise ValueError("non-finite number")
 
 
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
 def validate_relay_raw(raw: bytes) -> bool:
     """True when the raw request body is valid (section 3.2): the size limit and the decoding rules
     are checked on the bytes, before and while parsing, then the parsed object is validated."""
@@ -51,7 +58,7 @@ def validate_relay_raw(raw: bytes) -> bool:
         return False
     try:
         # Strict UTF-8 with no BOM stripping: a leading BOM stays in the text and json rejects it.
-        body = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+        body = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant, object_pairs_hook=_unique_keys)
     except (UnicodeDecodeError, ValueError):
         return False
     return validate_relay_request(body)

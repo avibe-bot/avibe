@@ -102,7 +102,8 @@ No installation management credential is required.
 
 **The raw bytes are judged before the object** (reference: `validate_relay_raw`):
 - The body is at most 1024 bytes as received. Check this before parsing, so whitespace padding or `\uXXXX` escapes cannot slip past it.
-- Decode it as strict UTF-8 without stripping a BOM. In TypeScript use `new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })`, then `JSON.parse`.
+- Decode it as strict UTF-8 without stripping a BOM. In TypeScript use `new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })`.
+- Parse it strictly, keeping integer and non-integer number tokens distinct: `1795000900.0` and `1.7950009e9` are not integers and fail. Duplicate keys are rejected. Plain `JSON.parse` meets neither rule; avibe-backend's existing `parsePushJson`, followed by field type checks, meets both.
 - The top level must be a JSON object, with no trailing data and no `NaN` or `Infinity`.
 - Any failure here is `400 invalid_live_activity`.
 
