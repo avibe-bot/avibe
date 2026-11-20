@@ -2414,6 +2414,8 @@ fn apply_pending_deep_link_on_main(app: &AppHandle) {
             // serializer. The owner captures this exact Runtime document now.
             drop(_client_navigation);
             let Some(launch) = app_windows::prepare_show(&window, &session, navigation.clone()) else {
+                // This document cannot launch now; the next page load retries.
+                release_show_delivery(app, &navigation);
                 return;
             };
             let app = app.clone();
@@ -2425,8 +2427,15 @@ fn apply_pending_deep_link_on_main(app: &AppHandle) {
                 if !current {
                     return;
                 }
-                let _status = app_windows::open_show(launch).await;
-                commit_deep_link_navigation(&app, &navigation, true, observed_generation);
+                if app_windows::open_show(launch).await == app_windows::Status::Stale {
+                    // The Workbench document changed under the launch (a reload
+                    // does not advance the window generation). Nothing opened
+                    // and nothing was deposited, so the link stays pending for
+                    // the replacement document instead of being consumed.
+                    release_show_delivery(&app, &navigation);
+                } else {
+                    commit_deep_link_navigation(&app, &navigation, true, observed_generation);
+                }
                 // A successor may have arrived while fallback deposit held A5.
                 // Its receipt stays pending until this delivery releases all
                 // guards and commits only its own Arc.
@@ -2436,6 +2445,12 @@ fn apply_pending_deep_link_on_main(app: &AppHandle) {
             let succeeded = window.navigate(navigation.url().clone()).is_ok();
             commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
         }
+    }
+}
+
+fn release_show_delivery(app: &AppHandle, navigation: &DeepLinkNavigation) {
+    if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        links.release_app_launch(navigation);
     }
 }
 

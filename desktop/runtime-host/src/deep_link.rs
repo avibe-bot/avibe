@@ -284,6 +284,17 @@ impl DeepLinks {
         })
     }
 
+    /// Gives a claimed Show delivery back without consuming it: its launch went
+    /// stale against a document that is being replaced, or never started. The
+    /// delivery stays pending, so the replacement document can claim it again.
+    pub fn release_app_launch(&mut self, navigation: &DeepLinkNavigation) -> bool {
+        let owned = self.owns_app_launch(navigation);
+        if owned {
+            self.app_launch = None;
+        }
+        owned
+    }
+
     pub fn commit_navigation(
         &mut self,
         navigation: &DeepLinkNavigation,
@@ -367,6 +378,29 @@ mod tests {
         assert!(!links.commit_navigation(&next, true, 1, 2));
         assert!(links.commit_navigation(&next, true, 2, 2));
         assert!(!links.has_pending());
+    }
+
+    #[test]
+    fn a_stale_show_launch_keeps_its_delivery_for_the_replacement_document() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:39567").unwrap();
+        let mut links = DeepLinks::default();
+        links.receive_owned(["avibe://show/session"], Some(4));
+        let first = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+        assert!(links.claim_app_launch(&first));
+        assert!(links.release_app_launch(&first));
+        assert!(links.has_pending(), "a stale launch must not consume the delivery");
+        assert!(!links.owns_app_launch(&first));
+        assert!(!links.release_app_launch(&first), "only the owning claim releases");
+
+        let retry = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+        assert_eq!(retry.show_session(), Some("session"));
+        assert!(links.claim_app_launch(&retry));
+        assert!(links.commit_navigation(&retry, true, 1, 1));
+        assert!(!links.has_pending());
+        assert!(
+            !links.release_app_launch(&retry),
+            "a committed delivery has nothing to release"
+        );
     }
 
     const MAPPINGS: &[(&str, &str)] = &[
