@@ -20,15 +20,17 @@ Show/file-browser authority model is outside this change.
 
 The existing instance host fence stays in force. Device routes bypass cookie
 and CSRF authentication only after exact method/path and raw-path matching;
-their native handlers authenticate the code or bearer and recheck live Personal
-ownership and an empty allowlist. Offline projections cannot authorize sync.
+their native handlers authenticate the code or bearer and recheck the live
+instance owner on any instance kind or sharing state. Offline projections pause
+sync without purging.
 The existing Cloudflare ingress forwards the instance hostname unchanged; no
 backend code or production gateway deployment is required.
 
 The store uses a separate versioned SQLite file with mode 0600. Cleanup removes
 health days after 30 local-calendar days, terminal requests after seven days,
-and access records after 90 days; revoke, sharing, ownership change, sign-out,
-and unused credentials purge device health data. Controller maintenance runs off
+and access records after 90 days; an explicit revoke or unpair, a live
+confirmed ownership change, and unused credentials purge device health data.
+Sharing does not (November 20 decision). Controller maintenance runs off
 its event loop. OS waiter locks and transactional continuation claims give the
 synchronous waiter or a stable callback Run sole continuation ownership.
 These retention rules concern active mobile storage; they do not erase

@@ -1067,14 +1067,16 @@ export const USAGE_DEFAULT_WINDOW: UsageWindowKey = '24h';
 /** `quota-summary.schema.json` — a subscription's own rate-limit windows, and
  *  what its metered usage would have cost at API prices. A report, like usage:
  *  nothing in routing reads it. */
-export type QuotaWindowKind = 'session' | 'weekly' | 'model_weekly' | 'other';
+/** `session`, `weekly` and `monthly` are the account's own; the `model_*` kinds
+ *  count only the model (or model group) `scope_model` names. */
+export type QuotaWindowKind = 'session' | 'weekly' | 'monthly' | 'model_session' | 'model_weekly' | 'other';
 
 export type QuotaWindow = {
   id: string;
   kind: QuotaWindowKind;
-  /** The upstream name. Views compose their own copy for `session`/`weekly`. */
+  /** The upstream name. Views compose their own copy for every kind but `other`. */
   label: string;
-  /** Present on `model_weekly`: the model the window alone counts. */
+  /** Present on `model_session` and `model_weekly`: the model or model group the window alone counts. */
   scope_model?: string;
   /** Present when `label` (and `scope_model`) is an upstream id, not display text. */
   label_is_key?: true;

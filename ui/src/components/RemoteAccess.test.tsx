@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { RemoteAccess } from './RemoteAccess';
-import { deviceDirectLine, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import { deviceUsing, directTagKind, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import type { NativeDirectPathSnapshot } from '../lib/native';
 import { setLiveStreamVia } from '../lib/liveStreamVia';
 import type { RemoteAccessStatus, TunnelQualitySnapshot } from '../context/ApiContext';
 import { InstanceAuthorizationProvider } from '../context/InstanceAuthorizationProvider';
@@ -138,24 +139,70 @@ describe('RemoteAccess direct lines', () => {
     expect(remoteAccessDirectLines(direct('running', '', null), null, NOW)?.certificateDate).toBeNull();
   });
 
-  it('says whether this device\'s own direct path is up, and which kind, only in the App', () => {
-    expect(deviceDirectLine(null, 'direct')).toBeNull();
-    expect(deviceDirectLine({ preferred: 'tunnel', path: null }, null)).toBeNull();
-    expect(deviceDirectLine({ preferred: 'direct', path: 'relay' }, 'other')).toEqual({
-      stateKey: 'remoteAccess.direct.deviceOn', pathKey: 'remoteAccess.direct.pathRelay',
-    });
-    expect(deviceDirectLine({ preferred: 'direct', path: 'ipv6' }, 'direct')).toEqual({
-      stateKey: 'remoteAccess.direct.deviceInUse', pathKey: 'remoteAccess.direct.pathIpv6',
-    });
-    expect(deviceDirectLine({ preferred: 'direct', path: null }, null)).toEqual({
-      stateKey: 'remoteAccess.direct.deviceOn', pathKey: null,
-    });
+  const app = (snapshot: Partial<NativeDirectPathSnapshot>): NativeDirectPathSnapshot => ({
+    preferred: 'direct', path: null, scope: null, rttMs: null, lastConnection: null, ...snapshot,
+  });
+
+  // Version 3: the App keeps its path current, in events too.
+  const using = (snapshot: NativeDirectPathSnapshot | null, pageVia: 'direct' | 'other' | null) =>
+    deviceUsing(snapshot, pageVia, true);
+
+  it('says what this device is using, never calling the relay direct, and only in the App', () => {
+    // A browser, or a stream that has not said how it came in: no line.
+    expect(using(null, 'direct')).toBeNull();
+    expect(using(app({ path: 'ipv4' }), null)).toBeNull();
+    // On Cloudflare: with the relay up, Cloudflare is still what is used, and the relay is named as slower.
+    expect(using(app({ path: 'relay' }), 'other')).toEqual({ kind: 'tunnel', relayUp: true });
+    expect(using(app({ preferred: 'tunnel' }), 'other')).toEqual({ kind: 'tunnel', relayUp: false });
+    expect(using(app({ path: 'ipv6', scope: 'global' }), 'other')).toEqual({ kind: 'tunnel', relayUp: false });
+    // On the direct ingress, through the relay: 中继, never 直连.
+    expect(using(app({ path: 'relay', rttMs: 140 }), 'direct')).toEqual({ kind: 'relay', rttMs: 140 });
+    // On an address: LAN, hole-punched, or plain direct when the App does not say which.
+    expect(using(app({ path: 'ipv4', scope: 'local', rttMs: 3 }), 'direct'))
+      .toEqual({ kind: 'lan', family: 'ipv4', rttMs: 3 });
+    expect(using(app({ path: 'ipv6', scope: 'global', rttMs: 85 }), 'direct'))
+      .toEqual({ kind: 'punched', family: 'ipv6', rttMs: 85 });
+    expect(using(app({ path: 'ipv6' }), 'direct')).toEqual({ kind: 'direct', family: 'ipv6', rttMs: null });
+    // On the direct ingress with no path named (the App's path dropped meanwhile): no line.
+    expect(using(app({ preferred: 'tunnel' }), 'direct')).toBeNull();
+  });
+
+  it('names no path for an App that does not keep its path current (direct version 2)', () => {
+    // Version 2 answers a path in the status, but sends no event when it changes: it can be stale.
+    expect(deviceUsing(app({ path: 'ipv4', scope: 'global' }), 'direct', false)).toBeNull();
+    expect(deviceUsing(app({ path: 'relay' }), 'other', false)).toBeNull();
+    expect(directTagKind('direct', 'ipv4', false)).toBeNull();
+    expect(directTagKind('direct', 'relay', false)).toBeNull();
+    // And in any App the page line is not shown, so nothing calls a relayed page 直连.
+    expect(remoteAccessDirectLines(direct('running'), 'direct', NOW, true)?.pageKey).toBeNull();
+  });
+
+  it('tags 直连 only for an address, 中继 for the relay, and nothing else', () => {
+    expect(directTagKind('direct', 'ipv4', true)).toBe('direct');
+    expect(directTagKind('direct', 'ipv6', true)).toBe('direct');
+    expect(directTagKind('direct', 'relay', true)).toBe('relay');
+    expect(directTagKind('direct', null, true)).toBeNull();
+    expect(directTagKind('other', 'ipv4', true)).toBeNull();
+    expect(directTagKind(null, 'relay', true)).toBeNull();
+  });
+
+  it('gives the last connection race, and nothing when the App recorded none', () => {
+    expect(lastConnectionLegs(null)).toBeNull();
+    expect(lastConnectionLegs(app({ path: 'ipv4' }))).toBeNull();
+    expect(lastConnectionLegs(app({
+      path: 'ipv4', lastConnection: { direct: 42, public: 'none', winner: 'direct' },
+    }))).toEqual({ direct: 42, public: 'none' });
   });
 
   it('hides the page line until a live stream has answered', () => {
     expect(remoteAccessDirectLines(direct('running'), null, NOW)?.pageKey).toBeNull();
     expect(remoteAccessDirectLines(direct('running'), 'direct', NOW)?.pageKey).toBe('remoteAccess.direct.pageDirect');
     expect(remoteAccessDirectLines(direct('running'), 'other', NOW)?.pageKey).toBe('remoteAccess.direct.pageOther');
+  });
+
+  it('shows no page line in the App, where only the device line can tell the relay apart', () => {
+    expect(remoteAccessDirectLines(direct('running'), 'direct', NOW, true)?.pageKey).toBeNull();
+    expect(remoteAccessDirectLines(direct('running'), 'other', NOW, true)?.pageKey).toBeNull();
   });
 });
 
@@ -237,6 +284,64 @@ describe('RemoteAccess', () => {
       expect(showToast).not.toHaveBeenCalled();
     },
   );
+
+  it('folds the network path as the fallback route while this page runs through the direct ingress', async () => {
+    act(() => setLiveStreamVia('direct'));
+    try {
+      renderPage();
+      const fallback = await screen.findByTestId('remote-access-fallback-route');
+      expect(fallback.tagName).toBe('DETAILS');
+      expect((fallback as HTMLDetailsElement).open).toBe(false);
+      expect(screen.getByText('remoteAccess.fallbackRoute')).toBeTruthy();
+      expect(screen.queryByText('remoteAccess.networkPath')).toBeNull();
+      expect(screen.getByText('remoteAccess.qualityFallback')).toBeTruthy();
+      expect(screen.queryByText('remoteAccess.quality')).toBeNull();
+
+      // Back on Cloudflare: the path in use again, unfolded and under its own name.
+      act(() => setLiveStreamVia('other'));
+      expect(screen.queryByTestId('remote-access-fallback-route')).toBeNull();
+      expect(screen.getByText('remoteAccess.networkPath')).toBeTruthy();
+      expect(screen.getByText('remoteAccess.quality')).toBeTruthy();
+    } finally {
+      act(() => setLiveStreamVia(null));
+    }
+  });
+
+  it("reads the App's path again while shown, so a move within one family is followed", async () => {
+    vi.useFakeTimers();
+    const call = vi.fn((method: string) => Promise.resolve(method === 'direct.status'
+      ? { preferred: 'direct', sequence: 3, closure: 0, path: 'ipv4', path_scope: 'local', rtt_ms: 3 }
+      : null));
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: {
+        contract: 1, platform: 'ios', shellVersion: '1.0 (1)', capabilities: { direct: 3 }, call,
+        on: vi.fn(() => () => undefined),
+      },
+    });
+    const reads = () => call.mock.calls.filter(([method]) => method === 'direct.status').length;
+    try {
+      api.remoteAccessStatus.mockResolvedValue(runningStatus({
+        direct: { enabled: true, state: 'running', reason: 'published', certificate_not_after: null, transport_running: true, direct_access_allowed: true },
+      }));
+      act(() => setLiveStreamVia('direct'));
+      await act(async () => { renderPage(); });
+      const first = reads();
+      expect(first).toBeGreaterThan(0);
+      await act(async () => { vi.advanceTimersByTime(5_000); });
+      expect(reads()).toBe(first + 1);
+
+      // Not while the page is hidden.
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      expect(reads()).toBe(first + 1);
+    } finally {
+      Reflect.deleteProperty(document, 'visibilityState');
+      Reflect.deleteProperty(window, 'avibeNative');
+      vi.useRealTimers();
+      act(() => setLiveStreamVia(null));
+    }
+  });
 
   it('RA-TQ-032 shows technical details when the remote status includes a network path', async () => {
     renderPage();

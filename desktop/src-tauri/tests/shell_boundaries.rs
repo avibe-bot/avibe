@@ -180,7 +180,11 @@ fn the_shell_enables_only_its_declared_capabilities() {
     assert!(popover.get("remote").is_none());
     assert_eq!(
         popover["permissions"],
-        serde_json::json!(["allow-desktop-client-request", "core:window:allow-close"])
+        serde_json::json!([
+            "allow-desktop-client-request",
+            "allow-update-popover-fit",
+            "core:window:allow-close"
+        ])
     );
     let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
     assert!(
@@ -666,6 +670,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_unbind",
         "pet_open",
         "focus_main_window",
+        "update_popover_fit",
     ];
     let declared: Vec<&str> = commands
         .into_iter()

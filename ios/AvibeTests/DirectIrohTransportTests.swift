@@ -1,3 +1,4 @@
+import Network
 import UIKit
 import XCTest
 @testable import Avibe
@@ -326,10 +327,21 @@ final class DirectIrohTransportTests: XCTestCase {
         )
         let relay = try await harness.transport.openStream(for: harness.tag("boot:1", path: 4))
 
+        // Updates the monitor ignored as no change are counted with it.
+        harness.network.ignoredUpdates = 7
+        XCTAssertEqual(
+            harness.transport.pathCounts,
+            DirectPathCounts(dials: 1, pathUpdatesIgnored: 7)
+        )
+
         harness.network.change()
         harness.network.change()
         // Reported at once and once; probed when the network is quiet.
         XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        XCTAssertEqual(
+            harness.transport.pathCounts,
+            DirectPathCounts(verifications: 1, dials: 1, pathUpdates: 2, pathUpdatesIgnored: 7)
+        )
         XCTAssertEqual(harness.scheduler.pending.filter { $0 == 0.5 }, [0.5])
         XCTAssertEqual(connection.streams.count, 2)
         // Nothing new opens while the path is being verified.
@@ -352,6 +364,12 @@ final class DirectIrohTransportTests: XCTestCase {
         }
         XCTAssertEqual(harness.log.count(of: "bind"), 1)
         XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        XCTAssertEqual(
+            harness.transport.pathCounts,
+            DirectPathCounts(
+                verifications: 1, probesAfterPathUpdate: 1, dials: 1, pathUpdates: 2, pathUpdatesIgnored: 7
+            )
+        )
         // A tag from before the change is stale; a newer one opens.
         await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 4)) }
         _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 5))
@@ -368,6 +386,187 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(harness.reports[3], .verifying)
         XCTAssertEqual(harness.log.count(of: "connection.close"), 1)
         await assertCancelled { try await relay.write(Data("x".utf8)) }
+        let counts = harness.transport.pathCounts
+        XCTAssertEqual(counts.verifications, 2)
+        XCTAssertEqual(counts.probesAfterPathUpdate, 2)
+        XCTAssertEqual(counts.pathUpdates, 3)
+
+        // The counts speak for one selection: a new one, or none, starts
+        // from nothing, and from what the monitor had ignored by then.
+        harness.transport.deselect()
+        XCTAssertEqual(harness.transport.pathCounts, .zero)
+    }
+
+    // MARK: Which network path updates are changes
+
+    private func snapshot(
+        status: DirectIrohNetworkSnapshot.Status = .satisfied,
+        interfaces: [(String, DirectIrohNetworkSnapshot.InterfaceKind)] = [("en0", .wifi), ("pdp_ip0", .cellular)],
+        ipv4: Bool = true,
+        ipv6: Bool = true,
+        dns: Bool = true,
+        gateways: [String] = ["192.0.2.1"],
+        addresses: [DirectIrohInterfaceAddress]
+    ) -> DirectIrohNetworkSnapshot {
+        DirectIrohNetworkSnapshot(
+            status: status,
+            interfaces: interfaces.map { DirectIrohNetworkSnapshot.Interface(name: $0.0, kind: $0.1) },
+            supportsIPv4: ipv4,
+            supportsIPv6: ipv6,
+            supportsDNS: dns,
+            gateways: gateways,
+            addresses: addresses
+        )
+    }
+
+    private func address(_ interface: String, _ bytes: [UInt8]) -> DirectIrohInterfaceAddress {
+        DirectIrohInterfaceAddress(interface: interface, family: bytes.count == 4 ? .ipv4 : .ipv6, bytes: bytes)
+    }
+
+    /// Sixteen bytes: `prefix`, zeros, then `last`.
+    private func ipv6(_ prefix: [UInt8], _ last: UInt8) -> [UInt8] {
+        var bytes = prefix
+        bytes.append(contentsOf: [UInt8](repeating: 0, count: 15 - prefix.count))
+        bytes.append(last)
+        return bytes
+    }
+
+    /// An IPv6 link-local address (fe80::/10).
+    private func linkLocal(_ last: UInt8) -> [UInt8] {
+        ipv6([0xFE, 0x80], last)
+    }
+
+    /// Every change that can matter to the path is seen, and what cannot is
+    /// not. Addresses here are from the documentation ranges.
+    func testANetworkSnapshotDiffersForEveryChangeThatMattersAndForNoOther() {
+        let wifi = address("en0", [192, 0, 2, 10])
+        let wifiV6 = address("en0", ipv6([0x20, 0x01, 0x0D, 0xB8], 1))
+        let cellular = address("pdp_ip0", [198, 51, 100, 7])
+        // The system's own tunnel: a link-local address only.
+        let systemTunnel = address("utun0", linkLocal(9))
+        let base = snapshot(addresses: [wifi, wifiV6, cellular, systemTunnel])
+
+        // The same facts read again, in another order: the same network.
+        XCTAssertEqual(snapshot(addresses: [systemTunnel, cellular, wifiV6, wifi, wifi]), base)
+        // Interfaces that carry nothing of the path: an AirDrop link, a
+        // second cellular context, another system tunnel.
+        XCTAssertEqual(
+            snapshot(addresses: [
+                wifi, wifiV6, cellular, systemTunnel,
+                address("awdl0", linkLocal(4)),
+                address("llw0", linkLocal(5)),
+                address("pdp_ip1", [203, 0, 113, 9]),
+                address("utun3", linkLocal(6)),
+            ]),
+            base
+        )
+
+        // Wi-Fi to cellular, and back.
+        let onCellular = snapshot(interfaces: [("pdp_ip0", .cellular)], addresses: [cellular, systemTunnel])
+        XCTAssertNotEqual(onCellular, base)
+        XCTAssertEqual(snapshot(addresses: [wifi, wifiV6, cellular, systemTunnel]), base)
+        // The order of preference alone: cellular took the default route.
+        XCTAssertNotEqual(
+            snapshot(interfaces: [("pdp_ip0", .cellular), ("en0", .wifi)], addresses: [wifi, wifiV6, cellular, systemTunnel]),
+            base
+        )
+        // An address added to the same interface, removed from it, replaced.
+        XCTAssertNotEqual(
+            snapshot(addresses: [wifi, wifiV6, cellular, systemTunnel, address("en0", [192, 0, 2, 11])]),
+            base
+        )
+        XCTAssertNotEqual(snapshot(addresses: [wifi, cellular, systemTunnel]), base)
+        XCTAssertNotEqual(
+            snapshot(addresses: [address("en0", [192, 0, 2, 99]), wifiV6, cellular, systemTunnel]),
+            base
+        )
+        // The same address on another interface is another network.
+        XCTAssertNotEqual(
+            snapshot(addresses: [address("pdp_ip0", [192, 0, 2, 10]), wifiV6, cellular, systemTunnel]),
+            base
+        )
+        // A VPN on: a tunnel interface with a routable address, whether or
+        // not it takes the default route. And off again.
+        let splitVPN = snapshot(addresses: [wifi, wifiV6, cellular, systemTunnel, address("utun4", [100, 64, 0, 2])])
+        XCTAssertNotEqual(splitVPN, base)
+        let fullVPN = snapshot(
+            interfaces: [("utun4", .other), ("en0", .wifi), ("pdp_ip0", .cellular)],
+            addresses: [wifi, wifiV6, cellular, systemTunnel, address("utun4", [10, 8, 0, 2])]
+        )
+        XCTAssertNotEqual(fullVPN, base)
+        XCTAssertNotEqual(fullVPN, splitVPN)
+        XCTAssertNotEqual(
+            snapshot(addresses: [wifi, wifiV6, cellular, systemTunnel, address("ipsec0", [198, 51, 100, 40])]),
+            base
+        )
+        // No path, a gateway, and what the path carries.
+        XCTAssertNotEqual(snapshot(status: .unsatisfied, interfaces: [], addresses: []), base)
+        XCTAssertNotEqual(snapshot(gateways: ["192.0.2.254"], addresses: [wifi, wifiV6, cellular, systemTunnel]), base)
+        XCTAssertNotEqual(snapshot(ipv6: false, addresses: [wifi, wifiV6, cellular, systemTunnel]), base)
+        XCTAssertNotEqual(snapshot(ipv4: false, addresses: [wifi, wifiV6, cellular, systemTunnel]), base)
+        XCTAssertNotEqual(snapshot(dns: false, addresses: [wifi, wifiV6, cellular, systemTunnel]), base)
+
+        // Only digests are kept: 32 bytes each, whatever was read.
+        XCTAssertEqual(base.addressDigest.count, 32)
+        XCTAssertEqual(base.gatewayDigest.count, 32)
+        XCTAssertEqual(snapshot(status: .unsatisfied, interfaces: [], gateways: [], addresses: []).addressDigest.count, 32)
+    }
+
+    /// The first reading is the path as it is; after it, only a reading
+    /// that differs from the one before is a change.
+    func testOnlyAReadingThatDiffersFromTheOneBeforeIsANetworkChange() {
+        let wifi = address("en0", [192, 0, 2, 10])
+        let cellular = address("pdp_ip0", [198, 51, 100, 7])
+        let onWifi = snapshot(addresses: [wifi, cellular])
+        let onCellular = snapshot(interfaces: [("pdp_ip0", .cellular)], addresses: [cellular])
+        var filter = DirectIrohNetworkChangeFilter()
+
+        XCTAssertEqual(filter.observe(onWifi), .baseline)
+        for _ in 0..<20 {
+            XCTAssertEqual(filter.observe(onWifi), .unchanged)
+        }
+        XCTAssertEqual(filter.observe(onCellular), .changed)
+        XCTAssertEqual(filter.observe(onCellular), .unchanged)
+        XCTAssertEqual(filter.observe(onWifi), .changed)
+        // A watch started again begins from what it then reads.
+        filter.reset()
+        XCTAssertEqual(filter.observe(onCellular), .baseline)
+        XCTAssertEqual(filter.observe(onCellular), .unchanged)
+    }
+
+    /// On this host's real network, with the system's own monitor: reading
+    /// the same path twice gives the same snapshot, and a monitor that is
+    /// started reports no change for the path as it finds it. This shows
+    /// the reading is stable on a real system; it is not a network switch.
+    func testTheRealPathReadTwiceIsTheSameNetworkAndStartingReportsNoChange() async throws {
+        XCTAssertFalse(DirectIrohInterfaceAddress.system().isEmpty, "the loopback at least")
+
+        let first = Recorder<DirectIrohNetworkSnapshot>()
+        let system = NWPathMonitor()
+        system.pathUpdateHandler = { path in
+            first.record(DirectIrohNetworkSnapshot(path: path, addresses: DirectIrohInterfaceAddress.system()))
+            first.record(DirectIrohNetworkSnapshot(path: path, addresses: DirectIrohInterfaceAddress.system()))
+        }
+        system.start(queue: .main)
+        defer {
+            system.cancel()
+        }
+        try await eventually("the system reports its path") { first.values.count >= 2 }
+        XCTAssertEqual(first.values[0], first.values[1])
+
+        let monitor = DirectIrohPathMonitor()
+        let changes = Recorder<Int>()
+        monitor.start { changes.record(1) }
+        defer {
+            monitor.stop()
+        }
+        // Long enough for the monitor's first update, which the system
+        // delivered above within the same wait. Nothing can be awaited for
+        // "no change was reported", so this is a wait and not a barrier.
+        try await Task.sleep(nanoseconds: 500_000_000)
+        // A second, identical update from the system in that time would be
+        // ignored and counted, which is the behaviour and not a failure.
+        XCTAssertEqual(changes.values, [])
     }
 
     func testANetworkChangeBeforeAnyPathStartsOver() async throws {
@@ -572,6 +771,116 @@ final class DirectIrohTransportTests: XCTestCase {
         // The history speaks for one selection: a new one, or none, starts empty.
         harness.transport.deselect()
         XCTAssertEqual(harness.transport.pathDiagnostics, .empty)
+    }
+
+    /// The selected path's class and round trip are read with its kind, and
+    /// kept only while the two readings agree.
+    func testTheSelectedPathsClassAndRoundTripAreReadWithItsKind() async throws {
+        let harness = Harness()
+        let endpoint = harness.engine.prepare()
+        let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        connection.selectedPath = .ipv4
+        connection.selectedPathDetail = DirectSelectedPath(kind: .ipv4, local: false, rttMs: 85)
+        endpoint.connection.resolve(connection)
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(generation: "boot:1", client: harness.engine.key.endpointID, relay: Self.relayA)
+        )
+        harness.select()
+        try await eventually("the path comes up") { harness.reports == [.usable(generation: "boot:1")] }
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .ipv4)
+        XCTAssertEqual(
+            harness.transport.pathDiagnostics.selected,
+            DirectSelectedPath(kind: .ipv4, local: false, rttMs: 85)
+        )
+
+        // The two readings disagree (the path moved between them): no class.
+        connection.selectedPath = .ipv6
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .ipv6)
+        XCTAssertNil(harness.transport.pathDiagnostics.selected)
+
+        harness.transport.deselect()
+        XCTAssertNil(harness.transport.pathDiagnostics.selected)
+    }
+
+    /// Only the class of the far end's address leaves the binding: local
+    /// (private, shared address space, unique-local, link-local) or not. Zero round trip is
+    /// "not measured".
+    func testASelectedPathIsClassedByItsRemoteAddressAndNeverKeepsIt() {
+        let local = [
+            "10.0.0.7:4433", "172.16.1.2:1", "172.31.255.255:1", "192.168.1.20:52000", "169.254.3.4:1",
+            "[fd7a:115c:a1e0::1]:4433", "[fc00::1]:1", "[fe80::1%en0]:4433", "[FE80::abcd]:1",
+            "[::ffff:192.168.1.2]:1", "100.64.0.1:1", "100.127.255.1:41641",
+        ]
+        for address in local {
+            XCTAssertTrue(DirectSelectedPath.isLocalNetwork(socketAddress: address), address)
+        }
+        let global = [
+            "203.0.113.5:4433", "172.32.0.1:1", "172.15.0.1:1", "100.63.255.1:1", "100.128.0.1:1", "8.8.8.8:53",
+            "[2001:db8::1]:4433", "[::1]:1", "[::ffff:8.8.8.8]:1", "[fec0::1]:1", "not-an-address",
+        ]
+        for address in global {
+            XCTAssertFalse(DirectSelectedPath.isLocalNetwork(socketAddress: address), address)
+        }
+
+        XCTAssertEqual(
+            DirectSelectedPath(isRelay: false, isIp: true, remoteAddress: "[fe80::1]:4433", rttMs: 3),
+            DirectSelectedPath(kind: .ipv6, local: true, rttMs: 3)
+        )
+        XCTAssertEqual(
+            DirectSelectedPath(isRelay: false, isIp: true, remoteAddress: "203.0.113.5:4433", rttMs: 0),
+            DirectSelectedPath(kind: .ipv4, local: false, rttMs: nil)
+        )
+        XCTAssertEqual(
+            DirectSelectedPath(isRelay: true, isIp: false, remoteAddress: "https://relay.example/", rttMs: 140),
+            DirectSelectedPath(kind: .relay, local: nil, rttMs: 140)
+        )
+        XCTAssertNil(DirectSelectedPath(isRelay: false, isIp: false, remoteAddress: "custom", rttMs: 5))
+    }
+
+    func testAChangeOfTheConnectionsPathIsReportedOnceAndOnlyWhileThePathIsLive() async throws {
+        let harness = Harness()
+        let endpoint = harness.engine.prepare()
+        let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        connection.selectedPath = .relay
+        endpoint.connection.resolve(connection)
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(
+                generation: "boot:1", client: harness.engine.key.endpointID, addresses: [], relay: Self.relayA
+            )
+        )
+        harness.select()
+        try await eventually("the path comes up") { harness.reports == [.usable(generation: "boot:1")] }
+
+        // A stream opened while the connection still runs through the relay.
+        let early = try await harness.transport.openStream(for: harness.tag("boot:1"))
+
+        // The relayed connection reaches a direct address: reported once.
+        connection.movePath(to: .ipv4)
+        connection.movePath(to: .ipv4)
+        try await eventually("the upgrade is reported") {
+            harness.reports == [.usable(generation: "boot:1"), .pathChanged(.ipv4)]
+        }
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .ipv4)
+        // The change is a migration inside the one connection: nothing was
+        // closed, the stream opened before it still carries bytes, and new
+        // streams open on the same connection.
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        try await early.write(Data("still".utf8))
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1"))
+        XCTAssertEqual(harness.engine.bound.count, 1)
+        connection.movePath(to: .relay)
+        try await eventually("the way back is reported") {
+            harness.reports.last == .pathChanged(.relay)
+        }
+        XCTAssertEqual(harness.reports.count, 3)
+
+        // Once the selection ends the watch is stopped, and a late change of
+        // the old connection is reported to nobody.
+        harness.transport.deselect()
+        try await eventually("the watch is stopped") { harness.log.count(of: "watch.stop") == 1 }
+        connection.movePath(to: .ipv6)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(harness.reports.count, 3)
     }
 
     func testAnAnswerWithoutAKnownRelayBindsNoRelayAtAll() async throws {

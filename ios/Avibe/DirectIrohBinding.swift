@@ -84,13 +84,62 @@ struct DirectIrohBinding: DirectIrohEngine {
         }
 
         var selectedPath: DirectPathKind? {
+            Self.kind(of: connection.paths())
+        }
+
+        var selectedPathDetail: DirectSelectedPath? {
             guard let path = connection.paths().first(where: \.isSelected) else {
+                return nil
+            }
+            return DirectSelectedPath(
+                isRelay: path.isRelay,
+                isIp: path.isIp,
+                remoteAddress: path.remoteAddr,
+                rttMs: path.rttMs
+            )
+        }
+
+        func watchSelectedPath(
+            _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+        ) -> (any DirectPathWatch)? {
+            Watch(handle: connection.watchPaths(callback: PathCallback(handler: onChange)))
+        }
+
+        static func kind(of paths: [IrohLib.PathSnapshot]) -> DirectPathKind? {
+            guard let path = paths.first(where: \.isSelected) else {
                 return nil
             }
             if path.isRelay {
                 return .relay
             }
             return path.isIp ? DirectPathKind.family(ofSocketAddress: path.remoteAddr) : nil
+        }
+    }
+
+    private final class PathCallback: IrohLib.PathChangeCallback, @unchecked Sendable {
+        private let handler: @Sendable (DirectPathKind?) -> Void
+
+        init(handler: @escaping @Sendable (DirectPathKind?) -> Void) {
+            self.handler = handler
+        }
+
+        func onChange(paths: [IrohLib.PathSnapshot]) async throws {
+            handler(Live.kind(of: paths))
+        }
+    }
+
+    private final class Watch: DirectPathWatch, @unchecked Sendable {
+        private let handle: IrohLib.WatchHandle
+
+        init(handle: IrohLib.WatchHandle) {
+            self.handle = handle
+        }
+
+        func stop() {
+            let handle = handle
+            Task {
+                await handle.stop()
+            }
         }
     }
 

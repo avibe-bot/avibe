@@ -220,15 +220,131 @@ async def test_off_is_literal_no_listener_child_order_or_file(reports, monkeypat
     assert set(paths.get_state_dir().rglob("*")) == before
 
 
-async def test_product_without_binary_never_orders_even_with_fresh_permission(reports):
+@pytest.mark.parametrize("bad_pin", ["pending", "tampered"])
+async def test_failed_auto_install_backs_off_without_starting(reports, published, monkeypatch, bad_pin):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    payload, manifest, downloads, sources = published
+    if bad_pin == "pending":
+        payload["release_state"] = "pending"
+        manifest.write_text(json.dumps(payload))
+    else:
+        source = sources[payload["archives"]["linux-x64"]["url"]]
+        source.write_bytes(b"x" * source.stat().st_size)
+    attempts = []
+    ensure = DirectTransportRuntimeManager.ensure
+    def counted(manager):
+        attempts.append(time.monotonic())
+        return ensure(manager)
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", counted)
+    monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.3)
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
     config = _config()
     async with _owner(config, reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
-        await _wait(lambda: owner.status().state == "transport-not-installed")
+        await _wait(lambda: owner.status().reason == "transport_install_failed")
         await _permission(owner, config)
-        await asyncio.sleep(0.12)
-        assert not cert.calls
-        assert "ingress_start" not in calls and "supervisor_start" not in calls
-        assert rv.endpoint is None and rv.reason == "transport_not_installed"
+        await _wait(lambda: len(attempts) >= 2 and owner.status().reason == "transport_install_failed" and owner._install_task is None)
+        assert attempts[1] - attempts[0] >= 0.3
+        assert not cert.calls and rv.endpoint is None and "supervisor_start" not in calls
+        assert DirectTransportRuntimeManager().resolve_binary() is None
+        assert not downloads if bad_pin == "pending" else len(downloads) == 2
+
+
+async def test_auto_failure_logs_hide_manager_details_but_not_other_callers(reports, published, monkeypatch, caplog):
+    from core import managed_runtime
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    entered, release = threading.Event(), threading.Event()
+    def fail_lock(manager):
+        entered.set()
+        assert release.wait(3)
+        raise OSError("/private/path/owner/test-lock")
+    monkeypatch.setattr(DirectTransportRuntimeManager, "_acquire_mutation_lock", fail_lock)
+    caplog.set_level("INFO")
+    async with _owner(_config(), reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, *_):
+        try:
+            await _wait(entered.is_set)
+            managed_runtime.logger.warning("unrelated manager diagnostic")
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == "transport_install_failed")
+    records = [r for r in caplog.records if r.name in (managed_runtime.logger.name, module.logger.name)]
+    assert [r.getMessage() for r in records] == ["Direct transport install reason=transport_installing",
+        "unrelated manager diagnostic", "Direct transport install reason=transport_install_failed"]
+    assert all(not r.exc_info for r in records)
+
+
+async def test_skipped_install_and_prior_failure_do_not_delay_reenable(reports, published, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    config = _config()
+    entered, release = threading.Event(), threading.Event()
+    worker = threading.local()
+    install_pin = DirectAccessLifecycle._install_pin
+    def mark_worker(self, *args):
+        worker.install = True
+        try:
+            return install_pin(self, *args)
+        finally:
+            worker.install = False
+    def load():
+        if getattr(worker, "install", False) and not entered.is_set():
+            entered.set()
+            assert release.wait(3)
+        return config
+    attempts = []
+    ensure = DirectTransportRuntimeManager.ensure
+    def fail_once(manager):
+        attempts.append(1)
+        return {"ok": False} if len(attempts) == 1 else ensure(manager)
+    monkeypatch.setattr(DirectAccessLifecycle, "_install_pin", mark_worker)
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", fail_once)
+    async with _owner(config, reports, config_loader=load, binary_resolver=module.resolve_direct_transport_binary) as (owner, *_):
+        async def toggle(enabled):
+            config.remote_access.vibe_cloud.direct = enabled
+            owner.notify_config_changed(config)
+            await _wait(lambda: owner.status().enabled == enabled)
+        try:
+            await _wait(entered.is_set)
+            await toggle(False)
+            await toggle(True)
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == "transport_install_failed")
+        assert attempts == [1] and owner._install_delay == 2 * module.INSTALL_RETRY_INITIAL_SECONDS
+        await toggle(False)
+        await toggle(True)
+        await _wait(lambda: owner.status().state == "waiting-permission")
+        assert attempts == [1, 1]
+
+
+async def test_auto_install_once_only_when_enabled(reports, published, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    config = _config(direct=False)
+    attempts = []
+    entered, release = threading.Event(), threading.Event()
+    ensure = DirectTransportRuntimeManager.ensure
+    def slow(manager):
+        attempts.append(1)
+        entered.set()
+        assert release.wait(4)
+        return ensure(manager)
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", slow)
+    async with _owner(config, reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
+        assert not attempts and not published[2]
+        config.remote_access.vibe_cloud.direct = True
+        owner.notify_config_changed(config)
+        try:
+            await _wait(entered.is_set)
+            await _wait(lambda: owner.status().state == "installing")
+            await _permission(owner, config)
+            await asyncio.sleep(0.15)
+            assert not cert.calls and rv.endpoint is None and attempts == [1]
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().state == "running")
+        assert attempts == [1] and len(published[2]) == 1 and rv.endpoint is not None
 
 
 async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_then_retires_on_off(reports, published, monkeypatch):
@@ -305,10 +421,9 @@ async def test_managed_install_reaches_publication_only_after_all_lifecycle_gate
             # Removing integrity approval, without changing pairing or permission,
             # withdraws the ready answer. Repair resumes the normal gated path.
             binary.write_bytes(b"tampered test fixture")
-            await _wait(lambda: owner.status().state == "transport-not-installed")
-            assert rv.endpoint is None and not owner.status().transport_running
-            assert manager.ensure()["ok"] is True
+            await _wait(lambda: calls.count("supervisor_stop") == 1)
             await _wait(lambda: owner.status().state == "running")
+            assert manager.resolve_binary() == binary and binary.read_bytes() != b"tampered test fixture"
             assert calls.count("supervisor_start") == 2
     finally:
         release.set()
@@ -474,8 +589,10 @@ async def test_binary_recovery_waits_for_certificate_after_discarded_renewal_ret
             await _permission(owner, config)
             await _wait(lambda: owner.status().state == "running")
             await _wait(renewal_entered.is_set)
+            from core.direct_transport_runtime import DirectTransportRuntimeManager
+            monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", lambda self: {"ok": False})
             available[0] = False
-            await _wait(lambda: owner.status().state == "transport-not-installed")
+            await _wait(lambda: owner.status().reason == "transport_install_failed")
             renewal_release.set()
             await _wait(lambda: owner._poll_task is None and not old_chain.exists())
             available[0] = True

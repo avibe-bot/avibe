@@ -1557,7 +1557,7 @@ mod tests {
     /// A helper still updating the database outlives the 120 s readiness wait.
     /// Retry must wait on that same helper with a fresh budget and report its
     /// real outcome: the disk-full cause, or the Runtime once it is ready.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_after_a_timeout_reports_the_retained_helpers_real_outcome() {
         use crate::bootstrap::{BootstrapTrigger, DiscardStatus, RuntimeHost, RuntimeHostSettings};
         use crate::health::{HealthProbe, Presence};

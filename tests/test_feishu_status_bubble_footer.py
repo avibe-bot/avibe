@@ -13,7 +13,7 @@ documented replacement) — the analog of Slack's context block and Discord's
 - the empty-body guard relaxation;
 - the lark platform capability flag.
 
-The send paths use a stubbed lark client so nothing touches the network.
+The send paths use a stubbed message API so nothing touches the network.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from config.v2_config import LarkConfig
 from modules.im import MessageContext
 from modules.im.base import InlineButton, InlineKeyboard
 from modules.im.feishu import FeishuBot
+from modules.im.feishu_api import FeishuApiResponse
 
 
 def _card_elements(card_json: str) -> list:
@@ -53,27 +54,19 @@ def _make_bot() -> FeishuBot:
     return FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret"))
 
 
-class _FakeResponse:
-    def __init__(self, message_id: str = "om_new") -> None:
-        self.data = types.SimpleNamespace(message_id=message_id, chat_id="oc_chat")
-        self.code = 0
-        self.msg = "ok"
-
-    def success(self) -> bool:
-        return True
+def _sent() -> FeishuApiResponse:
+    return FeishuApiResponse(code=0, msg="ok", data={"message_id": "om_new", "chat_id": "oc_chat"})
 
 
-def _stub_lark_client(bot: FeishuBot) -> types.SimpleNamespace:
-    """Give ``bot`` a fake ``_lark_client`` capturing create/patch/reply calls."""
-    message = types.SimpleNamespace(
-        acreate=AsyncMock(return_value=_FakeResponse()),
-        apatch=AsyncMock(return_value=_FakeResponse()),
-        areply=AsyncMock(return_value=_FakeResponse()),
+def _stub_api(bot: FeishuBot) -> types.SimpleNamespace:
+    """Give ``bot`` a fake message API capturing create/patch/reply calls."""
+    api = types.SimpleNamespace(
+        create_message=AsyncMock(return_value=_sent()),
+        patch_message=AsyncMock(return_value=_sent()),
+        reply_message=AsyncMock(return_value=_sent()),
     )
-    client = types.SimpleNamespace(im=types.SimpleNamespace(v1=types.SimpleNamespace(message=message)))
-    bot._lark_client = client
-    bot._ensure_client = lambda: None  # type: ignore[method-assign]
-    return message
+    bot._api = api
+    return api
 
 
 class BuildCardJsonFooterTests(unittest.TestCase):
@@ -130,68 +123,69 @@ class BuildCardJsonFooterTests(unittest.TestCase):
 class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_message_forwards_subtext(self):
         bot = _make_bot()
-        message = _stub_lark_client(bot)
+        api = _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         await bot.send_message(ctx, "🔧 x", subtext="⏳ 5s")
-        content = json.loads(message.acreate.await_args.args[0].request_body.content)
+        content = json.loads(api.create_message.await_args.args[3])
         _assert_is_footer(self, content["body"]["elements"][-1], "⏳ 5s")
 
     async def test_send_message_footer_only_is_allowed(self):
         bot = _make_bot()
-        message = _stub_lark_client(bot)
+        api = _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         # Empty body + subtext must NOT raise (turn-start footer-only bubble).
         mid = await bot.send_message(ctx, "", subtext="⏳ working · 0s")
         self.assertEqual(mid, "om_new")
-        content = json.loads(message.acreate.await_args.args[0].request_body.content)
+        content = json.loads(api.create_message.await_args.args[3])
         self.assertEqual(len(content["body"]["elements"]), 1)
         _assert_is_footer(self, content["body"]["elements"][0], "⏳ working · 0s")
 
     async def test_send_message_empty_without_subtext_still_rejected(self):
         bot = _make_bot()
-        _stub_lark_client(bot)
+        _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         with self.assertRaises(ValueError):
             await bot.send_message(ctx, "", subtext=None)
 
     async def test_thread_reply_forwards_subtext(self):
         bot = _make_bot()
-        message = _stub_lark_client(bot)
+        api = _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark", thread_id="om_root")
         await bot.send_message(ctx, "🔧 x", subtext="⏳ 5s")
-        # Thread reply goes through areply (reply_in_thread), not acreate.
-        message.acreate.assert_not_awaited()
-        content = json.loads(message.areply.await_args.args[0].request_body.content)
+        # Thread reply goes through the reply call (reply_in_thread), not create.
+        api.create_message.assert_not_awaited()
+        self.assertTrue(api.reply_message.await_args.kwargs["reply_in_thread"])
+        content = json.loads(api.reply_message.await_args.args[2])
         _assert_is_footer(self, content["body"]["elements"][-1], "⏳ 5s")
 
     async def test_edit_message_forwards_subtext(self):
         bot = _make_bot()
-        message = _stub_lark_client(bot)
+        api = _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         ok = await bot.edit_message(ctx, "om_1", text="🔧 y", subtext="⏳ 9s")
         self.assertTrue(ok)
-        content = json.loads(message.apatch.await_args.args[0].request_body.content)
+        content = json.loads(api.patch_message.await_args.args[1])
         _assert_is_footer(self, content["body"]["elements"][-1], "⏳ 9s")
 
     async def test_edit_message_collapse_marker_footer_only(self):
         bot = _make_bot()
-        message = _stub_lark_client(bot)
+        api = _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         # Terminal collapse edits body to "" and carries a marker footer.
         ok = await bot.edit_message(ctx, "om_1", text="", subtext="✅ done")
         self.assertTrue(ok)
-        content = json.loads(message.apatch.await_args.args[0].request_body.content)
+        content = json.loads(api.patch_message.await_args.args[1])
         self.assertEqual(len(content["body"]["elements"]), 1)
         _assert_is_footer(self, content["body"]["elements"][0], "✅ done")
 
     async def test_send_message_with_buttons_forwards_subtext(self):
         bot = _make_bot()
-        message = _stub_lark_client(bot)
+        api = _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         keyboard = InlineKeyboard(buttons=[[InlineButton(text="Continue", callback_data="cont")]])
         # Concise result path: buttons AND a done footer together.
         await bot.send_message_with_buttons(ctx, "Final answer", keyboard, subtext="✅ done · 248k tok")
-        content = json.loads(message.acreate.await_args.args[0].request_body.content)
+        content = json.loads(api.create_message.await_args.args[3])
         tags = [e["tag"] for e in content["body"]["elements"]]
         # Both the buttons and the footer survive (the regression codex flagged).
         self.assertIn("button", tags)
@@ -204,7 +198,7 @@ class KeyboardRemovalFooterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_remove_inline_keyboard_reapplies_cached_footer(self):
         bot = _make_bot()
-        _stub_lark_client(bot)
+        _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         kb = InlineKeyboard(buttons=[[InlineButton(text="Continue", callback_data="c")]])
         mid = await bot.send_message_with_buttons(ctx, "Final answer", kb, subtext="✅ done · 1:30 · 240k tok")
@@ -224,7 +218,7 @@ class KeyboardRemovalFooterTests(unittest.IsolatedAsyncioTestCase):
         # Restart / cache miss: the footer is recovered from the live card and
         # kept OUT of the body (font wrapper stripped), not folded into it.
         bot = _make_bot()
-        _stub_lark_client(bot)
+        _stub_api(bot)
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         card = json.loads(
             bot._build_card_json("Final answer", [[{"text": "OK", "callback_data": "ok"}]], subtext="✅ done · 5s")

@@ -1,6 +1,7 @@
 export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
+  | 'appLock'
   | 'app'
   | 'badge'
   | 'health'
@@ -48,7 +49,13 @@ export type NativeDirectStatus = {
   preferred: NativeDirectPreference;
   sequence: number;
   closure: number;
+  /** `direct` version 3: the kind of path the shell's own direct connection
+   *  runs on while `preferred` is `direct`; null when not known. */
+  path: NativeDirectPathKind | null;
 };
+
+/** The kind of path the App's own direct connection runs on. */
+export type NativeDirectPathKind = 'relay' | 'ipv4' | 'ipv6';
 
 export type NativeBridgeError = {
   code: string;
@@ -651,14 +658,19 @@ function isCounter(value: unknown): value is number {
 
 function parseNativeDirectStatus(payload: unknown): NativeDirectStatus | null {
   if (!payload || typeof payload !== 'object') return null;
-  const { preferred, sequence, closure } = payload as {
+  const { preferred, sequence, closure, path } = payload as {
     preferred?: unknown;
     sequence?: unknown;
     closure?: unknown;
+    path?: unknown;
   };
   if (preferred !== 'tunnel' && preferred !== 'direct') return null;
   if (!isCounter(sequence) || !isCounter(closure)) return null;
-  return { preferred, sequence, closure };
+  return { preferred, sequence, closure, path: parseDirectPathKind(path) };
+}
+
+function parseDirectPathKind(value: unknown): NativeDirectPathKind | null {
+  return value === 'relay' || value === 'ipv4' || value === 'ipv6' ? value : null;
 }
 
 /**
@@ -694,8 +706,10 @@ type DirectTracker = {
   stateListeners: Set<() => void>;
   /** The latest preference, ordered by `sequence`; null before any. */
   preferred: NativeDirectPreference | null;
+  /** The shell's path with that preference (`direct` version 3). */
+  path: NativeDirectPathKind | null;
   preferredSequence: number;
-  preferenceHandlers: Set<(preferred: NativeDirectPreference) => void>;
+  preferenceHandlers: Set<(preferred: NativeDirectPreference, path: NativeDirectPathKind | null) => void>;
 };
 
 // One per document: a WebView document and each child window load their own
@@ -738,9 +752,10 @@ function observeDirectStatus(
   }
 }
 
-// The preference, ordered by `sequence`. Its handlers hear every change, and
-// every status read while it is `direct` (a resume), so a hand-over skipped
-// earlier can be tried again; they decide for themselves whether to act.
+// The preference and the shell's path, ordered by `sequence`. Their handlers
+// hear every change of either, and every status read while the preference is
+// `direct` (a resume), so a hand-over skipped earlier can be tried again; they
+// decide for themselves whether to act.
 function observeDirectPreference(
   tracker: DirectTracker,
   status: NativeDirectStatus,
@@ -749,15 +764,16 @@ function observeDirectPreference(
   if (status.sequence <= tracker.preferredSequence && tracker.preferred !== null) {
     if (!(fromRead && tracker.preferred === 'direct')) return;
   } else {
-    const changed = tracker.preferred !== status.preferred;
+    const changed = tracker.preferred !== status.preferred || tracker.path !== status.path;
     tracker.preferred = status.preferred;
+    tracker.path = status.preferred === 'direct' ? status.path : null;
     tracker.preferredSequence = status.sequence;
     if (!changed && !fromRead) return;
   }
   const preferred = tracker.preferred;
   if (preferred === null) return;
   for (const handler of Array.from(tracker.preferenceHandlers)) {
-    if (tracker.preferenceHandlers.has(handler)) handler(preferred);
+    if (tracker.preferenceHandlers.has(handler)) handler(preferred, tracker.path);
   }
 }
 
@@ -815,6 +831,7 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
     closureHandlers: new Set(),
     stateListeners: new Set(),
     preferred: null,
+    path: null,
     preferredSequence: -1,
     preferenceHandlers: new Set(),
   };
@@ -914,12 +931,12 @@ export function onNativeDirectClosure(handler: () => void): () => void {
 }
 
 /**
- * Calls `handler` with the preference whenever it changes (ordered by
- * `sequence`), and on every status read while it is `direct`. Without the
- * `direct` capability this never fires.
+ * Calls `handler` with the preference and the shell's path whenever either
+ * changes (ordered by `sequence`), and on every status read while the
+ * preference is `direct`. Without the `direct` capability this never fires.
  */
 export function onNativeDirectPreference(
-  handler: (preferred: NativeDirectPreference) => void,
+  handler: (preferred: NativeDirectPreference, path: NativeDirectPathKind | null) => void,
 ): () => void {
   const native = directBridge();
   if (!native) return () => undefined;
@@ -934,6 +951,17 @@ export function onNativeDirectPreference(
 export function nativeDirectPreference(): NativeDirectPreference | null {
   const native = directBridge();
   return native ? directTrackerFor(native).preferred : null;
+}
+
+/** The shell's path with the latest preference; null when not known. */
+export function nativeDirectPathKind(): NativeDirectPathKind | null {
+  const native = directBridge();
+  return native ? directTrackerFor(native).path : null;
+}
+
+/** The shell reports its path and its changes (`direct` version 3). */
+export function nativeDirectPathReported(): boolean {
+  return hasNativeCapability('direct', 3);
 }
 
 /** The shell answers `direct.handover` (`direct` version 2). */
@@ -973,14 +1001,43 @@ export async function nativeDirectHandover(): Promise<NativeDirectHandoverResult
   }
 }
 
-/** The kind of path the App's own direct connection runs on. */
-export type NativeDirectPathKind = 'relay' | 'ipv4' | 'ipv6';
-
 /** For the Settings line: the preference, and the App's own path if it has one. */
 export type NativeDirectPathSnapshot = {
   preferred: NativeDirectPreference;
   path: NativeDirectPathKind | null;
+  /** For an IPv4 or IPv6 path: whether its far end is on a local network
+   *  (`local`) or not (`global`). Null for the relay, or when not reported. */
+  scope: 'local' | 'global' | null;
+  /** The path's round-trip time in ms, when the shell measured it. */
+  rttMs: number | null;
+  /** The last new connection's race, if the shell recorded one. */
+  lastConnection: NativeDirectConnection | null;
 };
+
+/** One new connection's race between the direct path and the public origin:
+ *  how long each took to be ready (ms), or what became of it, and which won. */
+export type NativeDirectConnection = {
+  direct: number | 'none' | 'failed' | 'timeout' | 'cancelled';
+  public: number | 'none' | 'failed' | 'timeout' | 'cancelled';
+  winner: 'direct' | 'public' | 'none';
+};
+
+function parseDirectLeg(value: unknown): NativeDirectConnection['direct'] | null {
+  if (isCounter(value)) return value;
+  return value === 'none' || value === 'failed' || value === 'timeout' || value === 'cancelled'
+    ? value
+    : null;
+}
+
+function parseDirectConnection(value: unknown): NativeDirectConnection | null {
+  if (!value || typeof value !== 'object') return null;
+  const { direct, public: publicLeg, winner } = value as { direct?: unknown; public?: unknown; winner?: unknown };
+  const directLeg = parseDirectLeg(direct);
+  const publicParsed = parseDirectLeg(publicLeg);
+  if (directLeg === null || publicParsed === null) return null;
+  if (winner !== 'direct' && winner !== 'public' && winner !== 'none') return null;
+  return { direct: directLeg, public: publicParsed, winner };
+}
 
 /** Reads `direct.status()` once for display. Null without `direct` or on failure. */
 export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot | null> {
@@ -990,10 +1047,31 @@ export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot |
     const answer = await native.call<unknown>('direct.status');
     const status = parseNativeDirectStatus(answer);
     if (!status) return null;
-    const raw = (answer as { path?: unknown }).path;
-    const path = raw === 'relay' || raw === 'ipv4' || raw === 'ipv6' ? raw : null;
-    return { preferred: status.preferred, path };
+    const connections = (answer as { connections?: unknown }).connections;
+    const last = Array.isArray(connections) && connections.length > 0
+      ? parseDirectConnection(connections[connections.length - 1])
+      : null;
+    const { path_scope: scope, rtt_ms: rttMs } = answer as { path_scope?: unknown; rtt_ms?: unknown };
+    // Both belong to the path the status names; without one they are not shown.
+    const named = status.path !== null;
+    return {
+      preferred: status.preferred,
+      path: status.path,
+      scope: named && status.path !== 'relay' && (scope === 'local' || scope === 'global') ? scope : null,
+      rttMs: named && isCounter(rttMs) && rttMs > 0 ? rttMs : null,
+      lastConnection: last,
+    };
   } catch {
     return null;
   }
+}
+
+/** `appLock.status` (ui/src/lib/appLockContract.ts); the caller parses the payload. */
+export async function nativeAppLockStatus(): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.status');
+}
+
+/** `appLock.setPolicy`; the shell verifies the device owner before it saves. */
+export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.setPolicy', { policy });
 }

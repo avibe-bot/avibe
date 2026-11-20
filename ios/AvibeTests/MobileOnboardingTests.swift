@@ -2208,6 +2208,8 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.info",
                 "app.openExternal",
                 "app.setAccountActionAvailable",
+                "appLock.setPolicy",
+                "appLock.status",
                 "app.showAccount",
                 "app.showInstances",
                 "badge.set",

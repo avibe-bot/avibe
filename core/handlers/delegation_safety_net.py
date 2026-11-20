@@ -88,11 +88,11 @@ class DelegationSafetyNet:
             pair = self._eligible(conn, observation)
             if pair is None:
                 return False
-            if pair.get("unavailable"):
+            if pair.get("unavailable") or pair.get("answered"):
                 conn.execute(update(session_delegations).where(
                     session_delegations.c.sender_session_id == pair["sender_session_id"],
                     session_delegations.c.recipient_session_id == pair["recipient_session_id"],
-                ).values(state="unavailable"))
+                ).values(state="answered" if pair.get("answered") else "unavailable"))
                 return False
             if target is None:
                 return False

@@ -129,6 +129,15 @@ def test_offer_and_renewal_logs_only_offer_counts_and_safe_reason(caplog):
         assert private not in "\n".join(lines)
 
 
+@pytest.mark.parametrize("reason", ["transport_installing", "transport_install_failed"])
+def test_install_refusal_log_preserves_fixed_reason(reason, caplog):
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    rv = DirectRendezvous()
+    rv.publish(None, reason=reason)
+    _offer(rv)
+    assert caplog.messages[-1].endswith(f"outcome=refused reason={reason} suppressed=0")
+
+
 def test_repeat_log_window_is_per_caller_and_keeps_permission_codes(monkeypatch, caplog):
     caplog.set_level("INFO", logger="vibe.direct_rendezvous")
     now = [100.0]

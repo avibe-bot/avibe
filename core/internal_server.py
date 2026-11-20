@@ -809,6 +809,20 @@ def create_app(
                 )
         return submission if delivery_owner_transferred else route
 
+    @app.post("/internal/diagnostics/warm-gc-freeze")
+    async def _arm_warm_gc_freeze():
+        watchdog = getattr(controller, "_loop_watchdog", None)
+        if watchdog is None:
+            raise HTTPException(status_code=503, detail="watchdog_unavailable")
+        return {"state": watchdog.arm_warm_freeze(manager), "controller_pid": os.getpid()}
+
+    @app.post("/internal/diagnostics/warm-gc-unfreeze")
+    async def _rollback_warm_gc_freeze():
+        watchdog = getattr(controller, "_loop_watchdog", None)
+        if watchdog is None:
+            raise HTTPException(status_code=503, detail="watchdog_unavailable")
+        return {"state": watchdog.rollback_warm_freeze(), "controller_pid": os.getpid()}
+
     @app.post("/internal/diagnostics/warm-gc-census")
     async def _arm_warm_gc_census():
         import os

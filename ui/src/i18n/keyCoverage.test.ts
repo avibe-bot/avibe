@@ -926,6 +926,8 @@ const NON_KEY_LITERALS = [
   'app.setAccountActionAvailable',
   'app.showAccount',
   'app.showInstances',
+  'appLock.setPolicy',
+  'appLock.status',
   'auth.signInWithProvider',
   'auth.signInWithPasskey',
   'auth.providers',

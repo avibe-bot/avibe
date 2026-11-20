@@ -96,7 +96,7 @@ export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwit
       { id: 'team', name: fixture.state === 'long-content' ? '跨时区产品研发团队 — Product design and research workstation' : 'Product team', host: 'team-app.avibe.bot', url: 'https://team-app.avibe.bot', relationship: 'shared', owner_email: 'zhou.min.design-and-research@example.test', available: true },
     ] },
     desktop: { version: '3.2.6rc19', update: { phase: 'current', latest: null, channel: 'test', skippedVersion: null, interactive: false } },
-    consent: null, remote_auxiliary: 'local',
+    instance_update: null, consent: null, remote_auxiliary: 'local',
   };
   if (['empty', 'loading', 'list-error'].includes(fixture.state)) { state.catalog.instances = []; state.local.slug = null; }
   if (fixture.state === 'loading') state.catalog.status = 'loading';

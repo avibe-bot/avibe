@@ -14,7 +14,8 @@ Incus. The first operational exercise requires the lead's confirmation that
   `core.managed_runtime` for download bounds, archive/binary SHA-256 checks,
   extraction, mutation serialization and atomic selection. No PATH lookup,
   custom manifest, URL, environment or arbitrary executable override.
-- Installation is explicit and independent of enablement. It must not alter
+- Explicit CLI installation remains independent of enablement. An opted-in
+  lifecycle also uses this installer to recover a missing packaged pin. Neither path may alter
   pairing, certificates, `remote_access.vibe_cloud.direct` or Cloudflare, and
   must not run the sidecar as a version/readiness probe.
 - Pending, missing, malformed or unsupported pins cannot install or resolve a

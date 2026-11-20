@@ -600,6 +600,22 @@ final class AppModel: ObservableObject {
         }
         _ = nativePushCoordinator
         _ = directPathController
+        // The Action Button's hidden WebView loads through the same local
+        // listener as the page, so it asks the same gate before its load.
+        VoiceCaptureLoadGate.provider = { [weak self] origin, storeIdentifier in
+            guard let self, let controller = self.directPathController else {
+                return .open
+            }
+            // Asked by the take's own host, with no runtime: a take kept
+            // for an instance that is no longer the one shown still goes
+            // through the listener its host is routed to.
+            return VoiceCaptureLoadGate.gate(
+                for: origin, store: storeIdentifier, currentStore: self.websiteDataStore.identifier
+            ) { url in
+                controller.settleRecordedFault()
+                return controller.loadGate(forInstanceURL: url)
+            }
+        }
         runtimeOpenLifecycleObservers = [
             runtimeOpenNotificationCenter.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification,

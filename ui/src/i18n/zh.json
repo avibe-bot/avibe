@@ -1,4 +1,29 @@
 {
+  "appLock": {
+    "lock": {
+      "lockedTitle": "Avibe 已锁定",
+      "unlockTouchID": "使用触控 ID 解锁",
+      "unlockPassword": "使用登录密码解锁",
+      "verifying": "正在验证…",
+      "verificationFailed": "没有验证成功，再试一次。",
+      "macNotEnrolled": "这台 Mac 没有录入指纹。",
+      "macLockout": "触控 ID 多次未识别，请用登录密码解锁。",
+      "macUnavailable": "触控 ID 现在不可用，例如笔记本合盖时。",
+      "restoreAllWindows": "解锁后，所有 Avibe 窗口一起恢复。",
+      "pendingContent": "收到一段要发给 Vibey 的内容。解锁后会放进输入框，由你确认再发送。",
+      "pendingLink": "收到一个 Avibe 链接。解锁后会打开它。",
+      "changeReason": "确认更改 App 锁",
+      "unlockReason": "解锁 Avibe",
+      "iphone": {
+        "unlockFaceID": "使用面容 ID 解锁",
+        "unlockPasscode": "使用设备密码解锁",
+        "faceIDNotEnrolled": "这台 iPhone 没有录入面容 ID。",
+        "faceIDDenied": "Avibe 没有使用面容 ID 的权限。可在 iOS 设置 › Avibe 中允许。",
+        "faceIDLockout": "面容 ID 多次未识别，请用设备密码解锁。",
+        "touchIDLockout": "触控 ID 多次未识别，请用设备密码解锁。"
+      }
+    }
+  },
   "desktopBootstrap": {
     "retry": "重试",
     "installationHelp": "安装帮助",
@@ -708,6 +733,24 @@
       "remoteInstallWarning": "远程安装可能在主机无人值守时重启 Avibe、中断正在运行的工作，并在更新失败时需要主机上的人修复。",
       "autosaved": "修改会自动保存",
       "languageSaveFailed": "语言已在本机切换，但未能保存到此实例",
+      "appLock": {
+        "title": "App 锁",
+        "descriptionFaceId": "打开 Avibe，或离开超过所选时间后回来，需要先用面容 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
+        "descriptionTouchIdPhone": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
+        "descriptionMac": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或 Mac 登录密码解锁。只对这台 Mac 生效，更改时需要验证一次。",
+        "off": "关闭",
+        "immediately": "立即",
+        "oneMinute": "1 分钟后",
+        "fiveMinutes": "5 分钟后",
+        "verifying": "正在验证…",
+        "failed": "没有验证成功，设置没有改变。",
+        "noPasscodePhone": "这台 iPhone 没有设置密码，App 锁无法使用。在 iOS 设置 › 面容 ID 与密码 中设置密码后即可开启。",
+        "noPasswordMac": "这个 Mac 用户没有登录密码，App 锁无法使用。在系统设置 › 用户与群组 中设置密码后即可开启。",
+        "faceIdDenied": "Avibe 没有使用面容 ID 的权限，会用设备密码解锁。可在 iOS 设置 › Avibe 中允许面容 ID。",
+        "passwordOnlyMac": "这台 Mac 现在没有可用的触控 ID，会用 Mac 登录密码解锁。",
+        "coversPhone": "App 锁只挡住 App 里的内容。通知预览由 iOS 设置 › 通知 决定；后台同步和提醒照常进行。",
+        "coversMac": "App 锁挡住 Avibe 的所有窗口。本机 Runtime 和 Agent 照常运行；通知预览由系统设置 › 通知 决定。"
+      },
       "desktopMini": {
         "title": "桌面迷你窗",
         "description": "在桌面上显示桌宠迷你窗。",
@@ -1737,12 +1780,15 @@
         "autoRefresh": "每 5 分钟自动刷新",
         "refresh": "立即刷新",
         "refreshing": "刷新中…",
-        "empty": "还没有已登录的订阅账号。在「供应商与路由」里添加 Claude 或 ChatGPT 订阅后，这里会显示它们的额度。",
+        "refreshAccount": "刷新额度",
+        "empty": "还没有已登录的订阅账号。在「供应商与路由」里登录订阅账号后，这里会显示它们的额度。",
         "left": "剩余",
         "window": {
           "session": "5 小时额度",
           "weekly": "每周额度",
           "model": "{{model}} 每周额度",
+          "modelSession": "{{model}} 5 小时额度",
+          "monthly": "每月额度",
           "span": {
             "hours": "{{hours}} 小时",
             "days": "{{days}} 天"
@@ -1783,7 +1829,7 @@
         },
         "unread": {
           "auth_expired": "登录已过期，读不到额度",
-          "unsupported": "这个订阅不提供额度数据",
+          "unsupported": "供应商没有提供这个账号的额度数据",
           "error": "暂时读不到额度，稍后会自动重试"
         },
         "ago": {
@@ -3070,6 +3116,7 @@
     "ready": "已就绪",
     "stateNeedsAttention": "需要检查",
     "quality": "连接质量",
+    "qualityFallback": "备用路径质量",
     "qualityGood": "良好",
     "qualityFair": "一般",
     "qualityPoor": "较慢",
@@ -3089,6 +3136,7 @@
     "requestPathUnavailable": "远程请求不可用 · {{success}}/{{count}} 成功",
     "requestPathMeasuring": "正在测量远程请求 · {{count}} 个样本",
     "networkPath": "网络路径",
+    "fallbackRoute": "备用路径：Cloudflare 隧道",
     "networkBrowserIngress": "浏览器请求的 Cloudflare 入口",
     "networkProvider": "网络",
     "networkConnectorEdges": "Tunnel 边缘节点",
@@ -3151,13 +3199,22 @@
       "detail": "{{certificate}} · {{page}}",
       "pageDirect": "本页当前连接：直连",
       "pageOther": "本页当前连接：未走直连",
-      "device": "本设备直连：{{state}}",
-      "deviceWithPath": "本设备直连：{{state}} · {{path}}",
-      "deviceInUse": "使用中",
-      "deviceOn": "已开启",
-      "pathRelay": "中继",
-      "pathIpv4": "直连 IPv4",
-      "pathIpv6": "直连 IPv6"
+      "using": "本设备正在使用：{{path}}",
+      "usingTunnel": "Cloudflare 隧道",
+      "usingTunnelRelayUp": "Cloudflare 隧道（中继可用，但更慢）",
+      "usingRelay": "中继",
+      "usingLan": "局域网直连",
+      "usingPunched": "打洞直连",
+      "usingDirect": "直连",
+      "familyIpv4": "IPv4",
+      "familyIpv6": "IPv6",
+      "withDetail": "{{path}} · {{detail}}",
+      "lastConnection": "最近一次连接：直连 {{direct}} / Cloudflare {{public}}",
+      "legMs": "{{ms}} ms",
+      "legNone": "—",
+      "legFailed": "失败",
+      "legCancelled": "未用上",
+      "legTimeout": "超时"
     }
   },
   "models": {
@@ -3208,10 +3265,10 @@
     "quota": {
       "error": {
         "auth_expired": "登录已过期",
-        "rate_limited": "服务商暂时限制了额度查询",
-        "unsupported": "这个订阅不提供额度数据",
+        "rate_limited": "供应商暂时限制了额度查询",
+        "unsupported": "供应商没有提供这个账号的额度数据",
         "unavailable": "暂时读不到额度",
-        "malformed": "服务商返回的额度数据读不懂"
+        "malformed": "供应商返回的额度数据读不懂"
       }
     }
   },
@@ -3660,7 +3717,8 @@
     "signOut": "退出登录",
     "signingOut": "正在退出…",
     "resizeSidebar": "调整侧栏宽度",
-    "directTag": "直连"
+    "directTag": "直连",
+    "relayTag": "中继"
   },
   "workbench": {
     "eyebrow": "Agent OS",

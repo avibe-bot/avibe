@@ -382,6 +382,13 @@ async def _activate(
     return turn_id, context
 
 
+def _written_evidence(turn) -> dict:
+    """A Turn's terminal evidence, without the receipt-eligibility mark every end carries."""
+    evidence = json.loads(turn["terminal_evidence_json"])
+    assert evidence.pop("delegation_receipt_eligible") is True
+    return evidence
+
+
 def _rows(engine) -> list[dict]:
     with engine.connect() as conn:
         return [
@@ -8673,7 +8680,7 @@ async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
             str((context.platform_specific or {})["turn_token"]),
         )
     assert turn is not None
-    assert json.loads(turn["terminal_evidence_json"]) == {
+    assert _written_evidence(turn) == {
         "result_text": "agent-initiated terminal body",
         "settles_run": True,
     }
@@ -9280,7 +9287,7 @@ async def test_pending_terminal_evidence_survives_timeout_and_competing_terminal
         successor = delivery_store.get_delivery(conn, str(queued.delivery_id))
     assert turn["state"] == "terminal" and turn["terminal_outcome"] == "completed"
     assert turn["terminal_evidence_kind"] == "terminal_result"
-    assert json.loads(turn["terminal_evidence_json"]) == evidence
+    assert _written_evidence(turn) == evidence
     assert successor["state"] == ("queued" if competitor == "shutdown" else "claimed")
     assert not manager._pending_terminals
 
@@ -9437,7 +9444,7 @@ async def test_terminal_evidence_writer_keeps_controller_loop_responsive(manager
             turn = delivery_store.get_turn(conn, turn_id)
         assert turn["state"] == "terminal"
         assert turn["terminal_evidence_kind"] == "terminal_result"
-        assert json.loads(turn["terminal_evidence_json"]) == {
+        assert _written_evidence(turn) == {
             "result_text": "durable result", "settles_run": True,
         }
         assert tick_before_release, (

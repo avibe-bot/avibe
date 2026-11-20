@@ -232,5 +232,48 @@
     "action": {
       "type": "refresh_sign_in_methods"
     }
+  },
+  {
+    "version": 1,
+    "request_id": "request-24",
+    "expected_generation": 2,
+    "action": {
+      "type": "instance_update_refresh"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-25",
+    "expected_generation": 2,
+    "action": {
+      "type": "instance_update_check"
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-26",
+    "expected_generation": 2,
+    "action": {
+      "type": "instance_update_set_prereleases",
+      "enabled": true
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-27",
+    "expected_generation": 2,
+    "action": {
+      "type": "instance_update_set_auto_update",
+      "enabled": false
+    }
+  },
+  {
+    "version": 1,
+    "request_id": "request-28",
+    "expected_generation": 2,
+    "action": {
+      "type": "instance_update_install",
+      "target_version": "3.2.8rc4"
+    }
   }
 ]

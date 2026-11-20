@@ -19,7 +19,10 @@ use super::{
     storage::{ConnectionRecord, ConnectionStore, Credentials, InstanceRecency},
     transport::{Epoch, NativeSession, Transport},
 };
+mod updates;
+use super::instance_update::InstanceUpdate;
 use crate::LoopbackOrigin;
+use updates::CommittedUpdate;
 
 #[async_trait]
 pub trait ClientView: Send + Sync {
@@ -28,6 +31,12 @@ pub trait ClientView: Send + Sync {
     /// the selected Runtime's session, cookies or account persistence.
     fn desktop_update(&self, _action: ClientAction, _epoch: Epoch) -> Result<(), ClientError> {
         Err(ClientError::new("invalid_action"))
+    }
+    /// The committed instance's cookies as its WebView holds them, for exactly
+    /// `origin`. Read only to recover the shell's own instance requests after
+    /// the instance rotated or renewed its sign-in through the page.
+    fn instance_cookies(&self, _epoch: &Epoch, _origin: &url::Url) -> Option<Vec<cookie::Cookie<'static>>> {
+        None
     }
     /// Immediately invalidate all pending window/cookie/download callbacks.
     fn invalidate(&self, generation: u64);
@@ -70,6 +79,7 @@ struct Inner {
     local: Option<NativeSession>,
     enrollment: EnrollmentFlow,
     selection: Option<Selection>,
+    update_session: Option<Arc<CommittedUpdate>>,
     record: ConnectionRecord,
     recency: InstanceRecency,
     restore_allowed: bool,
@@ -135,6 +145,7 @@ impl Coordinator {
                 local: None,
                 enrollment: EnrollmentFlow::default(),
                 selection: None,
+                update_session: None,
                 record,
                 recency,
                 restore_allowed: true,
@@ -513,6 +524,10 @@ impl Coordinator {
         if self.signing_out.load(Ordering::SeqCst) {
             return self.reply(request.request_id, Err(ClientError::new("busy")));
         }
+        if request.action.is_instance_update() {
+            let result = self.instance_action(request.expected_generation, request.action).await;
+            return self.reply(request.request_id, result.map(|_| None));
+        }
         let _operation = if provider.is_some() {
             // The person finished in the browser: wait for short work rather than refuse.
             self.operation.lock().await
@@ -812,6 +827,8 @@ impl Coordinator {
             working.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
             working.committed_view_generation = Some(epoch.value);
             working.state.current_instance = Some(selection.instance.clone());
+            working.state.instance_update = Some(InstanceUpdate::loading(selection.instance.id.clone()));
+            working.update_session = Some(Arc::new(CommittedUpdate::new(selection.session.clone())));
             working.display_account = working
                 .state
                 .account
@@ -896,6 +913,10 @@ impl Coordinator {
         let rollback_record = {
             let mut current = self.inner.lock().expect("client state");
             let opened = working.committed_view_generation != current.committed_view_generation;
+            if !opened {
+                working.state.instance_update.clone_from(&current.state.instance_update);
+                working.update_session.clone_from(&current.update_session);
+            }
             if saved.is_ok() && epoch.check().is_ok() && opened {
                 saved = self.view.committed(epoch.clone());
             }
@@ -1126,6 +1147,8 @@ impl Coordinator {
                 };
             }
             if signing_out || matches!(action, ClientAction::ReturnLocal) {
+                inner.update_session = None;
+                inner.state.instance_update = None;
                 inner.state.connection.committed = ClientTarget::Local {
                     name: inner.state.local.name.clone(),
                     instance_id: inner.state.enrollment.instance_id.clone(),

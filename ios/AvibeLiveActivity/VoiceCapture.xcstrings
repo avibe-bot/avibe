@@ -65,6 +65,22 @@
         }
       }
     },
+    "voiceCapture.action.retryAll" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry all"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全部重试"
+          }
+        }
+      }
+    },
     "voiceCapture.action.send" : {
       "localizations" : {
         "en" : {
@@ -157,6 +173,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "诊断：后台录音后结束进程，已开启。"
+          }
+        }
+      }
+    },
+    "voiceCapture.late.day %@ %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "(Spoken on %1$@ at %2$@; delivered just now.)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "（这条语音说于 %1$@ %2$@，刚刚才送达。）"
+          }
+        }
+      }
+    },
+    "voiceCapture.late.today %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "(Spoken today at %@; delivered just now.)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "（这条语音说于今天 %@，刚刚才送达。）"
           }
         }
       }
@@ -529,6 +577,22 @@
         }
       }
     },
+    "voiceCapture.reason.willSend" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not sent yet. It'll send once your Avibe is reachable."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还没发出去，连上你的 Avibe 后会自动发送。"
+          }
+        }
+      }
+    },
     "voiceCapture.startedInApp" : {
       "localizations" : {
         "en" : {
@@ -621,6 +685,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "准备录音文件"
+          }
+        }
+      }
+    },
+    "voiceCapture.unsent.many %lld %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld voice messages couldn't be sent; the oldest is from %2$@."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有 %1$lld 条语音没能发出去，最早的是 %2$@。"
+          }
+        }
+      }
+    },
+    "voiceCapture.unsent.notice" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This voice message couldn't be sent. Open Avibe to retry."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这条语音没能发出去，打开 Avibe 可以重试。"
+          }
+        }
+      }
+    },
+    "voiceCapture.unsent.one %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A voice message from %@ couldn't be sent."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有一条 %@的语音没能发出去。"
           }
         }
       }

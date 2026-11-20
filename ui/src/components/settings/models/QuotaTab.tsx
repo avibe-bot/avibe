@@ -1,8 +1,10 @@
 // 订阅额度 — each logged-in subscription's own rate-limit windows
 // (`quota-summary.schema.json`).
 //
-// Like 用量 it is a report and only a report: nothing here feeds resolution,
-// admission, or cooldown. Beside the quota it states what the same use would
+// Like 用量 it is a report: nothing here feeds resolution or admission. The
+// refresh the user presses is the one exception, on the server: it resumes an
+// account paused for quota once the vendor reports quota again, so the page
+// reads its providers behind that refresh. Beside the quota it states what the same use would
 // cost at list API prices (the optional `value` block), against the plan's
 // monthly fee — a valuation to judge whether the plan pays for itself, never a
 // charge. A server that predates the block draws the quota alone.
@@ -107,12 +109,15 @@ const useQuotaText = (now: number) => {
   const windowLabel = React.useCallback((window: QuotaWindow) => {
     if (window.kind === 'session') return t('settings.models.quota.window.session') as string;
     if (window.kind === 'weekly') return t('settings.models.quota.window.weekly') as string;
-    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
+    if (window.kind === 'monthly') return t('settings.models.quota.window.monthly') as string;
+    const model = upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key));
+    if (window.kind === 'model_session') return t('settings.models.quota.window.modelSession', { model }) as string;
+    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model }) as string;
     return upstreamName(window.label, Boolean(window.label_is_key));
   }, [t, upstreamName]);
   const windowHint = React.useCallback((window: QuotaWindow) => {
-    if (window.kind === 'model_weekly') return t('settings.models.quota.hint.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
-    if (window.kind === 'session' || window.kind === 'weekly') return t('settings.models.quota.hint.shared') as string;
+    if (windowIsScoped(window)) return t('settings.models.quota.hint.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
+    if (window.kind === 'session' || window.kind === 'weekly' || window.kind === 'monthly') return t('settings.models.quota.hint.shared') as string;
     return null;
   }, [t, upstreamName]);
   const paceText = React.useCallback((pace: QuotaPace) => {
@@ -200,10 +205,14 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
   );
 };
 
-/** The no-reading line: the known states have their own copy, a named failure its own reason. */
+/**
+ * The no-reading line: the known states have their own copy, a named failure its
+ * own reason. A provider that reports nothing for the account (no report at all,
+ * or a current report with no windows) says so, never that a read will retry.
+ */
 const unreadKey = (source: SourceQuota) => {
   if (source.state === 'auth_expired') return 'settings.models.quota.unread.auth_expired' as const;
-  if (source.state === 'unsupported') return 'settings.models.quota.unread.unsupported' as const;
+  if (source.state === 'unsupported' || source.state === 'ok') return 'settings.models.quota.unread.unsupported' as const;
   if (source.error_key === 'models.quota.error.rate_limited') return 'models.quota.error.rate_limited' as const;
   if (source.error_key === 'models.quota.error.malformed') return 'models.quota.error.malformed' as const;
   return 'settings.models.quota.unread.error' as const;
@@ -286,6 +295,8 @@ const AccountCard: React.FC<{
   const status = sourceStatus(source, now);
   const shared = source.windows.filter((window) => !windowIsScoped(window));
   const scoped = source.windows.filter(windowIsScoped);
+  // Only beside an account-wide weekly limit do the model limits also count toward one.
+  const sharedWeekly = shared.some((window) => window.kind === 'weekly');
   const statusTone: QuotaTone = status.kind === 'ok' ? 'ok' : status.kind === 'exhausted' ? 'danger' : 'stale';
   const statusText = status.kind === 'exhausted'
     ? t('settings.models.quota.status.exhausted', { label: text.windowLabel(status.window) })
@@ -354,7 +365,7 @@ const AccountCard: React.FC<{
                 <div className="model-hub-quota-scoped flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                   <Sparkles className="size-[11px]" aria-hidden />
                   {t('settings.models.quota.scoped.title')}
-                  <span>{t('settings.models.quota.scoped.note')}</span>
+                  {sharedWeekly && <span>{t('settings.models.quota.scoped.note')}</span>}
                 </div>
               )}
               {scoped.map((window) => <WindowRow key={window.id} window={window} now={now} retained={retained} nested text={text} />)}

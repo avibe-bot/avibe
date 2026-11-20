@@ -54,7 +54,7 @@ def _send(h, sender="sesA", recipient="sesB", **kwargs):
     )
 
 
-def _accept(h, *requests, finish=True, provenance=None):
+def _accept(h, *requests, finish=True, provenance=None, suffix=""):
     """Use the actual shared acceptance boundary, including multi-sender batching."""
     turn_id = "turn_" + uuid4().hex
     with h.engine.begin() as conn:
@@ -63,17 +63,19 @@ def _accept(h, *requests, finish=True, provenance=None):
             snapshot = deliveries.message_snapshot(
                 scope_id=None, session_id=request.session_id, platform="avibe", author="harness", source="harness",
                 message_type="harness", text=request.prompt,
-                metadata={"scheduled_provenance": (provenance or {}).get(request.id) or {"platform_specific": {
+                metadata={**({"turn_carry": "failed"} if suffix else {}),
+                          "scheduled_provenance": (provenance or {}).get(request.id) or {"platform_specific": {
                     "task_trigger_kind": "agent_run", "task_execution_id": request.id,
                     "source_kind": request.source_kind, "source_actor": request.source_actor,
                 }}},
             )
             batch.append(deliveries.insert_delivery(
-                conn, delivery_id="msg_" + request.id, session_id=request.session_id, priority="p3", state="queued",
+                conn, delivery_id="msg_" + request.id + suffix, session_id=request.session_id, priority="p3",
+                state="queued",
                 snapshot=snapshot, dispatch_text=request.prompt,
             ))
             conn.execute(update(agent_runs).where(agent_runs.c.id == request.id).values(
-                status="running", delivery_id="msg_" + request.id,
+                status="running", delivery_id="msg_" + request.id + suffix,
             ))
         deliveries.claim_start_batch(
             conn, turn_id=turn_id, session_id=requests[0].session_id, backend="vibey", deliveries=batch,
@@ -806,6 +808,8 @@ def test_p1_acceptance_and_concurrent_notifiers_keep_one_notice(harness):
                 }}},
             ),
         )
+        # As production admission does: the Run is bound to its Delivery.
+        conn.execute(update(agent_runs).where(agent_runs.c.id == steer.id).values(delivery_id="steer"))
         deliveries.open_steer_attempt(conn, "steer", expected_version=delivery["version"], turn_id=turn,
                                      attempt_id="steer-attempt", expected_native_turn_id=turn)
         assert deliveries.materialize_steer_acceptance(conn, leader_delivery_id="steer",
@@ -936,3 +940,102 @@ def test_two_dispatches_that_end_before_the_receipt_get_one_receipt_with_the_lat
     assert not h.lane._notify(_pair(h))
     [notice] = _notices(h)
     assert notice["prompt"].split("\n", 1)[1] == "second reply"
+
+
+# ----- 3.2.8rc2 upgrade backfill (11-20 08:27: 24 receipts for old dispatches) -----
+
+def _ended_by_an_older_version(h, *run_ids):
+    """What an older release wrote: a Turn end without this version's mark."""
+    from storage.models import message_deliveries as delivery_rows, session_turns
+    with h.engine.begin() as conn:
+        for run_id in run_ids:
+            turn_id = conn.execute(select(delivery_rows.c.turn_id).select_from(
+                agent_runs.join(delivery_rows, delivery_rows.c.id == agent_runs.c.delivery_id),
+            ).where(agent_runs.c.id == run_id)).scalar_one()
+            conn.execute(update(session_turns).where(session_turns.c.id == turn_id).values(
+                terminal_evidence_json='{"kind":"terminal_result"}'))
+
+
+def test_an_upgraded_instance_sends_nothing_for_dispatches_that_ended_before_it(harness):
+    """Old open pairs (Turns an older version ended) are history: retired silently,
+    never answered with a receipt. No clock is compared."""
+    h = harness
+    old, other = _send(h), _send(h, sender="sesC", recipient="sesD")
+    _accept(h, old)
+    _accept(h, other)
+    _ended_by_an_older_version(h, old.id, other.id)
+    items, _ = h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
+    for item in items:
+        h.lane._notify(item.observation)
+    assert _notices(h) == []
+    assert _pair(h)["state"] == "unavailable" and _pair(h, "sesC", "sesD")["state"] == "unavailable"
+    # A dispatch this version ends still gets its receipt.
+    fresh = _send(h)
+    _accept(h, fresh)
+    assert h.lane._notify(_pair(h))
+    assert len(_notices(h)) == 1
+
+
+def test_an_unresolvable_dispatch_fails_closed(harness):
+    """No Turn to read: no receipt, and the pair is left as it is."""
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(delivery_id=None))
+    assert not h.lane._notify(_pair(h)) and _pair(h)["state"] == "open"
+
+
+def test_a_carried_dispatch_keeps_the_answer_it_already_had(harness):
+    """B wrote back and A accepted (answered); B's next Turn takes a carried copy of the
+    same dispatch (#4010). That is not a new request: no receipt after it."""
+    h = harness
+    run = _send(h)
+    turn = _accept(h, run, finish=False)
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    assert _pair(h)["state"] == "answered"
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="queued"))
+    _finish(h, turn, [])
+    _accept(h, run, suffix="~carry")  # the same Run, accepted again by the successor Turn
+    assert _pair(h)["state"] == "answered"
+    assert not h.lane._notify(_pair(h)) and _notices(h) == []
+
+
+def test_a_dispatch_its_sender_cancelled_gets_no_receipt(harness):
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="canceled", cancel_requested=1))
+    assert not h.lane._notify(_pair(h))
+    assert _notices(h) == [] and _pair(h)["state"] == "unavailable"
+
+
+def test_a_recipient_that_wrote_back_already_answered_the_pair(harness):
+    """Any report B sends back that A accepts answers the pair (``record_accepted_exchange``),
+    so no receipt follows; no separate look-back is needed."""
+    h = harness
+    _accept(h, _send(h))
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    assert _pair(h)["state"] == "answered"
+    assert not h.lane._notify(_pair(h)) and _notices(h) == []
+
+
+
+def test_a_carried_copy_of_an_old_report_does_not_answer_a_newer_dispatch(harness):
+    """A accepted B's report for dispatch 1, sent dispatch 2, and B finished it silently;
+    A's Turn failed and its successor took the carried copy of the OLD report (#4010).
+    The replay must not close dispatch 2."""
+    h = harness
+    _accept(h, _send(h))
+    report = _send(h, sender="sesB", recipient="sesA")
+    _accept(h, report)
+    second = _send(h)
+    _accept(h, second)
+    assert _pair(h)["state"] == "open" and _pair(h)["run_id"] == second.id
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == report.id).values(status="queued"))
+    _accept(h, report, suffix="~carry")
+    assert _pair(h)["state"] == "open"
+    assert h.lane._notify(_pair(h))

@@ -17,6 +17,7 @@ import {
 import type { SettingsMenuPlacement } from '../../lib/settingsMenuPlacement';
 import type { TranslationKey } from '../../i18n/types';
 import { useDesktopPetSettings } from '../../lib/useDesktopPetSettings';
+import { AppLockSetting } from './AppLockSetting';
 import { DesktopRemoteUpdateSetting } from './DesktopRemoteUpdateSetting';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useHomePreferences } from '../home/useHomePreferences';
@@ -307,6 +308,9 @@ export const SettingsGeneralPage: React.FC = () => {
 
         {/* This account's answer to voice input's question (ui/design: composer/voice-consent/*). */}
         {capabilities.can_chat && <VoiceInputSetting />}
+
+        {/* This device's App Lock, when its shell owns one (ui/design: app-lock/settings/*). */}
+        <AppLockSetting />
 
         {pet.supported && (
           <SettingsPanel

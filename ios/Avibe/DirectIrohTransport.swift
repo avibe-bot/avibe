@@ -45,6 +45,8 @@ enum DirectIrohReport: Equatable, Sendable {
     /// The App went to the background: everything stopped, and the path is
     /// gone.
     case lostToBackground
+    /// The usable path's connection now runs on another kind of path.
+    case pathChanged(DirectPathKind?)
 }
 
 /// Fetches the rendezvous answer for a selection, natively and on that
@@ -238,6 +240,10 @@ final class DirectIrohTransport {
         /// times the path stopped being usable.
         let authority: DirectIrohAuthority
         private var streams: [WeakStream] = []
+        /// The kind of path last reported for the connection, and the watch
+        /// that reports changes.
+        var lastPath: DirectPathKind?
+        var pathWatch: (any DirectPathWatch)?
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link, authority: DirectIrohAuthority) {
             self.id = id
@@ -314,12 +320,18 @@ final class DirectIrohTransport {
     private var spacingTimer: (any DirectIrohTimer)?
     /// The last attempts, oldest first (`DirectPathDiagnostics`).
     private var attempts: [DirectDialAttempt] = []
+    /// How often the path was checked again, and why, for this selection.
+    private var counts = DirectPathCounts()
+    /// The monitor's count of ignored updates when this selection began.
+    private var ignoredUpdatesAtSelection = 0
     /// The live path. Whenever this is cleared or replaced, the path's
     /// authority is revoked.
     private var session: Session? {
         didSet {
             if oldValue !== session {
                 oldValue?.authority.revoke()
+                oldValue?.pathWatch?.stop()
+                oldValue?.pathWatch = nil
             }
         }
     }
@@ -407,6 +419,8 @@ final class DirectIrohTransport {
         self.report = report
         // The history speaks for one selection (one instance, one account).
         attempts.removeAll()
+        counts = DirectPathCounts()
+        ignoredUpdatesAtSelection = network.ignoredUpdates
         failures = 0
         pageRetries = 0
         // Path generations are compared within one selection only: nothing
@@ -428,6 +442,8 @@ final class DirectIrohTransport {
         selection = nil
         report = nil
         attempts.removeAll()
+        counts = DirectPathCounts()
+        ignoredUpdatesAtSelection = network.ignoredUpdates
         network.stop()
     }
 
@@ -773,6 +789,7 @@ final class DirectIrohTransport {
         raiseFloor()
         ensureAsking()
         if wasUsable {
+            counts.verifications += 1
             emit(.verifying)
         }
     }
@@ -840,6 +857,7 @@ final class DirectIrohTransport {
 
     private func startDial(under accepted: Lease, key: DirectIrohLaunchKey, host: String) {
         cancelDial()
+        counts.dials += 1
         lease = accepted
         armLeaseTimer()
         let offer = accepted.offer
@@ -1024,7 +1042,9 @@ final class DirectIrohTransport {
             authority: DirectIrohAuthority(deadline: accepted.deadline, clock: uptime)
         )
         self.session = session
-        recordAttempt(offer, local: link.endpoint.localFamilies, path: link.connection.selectedPath)
+        session.lastPath = link.connection.selectedPath
+        recordAttempt(offer, local: link.endpoint.localFamilies, path: session.lastPath)
+        watchPath(of: session)
         watchClose(of: session)
         stableTimer?.cancel()
         stableTimer = scheduler.schedule(after: timing.stableSeconds) { [weak self] in
@@ -1104,6 +1124,14 @@ final class DirectIrohTransport {
             clock: uptime
         )
         probeReason = reason
+        switch reason {
+        case .networkChange:
+            counts.probesAfterPathUpdate += 1
+        case .candidateFailure:
+            counts.probesAfterCandidateFailure += 1
+        case .renewal:
+            counts.probesAfterRenewal += 1
+        }
         probeTask = Task { @MainActor [weak self] in
             let verdict: ProbeVerdict
             do {
@@ -1246,6 +1274,31 @@ final class DirectIrohTransport {
         self.report?(report)
     }
 
+    /// Reports each change of the kind of path the session's connection
+    /// runs on (relay, IPv4, IPv6) while the session is current and usable.
+    private func watchPath(of session: Session) {
+        let id = session.id
+        session.pathWatch = session.link.connection.watchSelectedPath { [weak self] kind in
+            Task { @MainActor [weak self] in
+                self?.pathDidChange(to: kind, session: id)
+            }
+        }
+    }
+
+    private func pathDidChange(to kind: DirectPathKind?, session id: Int) {
+        guard let session, session.id == id, session.lastPath != kind else {
+            return
+        }
+        session.lastPath = kind
+        // While the path is verified again, or after its answer ran out, the
+        // next `usable` report carries the path it then has.
+        guard session.isUsable else {
+            return
+        }
+        Self.logger.info("Direct transport: path now \(kind?.rawValue ?? "unknown", privacy: .public)")
+        emit(.pathChanged(kind))
+    }
+
     // MARK: The network and the App's lifecycle
 
     private func startNetworkWatch() {
@@ -1260,6 +1313,12 @@ final class DirectIrohTransport {
         guard selection != nil, !isInBackground else {
             return
         }
+        counts.pathUpdates += 1
+        let acted = counts.pathUpdates
+        let ignored = network.ignoredUpdates - ignoredUpdatesAtSelection
+        Self.logger.info(
+            "Direct transport: network path changed (\(acted, privacy: .public) so far, \(ignored, privacy: .public) updates ignored as no change)"
+        )
         reconcileLease()
         debounceTimer?.cancel()
         if let session {
@@ -1280,6 +1339,7 @@ final class DirectIrohTransport {
                 self?.startProbe(.networkChange)
             }
             if wasUsable {
+                counts.verifications += 1
                 emit(.verifying)
             }
             return
@@ -1372,6 +1432,8 @@ extension DirectPathReport {
             self = .lost
         case .lostToBackground:
             self = .lostToBackground
+        case .pathChanged(let kind):
+            self = .pathChanged(kind)
         }
     }
 }
@@ -1379,11 +1441,22 @@ extension DirectPathReport {
 extension DirectIrohByteStream: DirectByteStream {}
 
 extension DirectIrohTransport: DirectTransporting {
+    /// How often this selection's path was checked again, and why, with the
+    /// network path updates the monitor ignored meanwhile.
+    var pathCounts: DirectPathCounts {
+        var current = counts
+        current.pathUpdatesIgnored = network.ignoredUpdates - ignoredUpdatesAtSelection
+        return current
+    }
+
     /// The path the usable session's connection runs on now, read from the
     /// binding, and the last attempts.
     var pathDiagnostics: DirectPathDiagnostics {
-        let current = session.flatMap { $0.isUsable ? $0.link.connection.selectedPath : nil }
-        return DirectPathDiagnostics(current: current, attempts: attempts)
+        let connection = session.flatMap { $0.isUsable ? $0.link.connection : nil }
+        let current = connection?.selectedPath
+        // Read apart from `current`: kept only while the two agree.
+        let selected = connection?.selectedPathDetail.flatMap { $0.kind == current ? $0 : nil }
+        return DirectPathDiagnostics(current: current, attempts: attempts, selected: selected)
     }
 
     func select(

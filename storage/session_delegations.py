@@ -23,6 +23,11 @@ from storage.models import (
 )
 
 IDLE_NOTICE_ACTOR_PREFIX = "delegation-idle:"
+#: ``session_turns.terminal_evidence_json`` key this version writes on every Turn end
+#: (``message_deliveries.terminalize_turn``). A dispatched Turn whose end lacks it was
+#: ended by an older version: history, never answered with a receipt. 3.2.8rc2 sent
+#: 24 receipts for dispatches up to ten days old on its first scan.
+RECEIPT_ELIGIBLE_EVIDENCE_KEY = "delegation_receipt_eligible"
 _PENDING_DELIVERIES = tuple(state for state, policy in DELIVERY_STATE_MATRIX.items() if policy.ordering != "terminal")
 _LIVE_RUN_STATUSES = ("queued", "pending", "running", "processing")
 
@@ -45,6 +50,11 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
     if snapshot.get("source") != "harness":
         return
     metadata = _object(snapshot.get("metadata_json"))
+    if metadata.get("turn_carry"):
+        # A failed or stopped Turn carried this input on (#4010): continued processing
+        # of an input already accepted once, neither a new send nor a return. The pair
+        # projection already counted it; leave both directions as they stand.
+        return
     sources = metadata.get("merged_harness_sources")
     if not isinstance(sources, list):
         sources = [_object(metadata.get("scheduled_provenance")).get("platform_specific")]
@@ -86,6 +96,7 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
         # answers. Only A sending again rearms A→B; wording/turns are not judged.
         if run["source_kind"] != "agent" or answered:
             continue
+
         values = dict(
             sender_session_id=sender, recipient_session_id=recipient,
             message_id=message_id, run_id=run["id"], state="open", notice_run_id=None, updated_at=at,
@@ -199,15 +210,23 @@ def eligible_pair(
     )).mappings().first()
     if pair is None:
         return None
-    run = conn.execute(select(agent_runs.c.metadata_json).where(
-        agent_runs.c.id == pair["run_id"],
-    )).mappings().first()
+    run = conn.execute(select(
+        agent_runs.c.metadata_json, agent_runs.c.status, agent_runs.c.cancel_requested, agent_runs.c.created_at,
+    ).where(agent_runs.c.id == pair["run_id"])).mappings().first()
     if run is None:
         return None
     metadata = _object(run["metadata_json"])
     if metadata.get("no_reply") is True:
         # An older same-epoch binary can open this pair during rollback.
         # Retire it even when pending work would otherwise defer the receipt.
+        return {**dict(pair), "unavailable": True}
+    # History is never answered: a receipt is owed only for a dispatched Turn this
+    # version ended, marked in the end it wrote. No clock is compared. Anything
+    # unresolvable fails closed: no receipt, the pair stays as it is.
+    turn = conn.execute(dispatched_turn_query(str(pair["run_id"]))).mappings().first()
+    if turn is None or turn["state"] != "terminal":
+        return None
+    if _object(turn["terminal_evidence_json"]).get(RECEIPT_ELIGIBLE_EVIDENCE_KEY) is not True:
         return {**dict(pair), "unavailable": True}
     recipient = pair["recipient_session_id"]
     for session_id in (pair["sender_session_id"], recipient):
@@ -229,6 +248,9 @@ def eligible_pair(
         pair["sender_session_id"], recipient, str(pair["run_id"]),
     )):
         return None
+    if run["cancel_requested"] or str(run["status"] or "") in {"canceled", "cancelled"}:
+        # The dispatcher called it off; its failure notice, not a receipt, answers it.
+        return {**dict(pair), "unavailable": True}
     return {**dict(pair), "metadata": metadata}
 
 
@@ -260,7 +282,10 @@ def acknowledge_sync_return(engine, run_id: str) -> None:
 def dispatched_turn_query(run_id: str):
     """The Turn that took a dispatched Run's input: three primary-key lookups."""
     return (
-        select(session_turns.c.id, session_turns.c.terminal_evidence_json)
+        select(
+            session_turns.c.id, session_turns.c.state, session_turns.c.terminal_at,
+            session_turns.c.terminal_evidence_json,
+        )
         .select_from(
             agent_runs.join(message_deliveries, message_deliveries.c.id == agent_runs.c.delivery_id)
             .join(session_turns, session_turns.c.id == message_deliveries.c.turn_id)

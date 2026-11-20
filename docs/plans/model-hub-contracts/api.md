@@ -71,7 +71,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. Search-service requests are reported in `services[]`, never in `sources[]` (see Search-service usage). The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
-| POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
+| POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. The forced read also resumes each Source paused for quota or rate (`cooldown` with `quota_exhausted` or `rate_limited`, or its live deadline) unless its fresh report shows an account-wide window (5-hour, weekly, or monthly) used up; an unreadable report lifts the pause so the next request asks the vendor, while `auth_expired` and a Source still `pending` are left as they are. Clients read Sources again afterwards. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
 | POST `/api/models/hosted-tools/web_fetch/services/<source_id>/retry` | `{}` → `{}` | Clears the same Source/service cooldown and generation as search for Exa (`src_exakeyless`, `exa/mcp`), or Jina's own. Member management role; no fetch is sent. Local has no whole-executor retry and returns `404 source_not_found`. |
 | POST `/api/models/hosted-tools/web_search/services/<source_id>/retry` | `{}` → `{}` | Clears the controller's `(Source, service)` cooldown, advances its generation, and leaves Source health unchanged. The Tools read is the follow-up source of truth. Member management role. |
@@ -1122,7 +1122,8 @@ refresh a source whose global state is `needs_action` or `error`, even though no
 turn resolution and the chain probe exclude that source as non-runnable.
 
 On usable discovery it updates the discovered model set, clears the blocker, and
-sets the source to `standby`. The success response is the guarded Source-mutation
+sets the source to `standby`. A `cooldown` on a Source whose credential and
+endpoint are unchanged is kept: a listing is not inference evidence. The success response is the guarded Source-mutation
 envelope `{source, removed_hops, interrupted}`; clients render the complete updated
 Source and the exact route impact from that envelope. `last_discovered_at` advances
 only on this successful replacement. A classified failure updates the source-global
@@ -1717,6 +1718,14 @@ through its management `api-call`, so Avibe never handles the token:
 | --- | --- | --- |
 | `anthropic` | `GET https://api.anthropic.com/api/oauth/usage` | `anthropic-beta: oauth-2025-04-20` |
 | `openai` / `codex` | `GET https://chatgpt.com/backend-api/wham/usage` | `ChatGPT-Account-ID` when the grant carries one |
+| `gemini` (Antigravity) | `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`, body `{"project": <auth project_id>}`; on 404, 408, or 5xx the same call on `https://cloudcode-pa.googleapis.com` | The engine's own Antigravity `User-Agent` |
+| `xai` (Grok) | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` | The engine's own Grok CLI identity (`X-XAI-Token-Auth`, `x-grok-client-version`, `User-Agent`, `x-grok-client-identifier`) |
+
+`kimi` has no report the account sign-in can read (its usage endpoint takes an
+API key), so a Kimi Source is `unsupported`. The Antigravity project id comes
+from the engine's auth listing (`project_id`) and only ever travels inside the
+engine call; a grant without one is reported with no windows, as is an answer
+with no buckets.
 
 Only parsed fields cross the adapter boundary (`EngineAdapter.subscription_quota`);
 the raw body, headers, and grant never reach the service, a log line, or a
@@ -1730,6 +1739,17 @@ fall back to the fixed top-level keys (`five_hour`, `seven_day`,
 primary/secondary windows are classified by `limit_window_seconds`, and each
 `additional_rate_limits` entry is named by its metered feature (`codex_bengalfox`
 is Spark) or `limit_name`.
+Antigravity's `groups[]` (or an older answer's top-level `buckets[]`) name the
+models that share their buckets: a `5h` bucket is `model_session` and a `weekly`
+one `model_weekly`, scoped to the group's `displayName` (or, without one, the
+bucket id less its window suffix, marked `label_is_key`); none stops the whole
+account. Used is `(1 - remainingFraction) * 100`; proto3 omits a zero, so a
+bucket with a `resetTime` and no `remainingFraction` is spent. A full bucket
+reports a rolling reset that moves with each read, so it carries none. Disabled
+buckets are skipped. Grok's one credit window is `weekly` or `monthly` by
+`config.currentPeriod.type`, resets at the period's `end`, and lasts `end -
+start`; a missing `creditUsagePercent` reads as 0 only beside a well-formed
+weekly or monthly period, otherwise there is no window.
 
 The service caches the last good snapshot per Source. A read re-fetches a Source
 whose last attempt is older than `refresh_interval_seconds` (300); a forced

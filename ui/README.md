@@ -2,7 +2,7 @@
 
 ## Development toolchain
 
-Use Node.js `^20.19.0 || ^22.13.0 || >=24` (UI CI uses 22.23.4), then run
+Use Node.js `^22.13.0 || ^24.0.0 || >=26.0.0` (UI CI uses 26.13.1), then run
 `npm ci`. TypeScript 7 is the only installed compiler. Oxlint is the lint engine;
 React plugins and two core-rule compatibility implementations still require
 ESLint 10, so the Node support range has not changed.

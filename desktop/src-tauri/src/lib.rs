@@ -2812,23 +2812,23 @@ pub fn run() {
                             }
                         }
                     }
-                    // The pet is a visible window too, so whether any window is
-                    // visible says nothing about the Workbench: a Dock click
-                    // restores `main` whenever `main` itself is not on screen.
+                    // A Dock click always brings the Workbench forward. No
+                    // visibility test can decide it: `main` stays "visible"
+                    // while a standalone App window (Show, Editor, Terminal)
+                    // covers it, and AppKit's own activation keeps that window
+                    // in front; the pet is visible beside it too. Restoring a
+                    // hidden or minimized `main` is the same call. Cmd-Tab
+                    // sends no reopen and keeps the window last worked in.
                     #[cfg(target_os = "macos")]
                     if let RunEvent::Reopen { .. } = event {
-                        let main_visible = app
-                            .get_window(MAIN_WINDOW)
-                            .is_some_and(|window| window.is_visible().unwrap_or(false));
-                        if !main_visible {
-                            focus_or_restore_main_window(app);
-                        }
+                        focus_or_restore_main_window(app);
                     }
                 })
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
             instance_client::desktop_client_request,
+            update_popover::update_popover_fit,
             bootstrap_status,
             bootstrap_retry,
             open_install_docs,

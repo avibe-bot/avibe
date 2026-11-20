@@ -110,8 +110,12 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     CliCommandObservations().bind(monkeypatch)
 
 
-def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypatch, tmp_path):
-    """AUTH-SETUP-186: real producers/consumers; fake phone, policy and push only."""
+@pytest.mark.parametrize("instance_kind", ["personal", "organization"])
+def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypatch, tmp_path, instance_kind):
+    """AUTH-SETUP-186: real producers/consumers; fake phone, policy and push only.
+
+    Personal and shared organization instances follow the same closed loop: who may reach
+    the instance is the owner's own access setting, not a Health eligibility rule."""
     from sqlalchemy import select
     from core import web_push
     from core.handlers import mobile_health
@@ -124,12 +128,16 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
 
     now = datetime(2026, 11, 18, 1, tzinfo=timezone.utc)
     monkeypatch.setattr(mobile_store, "_now", lambda: now.isoformat())
-    config = _save_config(tmp_path, paired=True, instance_kind="personal")
+    config = _save_config(tmp_path, paired=True, instance_kind=instance_kind)
     config.language = "zh"
     config.save()
+    organization = instance_kind == "organization"
     projection = {
-        "instance": {"id": IDENTITY["id"], "name": IDENTITY["name"], "access_mode": "allowlist"},
-        "access": {"owner": {"email": IDENTITY["owner"]}, "entries": []},
+        "instance": {"id": IDENTITY["id"], "name": IDENTITY["name"], "access_mode": "allowlist",
+                     "organization": {"id": "org_synthetic", "name": "Synthetic org"} if organization else None},
+        "access": {"owner": {"email": IDENTITY["owner"]}, "entries": [
+            {"kind": "email", "value": "colleague@example.test", "role": "member"},
+        ] if organization else []},
     }
     monkeypatch.setattr(permissions, "get_current_permissions", lambda *_a: SimpleNamespace(
         source="live", projection=projection,
@@ -140,7 +148,7 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
         authorization_state="current", last_checked_at=int(now.timestamp()), updated_at=int(now.timestamp()),
         claims={"sub": "synthetic-owner", "email": IDENTITY["owner"],
                 "vibe_instance_id": IDENTITY["id"], "vibe_instance_role": "owner",
-                "vibe_instance_access_source": "owner", "vibe_instance_kind": "personal"},
+                "vibe_instance_access_source": "owner", "vibe_instance_kind": instance_kind},
     )
     engine = get_cached_sqlite_engine()
     session_id = "ses_mobile_synthetic"

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _LOG_REFUSALS = frozenset({
     "owner_required", "no_reachable_address", "not_running", "starting", "stopped",
     "setting_off", "unpaired", "permission_denied", "permission_required", "permission_expired", "certificate_not_ready",
-    "transport_not_installed", "transport_start_failed", "state_changed", "sidecar_exited",
+    "transport_installing", "transport_install_failed", "transport_not_installed", "transport_start_failed", "state_changed", "sidecar_exited",
 })
 
 RENDEZVOUS_VERSION = 1

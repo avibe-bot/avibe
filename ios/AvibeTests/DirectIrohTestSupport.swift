@@ -204,6 +204,19 @@ struct DirectIrohFakeStream {
     }
 }
 
+/// A watch a test can see stopped.
+struct FakeWatch: DirectPathWatch {
+    let onStop: @Sendable () -> Void
+
+    init(_ onStop: @escaping @Sendable () -> Void) {
+        self.onStop = onStop
+    }
+
+    func stop() {
+        onStop()
+    }
+}
+
 final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable {
     static let established = Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
     static let refused = Data("HTTP/1.1 503 Service Unavailable\r\n\r\n".utf8)
@@ -221,6 +234,41 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
     var selectedPath: DirectPathKind? {
         get { lock.withLock { storedPath } }
         set { lock.withLock { storedPath = newValue } }
+    }
+
+    private var storedDetail: DirectSelectedPath?
+
+    /// The selected path's class and round-trip time, as the binding would
+    /// read them; set apart from `selectedPath`, as the binding reads them
+    /// apart.
+    var selectedPathDetail: DirectSelectedPath? {
+        get { lock.withLock { storedDetail } }
+        set { lock.withLock { storedDetail = newValue } }
+    }
+
+    private var pathWatcher: (@Sendable (DirectPathKind?) -> Void)?
+
+    func watchSelectedPath(
+        _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+    ) -> (any DirectPathWatch)? {
+        lock.withLock { pathWatcher = onChange }
+        let log = log
+        return FakeWatch { [weak self] in
+            log.add("watch.stop")
+            guard let self else {
+                return
+            }
+            self.lock.withLock { self.pathWatcher = nil }
+        }
+    }
+
+    /// The connection's paths changed: the selected one is now `kind`.
+    func movePath(to kind: DirectPathKind?) {
+        let watcher: (@Sendable (DirectPathKind?) -> Void)? = lock.withLock {
+            storedPath = kind
+            return pathWatcher
+        }
+        watcher?(kind)
     }
 
     /// `answers` are what the first read of each new stream returns, in
@@ -527,6 +575,8 @@ final class DirectIrohManualClock: @unchecked Sendable {
 @MainActor
 final class DirectIrohFakeNetwork: DirectIrohNetworkMonitoring {
     private var onChange: (@MainActor () -> Void)?
+    /// What the stand-in says the monitor ignored so far.
+    var ignoredUpdates = 0
 
     var isWatching: Bool {
         onChange != nil

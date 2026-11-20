@@ -2,11 +2,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, expect, expectTypeOf, it, vi } from 'vitest';
 import en from '../i18n/en.json';
 import zh from '../i18n/zh.json';
 import { AccountApp } from './AccountApp';
-import { DESKTOP_CLIENT_STATE_EVENT, DESKTOP_PRESENT_EVENT, DESKTOP_CLIENT_VIEWS, type DesktopClientRequest } from './bridge';
+import { DESKTOP_CLIENT_STATE_EVENT, DESKTOP_PRESENT_EVENT, DESKTOP_CLIENT_VIEWS, withLocalIdentity, type DesktopClientAction, type DesktopClientProjection, type DesktopClientRequest, type DesktopClientState } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
 import replies from './__fixtures__/instance-client-v1/replies.json';
 import requests from './__fixtures__/instance-client-v1/requests.json';
@@ -859,3 +859,28 @@ it('AUTH-SETUP-183 says when a different account could not forget the stored one
   expect(screen.getByRole('button', { name: en.mobileApp.welcome.continueWithEmail })).toBeTruthy();
 });
 
+// B1 (docs/plans/2026-11-20-update-panel-instance-and-app.md): the shell's own
+// read of the selected instance is full-state input for the bundled pages only,
+// with exactly five enumerated actions. Native roundtrips the same samples.
+it('B1 instance update state and actions are bundled-page protocol only', () => {
+  const actions: DesktopClientAction[] = requests.map((entry) => entry.action as DesktopClientAction)
+    .filter((action) => action.type.startsWith('instance_update_'));
+  expect(actions).toEqual([
+    { type: 'instance_update_refresh' },
+    { type: 'instance_update_check' },
+    { type: 'instance_update_set_prereleases', enabled: true },
+    { type: 'instance_update_set_auto_update', enabled: false },
+    { type: 'instance_update_install', target_version: '3.2.8rc4' },
+  ]);
+  for (const [name, sample] of Object.entries(states)) {
+    expect(sample.instance_update === null, name).toBe(name !== 'remote_connected');
+  }
+  const remote = states.remote_connected as unknown as DesktopClientState;
+  expect(remote.instance_update).toMatchObject({ instance_id: remote.connection.committed.instance_id, status: 'ready', can_manage: true,
+    request: { action: 'install', phase: 'sending', target: remote.instance_update?.snapshot?.latest } });
+  expect(remote.instance_update?.snapshot?.install).toEqual({ phase: 'installing', target: '3.2.8rc4', started_at: '2026-11-20T07:03:17Z' });
+  expectTypeOf<DesktopClientProjection>().not.toHaveProperty('instance_update');
+  // A shell from before B1 sends no field; consumers see null, not undefined.
+  const { instance_update: _omitted, ...older } = remote;
+  expect(withLocalIdentity(older as DesktopClientState).instance_update).toBeNull();
+});

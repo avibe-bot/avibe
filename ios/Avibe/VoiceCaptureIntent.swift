@@ -47,14 +47,22 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         if #available(iOS 26.0, *) {
             canComeForward = systemContext.currentMode.canContinueInForeground
         }
-        // One background try first (island, a mixable session, the
-        // recorder); if iOS refuses it, Avibe comes forward and records
-        // there as soon as it is active.
-        var outcome = await controller.startTake(inFront: false, foregroundFallback: canComeForward, reservation: press)
-        var inFront = false
+        // Avibe already in front records there at once, with the session
+        // that pauses other audio (39.1: the mixable one recorded the music
+        // playing from the speaker). Otherwise one background try first
+        // (island, a mixable session, the recorder); if iOS refuses it,
+        // Avibe comes forward and records there as soon as it is active.
+        let active = controller.isInFront
+        // Taken before any start: a start in front that fails is said in
+        // an alert (the island is not drawn over the App), and that is told
+        // by the failure being new.
         let before = controller.lastFailure
         let notices = controller.noticeCount
-        if outcome == .needsForeground || (canComeForward && outcome.isNeedsApp) {
+        var outcome = await controller.startTake(
+            inFront: active, foregroundFallback: !active && canComeForward, reservation: press
+        )
+        var inFront = active
+        if outcome == .needsForeground || (canComeForward && !inFront && outcome.isNeedsApp) {
             if #available(iOS 26.0, *) {
                 do {
                     try await continueInForeground(alwaysConfirm: false)
@@ -86,10 +94,12 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         case .stopped:
             // In front the island is not drawn, so say a failure here.
             guard inFront else { break }
-            if let failure = controller.lastFailure, failure != before {
-                VoiceCaptureAlert.present(.recordingFailed, failure: failure)
-            } else if controller.noticeCount != notices, let reason = controller.lastNoticeReason {
-                VoiceCaptureAlert.present(reason)
+            if let alert = VoiceCaptureController.stoppedAlert(
+                before: before, after: controller.lastFailure,
+                noticesBefore: notices, noticesAfter: controller.noticeCount,
+                lastNoticeReason: controller.lastNoticeReason
+            ) {
+                VoiceCaptureAlert.present(alert.reason, failure: alert.failure)
             }
         }
         return .result()

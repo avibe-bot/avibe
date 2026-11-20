@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Avibe uses the camera when you choose to capture an attachment.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Use Face ID to unlock Avibe.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Avibe reads your steps, activity, workouts, and sleep to provide your personal daily and weekly status through your own Avibe instance. Access is read-only; Avibe never writes to Apple Health.</string>
 	<key>NSHealthUpdateUsageDescription</key>

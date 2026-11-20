@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import errno
 import hashlib
 import importlib.resources as package_resources
@@ -44,6 +45,19 @@ from storage.lock import (
 
 
 logger = logging.getLogger(__name__)
+# Automatic callers emit their own fixed outcome instead of verbose local CLI
+# diagnostics. Never disable the logger process-wide: other installs may overlap.
+_omit_details = contextvars.ContextVar("managed_runtime_omit_details", default=False)
+logger.addFilter(lambda _record: not _omit_details.get())
+
+
+@contextlib.contextmanager
+def omit_managed_runtime_log_details() -> Iterator[None]:
+    token = _omit_details.set(True)
+    try:
+        yield
+    finally:
+        _omit_details.reset(token)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_CACHE_RE = re.compile(r"^manifest-[0-9a-f]{16}\.json$")
