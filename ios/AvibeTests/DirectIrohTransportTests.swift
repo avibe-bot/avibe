@@ -604,19 +604,19 @@ final class DirectIrohTransportTests: XCTestCase {
     }
 
     /// Only the class of the far end's address leaves the binding: local
-    /// (private, unique-local, link-local) or not. Zero round trip is
+    /// (private, shared address space, unique-local, link-local) or not. Zero round trip is
     /// "not measured".
     func testASelectedPathIsClassedByItsRemoteAddressAndNeverKeepsIt() {
         let local = [
             "10.0.0.7:4433", "172.16.1.2:1", "172.31.255.255:1", "192.168.1.20:52000", "169.254.3.4:1",
             "[fd7a:115c:a1e0::1]:4433", "[fc00::1]:1", "[fe80::1%en0]:4433", "[FE80::abcd]:1",
-            "[::ffff:192.168.1.2]:1",
+            "[::ffff:192.168.1.2]:1", "100.64.0.1:1", "100.127.255.1:41641",
         ]
         for address in local {
             XCTAssertTrue(DirectSelectedPath.isLocalNetwork(socketAddress: address), address)
         }
         let global = [
-            "203.0.113.5:4433", "172.32.0.1:1", "172.15.0.1:1", "100.64.0.1:1", "8.8.8.8:53",
+            "203.0.113.5:4433", "172.32.0.1:1", "172.15.0.1:1", "100.63.255.1:1", "100.128.0.1:1", "8.8.8.8:53",
             "[2001:db8::1]:4433", "[::1]:1", "[::ffff:8.8.8.8]:1", "[fec0::1]:1", "not-an-address",
         ]
         for address in global {

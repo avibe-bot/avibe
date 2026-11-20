@@ -31,6 +31,7 @@ import { onPageReactivated } from '../lib/pageActivity';
 import { liveStreamVia, subscribeLiveStreamVia, type LiveStreamVia } from '../lib/liveStreamVia';
 import { deviceUsing, deviceUsingText, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
 import {
+  hasNativeCapability,
   nativeDirectPathReported,
   onNativeDirectPreference,
   readNativeDirectPath,
@@ -1017,7 +1018,7 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
   const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
   const [now] = useState(() => Date.now());
   const devicePath = useNativeDirectPath(pageVia);
-  const lines = remoteAccessDirectLines(direct, pageVia, now, nativeDirectPathReported());
+  const lines = remoteAccessDirectLines(direct, pageVia, now, hasNativeCapability('direct', 1));
   if (!lines) return null;
   // Written like other Settings dates: the page's own locale.
   const certificate = lines.certificateDate
@@ -1027,7 +1028,7 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
     })
     : null;
   const page = lines.pageKey ? t(lines.pageKey) : null;
-  const using = deviceUsing(devicePath, pageVia);
+  const using = deviceUsing(devicePath, pageVia, nativeDirectPathReported());
   const deviceText = using ? deviceUsingText(t, using) : null;
   const legs = lastConnectionLegs(devicePath);
   const legKeys = {

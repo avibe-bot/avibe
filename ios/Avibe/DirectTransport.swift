@@ -176,7 +176,8 @@ struct DirectSelectedPath: Equatable, Sendable {
     }
 
     /// Whether a numeric socket address (`a.b.c.d:port` or `[x:...:x]:port`)
-    /// is on a local network: IPv4 10/8, 172.16/12, 192.168/16, 169.254/16;
+    /// is on a local network: IPv4 10/8, 172.16/12, 192.168/16, 169.254/16,
+    /// and 100.64/10 (shared address space: Tailscale, or a carrier's NAT);
     /// IPv6 fc00::/7 (unique local), fe80::/10 (link-local), or an
     /// IPv4-mapped address of a local IPv4 one.
     static func isLocalNetwork(socketAddress address: String) -> Bool {
@@ -208,6 +209,8 @@ struct DirectSelectedPath: Equatable, Sendable {
             return true
         case (172, let second):
             return (16...31).contains(second)
+        case (100, let second):
+            return (64...127).contains(second)
         default:
             return false
         }

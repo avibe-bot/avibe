@@ -17,16 +17,17 @@ export type DirectLines = {
 };
 
 /**
- * Null while direct is turned off. `appReportsPath`: in an App that reports
- * its own path (`direct` version 3), the page line gives way to the device
- * line, which can tell the relay from a direct address; the page line alone
- * cannot.
+ * Null while direct is turned off. `inApp`: in the App (any `direct` version)
+ * the page line is not shown. Only the App can tell the relay from a direct
+ * address, so 「本页当前连接：直连」 there could name a relayed path; where
+ * the App reports its path, the device line says it instead, and the two
+ * can never both be shown.
  */
 export function remoteAccessDirectLines(
   direct: RemoteAccessStatus['direct'],
   pageVia: LiveStreamVia,
   now: number,
-  appReportsPath = false,
+  inApp = false,
 ): DirectLines | null {
   if (!direct?.enabled) return null;
   const stateKey: TranslationKey = direct.state === 'running'
@@ -41,7 +42,7 @@ export function remoteAccessDirectLines(
   // Only a certificate that is still valid has a date worth showing.
   const notAfter = direct.certificate_not_after ? new Date(direct.certificate_not_after) : null;
   const certificateDate = notAfter && notAfter.getTime() > now ? notAfter : null;
-  const pageKey: TranslationKey | null = appReportsPath
+  const pageKey: TranslationKey | null = inApp
     ? null
     : pageVia === 'direct'
       ? 'remoteAccess.direct.pageDirect'
@@ -70,14 +71,16 @@ export type DeviceUsing =
  * direct path from the App (`direct.status()`): the relay, or an IPv4 or IPv6
  * address, on a local network (`lan`) or not (`punched`), or `direct` when
  * the App does not say. A relayed path is never called direct. Null in a
- * browser, before the stream has said, and when the stream is direct but the
- * App names no path for it.
+ * browser, before the stream has said, when the stream is direct but the App
+ * names no path for it, and unless the App keeps its path current
+ * (`appReportsPath`, `direct` version 3; an older App's path can be stale).
  */
 export function deviceUsing(
   snapshot: NativeDirectPathSnapshot | null,
   pageVia: LiveStreamVia,
+  appReportsPath: boolean,
 ): DeviceUsing | null {
-  if (!snapshot || pageVia === null) return null;
+  if (!appReportsPath || !snapshot || pageVia === null) return null;
   if (pageVia === 'other') {
     return { kind: 'tunnel', relayUp: snapshot.preferred === 'direct' && snapshot.path === 'relay' };
   }
@@ -122,13 +125,15 @@ export function deviceUsingText(t: TFunction, using: DeviceUsing): string {
  * The tag beside the instance name: `direct` only while this page's stream is
  * on the direct ingress and the App's path is an IPv4 or IPv6 address, `relay`
  * while it is on the direct ingress through the relay, otherwise none (a
- * browser, the public origin, or a path the App does not name).
+ * browser, the public origin, a path the App does not name, or an App that
+ * does not keep its path current: `appReportsPath`, `direct` version 3).
  */
 export function directTagKind(
   pageVia: LiveStreamVia,
   appPath: NativeDirectPathKind | null,
+  appReportsPath: boolean,
 ): 'direct' | 'relay' | null {
-  if (pageVia !== 'direct') return null;
+  if (!appReportsPath || pageVia !== 'direct') return null;
   if (appPath === 'ipv4' || appPath === 'ipv6') return 'direct';
   return appPath === 'relay' ? 'relay' : null;
 }

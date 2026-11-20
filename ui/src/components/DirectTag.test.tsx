@@ -11,11 +11,14 @@ import { DirectTag } from './DirectTag';
 // The App's path as its status says; null stands for a browser, or a path not named.
 const app = vi.hoisted(() => ({
   path: null as NativeDirectPathKind | null,
+  reported: true,
   listeners: new Set<() => void>(),
 }));
 
 vi.mock('../lib/native', () => ({
   nativeDirectPathKind: () => app.path,
+  // `direct` version 3: the App keeps its path current.
+  nativeDirectPathReported: () => app.reported,
   onNativeDirectPreference: (handler: () => void) => {
     app.listeners.add(handler);
     return () => app.listeners.delete(handler);
@@ -34,6 +37,7 @@ afterEach(() => {
   cleanup();
   act(() => setLiveStreamVia(null));
   app.path = null;
+  app.reported = true;
 });
 
 describe('DirectTag', () => {
@@ -60,6 +64,17 @@ describe('DirectTag', () => {
     act(() => setLiveStreamVia('other'));
     expect(container.innerHTML).toBe('');
     appPath('ipv4');
+    expect(container.innerHTML).toBe('');
+  });
+
+  it('shows nothing for an App whose path can be stale (direct version 2)', async () => {
+    await i18n.changeLanguage('zh');
+    app.reported = false;
+    app.path = 'ipv4';
+    act(() => setLiveStreamVia('direct'));
+    const { container } = render(<DirectTag />);
+    expect(container.innerHTML).toBe('');
+    appPath('relay');
     expect(container.innerHTML).toBe('');
   });
 

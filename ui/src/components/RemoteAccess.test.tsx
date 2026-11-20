@@ -143,33 +143,47 @@ describe('RemoteAccess direct lines', () => {
     preferred: 'direct', path: null, scope: null, rttMs: null, lastConnection: null, ...snapshot,
   });
 
+  // Version 3: the App keeps its path current, in events too.
+  const using = (snapshot: NativeDirectPathSnapshot | null, pageVia: 'direct' | 'other' | null) =>
+    deviceUsing(snapshot, pageVia, true);
+
   it('says what this device is using, never calling the relay direct, and only in the App', () => {
     // A browser, or a stream that has not said how it came in: no line.
-    expect(deviceUsing(null, 'direct')).toBeNull();
-    expect(deviceUsing(app({ path: 'ipv4' }), null)).toBeNull();
+    expect(using(null, 'direct')).toBeNull();
+    expect(using(app({ path: 'ipv4' }), null)).toBeNull();
     // On Cloudflare: with the relay up, Cloudflare is still what is used, and the relay is named as slower.
-    expect(deviceUsing(app({ path: 'relay' }), 'other')).toEqual({ kind: 'tunnel', relayUp: true });
-    expect(deviceUsing(app({ preferred: 'tunnel' }), 'other')).toEqual({ kind: 'tunnel', relayUp: false });
-    expect(deviceUsing(app({ path: 'ipv6', scope: 'global' }), 'other')).toEqual({ kind: 'tunnel', relayUp: false });
+    expect(using(app({ path: 'relay' }), 'other')).toEqual({ kind: 'tunnel', relayUp: true });
+    expect(using(app({ preferred: 'tunnel' }), 'other')).toEqual({ kind: 'tunnel', relayUp: false });
+    expect(using(app({ path: 'ipv6', scope: 'global' }), 'other')).toEqual({ kind: 'tunnel', relayUp: false });
     // On the direct ingress, through the relay: 中继, never 直连.
-    expect(deviceUsing(app({ path: 'relay', rttMs: 140 }), 'direct')).toEqual({ kind: 'relay', rttMs: 140 });
+    expect(using(app({ path: 'relay', rttMs: 140 }), 'direct')).toEqual({ kind: 'relay', rttMs: 140 });
     // On an address: LAN, hole-punched, or plain direct when the App does not say which.
-    expect(deviceUsing(app({ path: 'ipv4', scope: 'local', rttMs: 3 }), 'direct'))
+    expect(using(app({ path: 'ipv4', scope: 'local', rttMs: 3 }), 'direct'))
       .toEqual({ kind: 'lan', family: 'ipv4', rttMs: 3 });
-    expect(deviceUsing(app({ path: 'ipv6', scope: 'global', rttMs: 85 }), 'direct'))
+    expect(using(app({ path: 'ipv6', scope: 'global', rttMs: 85 }), 'direct'))
       .toEqual({ kind: 'punched', family: 'ipv6', rttMs: 85 });
-    expect(deviceUsing(app({ path: 'ipv6' }), 'direct')).toEqual({ kind: 'direct', family: 'ipv6', rttMs: null });
+    expect(using(app({ path: 'ipv6' }), 'direct')).toEqual({ kind: 'direct', family: 'ipv6', rttMs: null });
     // On the direct ingress with no path named (the App's path dropped meanwhile): no line.
-    expect(deviceUsing(app({ preferred: 'tunnel' }), 'direct')).toBeNull();
+    expect(using(app({ preferred: 'tunnel' }), 'direct')).toBeNull();
+  });
+
+  it('names no path for an App that does not keep its path current (direct version 2)', () => {
+    // Version 2 answers a path in the status, but sends no event when it changes: it can be stale.
+    expect(deviceUsing(app({ path: 'ipv4', scope: 'global' }), 'direct', false)).toBeNull();
+    expect(deviceUsing(app({ path: 'relay' }), 'other', false)).toBeNull();
+    expect(directTagKind('direct', 'ipv4', false)).toBeNull();
+    expect(directTagKind('direct', 'relay', false)).toBeNull();
+    // And in any App the page line is not shown, so nothing calls a relayed page 直连.
+    expect(remoteAccessDirectLines(direct('running'), 'direct', NOW, true)?.pageKey).toBeNull();
   });
 
   it('tags 直连 only for an address, 中继 for the relay, and nothing else', () => {
-    expect(directTagKind('direct', 'ipv4')).toBe('direct');
-    expect(directTagKind('direct', 'ipv6')).toBe('direct');
-    expect(directTagKind('direct', 'relay')).toBe('relay');
-    expect(directTagKind('direct', null)).toBeNull();
-    expect(directTagKind('other', 'ipv4')).toBeNull();
-    expect(directTagKind(null, 'relay')).toBeNull();
+    expect(directTagKind('direct', 'ipv4', true)).toBe('direct');
+    expect(directTagKind('direct', 'ipv6', true)).toBe('direct');
+    expect(directTagKind('direct', 'relay', true)).toBe('relay');
+    expect(directTagKind('direct', null, true)).toBeNull();
+    expect(directTagKind('other', 'ipv4', true)).toBeNull();
+    expect(directTagKind(null, 'relay', true)).toBeNull();
   });
 
   it('gives the last connection race, and nothing when the App recorded none', () => {
@@ -186,7 +200,7 @@ describe('RemoteAccess direct lines', () => {
     expect(remoteAccessDirectLines(direct('running'), 'other', NOW)?.pageKey).toBe('remoteAccess.direct.pageOther');
   });
 
-  it('leaves the page line to the device line in an App that reports its path', () => {
+  it('shows no page line in the App, where only the device line can tell the relay apart', () => {
     expect(remoteAccessDirectLines(direct('running'), 'direct', NOW, true)?.pageKey).toBeNull();
     expect(remoteAccessDirectLines(direct('running'), 'other', NOW, true)?.pageKey).toBeNull();
   });
