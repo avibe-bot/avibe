@@ -1318,8 +1318,9 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.phase, .failed)
         XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
         XCTAssertEqual(world.retryHolds, 0)
+        XCTAssertEqual(world.instance.transcribed, 1)
         await controller.retryKeptNow()
-        XCTAssertEqual(world.instance.transcribed, 0, "not sent again by itself")
+        XCTAssertEqual(world.instance.transcribed, 1, "not sent again by itself")
 
         // The same when the consent ask meets the fault.
         let asked = World()
