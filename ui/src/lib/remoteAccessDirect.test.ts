@@ -24,8 +24,8 @@ describe('deviceUsingText', () => {
     expect(await text('en', { kind: 'tunnel', relayUp: true }))
       .toBe('This device is using: Cloudflare tunnel (relay available, but slower)');
     expect(await text('en', { kind: 'punched', family: 'ipv4', rttMs: 85 }))
-      .toBe('This device is using: Hole-punched direct · IPv4 · 85 ms');
-    expect(await text('en', { kind: 'lan', family: 'ipv6', rttMs: 2 })).toBe('This device is using: LAN direct · IPv6 · 2 ms');
+      .toBe('This device is using: Direct (hole punching) · IPv4 · 85 ms');
+    expect(await text('en', { kind: 'lan', family: 'ipv6', rttMs: 2 })).toBe('This device is using: Direct (local network) · IPv6 · 2 ms');
     await i18n.changeLanguage('zh');
   });
 });
