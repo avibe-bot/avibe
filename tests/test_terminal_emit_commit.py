@@ -129,7 +129,11 @@ class _Harness:
 
 
 def _evidence(turn: dict) -> dict:
-    return json.loads(str(turn.get("terminal_evidence_json") or "{}"))
+    """The evidence the runner handed over, without the receipt-eligibility mark every
+    Turn end this version writes carries (``session_delegations``)."""
+    evidence = json.loads(str(turn.get("terminal_evidence_json") or "{}"))
+    evidence.pop("delegation_receipt_eligible", None)
+    return evidence
 
 
 async def _blocked_at(dispatcher, monkeypatch, name: str) -> asyncio.Event:
