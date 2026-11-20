@@ -7,6 +7,8 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceContextSource } from '../../lib/voiceContext';
+import { closeVoiceConsent, noteVoiceStatus, voiceConsentAsking } from '../../lib/voiceConsent';
+import { writeVoiceInputSelection } from '../../lib/voiceInput';
 
 type VoiceStopped = (
   reason: 'finish' | 'abort' | 'error',
@@ -216,6 +218,31 @@ describe('Composer voice shortcut', () => {
   const telemetrySent = () => apiFetch.mock.calls
     .filter(([path]) => path === '/api/asr/telemetry')
     .map(([, init]) => JSON.parse((init as RequestInit).body as string) as Record<string, unknown>);
+
+  // Composition contract: a saved input changes capture constraints, never consent admission.
+  // Existing shortcut cases use legacy status without consent and the system-default input.
+  it('requests the selected microphone only on a newly granted voice press', async () => {
+    writeVoiceInputSelection('usb-selected');
+    renderComposer();
+    const textbox = await screen.findByRole('textbox');
+    await act(async () => undefined);
+    for (const consent of [null, 'declined'] as const) {
+      act(() => { noteVoiceStatus({ consent }); });
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await act(async () => undefined);
+      expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+      if (consent === null) expect(voiceConsentAsking()).toBe(true);
+      act(() => { closeVoiceConsent(); });
+    }
+    act(() => { noteVoiceStatus({ consent: 'granted' }); });
+    expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    expect(voiceMocks.getUserMedia).toHaveBeenCalledWith({ audio: { deviceId: { exact: 'usb-selected' } } });
+    await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledOnce());
+    fireEvent.keyDown(textbox, { code: 'Escape' });
+    await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+  });
 
   it('traces a tap take from its microphone request, and logs a microphone that never opened', async () => {
     renderComposer();

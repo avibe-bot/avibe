@@ -72,6 +72,7 @@ fn valid_identifier(identifier: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+#[derive(Clone)]
 pub struct DeepLinkNavigation {
     destination: Url,
     delivery: Option<Arc<DeepLinkTarget>>,
@@ -80,6 +81,10 @@ pub struct DeepLinkNavigation {
 impl DeepLinkNavigation {
     pub fn url(&self) -> &Url {
         &self.destination
+    }
+
+    pub fn show_session(&self) -> Option<&str> {
+        self.delivery.as_ref()?.path.strip_prefix("/apps/show/")
     }
 }
 
@@ -102,6 +107,7 @@ pub struct DeepLinks {
     action_owner: Option<u64>,
     local_return: Option<LocalReturn>,
     failed: bool,
+    app_launch: Option<Arc<DeepLinkTarget>>,
 }
 
 impl DeepLinks {
@@ -219,14 +225,21 @@ impl DeepLinks {
             return None;
         }
         let origin = LoopbackOrigin::parse(&status.origin).ok()?;
-        Some(if self.pending_for_owner(owner) {
-            self.prepare_navigation(&origin)
-        } else {
-            DeepLinkNavigation {
-                destination: origin.navigation_url(),
-                delivery: None,
-            }
-        })
+        Some(
+            if self.pending_for_owner(owner)
+                && !self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|target| target.path.starts_with("/apps/show/"))
+            {
+                self.prepare_navigation(&origin)
+            } else {
+                DeepLinkNavigation {
+                    destination: origin.navigation_url(),
+                    delivery: None,
+                }
+            },
+        )
     }
 
     pub fn workbench_navigation(&self, origin: &LoopbackOrigin, current_url: &Url) -> Option<DeepLinkNavigation> {
@@ -235,6 +248,40 @@ impl DeepLinks {
         }
         self.pending.as_ref()?;
         Some(self.prepare_navigation(origin))
+    }
+
+    /// Claim exactly one Show delivery without consuming it as main navigation.
+    /// A later same-URL delivery has a distinct Arc and remains independently live.
+    pub fn claim_app_launch(&mut self, navigation: &DeepLinkNavigation) -> bool {
+        let Some(delivery) = &navigation.delivery else {
+            return false;
+        };
+        if navigation.show_session().is_none()
+            || !self
+                .pending
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, delivery))
+            || self
+                .app_launch
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, delivery))
+        {
+            return false;
+        }
+        self.app_launch = Some(delivery.clone());
+        true
+    }
+
+    pub fn owns_app_launch(&self, navigation: &DeepLinkNavigation) -> bool {
+        navigation.delivery.as_ref().is_some_and(|delivery| {
+            self.pending
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, delivery))
+                && self
+                    .app_launch
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, delivery))
+        })
     }
 
     pub fn commit_navigation(
@@ -250,6 +297,7 @@ impl DeepLinks {
         match (&self.pending, &navigation.delivery) {
             (Some(pending), Some(delivery)) if Arc::ptr_eq(pending, delivery) => {
                 self.pending = None;
+                self.app_launch = None;
                 true
             }
             _ => false,
@@ -296,6 +344,29 @@ mod tests {
         assert!(links.claim_local_return(13, 4).is_none());
         links.receive_owned(["avibe://settings"], Some(5));
         assert!(links.claim_local_return(14, 5).is_some());
+    }
+
+    #[test]
+    fn show_bootstrap_keeps_the_root_and_claims_one_exact_app_delivery() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:39567").unwrap();
+        let ready = BootstrapStatus::ready(&origin, 1, BootstrapNoticeCode::Ready);
+        let mut links = DeepLinks::default();
+        links.receive_owned(["avibe://show/session"], Some(4));
+        let cold = links.bootstrap_navigation_owned(&ready, Some(4)).unwrap();
+        assert_eq!(cold.url(), &origin.navigation_url());
+        assert!(!links.commit_navigation(&cold, true, 1, 1));
+        let first = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+        assert_eq!(first.show_session(), Some("session"));
+        assert!(links.claim_app_launch(&first));
+        assert!(!links.claim_app_launch(&first));
+        links.receive_owned(["avibe://show/session"], Some(4));
+        assert!(!links.owns_app_launch(&first));
+        let next = links.workbench_navigation(&origin, &origin.navigation_url()).unwrap();
+        assert!(links.claim_app_launch(&next));
+        assert!(!links.commit_navigation(&first, true, 1, 1));
+        assert!(!links.commit_navigation(&next, true, 1, 2));
+        assert!(links.commit_navigation(&next, true, 2, 2));
+        assert!(!links.has_pending());
     }
 
     const MAPPINGS: &[(&str, &str)] = &[

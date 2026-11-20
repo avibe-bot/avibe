@@ -1436,30 +1436,14 @@ fn navigation_is_allowed(url: &Url, active_origin: Option<&LoopbackOrigin>) -> b
     is_shell_ui_url(url) || active_origin.is_some_and(|origin| origin.matches_url_origin(url))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenAppWindowRequest {
-    app_id: String,
-    session_id: Option<String>,
-    title: Option<String>,
-    new_window: bool,
-}
+type OpenAppWindowRequest = app_windows::Request;
 
 #[tauri::command]
-async fn open_app_window(window: Webview, app: AppHandle, request: OpenAppWindowRequest) -> Result<(), String> {
-    let _launch = app_windows::LAUNCH_LOCK.lock().await;
+async fn open_app_window(window: Webview, request: OpenAppWindowRequest) -> Result<(), String> {
     if !pet::is_workbench(&window) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
     }
-    let target = app_windows::parse_target(&request.app_id, request.session_id.as_deref())?;
-    let origin = app
-        .state::<Shell>()
-        .active_origin
-        .lock()
-        .map_err(|_| "The desktop Runtime origin is unavailable.".to_owned())?
-        .clone()
-        .ok_or_else(|| "The desktop Runtime origin is unavailable.".to_owned())?;
-    app_windows::open(&app, &origin, &target, request.title.as_deref(), request.new_window)
+    app_windows::open_legacy(&window, request).await
 }
 
 /// The Console settings page expresses a UI rebind as a navigation to a bare
@@ -1945,11 +1929,15 @@ fn build_main_window(
         config.url = tauri::WebviewUrl::External("about:blank".parse().ok()?);
         config.visible = false;
     }
+    let app_document = app_windows::document(app, MAIN_WINDOW);
+    let navigation_document = app_document.clone();
+    let navigation_app = app.clone();
     let builder = WebviewWindowBuilder::from_config(app, &config)
         .ok()?
         .incognito(disposable)
         .initialization_script(DESKTOP_SHELL_MARKER)
         .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
+        .initialization_script(app_windows::PROTOCOL_SCRIPT)
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
@@ -1958,10 +1946,16 @@ fn build_main_window(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
         ))
+        .on_navigation(move |url| app_windows::navigation_for(&navigation_app, MAIN_WINDOW, &navigation_document, url))
         .on_new_window(|url, _features| handle_new_window_request(url));
     let document_window = instance_client::window_created(app);
     let generation = instance_client::epoch(app);
     let builder = builder.on_page_load(move |webview, payload| {
+        app_windows::document_load(
+            webview.as_ref(),
+            &app_document,
+            payload.event() == tauri::webview::PageLoadEvent::Started,
+        );
         if payload.event() == tauri::webview::PageLoadEvent::Started {
             // The document that opened a Vault sandbox window is gone.
             #[cfg(target_os = "macos")]
@@ -1988,7 +1982,7 @@ fn build_main_window(
     };
     // macOS draws the page under a transparent native title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
-    let builder = builder.initialization_script(macos_title_bar::inset_script());
+    let builder = builder.initialization_script(macos_title_bar::inset_script(app.config()));
     #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let builder = builder.initialization_script(DESKTOP_COMPUTER_USE_MARKER);
     let window = builder.build().ok()?;
@@ -2021,12 +2015,17 @@ fn build_main_child(
         .windows
         .iter()
         .find(|config| config.label == MAIN_WINDOW)?;
+    let app_document = app_windows::document(app, label);
+    let navigation_document = app_document.clone();
+    let navigation_app = app.clone();
+    let navigation_label = label.to_owned();
     let mut builder =
         tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External("about:blank".parse().ok()?))
             .incognito(disposable)
             .auto_resize()
             .initialization_script(DESKTOP_SHELL_MARKER)
             .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
+            .initialization_script(app_windows::PROTOCOL_SCRIPT)
             .initialization_script(pet::DESKTOP_PET_MARKER)
             .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
             .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
@@ -2035,8 +2034,16 @@ fn build_main_child(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
         serde_json::to_string(&app.package_info().version.to_string()).ok()?
     ))
+            .on_navigation(move |url| {
+                app_windows::navigation_for(&navigation_app, &navigation_label, &navigation_document, url)
+            })
             .on_new_window(|url, _features| handle_new_window_request(url))
             .on_page_load(move |view, payload| {
+                app_windows::document_load(
+                    &view,
+                    &app_document,
+                    payload.event() == tauri::webview::PageLoadEvent::Started,
+                );
                 if payload.event() == tauri::webview::PageLoadEvent::Started {
                     // The document that opened a Vault sandbox window is gone.
                     #[cfg(target_os = "macos")]
@@ -2057,7 +2064,7 @@ fn build_main_child(
     }
     #[cfg(target_os = "macos")]
     {
-        builder = builder.initialization_script(macos_title_bar::inset_script());
+        builder = builder.initialization_script(macos_title_bar::inset_script(app.config()));
     }
     #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
@@ -2362,8 +2369,40 @@ fn apply_pending_deep_link_on_main(app: &AppHandle) {
         if shell.window_generation.load(Ordering::SeqCst) != observed_generation {
             return;
         }
-        let succeeded = window.navigate(navigation.url().clone()).is_ok();
-        commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
+        if let Some(session) = navigation.show_session().map(str::to_owned) {
+            if !app
+                .state::<Mutex<DeepLinks>>()
+                .lock()
+                .is_ok_and(|mut links| links.claim_app_launch(&navigation))
+            {
+                return;
+            }
+            // Release the A5 serializer before joining the App owner's launch
+            // serializer. The owner captures this exact Runtime document now.
+            drop(_client_navigation);
+            let Some(launch) = app_windows::prepare_show(&window, &session, navigation.clone()) else {
+                return;
+            };
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let current = app.state::<Mutex<DeepLinks>>().lock().is_ok_and(|links| {
+                    links.owns_app_launch(&navigation)
+                        && links.pending_for_owner(instance_client::presentation_owner(&app))
+                });
+                if !current {
+                    return;
+                }
+                let _status = app_windows::open_show(launch).await;
+                commit_deep_link_navigation(&app, &navigation, true, observed_generation);
+                // A successor may have arrived while fallback deposit held A5.
+                // Its receipt stays pending until this delivery releases all
+                // guards and commits only its own Arc.
+                apply_pending_deep_link(&app);
+            });
+        } else {
+            let succeeded = window.navigate(navigation.url().clone()).is_ok();
+            commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
+        }
     }
 }
 
@@ -2754,6 +2793,7 @@ pub fn run() {
                     }
                 })
                 .on_navigation(|webview, url| {
+                    if let Some(allowed) = app_windows::navigation(webview, url) { return allowed; }
                     if webview.label() == pet::PET_WINDOW {
                         return pet::navigation_allowed(webview.app_handle(), url);
                     }
@@ -2786,7 +2826,7 @@ pub fn run() {
                         .try_state::<Shell>()
                         .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
                     if app_windows::is_app_window(webview.label()) {
-                        return active_origin.is_some_and(|origin| origin.matches_url_origin(url));
+                        return app_windows::child_navigation(webview, url);
                     }
                     if navigation_is_allowed(url, active_origin.as_ref()) {
                         return true;

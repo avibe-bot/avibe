@@ -291,7 +291,7 @@
     },
     "src/components/ui/file-preview.tsx": {
       "avibe/localized-user-text": 4,
-      "react-hooks/set-state-in-effect": 6
+      "react-hooks/set-state-in-effect": 5
     },
     "src/components/ui/file-viewer-modal.tsx": {
       "avibe/localized-user-text": 1
@@ -410,7 +410,7 @@
       "avibe/localized-user-text": 2,
       "react-hooks/immutability": 1,
       "react-hooks/preserve-manual-memoization": 1,
-      "react-hooks/set-state-in-effect": 2
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/EditorFontSizePopover.tsx": {
       "avibe/localized-user-text": 3

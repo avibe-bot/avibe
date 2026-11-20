@@ -94,6 +94,7 @@ import type {
 import { DeferredMentionEditor } from './deferredMentionEditor';
 import type { MentionReference } from '../../lib/mentions';
 import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
+import { requestVoiceInputStream } from '../../lib/voiceInput';
 import { beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
 
 export type ComposerAttachment = {
@@ -1328,7 +1329,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     try {
       await captureClaim.ready;
       micRequestedAt = trace.mark();
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await requestVoiceInputStream();
       trace.micSettled(micRequestedAt);
       if (!captureClaim.isCurrent() || unmountedRef.current || disabledRef.current) {
         stream.getTracks().forEach((track) => track.stop());

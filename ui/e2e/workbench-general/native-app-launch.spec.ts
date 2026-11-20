@@ -1,11 +1,12 @@
+import type { AppLaunchRequest, AppLaunchSnapshot } from '../../src/apps/appLaunchProtocol';
 import { expect, test, type Page } from '../support/browserTest';
 import { DESKTOP, serveProduct } from './support';
 
 type Surface = 'Dock' | 'Library' | 'Search';
 type Mode = 'native' | 'old-shell' | 'web' | 'rejected';
-type Call = { command: string; args: { request: { appId: string; sessionId: string | null; title: string; newWindow: boolean } } };
+type Call = { request: AppLaunchRequest };
 
-async function prepare(page: Page, mode: Mode) {
+async function prepare(page: Page, mode: Mode, surface: Surface) {
   await page.setViewportSize(DESKTOP);
   await serveProduct(page);
   await page.route('**/api/search/messages?**', route => route.fulfill({ json: { sessions: [] } }));
@@ -18,20 +19,28 @@ async function prepare(page: Page, mode: Mode) {
   } } }));
   const calls: Call[] = [];
   await page.exposeFunction('recordNativeLaunch', (call: Call) => calls.push(call));
-  await page.addInitScript((mode) => {
+  await page.addInitScript(({ mode, surface }) => {
     if (mode !== 'web') Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });
-    if (mode === 'native' || mode === 'rejected') Object.defineProperty(window, '__AVIBE_DESKTOP_APP_WINDOWS__', { value: true });
+    if (surface === 'Library' && mode !== 'web') Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });
+    if (mode === 'native' || mode === 'rejected') window.__AVIBE_APP_LAUNCH_PROTOCOL__ = 1;
+    document.addEventListener('click', event => {
+      const link = event.target as HTMLAnchorElement;
+      if (!link.href?.startsWith('avibe-app://launch?')) return;
+      event.preventDefault();
+      const request = JSON.parse(new URL(link.href).searchParams.get('request')!);
+      void (window as unknown as { recordNativeLaunch: (call: unknown) => Promise<void> }).recordNativeLaunch({ request }).then(() => {
+        window.dispatchEvent(new CustomEvent('avibe:app-launch-result', { detail: { requestId: request.requestId, status: mode === 'rejected' ? 'fallback' : 'opened' } }));
+      });
+    });
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {
-      invoke: async (command: string, args: unknown) => {
+      invoke: async (command: string) => {
         if (command === 'desktop_update_state') return { phase: 'idle', currentVersion: '2.4.0' };
-        if (command !== 'open_app_window') return;
-        await (window as unknown as { recordNativeLaunch: (call: unknown) => Promise<void> }).recordNativeLaunch({ command, args });
-        if (mode === 'rejected') throw new Error('native window creation refused');
+        if (command === 'open_app_window') throw new Error('New UI must not use main-only legacy App IPC');
       },
     } });
-  }, mode);
-  await page.goto('/');
-  await expect(page.getByRole('button', { name: 'Apps', exact: true })).toBeVisible();
+  }, { mode, surface });
+  await page.goto(surface === 'Library' ? '/apps/library?standalone=1' : '/');
+  if (surface !== 'Library') await expect(page.getByRole('button', { name: 'Apps', exact: true })).toBeVisible();
   return calls;
 }
 
@@ -40,10 +49,7 @@ async function launch(page: Page, surface: Surface, title: string, modifiers: ('
     await page.getByRole('button', { name: 'Apps', exact: true }).hover();
     await page.getByRole('button', { name: title, exact: true }).click({ modifiers });
   } else if (surface === 'Library') {
-    await page.getByRole('button', { name: 'Apps', exact: true }).hover();
-    await page.getByRole('button', { name: 'App Library', exact: true }).click();
-    await page.getByRole('dialog', { name: 'App Library', exact: true })
-      .getByRole('button', { name: new RegExp(`^Reorder ${title} `) }).click({ modifiers });
+    await page.getByRole('button', { name: new RegExp(`^Reorder ${title} `) }).click({ modifiers });
   } else {
     await page.getByRole('button', { name: 'Search', exact: true }).click();
     await page.getByRole('dialog').getByRole('textbox').fill(title);
@@ -53,18 +59,16 @@ async function launch(page: Page, surface: Surface, title: string, modifiers: ('
 
 for (const surface of ['Dock', 'Library', 'Search'] as const) {
   test(`${surface}: native launches carry structured targets and modifier intent`, async ({ page }) => {
-    const calls = await prepare(page, 'native');
+    const calls = await prepare(page, 'native', surface);
     await launch(page, surface, 'Files');
     await expect.poll(() => calls.length).toBe(1);
-    expect(calls[0]).toEqual({ command: 'open_app_window', args: { request: {
-      appId: 'files', sessionId: null, title: 'Files', newWindow: false,
-    } } });
+    expect(calls[0].request).toMatchObject({ appId: 'files', newWindow: false, mode: 'activate', source: surface === 'Dock' ? 'dock' : surface === 'Library' ? 'library' : 'command-palette' });
     await expect(page.getByRole('dialog', { name: 'Files', exact: true })).toHaveCount(0);
   });
 
   for (const mode of ['old-shell', 'web', 'rejected'] as const) {
     test(`${surface}: ${mode} preserves the internal window fallback`, async ({ page }) => {
-      const calls = await prepare(page, mode);
+      const calls = await prepare(page, mode, surface);
       await launch(page, surface, 'Files');
       await expect(page.getByRole('dialog', { name: 'Files', exact: true })).toBeVisible();
       expect(calls).toHaveLength(mode === 'rejected' ? 1 : 0);
@@ -73,15 +77,34 @@ for (const surface of ['Dock', 'Library', 'Search'] as const) {
 
   for (const modifier of ['Alt', 'Shift'] as const) {
     test(`${surface}: ${modifier} opens another Show Page window`, async ({ page }) => {
-      const calls = await prepare(page, 'native');
+      const calls = await prepare(page, 'native', surface);
       await launch(page, surface, 'Window fixture', [modifier]);
       await expect.poll(() => calls.length).toBe(1);
-      expect(calls[0].args.request).toEqual({
+      expect(calls[0].request).toMatchObject({
         appId: 'showpage', sessionId: 'ses-native-fixture', title: 'Window fixture', newWindow: true,
       });
     });
   }
 }
+
+test('W1 Option uses physical digits and excludes editable targets through the real WindowLayer', async ({ page }) => {
+  const calls = await prepare(page, 'native', 'Dock');
+  await page.evaluate(() => {
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '¡', code: 'Digit1', altKey: true, bubbles: true }));
+  });
+  await expect.poll(() => calls.length).toBe(1);
+  expect(calls[0].request).toMatchObject({ appId: 'files', source: 'dock-shortcut', mode: 'activate' });
+  await page.evaluate(() => {
+    const input = document.createElement('input');
+    document.body.append(input);
+    input.focus();
+    const event = new KeyboardEvent('keydown', { key: '™', code: 'Digit2', altKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+    if (event.defaultPrevented) throw new Error('Editable target consumed App shortcut');
+    input.remove();
+  });
+  expect(calls).toHaveLength(1);
+});
 
 test('native Terminal windows use independent disposable sessions and preserve browser reattachment', async ({ context }) => {
   const sessions: string[] = [];
@@ -174,25 +197,150 @@ for (const width of [720, 1200]) {
     expect(attached.has(persistent)).toBe(false);
     expect(new URL(native.url()).searchParams.has('cwd')).toBe(false);
 
-    if (width < 768) {
-      await expect(native).toHaveURL(/\/apps\/terminal/);
-      await native.reload();
-      await expect.poll(() => attached.size).toBe(2);
-      await native.goBack();
-      await expect(native.getByText('native-folder', { exact: true })).toBeVisible();
-      const beforeForward = connections;
-      await native.goForward();
-      await expect.poll(() => connections).toBeGreaterThan(beforeForward);
-      // A confirmed DELETE releases a slot, so history traversal may safely reuse it.
-      expect([...attached.values()].every(cwd => cwd === '/fixture/work/native-folder')).toBe(true);
-      expect(attached.has(persistent)).toBe(false);
-    } else {
-      await expect(native.getByRole('dialog', { name: 'Terminal', exact: true })).toBeVisible();
-      await expect(native).toHaveURL(/\/apps\/files/);
-    }
+    await expect(native.getByRole('dialog', { name: 'Terminal', exact: true })).toBeVisible();
+    await expect(native).toHaveURL(/\/apps\/files/);
+    await expect(native.getByRole('button', { name: 'native-folder — —', exact: true })).toBeVisible();
+    expect(connections).toBeGreaterThan(0);
     await browser.reload();
     await expect(browser.getByRole('button', { name: 'New tab', exact: true })).toBeVisible();
     expect([...persistentSessions]).toEqual([persistent]);
     expect(await browser.evaluate(() => localStorage.getItem('avibe.terminal.sessionId'))).toBe(persistent);
   });
 }
+
+async function nativeSnapshot(page: Page, snapshot: AppLaunchSnapshot) {
+  await page.addInitScript(snapshot => {
+    if (window.self !== window.top) return;
+    Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });
+    window.__AVIBE_APP_LAUNCH__ = snapshot;
+  }, snapshot);
+}
+async function repeatLaunch(page: Page, snapshot: AppLaunchSnapshot) {
+  await page.evaluate(snapshot => {
+    window.__AVIBE_APP_LAUNCH__ = snapshot;
+    window.dispatchEvent(new CustomEvent('avibe:app-launch', { detail: snapshot }));
+  }, snapshot);
+}
+
+for (const lang of ['en', 'zh'] as const) {
+  test(`W1 ${lang}: complete Editor body preserves an actual Monaco draft across native reuse`, async ({ page }) => {
+    await page.setViewportSize({ width: 880, height: 600 });
+    await serveProduct(page, lang);
+    await page.route('**/api/files/list?**', route => route.fulfill({ json: { ok: true, path: '/fixture', parent: '/', entries: [] } }));
+    await page.route('**/api/files/content?**', route => route.fulfill({ contentType: 'text/plain', body: 'second fixture file' }));
+    const initial: AppLaunchSnapshot = { appId: 'editor', requestId: 'editor-one', windowId: 'native-editor', source: 'file-browser', params: { newFileDir: '/fixture' } };
+    await nativeSnapshot(page, initial);
+    await page.goto('/apps/editor?standalone=1');
+    const editor = page.locator('.monaco-editor .view-lines').first();
+    await editor.click({ position: { x: 12, y: 10 } });
+    await page.keyboard.insertText('unsaved W1 draft');
+    await repeatLaunch(page, { ...initial, requestId: 'editor-two', params: { path: '/fixture/two.txt', filename: 'two.txt', mtime: 1 } });
+    await expect(page.getByText('two.txt', { exact: true }).first()).toBeVisible();
+    await expect(page.locator('.monaco-editor')).toHaveCount(2);
+    const untitled = lang === 'en' ? /Untitled/ : /未命名/;
+    await page.getByRole('button', { name: untitled }).first().click();
+    await expect(page.locator('.monaco-editor:visible .view-lines')).toContainText('unsaved W1 draft');
+    await page.screenshot({ path: `/tmp/w1-ui-evidence/editor-reuse-${lang}.png` });
+    expect(new URL(page.url()).searchParams.has('path')).toBe(false);
+  });
+}
+
+test('W1 complete Library/Preview/Show bodies consume snapshots without command route recursion', async ({ context }) => {
+  const library = await context.newPage();
+  await library.setViewportSize({ width: 880, height: 600 });
+  await serveProduct(library);
+  await library.route('**/api/files/list?**', route => route.fulfill({ json: { ok: true, path: '/fixture', parent: '/', entries: [{ name: 'fixture.txt', kind: 'file', size: 12, mtime: 1, ext: 'txt' }] } }));
+  const libraryLaunch: AppLaunchSnapshot = { appId: 'library', requestId: 'library-one', windowId: 'native-library', source: 'library', params: { initialTab: 'showpages' } };
+  await nativeSnapshot(library, libraryLaunch);
+  await library.goto('/apps/library?standalone=1');
+  await expect(library.getByRole('button', { name: /^ShowPage/ })).toHaveAttribute('aria-pressed', 'true');
+  await repeatLaunch(library, { ...libraryLaunch, requestId: 'library-two', params: { initialTab: 'apps' } });
+  await expect(library.getByRole('button', { name: /^Apps ·/ })).toHaveAttribute('aria-pressed', 'true');
+  await library.getByRole('button', { name: /^Reorder Files / }).click();
+  await expect(library.getByRole('dialog', { name: 'Files', exact: true })).toBeVisible();
+  await expect(library.getByRole('button', { name: /^Apps ·/ })).toBeVisible();
+  await expect(library.getByText('fixture.txt', { exact: true })).toBeVisible();
+  await library.screenshot({ path: '/tmp/w1-ui-evidence/library-child-fallback.png' });
+
+  const preview = await context.newPage();
+  await preview.setViewportSize({ width: 880, height: 600 });
+  await serveProduct(preview);
+  await preview.route('**/api/files/content?**', route => route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><rect width="120" height="120" fill="teal"/></svg>' }));
+  const previewLaunch: AppLaunchSnapshot = { appId: 'preview', requestId: 'preview-one', windowId: 'native-preview', source: 'file-browser', params: { path: '/fixture/one.svg', name: 'one.svg' } };
+  await nativeSnapshot(preview, previewLaunch);
+  await preview.goto('/apps/preview?standalone=1');
+  await expect(preview.locator('img').first()).toHaveAttribute('alt', 'one.svg');
+  await repeatLaunch(preview, { ...previewLaunch, requestId: 'preview-two', params: { path: '/fixture/two.svg', name: 'two.svg' } });
+  await expect(preview.locator('img').first()).toHaveAttribute('alt', 'two.svg');
+  await expect(preview.getByText('Loading…', { exact: true })).toHaveCount(0);
+  await expect(preview.locator('img').first()).toHaveCSS('opacity', '1');
+  await preview.screenshot({ path: '/tmp/w1-ui-evidence/preview-reuse.png' });
+
+  const show = await context.newPage();
+  await show.setViewportSize({ width: 880, height: 600 });
+  await serveProduct(show);
+  await show.route('**/api/sessions/ses-w1', route => route.fulfill({ json: { id: 'ses-w1', status: 'active', title: 'Fixture Show' } }));
+  await show.route('**/show/ses-w1/**', route => route.fulfill({ contentType: 'text/html', body: '<label>Show draft<textarea></textarea></label>' }));
+  const showLaunch: AppLaunchSnapshot = { appId: 'showpage', requestId: 'show-one', windowId: 'native-show', source: 'deep-link', sessionId: 'ses-w1' };
+  await nativeSnapshot(show, showLaunch);
+  await show.goto('/apps/show/ses-w1?standalone=1');
+  const draft = show.frameLocator('iframe').getByRole('textbox', { name: 'Show draft' });
+  await draft.fill('keep show buffer');
+  await repeatLaunch(show, { ...showLaunch, requestId: 'show-two' });
+  await expect(draft).toHaveValue('keep show buffer');
+  await expect(show).toHaveURL(/\/apps\/show\/ses-w1/);
+  await expect(show.locator('[data-window-id]')).toHaveCount(0);
+  await show.screenshot({ path: '/tmp/w1-ui-evidence/show-reuse.png' });
+});
+
+test('W1 main fallback snapshot retains a nonempty Editor draft and never resubmits native', async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await serveProduct(page);
+  await page.addInitScript(() => { window.__AVIBE_APP_LAUNCH_PROTOCOL__ = 1; });
+  await page.route('**/api/files/list?**', route => route.fulfill({ json: { ok: true, path: '/fixture', parent: '/', entries: [] } }));
+  await page.route('**/api/sessions/ses-fallback', route => route.fulfill({ json: { id: 'ses-fallback', status: 'active', title: 'Fallback Show' } }));
+  await page.route('**/show/ses-fallback/**', route => route.fulfill({ contentType: 'text/html', body: '<label>Fallback body<input /></label>' }));
+  await page.goto('/apps/editor');
+  await page.getByRole('button', { name: /^New File/ }).first().click();
+  await page.locator('.monaco-editor .view-lines').first().click({ position: { x: 12, y: 10 } });
+  await page.keyboard.insertText('main draft survives deep link');
+  const requests: string[] = [];
+  page.on('request', request => { if (request.url().startsWith('avibe-app:')) requests.push(request.url()); });
+  const launch: AppLaunchSnapshot = { appId: 'showpage', requestId: 'main-fallback-one', windowId: 'runtime-fixture', sessionId: 'ses-fallback', source: 'deep-link' };
+  await repeatLaunch(page, launch);
+  const app = page.locator('[data-window-id]');
+  await expect(app).toHaveCount(1);
+  await expect(app).toBeVisible();
+  await expect(page.frameLocator('iframe[title="Show Page"]').getByRole('textbox', { name: 'Fallback body' })).toBeVisible();
+  await repeatLaunch(page, launch);
+  await expect(app).toHaveCount(1);
+  await expect(page.locator('.monaco-editor .view-lines')).toContainText('main draft survives deep link');
+  await expect(page).toHaveURL(/\/apps\/editor$/);
+  expect(requests).toEqual([]);
+  await page.screenshot({ path: '/tmp/w1-ui-evidence/main-show-fallback-retained-draft.png' });
+});
+
+test('W1 native Terminal snapshot reuse preserves all backend session contexts', async ({ page }) => {
+  await page.setViewportSize({ width: 880, height: 600 });
+  await serveProduct(page);
+  await page.route('**/api/terminal/*', route => route.fulfill({ status: 204 }));
+  const sessions = new Map<string, string | null>();
+  await page.routeWebSocket('**/api/terminal/*', socket => {
+    const url = new URL(socket.url());
+    sessions.set(url.pathname.split('/').at(-1)!, url.searchParams.get('cwd'));
+    socket.send(JSON.stringify({ type: 'ready', persistent: true }));
+  });
+  const launch: AppLaunchSnapshot = { appId: 'terminal', requestId: 'terminal-one', windowId: 'native-terminal', source: 'file-browser', params: { cwd: '/fixture/one' } };
+  await nativeSnapshot(page, launch);
+  await page.goto('/apps/terminal?standalone=1');
+  await expect.poll(() => sessions.size).toBe(1);
+  const original = [...sessions.keys()][0];
+  await repeatLaunch(page, { ...launch, requestId: 'terminal-two', params: { cwd: '/fixture/two' } });
+  await expect.poll(() => sessions.size).toBe(2);
+  expect(sessions.get(original)).toBe('/fixture/one');
+  expect([...sessions.values()]).toEqual(['/fixture/one', '/fixture/two']);
+  await repeatLaunch(page, { ...launch, requestId: 'terminal-two', params: { cwd: '/fixture/two' } });
+  await expect(page.getByRole('button', { name: 'New tab', exact: true })).toBeVisible();
+  expect(sessions.size).toBe(2);
+  await page.screenshot({ path: '/tmp/w1-ui-evidence/terminal-reuse.png' });
+});

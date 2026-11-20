@@ -35,7 +35,8 @@ vi.mock('../../context/DockContext', () => ({
   useDock: () => dockState,
 }));
 
-vi.mock('../../context/WindowManagerContext', () => ({
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../context/WindowManagerContext')>(),
   useWindowManager: () => ({
     windows: windowsRef.current,
     ...windowManager,

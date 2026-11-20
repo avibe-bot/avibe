@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, type ReactNode } from 'react';
+import { useContext, useMemo, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 
 import { ApiProvider } from '@/context/ApiContext';
@@ -23,6 +23,7 @@ import { unreadByCategory } from '@/lib/notificationPreferences';
 import type { DesignTheme, FrameRoute } from '../frame';
 
 import { owner, type WorkbenchFixtures } from './fixtures';
+import { FixturesContext } from './fixturesContext';
 
 /** Any member a frame does not set is a no-op: functions resolve to null, nothing throws. */
 function inert<T extends object>(known: Partial<T>): T {
@@ -97,9 +98,6 @@ function projectsValue(fixtures: WorkbenchFixtures): WorkbenchProjectsTree {
     isSavingDefaultAgent: () => false,
   });
 }
-
-/** The frame's fixtures, for providers a frame places itself (`InboxStateProvider`). */
-const FixturesContext = createContext<WorkbenchFixtures>({});
 
 /** One of the frame's `inboxStates`: the Inbox context this shell builds for the frame, with that
  *  state's rows and counts, for a frame that stacks the Inbox before and after a change. */

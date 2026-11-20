@@ -37,6 +37,7 @@ export const SettingsLayout = lazyPage(() => settings().then((m) => m.SettingsLa
 export const SettingsGeneralPage = lazyPage(() => settings().then((m) => m.SettingsGeneralPage));
 export const SettingsNotificationsPage = lazyPage(() => settings().then((m) => m.SettingsNotificationsPage));
 export const SettingsShortcutsPage = lazyPage(() => settings().then((m) => m.SettingsShortcutsPage));
+export const SettingsMicrophonePage = lazyPage(() => settings().then((m) => m.SettingsMicrophonePage));
 export const SettingsComputerUsePage = lazyPage(() => settings().then((m) => m.SettingsComputerUsePage));
 export const SettingsServicePage = lazyPage(() => settings().then((m) => m.SettingsServicePage));
 export const SettingsPlatformsPage = lazyPage(() => settings().then((m) => m.SettingsPlatformsPage));

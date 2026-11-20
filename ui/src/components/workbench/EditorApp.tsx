@@ -350,14 +350,19 @@ export const EditorApp: React.FC<{
     });
   }, []);
 
-  // Open the launch file (from the File Browser) once on mount, OR — when the File Browser's
+  // Consume each launch file (from the File Browser), OR — when the File Browser's
   // "New File" launched us with a target dir — root the explorer there and start a fresh untitled
   // buffer (its first save lands in that dir).
+  const handledLaunch = useRef<unknown>(undefined);
   useEffect(() => {
+    const key = params?.launchRequestId ?? params ?? null;
+    if (handledLaunch.current === key) return;
+    const initial = handledLaunch.current === undefined;
+    handledLaunch.current = key;
     // Restore a persisted session (explorer root + saved tabs) when this window was rehydrated on
     // reload — re-reading each file from disk for a fresh mtime, dropping any that vanished. Takes
     // precedence over the launch-file path below; the persisted state fully describes what to open.
-    const restore = sanitizeEditorRestore(params?.[WINDOW_RESTORE_PARAM]);
+    const restore = initial ? sanitizeEditorRestore(params?.[WINDOW_RESTORE_PARAM]) : null;
     if (restore && (restore.root != null || restore.tabs.length > 0)) {
       if (restore.root != null) setRoot(restore.root);
       const infos = restore.tabs;
@@ -411,6 +416,11 @@ export const EditorApp: React.FC<{
       }
       return;
     }
+    const rootDir = typeof params?.rootDir === 'string' ? params.rootDir : null;
+    if (rootDir) {
+      setRoot(rootDir);
+      rememberRecentFolder(rootDir);
+    }
     const p = typeof params?.path === 'string' ? params.path : null;
     if (p) {
       const name = (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p;
@@ -441,15 +451,8 @@ export const EditorApp: React.FC<{
       newFile();
       return;
     }
-    // "Open in Editor" from a project (sidebar): root the explorer at the folder with NO tab open —
-    // just the file tree + the select-a-file hint, no untitled buffer.
-    const rootDir = typeof params?.rootDir === 'string' ? params.rootDir : null;
-    if (rootDir) {
-      setRoot(rootDir);
-      rememberRecentFolder(rootDir);
-    }
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
-  }, []);
+  }, [params]);
 
   const anyDirty = Object.values(dirty).some(Boolean);
   useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);

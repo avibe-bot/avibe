@@ -19,9 +19,11 @@ const EditorApp = lazy(() => import('./EditorApp').then((m) => ({ default: m.Edi
 // Carried in router state — like the window params `wm.openApp` passes — so absolute paths stay out
 // of the URL; a refresh (no state) just lands on the empty/welcome state.
 type LaunchFile = {
-  path: string;
-  filename: string;
-  mtime: number | null;
+  path?: string;
+  filename?: string;
+  mtime?: number | null;
+  newFileDir?: string;
+  rootDir?: string;
   line?: number;
   column?: number;
   endColumn?: number;
@@ -30,15 +32,19 @@ type LaunchFile = {
 function readLaunch(state: unknown): LaunchFile | null {
   if (!state || typeof state !== 'object') return null;
   const s = state as Record<string, unknown>;
-  if (typeof s.path !== 'string') return null;
+  if (typeof s.path !== 'string' && typeof s.newFileDir !== 'string' && typeof s.rootDir !== 'string') return null;
   const line = typeof s.line === 'number' && Number.isInteger(s.line) && s.line > 0 ? s.line : undefined;
   const column = typeof s.column === 'number' && Number.isInteger(s.column) && s.column >= 0 ? s.column : 0;
   const endColumn = typeof s.endColumn === 'number' && Number.isInteger(s.endColumn) && s.endColumn >= column
     ? s.endColumn
     : column;
   return {
-    path: s.path,
-    filename: typeof s.filename === 'string' ? s.filename : s.path.split('/').filter(Boolean).pop() || s.path,
+    ...(typeof s.path === 'string' ? {
+      path: s.path,
+      filename: typeof s.filename === 'string' ? s.filename : s.path.split('/').filter(Boolean).pop() || s.path,
+    } : {}),
+    ...(typeof s.newFileDir === 'string' ? { newFileDir: s.newFileDir } : {}),
+    ...(typeof s.rootDir === 'string' ? { rootDir: s.rootDir } : {}),
     mtime: typeof s.mtime === 'number' ? s.mtime : null,
     ...(line ? { line, column, endColumn } : {}),
   };
@@ -63,14 +69,14 @@ const PaneLoading: React.FC = () => {
   return <div className="grid min-h-0 flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
 };
 
-export const AppsEditorPage: React.FC = () => {
+export const AppsEditorPage: React.FC<{ launchParams?: Record<string, unknown> }> = ({ launchParams }) => {
   const { t } = useTranslation();
   const location = useLocation();
   const desktop = useIsDesktop();
   const [dirty, setDirty] = useState(false);
   // Re-read whenever the router state changes (each navigation carries a fresh state object) so
   // opening another file while already on this route swaps the launch target.
-  const launch = useMemo(() => readLaunch(location.state), [location.state]);
+  const launch = useMemo(() => launchParams ?? readLaunch(location.state), [launchParams, location.state]);
   const standalone = useStandaloneAppTab();
   // The shell drops its chrome for standalone tabs. Ordinary phone routes also
   // fill the viewport and render a compact app-local header instead.
@@ -104,7 +110,7 @@ export const AppsEditorPage: React.FC = () => {
 // open/edit/save all work full-page. `useWindowCloseGuard` is a no-op without a window, so the route
 // page owns its navigation and unload guards.
 const EditorSurface: React.FC<{
-  launch: LaunchFile | null;
+  launch: Record<string, unknown> | LaunchFile | null;
   onDirtyChange: (dirty: boolean) => void;
   fullBleed?: boolean;
   mobile?: boolean;

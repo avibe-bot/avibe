@@ -20,6 +20,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/apps/files',
   '/apps/terminal',
   '/apps/editor',
+  '/apps/preview',
   '/apps/library',
   '/admin',
   '/admin/dashboard',

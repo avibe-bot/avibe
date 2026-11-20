@@ -19,5 +19,6 @@ export { SettingsPlatformsPage } from './SettingsPlatformsPage';
 export { SettingsServicePage } from './SettingsServicePage';
 export { SettingsGeneralPage } from './SettingsGeneralPage';
 export { SettingsShortcutsPage } from './SettingsShortcutsPage';
+export { SettingsMicrophonePage } from './MicrophoneSettingsPage';
 export { SettingsNotificationsPage } from './SettingsNotificationsPage';
 export { SettingsComputerUsePage } from './SettingsComputerUsePage';

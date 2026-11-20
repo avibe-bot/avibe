@@ -1,3 +1,5 @@
+import { StandaloneAppRoute } from './components/apps/StandaloneAppRoute';
+import { useAppLaunch } from './apps/useAppLaunch';
 import {
   createBrowserRouter,
   createRoutesFromElements,
@@ -34,6 +36,7 @@ import {
   SettingsLayout,
   SettingsLogsPage,
   SettingsMessagingPage,
+  SettingsMicrophonePage,
   SettingsNotificationsPage,
   SettingsOpencodeProviderPage,
   SettingsPlatformsPage,
@@ -52,7 +55,6 @@ import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationPr
 import { BootSkeleton } from './components/BootSkeleton';
 import { BotsProvider } from './context/BotsProvider';
 import { BotHoldProvider } from './components/workbench/bots/BotHold';
-import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
 import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanceBridge';
@@ -747,7 +749,7 @@ const AppsRouteFallback = () => {
 // render the Library body full-screen (the same component, its page shell).
 const LibraryRoute = () => {
   const isDesktop = useIsDesktop();
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('library');
   const navigate = useNavigate();
   const location = useLocation();
   const handledRef = useRef(false);
@@ -763,19 +765,8 @@ const LibraryRoute = () => {
   useEffect(() => {
     if (!isDesktop || handledRef.current) return;
     handledRef.current = true;
-    const own = wm.windows.filter((w) => w.appId === 'library');
-    const target = own.find((w) => !w.minimized) ?? own[0];
-    if (target) {
-      if (target.minimized) wm.restore(target.id);
-      else wm.focus(target.id);
-      // Honor the requested tab on an already-open window (its LibraryApp reads
-      // navKey/navTab), so an old /admin/show-pages link still lands on Show Pages.
-      if (initialTab) wm.setParams(target.id, { navTab: initialTab, navKey: location.key });
-    } else {
-      wm.openApp('library', { params: { initialTab } });
-    }
-    navigate('/', { replace: true });
-  }, [isDesktop, wm, navigate, initialTab, location.key]);
+    void launchApp({ appId: 'library', params: { initialTab } }).then((outcome) => { if (outcome !== 'stale' && outcome !== 'unknown') navigate('/', { replace: true }); });
+  }, [isDesktop, launchApp, navigate, initialTab, location.key]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   return (
@@ -881,6 +872,7 @@ const settingsRoute = () => (
     <Route path="account" element={<Navigate to="/settings/replies" replace />} />
     <Route path="notifications" element={<SettingsNotificationsPage />} />
     <Route path="shortcuts" element={<SettingsShortcutsPage />} />
+    <Route path="microphone" element={<SettingsMicrophonePage />} />
     <Route path="computer-use" element={<SettingsComputerUsePage />} />
     <Route path="service" element={<SettingsServicePage />} />
     <Route path="platforms" element={<SettingsPlatformsPage />} />
@@ -941,7 +933,7 @@ const WorkbenchRouteSurface = () => {
       path="/apps/files"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <AppsFileBrowserPage />
+          <StandaloneAppRoute appId="files"><AppsFileBrowserPage /></StandaloneAppRoute>
         </Suspense>
       }
     />
@@ -949,7 +941,7 @@ const WorkbenchRouteSurface = () => {
       path="/apps/terminal"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <AppsTerminalPage />
+          <StandaloneAppRoute appId="terminal"><AppsTerminalPage /></StandaloneAppRoute>
         </Suspense>
       }
     />
@@ -957,16 +949,17 @@ const WorkbenchRouteSurface = () => {
       path="/apps/editor"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <AppsEditorPage />
+          <StandaloneAppRoute appId="editor"><AppsEditorPage /></StandaloneAppRoute>
         </Suspense>
       }
     />
-    <Route path="/apps/library" element={<LibraryRoute />} />
+    <Route path="/apps/library" element={<StandaloneAppRoute appId="library"><LibraryRoute /></StandaloneAppRoute>} />
+    <Route path="/apps/preview" element={<StandaloneAppRoute appId="preview" />} />
     <Route
       path="/apps/show/:sessionId"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <ShowPageRoute />
+          <StandaloneAppRoute appId="showpage"><ShowPageRoute /></StandaloneAppRoute>
         </Suspense>
       }
     />
