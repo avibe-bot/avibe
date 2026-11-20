@@ -7643,7 +7643,7 @@ def renew_session_cookie(
     }
     from storage.device_registry import touch
 
-    touch(browser_session_id, current)
+    touch(browser_session_id, current, expires_at)
     return _encode_session_cookie(cloud.session_secret, identity)
 
 

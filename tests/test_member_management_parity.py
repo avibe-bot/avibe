@@ -178,7 +178,8 @@ def test_complete_registered_api_management_inventory():
     # + 1 voice consent answer (Editor, with the voice routes it gates).
     # + 2 system schedule device claim/receipt methods (Editor).
     # + 7 independent device routes and 2 Owner-only mobile metadata routes.
-    assert len(endpoints) == 349
+    # + 4 account-scoped registry list, self-report and sign-out routes.
+    assert len(endpoints) == 353
     for path in ("/api/system-schedule/claim", "/api/system-schedule/receipt"):
         assert ("POST", path) in endpoints
         assert http_authorization_policy("POST", path).minimum_role == "editor"

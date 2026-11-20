@@ -26,17 +26,25 @@ def install(monkeypatch):
 
 def login(cfg, subject, role, *, installation=None):
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh) Chrome/100.0 Safari/537.36"}
-    if installation:
-        headers.update(
-            {
-                "X-Avibe-Device-Name": "Work device",
-                "X-Avibe-Device-Kind": "desktop_app",
-                "X-Avibe-Installation-ID": installation,
-            }
-        )
-    return remote_access.make_session_cookie(
+    cookie = remote_access.make_session_cookie(
         cfg, subject + "@test.invalid", subject, session_claims=_session_claims(cfg, role=role), device_headers=headers
     )
+    if installation:
+        c = client(cookie)
+        assert report(c, installation).status_code == 200
+    return cookie
+
+
+def report(c, installation, **fields):
+    body = dict(
+        kind="iphone_app",
+        display_name="Work device",
+        installation_id=installation,
+        aliases=[],
+        app_version="1.0 (42)",
+        system_version="iOS 26.1",
+    )
+    return c.post("/api/devices/self", base_url=ORIGIN, headers=csrf_headers(c, ORIGIN), json={**body, **fields})
 
 
 def client(cookie):
@@ -47,7 +55,7 @@ def client(cookie):
 
 def listing(c, origin=ORIGIN):
     response = c.get("/api/devices", base_url=origin)
-    assert response.status_code == 200, response.get_data(as_text=True)
+    assert response.status_code == 200, response.get_json()
     return response.get_json()
 
 
@@ -108,13 +116,14 @@ def test_bulk_fence_covers_unseen_and_racing_legacy_cookie_preserves_caller(inst
         assert int(conn.scalar(select(state_meta.c.value_json).where(state_meta.c.key == key))) > time.time()
     for cookie in (caller, other, login(install, "member", "member")):
         assert remote_access.parse_session_identity(install, cookie)
+    unseen = _pre_registry_cookie(install, login(install, "guest", "viewer"))
+    install.remote_access.vibe_cloud.instance_secret = "fixture-runtime-credential"
     local = ui_server.app.test_client()
     local_origin = "http://127.0.0.1:5123"
     view = listing(local, local_origin)
     assert view["bulk_action"] == "all_remote"
     assert [r["id"] for r in view["mine"][:1]] == ["host"]
     assert [r["account"]["subject"] for r in view["mine"][1:]] == ["owner"]
-    unseen = _pre_registry_cookie(install, login(install, "guest", "viewer"))
     assert sign_out(local, "sign-out-others", local_origin).status_code == 200
     assert remote_access.parse_session_identity(install, unseen) is None
     assert remote_access.parse_session_identity(install, caller) is None
@@ -146,12 +155,101 @@ def test_push_identity_survives_login_and_capability_follows_subscription(instal
     assert device["display_name"] == "Chrome · macOS"
     assert device["capabilities"]["push_enabled"] is True
     assert "stable-push-id" not in json.dumps(device)
-    from storage.web_push_service import disable_device_subscription
+    # A bulk logout preserves the caller's shared registration. Targeting
+    # the final session later disables actual delivery, not just the UI join.
+    assert sign_out(a, "sign-out-others").get_json()["revoked_sessions"] == 1
+    assert listing(a)["mine"][0]["capabilities"]["push_enabled"]
+    from storage.web_push_service import count_enabled, disable_device_subscription
 
     with get_cached_sqlite_engine().begin() as conn:
         disable_device_subscription(conn, user_key="remote:member", device_id="stable-push-id")
     (disabled,) = listing(observer)["others"]
     assert disabled["id"] == device["id"] and disabled["capabilities"]["push_enabled"] is False
+    assert subscribe(a, "https://example.invalid/3").status_code == 200
+    assert sign_out(observer, device["id"] + "/sign-out").status_code == 200
+    with get_cached_sqlite_engine().connect() as conn:
+        assert count_enabled(conn, user_key="remote:member") == 0
+
+
+def test_self_describe_changes_only_own_session_and_checks_reports(install):
+    import hashlib
+
+    c = client(login(install, "subject", "viewer"))
+    old = listing(c)["mine"][0]
+    aliases = [
+        {"source": "health", "id": "hc"},
+        {"source": "schedule", "id": "sc"},
+        {"source": "future", "id": "ignored"},
+    ]
+    assert report(c, "app", aliases=aliases, subject="another").status_code == 400
+    assert report(c, "app", aliases=aliases).get_json() == {"ok": True}
+    new = listing(c)["mine"][0]
+    assert new["id"] != old["id"] and new["display_name"] == "Work device" and new["app_version"] == "1.0 (42)"
+    assert sign_out(c, old["id"] + "/sign-out").status_code == 404
+    assert report(c, "app", aliases=aliases).status_code == 200
+    assert report(c, "app", aliases=[], display_name="Changed").status_code == 429
+    assert report(c, "different", aliases=aliases).status_code == 409
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(remote_device_sessions.c.health_alias_hash, remote_device_sessions.c.schedule_alias)
+        ).one() == (hashlib.sha256(b"hc").hexdigest(), "sc")
+    response = sign_out(c, new["id"] + "/sign-out")
+    assert response.status_code == 200
+    cookies = [
+        h for h in response.headers.getlist("Set-Cookie") if h.startswith(remote_access.SESSION_COOKIE_NAME + "=")
+    ]
+    assert len(cookies) == 1 and "Max-Age=0" in cookies[0]
+
+
+def test_local_device_administration_needs_pairing_and_direct_loopback(install, monkeypatch):
+    import ipaddress
+
+    monkeypatch.setattr(ui_server, "_local_interface_network", lambda *_: ipaddress.ip_network("192.168.2.0/24"))
+    local = ui_server.app.test_client()
+    loop = "http://127.0.0.1:5123"
+    assert listing(local, loop)["bulk_action"] is None
+    assert sign_out(local, "sign-out-others", loop).status_code == 403
+    install.ui.setup_host = "192.168.2.12"
+    lan = dict(base_url="http://192.168.2.12:5123", environ_base={"REMOTE_ADDR": "192.168.2.50"})
+    assert local.get("/api/devices", **lan).get_json()["bulk_action"] is None
+    install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    assert local.get("/api/devices", **lan).status_code == 403
+    for headers in ({"X-Forwarded-For": "192.168.2.50"}, {"CF-Connecting-IP": "192.168.2.50"}):
+        assert local.get("/api/devices", base_url=loop, headers=headers).status_code in (403, 503)
+
+
+def test_demotion_is_not_overridden_by_registry_login_role(install):
+    previous = client(login(install, "former-owner", "owner"))
+    other = client(login(install, "other", "owner"))
+    other_id = listing(other)["mine"][-1]["id"]
+    login(install, "former-owner", "member")
+    view = listing(previous)
+    assert view["others"] == [] and all(r["account"]["subject"] == "former-owner" for r in view["mine"])
+    assert any(r["account"]["login_role"] == "owner" for r in view["mine"])
+    assert sign_out(previous, other_id + "/sign-out").status_code == 404
+
+
+def test_idle_expiry_hides_device_but_bulk_still_writes_its_absolute_tombstone(install, monkeypatch):
+    from tests.test_remote_access_vibe_cloud import _pin_clock
+
+    start = int(time.time())
+    clock = _pin_clock(monkeypatch, start)
+    cookie = login(install, "member", "member")
+    identity = remote_access.parse_session_identity(install, cookie)
+    sid = identity["browser_session_id"]
+    clock["now"] = identity["exp"]
+    fresh = client(login(install, "member", "member"))
+    assert len(listing(fresh)["mine"]) == 1
+    assert sign_out(fresh, "sign-out-others").get_json() == {"ok": True, "revoked_sessions": 0}
+    with get_cached_sqlite_engine().connect() as conn:
+        assert (
+            int(
+                conn.scalar(
+                    select(state_meta.c.value_json).where(state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + sid)
+                )
+            )
+            == start + remote_access.SESSION_ABSOLUTE_TTL_SECONDS
+        )
 
 
 def test_legacy_adoption_and_ordinary_requests_are_read_only_after_first_visit(install):

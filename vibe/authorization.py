@@ -493,7 +493,7 @@ _VIEWER_HTTP_NAMESPACES = (
     "/api/web-push",
 )
 _VIEWER_HTTP_MUTATION_RULES = (
-    ("POST", re.compile(r"^/api/devices/(?:sign-out-others|[^/]+/sign-out)$")),
+    ("POST", re.compile(r"^/api/devices/(?:self|sign-out-others|[^/]+/sign-out)$")),
     ("PUT", re.compile(r"^/api/notifications/preferences$")),
     ("PUT", re.compile(r"^/api/home/preferences$")),
     ("POST", re.compile(r"^/api/sessions/[^/]+/mark-read$")),

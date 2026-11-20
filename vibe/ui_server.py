@@ -3478,11 +3478,17 @@ def renew_remote_access_cookie(response: Response) -> Response:
     if config is None or not config.remote_access.vibe_cloud.session_secret:
         return response
     from vibe import remote_access
+    from sqlalchemy.exc import OperationalError
 
     if not isinstance(renew, dict):
         return response
     try:
         session_cookie = remote_access.renew_session_cookie(config, renew)
+    except OperationalError:
+        # An activity write may contend with another process. Keep the
+        # successful response and original cookie; retry renewal on next use.
+        logger.warning('remote session renewal deferred: storage unavailable')
+        return response
     except (remote_access.OAuthCodeExchangeError, TypeError, ValueError):
         return response
     response.set_cookie(
@@ -7645,7 +7651,7 @@ def system_schedule_receipt():
 @app.route("/api/web-push/status", methods=["GET", "POST"])
 def web_push_status():
     from core.web_push import load_or_create_vapid_keys
-    from storage import web_push_service
+    from storage import device_registry, web_push_service
 
     keys = load_or_create_vapid_keys()
     body = request.json if request.method == "POST" else {}
@@ -7658,6 +7664,9 @@ def web_push_status():
     engine = _projects_engine()
     with engine.begin() as conn:
         if subscription is not None:
+            identity = getattr(g, 'remote_session_identity', None)
+            if not device_registry.begin_push_change(conn, identity, now=int(time.time())):
+                return jsonify({'error': 'session_revoked'}), 401
             try:
                 synced = web_push_service.attach_device_to_enabled_subscription(
                     conn,
@@ -7670,8 +7679,7 @@ def web_push_status():
                 )
                 if synced is not None:
                     endpoint = synced["endpoint"]
-                    from storage.device_registry import attach_push
-                    attach_push(conn, getattr(g, 'remote_session_identity', None), synced)
+                    device_registry.attach_push(conn, identity, synced)
             except ValueError:
                 logger.debug("web push: ignoring invalid status subscription payload", exc_info=True)
         subscription_count = web_push_service.count_enabled(conn, user_key=user_key)
@@ -7713,7 +7721,7 @@ def web_push_vapid_public_key():
 
 @app.route("/api/web-push/subscriptions", methods=["POST"])
 def web_push_subscribe():
-    from storage import web_push_service
+    from storage import device_registry, web_push_service
 
     payload = request.json or {}
     user_agent = request.headers.get("User-Agent")
@@ -7725,6 +7733,9 @@ def web_push_subscribe():
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            identity = getattr(g, 'remote_session_identity', None)
+            if not device_registry.begin_push_change(conn, identity, now=int(time.time())):
+                return jsonify({'error': 'session_revoked'}), 401
             if background_rotation:
                 row = web_push_service.upsert_background_rotated_subscription(
                     conn,
@@ -7743,8 +7754,7 @@ def web_push_subscribe():
                     device_id=device_id,
                     previous_endpoints=previous_endpoints,
                 )
-                from storage.device_registry import attach_push
-                attach_push(conn, getattr(g, 'remote_session_identity', None), row)
+                device_registry.attach_push(conn, identity, row)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     return jsonify({"ok": True, "accepted": row is not None, "subscription": row})
@@ -8849,7 +8859,8 @@ def _device_viewer():
         return (identity['_device_binding'], context.subject, context.is_instance_owner, identity['browser_session_id'])
     if context and context.is_instance_owner and _is_direct_loopback_connection():
         config = _load_remote_access_config()
-        return (remote_access.device_binding(config) if config else '', None, True, None)
+        paired = config and config.remote_access.vibe_cloud.is_runtime_paired()
+        return (remote_access.device_binding(config) if paired else '', None, True, None)
     return None
 
 
@@ -8864,7 +8875,7 @@ def device_list():
             'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
     if viewer is None:
         config = _load_remote_access_config()
-        if config and not config.remote_access.vibe_cloud.instance_id and _is_setup_host_request(config):
+        if config and not config.remote_access.vibe_cloud.is_runtime_paired() and _is_setup_host_request(config):
             return jsonify({'mine': [host], 'others': [], 'bulk_action': None})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
@@ -8876,7 +8887,26 @@ def device_list():
             account = row['account']
             is_mine = account['subject'] == subject if subject else account['login_role'] == 'owner'
             (mine if is_mine else others).append(row)
-    return jsonify({'mine': mine, 'others': others, 'bulk_action': 'other_sessions' if caller else 'all_remote'})
+    return jsonify({'mine': mine, 'others': others, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+
+
+@app.route('/api/devices/self', methods=['POST'])
+def device_self_description():
+    from storage import device_registry
+    from vibe.device_metadata import self_description
+
+    viewer = _device_viewer()
+    if viewer is None or not viewer[3]:
+        return jsonify({'error': 'remote_session_required'}), 403
+    try:
+        report = self_description(request.json)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    binding, subject, _, caller = viewer
+    status = device_registry.describe_self(binding, subject, caller, report, int(time.time()))
+    if status != 200:
+        return jsonify({'error': {404:'device_not_found', 409:'installation_mismatch', 429:'device_report_rate_limited'}[status]}), status
+    return jsonify({'ok': True})
 
 
 @app.route('/api/devices/<device_id>/sign-out', methods=['POST'])
@@ -8890,11 +8920,13 @@ def device_sign_out(device_id=None):
     if viewer is None:
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
+    if not binding:
+        return jsonify({'error': 'device_access_forbidden'}), 403
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
     try:
-        ids = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+        ids, count = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
@@ -8902,7 +8934,10 @@ def device_sign_out(device_id=None):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
-    return jsonify({'ok': True, 'revoked_sessions': len(ids)})
+    response = jsonify({'ok': True, 'revoked_sessions': count})
+    if caller in ids:
+        _clear_remote_browser_cookie(response)
+    return response
 
 
 @app.route("/api/session", methods=["GET"])
@@ -9126,10 +9161,6 @@ def remote_access_logout():
                 )
         except Exception:
             logger.warning("remote logout could not disable browser Push", exc_info=True)
-    # Suppress the after-request renewal so we don't re-issue the cookie we're
-    # about to clear; flagged so future hook reorderings stay safe.
-    g.remote_session_renew = None
-    g.remote_session_logout = True
     # The cookie is cleared either way; a sign-out that could not be recorded
     # says so, because a copy of the cookie would still be accepted.
     if revocation_recorded:
@@ -9137,6 +9168,15 @@ def remote_access_logout():
     else:
         response = jsonify({"ok": False, "error": "remote_logout_unavailable"})
         response.status_code = 503
+    _clear_remote_browser_cookie(response)
+    return response
+
+
+def _clear_remote_browser_cookie(response):
+    from vibe import remote_access
+
+    g.remote_session_renew = None
+    g.remote_session_logout = True
     response.delete_cookie(
         remote_access.SESSION_COOKIE_NAME,
         path="/",
@@ -9145,7 +9185,6 @@ def remote_access_logout():
         samesite="Lax",
     )
     response.headers["Cache-Control"] = "no-store"
-    return response
 
 
 @app.route("/api/ui/reload", methods=["POST"])

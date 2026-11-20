@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from sqlalchemy import Integer, String, cast, func, literal, select
+from sqlalchemy import Integer, String, cast, func, literal, or_, select
 from sqlalchemy.dialects.sqlite import insert
 
 from storage.db import get_cached_sqlite_engine
@@ -61,14 +61,42 @@ def prune(conn, now):
         .all()
     )
     if keys:
-        # Old binaries may have extended a tombstone without its cleanup hint.
+        conn.execute(deadlines.delete().where(deadlines.c.key.in_(keys)))
+    # Predecessors only write state_meta. Walk one bounded keyset page, even
+    # after a rollback/upgrade, without scanning the lifetime of sign-outs.
+    cursor_key = "remote_access.tombstone_gc_cursor.v1"
+    cursor = conn.scalar(select(state_meta.c.value_json).where(state_meta.c.key == cursor_key))
+    lower = json.loads(cursor) if cursor else REVOKED_BROWSER_SESSION_KEY_PREFIX
+    end = REVOKED_BROWSER_SESSION_KEY_PREFIX[:-1] + chr(ord(REVOKED_BROWSER_SESSION_KEY_PREFIX[-1]) + 1)
+    page = conn.execute(
+        select(state_meta.c.key, state_meta.c.value_json)
+        .where(state_meta.c.key > lower, state_meta.c.key >= REVOKED_BROWSER_SESSION_KEY_PREFIX, state_meta.c.key < end)
+        .order_by(state_meta.c.key)
+        .limit(32)
+    ).all()
+    expired = []
+    for key, raw in page:
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError):
+            continue  # malformed revocations remain fail-closed
+        if type(value) is int and value <= now:
+            expired.append(key)
+    if expired:
+        conn.execute(state_meta.delete().where(state_meta.c.key.in_(expired)))
+    if len(page) == 32:
+        marker = insert(state_meta).values(key=cursor_key, value_json=json.dumps(page[-1].key), updated_at=str(now))
         conn.execute(
-            state_meta.delete().where(
-                state_meta.c.key.in_([k for k in keys if k.startswith(REVOKED_BROWSER_SESSION_KEY_PREFIX)]),
-                cast(state_meta.c.value_json, Integer) <= now,
+            marker.on_conflict_do_update(
+                index_elements=["key"],
+                set_={
+                    "value_json": marker.excluded.value_json,
+                    "updated_at": marker.excluded.updated_at,
+                },
             )
         )
-        conn.execute(deadlines.delete().where(deadlines.c.key.in_(keys)))
+    elif cursor:
+        conn.execute(state_meta.delete().where(state_meta.c.key == cursor_key))
     conn.execute(
         sessions.delete().where(
             sessions.c.session_id.in_(
@@ -100,8 +128,8 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh)
             or fenced(conn, binding, subject, sid, signed_in, now)
         ):
             return
-        source = "installation" if metadata.get("installation_id") else "session"
-        key = device_key(binding, subject, source, metadata.get("installation_id") or sid)
+        source = "session"
+        key = device_key(binding, subject, source, sid)
         prune(conn, now)
         conn.execute(
             insert(sessions)
@@ -115,6 +143,7 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh)
                 identity_source=source,
                 signed_in_at=signed_in,
                 last_active_at=now,
+                cookie_exp=identity["exp"],
                 expires_at=expires_at,
                 **{k: metadata.get(k) for k in ("kind", "display_name", "app_version", "system_version")},
             )
@@ -122,13 +151,70 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh)
         )
 
 
-def touch(session_id, now):
+def describe_self(binding, subject, sid, report, now):
+    """At most one PK update per minute; a sign-out can never re-create a row."""
+    values = dict(report)
+    installation = values.pop("installation_id")
+    key = device_key(binding, subject, "installation", installation)
+    values.update(device_id=key, identity_source="installation")
+    target = (
+        sessions.c.session_id == sid,
+        sessions.c.binding == binding,
+        sessions.c.subject == subject,
+        sessions.c.expires_at > now,
+    )
+    with get_cached_sqlite_engine().begin() as conn:
+        stmt = (
+            sessions.update()
+            .where(
+                *target,
+                (sessions.c.identity_source != "installation") | (sessions.c.device_id == key),
+                sessions.c.described_at.is_(None) | (sessions.c.described_at <= now - 60),
+                or_(*(sessions.c[k].is_distinct_from(v) for k, v in values.items())),
+            )
+            .values(**values, described_at=now)
+        )
+        if conn.execute(stmt).rowcount:
+            return 200
+        row = conn.execute(select(sessions).where(*target)).mappings().first()
+        if not row:
+            return 404
+        if all(row[k] == v for k, v in values.items()):
+            return 200
+        return 409 if row["identity_source"] == "installation" and row["device_id"] != key else 429
+
+
+def touch(session_id, now, cookie_exp):
     with get_cached_sqlite_engine().begin() as conn:
         conn.execute(
             sessions.update()
-            .where(sessions.c.session_id == session_id, sessions.c.last_active_at < now - 300)
-            .values(last_active_at=now)
+            .where(
+                sessions.c.session_id == session_id,
+                (sessions.c.cookie_exp < cookie_exp) | (sessions.c.last_active_at < now - 300),
+            )
+            .values(
+                last_active_at=func.max(sessions.c.last_active_at, now),
+                cookie_exp=func.max(sessions.c.cookie_exp, cookie_exp),
+            )
         )
+
+
+def begin_push_change(conn, identity, *, now):
+    """Serialize a remote push registration with device sign-out before it can re-enable delivery."""
+    if identity is None:
+        return True
+    conn.exec_driver_sql("BEGIN IMMEDIATE")
+    return (
+        conn.execute(
+            select(sessions.c.session_id).where(
+                sessions.c.session_id == identity["browser_session_id"],
+                sessions.c.binding == identity["_device_binding"],
+                sessions.c.subject == identity["sub"],
+                sessions.c.expires_at > now,
+            )
+        ).first()
+        is not None
+    )
 
 
 def attach_push(conn, identity, subscription):
@@ -165,6 +251,7 @@ def list_devices(binding, subject, *, owner, caller, now):
     )
     stmt = select(sessions, notifications.label("notifications")).where(
         sessions.c.binding == binding,
+        sessions.c.cookie_exp > now,
         sessions.c.expires_at > now,
         ~select(state_meta.c.key)
         .where(state_meta.c.key == literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id)
@@ -214,7 +301,6 @@ def revoke_sid(conn, sid, expiry, now):
             where=cast(state_meta.c.value_json, Integer) < expiry,
         )
     )
-    _deadline(conn, key, now, expiry)
     conn.execute(sessions.delete().where(sessions.c.session_id == sid))
 
 
@@ -246,9 +332,35 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
             stmt = stmt.where(sessions.c.device_id == device_id)
             if not owner:
                 stmt = stmt.where(sessions.c.subject == subject)
-        ids = conn.execute(stmt.with_only_columns(sessions.c.session_id)).scalars().all()
+        rows = conn.execute(stmt.with_only_columns(sessions.c.session_id, sessions.c.cookie_exp)).all()
+        ids = [r.session_id for r in rows]
+        visible_count = sum(r.cookie_exp > now for r in rows)
         if ids:
+            from storage import web_push_service
             from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+
+            # Push has its own delivery authority. Disable the targets' known
+            # subscriptions in this transaction, unless a surviving session of
+            # the same subject still uses that exact registration (e.g. caller).
+            remaining = sessions.alias("remaining")
+            survivor = select(remaining.c.session_id).where(
+                remaining.c.binding == binding,
+                remaining.c.subject == sessions.c.subject,
+                remaining.c.push_id == sessions.c.push_id,
+                remaining.c.cookie_exp > now,
+                remaining.c.expires_at > now,
+            )
+            if device_id is not None:
+                survivor = survivor.where(remaining.c.device_id != device_id)
+            elif caller:
+                survivor = survivor.where(remaining.c.session_id == caller)
+            targets = stmt.with_only_columns(sessions.c.subject, sessions.c.push_id).where(
+                sessions.c.push_id.is_not(None)
+            )
+            if device_id is not None or caller:
+                targets = targets.where(~survivor.exists())
+            for push_subject, push_id in set(conn.execute(targets)):
+                web_push_service.disable_device_subscription(conn, user_key="remote:" + push_subject, device_id=push_id)
 
             key = literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id
             # One indexed pass per ledger, not three DB round-trips per device.
@@ -267,18 +379,6 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
                     where=cast(state_meta.c.value_json, Integer) < cast(tombstones.excluded.value_json, Integer),
                 )
             )
-            hints = insert(deadlines).from_select(
-                ["key", "issued_at", "expires_at"], stmt.with_only_columns(key, literal(now), expiry)
-            )
-            conn.execute(
-                hints.on_conflict_do_update(
-                    index_elements=["key"],
-                    set_={
-                        "issued_at": now,
-                        "expires_at": func.max(deadlines.c.expires_at, hints.excluded.expires_at),
-                    },
-                )
-            )
             conn.execute(sessions.delete().where(stmt.whereclause))
         prune(conn, now)
-    return ids
+    return ids, visible_count
