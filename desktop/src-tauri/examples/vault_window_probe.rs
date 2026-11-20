@@ -800,6 +800,18 @@ fetch('/report', { method: 'POST', body: JSON.stringify({ case: 'storage', store
                     !persistent,
                     "a replacement Workbench's disposable data store is persistent"
                 );
+                // The card's page is running before it is retired: its server
+                // has heard from it, and its first write is in the store.
+                // Without this a card displayed within 50 ms of its script
+                // starting could be retired before it ever said anything.
+                let started = Instant::now();
+                while last_sign_of(ending).is_none() || !store_cookies(&view).iter().any(|(name, _)| name == "probe") {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "the card of a {ending} Workbench never called the server or wrote to its store"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
 
                 // A retirement begins by hiding the web view.
                 let hidden = now_ms();
