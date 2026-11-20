@@ -1,189 +1,249 @@
 # Desktop App Lock: event and state contract
 
-Status: draft for independent table review; implementation is paused.
-Baseline: `68ebe612f96294ced6163442e54953c5f60ffb32`.
-Decision owner: main, 2026-11-20. Reviewer: `sesmsfnku7fjm`.
+Status: revision 2, awaiting independent table review. Native implementation
+remains paused at `68ebe612f96294ced6163442e54953c5f60ffb32`.
+Decision owner: main. Reviewer: `sesmsfnku7fjm`.
+
+Authoritative decisions: main's `app-lock-desktop-table-decisions-1210.md`
+(2026-11-20), the public-signals clarification `b15574d1e709`, and shared
+availability contract `50c57df65c51d4a2ecddfbe2d94e393be11dcb83`.
 
 Three reviewed heads (`e899f374d2`, `295e3fe69e`, `68ebe612f9`) contained
 findings in the departure/authentication family. This table replaces local
-patching with an exhaustive input contract. No implementation change is
-permitted until the independent reviewer approves the table. It retains the
-approved two-second LA return rule, asynchronous lifecycle sheets, single
-pending intent, and existing product policies.
+patching with an input contract. No native implementation change is permitted
+until the independent reviewer approves it.
 
 ## A concrete case
 
 An unlocked user with One Minute chooses Quit at time 10, then Cancel at time
 12, and continues working until time 100. Neither showing nor dismissing the
-sheet is a departure. `away_since` remains absent and the app remains unlocked.
+sheet is a departure. With no prior resign, `away_since` stays absent and the
+app remains unlocked.
 
-If that user actually switches to another app at time 20, the resign event
-records 20. A busy response, window redraw, deferred link, or authentication
-cancellation at time 30 must not move or erase 20. At time 80, One Minute locks.
-Only an actual foreground return can end that absence; an expired deadline
-latches the lock before the absence is cleared.
+If that user actually switches to another app at time 20, the departure records
+20. A busy response, redraw, deferred link, or verification cancellation at time
+30 cannot erase or move 20. At time 80, One Minute locks. Actual foreground
+return evaluates the deadline before clearing the absence.
 
-## State, time, and ownership
+During LA verification, a resign is initially ambiguous. If it is C=20 and a
+lifecycle cancellation ends verification at time 30, C survives until a real
+foreground observation or expiry at 32. At expiry, the absence starts at 20,
+not 30 or 32. A screen lock or definite switch to another app at 31 immediately
+confirms departure from 20. Conversely, a timely foreground return resolves
+the focus excursion without manufacturing a departure.
+
+## State and invariant vocabulary
 
 - `A`: `away_since`, the first confirmed departure in the current absence.
-- `C`: candidate resign during LA verification. It is an observed resign whose
-  cause may be the system verification panel. It is not yet a confirmed `A`.
-- `V`: verification purpose and epoch (Unlock or Change(policy)).
-- `R`: LA outcome plus the original callback timestamp; lifetime is strictly
-  less than two seconds. The callback timestamps before dispatch to main.
-- `Q`: resolved completion awaiting native consumption/persistence. It is never
-  an indefinite successful return token. `begin` and automatic prompts remain
-  blocked until Q is consumed or invalidated.
-- `B`: sleep/display-sleep/screen-lock/session-inactive reason bits.
-- `L`: the latched locked state. Returning or cancelling does not unlock L.
-  Valid successful verification can unlock; unavailable authentication or Off
-  makes protection ineffective as required by the shared contract.
+- `C`: earliest observed resign while verification is in flight. It may be
+  caused by the LA panel, so it is not confirmed A until its classification ends.
+- `V`: in-flight LA verification, with purpose (Unlock/Change) and epoch.
+- `W`: a bounded return transition after V ends by any means. It retains C and
+  an end timestamp; a matching LA reply can also carry an outcome. An existing
+  earlier deadline is never extended by cancellation, duplicate replies or UI.
+- `R`: the outcome and original callback timestamp inside W when one exists.
+  Success is consumable only while age < 2 seconds, with real foreground.
+- `Q`: resolved outcome awaiting native consumption/persistence. It is not an
+  activation token. New evaluations and automatic prompts cannot overtake it.
+- `B`: suppression reasons from system-departure hints. B suppresses automatic
+  evaluation, but never permanently prevents an explicit Unlock button tap.
+- `P`: whether an authentication attempt has already been used on this visit.
+  `Used` suppresses automatic re-prompt; `Fresh` permits one eligible automatic
+  attempt. Panel return is part of the same visit; a confirmed departure and
+  subsequent actual return starts a new visit.
+- `L`: latched lock. Ordinary return/cancellation cannot unlock it. Authorized
+  successful verification can; Off or confirmed missing passcode makes locking
+  ineffective under the shared contract.
 
-The pure Machine owns every time/classification decision. Native code supplies
-facts, presents controls, persists an authorized policy, and consumes effects.
-A presentation callback must not directly set a departure timestamp.
+`First(t)` sets A only when absent, retaining an earlier A. `Confirm(t)` uses
+First(min(C,t)) when C exists, otherwise First(t), and clears C. `Preserve`
+creates, clears and moves nothing. Real foreground return evaluates Due(A,t)
+before clearing A. Time is continuous monotonic seconds, including sleep.
 
-`First(t)` sets A to t only if absent; it preserves an earlier A. Repeated resign
-or system notifications never extend a deadline. `Preserve` neither creates nor
-clears A. `Clear on return` first evaluates the existing deadline and then clears
-A only when real foreground is observed and all B bits are clear.
+`Due` locks Immediate whenever A exists, One Minute when `t-A >= 60`, and Five
+Minutes when `t-A >= 300`. Without A it does nothing. `Keep` retains L. A locked
+app stays locked until successful verification or the explicit Off/missing-
+passcode exceptions. Passive checks may apply Due but cannot restart A.
 
-`Due(A,t)` means Immediate locks when A exists, One Minute locks at `t-A >= 60`,
-and Five Minutes at `t-A >= 300`. All rows marked Due use precisely this rule;
-if A is absent, Due does nothing. Keep means L is unchanged (already locked
-stays locked). All transitions use continuous monotonic time, including sleep.
+### One end-of-verification rule
 
-Only actual application resign, system lock/sleep/session loss, or confirmation
-of an observed candidate resign after the bounded LA return can create A.
-Internal sheets, settings requests, LA reply/cancellation, entry requests,
-window events, and Runtime/account operations cannot invent a departure.
-No candidate is synthesized from a reply timestamp: that timestamp bounds R,
-not the start of an absence. A reply with no observed resign still expires,
-but cannot manufacture an A.
+All endings of V (reply, cancellation, lifecycle cancellation or epoch
+invalidation) preserve C and enter the same two-second W. If no C or pending
+reply exists, invalidation has no focus transition to wait for. LA reply time
+is captured before dispatch to main; delayed dispatch cannot renew its TTL.
+No C is invented from a reply timestamp.
 
-An actual foreground observation is distinct from the verification outcome.
-`DidBecomeActive`, or the real `NSApp.isActive` sample accompanying a reply or
-system return, can establish return. A panel being created/closed, a focus
-request, `orderFront`, or a successful LA outcome alone cannot establish it.
-Expiry is checked before any foreground observation can consume R.
+- Actual foreground within W clears C. It can consume an unexpired matching
+  reply; a cancelled epoch can never become successful again.
+- W expiry confirms C as A, preserving an earlier A. With no C it preserves A.
+  A retained successful reply expires as Cancelled for Unlock, Failed for
+  Change. No stale Change grants persistence authority.
+- A definite system departure or definite foreground switch away during V/W
+  immediately Confirm(event time), invalidates verification and closes W.
+  It does not wait two more seconds, because departure is already established.
+- Lifecycle cancellation may answer its settings sender immediately, but W
+  continues classifying its retained C. Repeated cancellation cannot extend W.
+- Foreground expiry checking happens before any success consumption. A fresh
+  real return after expiry can begin a new verification; it cannot reuse the
+  old result. The native test must count fresh LA calls separately.
 
-## Event × state table
+There is deliberately **no maximum V duration**. Main rejected a 60-second
+limit: idle while a Change panel is open is treated like idle in an unlocked
+app, which this feature does not protect. Unlock already has L=true. A genuine
+app switch/system departure is different and is handled immediately. An
+unlocked screen saver without screen lock is likewise not an App Lock event.
 
-Each ID below is a required table-driven Machine test row, run for Immediate,
-One Minute and Five Minutes. Branches within a row are separate cases. Native
-sources that only read/check state map to a passive deadline check; they do not
-need new production event variants merely to obtain a test name.
+### Automatic prompts and actual return
 
-| ID | Input and precondition | A operation | Verification / C / epoch operation | Immediate / One Minute / Five Minutes lock result |
-| --- | --- | --- | --- | --- |
-| E01 | Process initialization, password available, saved enabled policy | Absent | V/R/Q/C empty; B empty | Locked / Locked / Locked, independent of elapsed absence |
-| E02 | Actual app resign; no verification | First(event time) | No verification change | Due / Due / Due |
-| E03 | Repeated actual resign in same absence | Preserve earliest A | No verification change | Due / Due / Due; deadline never restarts |
-| E04 | App resign during V, including LA panel focus loss | Preserve A | First observed resign becomes C; preserve earlier C; retain V/R | Due from existing A only; C alone does not lock yet |
-| E05 | Actual foreground return, B empty, no V/R | Clear on return | Preserve settled outcome; do not mint verification | Due before clear; otherwise Keep / Keep / Keep |
-| E06 | Actual foreground return while V waits for an LA reply | Clear on return | Clear C; retain V; no successful outcome yet | Due before clear; otherwise Keep / Keep / Keep |
-| E07 | Begin Unlock while L=true, available, unblocked, no V/R/Q | Preserve A | New epoch/V; clear stale C/R; mark automatic attempt used | Keep / Keep / Keep; verification is not unlocking |
-| E08 | Begin Change from an unlocked settings caller | Preserve A | New epoch/V; clear stale C/R | Keep / Keep / Keep; saved policy unchanged |
-| E09 | Begin rejected: blocked, unavailable, another V or Q, or Unlock while unlocked | Preserve A | No mutation of current verification or candidate | Keep / Keep / Keep; reply busy/unavailable as applicable |
-| E10 | Current-epoch LA Success before TTL, actual foreground observed | Clear on return, independently of outcome | Resolve V to successful Q; clear C/R; native may persist Change before commit | Successful Unlock/Change commit unlocks; persistence failure follows E17 |
-| E11 | Current-epoch LA Cancelled/Failed/Unavailable, actual foreground observed | Clear on return, independently of outcome | Resolve V to matching Q; clear C/R; no policy write | Due before return, then Keep; failure/cancellation does not unlock |
-| E12 | Current-epoch LA reply while not foreground, with C present | Preserve A | Store outcome/timestamp R and retain V/C for at most two seconds | Due from existing A only; locked content remains covered |
-| E13 | Current-epoch LA reply while not foreground, no C observed | Preserve A | Store R and retain V; leave C absent | Due from existing A only; reply does not manufacture departure |
-| E14 | Actual foreground return with R age < 2 seconds | Clear on return | Resolve R to Q; clear C/R/V | Success may unlock after commit; all other outcomes Keep |
-| E15 | R reaches age >= 2 seconds, C present; includes delayed callback dispatch and late Arrive | First(C), preserving earlier A; Due before any real-return clear | Discard original outcome; Unlock resolves Cancelled, Change resolves Failed; clear C/R/V; never persist stale Change | Due / Due / Due; later return cannot consume old Success |
-| E16 | R reaches age >= 2 seconds, no C present | Preserve A; Due before any real-return clear | Same invalidation/result as E15; no synthetic C or A | Due from existing A only; L never becomes unlocked from old Success |
-| E17 | Native consumes Q; policy persistence succeeds or fails | Preserve A; a successful foreground verification has already ended the absence | Only successful Change authorizes write; failed write keeps old policy and returns Failed; consume Q; no automatic retry | Valid Success unlocks; other results Keep; no new departure |
-| E18 | Old epoch, duplicate reply, reply after lifecycle/system invalidation | Preserve A | Ignore; cannot replace V/R/Q or revive C | Keep / Keep / Keep |
-| E19 | `cancel_for_lifecycle`: supersede verification to show Quit/busy | Preserve A exactly | Increment epoch; clear V/R/Q/C; invalidate LAContext; cancel settings sender; suppress automatic re-prompt | Keep / Keep / Keep; no leave, arrive, or deadline mutation |
-| E20 | Quit/busy sheet created; already unlocked or already locked | Preserve A | E19 once for a new sheet; duplicate request keeps current sheet and state | Keep / Keep / Keep; sheet is not a departure |
-| E21 | Quit/busy sheet cancelled or dismissed | Preserve A | No authentication transition; resolve lifecycle callback only | Keep / Keep / Keep; later ticks can use only an independently recorded A |
-| E22 | Quit Keep/Stop confirmed, no question required, or process exit | Preserve A until process exit | Invalidate outstanding verification if continuing lifecycle; on exit discard in-memory pending entry and owner | No unlock required; process termination is not an unlock |
-| E23 | OS screen lock, will sleep, display sleep, or user-session inactive | First(system-event time), preserving earlier confirmed A | Set its B bit; invalidate epoch/V/R/Q/C and LAContext; cancel settings sender | Due / Due / Due; a definite new event uses its own timestamp, not an unconfirmed panel C |
-| E24 | Repeated/overlapping system departure notifications | Preserve earliest A | Accumulate B bits; repeated cancellation harmless | Due / Due / Due |
-| E25 | Wake/screens wake/screen unlock/session return, but another B bit remains or app is not foreground | Preserve A | Clear only matching B bit; do not revive V/R/Q/C | Due / Due / Due; wake is not necessarily app return |
-| E26 | Last system reason clears and real app foreground is observed | Clear on return | No stale verification revived; ordinary automatic-prompt eligibility applies | Due before clear; locked stays locked until a fresh verification |
-| E27 | Periodic tick; synchronous `is_locked`/entry check | Preserve A, except E15 promotes an existing C | Resolve expired R via E15/E16; keep Q until consumed on main | Due / Due / Due; checks cannot restart the clock |
-| E28 | Dock/tray/menu/deep-link request, or queued launch link; locked | Preserve A | Replace single pending intent; may subsequently request foreground and attempt E07; neither request itself is Arrive | Due check then Keep; execute pending action only after successful unlock |
-| E29 | Mini/global shortcut press/release; locked | Preserve A | Press queues one action and may request E07; release alone neither verifies nor delivers; paired replay happens after unlock | Due check then Keep; Mini stays hidden |
-| E30 | Ask Vibey content entry; locked (integration after #4035) | Preserve A | Replace pending Content before file read or compose enqueue; may request E07 | Due check then Keep; no content written or delivered before unlock |
-| E31 | Window creation/order/content/title/visibility/resize/key-window event; Mini/Show/Vault changes | Preserve A | No verification change; synchronize native cover and desired visibility | Due check then Keep; key-window change within Avibe is not app departure |
-| E32 | Deferred action delivery or document-load completion | Preserve A | Execute only if L=false; otherwise retain intent; no synthetic Arrive | Due check then Keep; returning to a page is not app activation |
-| E33 | Runtime stop/restart/rebind, instance switch, account sign-out, remote/local route or auth-page replacement | Preserve A and saved device policy | No App Lock reset; menu entry obeys E28; native content remains covered if locked | Due check then Keep; runtime/account lifecycle is not OS session departure |
-| E34 | Settings/status read; same-policy request; unknown policy; unauthorized caller | Preserve A | Status may refresh availability under E36/E37; same policy is a no-op without verification; unknown/unauthorized rejects transport | Due check then Keep; no departure or unlock from a command |
-| E35 | Settings change cancelled, failed, busy, unavailable, or persistence failure | Preserve A except an independently observed actual return | Existing E09/E11-E19 govern verification; old persisted policy stays | Keep, subject to pre-existing Due; UI failure cannot start or reset an absence |
-| E36 | Availability becomes false, or successfully committed policy becomes Off | Clear A because protection is ineffective | Preserve saved policy on unavailable; do not evaluate a new LA request; refresh is outside active verification | Unlocked/ineffective for all stored policies; explicit shared-contract exception |
-| E37 | Availability becomes true while a saved enabled policy was ineffective | A remains absent | No reusable verification; new lock can prompt on actual activation | Locked / Locked / Locked; no invented departure timestamp |
-| E38 | Application Ready while active/inactive; main recreation after close/minimize | Active Ready follows E05; inactive Ready preserves A | Cold L from E01 persists; recreation is E31, not new owner initialization | Never unlock merely because a window appears; active Ready may begin fresh E07 |
+P is set Used by every begun evaluation, rejection does not consume an attempt.
+Cancellation/failure/expiry keeps Used for that visit. A confirmed departure
+arms a new visit; on actual foreground return P becomes Fresh, unless an
+already-running evaluation is serving that return. A panel-only return never
+resets P. Sleep/screen lock followed by actual return is a new visit even when
+L was already true. A return can begin at most one automatic evaluation; begin
+sets P Used before calling LA. Explicit unlock can retry regardless of P.
 
-## Clarifications that prevent another timing patch
+### Native observations and B reconciliation
 
-1. Lifecycle cancellation is verification invalidation, not a synthetic system
-   departure. It must not call `leave`, `system_leave`, `block`, or `arrive`.
-   Existing A survives even when a stale C is discarded.
-2. C can come only from an observed resign during V. A reply timestamp is not C.
-   Expiring an outcome with no candidate still rejects stale Success; it does
-   not by itself prove the user left the app. This explicitly removes the
-   current reply-time fallback from the proposed implementation.
-3. A definite system departure invalidates LA and records the system event's
-   own time, preserving an earlier confirmed A. It does not retroactively turn
-   an earlier ambiguous panel resign into a confirmed departure. Only the
-   bounded-return expiry rule promotes C. This explicitly distinguishes E23
-   from E15 and removes the current `candidate_leave.take().unwrap_or(now)`
-   shortcut in `system_leave`.
-4. Foreground return must evaluate a real existing deadline before clearing A.
-   Cancellation does not clear it; observed actual foreground can. This holds
-   whether foreground precedes or follows the LA reply.
-5. No internal UI or account/Runtime event may route through a system-departure
-   helper just to cancel verification. Conversely, cancellation cannot reset
-   a previously confirmed absence. Passive checks evaluate A without changing
-   its timestamp.
-6. Off and unavailable authentication are explicit exceptions to protection,
-   not fake foreground returns. Settings verification still has a TTL while
-   the stored policy is Off.
-7. The raw LA outcome grants no persistence authority. Only a current,
-   unexpired completion resolved with real foreground may authorize Change.
-   Expiry/system invalidation/lifecycle cancellation must defeat a late reply
-   even if it says Success.
+The app-level coordinator is entered by `NSApplicationDidBecomeActive`, never
+by an arbitrary window focus. It samples public `CGSessionCopyCurrentDictionary`
+with a present, correctly typed `kCGSessionOnConsoleKey == true`, plus
+`CGDisplayIsAsleep(CGMainDisplayID()) == false`. Combined with actual NSApp
+activation, these facts clear B together. A dictionary that is empty/malformed,
+a sleeping display, or an off-console session retains suppression and records
+a diagnostic. No undocumented screen-lock dictionary key is used. This is the
+public-signals policy chosen by main, not a claim that these APIs independently
+expose the graphical screen-lock state.
 
-## Verification required after table approval
+A fresh, non-expired successful explicit LA verification also clears B. The
+manual Unlock path can start while B is set; stale/rejected LA results cannot
+clear B. Availability still follows the shared rule, so a transient error must
+not turn a blocked/locked app into an unprotected one.
 
-Use stable E01-E38 IDs in a table-driven pure Machine suite. Every row runs
-across the three enabled policies, including each precondition branch above.
-For Preserve/no-op rows, seed both no A and an existing A: advance beyond the
-policy threshold to prove respectively no new lock and no postponed lock.
-For rows involving verification, seed both Unlock and Change where applicable,
-with a candidate and without one. Assert the resulting policy, A, C, V/R/Q,
-lock latch, persistence authorization, and stale-epoch rejection, not only a
-boolean snapshot. No-op native source aliases consume the same Machine check;
-source wiring is verified separately rather than inventing duplicate owners.
+System departure notifications immediately record a conservative departure
+and suppress automatic prompts. Their matching return notifications request
+reconciliation; no individual pair can decrement B into an unprotected state.
+A trusted app activation (or fresh LA success) recovers all stale hints at one
+coordinator. This avoids permanent denial after a missed return notification.
 
-Required native consumer tests:
+Native source pairs: NSWorkspace willSleep/didWake, screensDidSleep/screensDidWake,
+sessionDidResignActive/sessionDidBecomeActive, and distributed screenIsLocked/
+screenIsUnlocked. Distributed names remain hints, not a public screen-state API.
 
-- Unlocked Quit and busy sheet, Cancel/dismiss, then advance past each policy
-  threshold while still foreground: no lock. Repeat with actual departure
-  before the sheet: its original deadline survives.
-- Already locked Quit/busy remains usable without unlocking; a queued main
-  dispatch block runs while the sheet is visible. Duplicate busy requests do
-  not replace the exact exempt window.
-- LA reply before/after foreground; 2-second boundary; one-hour late return;
-  real resign versus no-resign expiry; Change never persists stale success;
-  screen-lock/sleep and lifecycle cancellation invalidate stored replies.
-- Existing pending-entry, native-window coverage, title privacy, Mini,
-  status/menu, Vault arrival, shared-contract and release-feature gates remain.
+A definite app switch while V/W exists must also be observable if Avibe already
+resigned to LA. Use NSWorkspace didActivateApplication for a different regular
+foreground application; the system LA UI is an authentication excursion, never
+this definite-switch input. Native classification must distinguish its own LA
+UI from a user app, and test that distinction. An unknown/helper-only activation
+is not proof of definite departure; it keeps the existing candidate/return rule.
+The public activation-policy filter and real LA behavior are smoke-test items.
 
-## Real-device smoke checks (not substituted by the peer)
+## Core Machine event × state table
 
-- Global shortcut/deep-link launch while Avibe is in the background: after LA
-  success, confirm macOS returns Avibe to foreground within two seconds, or
-  that expired verification leaves a clear, usable explicit unlock action.
-- Quit from Dock/menu with the main window minimized or app in the background:
-  confirm the main-window sheet is visible and usable, and dismissal releases
-  the lifecycle request. This is an explicit acceptance item, not an assertion
-  that `orderFront` restores minimized windows or activates the app.
-- Run the product plan section 5 Touch ID Mac and no-usable-Touch-ID groups,
-  including real login password, Watch, lid/sleep, Mission Control, all window
-  types and both ad-hoc and signed TEST RC packages.
+Each core row and its branches runs against Immediate, One Minute and Five
+Minutes. P's default in every row is Preserve; its explicit changes are listed.
+The final column applies to all three policies through the defined Due rule.
+
+| ID | Input / precondition | A | V / W / C / epoch / B | P | Lock/persistence effect |
+| --- | --- | --- | --- | --- | --- |
+| E01 | Initialization, available and saved enabled policy | Absent | Empty verification and B | Fresh | All three start Locked |
+| E02 | Actual resign, effective, no V/W | First(event) | No verification mutation | Arm next real visit | Due |
+| E03 | Repeated real departure in same absence | Preserve earliest A | Preserve | Preserve armed visit | Due; deadline never restarts |
+| E04 | Ambiguous resign while V/W exists | Preserve | First observed resign becomes C; no deadline restart | Preserve | Due from A only |
+| E05 | Trusted actual foreground, no V/W | Due then clear | Reconcile B from public facts | Fresh if confirmed departure armed visit, else Preserve | Keep after Due; eligible automatic begin once |
+| E06 | Foreground before LA reply | Due then clear | Clear C; retain V; reconcile B | Existing V counts as Used; no duplicate | Keep after Due |
+| E07 | Begin Unlock, locked, available, no V/W/Q | Preserve | Create epoch/V; explicit tap may proceed despite B, automatic may not | Used | Keep |
+| E08 | Begin Change from unlocked settings caller | Preserve | Create epoch/V; do not write policy | Used | Keep |
+| E09 | Begin rejected: unavailable, another V/W/Q, automatic blocked by B, or Unlock while unlocked | Preserve | Preserve current verification/C/B | Preserve | Keep; busy/unavailable reply |
+| E10 | Current Success, real foreground, age < 2 seconds | Due then clear as actual return | End V via W and immediately resolve to successful Q; clear C; fresh success clears B | Used | Only successful commit unlocks/persists |
+| E11 | Current Cancelled/Failed/Unavailable, real foreground | Due then clear as actual return | Same end rule; matching unsuccessful Q, no write | Used for this visit | Keep after Due |
+| E12 | Current reply, not foreground, with C | Preserve | End V; retain C/outcome in W, deadline original reply+2 | Used | Due from A only; no success commit |
+| E13 | Current reply, not foreground, no C | Preserve | End V; retain outcome in W; C stays absent | Used | Due from A only; no invented absence |
+| E14 | Actual foreground before W deadline | Due then clear | Clear C/W; consume only unexpired current result; invalidated epoch stays invalid | Used for panel return; fresh real visit follows E05 | Success may commit; other outcomes Keep |
+| E15 | W expiry with C, including delayed dispatch / late arrival | First(C), Due before any actual-return clear | Clear C/W; stale success => Unlock Cancelled / Change Failed; no stale write | Used until a later real return; arm next visit | Due; later arrival can only start fresh LA |
+| E16 | W expiry without C | Preserve; Due before any actual-return clear | Same outcome invalidation; no synthetic departure | Used unless already armed real return | Due from existing A only |
+| E17 | Consume Q / persist authorized Change | Preserve | Consume once; failed write keeps old policy and yields Failed | Used on success/failure/cancel | Success unlocks; other outcomes Keep |
+| E18 | Old/duplicate reply, invalidated epoch | Preserve | Ignore; no V/W/C/B resurrection or extended deadline | Preserve | Keep |
+| E19 | cancel_for_lifecycle / epoch invalidation | Preserve | End V through same W; retain C, invalidate outcome/context, answer cancelled sender; existing W deadline cannot extend | Used if cancelling an attempt; otherwise Preserve | Keep; no synthetic departure |
+| E23 | Definite lock/sleep/display sleep/session loss | Confirm(event time) | Invalidate V/R/Q/context; close W/C; add B hint | Arm next real visit, never prompt while absent | Due |
+| E24 | Repeated/overlapping system departure | Preserve earliest A (Confirm earlier C if present) | Accumulate hints, invalidate once; no reusable result | Preserve armed visit | Due |
+| E25 | Return notification, foreground/public recovery not established | Preserve | Request reconciliation; retain B and invalidation | Preserve | Due; wake alone is not foreground |
+| E26 | Trusted actual return with public facts agreeing after system departure | Due then clear | Recompute/clear all B together; no old result revived | Fresh for new visit, then Used on automatic begin | Keep after Due; fresh LA required |
+| E27 | Timer / is_locked / entry deadline check | Preserve except C confirmation on W expiry | Resolve W expiry; drain Q on main; no UI-created departure | Preserve except E15's visit arming | Due |
+| E34 | Same-policy request / unknown policy / unauthorized caller | Preserve | No mutation; same policy succeeds without LA, others reject as specified | Preserve | Keep; no verification/persistence |
+| E35 | Settings change cancelled/failed/busy/unavailable/write failure | Preserve except separately observed foreground | Existing E09/E11-E19 govern end of verification; retain old policy | Preserve for rejected begin; Used for an attempted evaluation | Keep, subject to existing Due |
+| E36 | Confirmed passcodeNotSet, or successful committed Off | Clear (protection ineffective) | Do not start LA while unavailable; keep saved policy on missing passcode | No automatic prompt while ineffective | Unlocked/ineffective |
+| E37 | Passcode becomes available under stored enabled policy | A absent | Availability true; no reusable verification | Fresh | Locked, as cold initialization |
+| E39 | didBecomeActive reconciliation: valid awake/on-console vs malformed/off-console/asleep | No new departure; actual return follows E05/E06/E14/E26 | Agreeing public facts clear B, other results retain it; explicit Unlock remains available | Governed by actual-return classification, never window focus | Cannot unlock on facts alone |
+| E40 | Definite other-app foreground during V/W | Confirm(event time) | Invalidate V/outcome/context; close W/C; no successful write | Arm next real visit | Due; no wait for a reply |
+| E41 | V still pending, no definite departure/return/reply, even after long idle | Preserve | No arbitrary V timeout; preserve C | Used | Due from existing A only; intentional no-idle-lock scope |
+| E42 | Availability evaluation: ok / passcodeNotSet / other error | E36/E37 only on effective-state change; otherwise Preserve | ok => true; -5 => false; other => previous ?? true; transient errors preserve L | Preserve unless E37 newly engages | Transient failure never unlocks |
+| E43 | Fresh successful explicit LA after retained B / missed return hint | Actual foreground and TTL rules still required; Due then clear | Clear B only after fresh accepted success; unsuccessful/stale result keeps B | Used | Success unlocks; failure stays Locked |
+| E44 | Off policy with resign/check, or screen saver without lock | No new A while ineffective; screen saver creates no event | Preserve verification rules for a pending Change; no screen-saver timer | Preserve | No idle lock; successful Change follows normal commit |
+
+## Native source wiring table
+
+These are consumer tests, not duplicate no-op Machine matrices. Every source
+must invoke its specified input(s), and must never substitute a system leave
+merely to cancel verification.
+
+| ID | Native source | Required input and side effect | A / P / lock rule |
+| --- | --- | --- | --- |
+| E20 | New Quit/busy sheet, locked or unlocked; duplicate busy | E19 only if an evaluation/return needs cancellation, then nonblocking native sheet with exact exemption; duplicate preserves sheet | Preserve A; no new visit; no implicit lock/unlock |
+| E21 | Quit/busy Cancel or dismissal | Resolve lifecycle callback; any existing W keeps classifying C independently | No new A/P transition; advance past thresholds to prove no new absence |
+| E22 | Quit Keep/Stop, unasked quit, termination | Cancel verification through E19 if needed; never demand unlock; discard memory-only state on exit | No unlock; an independently existing absence survives until exit |
+| E28 | Dock/tray/menu/deep link/cold launch pending link | Passive E27; if locked replace pending intent, request foreground then E07 when eligible; a request is not Arrive | Preserve A; actual OS activation determines new visit |
+| E29 | Mini/global shortcut press/release | Passive E27; locked press queues one action, release alone does not deliver; paired replay after unlock | Preserve A/P until real begin/return; Mini hidden |
+| E30 | Ask Vibey (after #4035 integration) | Passive E27 and Content defer before file read/compose enqueue; memory only until unlock | Preserve A/P; content delivery cannot unlock |
+| E31 | Window/content/title/order/visibility/resize/key-window; Mini/Show/Vault | Passive E27 plus cover synchronization; arbitrary focus cannot run E39 | Preserve A/P; never new owner initialization |
+| E32 | Deferred action/document-load completion | Passive E27; deliver only when unlocked, otherwise retain | Preserve A/P; page load is not foreground |
+| E33 | Runtime stop/restart/rebind, instance switch, account sign-out/auth-page replacement | Passive E27; preserve owner/device policy; menu entry obeys E28 | Preserve A/P; account sign-out is not OS session loss |
+| E38 | Ready / main recreation / close/minimize | Initial L from E01; actual active Ready can follow trusted activation; recreation is E31; hide/minimize alone is not synthetic resign | Never unlock merely because a window appears |
+| N01 | App resign / NSWorkspace other-app activation | E02 or ambiguous E04; definite other regular foreground app during V/W => E40; LA UI excursion stays E04 | Earliest departure preserved; native classification tested |
+| N02 | NSApp didBecomeActive / all system notification pairs | Native public snapshot into E39, then actual-return classification; departures E23, return hints E25 | Never clear B from arbitrary window focus; no paired-bit dead end |
+| N03 | LA callback / manual unlock button / settings command | Timestamp before dispatch; E10-E19 and E43; manual tap not blocked permanently by B | No raw-success unlock or stale policy write |
+| N04 | Availability query / status read | Shared E42 rule with process-local previous value; status read has no departure effect | Off+explanation only on -5; unknown first read fails closed |
+
+## Validation and real-device scope
+
+Core matrix: every core row's precondition branches across three enabled
+policies; Preserve rows seeded with and without A, and verification rows with
+and without C. Assert A/C/V/W/Q/B/P, policy, lock, and persistence authorization.
+Separate Off and previous-availability combinations exercise E36/E42/E44.
+Native aliases consume real adapters/controls and assert their specified core
+inputs/effects, not a second copy of the transition logic.
+
+Required native regression cases:
+
+- Unlocked Quit/busy, Cancel/dismiss, advance past each threshold while still
+  foreground: no new lock. With prior true departure: original deadline holds.
+- Cancel an in-flight Change for lifecycle while C exists; a timely actual
+  return clears the excursion; absent return confirms C at its original time.
+- Locked Quit stays usable; main dispatch work runs while the sheet is visible;
+  duplicate busy does not replace its exemption.
+- Reply/foreground in both orders, two-second boundary, late dispatch, one-hour
+  return, no-C expiry, sleep/screen lock and explicit other-app departure.
+  Separate an expired Success from a new automatically prompted verification.
+- Fresh explicit unlock can recover stale B; transient capability errors leave
+  a locked window covered; passcode reappearance re-engages Locked.
+- Existing entry, cover, title, Mini, tray/menu, Vault arrival and release gates.
+
+Real-device local-package smoke list:
+
+- Global shortcut/deep link from background: verify return within two seconds
+  after real LA, or a usable explicit retry after expiry.
+- Quit with main minimized or app in background: sheet visible/usable and
+  dismissal releases the pending lifecycle request.
+- Real LA focus excursion versus Cmd-Tab to a different app during LA;
+  workspace activation-policy classification must not mistake LA for departure.
+- Lock/unlock, fast user switching, lid close/external display and wake: public
+  snapshot coordination recovers missed hints; explicit retry remains usable.
+- Plan section 5 Touch ID Mac and no-usable-Touch-ID groups: password, Watch,
+  Mission Control, all window types, ad-hoc and signed TEST RC packages.
 
 ## Review record
 
-Awaiting independent review of this table. Implementation remains paused.
+Revision 1 (`53cd2d432a`): NOT PASS, receipt `42c0d51088ef`, T1-T4.
+Main resolved T1-T4 in the 12:10 decision and T3 public-signals clarification;
+T4 is mirrored from shared contract commit `50c57df6`.
+Revision 2: awaiting independent table review. Native code remains paused.
