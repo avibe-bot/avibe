@@ -66,7 +66,7 @@ describe('the device report', () => {
       await reportNativeDevice(apiFetch);
       await expect(nativeDeviceLabel()).resolves.toBe('iPhone App');
       vi.unstubAllGlobals();
-      }
+    }
     await reportNativeDevice(apiFetch);
     expect(apiFetch).not.toHaveBeenCalled();
   });
