@@ -2019,7 +2019,7 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_card_use.py::test_chatgpt_sends_only_the_earliest_available_credit_and_one_request_id
   - id: MH-QUOTA-051
-    name: Only a reading the user asked for after the outcome became unknown lifts the lock
+    name: Only a reading the user asked for once the wait after an unknown outcome is over lifts the lock
     status: covered
     kind: recovery
     layer: unit
@@ -2067,7 +2067,7 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_card_use.py::test_an_unknown_outcome_is_not_lifted_by_a_background_unread_or_foreign_reading
   - id: MH-QUOTA-059
-    name: Refreshes of one unknown use share a reading and wait out a vendor rate limit
+    name: Within the wait a refresh reads as usual; afterwards refreshes share a reading and wait out a vendor rate limit
     status: covered
     kind: concurrency
     layer: unit
@@ -2118,6 +2118,12 @@ scenarios:
       - tests/test_model_hub_card_use.py::test_a_fence_document_that_is_not_exactly_the_known_shape_locks_every_account
       - tests/test_model_hub_card_use.py::test_a_fence_entry_that_is_not_this_users_private_file_locks_every_account
       - tests/test_model_hub_card_use.py::test_a_store_that_was_never_written_is_empty_and_a_claim_creates_it_private
+  - id: MH-QUOTA-066
+    name: An unknown outcome is lifted only by a reading begun after it and at least 60 seconds later
+    status: covered
+    kind: safety
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_an_unknown_outcome_is_lifted_only_by_a_reading_begun_after_it_and_a_minute_later
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

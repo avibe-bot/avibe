@@ -13,9 +13,10 @@ is written around what must not happen:
 * "Used" or "not used" said wrongly. Either needs the vendor's own recognised
   statement and a fresh, recognised count of that same account that agrees with
   it. Everything else is ``unconfirmed``: the account stays locked.
-* An unknown outcome that goes away by itself. Only a reading the user asked for,
-  begun after the outcome became unknown, recognised and made under that same
-  account, lifts the lock.
+* An unknown outcome that goes away by itself, or too soon. Only a reading the
+  user asked for, begun after the outcome became unknown and at least a minute
+  later (``card_fences.UNKNOWN_OUTCOME_WAIT``), recognised and made under that
+  same account, lifts the lock.
 * A use that surfaces as a generic error. Once the claim is taken a press ends
   as "no usable card" with the claim released, or as the closed use result.
 
@@ -37,7 +38,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from .card_fences import IN_FLIGHT, KINDS, UNCONFIRMED, FenceUnavailable, FenceView
-from .quota import QUOTA_REFRESH_INTERVAL, CardReading, QuotaSourceRef, _iso
+from .quota import QUOTA_REFRESH_INTERVAL, CardReading, CardReadingFloor, QuotaSourceRef, _iso
 from .reset_cards import VENDORS
 
 if TYPE_CHECKING:
@@ -299,8 +300,8 @@ async def use(service: "ModelHubService", source_id: object, payload: object) ->
     return await asyncio.shield(task)
 
 
-async def unknown_floor(service: "ModelHubService") -> Optional[int]:
-    """The point a reading must have begun after to answer every unknown use; None when there is none."""
+async def unknown_floor(service: "ModelHubService") -> Optional[CardReadingFloor]:
+    """What a reading must be to answer every unknown use; None when there is none."""
 
     return await asyncio.to_thread(service.card_fences.unknown_floor)
 
@@ -309,9 +310,10 @@ async def lift_unknown(service: "ModelHubService", sources: list[QuotaSourceRef]
     """After the user's forced read: let each recognised reading answer the unknown use of its own account.
 
     Only readings the user asked for qualify, and the fence lifts a lock only
-    for a reading that began after its outcome became unknown. A background or
-    cached reading, one that was already under way, an unread inventory or
-    another account's reading leaves the lock where it is.
+    for a reading that began after its outcome became unknown and at least its
+    wait later. A background or cached reading, one that was already under way
+    or came too soon, an unread inventory or another account's reading leaves
+    the lock where it is.
     """
 
     readings = []
@@ -325,7 +327,7 @@ async def lift_unknown(service: "ModelHubService", sources: list[QuotaSourceRef]
             and reading.account is not None
             and _held(reading.cards) is not None
         ):
-            readings.append((reading.account, reading.sequence))
+            readings.append((reading.account, reading.sequence, reading.started_at))
     if readings:
         await asyncio.to_thread(service.card_fences.release_after_readings, readings)
 

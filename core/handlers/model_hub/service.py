@@ -1792,7 +1792,7 @@ class ModelHubService:
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
         # Reset-card uses: the durable claim per account, and the presses being handled now.
-        self.card_fences = CardFences(paths.get_state_dir() / "model_hub_card_fences")
+        self.card_fences = CardFences(paths.get_state_dir() / "model_hub_card_fences", now=lambda: self.now())
         self._card_presses: list[card_action.Press] = []
         self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
         # A cached copy only: the picker read must not wait on the network.
@@ -9157,13 +9157,14 @@ class ModelHubService:
 
         sources = await asyncio.to_thread(self._quota_sources)
         # A reset-card use whose outcome is unknown is answered only here, by the
-        # user's own refresh: each account with cards gets a reading begun after
-        # that point (shared by concurrent refreshes, held back by a vendor's
-        # rate-limit cooldown), and a recognised reading of the same account lifts
-        # its lock. A read that is not forced asks no vendor on a lock's behalf.
-        unknown_since = await card_action.unknown_floor(self) if force else None
-        summary = await self.quota.summary(sources, force=force, newer_than=unknown_since)
-        if unknown_since is not None:
+        # user's own refresh: once the wait after it is over, each account with
+        # cards gets a reading begun since (shared by concurrent refreshes, held
+        # back by a vendor's rate-limit cooldown), and a recognised reading of the
+        # same account lifts its lock. An earlier refresh reads as usual and leaves
+        # the lock. A read that is not forced asks no vendor on a lock's behalf.
+        unknown = await card_action.unknown_floor(self) if force else None
+        summary = await self.quota.summary(sources, force=force, answering=unknown)
+        if unknown is not None:
             await card_action.lift_unknown(self, sources)
         await card_action.overlay(self, sources, summary)
         if force:

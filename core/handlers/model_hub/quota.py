@@ -629,14 +629,24 @@ class CardReading:
     """One vendor reading of an account's reset cards, for the decisions that rest on it.
 
     ``sequence`` orders vendor readings against the moment a card use became
-    unknown; ``forced`` says the user asked for it; ``account`` is the opaque
-    key of the account the same reading was made under. None of it is serialized.
+    unknown and ``started_at`` is when this one began; ``forced`` says the user
+    asked for it; ``account`` is the opaque key of the account the same reading
+    was made under. None of it is serialized.
     """
 
     sequence: int
+    started_at: datetime
     forced: bool
     account: Optional[str]
     cards: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class CardReadingFloor:
+    """What a reading must be to answer every unknown card use: numbered above ``sequence``, begun at or after ``ripe_at``."""
+
+    sequence: int
+    ripe_at: datetime
 
 
 @dataclass
@@ -651,9 +661,11 @@ class _QuotaEntry:
     # The reading last started on this entry, whether or not it has answered.
     sequence: int = 0
     forced: bool = False
+    started_at: Optional[datetime] = None
     # The reading the snapshot came from, and the account it was made under.
     snapshot_sequence: int = 0
     snapshot_forced: bool = False
+    snapshot_started_at: Optional[datetime] = None
     card_account: Optional[str] = None
 
 
@@ -691,14 +703,14 @@ class SubscriptionQuotaCache:
         sources: Sequence[QuotaSourceRef],
         *,
         force: bool = False,
-        newer_than: Optional[int] = None,
+        answering: Optional[CardReadingFloor] = None,
     ) -> dict[str, Any]:
         """Report every Source, re-reading the ones that are due.
 
-        ``newer_than`` is for a forced read while a card use is unknown: an
-        account with cards then needs a reading the user asked for that began
-        after that point, so the forced-refresh interval does not hold one back.
-        A vendor's rate-limit cooldown still does.
+        ``answering`` is for a forced read while a card use is unknown. Once
+        its floor can be met, an account with cards needs a reading the user
+        asked for that meets it, so the forced-refresh interval does not hold
+        that one back. A vendor's rate-limit cooldown still does.
         """
 
         live = {source.source_id for source in sources}
@@ -708,7 +720,7 @@ class SubscriptionQuotaCache:
         pending = [
             task
             for source in sources
-            if (task := self._schedule(source, force=force, newer_than=newer_than)) is not None
+            if (task := self._schedule(source, force=force, answering=answering)) is not None
         ]
         if pending:
             # A slow vendor must not hold the page: whatever has not answered by
@@ -752,17 +764,25 @@ class SubscriptionQuotaCache:
         source: QuotaSourceRef,
         *,
         force: bool,
-        newer_than: Optional[int] = None,
+        answering: Optional[CardReadingFloor] = None,
     ) -> Optional[asyncio.Task[None]]:
         if source.vendor not in QUOTA_VENDORS:
             return None
         entry = self._entry(source)
-        # Whether this Source still owes the user a reading begun after `newer_than`.
+        now = self._now()
+        # Whether this Source owes the user a reading that can answer an unknown card
+        # use: the floor can be met by now, and the reading last started here does not.
         owed = (
             force
-            and newer_than is not None
+            and answering is not None
             and source.vendor in RESET_CARD_VENDORS
-            and not (entry.forced and entry.sequence > newer_than)
+            and now >= answering.ripe_at
+            and not (
+                entry.forced
+                and entry.sequence > answering.sequence
+                and entry.started_at is not None
+                and entry.started_at >= answering.ripe_at
+            )
         )
         if entry.task is not None and not entry.task.done():
             if not owed:
@@ -770,7 +790,6 @@ class SubscriptionQuotaCache:
                 return entry.task
             # The reading in flight began too early to answer; it lands on the detached entry.
             entry = self._detach(source, entry)
-        now = self._now()
         if entry.cooldown_until is not None and now < entry.cooldown_until:
             return None
         interval = QUOTA_FORCED_REFRESH_INTERVAL if force else QUOTA_REFRESH_INTERVAL
@@ -787,20 +806,30 @@ class SubscriptionQuotaCache:
             fetched_at=previous.fetched_at,
             snapshot_sequence=previous.snapshot_sequence,
             snapshot_forced=previous.snapshot_forced,
+            snapshot_started_at=previous.snapshot_started_at,
             card_account=previous.card_account,
         )
         self._entries[source.source_id] = entry
         return entry
 
     def _start(self, source: QuotaSourceRef, entry: _QuotaEntry, *, forced: bool) -> asyncio.Task[None]:
-        entry.sequence, entry.forced = self.tick(), forced
+        # A reading begins here for the rules that rest on it; its vendor request follows.
+        entry.sequence, entry.forced, entry.started_at = self.tick(), forced, self._now()
         entry.task = asyncio.create_task(
-            self._refresh(source, entry, sequence=entry.sequence, forced=forced),
+            self._refresh(source, entry, sequence=entry.sequence, forced=forced, started_at=entry.started_at),
             name=f"model-hub-quota-{source.source_id}",
         )
         return entry.task
 
-    async def _refresh(self, source: QuotaSourceRef, entry: _QuotaEntry, *, sequence: int, forced: bool) -> None:
+    async def _refresh(
+        self,
+        source: QuotaSourceRef,
+        entry: _QuotaEntry,
+        *,
+        sequence: int,
+        forced: bool,
+        started_at: datetime,
+    ) -> None:
         try:
             async with self._fetch_slots:
                 # The throttle counts from the vendor request, not from the queue:
@@ -834,7 +863,7 @@ class SubscriptionQuotaCache:
             entry.snapshot["reset_cards"] = parsed["reset_cards"]
         account = parsed.get("reset_card_account")
         entry.card_account = account if isinstance(account, str) and _CARD_ACCOUNT.fullmatch(account) else None
-        entry.snapshot_sequence, entry.snapshot_forced = sequence, forced
+        entry.snapshot_sequence, entry.snapshot_forced, entry.snapshot_started_at = sequence, forced, started_at
         entry.fetched_at = self._now()
         entry.failure = None
         entry.cooldown_until = None
@@ -865,12 +894,14 @@ class SubscriptionQuotaCache:
             entry is None
             or entry.credential_ref != source.credential_ref
             or entry.snapshot is None
+            or entry.snapshot_started_at is None
             or entry.failure is not None
             or "reset_cards" not in entry.snapshot
         ):
             return None
         return CardReading(
             sequence=entry.snapshot_sequence,
+            started_at=entry.snapshot_started_at,
             forced=entry.snapshot_forced,
             account=entry.card_account,
             cards=entry.snapshot["reset_cards"],

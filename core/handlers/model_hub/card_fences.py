@@ -22,6 +22,10 @@ Every way of not knowing fails closed:
   repairs or overwrites what it could not read.
 * A row found in flight when the process starts has no press behind it any more:
   it is an unknown outcome.
+* An unknown outcome is lifted only by a reading of that account the user asked
+  for, begun after the outcome became unknown and at least
+  ``UNKNOWN_OUTCOME_WAIT`` later: a vendor that did not answer may still finish
+  the request, and a count read a few seconds on would look untouched.
 
 All disk access happens under one mutex and belongs on a worker thread, never on
 the controller's event loop. The controller process is the only writer.
@@ -36,21 +40,23 @@ import re
 import stat
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Mapping, Optional
+from typing import Callable, Iterable, Mapping, Optional
 from uuid import uuid4
 
 from core import private_fs
 from vibe.model_hub_runtime.journal import write_durable
 
-from .quota import _iso, _moment
+from .quota import CardReadingFloor, _iso, _moment
 
 logger = logging.getLogger(__name__)
 
 KINDS = frozenset({"all", "fable", "session", "weekly", "account"})
 IN_FLIGHT = "in_flight"
 UNCONFIRMED = "unconfirmed"
+# How long after an outcome became unknown a reading must begin to lift its lock.
+UNKNOWN_OUTCOME_WAIT = timedelta(seconds=60)
 
 _VERSION = 1
 # A row is about 170 bytes; the cap bounds every read and is enforced on write.
@@ -74,6 +80,9 @@ class _Row:
     # Readings numbered above this began after the outcome became unknown.
     # In memory only: a row loaded from disk predates every reading of this process.
     mark: int = 0
+    # When the outcome became unknown, as far as this process can tell: when its press
+    # ended without an answer, or when the row was found at startup. None while in flight.
+    unknown_at: Optional[datetime] = None
 
     def stored(self) -> dict[str, str]:
         return {"request_id": self.request_id, "kind": self.kind, "since": self.since, "reason": self.reason}
@@ -183,10 +192,11 @@ def _read(path: Path) -> dict[str, _Row]:
 class CardFences:
     """One account, one unsettled use. See the module docstring for what fails closed."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         # A directory of its own: its privacy is checked, and on Windows inherited by the file.
         self.directory = directory
         self.path = directory / "fences.json"
+        self._now = now
         self._mutex = threading.Lock()
         self._rows: dict[str, _Row] = {}
         self._damaged = False
@@ -203,7 +213,12 @@ class CardFences:
             except FileNotFoundError:
                 return
             _require_private(self.directory, directory, directory=True)
-            self._rows = _read(self.path)
+            rows = _read(self.path)
+            # When each became unknown is not on disk. Found now is the latest it can be.
+            found_at = self._now()
+            for row in rows.values():
+                row.unknown_at = found_at
+            self._rows = rows
         except Exception:  # noqa: BLE001 - whatever stops the read, the answer is "locked"
             # No detail: a hostile document must not reach the log either.
             self._damaged = True
@@ -274,7 +289,7 @@ class CardFences:
                 else:
                     self._rows = remaining
                     return True
-            row.reason, row.mark = UNCONFIRMED, mark
+            row.reason, row.mark, row.unknown_at = UNCONFIRMED, mark, self._now()
             try:
                 self._publish(self._rows)
             except Exception:  # noqa: BLE001
@@ -282,21 +297,27 @@ class CardFences:
                 pass
             return False
 
-    def unknown_floor(self) -> Optional[int]:
-        """The newest mark among unconfirmed locks; None when no reading could lift anything."""
+    def unknown_floor(self) -> Optional[CardReadingFloor]:
+        """What one reading must be to answer every unknown outcome; None when there is none to lift."""
 
         with self._mutex:
             self._load()
-            marks = [row.mark for row in self._rows.values() if row.reason == UNCONFIRMED]
-            return max(marks) if marks and not self._damaged else None
+            unknown = [row for row in self._rows.values() if row.reason == UNCONFIRMED and row.unknown_at is not None]
+            if self._damaged or not unknown:
+                return None
+            return CardReadingFloor(
+                sequence=max(row.mark for row in unknown),
+                ripe_at=max(row.unknown_at for row in unknown) + UNKNOWN_OUTCOME_WAIT,
+            )
 
-    def release_after_readings(self, readings: Iterable[tuple[str, int]]) -> None:
+    def release_after_readings(self, readings: Iterable[tuple[str, int, datetime]]) -> None:
         """Lift each unconfirmed lock that a later reading of its own account answers.
 
-        ``readings`` are (account, sequence) of authoritative card readings the
-        user asked for. A lock is lifted only by a sequence above its mark, so
-        never by a reading that began before the outcome became unknown, and a
-        use still in flight is never touched. A failed write lifts nothing.
+        ``readings`` are (account, sequence, started_at) of authoritative card
+        readings the user asked for. A lock is lifted only by a reading numbered
+        above its mark, so begun after the outcome became unknown, that also began
+        at least ``UNKNOWN_OUTCOME_WAIT`` after that moment. A use still in flight
+        is never touched. A failed write lifts nothing.
         """
 
         with self._mutex:
@@ -304,9 +325,15 @@ class CardFences:
             if self._damaged:
                 return
             remaining = dict(self._rows)
-            for account, sequence in readings:
+            for account, sequence, started_at in readings:
                 row = remaining.get(account)
-                if row is not None and row.reason == UNCONFIRMED and sequence > row.mark:
+                if (
+                    row is not None
+                    and row.reason == UNCONFIRMED
+                    and row.unknown_at is not None
+                    and sequence > row.mark
+                    and started_at >= row.unknown_at + UNKNOWN_OUTCOME_WAIT
+                ):
                     del remaining[account]
             if len(remaining) == len(self._rows):
                 return

@@ -23,7 +23,7 @@ from jsonschema import Draft7Validator
 from core import private_fs
 from core.handlers.model_hub import card_fences
 from core.handlers.model_hub.card_fences import CardFences, FenceUnavailable
-from core.handlers.model_hub.quota import QuotaSourceRef, SubscriptionQuotaError
+from core.handlers.model_hub.quota import CardReadingFloor, QuotaSourceRef, SubscriptionQuotaError
 from core.handlers.model_hub.service import ModelHubError
 
 NOW = datetime(2026, 11, 20, tzinfo=timezone.utc)
@@ -77,16 +77,23 @@ def _unread():
     return {"state": "unread", "lock": None, "cards": []}
 
 
-def _hub(tmp_path, monkeypatch, account, sources, *, fences=None):
+def _hub(tmp_path, monkeypatch, account, sources, *, directory=None):
     from tests.test_model_hub_api import _service
 
     service, _store, adapter = _service(tmp_path)
-    service.card_fences = fences or CardFences(tmp_path / "fences")
+    service.card_fences = CardFences(directory or tmp_path / "fences", now=lambda: service.now())
     monkeypatch.setattr(service, "_quota_sources", lambda: list(sources))
     adapter.reset_card_account_key = account.account_key
     adapter.use_reset_card = account.use
     adapter.subscription_quota = account.quota
     return service
+
+
+def _advance(service, **elapsed):
+    """Move the service's clock, which its quota cache and its fence both read."""
+
+    moment = service.now() + timedelta(**elapsed)
+    service.now = lambda: moment
 
 
 def _lock(summary, source_id=None):
@@ -211,7 +218,7 @@ async def test_a_use_found_in_flight_after_a_restart_is_unknown_and_is_not_sent_
     assert private_fs.is_private(directory / "fences.json", (directory / "fences.json").lstat().st_mode)
 
     account = _Account({"fable": 1})
-    service = _hub(tmp_path, monkeypatch, account, [CLAUDE], fences=CardFences(directory))
+    service = _hub(tmp_path, monkeypatch, account, [CLAUDE], directory=directory)
     summary = await service.quota_summary()
     assert _lock(summary) == {"kind": "fable", "since": "2026-11-20T00:00:00Z", "reason": "unconfirmed"}
     from tests.test_model_hub_quota import QUOTA_SCHEMA
@@ -221,6 +228,11 @@ async def test_a_use_found_in_flight_after_a_restart_is_unknown_and_is_not_sent_
         await service.use_reset_card(CLAUDE.source_id, {"kind": "fable"})
     assert refused.value.code == "reset_card_locked" and account.uses == []
 
+    # When it became unknown is not on disk, so the wait counts from when this process found it.
+    assert _lock(await service.quota_summary(force=True))["reason"] == "unconfirmed"
+    _advance(service, seconds=59)
+    assert _lock(await service.quota_summary(force=True))["reason"] == "unconfirmed"
+    _advance(service, seconds=1)
     assert _lock(await service.quota_summary(force=True)) is None
     assert CardFences(directory).view().locks == {}
 
@@ -602,7 +614,7 @@ async def test_a_grant_that_now_belongs_to_another_account_is_not_used(vendor):
 
 
 async def test_only_the_users_reading_begun_after_the_unknown_outcome_lifts_the_lock(tmp_path, monkeypatch):
-    """MH-QUOTA-051: Neither the use's own re-read nor a refresh already at the vendor answers an unknown outcome; the first reading the user asks for afterwards does, and repeated refreshes share it."""
+    """MH-QUOTA-051: Neither the use's own re-read nor a refresh already at the vendor answers an unknown outcome, and a read nobody forced settles nothing; the reading the user asks for once the wait is over does."""
 
     from core.handlers.model_hub import quota
 
@@ -631,22 +643,23 @@ async def test_only_the_users_reading_begun_after_the_unknown_outcome_lifts_the_
     await asyncio.sleep(0.01)
     reads = len(account.reads)
 
-    # Both Sources now hold a recognised reading of the account that the user asked
-    # for: the use's own re-read, and the refresh that was already under way. Neither
-    # began after the outcome became unknown. The readings that would are held.
+    def locks(summary):
+        return [row["reset_cards"]["lock"] and row["reset_cards"]["lock"]["reason"] for row in summary["sources"]]
+
+    # The wait is over. Both Sources hold a recognised reading of the account that the
+    # user asked for: the use's own re-read, and the refresh that was already under way.
+    # Neither answers. The readings that can are still at the vendor when this refresh returns.
+    _advance(service, seconds=60)
     account.held.clear()
-    summary = await service.quota_summary(force=True)
-    assert {row["reset_cards"]["lock"]["reason"] for row in summary["sources"]} == {"unconfirmed"}
+    assert locks(await service.quota_summary(force=True)) == ["unconfirmed", "unconfirmed"]
     assert len(account.reads) == reads + 2
 
     account.held.set()
     await asyncio.sleep(0.01)
-    # The readings are there now, but a read nobody forced settles nothing.
-    summary = await service.quota_summary()
-    assert {row["reset_cards"]["lock"]["reason"] for row in summary["sources"]} == {"unconfirmed"}
-    # The refresh that asked for them is over; the next one finds them and asks no vendor again.
-    summary = await service.quota_summary(force=True)
-    assert [row["reset_cards"]["lock"] for row in summary["sources"]] == [None, None]
+    # They have answered now, but a read nobody forced settles nothing.
+    assert locks(await service.quota_summary()) == ["unconfirmed", "unconfirmed"]
+    # The next refresh finds them and asks no vendor again.
+    assert locks(await service.quota_summary(force=True)) == [None, None]
     assert len(account.reads) == reads + 2
 
 
@@ -658,15 +671,13 @@ async def test_an_unknown_outcome_is_not_lifted_by_a_background_unread_or_foreig
     monkeypatch.setattr(quota, "QUOTA_READ_DEADLINE_SECONDS", 0.05)
     account = _Account({"session": 1})
     service = _hub(tmp_path, monkeypatch, account, [CLAUDE])
-    clock = [service.now()]
-    service.now = lambda: clock[0]
     await _leave_unknown(service, account, CLAUDE, "session")
 
     def locked():
         return service.card_fences.view().locks.get(ACCOUNT, {}).get("reason")
 
-    # The periodic re-read of an open page: after the lock, recognised, the same account, but not asked for.
-    clock[0] += timedelta(minutes=6)
+    # The periodic re-read of an open page: long after the lock, recognised, the same account, but not asked for.
+    _advance(service, minutes=6)
     reads = len(account.reads)
     assert _lock(await service.quota_summary())["reason"] == "unconfirmed"
     assert len(account.reads) == reads + 1 and locked() == "unconfirmed"
@@ -684,42 +695,54 @@ async def test_an_unknown_outcome_is_not_lifted_by_a_background_unread_or_foreig
     assert locked() == "unconfirmed"
 
     account.state, account.reading_key = "ok", OTHER_ACCOUNT
-    clock[0] += timedelta(minutes=1)
+    _advance(service, minutes=1)
     await service.quota_summary(force=True)
     assert locked() == "unconfirmed"
 
     account.reading_key = ACCOUNT
-    clock[0] += timedelta(minutes=1)
+    _advance(service, minutes=1)
     assert _lock(await service.quota_summary(force=True)) is None and locked() is None
 
 
 async def test_refreshes_of_one_unknown_use_share_a_reading_and_wait_out_a_rate_limit(tmp_path, monkeypatch):
-    """MH-QUOTA-059: Concurrent refreshes of an unknown use make one vendor reading, and after a vendor 429 no further reading is made until its cooldown ends; the lock stays meanwhile."""
+    """MH-QUOTA-059: Within the wait a refresh reads as usual and leaves the lock; once it is over, concurrent refreshes make one vendor reading, and after a vendor 429 no further reading is made until its cooldown ends."""
 
     account = _Account({"session": 2})
     service = _hub(tmp_path, monkeypatch, account, [CLAUDE])
-    clock = [service.now()]
-    service.now = lambda: clock[0]
+
+    async def locked_after(refreshes):
+        for _ in range(refreshes):
+            assert _lock(await service.quota_summary(force=True))["reason"] == "unconfirmed"
+
     await _leave_unknown(service, account, CLAUDE, "session")
     reads = len(account.reads)
+    # Seconds after the use, a refresh is served the reading just taken, like any other refresh...
+    await locked_after(3)
+    assert len(account.reads) == reads
+    # ...and reads again once the ordinary 30 seconds have passed. Neither is late enough to answer.
+    _advance(service, seconds=45)
+    await locked_after(1)
+    assert len(account.reads) == reads + 1
 
+    # The wait is over 15 seconds later: the reading that answers is not held back, and is shared.
+    _advance(service, seconds=15)
     account.held.clear()
     refreshes = [asyncio.create_task(service.quota_summary(force=True)) for _ in range(3)]
     await asyncio.sleep(0.01)
     account.held.set()
     assert [_lock(summary) for summary in await asyncio.gather(*refreshes)] == [None, None, None]
-    assert len(account.reads) == reads + 1
+    assert len(account.reads) == reads + 2
 
     # The refresh of a second unknown use is itself rate limited: no more readings until the cooldown ends.
     await _leave_unknown(service, account, CLAUDE, "session")
+    _advance(service, seconds=60)
     reads = len(account.reads)
     account.read_failure = SubscriptionQuotaError("rate_limited", retry_after_seconds=600)
-    assert _lock(await service.quota_summary(force=True))["reason"] == "unconfirmed"
+    await locked_after(1)
     account.read_failure = None
-    for _ in range(3):
-        assert _lock(await service.quota_summary(force=True))["reason"] == "unconfirmed"
+    await locked_after(3)
     assert len(account.reads) == reads + 1
-    clock[0] += timedelta(minutes=11)
+    _advance(service, minutes=11)
     assert _lock(await service.quota_summary(force=True)) is None
     assert len(account.reads) == reads + 2
 
@@ -731,13 +754,47 @@ async def test_refreshes_of_one_unknown_use_share_a_reading_and_wait_out_a_rate_
     account.reply = lost_and_limited
     assert (await service.use_reset_card(CLAUDE.source_id, {"kind": "session"}))["use"]["outcome"] == "unconfirmed"
     account.read_failure = None
+    _advance(service, seconds=60)
     reads = len(account.reads)
-    for _ in range(3):
-        assert _lock(await service.quota_summary(force=True))["reason"] == "unconfirmed"
+    await locked_after(3)
     assert len(account.reads) == reads
-    clock[0] += timedelta(minutes=11)
+    _advance(service, minutes=11)
     assert _lock(await service.quota_summary(force=True)) is None
     assert len(account.reads) == reads + 1
+
+
+@pytest.mark.parametrize(
+    ("sequence", "seconds_later", "lifted"),
+    [
+        (11, 60, True),
+        (11, 3600, True),
+        # Too soon: the vendor may still be finishing the request.
+        (11, 59, False),
+        (11, 0, False),
+        # Not begun after the outcome became unknown, whatever a clock that was set back says.
+        (10, 60, False),
+        (3, 3600, False),
+    ],
+)
+def test_an_unknown_outcome_is_lifted_only_by_a_reading_begun_after_it_and_a_minute_later(
+    tmp_path, sequence, seconds_later, lifted
+):
+    """MH-QUOTA-066: A lock lifts only for a reading of its own account numbered after the outcome became unknown and begun at least 60 seconds later; a use still in flight is never lifted."""
+
+    moment = [NOW]
+    fences = CardFences(tmp_path / "fences", now=lambda: moment[0])
+    request_id = fences.claim(ACCOUNT, "session", NOW)
+    fences.release_after_readings([(ACCOUNT, 10**9, NOW + timedelta(days=1))])
+    assert fences.view().locks[ACCOUNT]["reason"] == "in_flight" and fences.unknown_floor() is None
+
+    moment[0] = unknown_at = NOW + timedelta(seconds=30)
+    assert fences.settle(ACCOUNT, request_id, unknown=True, mark=10) is False
+    assert fences.unknown_floor() == CardReadingFloor(sequence=10, ripe_at=unknown_at + timedelta(seconds=60))
+
+    began = unknown_at + timedelta(seconds=seconds_later)
+    fences.release_after_readings([(OTHER_ACCOUNT, 10**9, began + timedelta(days=1)), (ACCOUNT, sequence, began)])
+    assert (ACCOUNT not in fences.view().locks) is lifted
+    assert (ACCOUNT not in CardFences(tmp_path / "fences").view().locks) is lifted
 
 
 @pytest.mark.parametrize("answer", ["used", "not_used", "nothing-sent", "lost"])
@@ -771,6 +828,7 @@ async def test_a_settlement_that_cannot_be_written_is_the_unconfirmed_result_wit
 
     # Once the disk writes again, the user's refresh settles it like any unknown outcome.
     monkeypatch.setattr(card_fences, "write_durable", write_durable)
+    _advance(service, seconds=60)
     assert _lock(await service.quota_summary(force=True)) is None
     assert CardFences(tmp_path / "fences").view().locks == {}
 
@@ -1016,7 +1074,7 @@ async def test_reading_the_summary_asks_no_vendor_who_an_account_is_and_shows_an
     directory = tmp_path / "fences"
     CardFences(directory).claim(ACCOUNT, "weekly", NOW)
     account = _Account({"weekly": 1})
-    service = _hub(tmp_path, monkeypatch, account, [CLAUDE, CHATGPT], fences=CardFences(directory))
+    service = _hub(tmp_path, monkeypatch, account, [CLAUDE, CHATGPT], directory=directory)
     reader = account.quota
 
     async def per_source(source_id, vendor, credential_ref):
@@ -1024,8 +1082,6 @@ async def test_reading_the_summary_asks_no_vendor_who_an_account_is_and_shows_an
         return {**parsed, "reset_card_account": ACCOUNT if source_id == CLAUDE.source_id else OTHER_ACCOUNT}
 
     service.adapter.subscription_quota = per_source
-    clock = [service.now()]
-    service.now = lambda: clock[0]
 
     # Nothing could be read yet: neither row's account is known, so both show locked.
     account.read_failure = SubscriptionQuotaError("unavailable")
@@ -1038,7 +1094,7 @@ async def test_reading_the_summary_asks_no_vendor_who_an_account_is_and_shows_an
 
     # Once read, the lock is on the account that holds it and nowhere else.
     account.read_failure = None
-    clock[0] += timedelta(minutes=6)
+    _advance(service, minutes=6)
     rows = (await service.quota_summary())["sources"]
     assert rows[0]["reset_cards"]["lock"] == {"kind": "weekly", "since": "2026-11-20T00:00:00Z", "reason": "unconfirmed"}
     assert rows[1]["reset_cards"]["lock"] is None
@@ -1048,7 +1104,7 @@ async def test_reading_the_summary_asks_no_vendor_who_an_account_is_and_shows_an
     # A fence that cannot be read locks every account's cards, and a press sends nothing.
     (directory / "fences.json").write_text('{"version":1,"locks":{},"locks":{}}')
     (tmp_path / "again").mkdir()
-    damaged = _hub(tmp_path / "again", monkeypatch, account, [CLAUDE, CHATGPT], fences=CardFences(directory))
+    damaged = _hub(tmp_path / "again", monkeypatch, account, [CLAUDE, CHATGPT], directory=directory)
     damaged.adapter.subscription_quota = per_source
     rows = (await damaged.quota_summary())["sources"]
     assert [row["reset_cards"]["lock"]["reason"] for row in rows] == ["unconfirmed", "unconfirmed"]

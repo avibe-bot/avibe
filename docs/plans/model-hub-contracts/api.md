@@ -1805,12 +1805,16 @@ other clients of the same endpoints.
   could not be read, that is another account's, or that disagrees with the statement.
   `cleared` lists the known limits the vendor reported as cleared (`five_hour`, `seven_day`,
   `seven_day_overage_included`) and is empty unless `used`.
-- **Only the user's refresh lifts an unknown outcome.** `POST /api/models/quota/refresh`
-  reads each account with cards again. A reading that began after the outcome became
-  unknown, that the vendor's own report established (`state: "ok"`) and that was made under
-  the same account removes the lock. A read that was not forced, a reading that was already
-  under way and an `unread` inventory do not. Concurrent refreshes share one reading, and a
-  vendor's rate-limit cooldown is waited out with the lock in place.
+- **Only the user's refresh lifts an unknown outcome, and not at once.** `POST
+  /api/models/quota/refresh` reads each account with cards again. A reading that began at
+  least 60 seconds after the outcome became unknown, that the vendor's own report established
+  (`state: "ok"`) and that was made under the same account removes the lock. An earlier
+  refresh reads as usual and shows the count but leaves the lock: a vendor that did not
+  answer may still finish the request, and a count read seconds later would look untouched.
+  A read that was not forced, a reading that was already under way and an `unread` inventory
+  do not lift it either. Concurrent refreshes share one reading, and a vendor's rate-limit
+  cooldown is waited out with the lock in place. Nothing in the payload changes for the
+  wait: the lock simply stays. After a restart the wait counts from when the lock is found.
 - The `quota` returned with a use is read after it. An account paused for quota or rate is
   resumed by the rule of a forced read.
 
