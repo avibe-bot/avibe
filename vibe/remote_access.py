@@ -2247,14 +2247,9 @@ def start_authorization_revision_polling(
 ) -> None:
     """Start the paired-device authorization watermark poller once."""
 
+    # The UI owns this worker even if a different process binds the data root later.
+    # sync_authorization_revision_once reloads config and makes no request while unpaired.
     global _AUTHORIZATION_REVISION_POLL_STARTED
-    if config is None:
-        try:
-            config = V2Config.load()
-        except Exception:
-            return
-    if not _authorization_revision_sync_configured(config):
-        return
 
     def loop() -> None:
         while True:
@@ -2806,14 +2801,8 @@ def start_resource_acl_sync_polling(
 ) -> None:
     """Start the paired-device ACL poller once for the UI process."""
 
+    # As with the revision poller, the per-tick check owns admission, not startup.
     global _RESOURCE_ACL_SYNC_POLL_STARTED
-    if config is None:
-        try:
-            config = V2Config.load()
-        except Exception:
-            return
-    if not _resource_acl_sync_configured(config):
-        return
 
     def loop() -> None:
         while True:
@@ -5343,14 +5332,23 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
             or not payload["session_secret"]
         ):
             return None, "pending pairing request fingerprint is invalid"
-    if "desktop_enrollment" in payload:
-        desktop = payload["desktop_enrollment"]
+    if "personal_claim" in payload or "desktop_enrollment" in payload:
+        personal = "personal_claim" in payload
+        if personal and "desktop_enrollment" in payload:
+            return None, "conflicting enrollment journals"
+        desktop = payload.get("personal_claim" if personal else "desktop_enrollment")
         if not isinstance(desktop, dict) or any(
             not isinstance(desktop.get(key), str) or not desktop[key]
             for key in ("installation_id", "account_id")
         ):
             return None, "pending Desktop enrollment is invalid"
+        if personal and any(not isinstance(desktop.get(k), str) or not desktop[k] for k in (
+            "claim_id", "instance_id", "public_url",
+        )):
+            return None, "invalid personal claim target"
         retry = payload.get("redeem_request")
+        if personal and payload["phase"] == "prepared" and not retry:
+            return None, "missing personal claim redemption"
         if retry is not None and (
             not isinstance(retry, dict)
             or any(not isinstance(retry.get(key), str) or not retry[key] for key in (
@@ -5416,7 +5414,7 @@ def _retire_pending_pairing(*, operation_id: str) -> bool:
 def _same_pairing_claim_request(record: Mapping[str, Any], claim: Mapping[str, Any]) -> bool:
     """A grant renewal keeps its operation, but never its request identity."""
     return all(record.get(key) == claim.get(key) for key in (
-        "operation_id", "request_fingerprint", "redeem_request", "desktop_enrollment",
+        "operation_id", "request_fingerprint", "redeem_request", "desktop_enrollment", "personal_claim",
     ))
 
 
@@ -5857,7 +5855,7 @@ def pair(
         record, error = _read_pending_pairing_record()
         if not error and record and record.get("redeem_request") and record["phase"] == "prepared":
             try:
-                return _retry_desktop_claim(record)
+                return _retry_installation_pairing(record)
             except desktop_local_instance.LocalInstanceError as exc:
                 return {"ok": False, "error": exc.code, "status": exc.status}
             except (OSError, _PairingLockUnavailable):
@@ -5933,6 +5931,38 @@ def pair(
     })
 
 
+def _with_redeem_request(claim, backend_url: str, device_name: str, key: str) -> dict[str, Any]:
+    return {
+        **claim, "backend_url": backend_url, "device_name": device_name,
+        "request_fingerprint": _pairing_request_fingerprint(backend_url, key, claim["session_secret"]),
+        "redeem_request": {
+            "pairing_key": key, "redeem_request_id": secrets.token_urlsafe(32), "device_name": device_name,
+            "local_version": "dev", "origin_service": origin_service_for_pairing(),
+        },
+    }
+
+
+def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: str, installation: str,
+                        subject: str, claim_id: str, instance_id: str, hostname: str) -> dict[str, Any]:
+    """Atomic handoff into the same request-bound pairing journal used by Desktop."""
+    from vibe import desktop_local_instance as local
+    from storage.importer import ensure_sqlite_state
+
+    _run_pending_deferred_context_migration()
+    ensure_sqlite_state()
+    with _pairing_persist_lock():
+        config, identity, pending = local._config(), local._installation_id(), local._pending()
+        if identity != installation or local.claim_revision(config, identity, pending) != revision:
+            return {"ok": False, "error": "local_binding_changed"}
+        if pending and (pending["phase"] != "prepared" or pending.get("desktop_enrollment")):
+            return {"ok": False, "error": "local_instance_conflict"}
+        claim = _with_redeem_request(_new_pairing_claim(config, backend_url, device), backend_url, device, key)
+        claim["personal_claim"] = {"claim_id": claim_id, "installation_id": installation, "account_id": subject,
+                                   "instance_id": instance_id, "public_url": "https://" + hostname}
+        _write_pending_pairing_record(claim)
+    return _retry_installation_pairing(claim)
+
+
 def _pair_desktop(
     pairing_key: str, backend_url: str, device_name: str, guard: Any,
 ) -> dict[str, Any]:
@@ -5966,27 +5996,15 @@ def _pair_desktop(
             else:
                 if not pairing_key or not isinstance(device_name, str) or not device_name.strip():
                     raise desktop_local_instance.LocalInstanceError("invalid_request", 400)
-                claim = {
-                    **claim, "backend_url": backend.base_url, "device_name": device_name,
-                    "request_fingerprint": _pairing_request_fingerprint(
-                        backend.base_url, pairing_key, claim["session_secret"],
-                    ),
-                    "redeem_request": {
-                        "pairing_key": pairing_key,
-                        "redeem_request_id": secrets.token_urlsafe(32),
-                        "device_name": device_name,
-                        "local_version": "dev",
-                        "origin_service": origin_service_for_pairing(),
-                    },
-                }
+                claim = _with_redeem_request(claim, backend.base_url, device_name, pairing_key)
                 claim.pop("desktop_failure", None)
                 _write_pending_pairing_record(claim)
     if claim["phase"] in {"redeemed", "applied"}:
         return _persist_pairing(None, device_name=device_name, operation_id=claim["operation_id"])
-    return _retry_desktop_claim(claim)
+    return _retry_installation_pairing(claim)
 
 
-def _retry_desktop_claim(claim: Mapping[str, Any]) -> dict[str, Any]:
+def _retry_installation_pairing(claim: Mapping[str, Any]) -> dict[str, Any]:
     from vibe import desktop_local_instance
 
     with _pairing_persist_lock():
@@ -5994,7 +6012,7 @@ def _retry_desktop_claim(claim: Mapping[str, Any]) -> dict[str, Any]:
         config = desktop_local_instance._config()
         if (
             error or current != claim or claim["phase"] != "prepared"
-            or desktop_local_instance._installation_id() != claim["desktop_enrollment"]["installation_id"]
+            or desktop_local_instance._installation_id() != (claim.get("personal_claim") or claim["desktop_enrollment"])["installation_id"]
             or _pairing_identity_fingerprint(_pairing_identity_from_cloud(
                 config.remote_access.vibe_cloud
             )) != claim["source_fingerprint"]
@@ -6018,7 +6036,15 @@ def _redeem_pairing_claim(
             connection_target=backend,
         )
     except BackendRequestError as exc:
-        failure = {"ok": False, **exc.payload, "status": exc.status}
+        if claim.get("personal_claim"):
+            # Recovery is also reachable from the existing pair route and CLI.
+            # The raw upstream body/detail may contain the one-use key or credentials.
+            reason = exc.payload.get("error")
+            if reason not in ("pairing_key_expired", "registration_indeterminate", "pairing_redeem_pending"):
+                reason = "pairing_request_failed"
+            failure = {"ok": False, "error": reason, "status": exc.status}
+        else:
+            failure = {"ok": False, **exc.payload, "status": exc.status}
         retry_after = exc.payload.get("retry_after_seconds")
         if (
             claim.get("redeem_request") and exc.status == 409
@@ -6048,7 +6074,7 @@ def _redeem_pairing_claim(
         return {
             "ok": False,
             "error": "pairing_redeem_indeterminate",
-            "detail": str(exc),
+            **({} if claim.get("personal_claim") else {"detail": str(exc)}),
             "pairing": {"ok": False, "recoverable": bool(claim.get("redeem_request")), "cause": "pairing_request_failed"},
         }
     normalized_result, response_error = _validate_pairing_response(result)
@@ -6059,12 +6085,18 @@ def _redeem_pairing_claim(
             "detail": response_error,
         })
     assert normalized_result is not None
+    personal = claim.get("personal_claim")
+    if personal and (normalized_result["instance_id"] != personal["instance_id"]
+                     or normalized_result["public_url"] != personal["public_url"]):
+        # This is an invalid response to the saved pairing request, not a new
+        # user-facing recovery state. Legacy Resume already localizes this code.
+        return _pairing_failure_after_claim(claim, {"ok": False, "error": "invalid_pairing_response"})
     instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
         return _pairing_failure_after_claim(claim, {
             "ok": False,
-            "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
+            "error": "tunnel_origin_update_failed" if personal else str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
         })
     pairing_result: dict[str, Any] = {
@@ -6147,10 +6179,11 @@ def _persist_pairing_impl(
                 }
             return {"ok": False, "error": "missing_pairing_key"}
 
-        if record.get("desktop_enrollment"):
+        enrollment = record.get("personal_claim") or record.get("desktop_enrollment")
+        if enrollment:
             from vibe import desktop_local_instance
 
-            if desktop_local_instance._installation_id() != record["desktop_enrollment"]["installation_id"]:
+            if desktop_local_instance._installation_id() != enrollment["installation_id"]:
                 return {"ok": False, "error": "local_binding_changed", "status": 409}
 
         if result is not None:
@@ -6329,6 +6362,16 @@ def _persist_pairing_impl(
                     "pairing": {"ok": False, "reconciling": True},
                 }
             record = applied_record
+        if personal := record.get("personal_claim"):
+            # Every completion path (including the old Resume route) passes here.
+            # Preserve durable attribution before retiring the only journal that links
+            # this claim to this exact credential generation. A failed write is resumable.
+            from vibe.personal_claim_client import ClaimError
+            from vibe.personal_claims import record_bound
+            try:
+                record_bound(personal["claim_id"], persisted_identity)
+            except (OSError, ClaimError):
+                return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         if not _retire_pending_pairing(operation_id=str(record["operation_id"])):
             return {
                 **status(config),
