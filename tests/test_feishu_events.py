@@ -381,18 +381,19 @@ def test_an_endpoint_that_does_not_answer_is_given_up_and_asked_again(fake: Fake
     """The SDK asks for its endpoint with a blocking request and no timeout; nothing can stop a thread in it."""
     fake.endpoint_delays = [4.0]
 
-    def retry_at_once(_sdk: Any, client: Any) -> None:
-        # The client's own defaults (up to 30 s, then every 120 s) hold until an endpoint has answered.
-        client._reconnect_nonce, client._reconnect_interval = 0, 0.05
+    sdk = feishu_sdk_ws.sdk_ws_client_module()
+
+    class RetriesAtOnce(sdk.Client):
+        """The client's own defaults (up to 30 s, then every 120 s) hold until an endpoint has answered."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._reconnect_nonce, self._reconnect_interval = 0, 0.05
 
     connection = feishu_sdk_ws.SdkLongConnection(
-        app_id="cli_app",
-        app_secret="socket-secret",
-        domain=fake.url,
-        event_handler=FeishuEventDispatcher(),
-        on_client=retry_at_once,
+        app_id="cli_app", app_secret="socket-secret", domain=fake.url, event_handler=FeishuEventDispatcher()
     )
-    with patch.object(feishu_sdk_ws, "_ENDPOINT_TIMEOUT", (1.0, 0.5)):
+    with patch.object(feishu_sdk_ws, "_ENDPOINT_TIMEOUT", (1.0, 0.5)), patch.object(sdk, "Client", RetriesAtOnce):
         connection.start()
         try:
             fake.wait_connected(timeout=3)  # sooner than the withheld reply would have come

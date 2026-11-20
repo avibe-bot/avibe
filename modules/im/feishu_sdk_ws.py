@@ -39,7 +39,7 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +165,7 @@ class SdkLongConnection:
     """One SDK client, started on a thread and loop of its own, and stoppable for good.
 
     ``event_handler`` is called with each event payload by the SDK's client
-    (``_do_without_validation``). ``on_client`` is called with the SDK module
-    and the client once it exists, before it connects.
+    (``_do_without_validation``).
 
     ``stop`` may be called at any time, from any thread, any number of times,
     before ``start`` included. It only asks: the connection's own thread does
@@ -181,13 +180,11 @@ class SdkLongConnection:
         domain: str,
         event_handler: Any,
         thread_name: str = "feishu-ws",
-        on_client: Optional[Callable[[Any, Any], None]] = None,
     ) -> None:
         self._app_id = app_id
         self._app_secret = app_secret
         self._domain = domain
         self._event_handler = event_handler
-        self._on_client = on_client
         self._stop_requested = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._client: Any = None
@@ -247,8 +244,6 @@ class SdkLongConnection:
                 log_level=sdk.LogLevel.INFO,
                 domain=self._domain,
             )
-            if self._on_client is not None:
-                self._on_client(sdk, self._client)
             self._watcher = loop.create_task(self._watch_for_stop())
             logger.info("Feishu WS thread starting, domain=%s", self._domain)
             self._client.start()
