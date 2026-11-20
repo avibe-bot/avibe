@@ -1963,6 +1963,24 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/QuotaTab.test.tsx::MH-QUOTA-041
+  - id: MH-QUOTA-042
+    name: ChatGPT uses the available count and excludes redeemed and unrelated credit details
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_chatgpt_cards_use_usage_count_and_only_available_codex_details
+  - id: MH-QUOTA-043
+    name: Claude groups held unpaused grants by kind without returning identities
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_claude_cards_group_by_kind_without_exposing_grants
+  - id: MH-QUOTA-044
+    name: A cards-only read failure leaves quota windows available and reveals no upstream text
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_model_hub_quota.py::test_card_details_failure_preserves_current_windows
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

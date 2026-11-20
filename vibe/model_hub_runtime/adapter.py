@@ -51,6 +51,7 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.oauth import oauth_failure_detail
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
+from core.handlers.model_hub import reset_cards
 from core.handlers.model_hub.quota import (
     CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
     QUOTA_FETCH_TIMEOUT_SECONDS,
@@ -1522,9 +1523,34 @@ def _fetch_subscription_quota(
     if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
         raise SubscriptionQuotaError("unavailable")
     parsed = parse_subscription_quota(vendor, payload.get("body"))
+    if vendor in reset_cards.VENDORS:
+        parsed['reset_cards'] = _read_reset_cards(client, request, vendor, payload.get('body'))
     if vendor == "anthropic" and parsed.get("plan") is None:
         parsed["plan"] = _fetch_claude_plan(client=client, auth=auth)
     return parsed
+
+
+def _read_reset_cards(client: EngineClient, request: dict, vendor: str, usage: object) -> dict:
+    # Read separately: an error on the opt-in endpoint must not blank windows.
+    try:
+        if vendor == "anthropic":
+            url = _SUBSCRIPTION_QUOTA_URLS[vendor][0] + "?cedar_ember=1&skip_spend=1"
+        else:
+            count = reset_cards.codex_count(usage)
+            if not count:
+                return reset_cards.codex_cards(0, None, datetime.now(timezone.utc))
+            url = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+        response = client.management_request(
+            "POST", "/api-call", payload={**request, "url": url}, timeout=QUOTA_FETCH_TIMEOUT_SECONDS
+        )
+        if not isinstance(response, dict) or response.get("status_code") != 200:
+            return reset_cards.unread()
+        body, now = response.get("body"), datetime.now(timezone.utc)
+        return (
+            reset_cards.claude_cards(body, now) if vendor == "anthropic" else reset_cards.codex_cards(count, body, now)
+        )
+    except (EngineClientError, OSError, SubscriptionQuotaError, RecursionError):
+        return reset_cards.unread()
 
 
 def _fetch_claude_plan(*, client: EngineClient, auth: _AuthRecord) -> str | None:

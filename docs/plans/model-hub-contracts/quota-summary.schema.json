@@ -112,6 +112,9 @@
         },
         "value": {
           "$ref": "#/definitions/SourceValue"
+        },
+        "reset_cards": {
+          "$ref": "#/definitions/ResetCards"
         }
       },
       "if": {
@@ -457,6 +460,89 @@
               }
             }
           ]
+        }
+      }
+    },
+    "ResetCards": {
+      "type": "object",
+      "required": [
+        "state",
+        "lock",
+        "cards"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "unread"
+          ]
+        },
+        "lock": {
+          "type": "null"
+        },
+        "cards": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/definitions/ResetCard"
+          }
+        }
+      }
+    },
+    "ResetCard": {
+      "type": "object",
+      "required": [
+        "kind",
+        "count",
+        "expires_at",
+        "stated",
+        "usable",
+        "blocked",
+        "blocked_until"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "all",
+            "fable",
+            "session",
+            "weekly",
+            "account"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "stated": {
+          "type": "boolean"
+        },
+        "usable": {
+          "type": "boolean"
+        },
+        "blocked": {
+          "enum": [
+            null,
+            "needs_limit",
+            "cooldown",
+            "unavailable"
+          ]
+        },
+        "blocked_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
         }
       }
     }

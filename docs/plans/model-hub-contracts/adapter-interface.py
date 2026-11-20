@@ -817,7 +817,8 @@ class EngineAdapter(Protocol):
         """Read this subscription's rate-limit windows from the vendor's usage report.
 
         The engine makes the model-free account call with the bound grant; only
-        the parsed ``{plan, windows}`` crosses this boundary, never the grant or
+        parsed ``plan``, ``windows`` and optional ``reset_cards`` (closed per-kind
+        counts and eligibility from a separate read) cross this boundary, never the grant or
         the raw body. ``plan`` is the plan this read named, one without a built-in
         fee included, or None when it could not name one; only None keeps the
         last known plan. Raise ``SubscriptionQuotaError`` with a sanitized reason
