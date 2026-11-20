@@ -56,6 +56,32 @@ describe('W1 resolver owns launch intent, not native authority', () => {
     expect(result.current.wm.windows).toHaveLength(1);
     expect(result.current.wm.windows[0]).toMatchObject({ id, params: { newFileDir: '/draft', path: undefined } });
   });
+  it('returns DOM focus to an already-focused window from the launcher', async () => {
+    disposition = 'fallback';
+    const { result } = renderHook(() => ({ launch: useAppLaunch('dock'), wm: useWindowManager() }), { wrapper: Wrapper });
+    await act(async () => { await result.current.launch({ appId: 'files' }); });
+    const id = result.current.wm.windows[0].id;
+    expect(result.current.wm.focusedId).toBe(id);
+    const root = document.createElement('div');
+    root.tabIndex = -1;
+    root.dataset.windowId = id;
+    const field = document.createElement('input');
+    root.append(field);
+    const launcher = document.createElement('button');
+    document.body.append(root, launcher);
+    try {
+      launcher.focus();
+      await act(async () => { await result.current.launch({ appId: 'files' }); });
+      expect(result.current.wm.windows).toHaveLength(1);
+      expect(document.activeElement).toBe(root);
+      field.focus();
+      await act(async () => { await result.current.launch({ appId: 'files' }); });
+      expect(document.activeElement).toBe(field);
+    } finally {
+      root.remove();
+      launcher.remove();
+    }
+  });
   it('old shells cannot silently drop rich params through the legacy invoke', async () => {
     delete window.__AVIBE_APP_LAUNCH_PROTOCOL__;
     const { result } = renderHook(() => ({ launch: useAppLaunch('file-browser'), wm: useWindowManager() }), { wrapper: Wrapper });

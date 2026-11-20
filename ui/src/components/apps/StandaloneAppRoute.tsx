@@ -37,13 +37,24 @@ function StandaloneShowBody({ windowId, params }: { windowId: string; params: Re
   const api = useApi();
   const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
   const [status, setStatus] = useState<ShowPageWindowStatus>('loading');
+  const [archived, setArchived] = useState(false);
+  const [revalidateVersion, setRevalidateVersion] = useState(0);
+  // The same lifecycle source as the Workbench's Show windows: archive is
+  // terminal for the frame and its controls, and every (re)connect re-reads
+  // the session to close the gap the event stream could not cover.
+  useEffect(() => api.connectWorkbenchEvents({
+    onConnected: () => setRevalidateVersion((version) => version + 1),
+    onSessionActivity: (data) => {
+      if (data.event === 'archived' && data.session_id === sessionId) setArchived(true);
+    },
+  }), [api, sessionId]);
   useEffect(() => {
     let live = true;
     void api.getSessionResult(sessionId).then((result) => {
       if (live) setStatus((current) => showPageWindowStatusAfterRead(current, result));
     }).catch(() => { if (live) setStatus((current) => showPageWindowStatusAfterRead(current, { status: null, session: null })); });
     return () => { live = false; };
-  }, [api, sessionId]);
+  }, [api, revalidateVersion, sessionId]);
   const Body = APP_REGISTRY.showpage.Component;
-  return <ShowPageAnnotationHost src={showPageWindowSource(sessionId, status, false)}><Body windowId={windowId} params={params} /></ShowPageAnnotationHost>;
+  return <ShowPageAnnotationHost src={showPageWindowSource(sessionId, status, archived)}><Body windowId={windowId} params={params} /></ShowPageAnnotationHost>;
 }

@@ -17,6 +17,15 @@ function launchRequestId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+// Activating the window that is already focused changes no manager state, so
+// `AppWindow`'s focus effect does not run and keyboard focus would stay on the
+// launcher. A window that is new or still un-minimizing is not focusable yet;
+// its own effect takes focus once it renders. Focus already inside stays put.
+function focusWindowDom(id: string) {
+  const root = document.querySelector<HTMLElement>(`[data-window-id="${id}"]`);
+  if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
+}
+
 // All launch surfaces keep their animation geometry locally; only typed launch
 // state crosses the native boundary. The latest manager retains its foreground
 // gate when an async caller is now behind Settings.
@@ -54,11 +63,12 @@ export function useAppLaunch(source: AppLaunchSource) {
       return 'fallback';
     }
     const manager = wm.current;
-    manager.openApp(target.appId, {
+    const id = manager.openApp(target.appId, {
       ...options, reuse: mode === 'activate', title: target.title,
       // Retire previous launch intent, retaining app-owned buffers and restore state.
       params: { path: undefined, cwd: undefined, filename: undefined, name: undefined, mime: undefined, initialTab: undefined, mtime: undefined, newFileDir: undefined, rootDir: undefined, line: undefined, column: undefined, endColumn: undefined, ...params },
     });
+    focusWindowDom(id);
     return 'fallback';
   }, [active, navigate, ownerLifetime, source, wm]);
 }
