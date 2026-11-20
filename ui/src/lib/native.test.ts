@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   hasNativeCapability,
+  hasNativeShare,
+  hasNativeShareExport,
   isNativeShell,
   nativeAppInfo,
   nativeHapticImpact,
@@ -422,5 +424,94 @@ describe('system schedule supported kinds', () => {
   it('preserves bound recovery when the capability probe is unavailable', async () => {
     installBridge({ capabilities: { systemSchedule: 1 }, call: vi.fn().mockRejectedValue(new Error('bridge unavailable')) });
     expect(await nativeSystemScheduleKinds()).toEqual([]);
+  });
+});
+
+describe('desktop Show sharing', () => {
+  const capabilities = {
+    version: 1,
+    inbound_kinds: [],
+    outbound_kinds: ['link', 'pdf', 'image'],
+    max_bytes: { pdf: 52428800, image: 52428800, link: 32768 },
+    max_total_bytes: 52428800,
+    max_attachments: 1,
+    supports_pending: false,
+  };
+  const define = (name: string, value: unknown) =>
+    Object.defineProperty(window, name, { configurable: true, value });
+  const installDesktop = (marker: unknown = 1, present = (params: Record<string, unknown>) => ({ ...params, status: 'cancelled' })) => {
+    const invoke = vi.fn(async (command: string, args?: { request?: Record<string, unknown> }) => {
+      if (command !== 'desktop_show_share') throw new Error('unexpected command');
+      const { method, ...params } = args?.request ?? {};
+      if (method === 'share.capabilities') return capabilities;
+      if (method === 'share.present') return present(params);
+      return null;
+    });
+    define('__AVIBE_DESKTOP_SHELL__', true);
+    define('__AVIBE_DESKTOP_SHOW_SHARE__', marker);
+    define('__TAURI_INTERNALS__', { invoke });
+    return invoke;
+  };
+  afterEach(() => {
+    for (const name of ['__AVIBE_DESKTOP_SHELL__', '__AVIBE_DESKTOP_SHOW_SHARE__', '__TAURI_INTERNALS__']) {
+      Reflect.deleteProperty(window, name);
+    }
+  });
+
+  it('sends the same requests through the one desktop share command', async () => {
+    const invoke = installDesktop();
+    expect(hasNativeShare()).toBe(true);
+    const result = await nativeSharePresent('image', 'ses-1');
+    expect(result).toMatchObject({ kind: 'image', status: 'cancelled' });
+    expect(invoke).toHaveBeenNthCalledWith(1, 'desktop_show_share', { request: { method: 'share.capabilities' } });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'desktop_show_share', {
+      request: { method: 'share.present', operationId: result.operationId, kind: 'image', sessionId: 'ses-1' },
+    });
+  });
+
+  it('offers nothing without the shell marker, and fails without its command channel', async () => {
+    for (const marker of [null, true, 2]) {
+      const invoke = installDesktop(marker);
+      expect(hasNativeShare()).toBe(false);
+      await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'failed', error: { code: 'capability_mismatch' } });
+      expect(invoke).not.toHaveBeenCalled();
+    }
+    // The marker is what the page shows; a share without the command channel fails, untried.
+    installDesktop();
+    define('__TAURI_INTERNALS__', {});
+    expect(hasNativeShare()).toBe(true);
+    await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'failed', error: { code: 'unavailable' } });
+  });
+
+  it('recognises a native Show window, which carries the app-window marker instead of the shell marker', async () => {
+    const invoke = installDesktop();
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    expect(hasNativeShare()).toBe(false);
+    define('__AVIBE_NATIVE_APP_WINDOW__', true);
+    expect(hasNativeShare()).toBe(true);
+    await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'cancelled' });
+    expect(invoke).toHaveBeenCalledWith('desktop_show_share', expect.anything());
+    Reflect.deleteProperty(window, '__AVIBE_NATIVE_APP_WINDOW__');
+  });
+
+  it('exports only from a native Show window, never from the Workbench', () => {
+    installDesktop();
+    expect(hasNativeShareExport()).toBe(false);
+    define('__AVIBE_DESKTOP_SHOW_EXPORT__', 1);
+    expect(hasNativeShareExport()).toBe(true);
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHOW_EXPORT__');
+  });
+
+  it('keeps the phone bridge first when both are present', async () => {
+    const invoke = installDesktop();
+    const call = vi.fn(async (method: string, params?: Record<string, unknown>) =>
+      method === 'share.capabilities' ? capabilities : { ...params, status: 'completed' });
+    installBridge({
+      capabilities: { app: 1, 'c1.share_draft': 1 },
+      call: call as NonNullable<Window['avibeNative']>['call'],
+    });
+    await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'completed' });
+    expect(call).toHaveBeenCalledWith('share.present', expect.objectContaining({ kind: 'link' }));
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

@@ -67,6 +67,17 @@ async function boot() {
       value: { invoke: () => new Promise(() => {}) },
     });
   }
+  // The desktop app's Show share marker, as the shell injects it. The design browser keeps Tauri's
+  // command channel absent, so a share it starts answers that the shell is unavailable.
+  if (shown?.fixtures?.desktopShowShare) {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHOW_SHARE__', { configurable: true, value: 1 });
+  }
+  // A native Show window: the app-window marker, and the share marker that lets it export.
+  if (shown?.fixtures?.nativeShowWindow) {
+    Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { configurable: true, value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHOW_SHARE__', { configurable: true, value: 1 });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHOW_EXPORT__', { configurable: true, value: 1 });
+  }
   // The phone app defines its bridge at document start, before any page script (`src/lib/native.ts`).
   if (shown?.fixtures?.nativeShell) {
     const capabilities = shown.fixtures.nativeShell;

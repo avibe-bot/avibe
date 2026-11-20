@@ -31,6 +31,7 @@ mod native_frame;
 mod notifications;
 mod pet;
 mod pet_native;
+mod show_share;
 mod update_install;
 mod update_popover;
 pub mod updater;
@@ -52,6 +53,10 @@ mod macos_deep_link;
 mod macos_new_context;
 #[cfg(target_os = "macos")]
 mod macos_services;
+#[cfg(target_os = "macos")]
+mod macos_show_share;
+#[cfg(target_os = "macos")]
+mod macos_show_titlebar;
 #[cfg(target_os = "macos")]
 mod macos_terminate;
 #[cfg(target_os = "macos")]
@@ -297,7 +302,8 @@ struct NativeUninstallCatalog {
     unverified_keep: String,
 }
 
-fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> DesktopBootstrapCatalog {
+/// The product's English or Chinese copy, whichever the locales prefer.
+fn product_catalog_source(locales: impl IntoIterator<Item = String>) -> &'static str {
     let use_chinese = locales
         .into_iter()
         .find_map(|locale| {
@@ -311,14 +317,27 @@ fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> Desk
             }
         })
         .unwrap_or(false);
-    let source = if use_chinese {
+    if use_chinese {
         ZH_PRODUCT_CATALOG
     } else {
         EN_PRODUCT_CATALOG
-    };
+    }
+}
+
+fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> DesktopBootstrapCatalog {
+    let source = product_catalog_source(locales);
     serde_json::from_str::<ProductCatalog>(source)
         .expect("the checked product locale catalog must be valid")
         .desktop_bootstrap
+}
+
+/// One string of the product's copy, at a dotted key, in the system's language.
+pub(crate) fn product_text(key: &str) -> Option<String> {
+    let catalog: serde_json::Value = serde_json::from_str(product_catalog_source(sys_locale::get_locales())).ok()?;
+    key.split('.')
+        .try_fold(&catalog, |node, part| node.get(part))?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn native_tray_catalog() -> NativeTrayCatalog {
@@ -1974,6 +1993,7 @@ fn build_main_window(
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+        .initialization_script(show_share::marker())
         .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
@@ -2062,6 +2082,7 @@ fn build_main_child(
             .initialization_script(pet::DESKTOP_PET_MARKER)
             .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
             .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+            .initialization_script(show_share::marker())
             .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
             .initialization_script(format!(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
@@ -2985,7 +3006,8 @@ pub fn run() {
             pet::pet_bind,
             pet::pet_unbind,
             pet::pet_open,
-            window_return::focus_main_window
+            window_return::focus_main_window,
+            show_share::desktop_show_share
         ])
         .setup(|app| {
             #[cfg(feature = "bundled-runtime")]
@@ -3014,6 +3036,7 @@ pub fn run() {
                 app.path().app_local_data_dir()?.join("notifications.json"),
             ));
             app.manage(pet::Pet::new(app.path().app_local_data_dir()?.join("pet.json")));
+            show_share::setup(app.handle());
             #[cfg(target_os = "macos")]
             {
                 app.manage(compose::Queue::default());

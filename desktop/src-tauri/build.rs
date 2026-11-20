@@ -7,9 +7,10 @@ fn main() {
     // commands only to the shell's own local page, `pet.json` gives the pet
     // commands only to the pet window, `main-pet-bind.json` gives the
     // Workbench `pet_bind` alone, and `main-computer-use.json` gives it the
-    // two Computer Use guide actions on macOS, and `main-window-focus.json`
-    // lets it bring its own window forward; `update-popover.json` lets the
-    // update popup fit its own height.
+    // two Computer Use guide actions on macOS, `main-window-focus.json`
+    // lets it bring its own window forward, `update-popover.json` lets the
+    // update popup fit its own height, and `show-share.json` gives the
+    // Workbench and Show app windows the one Show share command.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "desktop_client_request",
         "update_popover_fit",
@@ -47,6 +48,7 @@ fn main() {
         "pet_unbind",
         "pet_open",
         "focus_main_window",
+        "desktop_show_share",
     ]);
     let mut attributes = tauri_build::Attributes::new().app_manifest(manifest);
     // tauri-build embeds its Windows application manifest, which binds Common

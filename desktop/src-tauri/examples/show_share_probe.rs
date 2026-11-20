@@ -1,0 +1,438 @@
+//! Hermetic probe of the desktop app's Show sharing with real WebKit.
+//!
+//! A loopback server plays a Show window's document: the Show, a forged frame
+//! claiming to be it, and another Show's hidden frame, as a same-origin Show
+//! script could arrange (review of 9904474a, P1). The probe runs the shipping
+//! share module (compiled in from its source file) against it:
+//! - the isolated-world read gives the bound Show's link whatever the DOM claims;
+//! - the export is the whole web view, pixel for pixel, not a frame the page names;
+//! - PNG and PDF encoding;
+//! - asking for the system share menu.
+//!
+//! Nothing is shared.
+//!
+//! By default the app is never activated, so the probe does not take the
+//! keyboard on a desktop in use. Its window sits off screen, where WebKit
+//! reports the page hidden and macOS shows no menu.
+//! `AVIBE_SHOW_SHARE_PROBE_FOCUS=1` puts the window on screen, checks that the
+//! page is visible, and opens and closes the real share menu. Run it only on a
+//! desktop nobody is using.
+//!
+//! Output is one JSON line per check; the run fails on the first one that
+//! does not hold.
+//!
+//!     cargo run --example show_share_probe
+
+#[cfg(not(target_os = "macos"))]
+fn main() {}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    probe::run();
+}
+
+#[cfg(target_os = "macos")]
+#[path = "../src/macos_show_share.rs"]
+// The probe shares a link only; the shell also shares files.
+#[allow(dead_code)]
+mod macos_show_share;
+
+#[cfg(target_os = "macos")]
+#[path = "../src/macos_show_titlebar.rs"]
+mod macos_show_titlebar;
+
+#[cfg(target_os = "macos")]
+mod probe {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        time::Duration,
+    };
+
+    use objc2::{rc::Retained, MainThreadMarker};
+    use objc2_web_kit::WKWebView;
+    use serde_json::{json, Value};
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    use crate::macos_show_share::{self as native, Item, Outcome};
+
+    const SESSION: &str = "ses-probe";
+
+    thread_local! {
+        /// Main thread only: the open share menu.
+        static PICKER: std::cell::RefCell<Option<native::Picker>> = const { std::cell::RefCell::new(None) };
+    }
+    const WORKBENCH: &str = r#"<!doctype html><meta charset="utf-8"><title>workbench</title>
+<style>html,body{margin:0;height:100%;background:#fff}iframe{position:absolute;border:0}</style>
+<iframe id="show" data-avibe-show-session="ses-probe" src="/show/ses-probe/" style="left:40px;top:60px;width:400px;height:300px"></iframe>
+<iframe id="other" data-avibe-show-session="ses-other" src="/show/ses-other/" style="left:0;top:0;width:1px;height:1px;opacity:0"></iframe>
+<script>
+addEventListener('avibe:show-share-open', () => fetch('/report', { method: 'POST', body: '{"case":"share-open"}' }));
+document.getElementById('show').addEventListener('load', () => {
+  // A same-origin Show script forges a frame that claims to be this Show.
+  const forged = document.createElement('iframe');
+  forged.dataset.avibeShowSession = 'ses-probe';
+  forged.src = '/settings';
+  forged.style.cssText = 'left:460px;top:60px;width:300px;height:300px';
+  forged.addEventListener('load', () => {
+    forged.contentWindow.history.replaceState(null, '', '/show/ses-probe/');
+    fetch('/report', { method: 'POST', body: '{"case":"ready"}' });
+  });
+  document.body.appendChild(forged);
+});
+</script>"#;
+    const SHOW: &str = r#"<!doctype html><meta charset="utf-8"><title>漏斗</title>
+<body style="margin:0;background:#00a050;font:24px sans-serif;color:#fff"><p style="margin:60px">Q4 漏斗看板</p></body>"#;
+
+    fn check(name: &str, ok: bool, detail: Value) {
+        println!("{}", json!({ "check": name, "ok": ok, "detail": detail }));
+        if !ok {
+            std::process::exit(1);
+        }
+    }
+
+    pub fn run() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || serve(listener, ready_tx));
+        let origin = format!("http://127.0.0.1:{port}");
+
+        let mut app = tauri::Builder::default().build(tauri::generate_context!()).unwrap();
+        let focus = std::env::var_os("AVIBE_SHOW_SHARE_PROBE_FOCUS").is_some();
+        if !focus {
+            app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+        }
+        let mut ready_rx = Some(ready_rx);
+        app.run(move |app, event| {
+            if let tauri::RunEvent::ExitRequested { api, code: None, .. } = &event {
+                api.prevent_exit();
+            }
+            let tauri::RunEvent::Ready = event else { return };
+            let window = WebviewWindowBuilder::new(
+                app,
+                "probe",
+                WebviewUrl::External(format!("{origin}/workbench").parse().unwrap()),
+            )
+            .inner_size(800.0, 600.0)
+            .position(if focus { 120.0 } else { -4000.0 }, if focus { 120.0 } else { -4000.0 })
+            .visible(true)
+            .focused(false)
+            .incognito(true)
+            .build()
+            .unwrap();
+
+            let ready = ready_rx.take().unwrap();
+            let origin = origin.clone();
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                assert_eq!(
+                    ready.recv_timeout(Duration::from_secs(20)).expect("workbench loaded"),
+                    "ready"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+                steps(&window, &origin, focus);
+                title_bar(&window, &ready);
+                println!("{}", json!({ "done": true }));
+                handle.exit(0);
+            });
+        });
+    }
+
+    /// Runs `body` on the main thread with the probe's WKWebView and waits for
+    /// what it sends back.
+    fn on_main<T: Send + 'static>(
+        window: &tauri::WebviewWindow,
+        body: impl FnOnce(&WKWebView, MainThreadMarker, mpsc::Sender<T>) + Send + 'static,
+    ) -> T {
+        let (tx, rx) = mpsc::channel();
+        window
+            .with_webview(move |platform| {
+                let mtm = MainThreadMarker::new().unwrap();
+                let webview = unsafe { Retained::retain(platform.inner().cast::<WKWebView>()) }.unwrap();
+                body(&webview, mtm, tx);
+            })
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(20)).expect("main thread answered")
+    }
+
+    fn script(window: &tauri::WebviewWindow, body: &'static str, args: Vec<(&'static str, String)>) -> Value {
+        on_main(window, move |webview, mtm, tx| {
+            let wrapped = format!("const run = async () => {{\n{body}\n}};\nreturn JSON.stringify(await run());");
+            let pairs: Vec<(&str, &str)> = args.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            native::call_script(webview, mtm, &wrapped, &pairs, move |answer| {
+                let _ = tx.send(
+                    answer
+                        .and_then(|text| serde_json::from_str(&text).ok())
+                        .unwrap_or(Value::Null),
+                );
+            });
+        })
+    }
+
+    fn read(window: &tauri::WebviewWindow, origin: &str, session: &str) -> Value {
+        script(
+            window,
+            native::READ,
+            vec![("sessionID", session.into()), ("origin", origin.into())],
+        )
+    }
+
+    fn steps(window: &tauri::WebviewWindow, origin: &str, focus: bool) {
+        // The link is the bound Show's, from its own read APIs; the forged
+        // frame and the other Show's hidden frame do not enter into it.
+        let state = read(window, origin, SESSION);
+        check(
+            "link-is-the-bound-show-s-own",
+            state["allowed"] == true && state["url"] == format!("{origin}/show/{SESSION}/"),
+            state.clone(),
+        );
+        // Off screen, WebKit may report the page hidden or not; the shell only
+        // exports a page that says it is visible.
+        check(
+            "page-visibility-is-reported",
+            state["visible"].is_boolean(),
+            state["visible"].clone(),
+        );
+        let foreign = script(
+            window,
+            native::READ,
+            vec![("sessionID", SESSION.into()), ("origin", "http://127.0.0.1:1".into())],
+        );
+        check("read-refuses-another-origin", foreign["allowed"] == false, foreign);
+        let unknown = read(window, origin, "ses-missing");
+        check(
+            "read-refuses-a-show-it-cannot-read",
+            unknown["allowed"] != true,
+            unknown,
+        );
+
+        // The export is the whole web view, so the page's own white and the
+        // Show's green are both in it, and so is the forged frame: what the
+        // window shows is what is exported, nothing chosen by a frame's claim.
+        let (png, pdf, size, view) = on_main(window, move |webview, mtm, tx| {
+            let (bounds, _, _) = native::geometry(webview);
+            assert!(native::within_pixel_cap(webview));
+            native::snapshot(webview, mtm, None, move |image| {
+                let image = image.expect("snapshot");
+                let size = image.size();
+                let _ = tx.send((
+                    native::png(&image),
+                    native::pdf(&image, mtm),
+                    (size.width, size.height),
+                    (bounds.size.width, bounds.size.height),
+                ));
+            });
+        });
+        let png = png.expect("png");
+        check(
+            "png-encodes-the-capture",
+            png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 100,
+            json!({ "bytes": png.len() }),
+        );
+        check(
+            "capture-is-the-whole-web-view",
+            size.0 == view.0 && (view.1 - size.1).abs() <= 40.0,
+            json!({ "capture": [size.0, size.1], "view": [view.0, view.1] }),
+        );
+        let pixels = png.clone();
+        let samples = on_main(window, move |_, _, tx| {
+            let data = objc2_foundation::NSData::with_bytes(&pixels);
+            let bitmap = objc2_app_kit::NSBitmapImageRep::imageRepWithData(&data).expect("decode");
+            let (width, height) = (bitmap.pixelsWide(), bitmap.pixelsHigh());
+            let (row, step) = (bitmap.bytesPerRow(), bitmap.bitsPerPixel() / 8);
+            let base = bitmap.bitmapData();
+            let scale = width as f64 / size.0;
+            let at = |x: f64, y: f64| unsafe {
+                let p = base.offset((y * scale) as isize * row + (x * scale) as isize * step);
+                [*p, *p.offset(1), *p.offset(2)]
+            };
+            // The page's white corner, and the Show's green inside its frame.
+            let _ = tx.send((at(10.0, 10.0), at(200.0, 300.0), width, height));
+        });
+        check(
+            "capture-holds-the-page-and-the-show",
+            samples.0 == [255, 255, 255] && samples.1[0] < 40 && samples.1[1] > 120,
+            json!({ "page": samples.0, "show": samples.1, "pixels": [samples.2, samples.3] }),
+        );
+        let pdf = pdf.expect("pdf");
+        check(
+            "pdf-encodes-the-capture",
+            pdf.starts_with(b"%PDF"),
+            json!({ "bytes": pdf.len() }),
+        );
+
+        // The share menu is requested; on screen, closing it is a cancellation.
+        let (outcome_tx, outcome_rx) = mpsc::channel::<Outcome>();
+        let link_url = state["url"].as_str().unwrap().to_owned();
+        let shown = on_main(window, move |webview, mtm, tx| {
+            let (bounds, _, _) = native::geometry(webview);
+            let anchor = objc2_foundation::NSRect::new(
+                objc2_foundation::NSPoint::new(bounds.size.width - 24.0, 0.0),
+                objc2_foundation::NSSize::new(1.0, 1.0),
+            );
+            let picker = native::present(
+                webview,
+                mtm,
+                Item::Link(&link_url),
+                anchor,
+                Box::new(move |outcome| {
+                    let _ = outcome_tx.send(outcome);
+                }),
+            );
+            let shown = picker.is_some();
+            PICKER.with_borrow_mut(|slot| *slot = picker);
+            let _ = tx.send(shown);
+        });
+        check("share-menu-is-requested", shown, json!(shown));
+        std::thread::sleep(Duration::from_secs(1));
+        on_main(window, |_, _, tx| {
+            if let Some(picker) = PICKER.with_borrow_mut(Option::take) {
+                picker.close();
+            }
+            let _ = tx.send(());
+        });
+        let outcome = outcome_rx.recv_timeout(Duration::from_secs(10)).ok();
+        if focus {
+            check(
+                "closing-the-menu-is-a-cancellation",
+                outcome == Some(Outcome::Cancelled),
+                json!(format!("{outcome:?}")),
+            );
+        } else {
+            println!(
+                "{}",
+                json!({ "check": "closing-the-menu-is-a-cancellation", "skipped": "needs AVIBE_SHOW_SHARE_PROBE_FOCUS=1", "detail": format!("{outcome:?}") })
+            );
+        }
+    }
+
+    /// The shipping title-bar button: installed on the window, pressed as a
+    /// click would, and the page hears the open event, but only on the route the
+    /// window was opened at (review of 45533723): `pushState` away silences it,
+    /// and coming back restores it.
+    fn title_bar(window: &tauri::WebviewWindow, reports: &mpsc::Receiver<String>) {
+        crate::macos_show_titlebar::install(window, "Share".to_owned(), "/workbench".to_owned());
+        std::thread::sleep(Duration::from_millis(300));
+        let press = || {
+            on_main(window, |webview, _, tx| {
+                let window = webview.window().expect("window");
+                let _ = tx.send(crate::macos_show_titlebar::press(&window));
+            })
+        };
+        let heard = |wait: u64| reports.recv_timeout(Duration::from_millis(wait)).ok();
+        check("title-bar-button-is-installed-and-pressed", press(), json!(true));
+        let on_route = heard(5000);
+        check(
+            "the-page-hears-the-open-event",
+            on_route.as_deref() == Some("share-open"),
+            json!(on_route),
+        );
+
+        script(
+            window,
+            "history.pushState(null, '', '/chat/elsewhere'); return true;",
+            vec![],
+        );
+        press();
+        let away = heard(1000);
+        check("off-route-the-press-is-not-heard", away.is_none(), json!(away));
+        let native = on_main(window, |webview, _, tx| {
+            let _ = tx.send(native::document_url(webview));
+        });
+        check(
+            "the-native-url-follows-pushstate",
+            native.as_deref().is_some_and(|url| url.ends_with("/chat/elsewhere")),
+            json!(native),
+        );
+
+        script(
+            window,
+            "history.pushState(null, '', '/workbench'); return true;",
+            vec![],
+        );
+        press();
+        let back = heard(5000);
+        check(
+            "back-on-route-it-is-heard-again",
+            back.as_deref() == Some("share-open"),
+            json!(back),
+        );
+    }
+
+    fn serve(listener: TcpListener, ready: mpsc::Sender<String>) {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let ready = ready.clone();
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                // The whole request: headers, then as much body as they announce.
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 8192];
+                    let count = stream.read(&mut chunk).unwrap_or(0);
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if let Some(split) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..split]).to_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .map_or(0, |length| length.trim().parse::<usize>().unwrap_or(0));
+                        if request.len() >= split + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).into_owned();
+                let path = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_owned();
+                let respond = |stream: &mut std::net::TcpStream, kind: &str, body: &str| {
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    );
+                };
+                match path.as_str() {
+                    "/workbench" => respond(&mut stream, "text/html; charset=utf-8", WORKBENCH),
+                    "/show/ses-probe/" => respond(&mut stream, "text/html; charset=utf-8", SHOW),
+                    "/show/ses-other/" | "/settings" => respond(
+                        &mut stream,
+                        "text/html; charset=utf-8",
+                        "<!doctype html><body style=\"margin:0;background:#3050ff\">elsewhere</body>",
+                    ),
+                    "/api/show-pages/ses-probe/access" => {
+                        respond(&mut stream, "application/json", r#"{"can_use":true}"#)
+                    }
+                    "/api/show-pages/ses-probe" => respond(
+                        &mut stream,
+                        "application/json",
+                        r#"{"session_id":"ses-probe","visibility":"private","active_url":"/show/ses-probe/","offline":false}"#,
+                    ),
+                    "/report" => {
+                        respond(&mut stream, "text/plain", "ok");
+                        let body = text.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+                        let case = serde_json::from_str::<Value>(body)
+                            .ok()
+                            .and_then(|v| v["case"].as_str().map(str::to_owned));
+                        let _ = ready.send(case.unwrap_or_default());
+                    }
+                    _ => {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                }
+            });
+        }
+    }
+}

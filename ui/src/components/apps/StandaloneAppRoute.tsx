@@ -10,6 +10,7 @@ import { WindowManagerContext } from '../../context/WindowManagerContext';
 import { useAppLaunchSnapshot } from '../../apps/useAppLaunchSnapshot';
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { AppsEditorPage } from '../workbench/AppsEditorPage';
+import { NativeShowShareEntry } from './NativeShowShareEntry';
 
 // Reuses the shipped App bodies inside the shell's transient manager. The body
 // stays mounted under fallback windows, so its editor buffers/terminals survive.
@@ -77,5 +78,12 @@ function StandaloneShowBody({ windowId, params }: { windowId: string; params: Re
     return () => { live = false; };
   }, [api, revalidateVersion, sessionId]);
   const Body = APP_REGISTRY.showpage.Component;
-  return <ShowPageAnnotationHost src={showPageWindowSource(sessionId, status, archived)}><Body windowId={windowId} params={params} /></ShowPageAnnotationHost>;
+  // A native Show window has no web title bar: its share entry is the shell's title-bar button.
+  const native = isNativeAppWindow();
+  return <ShowPageAnnotationHost src={showPageWindowSource(sessionId, status, archived)}>
+    {native ? <div className="relative h-full w-full">
+      <Body windowId={windowId} params={params} />
+      <NativeShowShareEntry sessionId={sessionId} />
+    </div> : <Body windowId={windowId} params={params} />}
+  </ShowPageAnnotationHost>;
 }

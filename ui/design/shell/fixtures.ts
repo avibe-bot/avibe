@@ -60,6 +60,12 @@ export interface WorkbenchFixtures {
   /** The desktop shell answers Computer Use's native actions: turning it on, or on and off
    *  (`computerUseShellActions()`). Its calls never settle, so a frame shows a change in flight. */
   desktopComputerUse?: 'on' | 'on-off';
+  /** The desktop app shares the Show this window displays (`__AVIBE_DESKTOP_SHOW_SHARE__`); with `desktopShell`.
+   *  The design browser has no Tauri command channel, so a share does not start. */
+  desktopShowShare?: boolean;
+  /** The page is a native Show window the desktop app opened (`__AVIBE_NATIVE_APP_WINDOW__`), which
+   *  shares its Show and exports it (`__AVIBE_DESKTOP_SHOW_EXPORT__`). */
+  nativeShowWindow?: boolean;
   /** The page runs in the Avibe phone app (`window.avibeNative`, `hasNativeCapability()`), with these
    *  capabilities and versions; its calls answer nothing and it sends no events. */
   nativeShell?: Record<string, number>;

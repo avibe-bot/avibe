@@ -378,6 +378,14 @@ impl Source {
             child,
         })
     }
+    fn document_current(&self) -> bool {
+        !self
+            .child
+            .as_ref()
+            .is_some_and(|entry| entry.retired.load(Ordering::SeqCst))
+            && self.document.owns(&self.view)
+            && self.document.generation.load(Ordering::SeqCst) == self.generation
+    }
     fn current(&self) -> bool {
         if self
             .child
@@ -400,6 +408,78 @@ impl Source {
             && self.document.generation.load(Ordering::SeqCst) == self.generation
             && self.view.url().is_ok_and(|url| same_origin(&self.runtime.origin, &url))
     }
+}
+
+/// Who may share a Show (`show_share`): the Workbench, or a Show app window
+/// the shell opened for exactly one Show, both on this computer's Runtime. The
+/// window's registered identity and current document decide it, never the
+/// page's request; `current` turns false once that document is gone.
+#[derive(Clone)]
+pub(crate) struct ShareSource {
+    source: Source,
+    show: Option<String>,
+    route: Option<String>,
+}
+impl ShareSource {
+    /// The Show this window was opened for, or `None` for the Workbench.
+    pub(crate) fn bound_show(&self) -> Option<&str> {
+        self.show.as_deref()
+    }
+    /// The path the shell opened a Show window at, `/apps/show/<id>`.
+    pub(crate) fn bound_route(&self) -> Option<&str> {
+        self.route.as_deref()
+    }
+    pub(crate) fn current(&self) -> bool {
+        self.source.current() && (self.show.is_some() || crate::pet::is_workbench(&self.source.view))
+    }
+    /// The same document is still loaded, read without a round trip through
+    /// the event loop, so it holds on the main thread inside a WebView call.
+    pub(crate) fn document_current(&self) -> bool {
+        self.source.document_current()
+    }
+    /// The Runtime still holds its receipt (`AppRuntime::receipt_current`):
+    /// safe on the main thread; the caller checks the URL.
+    pub(crate) fn receipt_current(&self) -> bool {
+        self.source.runtime.receipt_current(self.source.view.app_handle())
+    }
+    pub(crate) fn view(&self) -> &Webview {
+        &self.source.view
+    }
+    pub(crate) fn origin(&self) -> &Url {
+        &self.source.runtime.origin
+    }
+}
+fn is_loopback(origin: &Url) -> bool {
+    origin.scheme() == "http" && matches!(origin.host_str(), Some("127.0.0.1" | "[::1]"))
+}
+pub(crate) fn share_source(view: &Webview) -> Option<ShareSource> {
+    let source = Source::capture(view)?;
+    if !is_loopback(&source.runtime.origin) {
+        return None;
+    }
+    let mut route = None;
+    let show = match &source.child {
+        None => {
+            if !crate::pet::is_workbench(view) {
+                return None;
+            }
+            None
+        }
+        Some(child) => {
+            let AppWindowTarget::ShowPage(id) = &child.target else {
+                return None;
+            };
+            // The document is still the Show route the shell opened.
+            let expected = target_url(&source.runtime.origin, &child.target);
+            if view.url().ok()?.path() != expected.path() {
+                return None;
+            }
+            route = Some(expected.path().to_owned());
+            Some(id.clone())
+        }
+    };
+    let candidate = ShareSource { source, show, route };
+    candidate.current().then_some(candidate)
 }
 
 fn snapshot_script(snapshot: &Snapshot, event: bool) -> String {
@@ -772,6 +852,12 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
             .incognito(source.runtime.disposable)
             .initialization_script(NATIVE_APP_WINDOW_MARKER)
             .initialization_script(PROTOCOL_SCRIPT)
+            // Only a Show window learns it can share and export; `show_share` checks again.
+            .initialization_script(if matches!(target, AppWindowTarget::ShowPage(_)) {
+                crate::show_share::show_window_markers()
+            } else {
+                String::new()
+            })
             .initialization_script(initial_snapshot(&snapshot))
             .on_navigation(move |url| navigation_for(&app_for_nav, &label_for_nav, &doc_for_nav, url))
             .on_new_window(|url, _| crate::handle_new_window_request(url))
@@ -824,6 +910,17 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         }
     };
     entry.document.bind(window.as_ref());
+    // A Show window's share entry, in its title bar (ui/design:
+    // show-pages/desktop-native-entry/titlebar-*). It only asks the page to
+    // open its share popover; sharing itself stays `show_share`'s.
+    #[cfg(target_os = "macos")]
+    if matches!(target, AppWindowTarget::ShowPage(_)) && crate::show_share::supported() {
+        crate::macos_show_titlebar::install(
+            &window,
+            crate::product_text("chat.showPage.share").unwrap_or_else(|| "Share".to_owned()),
+            target_url(&source.runtime.origin, &target).path().to_owned(),
+        );
+    }
     let cleanup_app = app.clone();
     let cleanup_label = label.clone();
     let cleanup_entry = entry.clone();
