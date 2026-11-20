@@ -125,32 +125,36 @@ class EventLoopWatchdog:
                 self._freeze_manager = None
             return self._freeze_state
 
-    async def _try_warm_freeze(self, manager) -> None:
-        cancelled = threading.Event()
-        task = asyncio.current_task()
+    def _try_warm_freeze(self, manager) -> asyncio.Future:
+        # The observer can cancel its receipt; only the executor completion
+        # releases the attempt slot. No cancelled Task owns a live DB worker.
+        receipt = self._loop.create_future()
 
         def apply():
             with self._freeze_lock, transient_admission_lock:
                 if (self._freeze_state == "armed" and not self._stopped.is_set()
-                        and not cancelled.is_set() and not task.cancelling()
-                        and not _active_requests and not manager.in_flight and not gc.get_freeze_count()):
+                        and not _active_requests and not manager.in_flight and not gc.get_freeze_count()
+                        and not receipt.cancelled()):
                     gc.freeze()
                     self._freeze_state = "frozen"
                     self._freeze_manager = None
-        worker = asyncio.create_task(asyncio.to_thread(manager.with_idle_turn_ledger, apply))
-        try:
-            await asyncio.shield(worker)
-            if self._freeze_state == "frozen":
-                logger.warning("Warm GC trial frozen: count=%d", gc.get_freeze_count())
-        except asyncio.CancelledError:
-            with self._freeze_lock:
-                cancelled.set()
-            await asyncio.shield(worker)
-            raise
-        except Exception:
-            logger.warning("Warm GC trial: quiescence unavailable; freeze skipped")
-        finally:
-            self._freeze_task = None
+
+        def finished(worker):
+            try:
+                worker.result()
+                if self._freeze_state == "frozen":
+                    logger.warning("Warm GC trial frozen: count=%d", gc.get_freeze_count())
+            except Exception:
+                logger.warning("Warm GC trial: quiescence unavailable; freeze skipped")
+            finally:
+                self._freeze_task = None
+                if not receipt.done():
+                    receipt.set_result(None)
+
+        worker = self._loop.run_in_executor(None, manager.with_idle_turn_ledger, apply)
+        self._freeze_task = receipt
+        worker.add_done_callback(finished)
+        return receipt
 
     def arm_warm_census(self, controller) -> bool:
         # Called on the controller loop; idempotent even after the sample fires.
@@ -223,7 +227,7 @@ class EventLoopWatchdog:
             self._freeze_due = False
             if (self._freeze_state == "armed" and self._freeze_task is None and not _active_requests
                     and self._freeze_manager is not None and not self._freeze_manager.in_flight):
-                self._freeze_task = self._loop.create_task(self._try_warm_freeze(self._freeze_manager))
+                self._try_warm_freeze(self._freeze_manager)
         self._answered_at = self._monotonic()
         self._asking = False
 

@@ -10,7 +10,8 @@ from core import loop_watchdog as wd
 from core.session_turns import SessionTurnManager
 
 
-def test_cancel_pending_worker_cannot_freeze(monkeypatch):
+@pytest.mark.parametrize("ledger_fails", [False, True])
+def test_cancel_pending_worker_cannot_freeze(monkeypatch, ledger_fails, caplog):
     entered, allow = threading.Event(), threading.Event()
     calls = []
 
@@ -18,6 +19,8 @@ def test_cancel_pending_worker_cannot_freeze(monkeypatch):
         entered.set()
         assert allow.wait(3)
         apply()
+        if ledger_fails:
+            raise RuntimeError("private-ledger-message")
 
     manager = SimpleNamespace(in_flight={}, with_idle_turn_ledger=ledger)
     monkeypatch.setattr(wd.gc, "freeze", lambda: calls.append("frozen"))
@@ -27,17 +30,22 @@ def test_cancel_pending_worker_cannot_freeze(monkeypatch):
         loop = asyncio.get_running_loop()
         w = wd.EventLoopWatchdog(loop)
         w.arm_warm_freeze(manager)
-        task = w._freeze_task = loop.create_task(w._try_warm_freeze(manager))
+        receipt = w._try_warm_freeze(manager)
         try:
             assert await asyncio.to_thread(entered.wait, 3)
-            task.cancel()
-            await asyncio.sleep(0)
-            assert not task.done() and w._freeze_task is task
+            assert receipt.cancel() and not receipt.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await receipt
+            assert w._freeze_task is receipt  # slot still occupied by the worker
         finally:
             allow.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        for _ in range(300):
+            if w._freeze_task is None:
+                break
+            await asyncio.sleep(0.01)
         assert w._freeze_task is None and not calls
+        assert "private-ledger-message" not in caplog.text
+        assert ("quiescence unavailable" in caplog.text) == ledger_fails
 
     asyncio.run(run())
 
