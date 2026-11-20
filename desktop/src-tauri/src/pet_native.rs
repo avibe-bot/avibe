@@ -53,17 +53,17 @@ pub fn set_frame(window: &WebviewWindow, origin: (f64, f64), size: (f64, f64)) {
 pub enum Drag {
     /// The platform's own window drag runs until the button is released.
     Native,
-    /// The shell moves the window itself, keeping this offset between the
-    /// pointer and the window (`follow_pointer`, on every poll of the button).
+    /// The shell moves the window itself, keeping this point of the window
+    /// under the pointer (`follow_pointer`, on every poll of the button).
     Follow(PointerOffset),
 }
 
-/// The pointer's place in the window, measured from its origin in AppKit's
-/// global points (which span every display).
+/// A point of the window, in its points from its top-left corner, that the
+/// drag keeps under the pointer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointerOffset {
-    x: f64,
-    y: f64,
+    pub x: f64,
+    pub y: f64,
 }
 
 /// Starts dragging the window from where the pointer is now.
@@ -74,11 +74,17 @@ pub struct PointerOffset {
 /// side, the Dock or the menu bar has the system move the pet away on release
 /// (to a whole-window place, or to the middle of the display) before the shell
 /// can place it. Elsewhere the platform drags the window.
-pub fn start_drag(window: &WebviewWindow) -> Result<Drag, String> {
+///
+/// `hold` is the point of the window to keep under the pointer: where the
+/// press was, so the window does not jump by however far the pointer moved
+/// before the drag reached the shell. Without it, the pointer's place now.
+pub fn start_drag(window: &WebviewWindow, hold: Option<PointerOffset>) -> Result<Drag, String> {
     #[cfg(target_os = "macos")]
-    if let Some(offset) = pointer_offset_macos(window) {
+    if let Some(offset) = hold.or_else(|| pointer_offset_macos(window)) {
         return Ok(Drag::Follow(offset));
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = hold;
     window.start_dragging().map_err(|error| error.to_string())?;
     Ok(Drag::Native)
 }
@@ -106,10 +112,11 @@ fn native_window(window: &WebviewWindow) -> Option<objc2::rc::Retained<objc2_app
 fn pointer_offset_macos(window: &WebviewWindow) -> Option<PointerOffset> {
     let native = native_window(window)?;
     let mouse = objc2_app_kit::NSEvent::mouseLocation();
-    let origin = native.frame().origin;
+    let frame = native.frame();
+    // AppKit measures y up from the bottom; the offset is from the top.
     Some(PointerOffset {
-        x: mouse.x - origin.x,
-        y: mouse.y - origin.y,
+        x: mouse.x - frame.origin.x,
+        y: frame.origin.y + frame.size.height - mouse.y,
     })
 }
 
@@ -119,7 +126,8 @@ fn follow_pointer_macos(window: &WebviewWindow, offset: PointerOffset) {
         return;
     };
     let mouse = objc2_app_kit::NSEvent::mouseLocation();
-    let origin = objc2_foundation::NSPoint::new(mouse.x - offset.x, mouse.y - offset.y);
+    let height = native.frame().size.height;
+    let origin = objc2_foundation::NSPoint::new(mouse.x - offset.x, mouse.y + offset.y - height);
     if native.frame().origin != origin {
         native.setFrameOrigin(origin);
     }

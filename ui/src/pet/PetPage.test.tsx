@@ -3616,6 +3616,8 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(called('pet_ready')).toBe(3);
     drag(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(called('pet_drag')).toBe(1));
+    // The shell keeps the pressed point of Vibey under the pointer.
+    expect(invoke).toHaveBeenCalledWith('pet_drag', { x: 10, y: 10 });
   });
 
   it('draws a published snapshot before acknowledging it, and ignores an older one', async () => {

@@ -1225,12 +1225,17 @@ fn set_expanded(window: &WebviewWindow, expanded: bool) -> Result<PetLayout, Str
 /// revision's `pet_settle` (or after `SETTLE_TIMEOUT`); the reply carries no
 /// layout, so the page has one source for it.
 #[tauri::command]
-pub async fn pet_drag(window: WebviewWindow) -> Result<(), String> {
+pub async fn pet_drag(window: WebviewWindow, x: Option<f64>, y: Option<f64>) -> Result<(), String> {
     ensure_pet_page(&window)?;
     let app = window.app_handle().clone();
+    // Where the press was, in the window's points (pages since 2026-11-20).
+    let press = match (x, y) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some((x, y)),
+        _ => None,
+    };
     let generation = on_main_thread(&app, {
         let window = window.clone();
-        move |app| begin_drag(app, &window)
+        move |app| begin_drag(app, &window, press)
     })
     .await??;
     wait_for_release(&app, generation).await;
@@ -1310,10 +1315,11 @@ async fn on_main_thread<T: Send + 'static>(
     receive.await.map_err(|_| WINDOW_GONE.to_owned())
 }
 
-fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
+fn begin_drag(app: &AppHandle, window: &WebviewWindow, press: Option<(f64, f64)>) -> Result<u64, String> {
     let pet = app.state::<Pet>();
     let mut frame = lock(&pet.frame);
-    let anchor = window_anchor(window, frame.state.current()).ok_or(WINDOW_GONE)?;
+    let before = frame.state.current();
+    let anchor = window_anchor(window, before).ok_or(WINDOW_GONE)?;
     let Some(strip) = frame.state.begin_drag(anchor) else {
         // Placing it already, or its page has not said it draws the top
         // layout (it drags the window natively then).
@@ -1322,7 +1328,15 @@ fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
     set_frame(window, strip.origin(anchor, 1.0), strip.size());
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
     drop(frame);
-    match start_drag(window) {
+    // The press, moved with Vibey from the frame it was in to the strip.
+    let hold = press.map(|(x, y)| {
+        let (from, to) = (before.pet_offset(), strip.pet_offset());
+        PointerOffset {
+            x: x - from.0 + to.0,
+            y: y - from.1 + to.1,
+        }
+    });
+    match start_drag(window, hold) {
         Ok(Drag::Follow(offset)) => *lock(&pet.drag_follow) = Some(offset),
         Ok(Drag::Native) => *lock(&pet.drag_follow) = None,
         Err(error) => {

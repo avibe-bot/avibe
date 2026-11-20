@@ -1067,7 +1067,7 @@ const PetSurface: React.FC = () => {
           doubleOpenedRef.current = false;
           allowDoubleEventRef.current = false;
           // The drop's layout arrives as the shell's snapshot (petShell).
-          void petBridge.drag().catch(() => undefined);
+          void petBridge.drag({ x: press.x, y: press.y }).catch(() => undefined);
         }}
         onPointerCancel={() => {
           const press = pressRef.current;

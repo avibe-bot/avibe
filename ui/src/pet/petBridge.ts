@@ -182,14 +182,16 @@ export const petBridge = {
    * the pet (resolves once the drop is placed; its layout arrives as a
    * snapshot), else with the window's own `start_dragging`.
    */
-  drag: async (): Promise<void> => {
+  /** `press`: where the press was, in the window's CSS px; the shell keeps
+   * that point of Vibey under the pointer for the whole drag. */
+  drag: async (press?: { x: number; y: number }): Promise<void> => {
     const invoke = shellInvoke();
     if (!invoke) return;
     if (!petBridge.shellDrags()) {
       void invoke('plugin:window|start_dragging');
       return;
     }
-    await invoke('pet_drag');
+    await invoke('pet_drag', press ? { x: press.x, y: press.y } : undefined);
   },
 
   /**
