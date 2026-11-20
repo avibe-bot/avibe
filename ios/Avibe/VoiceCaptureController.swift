@@ -1857,6 +1857,7 @@ final class VoiceCaptureController {
         guard let outbox = environment.outbox, !restored else { return false }
         restored = true
         var removed = false
+        outbox.removeOrphanedAudio()
         for old in outbox.removeExpired(now: environment.now()) {
             noteRestored("expired", old)
             removed = true

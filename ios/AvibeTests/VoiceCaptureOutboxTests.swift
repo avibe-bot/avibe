@@ -134,6 +134,28 @@ final class VoiceCaptureOutboxTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: outbox.audioURL(for: entry.id).path))
     }
 
+    /// Audio no record points at (the App ended between moving it in and
+    /// writing its record, or its record could not be read) does not stay.
+    func testAudioWithoutARecordIsRemoved() throws {
+        let kept = entry()
+        try outbox.add(kept, movingAudioFrom: take())
+        let orphan = outbox.audioURL(for: UUID())
+        try Data([1]).write(to: orphan)
+        let broken = entry()
+        try outbox.add(broken, movingAudioFrom: take())
+        let record = outbox.directory.appending(
+            path: "\(String(format: "%010d", broken.sequence))-\(broken.id.uuidString.lowercased()).json"
+        )
+        try Data("not json".utf8).write(to: record)
+
+        outbox.removeOrphanedAudio()
+        XCTAssertEqual(outbox.entries(), [kept])
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: outbox.directory.path).filter { $0.hasSuffix(".m4a") },
+            [outbox.audioURL(for: kept.id).lastPathComponent]
+        )
+    }
+
     func testTheOldestGoesWhenTooManyAreKept() throws {
         var kept: [VoiceOutboxEntry] = []
         var dropped: [VoiceOutboxEntry] = []

@@ -378,7 +378,9 @@ the main Bot acts on the user's computer.
   on its way cannot be taken back, and `capture_earlier` then says
   `sentAfterEnd`). The order survives the App being ended: the next launch
   reads the outbox, asking about voice input afresh; a take whose POST was
-  begun is never posted again, and no POST is made unless that marker
+  begun is never posted again (audio no record points at, from a write
+  the App did not live to finish, is removed then), and no POST is made
+  unless that marker
   reached the disk first. An expired instance session destroys nothing: a
   take found signed out waits for Retry, and one being recorded when that
   is found is stopped at once and kept.

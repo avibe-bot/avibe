@@ -107,6 +107,18 @@ struct VoiceCaptureOutbox {
         return entries.sorted { $0.sequence < $1.sequence }
     }
 
+    /// Removes audio no record points at: a write the App did not live to
+    /// finish, or a record that could not be read. Without this such audio
+    /// would outlast `retention`, which only records are held to. Called
+    /// when a run first reads the outbox.
+    func removeOrphanedAudio() {
+        let kept = Set(entries().map { audioURL(for: $0.id).lastPathComponent })
+        let names = (try? files.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name.hasSuffix(".m4a") && !kept.contains(name) {
+            try? files.removeItem(at: directory.appending(path: name))
+        }
+    }
+
     /// The place the next take gets: after every take kept now.
     func nextSequence() -> Int {
         (entries().last?.sequence ?? 0) + 1
