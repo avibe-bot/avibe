@@ -202,6 +202,7 @@ class DirectTransportSupervisor:
         self._report_lines = self._report_skipped = 0
         self._report_pairs: set[int] = set()
         self._path_reports = False
+        self._device_reports = False
         self._connections = 0
         self._refusals = 0
         self._started = False
@@ -497,9 +498,10 @@ class DirectTransportSupervisor:
             if message_type == "ready":
                 self._handle_ready(message)
                 self._report_pairs.clear()
-                self._path_reports = message.get("path_reports_v1") is True
+                self._device_reports = message.get("path_reports_v2") is True
+                self._path_reports = self._device_reports or message.get("path_reports_v1") is True
                 if self._path_reports:
-                    await self._write_control(process.stdin, {"type": "observe_paths_v1"})
+                    await self._write_control(process.stdin, {"type": "observe_paths_v2" if self._device_reports else "observe_paths_v1"})
             elif message_type == "relay_status":
                 self._handle_relay_status(message)
             elif message_type == "addresses":
@@ -596,8 +598,10 @@ class DirectTransportSupervisor:
         def uint(value):
             return type(value) is int and 0 <= value < 2**64
         rows = msg.get("families")
-        if (not self._path_reports or self._endpoint_id is None or
-                set(msg) != {"type", "ordinal", "phase", "selected", "partial", "families"} or
+        schema = {"type", "ordinal", "phase", "selected", "partial", "families"}
+        if self._device_reports:
+            schema.update(("peer", "scope", "rtt_ms"))
+        if (not self._path_reports or self._endpoint_id is None or set(msg) != schema or
                 msg["phase"] not in ("open", "change", "close") or
                 msg["selected"] not in ("relay", "ipv4", "ipv6", "unknown") or
                 not uint(msg["ordinal"]) or type(msg["partial"]) is not bool or
@@ -605,6 +609,17 @@ class DirectTransportSupervisor:
                 any(not isinstance(row, dict) or set(row) != set(fields) or
                     not all(uint(row[k]) for k in fields) for row in rows)):
             raise _ProtocolError("invalid_path_report")
+        if self._device_reports:
+            selected, scope, rtt = msg["selected"], msg["scope"], msg["rtt_ms"]
+            ip = selected in ("ipv4", "ipv6")
+            if (not is_endpoint_id(msg["peer"]) or (rtt is not None and not uint(rtt))
+                    or (scope not in ("local", "global") if ip else scope is not None)):
+                raise _ProtocolError("invalid_path_report")
+            path = None if selected == "unknown" else {
+                "kind": ("lan" if scope == "local" else "punched") if ip else "relay",
+                "family": selected if ip else None, "rtt_ms": rtt,
+            }
+            self._rendezvous.observe_path(msg["peer"], msg["ordinal"], msg["phase"], path)
         now = asyncio.get_running_loop().time()
         if now >= self._report_window:
             self._report_window = now + 60

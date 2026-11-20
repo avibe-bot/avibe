@@ -2049,6 +2049,9 @@ def test_workbench_and_show_sse_end_after_revision_change(monkeypatch, tmp_path)
             try:
                 for _ in range(3):
                     await iterator.__anext__()
+                from vibe.sse_broker import broker
+                session = (identity['sub'], identity['browser_session_id'])
+                assert session in broker.tunnel_sessions(identity['_device_binding'])
                 remote_access._replace_authorization_revision(config, 42)
                 terminal = await asyncio.wait_for(iterator.__anext__(), timeout=1)
                 assert '"state":"revoked"' in terminal
@@ -2057,6 +2060,7 @@ def test_workbench_and_show_sse_end_after_revision_change(monkeypatch, tmp_path)
             finally:
                 await iterator.aclose()
 
+        assert session not in broker.tunnel_sessions(identity['_device_binding'])
         remote_access._replace_authorization_revision(config, 42)
         show_response = await ui_server._show_events_stream(
             "ses123",

@@ -63,6 +63,34 @@ def sign_out(c, target, origin=ORIGIN):
     return c.post("/api/devices/" + target, base_url=origin, headers=csrf_headers(c, origin), json={})
 
 
+def test_device_paths_follow_authenticated_offer_not_device_or_stream_claims(install, monkeypatch, caplog):
+    from vibe import direct_rendezvous as direct
+
+    clock = [time.time()]
+    rv = direct.DirectRendezvous(clock=lambda: clock[0])
+    monkeypatch.setattr(direct, "rendezvous", rv)
+    server, peer = "1" * 64, "2" * 64
+    rv.publish(direct.DirectEndpoint(server, ("192.168.1.2:3210",)))
+    caller = client(login(install, "member", "member", installation="alpha"))
+    other = client(login(install, "member", "member", installation="beta"))
+    def paths():
+        return {row["current"]: row["current_path"] for row in listing(caller)["mine"]}
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    assert caller.post('/api/direct/rendezvous', base_url=ORIGIN, headers=csrf_headers(caller, ORIGIN),
+                       json={"version": 1, "client_endpoint_id": peer}).get_json()["status"] == "ready"
+    path = {"kind": "lan", "family": "ipv4", "rtt_ms": 8}
+    rv.observe_path("3" * 64, 1, "open", path)
+    assert paths() == {True: None, False: None}
+    rv.observe_path(peer, 1, "open", path)
+    assert paths() == {True: path, False: None}
+    assert peer not in json.dumps(listing(other)) and peer not in caplog.text
+    rv.observe_path(peer, 1, "close", path)
+    assert paths() == {True: None, False: None}
+    rv.observe_path(peer, 2, "open", path)
+    clock[0] += direct.RENDEZVOUS_TTL_SECONDS + 1
+    assert paths() == {True: None, False: None}
+
+
 def test_device_action_selects_binding_and_subject_not_reported_metadata(install, monkeypatch):
     owner = login(install, "owner", "owner", installation="one")
     first = login(install, "member", "member", installation="one")

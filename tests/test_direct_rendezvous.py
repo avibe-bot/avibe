@@ -388,7 +388,9 @@ def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
         "addresses": [{"kind": "lan", "address": "192.168.1.20:51234"}],
         "relay": None,
     }
-    assert rendezvous._admissions == {CLIENT_ENDPOINT: ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)}
+    (grant,) = rendezvous._admissions.values()
+    assert rendezvous.is_admitted(CLIENT_ENDPOINT)
+    assert (grant.subject, grant.until) == ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)
 
 
 def test_before_a_transport_exists_the_answer_is_unavailable(instance):

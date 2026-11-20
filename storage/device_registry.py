@@ -252,7 +252,7 @@ def attach_push(conn, identity, subscription):
     device_push.attest(conn, subscription, sid, row.binding, subject, key, row.email, row.login_role)
 
 
-def list_devices(binding, subject, *, owner, caller, now):
+def list_devices(binding, subject, *, owner, caller, now, paths=None):
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
     stmt = select(sessions).where(
@@ -280,14 +280,17 @@ def list_devices(binding, subject, *, owner, caller, now):
                 "system_version": row["system_version"],
                 "signed_in_at": row["signed_in_at"],
                 "last_active_at": row["last_active_at"],
-                "current_path": {"kind": row["path_kind"], "family": row["path_family"], "rtt_ms": row["path_rtt_ms"]}
-                if row["path_kind"]
-                else None,
+                "current_path": None,
                 "push_only": False,
                 "current": False,
                 "capabilities": {"push_enabled": False},
             },
         )
+        if paths:
+            path = paths.get((row["subject"], row["session_id"]))
+            current = item["current_path"]
+            if path and (not current or (current["kind"] == "tunnel" and path["kind"] != "tunnel")):
+                item["current_path"] = path
         item["current"] |= row["session_id"] == caller
     with get_cached_sqlite_engine().connect() as conn:
         device_push.join_devices(conn, grouped, binding, subject, owner)
