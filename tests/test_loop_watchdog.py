@@ -481,3 +481,38 @@ def test_offline_export_rejects_unsafe_unknown_malformed_and_legacy_lines(caplog
     ):
         invalid.append(prefix + EVENT_MARKER + json.dumps(event | change))
     assert all(parse_watchdog_event(candidate) is None for candidate in invalid)
+
+
+def test_own_code_is_labelled_by_identity_and_parses_while_impostors_stay_redacted(caplog, monkeypatch) -> None:
+    # Redacted frames hid most non-GC field stalls. Avibe's own code gains a
+    # label only when reached from its module namespace; a clone carrying an
+    # Avibe-looking filename and name is not reachable and must stay redacted.
+    import copy
+    from core.session_turns import SessionTurnManager
+
+    caplog.set_level(logging.WARNING, logger="core.loop_watchdog")
+    method = SessionTurnManager.busy_session_ids.__code__
+    nested = next(c for c in EventLoopWatchdog._try_warm_freeze.__code__.co_consts if getattr(c, "co_name", "") == "apply")
+    impostor = method.replace(co_filename=method.co_filename, co_name="busy_session_ids")
+    third_party = copy.deepcopy.__code__.replace()
+    frames = _Frame(method, _Frame(nested, _Frame(impostor, _Frame(third_party))))
+    monkeypatch.setattr(sys, "_current_frames", lambda: {123: frames})
+    watchdog = EventLoopWatchdog(SimpleNamespace(_thread_id=123))
+    watchdog._report_stall(2.5, 0.0)
+    _, event = _formatted_event(caplog)
+    assert [(f["file"], f["function"]) for f in event["frames"]] == [
+        ("core/session_turns.py", "SessionTurnManager.busy_session_ids"),
+        ("core/loop_watchdog.py", "EventLoopWatchdog._try_warm_freeze.<locals>.apply"),
+        ("<redacted>", "<redacted>"),
+        ("<redacted>", "<redacted>"),
+    ]
+    assert "copy" not in watchdog._indexed_modules and "core.session_turns" in watchdog._indexed_modules
+
+    line, _ = _formatted_event(caplog)
+    prefix = line.split(EVENT_MARKER)[0]
+    base = {"version": 1, "kind": "loop_stall", "loop_id": 1, "loop_thread_id": 1, "watchdog_thread_id": 1, "lag_ms": 1,
+            "sampled_at_unix": 1, "gc_active": False, "watchdog_wake_lateness_ms": 0, "sample_status": "ok", "truncated": False}
+    for file, function in (("core/../secret.py", "f"), ("/abs/core/x.py", "f"), ("core/x.py", "秘密"),
+                           ("core/x.py", "f.<private>"), ("thirdparty/x.py", "f"), ("core/X.py", "f")):
+        frame = [{"file": file, "function": function, "line": 1}]
+        assert parse_watchdog_event(prefix + EVENT_MARKER + json.dumps(base | {"frames": frame})) is None

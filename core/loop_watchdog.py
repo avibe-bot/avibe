@@ -3,9 +3,11 @@
 The watchdog asks the loop to answer every second. After STALL_SECONDS without
 an answer it emits one structured warning per independent stall (not every
 poll of a prolonged stall), then logs recovery. Only the loop thread's innermost
-30 Python frames are inspected, and only fixed code-identity labels are emitted:
-no source, locals, arguments, absolute paths or arbitrary names. Unknown code is
-explicitly redacted. The JSON event is limited to 8 KiB. C calls themselves and
+30 Python frames are inspected, and only code-identity labels are emitted:
+no source, locals, arguments, absolute paths or arbitrary names. Labels come from
+a fixed vocabulary, or, for Avibe's own packages, from code reached by identity
+through the defining module's namespace at a stall (never from a frame's own
+filename or name). Unknown code is explicitly redacted. The JSON event is limited to 8 KiB. C calls themselves and
 unlisted or dynamically generated Python code are deliberate blind spots.
 
 GC-active at sampling and watchdog wake lateness are signals, not causality.
@@ -39,8 +41,10 @@ from core.loop_watchdog_events import (
     EVENT_MARKER,
     MAX_EVENT_BYTES,
     MAX_STACK_FRAMES,
+    OWN_PACKAGES,
     REDACTED_LABEL,
     _CODE_TARGETS,
+    own_code_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,7 @@ STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 GC_SLOW_SECONDS = 0.2
 _MAX_GC_REPORTS = 64
+_MAX_OWN_CODES = 200_000
 # Written only at Vibey stream boundaries on the controller loop; sampled without a lock by GC.
 _active_requests = 0
 # Only protects in-memory publication and the final freeze instruction; never DB or IPC.
@@ -91,6 +96,7 @@ class EventLoopWatchdog:
         # equal to static code. Retain code objects (never frames) to prevent id reuse.
         self._code_labels: dict[int, tuple[CodeType, tuple[str, str]]] = {}
         self._unresolved_targets = [(module, attribute) for module, attrs in _CODE_TARGETS for attribute in attrs]
+        self._indexed_modules: set[str] = set()
         self._gc_started_at: float | None = None
         self._gc_reports: deque[tuple[float, float, int, int, int, int, int, int, tuple[int, ...]]] = deque(maxlen=_MAX_GC_REPORTS)
         self._gc_callback = self._observe_gc
@@ -295,6 +301,53 @@ class EventLoopWatchdog:
                 unresolved.append((module, attribute))
         self._unresolved_targets = unresolved
 
+    def _index_own_modules(self) -> None:
+        """At a stall only: label Avibe's own code by identity, newly loaded modules only.
+
+        Code is reached from each own module's namespace: its functions, the methods
+        of classes it defines, and code nested in those (closures, lambdas,
+        comprehensions). Only code whose filename equals the module's own file is
+        taken, so imports and decorator wrappers keep their own attribution. A frame's
+        filename or name is never read; a cloned or generated code object stays
+        redacted because it is not reachable from a namespace.
+        """
+        for name, module in list(sys.modules.items()):
+            if (type(name) is not str or name in self._indexed_modules or type(module) is not ModuleType
+                    or name.partition(".")[0] not in OWN_PACKAGES):
+                continue
+            self._indexed_modules.add(name)
+            namespace = ModuleType.__getattribute__(module, "__dict__")
+            source = namespace.get("__file__")
+            if type(source) is not str:
+                continue
+            path = name.replace(".", "/") + ("/__init__.py" if source.endswith("__init__.py") else ".py")
+            if not own_code_label(path, "x"):
+                continue
+            codes: list[CodeType] = []
+            owners: list[tuple[object, int]] = [(value, 0) for value in list(namespace.values())]
+            seen_classes: set[int] = set()
+            while owners:
+                owner, depth = owners.pop()
+                if type(owner) in (staticmethod, classmethod):
+                    owner = owner.__func__
+                if type(owner) is property:
+                    owners.extend((part, depth) for part in (owner.fget, owner.fset, owner.fdel) if part is not None)
+                elif type(owner) is FunctionType:
+                    codes.append(owner.__code__)
+                elif isinstance(owner, type) and depth < 3 and id(owner) not in seen_classes:
+                    seen_classes.add(id(owner))
+                    attrs = type.__dict__["__dict__"].__get__(owner)
+                    if attrs.get("__module__") == name:
+                        owners.extend((value, depth + 1) for value in list(attrs.values()))
+            while codes and len(self._code_labels) < _MAX_OWN_CODES:
+                code = codes.pop()
+                if type(code) is not CodeType or code.co_filename != source or id(code) in self._code_labels:
+                    continue
+                function = getattr(code, "co_qualname", code.co_name)  # 3.10 has co_name only
+                if own_code_label(path, function):
+                    self._code_labels[id(code)] = (code, (path, function))
+                codes.extend(const for const in code.co_consts if type(const) is CodeType)
+
     def _loop_stack(self, loop_thread: int | None) -> tuple[list[dict], str, bool]:
         frame = all_frames = code = None
         try:
@@ -328,6 +381,7 @@ class EventLoopWatchdog:
     def _report_stall(self, lag: float, wake_lateness: float) -> None:
         try:
             self._refresh_code_labels()  # fixed unresolved entries only; no healthy-tick work
+            self._index_own_modules()  # own modules not yet indexed; stalls only
         except Exception:
             # Existing fixed labels remain safe; unresolved frames stay redacted.
             pass

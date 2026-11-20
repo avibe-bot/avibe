@@ -39,6 +39,23 @@ SAFE_CODE_LABELS = frozenset(
     for module, attributes in _CODE_TARGETS for attribute in attributes
 )
 REDACTED_LABEL = ("<redacted>", "<redacted>")
+# Avibe's own packages. Their code is labelled only when reached by identity from
+# the module's own namespace (never from a frame's filename or name strings), and
+# the label must also pass this syntax, which admits module paths and qualified
+# names only.
+OWN_PACKAGES = ("vibe", "config", "core", "modules", "storage")
+_OWN_FILE = re.compile(r"(?:vibe|config|core|modules|storage)(?:/[a-z_][a-z0-9_]{0,63}){0,6}\.py")
+_OWN_FUNCTION = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]{0,63}(?:\.(?:<locals>|<lambda>|<genexpr>|<listcomp>|<dictcomp>|<setcomp>|[A-Za-z_][A-Za-z0-9_]{0,63})){0,11}"
+)
+
+
+def own_code_label(file: object, function: object) -> bool:
+    return (
+        type(file) is str and type(function) is str and len(file) <= 200 and len(function) <= 400
+        and _OWN_FILE.fullmatch(file) is not None and _OWN_FUNCTION.fullmatch(function) is not None
+    )
+
 MAX_STACK_FRAMES = 30
 MAX_EVENT_BYTES = 8192
 EVENT_MARKER = "; loop_stall_v1="
@@ -114,7 +131,7 @@ def parse_watchdog_event(line: str) -> dict | None:
             if not isinstance(frame, dict) or frame.keys() != {"file", "function", "line"}:
                 return None
             label = (frame["file"], frame["function"])
-            if label != REDACTED_LABEL and label not in SAFE_CODE_LABELS:
+            if label != REDACTED_LABEL and label not in SAFE_CODE_LABELS and not own_code_label(*label):
                 return None
             if not _integer(frame["line"], 2**31 - 1):
                 return None
