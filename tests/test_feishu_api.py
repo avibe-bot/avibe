@@ -44,6 +44,7 @@ class _StubFeishu:
         self.calls: list[dict[str, Any]] = []
         self.token_requests: list[dict[str, Any]] = []
         self.token_reply: Any = {"code": 0, "msg": "ok", "tenant_access_token": "t-stub", "expire": 7200}
+        self.token_replies: list[Any] = []  # answered in order, before ``token_reply``
         self.token_content_type = "application/json"
         self.token_status = 200
         self.token_headers: dict[str, str] = {}
@@ -66,7 +67,7 @@ class _StubFeishu:
                     stub.token_requests.append(json.loads(raw))
                     if stub.token_delay:
                         threading.Event().wait(stub.token_delay)
-                    reply = stub.token_reply
+                    reply = stub.token_replies.pop(0) if stub.token_replies else stub.token_reply
                     status, body = stub.token_status, reply if isinstance(reply, bytes) else json.dumps(reply).encode()
                     headers["Content-Type"] = stub.token_content_type
                     headers.update(stub.token_headers)
@@ -426,35 +427,41 @@ async def test_the_app_secret_does_not_follow_a_redirect(feishu: _StubFeishu, bo
 async def test_tokens_fetched_on_two_loops_never_mix_one_token_with_the_other_s_lifetime(
     feishu: _StubFeishu, bot: FeishuBot, clock: "_Clock"
 ):
-    """The adapter is called on its own loop and on the controller's; both publish the token they fetched."""
-    replies = iter(
-        [
-            {"code": 0, "msg": "ok", "tenant_access_token": "t-long", "expire": 7200},
-            {"code": 0, "msg": "ok", "tenant_access_token": "t-short", "expire": 630},
-        ]
-    )
-    published: list[tuple[str, float]] = []
-    real_fetch = bot._fetch_tenant_token
+    """The adapter is called on its own loop and on the controller's; both publish the token they fetched.
 
-    async def fetch_and_note() -> str:
-        feishu.token_reply = next(replies)
-        token = await real_fetch()
-        published.append(bot._token)
-        return token
+    The first fetch is held at the moment it works out when its token stops
+    being used; the second fetches and publishes a short-lived token meanwhile.
+    """
+    feishu.token_replies = [
+        {"code": 0, "msg": "ok", "tenant_access_token": "t-long", "expire": 7200},
+        {"code": 0, "msg": "ok", "tenant_access_token": "t-short", "expire": 630},  # usable for 30 s
+    ]
+    held: dict[str, Any] = {"thread": None}
+    first_is_publishing = threading.Event()
+    second_has_published = threading.Event()
 
-    bot._fetch_tenant_token = fetch_and_note  # type: ignore[method-assign]
+    def time_that_holds_the_first_fetch() -> float:
+        if threading.current_thread() is held["thread"] and sys._getframe(1).f_code.co_name == "_fetch_tenant_token":
+            held["thread"] = None
+            first_is_publishing.set()
+            second_has_published.wait(5)
+        return clock.now
+
+    def first_loop() -> str:
+        held["thread"] = threading.current_thread()
+        return asyncio.run(bot._tenant_token())
+
+    with patch("modules.im.feishu.time.time", time_that_holds_the_first_fetch):
+        first = asyncio.create_task(asyncio.to_thread(first_loop))
+        assert await asyncio.to_thread(first_is_publishing.wait, 5)
+        assert await asyncio.to_thread(asyncio.run, bot._tenant_token()) == "t-short"
+        second_has_published.set()
+        assert await first == "t-long"
+
+    clock.now += 31  # the short token is past its use; the long one is not
 
     assert await bot._tenant_token() == "t-long"
-    bot._token = None  # the second loop misses the cache and fetches its own
-    assert await asyncio.to_thread(asyncio.run, bot._tenant_token()) == "t-short"
-
-    # Each record pairs a token with its own lifetime, and what is cached is one of them, whole.
-    assert published == [("t-long", clock.now + 6600), ("t-short", clock.now + 30)]
-    assert bot._token in published
-    clock.now += 31
-    feishu.token_reply = {"code": 0, "msg": "ok", "tenant_access_token": "t-fresh", "expire": 7200}
-    bot._fetch_tenant_token = real_fetch  # type: ignore[method-assign]
-    assert await bot._tenant_token() == "t-fresh"
+    assert len(feishu.token_requests) == 2
 
 
 async def test_a_direct_message_remembers_its_chat_as_a_dm(feishu: _StubFeishu, bot: FeishuBot):
