@@ -201,6 +201,12 @@ describe('read-only transcript withdraws session writes', () => {
     expect(archived).toContain('aria-pressed="true"');
   });
 
+  it('locks a text-answered group without selecting or displaying a choice', () => {
+    const answered = render(<QuickReplies options={['Ship it', 'Wait']} chosen="" onChoose={() => undefined} />);
+    expect(countDisabledButtons(answered)).toBe(2);
+    expect(answered).not.toContain('aria-pressed="true"');
+  });
+
   it('threads readOnly from the transcript row into the group', () => {
     const live = render(
       <MessageRow

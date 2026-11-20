@@ -20,8 +20,18 @@ import { gzipSync } from 'node:zlib';
 const KiB = 1024;
 // gzip bytes of JavaScript. Measured at 551 KiB (home) and 831 KiB (a
 // conversation) when set; before the split, every first load took 1215 KiB.
+//
+// home 600 -> 608 KiB (2026-11-20). Measured 600.4 KiB on master after Ask
+// Vibey (#4035, +1.5 KiB: the desktop compose receiver AppShell installs so a
+// macOS Services selection can reach the composer) and the App Lock setting
+// (#4040, +0.9 KiB). With the W1 native windows (#4036: the App launch protocol
+// and the native window close confirmation, needed before any App window
+// opens) it is 603.3 KiB, and 603.5 KiB with the Show share entry (#4037). All
+// of these are first-screen behaviour. Candidates to move behind an on-demand
+// import next: the App launch protocol (src/apps/appLaunchProtocol.ts, with
+// #4036) and the voice input stack (src/components/voice/, src/lib/voiceActivity.ts).
 const BUDGETS = {
-  home: 600 * KiB,
+  home: 608 * KiB,
   chat: 900 * KiB,
 };
 

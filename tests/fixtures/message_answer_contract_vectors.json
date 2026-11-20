@@ -1,0 +1,40 @@
+{
+  "contract": 1,
+  "revisionAlgorithm": "sha256-utf8-compact-json-no-ascii-escaping",
+  "questions": [
+    {
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "revision": "591e4424a227942cfaa898ff551771f8d762d17663e9e4b77d74c8d983582885"
+    },
+    {
+      "options": [
+        "继续 ✅",
+        "Stop"
+      ],
+      "revision": "4fb93062a3a94d5ade9e0e11f5b251e714b13f5ff777e6883bd250ae96aeb72b"
+    },
+    {
+      "options": [
+        "quote \" slash /",
+        "é",
+        "é"
+      ],
+      "revision": "ad859daaa2ef921b4105f19e6d7df1e041f224c876fff7e2eba691fa1c6e6be4"
+    }
+  ],
+  "answerKinds": [
+    {"answer_kind": "choice", "choice": "继续 ✅", "storedChoice": "继续 ✅"},
+    {"answer_kind": "text", "choice": null, "storedChoice": ""}
+  ],
+  "outcomes": {
+    "accepted": 201,
+    "duplicate": 200,
+    "already_handled": 409,
+    "stale": 409,
+    "forbidden": 403,
+    "not_found": 404
+  }
+}

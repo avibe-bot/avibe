@@ -1,4 +1,4 @@
-"""Durable Agent-to-iOS system schedule operations and device-bound attempts."""
+"""Durable Agent-to-device system schedule operations and device-bound attempts."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import and_, func, select
+
+from vibe.i18n import t
 
 from storage.db import get_cached_sqlite_engine, retry_sqlite_write
 from storage.models import (
@@ -313,7 +315,7 @@ def _operation_public(conn, row: Mapping[str, Any], now: datetime) -> dict[str, 
     else:
         state = "pending"
     status_message = (
-        "Waiting for your iPhone to return the result."
+        t("systemSchedule.waitingForDevice")
         if state == "awaiting_device"
         else None
     )
@@ -698,6 +700,7 @@ def _pending_attempt(
     action: str,
     instance_id: str,
     device_id: str | None,
+    kinds: tuple[str, ...] | None = None,
 ) -> Mapping[str, Any] | None:
     query = (
         select(system_schedule_attempts)
@@ -706,6 +709,17 @@ def _pending_attempt(
         .where(system_schedule_attempts.c.terminal_state.is_(None))
         .where(system_schedule_attempts.c.instance_id == instance_id)
     )
+    if action == "create" and device_id is None and kinds is not None:
+        if not kinds:
+            return None
+        query = query.where(
+            select(system_schedule_operations.c.operation_id)
+            .where(
+                system_schedule_operations.c.operation_id == system_schedule_attempts.c.operation_id,
+                system_schedule_operations.c.kind.in_(kinds),
+            )
+            .exists()
+        )
     if action == "cancel":
         query = query.where(system_schedule_attempts.c.purpose == "user")
     if device_id is None:
@@ -726,6 +740,7 @@ def claim_next(
     device_id: str,
     exclude_lease_tokens: object = None,
     allow_create: bool = True,
+    kinds: object = None,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
     instance_id = _bounded_identifier(instance_id, field="instance_id")
@@ -735,6 +750,13 @@ def claim_next(
             "invalid_allow_create",
             "allow_create must be a boolean",
         )
+    if kinds is not None and (
+        not isinstance(kinds, list)
+        or any(not isinstance(kind, str) or kind not in {"alarm", "reminder"} for kind in kinds)
+        or len(set(kinds)) != len(kinds)
+    ):
+        raise SystemScheduleServiceError("invalid_kinds", "kinds must contain distinct supported kinds")
+    allowed_kinds = tuple(kinds) if kinds is not None else None
     excluded = _excluded_lease_tokens(exclude_lease_tokens)
     now = (now or _utc_now()).astimezone(timezone.utc)
     _ensure_state()
@@ -771,6 +793,7 @@ def claim_next(
                     action="create",
                     instance_id=instance_id,
                     device_id=None,
+                    kinds=allowed_kinds,
                 )
             if attempt is None:
                 return None

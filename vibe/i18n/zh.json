@@ -1,4 +1,7 @@
 {
+  "systemSchedule": {
+    "waitingForDevice": "正在等待设备返回结果。"
+  },
   "storage": {
     "notice": {
       "epoch3BackupSkipped": "磁盘空间快满了，这次更新数据库时没有另存备份。你仍然可以装回 3.2.6；3.2.5 及更早的版本无法再打开这个数据库。建议腾出一些磁盘空间。"
