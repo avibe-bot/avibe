@@ -90,6 +90,21 @@ describe('the device report', () => {
     await expect(nativeDeviceLabel()).resolves.toBe('iPhone 16 Pro');
   });
 
+  it('reports nothing until the App has an installation id, but names the device', async () => {
+    const { installation_id: _id, ...withoutID } = described;
+    const call = installShell(withoutID);
+
+    await reportNativeDevice(apiFetch);
+    expect(apiFetch).not.toHaveBeenCalled();
+    await expect(nativeDeviceLabel()).resolves.toBe('iPhone 16 Pro');
+
+    // Push sets up; the next activation of the same page reports.
+    call.mockImplementation(async () => described);
+    await reportNativeDevice(apiFetch);
+    await reportNativeDevice(apiFetch);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('never lets a failed report surface', async () => {
     installShell(described);
     apiFetch.mockRejectedValueOnce(new Error('offline'));

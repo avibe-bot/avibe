@@ -71,7 +71,9 @@ export function nativeDeviceDescription(): Promise<NativeDeviceDescription | nul
   if (state === NO_SHELL) return pending;
   state.description = pending;
   void pending.then((answer) => {
-    if (!answer && state.description === pending) delete state.description;
+    // An answer without the installation id (push not set up yet) is
+    // asked again too.
+    if (!answer?.installation_id && state.description === pending) delete state.description;
   });
   return pending;
 }
@@ -94,7 +96,9 @@ export function reportNativeDevice(
   if (state.reported) return state.reported;
   const pending: Promise<void> = (async () => {
     const body = await nativeDeviceDescription();
-    if (!body) return false;
+    // The instance groups a device by its installation id and takes no
+    // report without one; the App has it once push has set up after sign-in.
+    if (!body?.installation_id) return false;
     try {
       await post('/api/devices/self', {
         method: 'POST',
