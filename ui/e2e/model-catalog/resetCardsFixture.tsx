@@ -1,6 +1,6 @@
 import { ApiCallError, modelsApi } from '../../src/components/settings/models/modelsApi';
 import type { QuotaSummary, ResetCard, ResetCardLock, ResetCardUseResult, SourceQuota } from '../../src/components/settings/models/types';
-import { installShellFixture } from './shellFixture';
+import { installShellFixture } from './shellApi';
 
 // The complete Models page on its 订阅额度 tab, with every vendor answer stubbed at the API
 // boundary: `modelsApi.getQuota`, `refreshQuota` and `redeemResetCard` are replaced in memory

@@ -1656,6 +1656,7 @@ export const SettingsModelsPage: React.FC = () => {
                       onRefreshAccount={(sourceId) => void refreshQuotaAndSources(false, sourceId)}
                       resetCardPhases={resetCardPhases}
                       onResetCardIntent={onResetCardIntent}
+                      canUseResetCards={capabilities.can_use_model_hub_reset_cards}
                       onRetry={retryQuota}
                       onRequestReauth={(sourceId) => {
                         const target = sources.find((source) => source.id === sourceId);

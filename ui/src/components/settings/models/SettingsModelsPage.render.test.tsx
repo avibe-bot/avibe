@@ -12,7 +12,8 @@ import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationCon
 import type { Bot } from '@/lib/bots';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
-import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
+import { OWNER_INSTANCE_CAPABILITIES, type InstanceCapabilities } from '@/lib/sessionInfo';
+import { capabilitiesFor } from '@/lib/testing/instanceRoleCapabilities';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
@@ -274,6 +275,8 @@ const renderPage = (
   agents?: AgentSupply[],
   runtimeValue: RuntimeDependency = runtime,
   toolsValue: HostedToolsStatus = hostedToolsStatus,
+  /** The reader's capabilities; absent, the context's own default (nothing granted). */
+  capabilities?: InstanceCapabilities,
 ) => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
   vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(agents ?? [
@@ -288,13 +291,16 @@ const renderPage = (
   vi.spyOn(modelsApi, 'getQuota').mockResolvedValue(quotaSummary);
   vi.spyOn(modelsApi, 'refreshQuota').mockResolvedValue(quotaSummary);
   vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(toolsValue);
-  return render(
+  const page = (
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
         <SettingsModelsPage />
       </I18nextProvider>
-    </ToastProvider>,
+    </ToastProvider>
   );
+  return render(capabilities
+    ? <InstanceAuthorizationContext.Provider value={{ remote: true, instanceKind: null, instanceRole: null, capabilities }}>{page}</InstanceAuthorizationContext.Provider>
+    : page);
 };
 
 const switchFirstGatewayAgentToDirect = async () => {
@@ -2915,8 +2921,8 @@ describe('SettingsModelsPage reset cards', () => {
       },
     ],
   });
-  const openWith = async (quota: QuotaSummary) => {
-    renderPage([retainedSource]);
+  const openWith = async (quota: QuotaSummary, capabilities = OWNER_INSTANCE_CAPABILITIES) => {
+    renderPage([retainedSource], undefined, runtime, hostedToolsStatus, capabilities);
     await screen.findByText('Retained source');
     vi.mocked(modelsApi.getQuota).mockResolvedValue(quota);
     vi.mocked(modelsApi.refreshQuota).mockResolvedValue(quota);
@@ -3021,6 +3027,25 @@ describe('SettingsModelsPage reset cards', () => {
     expect(within(account()).getByText('×2')).toBeTruthy();
     expect(cardUseButton('Fable').disabled).toBe(false);
     expect(redeem).toHaveBeenCalledTimes(3);
+  });
+
+  it('MH-QUOTA-062: only a reader the server lets spend cards is offered 「使用」; everyone else keeps the list and the refresh', async () => {
+    for (const capabilities of [capabilitiesFor('member'), capabilitiesFor('editor'), { ...OWNER_INSTANCE_CAPABILITIES, can_use_model_hub_reset_cards: false }]) {
+      await openWith(quotaWith(), capabilities);
+      const cards = within(account()).getByRole('region', { name: /^Limit resets$|^重置卡$/ });
+      expect(within(cards).getAllByRole('listitem')).toHaveLength(2);
+      expect(within(cards).queryAllByRole('button')).toHaveLength(0);
+      const force = vi.mocked(modelsApi.refreshQuota);
+      await userEvent.click(refreshButton('Claude Max'));
+      await waitFor(() => expect(force).toHaveBeenCalledTimes(1));
+      cleanup();
+      vi.restoreAllMocks();
+      vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(null);
+      vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
+    }
+    // The Owner's page offers it.
+    await openWith(quotaWith());
+    expect(cardUseButton('Fable').disabled).toBe(false);
   });
 
   it('MH-QUOTA-060: an account\'s own refresh forces one read of every account and spins only on that account', async () => {

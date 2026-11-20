@@ -296,7 +296,8 @@ const AccountCard: React.FC<{
   onRefresh?: () => void;
   resetCardPhase: ResetCardPhase | null;
   onResetCardIntent?: (intent: ResetCardIntent) => void;
-}> = ({ source, now, text, pending = false, onRequestReauth, refreshing, spinning, onRefresh, resetCardPhase, onResetCardIntent }) => {
+  canUseResetCards: boolean;
+}> = ({ source, now, text, pending = false, onRequestReauth, refreshing, spinning, onRefresh, resetCardPhase, onResetCardIntent, canUseResetCards }) => {
   const { t } = useTranslation();
   const retained = quotaIsRetained(source);
   const status = sourceStatus(source, now);
@@ -389,7 +390,7 @@ const AccountCard: React.FC<{
               {scoped.map((window) => <WindowRow key={window.id} window={window} now={now} retained={retained} nested text={text} />)}
             </div>
           )}
-      <ResetCardsBlock cards={source.reset_cards} phase={resetCardPhase} now={now} duration={text.duration} onIntent={onResetCardIntent} />
+      <ResetCardsBlock cards={source.reset_cards} phase={resetCardPhase} now={now} duration={text.duration} onIntent={onResetCardIntent} canUse={canUseResetCards} />
       {source.value && <ValueStrip value={source.value} text={text} />}
     </article>
   );
@@ -431,9 +432,11 @@ export const QuotaTab: React.FC<{
   /** Each account's reset-card step on this page (ui/design: models/quota-reset-cards/confirm, …). */
   resetCardPhases?: Readonly<Record<string, ResetCardPhase>>;
   onResetCardIntent?: (sourceId: string, intent: ResetCardIntent) => void;
+  /** The reader may spend reset cards (the Owner); others see the list with no use action. */
+  canUseResetCards?: boolean;
 }> = ({
   quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow,
-  refreshingSourceId = null, onRefreshAccount, resetCardPhases, onResetCardIntent,
+  refreshingSourceId = null, onRefreshAccount, resetCardPhases, onResetCardIntent, canUseResetCards = false,
 }) => {
   const { t } = useTranslation();
   const now = useNow(fixedNow);
@@ -586,6 +589,7 @@ export const QuotaTab: React.FC<{
                     onRefresh={onRefreshAccount && (() => onRefreshAccount(source.source_id))}
                     resetCardPhase={resetCardPhases?.[source.source_id] ?? null}
                     onResetCardIntent={onResetCardIntent && ((intent) => onResetCardIntent(source.source_id, intent))}
+                    canUseResetCards={canUseResetCards}
                   />
                 ))}
               </div>

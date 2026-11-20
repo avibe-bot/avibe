@@ -2268,6 +2268,18 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-087
+  - id: MH-QUOTA-088
+    name: A reader who may not spend reset cards sees the same list with no use action, whatever lock the server holds
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-088
+  - id: MH-QUOTA-089
+    name: Only a reader the server lets spend reset cards is offered use, and every reader keeps the list and the account's own refresh
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-089
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

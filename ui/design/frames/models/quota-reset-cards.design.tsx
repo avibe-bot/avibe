@@ -63,6 +63,7 @@ const quota = (held: Held, reset = false) => {
         refreshing={held.refreshing}
         refreshingSourceId={held.refreshing ? claudeMax.id : null}
         resetCardPhases={held.phase ? { [claudeMax.id]: held.phase } : {}}
+        canUseResetCards
       />
     </div>
   );

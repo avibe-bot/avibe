@@ -44,10 +44,14 @@ export const ResetCardsBlock: React.FC<{
   /** The quota tab's duration wording (「2 小时 10 分」). */
   duration: (ms: number) => string;
   onIntent?: (intent: ResetCardIntent) => void;
-}> = ({ cards, phase = null, now, duration, onIntent }) => {
+  /** Only the Owner spends cards; anyone else sees the list without any use action. */
+  canUse?: boolean;
+}> = ({ cards, phase: localPhase = null, now, duration, onIntent, canUse = true }) => {
   const { t, i18n } = useTranslation();
   const rows = cards?.cards ?? [];
-  const lock = cards?.lock ?? null;
+  // Without the right to use one, the lock and any step say nothing to this reader.
+  const lock = canUse ? cards?.lock ?? null : null;
+  const phase = canUse ? localPhase : null;
   const noteId = React.useId();
   const focusNext = React.useRef<string | null>(null);
   const block = React.useRef<HTMLElement>(null);
@@ -156,7 +160,9 @@ export const ResetCardsBlock: React.FC<{
                       </p>
                     )}
                   </div>
-                  {confirming ? (
+                  {!canUse ? (
+                    blocked && <span className={`shrink-0 text-muted ${NOTE}`} data-reset-card-blocked={card.blocked ?? 'unavailable'}>{blocked}</span>
+                  ) : confirming ? (
                     <div className="flex shrink-0 items-center gap-2">
                       <Button size="compact" aria-describedby={noteId} onClick={() => intent({ type: 'confirm', kind: card.kind }, 'block')}>
                         {t('settings.models.quota.resetCards.confirm')}
