@@ -86,12 +86,12 @@ final class DeviceDescriptionTests: XCTestCase {
         )
         let marker = InMemoryPushInstallationMarkerStore()
         marker.installationID = installationID
-        let appModel = try await makeAppModel(keychain: keychain, marker: marker)
-        var health: HealthDeviceIdentity? = HealthDeviceIdentity(
+        let health = HealthMemoryCredentials()
+        health.identity = HealthDeviceIdentity(
             installationID: "health-installation", accountID: "account-1", instanceID: "instance-1",
             instanceName: "One", origin: one, deviceID: "device-1", credential: "memory-only"
         )
-        appModel.healthIdentityReader = { health }
+        let appModel = try await makeAppModel(keychain: keychain, marker: marker, health: health)
 
         // No instance open yet.
         XCTAssertNil(appModel.describeDevice(instanceID: "instance-1"))
@@ -126,7 +126,7 @@ final class DeviceDescriptionTests: XCTestCase {
             HealthDeviceIdentity(installationID: "health-installation", accountID: "account-2", instanceID: "instance-1",
                                  instanceName: "One", origin: one, deviceID: "d", credential: "c"),
         ] {
-            health = identity
+            health.identity = identity
             let other = try XCTUnwrap(appModel.describeDevice(instanceID: "instance-1"))
             XCTAssertFalse((other["aliases"] as? [[String: String]] ?? []).contains { $0["source"] == "health" })
         }
@@ -232,6 +232,7 @@ final class DeviceDescriptionTests: XCTestCase {
     private func makeAppModel(
         keychain: InMemoryPushKeychainStore,
         marker: InMemoryPushInstallationMarkerStore,
+        health: HealthCredentialStoring = HealthMemoryCredentials(),
         defaults existing: UserDefaults? = nil,
         sessionCheckFails: Bool = false,
         waitForInstances: Bool = true
@@ -283,7 +284,8 @@ final class DeviceDescriptionTests: XCTestCase {
             pushInstallationMarker: marker,
             systemScheduleStore: FileSystemSystemScheduleStore(
                 fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
-            )
+            ),
+            healthCredentials: health
         )
         if waitForInstances {
             try await waitUntil {

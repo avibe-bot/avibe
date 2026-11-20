@@ -369,8 +369,9 @@ final class AppModel: ObservableObject {
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let systemScheduleCoordinator: SystemScheduleCoordinator
     var systemScheduleDeviceID: String? { systemScheduleCoordinator.installationID }
-    /// Health's paired identity, read without side effects (no id is made).
-    var healthIdentityReader: () -> HealthDeviceIdentity? = { try? HealthCredentialStore().load() }
+    /// Health's credential store, read here without side effects (`load()`
+    /// makes no id) for `device.describe`'s alias.
+    private let healthCredentials: HealthCredentialStoring
     private let systemScheduleNow: () -> Date
     private var pendingSystemSchedule: PendingSystemSchedule?
     private let nativeBadge: NativeBadge
@@ -553,10 +554,12 @@ final class AppModel: ObservableObject {
         runtimeOpenLongWait: Duration = .seconds(8),
         runtimeOpenNotificationCenter: NotificationCenter = .default,
         badgeCenter: AppBadgeCentering? = nil,
-        healthSync: HealthSyncCoordinator? = nil
+        healthSync: HealthSyncCoordinator? = nil,
+        healthCredentials: HealthCredentialStoring = HealthCredentialStore()
     ) {
         self.defaults = defaults
         self.healthSync = healthSync
+        self.healthCredentials = healthCredentials
         self.controlPlane = controlPlane
         let directFaultMarker = directFaultMarker
             ?? UserDefaultsDirectFaultMarker(defaults: defaults)
@@ -2526,7 +2529,7 @@ final class AppModel: ObservableObject {
         else {
             return nil
         }
-        let health = healthIdentityReader().flatMap {
+        let health = (try? healthCredentials.load()).flatMap {
             $0.accountID == accountID && $0.instanceID == instanceID ? $0.installationID : nil
         }
         return NativeDeviceDescription.body(
