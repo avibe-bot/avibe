@@ -43,8 +43,8 @@ pub(super) fn finish_if_ready(app: &AppHandle) {
         p.outcome
             .and_then(|outcome| p.pending.take().map(|(epoch, purpose)| (epoch, purpose, outcome)))
     });
-    if let Some((epoch, purpose, outcome)) = finish {
-        complete(app, epoch, purpose, outcome);
+    if let Some((epoch, _purpose, outcome)) = finish {
+        complete(app, epoch, outcome, now());
     }
 }
 fn output(id: Value, result: Result<Value, String>) {
@@ -105,9 +105,12 @@ fn snapshot(app: &AppHandle) -> Value {
             "contentCount":cover.hidden.len(), "compact":cover.view.ivars().compact.get(),
             "firstResponderIsCover":window.firstResponder().is_some_and(|r| std::ptr::eq(&*r, &*cover.view as &NSResponder)),
             "button":cover.view.ivars().button.title().to_string(),
-            "pendingLabel":cover.view.ivars().pending.stringValue().to_string()}))
+            "pendingLabel":cover.view.ivars().pending.stringValue().to_string(),
+            "buttonTop": (cover.view.ivars().button.frame().origin.y + cover.view.ivars().button.frame().size.height),
+            "pendingBottom": cover.view.ivars().pending.frame().origin.y}))
     }).collect::<Vec<_>>());
     json!({"status":state,"locked":locked,"verifying":verifying,"authCalls":calls,"executed":executed,"windows":windows,
+        "persistedPolicy": std::fs::read(&machine(app).path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()),
         "pending":machine(app).pending.lock().unwrap().is_some(),
         "mainTitle": app.get_window(crate::MAIN_WINDOW).unwrap().title().unwrap(),
         "floatingVisible": ([crate::pet::PET_WINDOW, crate::update_popover::UPDATE_POPOVER].map(|label| app.get_window(label).unwrap().is_visible().unwrap())),
@@ -212,7 +215,6 @@ fn handle(app: &AppHandle, request: Value) {
                 });
                 *machine(app).machine.lock().unwrap() = Machine::new(policy, available);
                 *machine(app).pending.lock().unwrap() = None;
-                PRESENTATION.with_borrow_mut(|p| p.completion = None);
                 sync_windows(app);
                 Ok(snapshot(app))
             }
@@ -253,6 +255,7 @@ fn handle(app: &AppHandle, request: Value) {
                     "wake" => event(app, Event::SystemReturn(1)),
                     _ => {
                         machine(app).machine.lock().unwrap().tick(time);
+                        finish_completion(app);
                         sync_windows(app);
                     }
                 }
@@ -376,23 +379,8 @@ fn handle(app: &AppHandle, request: Value) {
                 Ok(Value::Null)
             }
             "quitAlert" => {
-                // Tauri's user-event dispatcher intentionally does not reenter
-                // during NSAlert.runModal. Probe from the real modal run loop.
                 let observed = std::sync::Arc::new(Mutex::new(Value::Null));
                 let probe = observed.clone();
-                let handle = app.clone();
-                let block = RcBlock::new(move |_: NonNull<objc2_foundation::NSTimer>| {
-                    *probe.lock().unwrap() = snapshot(&handle);
-                    NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).stopModalWithCode(1002);
-                    if let Some(window) = PRESENTATION.with_borrow(|p| p.quit_window.as_ref().and_then(Weak::load)) {
-                        window.orderOut(None);
-                    }
-                });
-                let timer =
-                    unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.05, false, &block) };
-                unsafe {
-                    objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSModalPanelRunLoopMode);
-                }
                 let handle = app.clone();
                 let id = id.clone();
                 show_quit_question(app, &crate::native_tray_catalog(), move |choice| {
@@ -401,6 +389,21 @@ fn handle(app: &AppHandle, request: Value) {
                         id,
                         Ok(json!({"during": observed.lock().unwrap().clone(), "after": snapshot(&handle)})),
                     );
+                });
+                // A second lifecycle request cannot replace the exact exempt
+                // window while the first asynchronous sheet is still visible.
+                show_lifecycle_busy(app, &crate::native_tray_catalog());
+                // Queued behind sheet creation on the same serial executor as
+                // logout's replyToApplicationShouldTerminate. A synchronous
+                // modal would prevent this block (and this test) from finishing.
+                let handle = app.clone();
+                crate::macos_terminate::on_main_queue(move || {
+                    *probe.lock().unwrap() = snapshot(&handle);
+                    let sheet = PRESENTATION
+                        .with_borrow(|p| p.quit_window.as_ref().and_then(Weak::load))
+                        .unwrap();
+                    let parent = sheet.sheetParent().unwrap();
+                    parent.endSheet_returnCode(&sheet, 1002);
                 });
                 Ok(Value::Null)
             }

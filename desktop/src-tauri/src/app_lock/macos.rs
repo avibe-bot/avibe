@@ -55,7 +55,7 @@ struct Presentation {
     context: Option<Retained<LAContext>>,
     reply: Option<Reply>,
     quit_window: Option<Weak<NSWindow>>,
-    completion: Option<(u64, Authentication, Outcome)>,
+    quit_alert: Option<Retained<NSAlert>>,
 }
 thread_local! {
     static PRESENTATION: RefCell<Presentation> = RefCell::new(Presentation::default());
@@ -224,7 +224,7 @@ fn queue_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) 
     // A newer locked entry supersedes an earlier navigation/update that was
     // still waiting for a Workbench before the app locked.
     if let Some(links) = app.try_state::<Mutex<avibe_runtime_host::deep_link::DeepLinks>>() {
-        *links.lock().expect("deep links") = avibe_runtime_host::deep_link::DeepLinks::default();
+        links.lock().expect("deep links").clear_pending();
     }
     if let Some(updates) = app.try_state::<crate::PendingDesktopUpdateOpen>() {
         if let Some(id) = updates.current() {
@@ -320,8 +320,9 @@ fn authenticate(app: &AppHandle, purpose: Authentication, reply: Option<Reply>) 
         } else {
             Outcome::Failed
         };
+        let replied_at = now();
         let app = handle.clone();
-        let _ = handle.run_on_main_thread(move || complete(&app, epoch, purpose, outcome));
+        let _ = handle.run_on_main_thread(move || complete(&app, epoch, outcome, replied_at));
     });
     let reason = catalog(if matches!(purpose, Authentication::Change(_)) {
         "changeReason"
@@ -338,41 +339,40 @@ fn authenticate(app: &AppHandle, purpose: Authentication, reply: Option<Reply>) 
         );
     }
 }
-fn complete(app: &AppHandle, epoch: u64, purpose: Authentication, mut outcome: Outcome) {
-    {
+fn complete(app: &AppHandle, epoch: u64, outcome: Outcome, replied_at: f64) {
+    machine(app)
+        .machine
+        .lock()
+        .expect("app lock")
+        .reply(epoch, outcome, active(), replied_at, now());
+    finish_completion(app);
+    sync_windows(app);
+    deliver_pending(app);
+}
+fn finish_completion(app: &AppHandle) {
+    let outcome = {
         let owner = machine(app);
         let mut state = owner.machine.lock().expect("app lock");
-        if state.epoch != epoch || state.authenticating != Some(purpose) {
+        let Some(completion) = state.take_completion() else {
             return;
-        }
-        // LA can reply before AppKit returns focus. Keep the existing cover
-        // and authentication epoch until our activation, so "Immediately"
-        // never treats the system panel's trailing focus event as departure.
-        if !active() {
-            PRESENTATION.with_borrow_mut(|p| p.completion = Some((epoch, purpose, outcome)));
-            drop(state);
-            #[cfg(not(feature = "app-lock-e2e"))]
-            #[allow(deprecated)]
-            NSApplication::sharedApplication(MainThreadMarker::new().expect("authentication on main"))
-                .activateIgnoringOtherApps(true);
-            return;
-        }
+        };
+        let mut outcome = completion.outcome;
         if outcome == Outcome::Success {
-            if let Authentication::Change(policy) = purpose {
+            if let Authentication::Change(policy) = completion.purpose {
                 if let Err(error) = persist(&owner.path, policy) {
                     eprintln!("App Lock preference: {error}");
                     outcome = Outcome::Failed;
                 }
             }
         }
-        state.complete(epoch, outcome, active(), now());
-    }
+        state.commit(completion, outcome);
+        outcome
+    };
     let reply = PRESENTATION.with_borrow_mut(|p| {
         p.context = None;
         p.reply.take()
     });
     refresh(app);
-    sync_windows(app);
     if let Some(reply) = reply {
         let reason = match outcome {
             Outcome::Success => None,
@@ -382,7 +382,6 @@ fn complete(app: &AppHandle, epoch: u64, purpose: Authentication, mut outcome: O
         };
         let _ = reply.send(result(app, reason));
     }
-    deliver_pending(app);
 }
 fn deliver_pending(app: &AppHandle) {
     if !is_locked(app) {
@@ -532,6 +531,7 @@ impl LockView {
             msg_send![super(LockButton::alloc(mtm).set_ivars(ButtonFields { compact: Cell::new(compact) })), initWithFrame: NSRect::ZERO]
         };
         button.setBordered(false);
+        button.setImageHugsTitle(true);
         button.setFont(Some(&NSFont::systemFontOfSize(14.0)));
         let logo = NSImageView::initWithFrame(
             mtm.alloc(),
@@ -686,6 +686,7 @@ impl LockView {
         });
         f.pending
             .setStringValue(&NSString::from_str(&key.map(catalog).unwrap_or_default()));
+        self.arrange();
     }
 }
 
@@ -769,15 +770,18 @@ fn show_lifecycle_alert(
     }
     let handle = app.clone();
     crate::macos_terminate::on_main_queue(move || {
+        // Repeated busy requests share the visible native alert. There is one
+        // exact exemption; do not replace it while a sheet is still open.
+        if PRESENTATION.with_borrow(|p| p.quit_alert.is_some()) {
+            callback(tauri_plugin_dialog::MessageDialogResult::Cancel);
+            return;
+        }
         // Quit never waits for an already open unlock/change prompt.
         {
             let owner = machine(&handle);
             let mut state = owner.machine.lock().expect("app lock");
-            state.epoch = state.epoch.wrapping_add(1);
-            state.authenticating = None;
-            state.auto_prompted = true;
+            state.cancel_for_lifecycle(now());
         }
-        PRESENTATION.with_borrow_mut(|p| p.completion = None);
         let (context, reply) = PRESENTATION.with_borrow_mut(|p| (p.context.take(), p.reply.take()));
         if let Some(context) = context {
             unsafe {
@@ -797,14 +801,35 @@ fn show_lifecycle_alert(
         let window = alert.window();
         PRESENTATION.with_borrow_mut(|p| p.quit_window = Some(Weak::from_retained(&window)));
         sync_windows(&handle);
-        let response = alert.runModal();
-        PRESENTATION.with_borrow_mut(|p| p.quit_window = None);
-        let answer = match response {
-            1000 => tauri_plugin_dialog::MessageDialogResult::Yes,
-            1001 => tauri_plugin_dialog::MessageDialogResult::No,
-            _ => tauri_plugin_dialog::MessageDialogResult::Cancel,
+        let parent = handle
+            .get_window(crate::MAIN_WINDOW)
+            .and_then(|window| window.ns_window().ok())
+            .and_then(|window| unsafe { Retained::retain(window.cast::<NSWindow>()) });
+        let Some(parent) = parent else {
+            PRESENTATION.with_borrow_mut(|p| p.quit_window = None);
+            callback(tauri_plugin_dialog::MessageDialogResult::Cancel);
+            return;
         };
-        callback(answer);
+        PRESENTATION.with_borrow_mut(|p| p.quit_alert = Some(alert.clone()));
+        let callback = RefCell::new(Some(callback));
+        let completion = RcBlock::new(move |response: NSModalResponse| {
+            PRESENTATION.with_borrow_mut(|p| {
+                p.quit_window = None;
+                p.quit_alert = None;
+            });
+            let answer = match response {
+                1000 => tauri_plugin_dialog::MessageDialogResult::Yes,
+                1001 => tauri_plugin_dialog::MessageDialogResult::No,
+                _ => tauri_plugin_dialog::MessageDialogResult::Cancel,
+            };
+            if let Some(callback) = callback.borrow_mut().take() {
+                callback(answer);
+            }
+        });
+        // Return to both tao and the main dispatch queue immediately. Logout
+        // replies, timers and LA callbacks must run while the sheet is open.
+        parent.orderFront(None);
+        alert.beginSheetModalForWindow_completionHandler(&parent, Some(&completion));
     });
     true
 }
@@ -946,15 +971,10 @@ fn event(app: &AppHandle, event: Event) {
         Event::Arrive => {
             refresh(app);
             if active() {
-                let completion = PRESENTATION.with_borrow_mut(|p| p.completion.take());
-                if let Some((epoch, purpose, outcome)) = completion {
-                    complete(app, epoch, purpose, outcome);
-                }
                 machine(app).machine.lock().expect("app lock").arrive(now());
             }
         }
         Event::SystemLeave(reason) => {
-            PRESENTATION.with_borrow_mut(|p| p.completion = None);
             machine(app).machine.lock().expect("app lock").block(reason, now());
             let (context, reply) = PRESENTATION.with_borrow_mut(|p| (p.context.take(), p.reply.take()));
             if let Some(context) = context {
@@ -976,6 +996,7 @@ fn event(app: &AppHandle, event: Event) {
         }
         Event::Windows => {}
     }
+    finish_completion(app);
     sync_windows(app);
     if matches!(event, Event::Arrive | Event::SystemReturn(_)) {
         if active() && machine(app).machine.lock().expect("app lock").should_prompt() {
@@ -1074,8 +1095,7 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
             let needs_tick = {
                 let owner = machine(&handle);
                 let state = owner.machine.lock().expect("app lock");
-                (state.effective() && state.away_since.is_some())
-                    || owner.dirty.load(std::sync::atomic::Ordering::Relaxed)
+                state.needs_tick() || owner.dirty.load(std::sync::atomic::Ordering::Relaxed)
             };
             if !needs_tick {
                 continue;
@@ -1088,8 +1108,11 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
                         let mut state = owner.machine.lock().expect("app lock");
                         let before = state.locked;
                         state.tick(now());
-                        before != state.locked || owner.dirty.load(std::sync::atomic::Ordering::Relaxed)
+                        before != state.locked
+                            || state.completion.is_some()
+                            || owner.dirty.load(std::sync::atomic::Ordering::Relaxed)
                     };
+                    finish_completion(&app);
                     if changed {
                         sync_windows(&app);
                     }

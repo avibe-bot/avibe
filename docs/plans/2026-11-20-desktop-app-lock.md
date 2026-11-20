@@ -12,7 +12,7 @@ memory-only pending entry. Default Off preserves existing behavior. An enabled
 policy locks on cold start and after the selected departure threshold; changing
 policy requires successful system authentication. No account password makes the
 policy ineffective without discarding the saved preference. Availability is
-rechecked on activation. Authentication focus changes cannot start a new timer.
+rechecked on activation. Authentication focus changes use the bounded return rule below.
 
 The owner covers content before presentation, hides Mini and update popovers,
 and restores their prior state only after authentication. New windows inherit
@@ -49,7 +49,9 @@ The coverage domain is document content in `NSApplication.windows`, including
 unregistered native windows. AppKit status-bar, menu, and tooltip windows keep
 their system controls; they are not documents. A native-only lifecycle alert
 is individually exempted so Quit and its busy response never require unlocking.
-Lifecycle alerts run on the existing main dispatch queue outside tao callbacks.
+Lifecycle alerts attach an asynchronous NSAlert sheet on the existing main
+dispatch queue, then return immediately. Neither tao nor the dispatch queue runs
+a nested modal loop; logout replies and authentication callbacks remain live.
 Document titles are concealed along with their content and restore the latest
 requested title after unlock. Mini and the update popover restore only their
 latest desired visibility.
@@ -61,24 +63,51 @@ render cycle. Catalog parsing is cached and controls update only when their
 rendered state changes.
 
 A LocalAuthentication reply can arrive before AppKit restores activation. The
-owner retains that reply and its authentication epoch, requests activation, and
-finishes only when the app is active. Existing content stays protected through
-that transition. Sleep/session departures invalidate the retained reply as
-well as the LAContext. Restoring protected windows records a fresh Vault arrival
-so its existing two-second input guard applies even when LA did not change focus.
+pure Machine records the first resign time during evaluation. After the reply,
+it allows at most two seconds for foreground return. The LA callback timestamps
+the reply before dispatch; a delayed main queue cannot renew its lifetime. A timely return discards
+the candidate departure and finishes verification. At expiry, Unlock becomes
+Cancelled and Change becomes Failed; no stale Change authorizes persistence.
+The original candidate departure determines the existing policy deadline,
+including Immediate. Arrive checks expiry itself, even if no timer ran. Native
+callbacks feed events and drain resolved outcomes; they hold no separate reply
+or timing decision and never force activation on cancellation. Existing content
+stays protected through the transition. Sleep/session departures invalidate both
+the retained reply and LAContext. Restoring protected windows records a fresh
+Vault arrival so its existing two-second input guard applies even when LA did not change focus.
 
 Pending entries distinguish navigation, content for Vibey, and other actions;
-only the first two show the corresponding generic shared copy. The owner never
-puts the content itself on a lock screen. Pending publication is serialized with
+only the first two show the corresponding generic shared copy. Copy changes
+relayout the native controls immediately, including at unchanged window size.
+The owner never puts the content itself on a lock screen. Pending publication is serialized with
 completion; older Workbench navigation is replayed after unlock unless a newer
 locked intent superseded it. Deadline changes found by another entry are marked
 for the timer to synchronize, and Off does not dispatch a periodic UI tick.
 
 The first independent review examined `e899f374d2` and found the status/menu
 coverage and activation-return ordering defects, plus pending copy, repeated
-catalog parsing, modal callback placement, and Vault arrival issues. The above
-changes address that inventory; the final candidate needs a fresh exact-head
-review. This is the first findings-bearing review head, not a clean review.
+catalog parsing, modal callback placement, and Vault arrival issues. The second
+review examined `295e3fe69e`: ten old issues were resolved, but
+indefinite activation waiting repeated the LA timing root cause, and moving
+runModal to the dispatch queue repeated the serial-executor blocking root cause.
+The circuit breaker paused edits. On 2026-11-20 main approved a two-second return
+transition owned entirely by Machine and asynchronous sheets, plus pending-copy
+relayout, narrow DeepLinks pending cancellation preserving lifecycle tickets,
+and the standalone Vault probe's explicit no-lock adapter. Both findings-bearing
+heads count; a third same-family finding must stop and return to main. The next
+candidate needs exact-head review before a clean freeze can be claimed.
+
+## Current local evidence
+
+The consolidated second-review corrections pass 221 Desktop library tests
+(including 15 App Lock state-machine/copy cases), 246 runtime-host tests (three
+pre-existing ignored cases), 16 desktop-client e2e cases, and 28 focused Vitest
+cases. Both normal and e2e-feature all-target clippy pass with warnings denied;
+Rust formatting, the desktop-client TypeScript check and the release-guard
+script pass. The release guard compiles the normal release and proves that a
+release with authentication substitutes is rejected. Native light/dark captures
+were inspected. This evidence does not substitute for the pending exact-head
+review or the real-device acceptance below.
 
 ## Acceptance handoff
 

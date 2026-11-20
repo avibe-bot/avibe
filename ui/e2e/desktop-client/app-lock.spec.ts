@@ -8,8 +8,8 @@ import { APP_LOCK_FIXTURES, type AppLockStatus, type AppLockSetResult } from '..
 
 type Snapshot = {
   status: AppLockStatus; locked: boolean; verifying: boolean; authCalls: number;
-  pending: boolean; executed: string[]; mainTitle: string; floatingVisible: boolean[]; quitAlertVisible: boolean;
-  windows: { title: string; covered: boolean; hidden: boolean; contentCount: number; compact: boolean; firstResponderIsCover: boolean; button: string; pendingLabel: string }[];
+  persistedPolicy: string | null; pending: boolean; executed: string[]; mainTitle: string; floatingVisible: boolean[]; quitAlertVisible: boolean;
+  windows: { title: string; covered: boolean; hidden: boolean; contentCount: number; compact: boolean; firstResponderIsCover: boolean; button: string; pendingLabel: string; buttonTop: number; pendingBottom: number }[];
 };
 class NativePeer {
   process: ChildProcessWithoutNullStreams;
@@ -251,7 +251,10 @@ test('pending copy describes the entry and window titles stay private until unlo
     const state = await peer.send('entry', { kind, value: 'PRIVATE FIXTURE' });
     for (const window of state.windows) {
       if (!text) expect(window.pendingLabel).toBe('');
-      else expect(window.pendingLabel).toContain(text);
+      else {
+        expect(window.pendingLabel).toContain(text);
+        expect(window.buttonTop).toBeLessThan(window.pendingBottom);
+      }
     }
   }
   const changed = await peer.send('title', { value: 'PRIVATE NEW TITLE' });
@@ -266,4 +269,43 @@ test('real AppKit status item and open menu retain their native controls while l
   expect(result.trayVisible).toBe(true);
   expect(result.chrome.some((window) => /Menu|GlassEffect/.test(window.class))).toBe(true);
   expect(result.chrome.every((window) => !window.covered)).toBe(true);
+});
+
+
+test('expired success never persists a setting or unlocks on an hour-late arrival', async () => {
+  await peer.send('setPolicy', { policy: 'oneMinute' });
+  await peer.send('outcome', { value: null });
+  const setting = peer.send<AppLockSetResult>('setPolicy', { policy: 'off' });
+  await peer.send('leave', { time: 1 });
+  await peer.send('tick', { time: 62 });
+  await peer.send('outcome', { value: 'success' });
+  const expired = await peer.send('tick', { time: 64 });
+  expect(await setting).toMatchObject({ ok: false, reason: 'failed', status: { policy: 'oneMinute' } });
+  expect(expired.persistedPolicy).toBe('oneMinute');
+  expect(expired.locked).toBe(true);
+  await peer.send('outcome', { value: null });
+  const late = await peer.send('arrive', { time: 3600 });
+  expect(late.locked).toBe(true);
+  expect(late.verifying).toBe(false);
+  await peer.send('unlock');
+  await peer.send('leave', { time: 3601 });
+  await peer.send('outcome', { value: 'success' });
+  // No explicit tick: Arrive itself must reject the old success.
+  const later = await peer.send('arrive', { time: 7200 });
+  expect(later.locked).toBe(true);
+  expect(later.verifying).toBe(false);
+  expect(later.authCalls).toBe(3);
+});
+
+test('sleep invalidates a successful setting reply still waiting for activation', async () => {
+  await peer.send('setPolicy', { policy: 'immediately' });
+  await peer.send('outcome', { value: null });
+  const setting = peer.send<AppLockSetResult>('setPolicy', { policy: 'off' });
+  await peer.send('leave', { time: 1 });
+  await peer.send('outcome', { value: 'success' });
+  const sleeping = await peer.send('sleep', { time: 1.5 });
+  expect(await setting).toMatchObject({ ok: false, reason: 'cancelled' });
+  expect(sleeping.persistedPolicy).toBe('immediately');
+  await peer.send('outcome', { value: null });
+  expect((await peer.send('wake', { time: 10 })).locked).toBe(true);
 });

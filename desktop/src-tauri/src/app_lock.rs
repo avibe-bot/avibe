@@ -89,6 +89,15 @@ pub enum Authentication {
     Change(Policy),
 }
 
+const AUTH_RETURN_GRACE: f64 = 2.0;
+
+#[derive(Clone, Copy, Debug)]
+struct Completion {
+    epoch: u64,
+    purpose: Authentication,
+    outcome: Outcome,
+}
+
 /// The only clock input is continuous monotonic seconds (includes sleep).
 /// No system time, user data or native authentication is accessed by this type.
 pub struct Machine {
@@ -101,6 +110,9 @@ pub struct Machine {
     auto_prompted: bool,
     epoch: u64,
     blocked: u8,
+    candidate_leave: Option<f64>,
+    return_reply: Option<(Outcome, f64)>,
+    completion: Option<Completion>,
 }
 impl Machine {
     pub fn new(policy: Policy, availability: Availability) -> Self {
@@ -114,6 +126,9 @@ impl Machine {
             auto_prompted: false,
             epoch: 0,
             blocked: 0,
+            candidate_leave: None,
+            return_reply: None,
+            completion: None,
         }
     }
     pub fn effective(&self) -> bool {
@@ -145,17 +160,29 @@ impl Machine {
         }
     }
     pub fn leave(&mut self, now: f64) {
-        if self.authenticating.is_none() && self.effective() {
+        if self.authenticating.is_some() {
+            // LA owns focus temporarily. Preserve the first possible real
+            // departure so an unreturned verification cannot erase its time.
+            self.candidate_leave.get_or_insert(now);
+        } else if self.effective() {
             self.away_since.get_or_insert(now);
-            self.tick(now);
         }
+        self.tick(now);
     }
-    /// Sleep, screen lock and session switch are real departures even while
-    /// an authentication panel happens to be open. Invalidate its late reply.
+    /// Sleep, screen lock, session switch and lifecycle cancellation invalidate
+    /// both an in-flight evaluation and any reply waiting for foreground return.
     pub fn system_leave(&mut self, now: f64) {
         self.epoch = self.epoch.wrapping_add(1);
         self.authenticating = None;
-        self.leave(now);
+        self.return_reply = None;
+        self.completion = None;
+        let departure = self.candidate_leave.take().unwrap_or(now);
+        self.leave(departure);
+        self.tick(now);
+    }
+    fn cancel_for_lifecycle(&mut self, now: f64) {
+        self.system_leave(now);
+        self.auto_prompted = true;
     }
     pub fn block(&mut self, reason: u8, now: f64) {
         self.blocked |= reason;
@@ -168,7 +195,20 @@ impl Machine {
             self.arrive(now);
         }
     }
+    pub fn needs_tick(&self) -> bool {
+        self.return_reply.is_some() || (self.effective() && self.away_since.is_some()) || self.completion.is_some()
+    }
     pub fn tick(&mut self, now: f64) {
+        if self
+            .return_reply
+            .is_some_and(|(_, replied)| now - replied >= AUTH_RETURN_GRACE)
+        {
+            let outcome = match self.authenticating {
+                Some(Authentication::Change(_)) => Outcome::Failed,
+                _ => Outcome::Cancelled,
+            };
+            self.resolve(outcome, false);
+        }
         if self.effective()
             && self
                 .away_since
@@ -179,16 +219,29 @@ impl Machine {
         }
     }
     pub fn arrive(&mut self, now: f64) {
-        if self.authenticating.is_none() && self.blocked == 0 {
-            self.tick(now);
+        // Expiry wins even if the timer did not run while we were away.
+        self.tick(now);
+        if self.blocked == 0 {
+            if let Some((outcome, _)) = self.return_reply {
+                self.resolve(outcome, true);
+            }
+            self.candidate_leave = None;
             self.away_since = None;
         }
     }
     pub fn should_prompt(&self) -> bool {
-        self.blocked == 0 && self.locked && !self.auto_prompted && self.authenticating.is_none()
+        self.blocked == 0
+            && self.locked
+            && !self.auto_prompted
+            && self.authenticating.is_none()
+            && self.completion.is_none()
     }
     pub fn begin(&mut self, purpose: Authentication) -> Option<u64> {
-        if self.blocked != 0 || self.authenticating.is_some() || !self.availability.available {
+        if self.blocked != 0
+            || self.authenticating.is_some()
+            || self.completion.is_some()
+            || !self.availability.available
+        {
             return None;
         }
         if purpose == Authentication::Unlock && !self.locked {
@@ -196,33 +249,73 @@ impl Machine {
         }
         self.epoch = self.epoch.wrapping_add(1);
         self.authenticating = Some(purpose);
+        self.candidate_leave = None;
+        self.return_reply = None;
         self.auto_prompted = true;
         self.failed = false;
         Some(self.epoch)
     }
-    /// A policy is committed only after its caller has persisted it. Failed
-    /// writes are reported like failed verification, leaving the old policy.
-    pub fn complete(&mut self, epoch: u64, outcome: Outcome, active: bool, now: f64) -> bool {
-        if epoch != self.epoch {
+    /// Receive an LA result. The two-second return window belongs to this
+    /// machine, never to the native callback or a later activation request.
+    pub fn reply(&mut self, epoch: u64, outcome: Outcome, active: bool, replied_at: f64, now: f64) {
+        if epoch != self.epoch || self.authenticating.is_none() || self.return_reply.is_some() {
+            return;
+        }
+        self.return_reply = Some((outcome, replied_at));
+        self.candidate_leave.get_or_insert(replied_at);
+        // The callback timestamps the reply before dispatching it to main.
+        // Queue congestion must not renew an already expired verification.
+        self.tick(now);
+        if active && self.return_reply.is_some() {
+            self.resolve(outcome, true);
+        }
+    }
+    fn resolve(&mut self, outcome: Outcome, returned: bool) {
+        let Some(purpose) = self.authenticating.take() else {
+            return;
+        };
+        self.return_reply = None;
+        if returned {
+            self.away_since = None;
+            self.candidate_leave = None;
+        } else if let Some(since) = self.candidate_leave.take() {
+            self.away_since.get_or_insert(since);
+        }
+        self.completion = Some(Completion {
+            epoch: self.epoch,
+            purpose,
+            outcome,
+        });
+    }
+    /// Drain a resolved result before performing persistence. An expired Change
+    /// produces Failed here, so it cannot authorize a write in the native owner.
+    fn take_completion(&mut self) -> Option<Completion> {
+        self.completion.take()
+    }
+    fn commit(&mut self, completion: Completion, outcome: Outcome) -> bool {
+        if completion.epoch != self.epoch {
             return false;
         }
-        let Some(purpose) = self.authenticating.take() else {
-            return false;
-        };
         self.failed = outcome == Outcome::Failed;
+        // Suppress another automatic prompt, including when expiry just locked
+        // an Immediate policy. An explicit unlock button remains available.
+        self.auto_prompted = true;
         if outcome == Outcome::Success {
-            if let Authentication::Change(policy) = purpose {
+            if let Authentication::Change(policy) = completion.purpose {
                 self.policy = policy;
             }
             self.locked = false;
             self.away_since = None;
         }
-        // LA's own focus bounce is ignored while authenticating. Only its
-        // final real foreground state can start a new departure.
-        if !active {
-            self.leave(now);
-        }
         true
+    }
+    #[cfg(test)]
+    fn complete(&mut self, epoch: u64, outcome: Outcome, active: bool, now: f64) -> bool {
+        self.reply(epoch, outcome, active, now, now);
+        let Some(completion) = self.take_completion() else {
+            return false;
+        };
+        self.commit(completion, completion.outcome)
     }
 }
 
@@ -378,6 +471,122 @@ mod tests {
         assert!(m.locked);
         m.arrive(71.0);
         assert!(m.should_prompt());
+    }
+    fn finish(m: &mut Machine) -> Outcome {
+        let completion = m.take_completion().expect("settled result");
+        assert!(m.commit(completion, completion.outcome));
+        completion.outcome
+    }
+    #[test]
+    fn bounded_return_accepts_both_focus_orderings_without_relocking() {
+        for purpose in [Authentication::Unlock, Authentication::Change(Policy::Immediately)] {
+            for reply_first in [false, true] {
+                let mut m = if purpose == Authentication::Unlock {
+                    Machine::new(Policy::Immediately, available())
+                } else {
+                    unlocked(Policy::Off)
+                };
+                let epoch = m.begin(purpose).unwrap();
+                m.leave(10.0);
+                if reply_first {
+                    m.reply(epoch, Outcome::Success, false, 11.0, 11.0);
+                    assert!(m.take_completion().is_none());
+                    m.arrive(12.99);
+                } else {
+                    m.arrive(11.0);
+                    m.reply(epoch, Outcome::Success, true, 12.0, 12.0);
+                }
+                assert_eq!(finish(&mut m), Outcome::Success);
+                m.tick(100.0);
+                assert!(!m.locked);
+                assert_eq!(m.policy, Policy::Immediately);
+                m.leave(101.0);
+                assert!(m.locked);
+            }
+        }
+    }
+    #[test]
+    fn stale_unlock_never_survives_an_arrival_even_without_timer_delivery() {
+        for arrival in [12.0, 3600.0] {
+            let mut m = Machine::new(Policy::Immediately, available());
+            let epoch = m.begin(Authentication::Unlock).unwrap();
+            m.leave(1.0);
+            m.reply(epoch, Outcome::Success, false, 10.0, 10.0);
+            m.arrive(arrival);
+            assert_eq!(finish(&mut m), Outcome::Cancelled);
+            assert!(m.locked);
+            assert!(!m.should_prompt());
+            m.arrive(7200.0);
+            assert!(m.locked);
+            assert!(m.begin(Authentication::Unlock).is_some());
+        }
+    }
+    #[test]
+    fn expired_change_uses_original_departure_and_never_authorizes_persistence() {
+        for (policy, delay) in [
+            (Policy::Immediately, 0.0_f64),
+            (Policy::OneMinute, 60.0),
+            (Policy::FiveMinutes, 300.0),
+        ] {
+            for reply_at in [2.0, 62.0] {
+                let mut m = unlocked(policy);
+                let epoch = m.begin(Authentication::Change(Policy::Off)).unwrap();
+                m.leave(1.0);
+                m.leave(2.0);
+                m.reply(epoch, Outcome::Success, false, reply_at, reply_at);
+                m.tick(reply_at + AUTH_RETURN_GRACE);
+                assert_eq!(finish(&mut m), Outcome::Failed);
+                assert_eq!(m.policy, policy);
+                assert_eq!(m.locked, reply_at + AUTH_RETURN_GRACE - 1.0 >= delay);
+                m.tick(1.0 + delay.max(65.0));
+                assert!(m.locked);
+                m.arrive(3600.0);
+                assert!(m.locked);
+            }
+        }
+    }
+    #[test]
+    fn system_departures_discard_both_inflight_and_retained_results() {
+        for reason in [1, 8] {
+            for replied in [false, true] {
+                let mut m = unlocked(Policy::Immediately);
+                let epoch = m.begin(Authentication::Change(Policy::Off)).unwrap();
+                m.leave(1.0);
+                if replied {
+                    m.reply(epoch, Outcome::Success, false, 2.0, 2.0);
+                }
+                m.block(reason, 2.5);
+                m.reply(epoch, Outcome::Success, true, 3.0, 3.0);
+                m.unblock(reason, true, 4.0);
+                assert!(m.take_completion().is_none());
+                assert!(m.locked);
+                assert_eq!(m.policy, Policy::Immediately);
+            }
+        }
+    }
+    #[test]
+    fn dispatch_delay_cannot_renew_a_successful_reply() {
+        for purpose in [Authentication::Unlock, Authentication::Change(Policy::Off)] {
+            let mut m = Machine::new(Policy::Immediately, available());
+            let epoch = m.begin(purpose).unwrap();
+            m.leave(1.0);
+            m.arrive(2.0);
+            m.reply(epoch, Outcome::Success, true, 2.0, 60.0);
+            assert_ne!(finish(&mut m), Outcome::Success);
+            assert!(m.locked);
+            assert_eq!(m.policy, Policy::Immediately);
+        }
+    }
+    #[test]
+    fn cancelled_inactive_reply_expires_without_reopening_authentication() {
+        let mut m = Machine::new(Policy::Immediately, available());
+        let epoch = m.begin(Authentication::Unlock).unwrap();
+        m.reply(epoch, Outcome::Cancelled, false, 1.0, 1.0);
+        m.tick(3.0);
+        assert_eq!(finish(&mut m), Outcome::Cancelled);
+        m.arrive(100.0);
+        assert!(!m.should_prompt());
+        assert!(m.locked);
     }
     #[test]
     fn native_copy_is_present_in_both_shared_catalogs() {
