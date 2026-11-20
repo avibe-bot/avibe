@@ -188,6 +188,7 @@ const desktopState = (generation: number, account: DesktopClientState['account']
   },
   consent: null,
   remote_auxiliary: 'local',
+  instance_update: null,
 });
 
 const signedOutAccount: DesktopClientState['account'] = {

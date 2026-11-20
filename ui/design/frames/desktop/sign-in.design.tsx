@@ -29,6 +29,7 @@ const state = (account: DesktopClientState['account']): DesktopClientState => ({
   desktop: { version: '3.2.7', update: { phase: 'idle', latest: null, channel: 'stable', skippedVersion: null, interactive: false } },
   consent: null,
   remote_auxiliary: 'local',
+  instance_update: null,
 });
 
 const signedOut = state({ status: 'signed_out', identity: null, email: null, gate: null, methods: [] });

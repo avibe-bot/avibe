@@ -21,6 +21,7 @@ const signedOut: DesktopClientState = {
   desktop: { version: '3.2.7', update: { phase: 'idle', latest: null, channel: 'stable', skippedVersion: null, interactive: false } },
   consent: null,
   remote_auxiliary: 'local',
+  instance_update: null,
 };
 
 afterEach(() => cleanup());
