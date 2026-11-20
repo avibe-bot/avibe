@@ -28,8 +28,9 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { BackToDevices } from './DevicesPageView';
 import { DOMAIN_SUFFIX } from './rules';
-import { deviceTime, lowerFirst } from './format';
+import { timeParts } from './format';
 import {
   TRIAL_WINDOW_SECONDS,
   type ConnectionChange,
@@ -54,6 +55,8 @@ export type ConnectionPageActions = {
   onRenameContinue?: () => void;
   onRenameConfirm?: () => void;
   onRenameCancel?: () => void;
+  /** Back to the Devices page. */
+  onBack?: () => void;
 };
 
 export type ConnectionPageViewProps = ConnectionPageActions & {
@@ -62,7 +65,8 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   tunnel: TunnelState;
   direct: DirectState;
   relay: boolean;
-  /** The relay's switch; when false the row shows only its state. */
+  /** The relay's switch, shown only when the container turns it on; otherwise the row shows its
+   *  state only. */
   relayEditable?: boolean;
   /** The Avibe App's own path, as it reports it; null before it has. */
   path?: DeviceUsing | null;
@@ -113,6 +117,12 @@ const profileKeys = {
   balanced: 'remoteAccess.profileBalanced',
   low_latency: 'remoteAccess.profileLowLatency',
 } as const satisfies Record<RemoteAccessSettings['optimization_profile'], TranslationKey>;
+
+const revertedKeys = {
+  today: 'devices.connection.choiceRevertedToday',
+  yesterday: 'devices.connection.choiceRevertedYesterday',
+  other: 'devices.connection.choiceRevertedDated',
+} as const satisfies Record<ReturnType<typeof timeParts>['day'], TranslationKey>;
 
 const protocolName = (protocol: 'quic' | 'http2') => (protocol === 'quic' ? 'QUIC' : 'HTTP/2');
 
@@ -223,7 +233,10 @@ function PreferenceGroup({ path, preference, onChange }: {
       <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted">{t('devices.connection.choiceHint')}</p>
       {preference.reverted && (
         <p role="status" className="border-t border-border bg-gold/10 px-5 py-2.5 text-[11px] leading-relaxed text-foreground">
-          {t('devices.connection.choiceReverted', { time: lowerFirst(deviceTime(preference.reverted.at, t, i18n.language, 'stamp')) })}
+          {(() => {
+            const { day, date, time } = timeParts(preference.reverted.at, i18n.language);
+            return t(revertedKeys[day], { date, time });
+          })()}
         </p>
       )}
     </SettingsPanel>
@@ -298,7 +311,7 @@ function RenameDialogs({ host, rename, actions }: { host: string; rename: Rename
 }
 
 export function ConnectionPageView({
-  viewer, tunnel, direct, relay, relayEditable = true, path, preference, trial, reverted, host, rename, busy, ...actions
+  viewer, tunnel, direct, relay, relayEditable = false, path, preference, trial, reverted, host, rename, busy, ...actions
 }: ConnectionPageViewProps) {
   const { t } = useTranslation();
   const remote = viewer !== 'local';
@@ -319,8 +332,8 @@ export function ConnectionPageView({
       title={t('devices.connection.title')}
       subtitle={t('devices.connection.subtitle')}
       activeTab="remote-access"
-      breadcrumb={<span>{t('devices.connection.breadcrumb')}</span>}
     >
+      <BackToDevices onBack={actions.onBack} />
       {rename?.step === 'done' && host && (
         <div role="status" className="rounded-xl border border-mint/40 bg-mint-soft px-5 py-3 text-[12px] leading-relaxed text-foreground">
           {t('devices.connection.renamed', { host, from: rename.from })}
@@ -343,7 +356,8 @@ export function ConnectionPageView({
         <PathRow
           name={t('remoteAccess.direct.usingTunnel')}
           detail={t('devices.connection.tunnelDetail')}
-          state={using('tunnel') || viewer !== 'app' ? inUse : available}
+          // A browser elsewhere comes in through the tunnel; the computer itself does not.
+          state={viewer === 'browser' || using('tunnel') ? inUse : available}
           ms={tunnel.ms}
         />
         <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-3">

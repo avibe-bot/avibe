@@ -19,7 +19,8 @@ const tunnel: ConnectionPageViewProps['tunnel'] = {
   settings: { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: '4', edge_bind_address: '' },
   interfaces: [{ id: 'en0', name: 'Wi-Fi', address: '192.168.1.23', ip_version: '4' }],
 };
-const base: ConnectionPageViewProps = { viewer: 'browser', tunnel, direct: 'ready', relay: true };
+// The relay's switch is shown: whether it stays a switch is pending with Product, and the container decides.
+const base: ConnectionPageViewProps = { viewer: 'browser', tunnel, direct: 'ready', relay: true, relayEditable: true };
 const host = 'max-app.avibe.bot';
 /** How long a voided name is held before someone else may claim it (owner, 2026-11-20). */
 const voidDays = 7;
@@ -49,6 +50,7 @@ const app: ConnectionPageViewProps = {
 
 const designFrames = frames([
   frame('browser', '连接方式 · 从别的电脑的浏览器看：这个 Avibe 提供的路径、隧道设置', WIDE, base, ['light', 'dark']),
+  frame('browser-phone', '连接方式 · 375 宽的浏览器', { width: 375, height: 2000 }, base),
   frame('app', '连接方式 · 在 iPhone App 里：多一组「这台设备」（自动 / 仅 Cloudflare 隧道），正在走打洞直连', APP, app),
   frame('app-reverted', '连接方式 · App 选了「仅 Cloudflare 隧道」但连不上，已自己改回「自动」：一行说明', APP,
     { ...app, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: { at: new Date(DESIGN_NOW - 25 * 60_000).toISOString(), reason: 'unreachable' } } }),

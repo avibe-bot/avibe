@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '../../i18n';
 import { DevicesPageView } from './DevicesPageView';
-import { TESTFLIGHT_INVITE_URL, signOutNeedsConfirm, turnOffNeedsConfirm } from './rules';
+import {
+  TESTFLIGHT_INVITE_URL, capabilityControl, capabilityOffNeedsConfirm, signOutNeedsConfirm, signOutOthersNeedsConfirm,
+  turnOffNeedsConfirm,
+} from './rules';
 import type { Device, Reach } from './types';
 
 // ui/design: settings/devices/*
@@ -14,15 +17,15 @@ const host = 'max-app.avibe.bot';
 const on: Reach = { state: 'on', host, account, tunnel: 'good', ms: 120 };
 
 const macbook: Device = {
-  id: 'host', kind: 'host', name: 'MacBook', client: { kind: 'runtime', version: '3.2.8', platform: 'macOS' }, online: {},
+  id: 'host', group: 'mine', kind: 'host', name: 'MacBook', client: { kind: 'runtime', version: '3.2.8', platform: 'macOS' }, online: {},
   capabilities: [{ kind: 'computerUse', on: true }, { kind: 'notifications', on: true }],
 };
 const iphone: Device = {
-  id: 'iphone', kind: 'iphone', name: 'iPhone', client: { kind: 'app' }, online: { path: 'punched', ms: 38 },
+  id: 'iphone', group: 'mine', kind: 'iphone', name: 'iPhone', client: { kind: 'app' }, online: { path: 'punched', ms: 38 },
   capabilities: [{ kind: 'notifications', on: true }, { kind: 'health', on: true, data: ['steps'] }],
 };
-const chrome: Device = { id: 'chrome', kind: 'browser', name: 'Chrome', client: { kind: 'browser' }, capabilities: [] };
-const sara: Device = { ...chrome, id: 'sara', name: 'Sara Chrome', person: 'sara@example.test' };
+const chrome: Device = { id: 'chrome', group: 'mine', kind: 'browser', name: 'Chrome', client: { kind: 'browser' }, capabilities: [] };
+const sara: Device = { ...chrome, id: 'sara', group: 'others', name: 'Sara Chrome', person: 'sara@example.test' };
 const self = (device: Device): Device => ({ ...device, self: true });
 
 beforeEach(async () => {
@@ -35,19 +38,28 @@ describe('DevicesPageView', () => {
     expect(signOutNeedsConfirm(iphone)).toBe(true);
     expect(signOutNeedsConfirm(chrome)).toBe(false);
     expect(signOutNeedsConfirm({ ...iphone, capabilities: [{ kind: 'health', on: false, data: [] }] })).toBe(false);
-    // Turning remote access off at the computer itself locks nobody out; from another device it does.
+    // Health switched off keeps what it synced: signing out still deletes it.
+    expect(signOutNeedsConfirm({ ...iphone, capabilities: [{ kind: 'health', on: false, data: ['steps'], syncedAt: new Date().toISOString() }] })).toBe(true);
+    // Turning remote access off at the computer itself locks nobody out; from another device it does,
+    // and so it asks while this device is not known.
     expect(turnOffNeedsConfirm([self(macbook), iphone])).toBe(false);
     expect(turnOffNeedsConfirm([macbook, self(iphone)])).toBe(true);
+    expect(turnOffNeedsConfirm([macbook, iphone])).toBe(true);
+    // Health off deletes what it synced; signing out every other device always asks.
+    expect(capabilityOffNeedsConfirm({ kind: 'health', on: true, data: ['steps'] })).toBe(true);
+    expect(capabilityOffNeedsConfirm({ kind: 'notifications', on: true })).toBe(false);
+    expect(signOutOthersNeedsConfirm()).toBe(true);
   });
 
   it('shows a member only their own devices, with no instance controls', () => {
-    render(<DevicesPageView reach={on} viewer="member" ownerEmail={account} devices={[self(chrome), sara]}
+    render(<DevicesPageView reach={on} viewer="member" ownerEmail={account} devices={[self(chrome)]}
       activity={[{ id: 'a', at: new Date().toISOString(), event: { kind: 'directOn' } }]} />);
     expect(screen.getByText(`你登录了这个 Avibe 的设备。这个 Avibe 由 ${account} 管理。`)).toBeTruthy();
     expect(screen.queryByRole('switch', { name: '远程访问' })).toBeNull();
     expect(screen.queryByText('其他人的设备')).toBeNull();
     expect(screen.queryByText('最近活动')).toBeNull();
-    expect(screen.queryByRole('button', { name: '添加设备' })).toBeNull();
+    // Adding a device of their own is theirs too.
+    expect(screen.getByRole('button', { name: '添加设备' })).toBeTruthy();
   });
 
   it('turns on from a plain browser in one action, and says when avibe.bot cannot be reached', () => {
@@ -144,7 +156,7 @@ describe('DevicesPageView', () => {
     const remoteHost: Device = { ...macbook, capabilities: [{ kind: 'computerUse', on: true, fixed: true }, { kind: 'notifications', on: true }] };
     render(<DevicesPageView reach={on} devices={[remoteHost, self(iphone)]} detail="host" onCapabilityChange={onCapabilityChange} />);
     const dialog = screen.getByRole('dialog');
-    expect((within(dialog).getByRole('switch', { name: '电脑操作' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(dialog).queryByRole('switch', { name: '电脑操作' })).toBeNull();
     expect(within(dialog).getByText('已就绪。在那台电脑的 Avibe 里开关。')).toBeTruthy();
     fireEvent.click(within(dialog).getByRole('switch', { name: '通知' }));
     expect(onCapabilityChange).toHaveBeenCalledWith('host', 'notifications', false);
@@ -178,5 +190,89 @@ describe('DevicesPageView', () => {
     await i18n.changeLanguage('en');
     rerender(<DevicesPageView reach={on} devices={[self(macbook), iphone]} activity={[item]} />);
     expect(screen.getByText('An Agent read 1 day of steps and sleep')).toBeTruthy();
+  });
+
+  it('shows someone else\'s device functions without letting the owner change them', () => {
+    const saraPhone: Device = { ...iphone, id: 'sara-phone', group: 'others', person: 'sara@example.test' };
+    render(<DevicesPageView reach={on} devices={[self(macbook), saraPhone]} detail="sara-phone" />);
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).queryAllByRole('switch')).toHaveLength(0);
+    expect(within(dialog).getAllByText('已开启')).toHaveLength(2);
+  });
+
+  it('offers Health only as a way to turn it off, and lists it as off once it is', () => {
+    expect(capabilityControl(iphone, iphone.capabilities[1])).toBe('switch');
+    const healthOff: Device = { ...iphone, capabilities: [{ kind: 'health', on: false, data: ['steps'], syncedAt: new Date().toISOString() }] };
+    expect(capabilityControl(healthOff, healthOff.capabilities[0])).toBe('state');
+    const onCapabilityChange = vi.fn();
+    const { rerender } = render(<DevicesPageView reach={on} devices={[self(macbook), iphone]} detail="iphone" onCapabilityChange={onCapabilityChange} />);
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('switch', { name: '健康' }));
+    expect(onCapabilityChange).toHaveBeenCalledWith('iphone', 'health', false);
+    rerender(<DevicesPageView reach={on} devices={[self(macbook), iphone]} detail="iphone" confirm="health-off" />);
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('关闭健康？')).toBeTruthy();
+    expect(dialog.textContent).toContain('已同步的健康数据会删除。要再用，在 iPhone 上重新连接健康。');
+    // The action and the dialog's close button share the name 关闭 in zh; the action is the one with text.
+    expect(within(dialog).getAllByRole('button', { name: '关闭' }).filter((each) => !each.querySelector('svg'))).toHaveLength(1);
+    rerender(<DevicesPageView reach={on} devices={[self(macbook), healthOff]} detail="iphone" />);
+    expect(within(screen.getByRole('dialog')).queryByRole('switch', { name: '健康' })).toBeNull();
+  });
+
+  it('names no one it does not know when turning off, and counts everyone locked out', () => {
+    const { rerender } = render(<DevicesPageView reach={on} devices={[{ ...macbook, name: '' }, iphone, sara]} confirm="turn-off" />);
+    let text = screen.getByRole('dialog').textContent ?? '';
+    expect(text).not.toContain('你正在用');
+    expect(text).toContain('关闭后这台设备和其他 2 台都打不开，只能回到运行 Avibe 的电脑上重新开启。域名会为你保留。');
+    rerender(<DevicesPageView reach={on} devices={[macbook, self(iphone), sara, { ...chrome, id: 'push', group: 'unattributed' }]} confirm="turn-off" />);
+    text = screen.getByRole('dialog').textContent ?? '';
+    expect(text).toContain('你正在用 iPhone 远程打开它。关闭后这台设备和其他 1 台都打不开，只能回到 MacBook 上重新开启。');
+  });
+
+  it('never counts an unattributed push row as one of mine', () => {
+    const push: Device = { ...chrome, id: 'push', name: 'Unattributed', group: 'unattributed' };
+    render(<DevicesPageView reach={on} devices={[self(macbook), iphone, push]} />);
+    expect(screen.queryByText('Unattributed')).toBeNull();
+    // Only one other device of mine is signed in: no 「退出其他所有设备」.
+    expect(screen.queryByRole('button', { name: '退出其他所有设备' })).toBeNull();
+  });
+
+  it('shows the five latest entries on the page and the whole list newest first, or says there is none', () => {
+    const now = Date.now();
+    const entries = Array.from({ length: 7 }, (_, index) => ({
+      id: `e${index}`, at: new Date(now - (7 - index) * 60_000).toISOString(), event: { kind: 'signedIn', device: `D${index}` },
+    } as const));
+    const onBack = vi.fn();
+    const { rerender } = render(<DevicesPageView reach={on} devices={[self(macbook), iphone]} activity={entries} />);
+    expect(screen.getAllByText(/^D\d 登录$/).map((each) => each.textContent)).toEqual(['D6 登录', 'D5 登录', 'D4 登录', 'D3 登录', 'D2 登录']);
+    rerender(<DevicesPageView reach={on} devices={[self(macbook), iphone]} activity={entries} view="activity" onBack={onBack} />);
+    expect(screen.getAllByText(/^D\d 登录$/)).toHaveLength(7);
+    expect(screen.getAllByText(/^D\d 登录$/)[0].textContent).toBe('D6 登录');
+    fireEvent.click(screen.getByRole('button', { name: '返回设备' }));
+    expect(onBack).toHaveBeenCalledTimes(1);
+    rerender(<DevicesPageView reach={on} devices={[self(macbook)]} activity={[]} view="activity" />);
+    expect(screen.getByText('还没有活动。')).toBeTruthy();
+  });
+
+  it('says when there are no devices, and still offers to add one', () => {
+    render(<DevicesPageView reach={on} viewer="member" ownerEmail={account} viewerAccount="sara@example.test" devices={[]} />);
+    expect(screen.getByText('还没有设备。')).toBeTruthy();
+    expect(screen.getByText('打开 App，用 sara@example.test 登录。')).toBeTruthy();
+  });
+
+  it('gives the code\'s address as a link to copy, for a phone that cannot scan its own screen', () => {
+    const onCopyLink = vi.fn();
+    render(<DevicesPageView reach={on} devices={[self(macbook)]} onCopyLink={onCopyLink} />);
+    fireEvent.click(screen.getByRole('button', { name: '复制链接' }));
+    expect(onCopyLink).toHaveBeenCalledWith(TESTFLIGHT_INVITE_URL);
+  });
+
+  it('says a sync time in English with the sentence\'s own template', async () => {
+    await i18n.changeLanguage('en');
+    const old = new Date(Date.now() - 20 * 86_400_000);
+    old.setHours(8, 12, 0, 0);
+    const synced: Device = { ...iphone, capabilities: [{ kind: 'health', on: true, data: ['steps', 'sleep'], syncedAt: old.toISOString() }] };
+    render(<DevicesPageView reach={on} devices={[self(macbook), synced]} detail="iphone" />);
+    const date = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(old);
+    expect(screen.getByText(`Steps and sleep · synced ${date} at 08:12`)).toBeTruthy();
   });
 });

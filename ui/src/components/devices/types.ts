@@ -27,8 +27,13 @@ export type CapabilityKind = DeviceCapability['kind'];
 
 export type DeviceConnection = { path?: PathKind; family?: IpFamily; ms?: number };
 
+/** Which list a device belongs to, as `/api/devices` groups it: the viewer's own devices, other
+ *  people's (owner only), and push rows whose origin cannot be shown (owner only). */
+export type DeviceGroup = 'mine' | 'others' | 'unattributed';
+
 export type Device = {
   id: string;
+  group: DeviceGroup;
   kind: DeviceKind;
   /** The device's own name, as reported. */
   name: string;
@@ -41,7 +46,7 @@ export type Device = {
   lastActiveAt?: string;
   signedInAt?: string;
   capabilities: DeviceCapability[];
-  /** Someone else's device on a shared instance: their account. */
+  /** Someone else's device (`group: 'others'`): their account, as the row names it. */
   person?: string;
   recent?: DeviceActivity[];
 };
@@ -81,7 +86,8 @@ export type Reach =
 export type NameState = 'free' | 'taken';
 
 export type AddKind = 'iphone' | 'android' | 'computer';
-export type DevicesConfirm = 'remove' | 'turn-off' | 'remove-others';
+/** `remove`: sign the open device out. `health-off`: turn the open device's Health off. */
+export type DevicesConfirm = 'remove' | 'health-off' | 'turn-off' | 'remove-others';
 
 /** The instance's direct state, as `vibe remote direct status` reports it. */
 export type DirectState = 'ready' | 'off' | 'awaiting-permission' | 'denied' | 'awaiting-certificate' | 'not-running';

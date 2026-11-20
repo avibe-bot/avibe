@@ -5,7 +5,7 @@
 // A view: props only. The container reads the APIs, maps them onto `./types`, and passes handlers.
 import type { ReactNode } from 'react';
 import {
-  AlarmClock, Bell, ChevronRight, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LogOut, Monitor,
+  AlarmClock, ArrowLeft, Bell, ChevronRight, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LogOut, Monitor,
   MonitorCog, Plus, RefreshCw, Smartphone,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -22,8 +22,11 @@ import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { SegmentedRadio } from '../ui/segmented';
-import { clientText, connectionText, deviceTime, healthText, joinParts, lowerFirst, upperFirst } from './format';
-import { DOMAIN_SUFFIX, TESTFLIGHT_INVITE_URL, activityText, othersSignedIn, signOutNeedsConfirm } from './rules';
+import { clientText, connectionText, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
+import {
+  DOMAIN_SUFFIX, RECENT_ACTIVITY_LIMIT, instanceUrl, TESTFLIGHT_INVITE_URL, activityText, capabilityControl, lockedOut, newestFirst,
+  othersSignedIn, signOutNeedsConfirm,
+} from './rules';
 import type {
   AddKind, CapabilityKind, Device, DeviceActivity, DeviceCapability, DevicesConfirm, NameState, Reach,
 } from './types';
@@ -61,6 +64,10 @@ export type DevicesPageActions = {
   onAddKindChange?: (kind: AddKind) => void;
   onCloseAdd?: () => void;
   onOpenDownloads?: () => void;
+  /** Copy the add-a-device link (the same address as its code). */
+  onCopyLink?: (url: string) => void;
+  /** Back from the activity list to the page. */
+  onBack?: () => void;
 };
 
 export type DevicesPageViewProps = DevicesPageActions & {
@@ -84,6 +91,27 @@ export type DevicesPageViewProps = DevicesPageActions & {
 };
 
 const noop = () => undefined;
+
+const healthSyncedKeys = {
+  today: 'devices.capability.healthSyncedToday',
+  yesterday: 'devices.capability.healthSyncedYesterday',
+  other: 'devices.capability.healthSyncedDated',
+} as const satisfies Record<ReturnType<typeof timeParts>['day'], TranslationKey>;
+
+/** Back to the Devices page, as other Settings sub-pages draw it; shown at every width. */
+export function BackToDevices({ onBack }: { onBack?: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onBack}
+      className="inline-flex w-fit items-center gap-1.5 font-mono text-[11px] text-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <ArrowLeft className="size-3" />
+      {t('devices.backToDevices')}
+    </button>
+  );
+}
 
 /** The account, drawn as the App's own account row draws it: the initial and the email. */
 function Account({ email, note }: { email: string; note?: string }) {
@@ -218,27 +246,28 @@ function ReachCard({ reach, actions }: { reach: Reach; actions: DevicesPageActio
           ]);
   return (
     <SettingsPanel>
-      <div className="flex items-center gap-3.5 px-5 py-4">
-        <IconTile tone={on && !down ? 'on' : 'plain'}><Globe size={18} /></IconTile>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-1">
-            <span className={`truncate font-mono text-[14px] font-semibold ${reach.state === 'paused' ? 'text-muted' : 'text-foreground'}`}>{reach.host}</span>
-            {on && (
-              <>
-                <Button variant="ghost" size="2xs" aria-label={t('devices.reach.copyAddress')} onClick={actions.onCopyAddress}><Copy /></Button>
-                <Button variant="ghost" size="2xs" aria-label={t('devices.reach.openAddress')} onClick={actions.onOpenAddress}><ExternalLink /></Button>
-              </>
-            )}
-          </div>
-          <div className="mt-0.5 flex min-w-0 flex-col gap-x-1.5 text-[11px] leading-relaxed text-muted md:flex-row md:items-center">
-            <span className="truncate">{reach.account}</span>
-            <span aria-hidden className="max-md:hidden">{t('devices.dot')}</span>
-            <span className={down ? 'text-gold-ink' : undefined}>{status}</span>
+      {/* On a narrow screen the whole domain comes first; its buttons and the switch take the next line. */}
+      <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:gap-3.5">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
+          <IconTile tone={on && !down ? 'on' : 'plain'}><Globe size={18} /></IconTile>
+          <div className="min-w-0 flex-1">
+            <div className={`break-all font-mono text-[14px] font-semibold md:truncate ${reach.state === 'paused' ? 'text-muted' : 'text-foreground'}`}>{reach.host}</div>
+            <div className="mt-0.5 flex min-w-0 flex-col gap-x-1.5 text-[11px] leading-relaxed text-muted md:flex-row md:items-center">
+              <span className="truncate">{reach.account}</span>
+              <span aria-hidden className="max-md:hidden">{t('devices.dot')}</span>
+              <span className={down ? 'text-gold-ink' : undefined}>{status}</span>
+            </div>
           </div>
         </div>
-        {down && <Button variant="secondary" size="xs" onClick={actions.onRetry}><RefreshCw />{t('common.retry')}</Button>}
-        <div className="flex shrink-0 items-center gap-2.5">
-          <span className="hidden text-[12px] text-muted md:inline">{t('devices.reach.title')}</span>
+        <div className="flex items-center gap-1.5 max-md:pl-[50px] md:shrink-0">
+          {on && (
+            <>
+              <Button variant="ghost" size="2xs" aria-label={t('devices.reach.copyAddress')} onClick={actions.onCopyAddress}><Copy /></Button>
+              <Button variant="ghost" size="2xs" aria-label={t('devices.reach.openAddress')} onClick={actions.onOpenAddress}><ExternalLink /></Button>
+            </>
+          )}
+          {down && <Button variant="secondary" size="xs" onClick={actions.onRetry}><RefreshCw />{t('common.retry')}</Button>}
+          <span className="ml-auto pl-2 text-[12px] text-muted md:ml-1">{t('devices.reach.title')}</span>
           <ToggleSwitch
             enabled={on || starting}
             disabled={starting}
@@ -267,9 +296,9 @@ function capabilityDetail(t: TFunction, language: string, device: Device, capabi
       return t(device.kind === 'host' ? 'devices.capability.notificationsHost' : 'devices.capability.notificationsPush');
     case 'health': {
       const data = upperFirst(healthText(t, language, capability.data));
-      return capability.syncedAt
-        ? t('devices.capability.healthSynced', { data, when: lowerFirst(deviceTime(capability.syncedAt, t, language, 'stamp')) })
-        : data;
+      if (!capability.syncedAt) return data;
+      const { day, date, time } = timeParts(capability.syncedAt, language);
+      return t(healthSyncedKeys[day], { data, date, time });
     }
     case 'schedule':
       return t('devices.capability.scheduleDetail');
@@ -369,20 +398,19 @@ function DeviceDetail({ device, account, member, actions }: {
             <div className="px-6 pb-1 pt-3.5 text-[11px] font-semibold text-muted max-md:px-5">{t('devices.detail.functions')}</div>
             {device.capabilities.map((each) => {
               const CapabilityIcon = capabilityIcon[each.kind];
-              const fixed = each.kind === 'computerUse' && each.fixed;
+              const name = t(capabilityKeys[each.kind]);
               return (
                 <div key={each.kind} className="flex items-center gap-3 px-6 py-2.5 max-md:px-5">
                   <CapabilityIcon className="size-4 shrink-0 text-muted" />
                   <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-medium text-foreground">{t(capabilityKeys[each.kind])}</div>
+                    <div className="text-[13px] font-medium text-foreground">{name}</div>
                     <div className="text-[11px] leading-relaxed text-muted">{capabilityDetail(t, i18n.language, device, each)}</div>
                   </div>
-                  <ToggleSwitch
-                    enabled={each.on}
-                    disabled={Boolean(fixed)}
-                    onClick={() => actions.onCapabilityChange?.(device.id, each.kind, !each.on)}
-                    label={t(capabilityKeys[each.kind])}
-                  />
+                  {capabilityControl(device, each) === 'switch' ? (
+                    <ToggleSwitch enabled={each.on} onClick={() => actions.onCapabilityChange?.(device.id, each.kind, !each.on)} label={name} />
+                  ) : (
+                    <span className="shrink-0 text-[12px] text-muted">{t(each.on ? 'devices.capability.stateOn' : 'devices.capability.stateOff')}</span>
+                  )}
                 </div>
               );
             })}
@@ -403,8 +431,8 @@ function DeviceDetail({ device, account, member, actions }: {
         {device.kind !== 'host' && (
           <div className="flex flex-col gap-2 border-t border-border px-6 py-4 max-md:px-5 md:flex-row md:items-center md:justify-between">
             <p className="text-[11px] leading-relaxed text-muted md:max-w-[250px]">
-              {device.person
-                ? t('devices.detail.signOutPerson', { person: device.person })
+              {device.group === 'others'
+                ? t('devices.detail.signOutPerson', { person: device.person ?? '' })
                 : t(member ? 'devices.detail.signOutMember' : 'devices.detail.signOutOwn', { account })}
             </p>
             <Button variant="destructive-soft" size="sm" className="shrink-0" onClick={() => actions.onSignOutDevice?.(device.id)}>
@@ -436,7 +464,7 @@ function AddDevice({ kind, host, account, inline = false, actions }: {
     android: t('devices.add.androidNote'),
     computer: t('devices.add.computerNote'),
   };
-  const code = kind === 'iphone' ? TESTFLIGHT_INVITE_URL : `https://${host}`;
+  const code = kind === 'iphone' ? TESTFLIGHT_INVITE_URL : instanceUrl(host);
   const body = (
     <div className={inline ? 'px-5 pb-5 pt-1' : ''}>
       <SegmentedRadio
@@ -458,8 +486,15 @@ function AddDevice({ kind, host, account, inline = false, actions }: {
           </div>
         ) : (
           // The code stays dark on light in both themes, so every camera reads it.
-          <div className="shrink-0 self-start rounded-lg border border-edge bg-white p-2.5" data-testid="add-device-code" data-code={code}>
-            <QRCodeSVG value={code} size={112} />
+          <div className="flex shrink-0 flex-col gap-1.5 md:w-[134px]">
+            <div className="self-start rounded-lg border border-edge bg-white p-2.5" data-testid="add-device-code" data-code={code}>
+              <QRCodeSVG value={code} size={112} />
+            </div>
+            {/* A phone cannot scan its own screen: the same address, to copy. */}
+            <div className="flex min-w-0 items-center gap-1">
+              <span className="min-w-0 truncate font-mono text-[10px] text-muted" title={code}>{code}</span>
+              <Button variant="ghost" size="2xs" aria-label={t('devices.add.copyLink')} onClick={() => actions.onCopyLink?.(code)}><Copy /></Button>
+            </div>
           </div>
         )}
         <div className="min-w-0 flex-1">
@@ -506,24 +541,25 @@ export function DevicesPageView({
   reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
-  const mine = devices.filter((each) => !each.person);
-  const others = devices.filter((each) => each.person);
+  // Each device says which list it belongs to; push rows whose origin cannot be shown
+  // (`unattributed`) are counted nowhere here.
+  const mine = devices.filter((each) => each.group === 'mine');
+  const others = devices.filter((each) => each.group === 'others');
   const opened = devices.find((each) => each.id === detail);
   const owner = viewer === 'owner';
   const account = viewerAccount ?? (owner ? ownerEmail : undefined) ?? '';
   const on = reach.state === 'on';
   const signedIn = othersSignedIn(devices);
+  const latest = newestFirst(activity);
 
   if (view === 'activity') {
     return (
-      <SettingsPageShell
-        title={t('devices.activity.title')}
-        subtitle={t('devices.activity.subtitle')}
-        activeTab="remote-access"
-        breadcrumb={<span>{t('devices.activity.breadcrumb')}</span>}
-      >
+      <SettingsPageShell title={t('devices.activity.title')} subtitle={t('devices.activity.subtitle')} activeTab="remote-access">
+        <BackToDevices onBack={actions.onBack} />
         <SettingsPanel>
-          {activity.map((item) => <ActivityRow key={item.id} item={item} wide />)}
+          {latest.length > 0
+            ? latest.map((item) => <ActivityRow key={item.id} item={item} wide />)
+            : <p className="px-5 py-3 text-[12px] text-muted">{t('devices.activity.empty')}</p>}
         </SettingsPanel>
       </SettingsPageShell>
     );
@@ -532,6 +568,20 @@ export function DevicesPageView({
   const self = devices.find((each) => each.self);
   const host = devices.find((each) => each.kind === 'host');
   const othersSyncHealth = signedIn.some(signOutNeedsConfirm);
+  // Until a device besides the computer that runs Avibe is listed, the way to add one is in the list.
+  const onlyHost = mine.every((each) => each.kind === 'host');
+  const locked = lockedOut(devices).length;
+  const lockedText = locked > 0
+    ? host?.name
+      ? t('devices.confirm.turnOffLocked', { count: locked, host: host.name })
+      : t('devices.confirm.turnOffLockedHost', { count: locked })
+    : host?.name
+      ? t('devices.confirm.turnOffLockedAlone', { host: host.name })
+      : t('devices.confirm.turnOffLockedAloneHost');
+  // Who is turning it off is said only when this device is known, and by its name.
+  const turnOffBody = self && self.kind !== 'host' && self.name
+    ? t('devices.confirm.turnOffBodyFrom', { from: t('devices.confirm.turnOffFrom', { device: self.name }), locked: lockedText, kept: t('devices.confirm.turnOffKept') })
+    : t('devices.confirm.turnOffBodyPlain', { locked: lockedText, kept: t('devices.confirm.turnOffKept') });
 
   return (
     <SettingsPageShell
@@ -543,18 +593,19 @@ export function DevicesPageView({
 
       <SettingsPanel
         title={t('devices.list.mine')}
-        actions={owner && on && mine.length > 1
+        actions={on && !onlyHost
           ? <Button variant="text" size="compact" onClick={actions.onAddDevice}><Plus />{t('devices.list.add')}</Button>
           : undefined}
       >
         {mine.map((each) => <DeviceRow key={each.id} device={each} onOpen={actions.onOpenDevice} />)}
-        {owner && !on && reach.state !== 'starting' && mine.length === 1 && (
+        {mine.length === 0 && <p className="px-5 py-3 text-[12px] text-muted">{t('devices.list.empty')}</p>}
+        {owner && !on && reach.state !== 'starting' && mine.length === 1 && onlyHost && (
           <p className="px-5 py-3 text-[12px] text-muted">{t('devices.list.emptyOff')}</p>
         )}
-        {owner && mine.length === 1 && reach.state === 'on' && (
-          <div>
+        {on && onlyHost && (
+          <div className={mine.length > 0 ? 'border-t border-border' : undefined}>
             <div className="px-5 pb-2 pt-4 text-[13px] font-semibold text-foreground">{t('devices.list.add')}</div>
-            <AddDevice inline kind={add ?? 'iphone'} host={reach.host} account={reach.account} actions={actions} />
+            <AddDevice inline kind={add ?? 'iphone'} host={reach.host} account={account} actions={actions} />
           </div>
         )}
         {signedIn.length > 1 && (
@@ -573,18 +624,16 @@ export function DevicesPageView({
         </SettingsPanel>
       )}
 
-      {owner && activity.length > 0 && (
+      {owner && latest.length > 0 && (
         <SettingsPanel
           title={t('devices.list.recentActivity')}
           actions={<Button variant="text" size="compact" onClick={actions.onShowActivity}>{t('devices.list.all')}<ChevronRight /></Button>}
         >
-          {activity.map((item) => <ActivityRow key={item.id} item={item} />)}
+          {latest.slice(0, RECENT_ACTIVITY_LIMIT).map((item) => <ActivityRow key={item.id} item={item} />)}
         </SettingsPanel>
       )}
 
-      {add && mine.length > 1 && reach.state === 'on' && (
-        <AddDevice kind={add} host={reach.host} account={reach.account} actions={actions} />
-      )}
+      {add && on && !onlyHost && <AddDevice kind={add} host={reach.host} account={account} actions={actions} />}
       {opened && !confirm && <DeviceDetail device={opened} account={account} member={!owner} actions={actions} />}
       {opened && confirm === 'remove' && (
         <Confirm
@@ -594,15 +643,16 @@ export function DevicesPageView({
           actions={actions}
         />
       )}
-      {confirm === 'turn-off' && (
+      {opened && confirm === 'health-off' && (
         <Confirm
-          title={t('devices.confirm.turnOffTitle')}
-          body={signedIn.length > 0
-            ? t('devices.confirm.turnOffBody', { device: self?.name ?? '', count: signedIn.length, host: host?.name ?? '' })
-            : t('devices.confirm.turnOffBodyAlone', { device: self?.name ?? '', host: host?.name ?? '' })}
-          action={t('devices.confirm.turnOffAction')}
+          title={t('devices.confirm.healthOffTitle')}
+          body={t('devices.confirm.healthOffBody')}
+          action={t('devices.confirm.healthOffAction')}
           actions={actions}
         />
+      )}
+      {confirm === 'turn-off' && (
+        <Confirm title={t('devices.confirm.turnOffTitle')} body={turnOffBody} action={t('devices.confirm.turnOffAction')} actions={actions} />
       )}
       {confirm === 'remove-others' && (
         <Confirm

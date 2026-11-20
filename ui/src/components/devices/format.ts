@@ -13,10 +13,21 @@ const startOfDay = (at: number) => {
   return day.getTime();
 };
 
+/** Which day an instant falls on, seen from `now`, with its time and date in the locale. */
+export function timeParts(iso: string, language: string, now: number = Date.now()) {
+  const at = Date.parse(iso);
+  const time = new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit', hour12: false }).format(at);
+  const date = new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(at);
+  const today = startOfDay(now);
+  const day = at >= today ? 'today' as const : at >= today - DAY ? 'yesterday' as const : 'other' as const;
+  return { at, time, date, day };
+}
+
 /**
  * `stamp`: 「今天 09:41」, 「昨天 22:40」, then the date with its time. `date`: the same, without a
  * time once it is older than yesterday. `ago`: 「12 分钟前」 within the day, then as `stamp` for
- * yesterday, then 「3 天前」 for a week, then the date.
+ * yesterday, then 「3 天前」 for a week, then the date. For a time inside a sentence, use the
+ * sentence's own `Today` / `Yesterday` / `Dated` templates with `timeParts` instead.
  */
 export function deviceTime(
   iso: string,
@@ -25,15 +36,12 @@ export function deviceTime(
   style: 'stamp' | 'date' | 'ago',
   now: number = Date.now(),
 ): string {
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return iso;
-  const time = new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit', hour12: false }).format(at);
-  const date = new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(at);
-  const today = startOfDay(now);
-  if (style === 'ago' && at >= today) return formatRelativeTime(iso, t, now);
-  if (at >= today) return t('devices.time.today', { time });
-  if (at >= today - DAY) return t('devices.time.yesterday', { time });
-  if (style === 'ago' && at >= today - 6 * DAY) return formatRelativeTime(iso, t, now, { alwaysRelative: true });
+  if (!Number.isFinite(Date.parse(iso))) return iso;
+  const { at, time, date, day } = timeParts(iso, language, now);
+  if (style === 'ago' && day === 'today') return formatRelativeTime(iso, t, now);
+  if (day === 'today') return t('devices.time.today', { time });
+  if (day === 'yesterday') return t('devices.time.yesterday', { time });
+  if (style === 'ago' && at >= startOfDay(now) - 6 * DAY) return formatRelativeTime(iso, t, now, { alwaysRelative: true });
   return style === 'stamp' ? t('devices.time.dated', { date, time }) : date;
 }
 
@@ -91,5 +99,3 @@ export const healthText = (t: TFunction, language: string, data: HealthData[]) =
 
 /** Capitalise a list that opens a line (English names are lower-case inside a sentence). */
 export const upperFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-/** A time said inside a sentence (「synced today 08:12」). */
-export const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);

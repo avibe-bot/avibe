@@ -43,7 +43,7 @@ describe('ConnectionPageView', () => {
 
     rerender(<ConnectionPageView {...base} viewer="app" path={null}
       preference={{ mode: 'automatic', reverted: { at: new Date().toISOString(), reason: 'unreachable' } }} />);
-    expect(screen.getByRole('status').textContent).toMatch(/^「仅 Cloudflare 隧道」在 .+ 连不上，App 已自己改回「自动」。$/);
+    expect(screen.getByRole('status').textContent).toMatch(/^「仅 Cloudflare 隧道」今天 \d\d:\d\d 连不上，App 已自己改回「自动」。$/);
     // A browser has no choice of its own and no domain controls in the App.
     expect(screen.queryByText('更改域名')).toBeNull();
   });
@@ -71,12 +71,12 @@ describe('ConnectionPageView', () => {
     expect(onPutBack).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the relay one prop: a switch, or its state only; and no relay while direct is off', () => {
+  it('keeps the relay one prop: its state only unless the container offers the switch; no relay while direct is off', () => {
     const { rerender } = render(<ConnectionPageView {...base} />);
-    expect(screen.getByRole('switch', { name: '中继' })).toBeTruthy();
-    rerender(<ConnectionPageView {...base} relayEditable={false} />);
     expect(screen.queryByRole('switch', { name: '中继' })).toBeNull();
-    rerender(<ConnectionPageView {...base} direct="off" relay={false} />);
+    rerender(<ConnectionPageView {...base} relayEditable />);
+    expect(screen.getByRole('switch', { name: '中继' })).toBeTruthy();
+    rerender(<ConnectionPageView {...base} relayEditable direct="off" relay={false} />);
     expect((screen.getByRole('switch', { name: '中继' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -109,5 +109,24 @@ describe('ConnectionPageView', () => {
     rerender(<ConnectionPageView {...base} viewer="local" host={host} rename={{ step: 'confirm', name: 'maxwell', countdown: 0 }} onRenameConfirm={onRenameConfirm} />);
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '更改域名' }));
     expect(onRenameConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the tunnel in use only for a browser that comes through it, and goes back to Devices', () => {
+    const onBack = vi.fn();
+    const { rerender } = render(<ConnectionPageView {...base} onBack={onBack} />);
+    expect(screen.getByText('使用中')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '返回设备' }));
+    expect(onBack).toHaveBeenCalledTimes(1);
+    rerender(<ConnectionPageView {...base} viewer="local" />);
+    expect(screen.queryByText('使用中')).toBeNull();
+  });
+
+  it('says when the App went back by itself in English with the sentence\'s own template', async () => {
+    await i18n.changeLanguage('en');
+    const at = new Date(Date.now() - 20 * 86_400_000);
+    at.setHours(9, 5, 0, 0);
+    render(<ConnectionPageView {...base} viewer="app" path={null} preference={{ mode: 'automatic', reverted: { at: at.toISOString(), reason: 'unreachable' } }} />);
+    const date = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(at);
+    expect(screen.getByRole('status').textContent).toBe(`Cloudflare tunnel only could not connect on ${date} at 09:05, so the App went back to Automatic by itself.`);
   });
 });

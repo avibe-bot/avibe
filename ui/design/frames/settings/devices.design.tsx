@@ -25,7 +25,7 @@ const ago = (minutes: number) => new Date(DESIGN_NOW - minutes * 60_000).toISOSt
 const DAY = 24 * 60;
 
 const macbook = (extra: Partial<Device> = {}): Device => ({
-  id: 'host', kind: 'host', name: 'Max 的 MacBook Pro', client: { kind: 'runtime', version: '3.2.8', platform: 'macOS' }, online: {},
+  id: 'host', group: 'mine', kind: 'host', name: 'Max 的 MacBook Pro', client: { kind: 'runtime', version: '3.2.8', platform: 'macOS' }, online: {},
   capabilities: [{ kind: 'computerUse', on: true }, { kind: 'notifications', on: true }],
   ...extra,
 });
@@ -37,7 +37,7 @@ const iphoneCapabilities: DeviceCapability[] = [
 ];
 
 const iphone = (extra: Partial<Device> = {}): Device => ({
-  id: 'iphone', kind: 'iphone', name: 'iPhone 15 Pro', client: { kind: 'app', version: '3.2.8', platform: 'iOS 26.1' },
+  id: 'iphone', group: 'mine', kind: 'iphone', name: 'iPhone 15 Pro', client: { kind: 'app', version: '3.2.8', platform: 'iOS 26.1' },
   online: { path: 'punched', family: 'ipv6', ms: 38 }, signedInAt: ago(10 * DAY),
   capabilities: iphoneCapabilities,
   recent: [
@@ -48,21 +48,23 @@ const iphone = (extra: Partial<Device> = {}): Device => ({
 });
 
 const macMini: Device = {
-  id: 'mini', kind: 'desktop', name: 'Mac mini（办公室）', client: { kind: 'desktop', version: '3.2.8', platform: 'macOS' },
+  id: 'mini', group: 'mine', kind: 'desktop', name: 'Mac mini（办公室）', client: { kind: 'desktop', version: '3.2.8', platform: 'macOS' },
   online: { path: 'tunnel', ms: 120 }, signedInAt: ago(379), capabilities: [],
 };
 const chrome: Device = {
-  id: 'chrome', kind: 'browser', name: 'Chrome · Windows', client: { kind: 'browser' },
+  id: 'chrome', group: 'mine', kind: 'browser', name: 'Chrome · Windows', client: { kind: 'browser' },
   lastActiveAt: ago(3 * DAY + 60), signedInAt: ago(14 * DAY), capabilities: [],
 };
 const safari: Device = {
-  id: 'safari', kind: 'browser', name: 'Safari · iPad', client: { kind: 'homeScreen' },
+  id: 'safari', group: 'mine', kind: 'browser', name: 'Safari · iPad', client: { kind: 'homeScreen' },
   lastActiveAt: ago(1125), signedInAt: ago(30 * DAY),
   capabilities: [{ kind: 'notifications', on: true }],
 };
 const sara: Device = {
-  id: 'sara', kind: 'browser', name: 'Chrome · macOS', client: { kind: 'browser' }, person: 'sara@example.test',
-  online: { path: 'tunnel' }, signedInAt: ago(358), capabilities: [],
+  id: 'sara', group: 'others', kind: 'browser', name: 'Chrome · macOS', client: { kind: 'browser' }, person: 'sara@example.test',
+  online: { path: 'tunnel' }, signedInAt: ago(358),
+  // Someone else's: what it offers is listed, not switched, from here.
+  capabilities: [{ kind: 'notifications', on: true }],
 };
 
 const activity: DeviceActivity[] = [
@@ -71,12 +73,13 @@ const activity: DeviceActivity[] = [
   { id: 'a3', at: ago(1040), event: { kind: 'alarmCreated', label: '06:30 起床', confirmedOn: 'iPhone' }, source: 'iPhone 15 Pro' },
   { id: 'a4', at: ago(1257), event: { kind: 'signedOut', device: 'Firefox · Linux' }, source: 'Max 的 MacBook Pro' },
 ];
+// Newest first, as the activity list shows it (the view sorts it again whatever order it gets).
 const fullActivity: DeviceActivity[] = [
   ...activity,
-  { id: 'a5', at: ago(14 * DAY + 100), event: { kind: 'signedIn', device: 'Chrome · Windows' }, source: 'Chrome · Windows' },
-  { id: 'a6', at: ago(16 * DAY + 200), event: { kind: 'directOn' }, source: 'Max 的 MacBook Pro' },
   { id: 'a7', at: ago(10 * DAY + 30), event: { kind: 'healthConnected', device: 'iPhone 15 Pro', data: ['steps', 'activity', 'workouts', 'sleep'] }, source: 'iPhone 15 Pro' },
   { id: 'a8', at: ago(10 * DAY + 34), event: { kind: 'signedIn', device: 'iPhone 15 Pro' }, source: 'Avibe App' },
+  { id: 'a5', at: ago(14 * DAY + 100), event: { kind: 'signedIn', device: 'Chrome · Windows' }, source: 'Chrome · Windows' },
+  { id: 'a6', at: ago(16 * DAY + 200), event: { kind: 'directOn' }, source: 'Max 的 MacBook Pro' },
   { id: 'a9', at: ago(30 * DAY + 200), event: { kind: 'signedIn', device: 'Safari · iPad' }, source: 'Safari · iPad' },
   { id: 'a10', at: ago(30 * DAY + 204), event: { kind: 'remoteAccessOn', host }, source: 'Max 的 MacBook Pro' },
 ];
@@ -131,7 +134,7 @@ const designFrames = frames([
   frame('on-shared', '已开启 · 共享实例的所有者：别人的设备单独一组', at(1180),
     { reach: on, devices: [...all('host'), sara], activity }),
   frame('member', '共享实例的成员：只看到自己的设备', at(600),
-    { reach: on, viewer: 'member', devices: [{ ...sara, person: undefined, self: true }, iphone({ id: 'sara-phone', name: 'iPhone 16', online: undefined, lastActiveAt: ago(1300), capabilities: [iphoneCapabilities[0]] })] }),
+    { reach: on, viewer: 'member', devices: [{ ...sara, group: 'mine', person: undefined, self: true }, iphone({ id: 'sara-phone', name: 'iPhone 16', online: undefined, lastActiveAt: ago(1300), capabilities: [iphoneCapabilities[0]] })] }),
 
   // 4. A device's detail.
   frame('detail-iphone', '设备详情 · iPhone：连接、三项功能各一个开关、最近、退出这台设备', TALL,
@@ -152,8 +155,12 @@ const designFrames = frames([
     { reach: on, devices: [...all('host'), sara], activity, detail: 'sara' }),
 
   // 5. Activity.
-  frame('activity', '活动：登录、退出和功能使用，按时间', at(860),
+  frame('activity', '活动：登录、退出和功能使用，新的在上', at(860),
     { reach: on, devices: all('host'), activity: fullActivity, view: 'activity' }),
+  frame('activity-empty', '活动：还没有', at(500),
+    { reach: on, devices: all('host'), activity: [], view: 'activity' }),
+  frame('health-off-confirm', '关闭 iPhone 的健康：会删除已同步的数据，所以先确认', at(860),
+    { reach: on, devices: all('host'), activity, detail: 'iphone', confirm: 'health-off' }),
 
   // 6. Empty and error states that really occur.
   frame('empty', '刚开启，只有主机：「添加设备」直接摆在列表里（iPhone）', at(760),
@@ -165,6 +172,8 @@ const designFrames = frames([
   frame('add', '已有其他设备后：标题旁一个安静的「添加设备」，点开是同一块内容', TALL,
     { reach: on, devices: all('host'), activity, add: 'iphone' }),
   frame('tunnel-down', '已开启，但连不上 Cloudflare', at(760),
+    { reach: { ...on, tunnel: 'down' }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
+  frame('tunnel-down-phone', '已开启但连不上 Cloudflare · 375 宽：域名完整显示，按钮和开关换到下一行', { width: 375, height: 820 },
     { reach: { ...on, tunnel: 'down' }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
   frame('paused', '关闭后：域名保留，一个开关就能再开', at(700),
     { reach: { state: 'paused', host, account }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(120) })] }),

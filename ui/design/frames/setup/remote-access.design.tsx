@@ -19,7 +19,7 @@ const designFrames = frames([
   frame('browser', '设置向导 · 远程访问（可选）· 浏览器：一个动作，去 avibe.bot 起名后自动回来', { surface: 'browser' }),
   frame('desktop-signed-out', '设置向导 · 远程访问（可选）· Desktop App 未登录：走 App 自己的登录', { surface: 'desktop', account: null, name: '' }),
   frame('desktop-signed-in', '设置向导 · 远程访问（可选）· Desktop App 登录后回到这一步：起名，一个动作', { surface: 'desktop', account: 'max@example.test', name: 'max', nameState: 'free' }),
-  frame('browser-phone', '设置向导 · 远程访问（可选）· 手机宽度', { surface: 'browser' }, { width: 390, height: 844 }),
+  frame('browser-phone', '设置向导 · 远程访问（可选）· 手机宽度', { surface: 'browser' }, { width: 375, height: 844 }),
 ]);
 
 export default designFrames;
