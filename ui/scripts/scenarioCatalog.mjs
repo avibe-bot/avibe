@@ -231,6 +231,8 @@ export const collectCases = ({ root = UI_ROOT, files = [], globals = false } = {
       [
         VITEST_BIN,
         'list',
+        // The catalog cites tests registered at runtime, not declarations found in source.
+        '--no-static-parse',
         `--json=${output}`,
         '--root',
         root,

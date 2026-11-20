@@ -100,20 +100,13 @@ def test_ui_refresh_hold_preserves_the_established_export_contract() -> None:
     assert lock["packages"]["node_modules/eslint-plugin-react-refresh"]["version"] == "0.4.26"
 
 
-def test_ui_vitest_hold_preserves_the_node20_toolchain() -> None:
-    # The candidate's engine contract drops Node20 even when a smoke test works.
-    # Hold that candidate, not unrelated UI packages or future reviewed releases.
-    ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
-    assert [item for item in ui["ignore"] if item["dependency-name"] == "vitest"] == [
-        {"dependency-name": "vitest", "versions": ["5.0.5", "5.1.0"]}
-    ]
+def test_ui_vitest_matches_the_supported_build_toolchain() -> None:
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
-    assert "^20." in package["engines"]["node"]
-    assert package["devDependencies"]["vitest"].startswith("^4.")
+    assert lock["packages"][""]["engines"] == package["engines"]
+    assert package["engines"]["node"] == "^22.13.0 || ^24.0.0 || >=26.0.0"
     assert lock["packages"][""]["devDependencies"]["vitest"] == package["devDependencies"]["vitest"]
-    assert lock["packages"]["node_modules/vitest"]["version"].startswith("4.")
-    assert "^20." in lock["packages"]["node_modules/vitest"]["engines"]["node"]
+    assert lock["packages"]["node_modules/vitest"]["version"].startswith("5.")
 
 
 @pytest.mark.parametrize("python_version,expected", [("3.10", "2.0.57"), ("3.11", "2.1.0"), ("3.12", "2.1.0")])
@@ -147,7 +140,7 @@ def test_sqlalchemy_requirements_and_lock_preserve_python_version_branches(
     assert any(item["name"] == "sqlalchemy" and item["version"] == expected for item in lock["package"])
 
 
-def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
+def test_ui_jsdom_hold_preserves_existing_dom_consumers() -> None:
     # 31.0.0 excludes Node20 and fails startup there. Keep this candidate out
     # without blocking later independently reviewed releases or changing tests.
     ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
@@ -156,7 +149,6 @@ def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
     ]
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
-    assert "^20." in package["engines"]["node"]
     assert package["devDependencies"]["jsdom"] == "^29.1.1"
     assert lock["packages"][""]["devDependencies"]["jsdom"] == package["devDependencies"]["jsdom"]
     assert lock["packages"]["node_modules/jsdom"]["version"] == "29.1.1"
