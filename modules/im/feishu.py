@@ -13,7 +13,7 @@ import os
 import threading
 import time
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -160,8 +160,9 @@ class FeishuBot(BaseIMClient):
         self._recent_event_ids: Dict[str, float] = {}
         self._event_ids_swept_at = 0.0
         self._event_ids_lock = threading.Lock()
-        self._cached_token: Optional[str] = None
-        self._token_expires_at: Optional[float] = None
+        # (token, the time it stops being used). One record, replaced whole:
+        # fetches on different loops must not mix one's token with another's expiry.
+        self._token: Optional[Tuple[str, float]] = None
         self._token_fetches: Dict[asyncio.AbstractEventLoop, "asyncio.Task[str]"] = {}
         self._user_info_cache: Dict[str, Dict[str, Any]] = {}
         self._dm_chat_ids: set = set()
@@ -291,8 +292,9 @@ class FeishuBot(BaseIMClient):
 
     async def _tenant_token(self) -> str:
         """Return a valid tenant access token, or raise with Feishu's refusal."""
-        if self._cached_token and self._token_expires_at and time.time() < self._token_expires_at:
-            return self._cached_token
+        cached = self._token
+        if cached is not None and time.time() < cached[1]:
+            return cached[0]
         # Calls that miss the cache together share one fetch. The adapter is
         # called on more than one loop, and a task belongs to its loop.
         loop = asyncio.get_running_loop()
@@ -315,12 +317,15 @@ class FeishuBot(BaseIMClient):
         payload = json.dumps({"app_id": self.config.app_id, "app_secret": self.config.app_secret})
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            # The app secret goes to Feishu and nowhere a redirect points.
             async with session.post(
                 url, data=payload, headers={"Content-Type": "application/json"}, allow_redirects=False
             ) as resp:
                 raw = await resp.read()
         # Parsed whatever the content type says: a gateway can relabel Feishu's answer.
         result = json.loads(raw.decode("utf-8"))
+        if result is None:
+            result = {}
         if not isinstance(result, dict):
             raise RuntimeError("obtain self tenant access token failed: the reply is not a JSON object")
         token = result.get("tenant_access_token")
@@ -334,8 +339,7 @@ class FeishuBot(BaseIMClient):
         # Feishu gave it; a reply without a lifetime is used for this call only.
         expire = result.get("expire")
         lifetime = expire if isinstance(expire, (int, float)) and not isinstance(expire, bool) else 0
-        self._cached_token = token
-        self._token_expires_at = time.time() + max(lifetime - 600, 0)
+        self._token = (token, time.time() + max(lifetime - 600, 0))
         return token
 
     async def _get_tenant_token(self) -> Optional[str]:

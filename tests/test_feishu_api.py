@@ -45,6 +45,8 @@ class _StubFeishu:
         self.token_requests: list[dict[str, Any]] = []
         self.token_reply: Any = {"code": 0, "msg": "ok", "tenant_access_token": "t-stub", "expire": 7200}
         self.token_content_type = "application/json"
+        self.token_status = 200
+        self.token_headers: dict[str, str] = {}
         self.token_delay = 0.0
         self.reply_status = 200
         self.reply_body: bytes = b"{}"
@@ -65,8 +67,9 @@ class _StubFeishu:
                     if stub.token_delay:
                         threading.Event().wait(stub.token_delay)
                     reply = stub.token_reply
-                    status, body = 200, reply if isinstance(reply, bytes) else json.dumps(reply).encode()
+                    status, body = stub.token_status, reply if isinstance(reply, bytes) else json.dumps(reply).encode()
                     headers["Content-Type"] = stub.token_content_type
+                    headers.update(stub.token_headers)
                 else:
                     stub.calls.append(
                         {
@@ -280,6 +283,26 @@ async def test_request_and_reading_match_the_sdk(feishu: _StubFeishu, call_name:
 
 
 @pytest.mark.parametrize(
+    "call_name, data",
+    [
+        ("create in a chat", {"message_id": "om_new", "body": "text"}),
+        ("reply in a thread", {"message_id": "om_new", "mentions": {}}),
+        ("add a reaction", {"reaction_type": "OK"}),
+    ],
+)
+async def test_a_malformed_field_the_adapter_does_not_read_no_longer_fails_the_call(
+    feishu: _StubFeishu, call_name: str, data: dict[str, Any]
+):
+    """Known by design: the SDK parsed the whole reply into models; we read ``message_id`` and ``chat_id``."""
+    feishu.answer(200, {"code": 0, "msg": "success", "data": data})
+
+    theirs, ours = await _both(feishu, call_name)
+
+    assert theirs == ("raised",)
+    assert ours[:2] == ("reply", (True, 0, "success"))
+
+
+@pytest.mark.parametrize(
     "status, body",
     [(502, b"<html>Bad Gateway</html>"), (200, b""), (500, b"upstream connect error")],
     ids=["gateway page", "empty body", "plain text"],
@@ -320,6 +343,8 @@ def test_adapter_sends_a_message_in_a_process_that_cannot_import_the_sdk(feishu:
     feishu.answer(200, SENT)
     script = f"""
 import asyncio, sys
+from tests import network_guard
+sys.addaudithook(network_guard.audit)  # loopback only, as in the pytest process
 sys.modules["lark_oapi"] = None  # any import of the SDK now raises ImportError
 from unittest.mock import patch
 from config.v2_config import LarkConfig
@@ -374,6 +399,74 @@ async def test_feishu_refusing_the_token_fails_the_send_with_its_reason(
     assert "adapter-secret" not in caplog.text
     assert "code: 10014" in caplog.text
     assert feishu.calls == []
+
+
+async def test_a_null_token_reply_is_a_refusal_in_the_sdk_s_words(feishu: _StubFeishu, bot: FeishuBot):
+    feishu.token_reply = b"null"
+
+    with pytest.raises(RuntimeError) as failure:
+        await bot.send_message(CONTEXT, "hello")
+
+    assert str(failure.value) == "obtain self tenant access token failed, code: None, msg: None"
+
+
+async def test_the_app_secret_does_not_follow_a_redirect(feishu: _StubFeishu, bot: FeishuBot):
+    """Known by design: the SDK's token request followed redirects, taking the secret along."""
+    feishu.token_status = 307
+    feishu.token_headers = {"Location": "/open-apis/elsewhere"}
+    feishu.token_reply = {"code": 0, "msg": "ok"}
+
+    with pytest.raises(RuntimeError, match="obtain self tenant access token failed"):
+        await bot.send_message(CONTEXT, "hello")
+
+    assert len(feishu.token_requests) == 1
+    assert feishu.calls == []
+
+
+async def test_tokens_fetched_on_two_loops_never_mix_one_token_with_the_other_s_lifetime(
+    feishu: _StubFeishu, bot: FeishuBot, clock: "_Clock"
+):
+    """The adapter is called on its own loop and on the controller's; both publish the token they fetched."""
+    replies = iter(
+        [
+            {"code": 0, "msg": "ok", "tenant_access_token": "t-long", "expire": 7200},
+            {"code": 0, "msg": "ok", "tenant_access_token": "t-short", "expire": 630},
+        ]
+    )
+    published: list[tuple[str, float]] = []
+    real_fetch = bot._fetch_tenant_token
+
+    async def fetch_and_note() -> str:
+        feishu.token_reply = next(replies)
+        token = await real_fetch()
+        published.append(bot._token)
+        return token
+
+    bot._fetch_tenant_token = fetch_and_note  # type: ignore[method-assign]
+
+    assert await bot._tenant_token() == "t-long"
+    bot._token = None  # the second loop misses the cache and fetches its own
+    assert await asyncio.to_thread(asyncio.run, bot._tenant_token()) == "t-short"
+
+    # Each record pairs a token with its own lifetime, and what is cached is one of them, whole.
+    assert published == [("t-long", clock.now + 6600), ("t-short", clock.now + 30)]
+    assert bot._token in published
+    clock.now += 31
+    feishu.token_reply = {"code": 0, "msg": "ok", "tenant_access_token": "t-fresh", "expire": 7200}
+    bot._fetch_tenant_token = real_fetch  # type: ignore[method-assign]
+    assert await bot._tenant_token() == "t-fresh"
+
+
+async def test_a_direct_message_remembers_its_chat_as_a_dm(feishu: _StubFeishu, bot: FeishuBot):
+    feishu.answer(200, {"code": 0, "msg": "success", "data": {"message_id": "om_dm", "chat_id": "oc_dm"}})
+    assert await bot.send_dm("ou_user", "hello") == "om_dm"
+
+    # A field the SDK's model never carried does not mark a chat as a DM.
+    feishu.answer(200, {"code": 0, "msg": "success", "data": {"message_id": "om_dm2", "open_chat_id": "oc_other"}})
+    assert await bot.send_dm("ou_user", "again") == "om_dm2"
+
+    assert bot._dm_chat_ids == {"oc_dm"}
+    assert feishu.calls[0]["query"] == [("receive_id_type", "open_id")]
 
 
 async def test_a_token_reply_that_is_not_json_is_a_decoding_failure(feishu: _StubFeishu, bot: FeishuBot):

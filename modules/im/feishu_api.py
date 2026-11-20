@@ -31,6 +31,8 @@ class FeishuApiResponse:
     """The ``code``/``msg``/``data`` envelope every OpenAPI reply carries.
 
     ``data`` is ``None`` when the reply has none, as it is on most refusals.
+    It is the object Feishu sent, unchecked beyond being an object: the
+    adapter reads ``message_id`` and ``chat_id`` from it and nothing else.
     """
 
     code: Optional[int] = None

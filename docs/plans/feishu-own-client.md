@@ -108,6 +108,11 @@ nothing by default.
 - A reply that is JSON but not an envelope raises `FeishuApiError` where the
   SDK raised from inside its models. A send that Feishu calls a success but
   answers without a data object still fails at the call site, as it did.
+- A reply is read for what the adapter uses (`code`, `msg`, `data.message_id`,
+  `data.chat_id`). The SDK parsed all of `data` into its models, so a malformed
+  field the adapter never reads failed the call; it no longer does.
+- The token request does not follow a redirect: the app secret goes to Feishu
+  and nowhere else. The SDK's `requests` call followed one.
 - Requests carry aiohttp's `User-Agent`, not the SDK's.
 - Calls that miss the token cache together share one token request; the SDK
   got the same effect by blocking the loop while it fetched.
