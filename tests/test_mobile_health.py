@@ -100,6 +100,29 @@ def test_pairing_is_one_use_request_bound_and_stores_only_hashes(store, clock):
         store.pair({**payload, "pairing_code": code["pairing_code"]}, IDENTITY)
 
 
+def test_targeted_disconnect_preserves_other_phone_data_and_pending_pairing(store, clock):
+    first, req_a = pair_device(store, installation="phone-a")
+    store.upload(device_for(store, first), upload_payload())
+    store.cancel_request(req_a["id"])
+    clock[0] += timedelta(seconds=1)
+    second, req_b = pair_device(store, installation="phone-b")
+    store.upload(device_for(store, second), upload_payload())
+    store.cancel_request(req_b["id"])
+    pending, _ = store.create_request("health.connect", IDENTITY)
+    code = store.issue_pairing(pending["id"], IDENTITY)
+
+    store.revoke(device_id=first["device_id"])
+
+    with pytest.raises(MobileError, match="device_revoked"):
+        device_for(store, first)
+    assert device_for(store, second)["id"] == second["device_id"]
+    with store.transaction() as conn:
+        assert [(r[0], r[1]) for r in conn.execute(
+            "SELECT device_id,count(*) FROM health_days GROUP BY device_id"
+        )] == [(second["device_id"], 2)]
+    store.precheck_pairing({"pairing_code": code["pairing_code"]})
+
+
 def test_day_window_is_atomic_monotonic_and_preserves_empty_and_failure(store):
     """Incomplete uploads cannot partially replace data; failures keep prior days."""
     paired, _ = pair_device(store)

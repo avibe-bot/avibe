@@ -617,7 +617,8 @@ class MobileStore:
             if device_id is None:
                 conn.execute("UPDATE requests SET state='canceled',ended_at=? WHERE state IN ('queued','claimed')",
                              (now,))
-            conn.execute("DELETE FROM pairings")
+                conn.execute("DELETE FROM pairings")
+            # A targeted disconnect must not cancel unused codes on other phones.
             self._audit(conn, "health.revoke", caller=caller, session_id=session_id)
         publish_mobile_schedule_changed()
         return {"purged": True}
