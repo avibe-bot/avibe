@@ -108,7 +108,8 @@ export function createReceiver(deps: ReceiverDeps): Receiver {
     const opened = await until(vibey, OPEN_TIMEOUT);
     if (!opened) return 'unavailable';
     if (!opened.composerReady) opened.showChat();
-    const ready = await until(() => { const target = vibey(); return target?.composerReady ? target : null; }, READY_TIMEOUT);
+    // Ready waits for the saved draft to hydrate, which a slow instance can take a while to answer.
+    const ready = await until(() => { const target = vibey(); return target?.composerReady ? target : null; }, OPEN_TIMEOUT);
     if (!ready) return 'unavailable';
     if (share.kind === 'text' || share.kind === 'url') {
       const line = share.kind === 'text' ? quoteText(share.text!) : share.text!.trim();

@@ -28,6 +28,13 @@ Owner request: Max, 2026-11-20 (design frames approved 04:20; the w1.9 local pac
   - `CFBundleLocalizations` is `[en, zh-Hans]`.
 - **Files:** `avibe_runtime_host::selection::ordinary_open` / `unchanged`. A file is opened at selection without following a final symlink, then reopened and compared at delivery (device, inode, ctime, length, mtime). A file that differs is refused as unreadable.
 
+## Composer readiness
+- The page inserts only into a composer that can take the content:
+  - ChatPage's `composeReady`: not covered by the Show Page, and this route's bootstrap has reconciled the saved draft;
+  - the composer's own `appendLine` / `stageFiles` answers: mounted, not owned by voice capture, and for files not disabled and no send in flight.
+- A read-only chat publishes no target.
+
 ## Follow-ups
+- **Bootstrap never arrives** (the instance can't load the conversation): after about 30 s the share ends with the "couldn't open Vibey's conversation" notice and is dropped. It is not kept for a later successful hydration.
 - **Notice reasons:** several cases end in the "couldn't open Vibey's conversation" notice although the cause differs: voice capture holding the composer, a slow Workbench, an unreadable file, or an outdated remote Workbench. Text over 1 MiB and mixed selections borrow the upload-failed copy.
 - **Remote instances** need a Workbench that carries this receiver.

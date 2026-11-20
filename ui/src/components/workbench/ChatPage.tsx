@@ -26,6 +26,7 @@ import type { VoiceTarget } from '../voice/VoiceCard';
 import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposeTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { composeReady } from './composeReady';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
@@ -619,24 +620,6 @@ export const ChatPage: React.FC = () => {
         : null,
     [sessionId, session, showPageActive, writable, insertSessionReference],
   );
-  // Ask Vibey (desktop shell) puts a selection into this composer. Unlike the
-  // insert target it is published under a Show Page too, so the source can
-  // switch back to the conversation first. ui/design: composer/ask-vibey/inserted-zh
-  const sessionLoaded = session != null;
-  const composeTarget = useMemo<ComposeTarget | null>(
-    () =>
-      sessionId && sessionLoaded && writable
-        ? {
-            sessionId,
-            composerReady: !showPageActive,
-            showChat: () => selectChatView(sessionId, true),
-            appendLine: (text: string) => composerRef.current?.appendLine(text) ?? false,
-            addFiles: (files: File[]) => composerRef.current?.stageFiles(files) ?? false,
-          }
-        : null,
-    [sessionId, sessionLoaded, writable, showPageActive, selectChatView],
-  );
-  useRegisterComposerTarget(composerTarget, composeTarget);
 
   // Pending vault requests for this session. Provision requests are attached to
   // the Agent reply that announced them; access/sign retain the approval flow.
@@ -668,6 +651,24 @@ export const ChatPage: React.FC = () => {
   const [failedBootstrapSessionId, setFailedBootstrapSessionId] = useState<string | null>(null);
   // The route whose failed bootstrap said the chat is gone or not readable.
   const [unavailableSessionId, setUnavailableSessionId] = useState<string | null>(null);
+  // Ask Vibey (desktop shell) puts a selection into this composer. Unlike the
+  // insert target it is published under a Show Page too, so the source can
+  // switch back to the conversation first. ui/design: composer/ask-vibey/inserted-zh
+  const sessionLoaded = session != null;
+  const composeTarget = useMemo<ComposeTarget | null>(
+    () =>
+      sessionId && sessionLoaded && writable
+        ? {
+            sessionId,
+            composerReady: composeReady({ sessionId, showPageActive, hydratedSessionId: hydratedTranscriptSessionId }),
+            showChat: () => selectChatView(sessionId, true),
+            appendLine: (text: string) => composerRef.current?.appendLine(text) ?? false,
+            addFiles: (files: File[]) => composerRef.current?.stageFiles(files) ?? false,
+          }
+        : null,
+    [sessionId, sessionLoaded, writable, showPageActive, hydratedTranscriptSessionId, selectChatView],
+  );
+  useRegisterComposerTarget(composerTarget, composeTarget);
   const provisionPlacement = useMemo(
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
