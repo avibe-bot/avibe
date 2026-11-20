@@ -1460,27 +1460,33 @@ async def test_a_reading_under_way_when_the_check_ends_asks_for_nothing_more(
 
 
 async def test_a_history_not_read_to_its_end_is_not_shown_as_a_clean_one(clock: _Clock):
-    """Where the stage's result is read: a chat that failed, or stopped at the page limit, is counted as behind."""
+    """Where the stage's result is read: a chat not read up to the sweep's end is counted as behind."""
     from modules.im.feishu_history_check import FeishuHistoryCheck
 
     pages = {
         "oc_refused": [_History(code=1), _History(code=1), _History()],
-        "oc_long": [_History(people=("om_1",), more="2"), _History(people=("om_2",), more="3"), _History()],
+        # Two pages at one page per sweep: the second sweep finishes the first sweep's interval
+        # and has not yet read its own.
+        "oc_long": [_History(people=("om_1",), more="2"), _History(people=("om_2",)), _History(people=("om_3",))],
     }
+    asked: List[Tuple[str, int, int]] = []
 
-    async def list_messages(chat_id: str, _start: int, _end: int, _page: Optional[str]) -> _History:
+    async def list_messages(chat_id: str, start: int, end: int, _page: Optional[str]) -> _History:
+        asked.append((chat_id, start, end))
         return pages[chat_id].pop(0) if pages.get(chat_id) else _History()
 
     check = FeishuHistoryCheck(list_messages)
-    behind = []
+    seen = []
     with patch("modules.im.feishu_history_check._PAGE_LIMIT", 1):
         for _ in range(3):
             clock.now += 600
             await check.run_once(["oc_refused", "oc_long", "oc_quiet"])
-            behind.append(check.snapshot()["chats_behind"])
+            seen.append((check.snapshot()["chats_behind"], check.snapshot()["people_messages"]))
 
-    assert behind == [2, 2, 0]
-    assert check.snapshot()["people_messages"] == 2
+    # After the second sweep om_3, sent since the first, is in a stretch not yet read: not a clean line.
+    assert seen == [(2, 1), (2, 2), (0, 3)]
+    long_chat = [(start, end) for chat_id, start, end in asked if chat_id == "oc_long"]
+    assert long_chat[0] == long_chat[1] and long_chat[2][0] == long_chat[1][1]  # the stretch between is read next
 
 
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):

@@ -67,17 +67,21 @@ class FeishuHistoryCheck:
         self._unfinished: Dict[str, Tuple[int, int, str]] = {}
         # What was last said about a chat that could not be read, so that it is said once.
         self._said: Dict[str, str] = {}
+        # The chats the last sweep did not read up to its own end.
+        self._behind: set = set()
         self._started_at = int(time.time()) + 60  # the connection needs a moment to be there
 
     def snapshot(self) -> Dict[str, Any]:
-        """The counts as they stand together, and how many chats are not read up to their last sweep.
+        """The counts as they stand together, and how many chats the last sweep left behind.
 
-        ``chats_behind`` counts the chats whose last reading failed or stopped
-        at the page limit: while it is not 0, or ``ended`` is true, "nothing
-        missing" is not a result.
+        ``chats_behind`` counts the chats whose history the last sweep did not
+        read up to its own end, whatever the reason: a reading that failed,
+        one that stopped at the page limit, one that only finished an older
+        interval. While it is not 0, or ``ended`` is true, "nothing missing"
+        is not a result.
         """
         with self._lock:
-            return dict(vars(self.counts), chats_behind=len(self._said) + len(self._unfinished))
+            return dict(vars(self.counts), chats_behind=len(self._behind))
 
     def _end(self) -> None:
         """Called with the lock held: the last thing the check does. What it held is let go."""
@@ -112,7 +116,19 @@ class FeishuHistoryCheck:
 
     async def run_once(self, direct_chats: Iterable[str]) -> None:
         end = int(time.time()) - _SETTLE_SECONDS
-        for chat_id in sorted(set(direct_chats)):
+        chats = sorted(set(direct_chats))
+        try:
+            await self._sweep(chats, end)
+        finally:
+            with self._lock:
+                if not self.counts.ended:
+                    # By one measure for every reason: is the chat read up to this sweep's end?
+                    self._behind = {
+                        chat_id for chat_id in chats if self._checked_until.get(chat_id, self._started_at) < end
+                    }
+
+    async def _sweep(self, chats: List[str], end: int) -> None:
+        for chat_id in chats:
             if self.counts.ended:
                 return
             unfinished = self._unfinished.get(chat_id)
