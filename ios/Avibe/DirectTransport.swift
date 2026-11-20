@@ -238,6 +238,30 @@ struct DirectRaceRecord: Equatable, Sendable {
     }
 }
 
+/// Committed direct relays the App closed because their path was lost (or
+/// replaced, or the App went to the background), for diagnosis: how many,
+/// and for each how long it had carried no byte when it was closed. A short
+/// time means bytes were moving, so a request was probably cut; the listener
+/// cannot see requests themselves. Counts and durations only.
+struct DirectLossRecord: Equatable, Sendable {
+    let relays: Int
+    /// Milliseconds since each relay's last byte, shortest first, at most
+    /// `quietLimit` of them.
+    let quietMs: [Int]
+    /// The kind of path the App's connection ran on before the loss.
+    let path: DirectPathKind?
+
+    static let quietLimit = 8
+
+    var jsonObject: [String: Any] {
+        [
+            "relays": relays,
+            "last_byte_ms": quietMs,
+            "path": path.map { $0.rawValue as Any } ?? NSNull(),
+        ]
+    }
+}
+
 /// What the transport can say about its path, for diagnosis.
 struct DirectPathDiagnostics: Equatable, Sendable {
     /// The path the live connection runs on now, if one is usable.

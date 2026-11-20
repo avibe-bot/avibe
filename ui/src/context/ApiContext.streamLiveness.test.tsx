@@ -943,6 +943,25 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(FakeEventSource.instances).toHaveLength(2);
   });
 
+  it('checks the path again after waiting for a quiet page, and keeps its arm for the next direct address', async () => {
+    const shell = await pathShell();
+    const { beginPageRequest } = await import('../lib/pageConnections');
+    const done = beginPageRequest();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    // While the page was busy the shell went back to the relay.
+    shell.emit({ preferred: 'direct', sequence: 2, closure: 0, path: 'relay' });
+    done();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shell.handovers()).toBe(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // The arm was not spent: the next direct address hands over.
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+  });
+
   it('re-arms once for the upgrade without the spacing, and keeps the spacing after that', async () => {
     const shell = await pathShell();
     // The shell keeps a busy connection every time, so each hand-over arms again.

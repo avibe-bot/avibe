@@ -3847,6 +3847,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const quiet = await waitForQuietPage(DIRECT_HANDOVER_QUIET_WAIT_MS);
       if (!quiet || !state.armed) return;
+      // The wait can take seconds: the shell's path may have gone back to
+      // the relay meanwhile. Checked again before the arm is spent and
+      // anything is closed; a later return to a direct address tries again.
+      if (nativeDirectPathReported() && !isDirectAddressPath(nativeDirectPathKind())) return;
+      if (liveStreamVia() === 'direct') return;
       state.armed = false;
       state.skipSpacingOnce = false;
       state.lastAt = Date.now();

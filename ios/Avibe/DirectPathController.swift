@@ -34,6 +34,9 @@ struct DirectPathStatus: Equatable, Sendable {
     var path: DirectPathKind? = nil
     /// For diagnosis: the last few CONNECTs' races, oldest first.
     var races: [DirectRaceRecord] = []
+    /// For diagnosis: the last few times committed direct relays were closed
+    /// because their path was lost, oldest first.
+    var losses: [DirectLossRecord] = []
 
     static let initial = DirectPathStatus(preferred: .tunnel, sequence: 0, closure: 0)
 
@@ -69,6 +72,9 @@ struct DirectPathStatus: Equatable, Sendable {
         }
         if !races.isEmpty {
             object["connections"] = races.map(\.jsonObject)
+        }
+        if !losses.isEmpty {
+            object["losses"] = losses.map(\.jsonObject)
         }
         return object
     }
@@ -407,6 +413,8 @@ final class DirectPathController {
     /// The last few CONNECTs' races, oldest first; for diagnosis.
     private var races: [DirectRaceRecord] = []
     static let raceLimit = 5
+    /// The last few closes of committed direct relays for a lost path.
+    private var losses: [DirectLossRecord] = []
     private var pathGeneration = 0
     private var accountEpoch = 0
     private var isInBackground: Bool
@@ -520,7 +528,8 @@ final class DirectPathController {
             closure: closures[origin.host] ?? 0,
             diagnostics: diagnostics,
             path: preferred == .direct && selected ? currentPath : nil,
-            races: selected ? races : []
+            races: selected ? races : [],
+            losses: selected ? losses : []
         )
     }
 
@@ -824,6 +833,7 @@ final class DirectPathController {
         currentPath = nil
         stickyDropped = false
         races.removeAll()
+        losses.removeAll()
         acceptedGeneration = nil
         replacedGenerations.removeAll()
         guard target != nil else {
@@ -854,7 +864,7 @@ final class DirectPathController {
                 // A new instance endpoint key or address set.
                 replacedGenerations.insert(accepted)
                 advanceGeneration()
-                closeRelays(.direct, countsAsClosure: true)
+                closeRelays(.direct, countsAsClosure: true, lossPath: currentPath)
             }
             acceptedGeneration = generation
             isUsable = true
@@ -891,13 +901,14 @@ final class DirectPathController {
             advanceGeneration()
         case .lost:
             isUsable = false
+            let pathAtLoss = currentPath
             currentPath = nil
             advanceGeneration()
             // The preference is published before the closure, which is now
             // published in this turn: no status says `direct` for a path
             // that is gone.
             updatePreference()
-            closeRelays(.direct, countsAsClosure: true)
+            closeRelays(.direct, countsAsClosure: true, lossPath: pathAtLoss)
         case .lostToBackground:
             // The transport heard the background first. It is this App's
             // background: entered here now, as the background observer
@@ -915,6 +926,9 @@ final class DirectPathController {
         guard tag.target == target, tag.pathGeneration == pathGeneration else {
             return
         }
+        // At once, not when the race it lost has finished: the next plans
+        // hedge again while the transport probes the path.
+        stickyDropped = true
         transport.pathDidFail(for: tag)
     }
 
@@ -1112,6 +1126,7 @@ final class DirectPathController {
     private func closeRelays(
         _ backend: DirectRelayBackend?,
         countsAsClosure: Bool,
+        lossPath: DirectPathKind? = nil,
         then: (@MainActor () -> Void)? = nil
     ) {
         guard let listener else {
@@ -1133,13 +1148,46 @@ final class DirectPathController {
         // is not confirmed: the closure it publishes is for connections
         // that have been told to end.
         closesInFlight += 1
+        // A close of direct relays that counts as a closure is a path lost
+        // under what it carried: recorded, with the path it ran on.
+        let recordsLoss = countsAsClosure && backend == .direct
+        let pathAtClose = lossPath
+        let raced = selection
         Task { [weak self] in
-            _ = await listener.closeRelays(backend: backend, before: generation)
+            let result = await listener.closeRelaysTimed(backend: backend, before: generation)
             await MainActor.run {
                 self?.closeDidIssue()
+                if recordsLoss {
+                    self?.recordLoss(result.quietMs, path: pathAtClose, selection: raced)
+                }
                 then?()
             }
         }
+    }
+
+    /// Committed direct relays were closed for a lost path: kept for
+    /// diagnosis and logged once. Nothing is recorded when none was open.
+    private func recordLoss(_ quietMs: [Int], path: DirectPathKind?, selection raced: Int) {
+        guard !quietMs.isEmpty, raced == selection else {
+            return
+        }
+        let record = DirectLossRecord(
+            relays: quietMs.count,
+            quietMs: Array(quietMs.prefix(DirectLossRecord.quietLimit)),
+            path: path
+        )
+        losses.append(record)
+        if losses.count > Self.raceLimit {
+            losses.removeFirst(losses.count - Self.raceLimit)
+        }
+        let shortest = record.quietMs.first ?? 0
+        let kind = path?.rawValue ?? "none"
+        Self.logger.info(
+            """
+            Direct path lost: closed \(record.relays, privacy: .public) relays, \
+            shortest time since a byte \(shortest, privacy: .public) ms, path \(kind, privacy: .public)
+            """
+        )
     }
 
     /// A close was issued. With none left, a kept completion is handled
@@ -1495,6 +1543,7 @@ final class DirectPathController {
         // The relays are closed and counted before the transport is told to
         // stop, which closes its streams: a relay whose stream ended first
         // would no longer be there to count.
+        let pathAtBackground = currentPath
         deselect(stoppingTransport: false)
         advanceGeneration()
         // Out of service now, before any close runs, and on purpose: what a
@@ -1522,7 +1571,7 @@ final class DirectPathController {
             completionAwaitingCloses = nil
             rebindDidComplete(kept)
         }
-        closeRelays(.direct, countsAsClosure: true) { [weak self] in
+        closeRelays(.direct, countsAsClosure: true, lossPath: pathAtBackground) { [weak self] in
             // Unless a new selection was made meanwhile: selecting already
             // stops the transport's work for the previous target.
             guard let self, self.target == nil else {

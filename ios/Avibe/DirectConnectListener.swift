@@ -692,7 +692,18 @@ actor DirectConnectListener {
         backend: DirectRelayBackend?,
         before generation: Int = .max
     ) -> [String: Int] {
+        closeRelaysTimed(backend: backend, before: generation).closed
+    }
+
+    /// The same close, and for each relay it ended, how many milliseconds it
+    /// had carried no byte (for diagnosis).
+    func closeRelaysTimed(
+        backend: DirectRelayBackend?,
+        before generation: Int = .max
+    ) -> (closed: [String: Int], quietMs: [Int]) {
         var closed: [String: Int] = [:]
+        var quietMs: [Int] = []
+        let now = ProcessInfo.processInfo.systemUptime
         // Every relay granted before the event that asked for this close is
         // in the ledger by now: the grant and the event both ran on the main
         // actor, the grant first. One granted since has a later plan.
@@ -710,11 +721,12 @@ actor DirectConnectListener {
             if relay.claim.closeByEvent() {
                 closed[grant.host, default: 0] += 1
             }
+            quietMs.append(max(0, Int((now - relay.activity.lastActivity) * 1_000)))
             // Its authority ends now; its record stays until it has drained.
             lifecycle.end(id)
             drain(id)
         }
-        return closed
+        return (closed, quietMs.sorted())
     }
 
     /// A page asked to move to the direct path (`direct.handover`): closes

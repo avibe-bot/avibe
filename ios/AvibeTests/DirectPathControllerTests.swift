@@ -271,7 +271,12 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertTrue(plan.sticky)
         XCTAssertEqual(plan.path, .ipv4)
 
-        // A sticky attempt missed its bound: plans hedge again.
+        // A direct candidate failed: stickiness is dropped at once, before
+        // the race it lost has finished, and the transport is told.
+        plan.directFailed()
+        try await eventually { harness.transport.failedTags.count == 1 }
+        XCTAssertFalse(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
+        // The race then ends, recorded as a miss: plans keep hedging.
         plan.recordRace?(DirectRaceRecord(
             direct: .failed, publicOrigin: .ready(1_520), winner: .publicOrigin, path: .ipv4, sticky: true
         ))
@@ -352,11 +357,25 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.status("instance-1").closure, 0)
 
         // Lost closes the direct relays only, and counts once for the host.
+        harness.transport.currentPath = .ipv4
         harness.transport.report(.usable(generation: "g1"), for: target)
         harness.transport.report(.lost, for: target)
         try await eventually { aStream.isCancelled && bStream.isCancelled }
         try await eventually { harness.status("instance-1").closure == 1 }
         XCTAssertFalse(publicStream.isCancelled)
+        // What was cut is recorded once for diagnosis: how many relays, how
+        // long each had carried nothing, and the path they ran on.
+        try await eventually { harness.status("instance-1").losses.count == 1 }
+        let loss = try XCTUnwrap(harness.status("instance-1").losses.first)
+        XCTAssertEqual(loss.relays, 2)
+        XCTAssertEqual(loss.quietMs.count, 2)
+        XCTAssertEqual(loss.quietMs, loss.quietMs.sorted())
+        XCTAssertEqual(loss.path, .ipv4)
+        let reported = harness.status("instance-1").jsonObject["losses"] as? [[String: Any]]
+        XCTAssertEqual(reported?.first?["relays"] as? Int, 2)
+        XCTAssertEqual(reported?.first?["path"] as? String, "ipv4")
+        XCTAssertEqual(harness.status("instance-2").losses, [])
+        harness.transport.currentPath = nil
 
         // A new rendezvous generation closes the relays of the old one.
         harness.transport.report(.usable(generation: "g1"), for: target)
@@ -373,13 +392,15 @@ final class DirectPathControllerTests: XCTestCase {
         harness.transport.report(.usable(generation: "g2"), for: target)
         XCTAssertEqual(harness.status("instance-1").preferred, .direct)
 
-        // The runtime going away closes direct relays; that is no closure.
+        // The runtime going away closes direct relays; that is no closure,
+        // and no loss is recorded for it.
         let d = LoopbackClient(port: port)
         let dStream = try await establishDirect(d, harness: harness)
         harness.controller.runtimeDidStop()
         try await eventually { dStream.isCancelled }
         try await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(harness.status("instance-1").closure, 2)
+        XCTAssertEqual(harness.status("instance-1").losses, [])
         XCTAssertFalse(publicStream.isCancelled)
 
         // An account transition closes everything; no closure either.
