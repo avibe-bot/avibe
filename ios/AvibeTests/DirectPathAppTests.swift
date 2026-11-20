@@ -5255,13 +5255,13 @@ final class DirectPathAppTests: XCTestCase {
 
     // MARK: This device's path choice
 
-    /// "Cloudflare tunnel only" for an instance: its open prepares no route,
-    /// binds no listener and selects nothing, so the transport never dials
-    /// and nothing can hand over; its pages are told the tunnel. Another
-    /// instance, automatic, still dials.
+    /// "Cloudflare tunnel only" for an instance: its open prepares the route
+    /// (so a later Automatic takes effect on this store) but selects
+    /// nothing, so the transport never dials and nothing can hand over; its
+    /// pages are told the tunnel. Switched to Automatic in the same process,
+    /// it dials.
     @MainActor
-    func testTunnelOnlyOpensWithoutARouteASelectionOrAHandover() async throws {
-        let routeWrites = try ProxyConfigurationWrites.count()
+    func testTunnelOnlyRoutesButNeverSelectsDialsOrHandsOver() async throws {
         let transport = StandInDirectTransport()
         let app = try await makeApp(directTransport: transport)
         let defaults = try XCTUnwrap(appDefaults)
@@ -5273,12 +5273,10 @@ final class DirectPathAppTests: XCTestCase {
 
         let runtime = try await select("instance-1", in: app)
         XCTAssertEqual(app.directPathPreference(for: runtime).mode, .tunnel)
-        // The route would have been prepared, and the selection made, in
-        // the turns after the open.
+        XCTAssertFalse(app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty)
+        // The selection would have been made in the turn of the open.
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(transport.selections.count, 0)
-        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
-        XCTAssertTrue(app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty)
         let status = await withCheckedContinuation { continuation in
             app.directStatusProvider?(instance) { continuation.resume(returning: $0) }
         }
@@ -5288,9 +5286,10 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertEqual(handover, .skipped(.notUsable))
 
-        _ = try await select("instance-2", in: app)
+        let page = try XCTUnwrap(URL(string: "https://instance-one.example/"))
+        XCTAssertEqual(try XCTUnwrap(app.directPreferenceProvider).write(instance, .automatic, page), .automatic)
         try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
-            transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+            transport.selections.map(\.runtime.instance.id) == ["instance-1"]
         }
     }
 
@@ -5319,7 +5318,7 @@ final class DirectPathAppTests: XCTestCase {
         // Answered before anything was reopened.
         XCTAssertEqual(app.runtimeOpenAttempt?.id, identity)
         try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > identity }
-        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(try await waitForBrowser("instance-1", in: app), runtime)
         XCTAssertEqual(transport.deselectCount, 1)
         XCTAssertEqual(app.takeRuntimeStartURL(for: runtime), page)
         XCTAssertNil(app.takeRuntimeStartURL(for: runtime))

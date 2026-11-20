@@ -2353,25 +2353,20 @@ final class AppModel: ObservableObject {
         runtimeOpenAttempt = nil
         cancelRuntimeOpenTimers()
         stopRuntime()
-        let directAllowed = allowsDirect(runtime)
         let identity = beginRuntimeOpenAttempt(
             for: runtime,
-            phase: directPathController == nil || !directAllowed ? .connecting : .preparingRoute
+            phase: directPathController == nil ? .connecting : .preparingRoute
         )
         guard let directPathController else {
             route = .browser(runtime)
             return true
         }
-        guard directAllowed else {
-            // Cloudflare tunnel only: no route is prepared and nothing is
-            // selected, so the transport never dials and no plan has a
-            // direct candidate. A host routed earlier in this process still
-            // loads through the listener (public candidates only), so its
-            // load gate still decides, as for any open.
-            route = .loading
-            settleOpen(of: runtime, identity: identity)
-            return true
-        }
+        // The route is prepared whatever this device's path choice: a host
+        // loaded once without one keeps WebKit's pooled public connections
+        // on this store, so a later Automatic could never take effect
+        // (remote-direct-ios.md section 2). Under "Cloudflare tunnel only"
+        // nothing is selected (`settleOpen`): the transport never dials and
+        // every plan has only the public candidate.
         // The route for the instance's host must be in place before the
         // runtime's first load (docs/plans/remote-direct-ios.md section 5).
         // Its wait consumes the same fixed attempt budget as Web navigation.
@@ -2429,6 +2424,7 @@ final class AppModel: ObservableObject {
             deferredOpen = nil
             setRuntimeOpenPhase(.connecting, attemptID: identity)
             route = .browser(runtime)
+            // "Cloudflare tunnel only": routed, never selected.
             if allowsDirect(runtime) {
                 directPathController.runtimeDidOpen(runtime)
             }
