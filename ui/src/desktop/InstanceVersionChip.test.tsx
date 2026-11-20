@@ -130,6 +130,18 @@ it('loads the page again when a read on return finds the new version before the 
   expect(screen.queryByRole('button', { name: 'alex is on v3.2.8rc4' })).toBeNull();
 });
 
+it('loads the page again when it comes back to a version that changed without its seeing the install', async () => {
+  api.getVersion.mockResolvedValueOnce(idle);
+  mount();
+  await tick();
+  // Updated from the shell's panel, opened from the native menu: this page never saw an install running.
+  api.getVersion.mockResolvedValue({ current: '3.2.8rc4', latest: '3.2.8rc4', has_update: false });
+  vi.setSystemTime(Date.now() + 10_000);
+  await act(async () => { window.dispatchEvent(new Event('focus')); });
+  await tick();
+  expect(reload).toHaveBeenCalledOnce();
+});
+
 it('goes back to offering the update when the install ends without a new version', async () => {
   api.getVersion.mockResolvedValueOnce(installing);
   mount();

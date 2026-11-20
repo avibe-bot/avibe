@@ -170,6 +170,17 @@ it("a failed install of the instance is told by its section, not also by this pa
   expect(screen.queryByText(en.desktopClient.errors.request)).toBeNull();
 });
 
+it('while the shell still follows an install that changed nothing, the instance section offers no retry', async () => {
+  // Accepted six minutes ago; the instance still answers on the same version and offer.
+  shown.instance = instanceReady({ request: { action: 'install', phase: 'accepted', target: '3.2.7', error_code: null, updated_at: new Date(Date.now() - 6 * 60_000).toISOString() } });
+  const { instance } = await openPopup();
+  expect(instance!.textContent).toContain(en.update.failure.install.title);
+  expect(instance!.querySelector('button:not([aria-expanded])')).toBeNull();
+  // The header's check still reads the instance again, which the shell admits.
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.check }));
+  await waitFor(() => expect(send.mock.calls.map(([action]) => (action as { type: string }).type)).toEqual(['update_check', 'instance_update_refresh']));
+});
+
 it("a refusal that leaves no receipt keeps this page's notice: the section has nothing to tell", async () => {
   // An older failed install is still the shell's last receipt; this click is refused before any new one.
   shown.instance = instanceReady({ request: { action: 'install', phase: 'failed', target: '3.2.7', error_code: 'install_failed', updated_at: '2026-11-20T07:03:17Z' } });

@@ -102,20 +102,27 @@ it('shows an instance it cannot reach, or one the account cannot update, without
   expect(member.alex.queryByRole('button', { name: /Update/ })).toBeNull();
 });
 
-it("lets a subject whose install failed with no offer left try again through the panel's check", () => {
+it('lets a subject whose install failed with no offer left try again through its own check, and offers none where it has no check', () => {
   // The desktop app's updater ends a failed install in `error` and drops the offer: its container has no install action.
   const failed = modelFromDesktopState({
     phase: 'error', latest: null, channel: 'test', prereleases: true, skippedVersion: null, interactive: true,
     autoUpdate: false, checkedAt: CHECKED, hostActions: ['check', 'prereleases', 'auto_update', 'install'],
   }, { current: '3.2.8-rc.2', installFailed: true });
   const check = vi.fn();
+  const both = vi.fn();
+  // The instance's install did not finish either, and the shell would take no check of it now: no retry there.
+  const stalled = instance({}, { result: { ok: false, target: '3.2.8rc4' } });
   render(<I18nextProvider i18n={i18n}>
-    <UpdateSubjectsPanel instanceName="alex" instance={{ model: instance(), actions: {} }} app={{ model: failed, actions: {} }} check={{ run: check }} />
+    <UpdateSubjectsPanel instanceName="alex" instance={{ model: stalled, actions: {} }} app={{ model: failed, actions: { check: { run: check } } }} check={{ run: both }} />
   </I18nextProvider>);
   const thisApp = within(document.querySelector<HTMLElement>('[data-update-subject="app"]')!);
+  const alex = within(document.querySelector<HTMLElement>('[data-update-subject="instance"]')!);
   expect(thisApp.getByText(en.update.failure.install.title)).toBeTruthy();
   fireEvent.click(thisApp.getByRole('button', { name: en.update.action.retry }));
   expect(check).toHaveBeenCalledOnce();
+  expect(both).not.toHaveBeenCalled();
+  expect(alex.getByText(en.update.failure.install.title)).toBeTruthy();
+  expect(alex.queryByRole('button', { name: en.update.action.retry })).toBeNull();
 });
 
 it('keeps the single panel as it ships: "Current version", one "Update", the offer without a name', () => {

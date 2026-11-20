@@ -128,6 +128,8 @@ export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>
       model: shown.model,
       unavailable: shown.unavailable,
       actions: {
+        // Its own check only where the shell would take one, so the section offers no retry the shell refuses.
+        ...(shown.canCheck ? { check: { run: () => void act({ type: 'instance_update_check' }), disabled: busy || shown.busy } } : {}),
         ...(shown.canUpdate && shown.target ? {
           update: { run: () => void act({ type: 'instance_update_install', target_version: shown.target! }), disabled: busy },
         } : {}),
@@ -139,6 +141,7 @@ export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>
     app={{
       model: modelFromDesktopState(update, { current: state.desktop.version, installFailed: install.failed }),
       actions: {
+        check: { run: () => void act({ type: 'update_check' }), disabled: busy || appChecking },
         ...(update.phase === 'available' && appTarget ? {
           // Only an accepted request can fail as an install; a rejected one installed nothing.
           update: { run: () => void act({ type: 'update_install', target_version: appTarget }).then((ok) => { if (ok) install.accept(); }), disabled: busy },

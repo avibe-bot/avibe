@@ -16,7 +16,8 @@ const WATCH_LIMIT_MS = 2 * 60_000;
 const REFRESH_MIN_INTERVAL_MS = 5000;
 
 /** Follows an install on this Avibe from `info` to its end: rereads the version until nothing is running, and
- *  loads the page again once the Runtime answers with another version, since its interface changed with it.
+ *  loads the page again once the Runtime answers with a version other than the one it had, since its
+ *  interface changed with it.
  *  Every read of the version while an install is followed goes through `receive`, whichever path made it, so
  *  none can show the new version on the old page. */
 export function useFollowInstall(info: VersionInfo | null, onRead: (info: VersionInfo) => void, enabled = true): {
@@ -37,14 +38,21 @@ export function useFollowInstall(info: VersionInfo | null, onRead: (info: Versio
   }, [reported]);
   // What the callbacks below read, without being rebuilt on every read.
   const latest = useRef({ info, onRead });
-  useEffect(() => { latest.current = { info, onRead }; });
+  // The version this page was loaded with: the first one it read.
+  const loaded = useRef<string | null>(null);
+  useEffect(() => {
+    latest.current = { info, onRead };
+    if (loaded.current === null && info) loaded.current = info.current;
+  });
   // The version the followed install started from, kept until a read shows it ended.
   const started = useRef<string | null>(null);
   useEffect(() => {
     if (running && started.current === null) started.current = latest.current.info?.current ?? null;
   }, [running]);
   const receive = useCallback((fresh: VersionInfo) => {
-    if (started.current && normalizeVersion(fresh.current) !== normalizeVersion(started.current)) {
+    // Also when no install was seen on the way: it may have started and ended between two reads.
+    const from = started.current ?? loaded.current;
+    if (from && normalizeVersion(fresh.current) !== normalizeVersion(from)) {
       window.location.reload();
       return;
     }

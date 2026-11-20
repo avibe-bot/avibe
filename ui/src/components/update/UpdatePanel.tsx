@@ -370,23 +370,20 @@ export type UpdateSubjectSection = {
   model: UpdatePanelModel | null;
   /** Why there is none: the instance does not answer (the default), or it no longer accepts the app's sign-in. */
   unavailable?: 'unreachable' | 'unauthorized';
-  /** Install, and the two switches, as far as this subject's updater takes them. The panel's one check and its close are the panel's. */
-  actions: Pick<UpdatePanelActions, 'update' | 'setPrereleases' | 'setAutoUpdate' | 'settingsBusy'>;
+  /** Install, the two switches, and a check of this subject alone, each as far as its updater takes it now: a
+   *  failed or missing check, or a failed install with no offer left, is tried again through that check. The
+   *  header's one check, which asks both, and the close are the panel's. */
+  actions: Pick<UpdatePanelActions, 'check' | 'update' | 'setPrereleases' | 'setAutoUpdate' | 'settingsBusy'>;
   /** Shown under the state: a request that could not be sent, a hint for a member who cannot install. */
   extra?: ReactNode;
 };
 
-function SubjectSection({ named, section, first, check }: {
-  named: Named;
-  section: UpdateSubjectSection;
-  first: boolean;
-  /** The panel's check, for a subject whose state is a check that failed or never ran. */
-  check?: { run: () => void; disabled?: boolean };
-}) {
+function SubjectSection({ named, section, first }: { named: Named; section: UpdateSubjectSection; first: boolean }) {
   const { t } = useTranslation();
   // Its last check and its switches open from its name; closed, the panel is the two states and their buttons.
   const [open, setOpen] = useState(false);
   const { model, actions } = section;
+  const check = actions.check;
   const status = model?.status ?? null;
   const copy = useStatusCopy(status, model?.subject ?? 'runtime', named);
   // Two buttons in one panel each say what they update.
@@ -482,8 +479,8 @@ export function UpdateSubjectsPanel({ instanceName, instance, app, check, close 
   return (
     <div data-update-panel data-update-subjects className="text-popover-foreground">
       <Header title={t('dashboard.versionAndUpdate')} check={check} checking={checking} checkLabel={t('update.action.check')} close={close} />
-      <SubjectSection named={{ kind: 'instance', name: instanceName, other: t('update.subject.app') }} section={instance} first check={check} />
-      <SubjectSection named={{ kind: 'app', name: t('update.subject.app'), other: instanceName }} section={app} first={false} check={check} />
+      <SubjectSection named={{ kind: 'instance', name: instanceName, other: t('update.subject.app') }} section={instance} first />
+      <SubjectSection named={{ kind: 'app', name: t('update.subject.app'), other: instanceName }} section={app} first={false} />
     </div>
   );
 }

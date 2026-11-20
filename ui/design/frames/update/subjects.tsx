@@ -14,7 +14,7 @@ export type PanelState = { name: string; zh: string; en: string; subjects: Subje
 const section = ({ model, unavailable, canUpdate = true }: Shown): UpdateSubjectSection => ({
   model,
   unavailable,
-  actions: canUpdate ? { update: { run: () => {} }, setPrereleases: () => {}, setAutoUpdate: () => {} } : {},
+  actions: canUpdate ? { check: { run: () => {} }, update: { run: () => {} }, setPrereleases: () => {}, setAutoUpdate: () => {} } : {},
 });
 
 /** The shipped two-section panel, with a frame's subjects. */
