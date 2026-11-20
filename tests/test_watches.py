@@ -5760,9 +5760,9 @@ def test_a_watch_retrying_for_long_says_so_once_per_activation(tmp_path: Path, m
 def test_a_marked_quiet_cycle_ends_the_run_of_retries_even_when_64_is_a_retry_code(tmp_path: Path, monkeypatch) -> None:
     """Quiet and success outcomes are classified before retry codes (#4015 review).
 
-    Asserted on the durable run of retries, not on a sub-second threshold: the old
-    0.2 s threshold left a 0.08 s margin, which a loaded CI runner's store writes
-    exceeded (a notice "after 0 min", #4064 shard 13/16).
+    Asserted on the durable transition, with no clock: the old 0.2 s threshold left
+    a 0.08 s margin, which a loaded CI runner's store writes exceeded (a notice
+    "after 0 min", #4064 shard 13/16).
     """
     store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
@@ -5776,14 +5776,16 @@ def test_a_marked_quiet_cycle_ends_the_run_of_retries_even_when_64_is_a_retry_co
         request_store=request_store, runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     outcomes = iter([75, 75, NO_EVENT_EXIT_CODE, 75])
-    entered: list[tuple[int, datetime]] = []
+    seen: list[tuple[int, object]] = []  # (code this cycle will return, durable run of retries at its start)
 
     async def fake_run_cycle(*args, **kwargs):
         code = next(outcomes, None)
         if code is None:
             service._running = False
             code = 75
-        entered.append((code, datetime.now(timezone.utc)))
+        # A fresh store reads the durable row, not this service's mirror.
+        durable = ManagedWatchStore(tmp_path / "watches.json").get_watch(watch.id)
+        seen.append((code, (durable.metadata or {}).get("watch_retrying_since")))
         await asyncio.sleep(0)
         return _CycleResult(exit_code=code, stdout="", stderr=NO_EVENT_MARKER if code == NO_EVENT_EXIT_CODE else "",
                             timed_out=False)
@@ -5792,10 +5794,13 @@ def test_a_marked_quiet_cycle_ends_the_run_of_retries_even_when_64_is_a_retry_co
     service._running = True
     service._requires_service_lease = False
     asyncio.run(service._run_watch(watch.id))
-    quiet_entered = next(at for code, at in entered if code == NO_EVENT_EXIT_CODE)
-    recorded = store.get_watch(watch.id).metadata["watch_retrying_since"]
-    # The run of retries that remains began after the quiet cycle, not with the first retry.
-    assert datetime.fromisoformat(recorded["since"]) > quiet_entered
+    codes = [code for code, _ in seen]
+    quiet = codes.index(NO_EVENT_EXIT_CODE)
+    # Two retries recorded a run of retries before the quiet cycle; the quiet cycle
+    # ended it, so the next check starts with none; the retry after it starts a new one.
+    assert seen[quiet][1] is not None
+    assert seen[quiet + 1][1] is None
+    assert seen[quiet + 2][1] is not None
     assert not [r for r in request_store.list_pending() if "has been retrying" in r.prompt]
 
 
