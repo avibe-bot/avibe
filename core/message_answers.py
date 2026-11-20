@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import and_, func, or_, select
 
 from storage import message_deliveries as deliveries, messages_service
+from storage.delivery_states import DELIVERY_STATE_MATRIX
 from storage.models import message_answer_operations as operations, message_deliveries, messages
 
 
@@ -159,16 +160,17 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
         return refuse("stale", 409)
     if answer.quick and answer.choice not in options:
         return {"status": 400, "body": {"error": {"code": "invalid_answer"}}}
+    order_value = messages_service.transcript_order_value()
+    target_order = target.get("delivered_at") or target["created_at"]
     newer = conn.execute(
         select(messages.c.id)
         .where(
             messages.c.session_id == session_id,
             messages.c.author.in_(("user", "agent")),
             messages.c.type.in_(messages_service.TRANSCRIPT_TYPES),
-            or_(
-                messages.c.created_at > target["created_at"],
-                and_(messages.c.created_at == target["created_at"], messages.c.id > answer.request_id),
-            ),
+            # Keep an explicit index range even for the equal-time id tie-break.
+            order_value >= target_order,
+            or_(order_value > target_order, messages.c.id > answer.request_id),
         )
         .limit(1)
     ).first()
@@ -176,9 +178,11 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
         select(message_deliveries.c.id)
         .where(
             message_deliveries.c.session_id == session_id,
-            message_deliveries.c.state.not_in(("retired", "accepted")),
+            message_deliveries.c.state.in_(
+                state for state, policy in DELIVERY_STATE_MATRIX.items() if policy.ordering != "terminal"
+            ),
             func.json_extract(message_deliveries.c.snapshot_json, "$.author") == "user",
-            message_deliveries.c.submitted_at >= target["created_at"],
+            message_deliveries.c.submitted_at >= target_order,
         )
         .limit(1)
     ).first()

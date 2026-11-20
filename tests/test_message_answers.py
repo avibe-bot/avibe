@@ -189,6 +189,86 @@ def test_stale_and_missing_answers_do_not_dispatch(answer_route, cause):
     assert r["dispatches"] == []
 
 
+def test_queued_input_accepted_after_question_makes_answer_stale(answer_route, monkeypatch):
+    from datetime import datetime, timedelta
+    from storage import message_deliveries as deliveries
+
+    r = answer_route
+    question_at = datetime.fromisoformat(r["question"]["created_at"].replace("Z", "+00:00"))
+    submitted_at = (question_at - timedelta(seconds=1)).isoformat()
+    accepted_at = (question_at + timedelta(seconds=1)).isoformat()
+    with r["engine"].begin() as conn:
+        queued = deliveries.enqueue_queued(
+            conn, scope_id=r["scope"], session_id=r["session"], text="Queued before question", now=submitted_at
+        )
+        claimed = deliveries.claim_start_batch(
+            conn,
+            turn_id="turn-queued-input",
+            session_id=r["session"],
+            backend="codex",
+            deliveries=[deliveries.get_delivery(conn, queued["id"])],
+            dispatch_text="Queued before question",
+        )
+        turn = claimed["turn"]
+        assert deliveries.bind_native_start(
+            conn,
+            turn["id"],
+            expected_version=turn["version"],
+            runtime_key="runtime-queued-input",
+            runtime_turn_id="runtime-turn-queued-input",
+            native_turn_id="native-queued-input",
+        )
+        monkeypatch.setattr(deliveries, "turn_now_iso", lambda: accepted_at)
+        accepted = deliveries.materialize_start_acceptance(
+            conn, turn_id=turn["id"], evidence={"kind": "test_native_acceptance"}
+        )
+        assert accepted[0]["state"] == "accepted"
+        message = messages_service.get_message(conn, accepted[0]["message_id"], session_id=r["session"])
+        assert message["created_at"] < r["question"]["created_at"] < message["delivered_at"]
+        transcript = messages_service.list_session_messages(conn, session_id=r["session"])["messages"]
+        assert [row["id"] for row in transcript] == [r["question"]["id"], message["id"]]
+
+    response = r["post"]()
+    assert response.status_code == 409
+    assert response.get_json()["answer"]["outcome"] == "stale"
+    assert r["dispatches"] == []
+
+
+def test_answer_freshness_queries_are_bounded_by_live_work(answer_route):
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+    from storage import message_deliveries as deliveries
+
+    r = answer_route
+    with r["engine"].begin() as conn:
+        for number in range(200):
+            queued = deliveries.enqueue_queued(
+                conn, scope_id=r["scope"], session_id=r["session"], text=f"Retired input {number}"
+            )
+            assert deliveries.retire_queued(conn, r["session"], queued["id"])
+    plans = {}
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT message_deliveries.id") and "json_extract" in statement:
+            key = "pending"
+        elif statement.startswith("SELECT messages.id") and "messages.author IN" in statement:
+            key = "transcript"
+        else:
+            return
+        plans[key] = "\n".join(
+            row[3] for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)
+        )
+
+    event.listen(Engine, "before_cursor_execute", capture)
+    try:
+        assert r["post"]().get_json()["answer"]["outcome"] == "accepted"
+    finally:
+        event.remove(Engine, "before_cursor_execute", capture)
+    assert "session_id=? AND state=? AND submitted_at>?" in plans["pending"], plans
+    assert "session_id=? AND <expr>>?" in plans["transcript"], plans
+    assert all("SCAN " not in plan and "TEMP B-TREE" not in plan for plan in plans.values()), plans
+
+
 def test_text_answer_is_ordinary_input_and_preserves_composer_draft(answer_route):
     from storage import message_deliveries as deliveries
 
