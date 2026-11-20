@@ -1909,17 +1909,25 @@ async def drive_sse_stream(
                 # gateway's to bound (``PROVIDER_SILENCE_TIMEOUT_S``).
                 # Encoded off the controller loop: a large context's body takes tens of
                 # milliseconds to serialize. Same call, so the same bytes go out.
-                request = await asyncio.to_thread(
-                    client.build_request,
-                    method,
-                    url,
-                    json=json_body,
-                    headers=headers,
-                    timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_S),
+                # A Stop during the encode ends the wait (``None``): nothing is recorded or sent.
+                request = await _await_network(
+                    asyncio.to_thread(
+                        client.build_request,
+                        method,
+                        url,
+                        json=json_body,
+                        headers=headers,
+                        timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_S),
+                    ),
+                    cancel,
                 )
                 # Durable before it is sent: a crash mid-request leaves it pending, never a success. A Stop ends
                 # the wait at once and nothing is sent; a write that stalls past its bound is not waited for.
-                pending = begin_attempt(request, endpoint=endpoint, protocol=assembler.protocol)
+                pending = (
+                    begin_attempt(request, endpoint=endpoint, protocol=assembler.protocol)
+                    if request is not None
+                    else None
+                )
                 if pending is not None:
                     try:
                         await _await_artifact(pending.written, cancel)

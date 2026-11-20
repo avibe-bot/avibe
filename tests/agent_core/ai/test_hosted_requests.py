@@ -9,6 +9,7 @@ Scenario MH-HOSTED-VIBEY-001.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -241,3 +242,41 @@ async def test_the_request_body_is_encoded_off_the_loop_into_the_same_bytes(prot
     (wire,) = sent
     assert built_on and loop_thread not in built_on
     assert wire.content == on_loop.content
+
+
+async def test_a_stop_during_the_off_loop_encode_sends_nothing_and_ends_aborted() -> None:
+    import threading
+
+    request = _request("openai_chat", {"web_search": PROXY}, tools=(WEB, READ, BASH))
+    sent: list[httpx.Request] = []
+    entered, release = threading.Event(), threading.Event()
+
+    def gateway(wire: httpx.Request) -> httpx.Response:
+        sent.append(wire)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=STREAMS["openai_chat"])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        original = client.build_request
+
+        def build_request(*args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return original(*args, **kwargs)
+
+        client.build_request = build_request  # type: ignore[method-assign]
+        adapter = create_adapter("openai_chat", client=client, gateway=True)  # type: ignore[arg-type]
+        token = CancelToken()
+
+        async def collect():
+            return [event async for event in adapter.stream(request, token)]
+
+        streaming = asyncio.create_task(collect())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            token.cancel()
+            events = await asyncio.wait_for(streaming, 5)  # Stop does not wait for the encode
+        finally:
+            release.set()
+
+    assert sent == []
+    assert getattr(events[-1], "kind", None) == "aborted"
