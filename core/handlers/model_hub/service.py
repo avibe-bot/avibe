@@ -916,7 +916,7 @@ def _pinned_hop(request: Any, backend: str) -> tuple[str, str | None] | None:
 
 _QUOTA_PAUSE_REASONS: Final = frozenset({"quota_exhausted", "rate_limited"})
 # The windows a whole account stops on; a model's own limit never pauses it.
-_ACCOUNT_QUOTA_WINDOWS: Final = frozenset({"session", "weekly"})
+_ACCOUNT_QUOTA_WINDOWS: Final = frozenset({"session", "weekly", "monthly"})
 
 
 def _paused_for_quota(source: ModelHubSourceConfig, live: SourceRecoveryAnnotation | None) -> bool:

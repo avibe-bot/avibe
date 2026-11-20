@@ -26,7 +26,7 @@ def _window(kind: str, used_pct: float, *, resets_in: int = RESET_SECONDS) -> di
     return {
         "id": kind, "kind": kind, "label": kind, "used_pct": used_pct,
         "window_seconds": RESET_SECONDS, "resets_at": (NOW + timedelta(seconds=resets_in)).isoformat(),
-        **({"scope_model": "Fable"} if kind == "model_weekly" else {}),
+        **({"scope_model": "Fable"} if kind in {"model_weekly", "model_session"} else {}),
     }
 
 
@@ -112,19 +112,25 @@ def test_refresh_resumes_a_paused_account_once_the_vendor_reports_quota(tmp_path
     # The vendor still reports the shared window used up: the pause and its reset time stay.
     ([_window("session", 100.0), _window("weekly", 41.0)], False),
     ([_window("session", 12.0), _window("weekly", 100.0)], False),
+    # Grok's one credit window can be monthly; spent, it stops the whole account too.
+    ([_window("monthly", 100.0)], False),
     # A used-up window that names no reset time is still used up.
     ([{**_window("session", 100.0), "resets_at": None}], False),
     # A used-up window whose reset has passed has given its quota back.
     ([_window("session", 100.0, resets_in=-60), _window("weekly", 41.0)], True),
     # One model's own limit never pauses the whole account.
     ([_window("session", 12.0), _window("model_weekly", 100.0)], True),
+    ([_window("model_session", 100.0), _window("model_weekly", 100.0)], True),
+    # A report of no quota at all (Gemini without a project) shows nothing used up.
+    ([], True),
     # Where the vendor's quota cannot be read, the next request asks the vendor.
     (SubscriptionQuotaError("unsupported"), True),
     (SubscriptionQuotaError("rate_limited", retry_after_seconds=600), True),
     (SubscriptionQuotaError("unavailable"), True),
     # A sign-in that has expired needs the sign-in, not a request.
     (SubscriptionQuotaError("auth_expired"), False),
-], ids=["session-used-up", "week-used-up", "no-reset-time", "reset-passed", "model-limit", "unreadable-vendor", "read-limited", "read-failed", "signed-out"])
+], ids=["session-used-up", "week-used-up", "month-used-up", "no-reset-time", "reset-passed", "model-limit",
+       "model-session-limit", "no-windows", "unreadable-vendor", "read-limited", "read-failed", "signed-out"])
 def test_refresh_keeps_the_pause_only_while_the_vendor_reports_it(tmp_path, reading, resumed):
     """MH-QUOTA-032: the vendor's current reading decides; an unreadable one lets the next request ask."""
 

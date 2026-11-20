@@ -23,6 +23,7 @@ import type {
   RuntimeDependency,
   RuntimeHealth,
   Source,
+  SourceQuota,
   SourceQuotaValue,
   SourceState,
   SuppliedModel,
@@ -466,6 +467,39 @@ export const quotaSummary = ({ claudeExpired = false } = {}): QuotaSummary => ({
   ],
   value: { currency: 'USD', price_table_date: '2026-10-30', week: priced(439.6), period: { sources: 2, fee_usd: 400, multiple: 3.97, ...priced(1587.5) } },
 });
+
+/**
+ * The other signed-in providers on the same card: Gemini through Antigravity
+ * (model-group 5-hour and weekly limits, one group spent), Grok's monthly credit,
+ * and Kimi, whose sign-in reports no quota.
+ */
+export const quotaProviders = (): QuotaSummary => {
+  const group = (id: string, model: string, kind: 'model_session' | 'model_weekly', used: number, resetsIn: number | null): QuotaWindow => quotaWindow({
+    id, kind, label: model, scope_model: model, used_pct: used,
+    window_seconds: kind === 'model_session' ? 18_000 : 604_800, resets_at: resetsIn === null ? null : at(resetsIn),
+  });
+  const source = (source_id: string, vendor: string, display_name: string, over: Partial<SourceQuota>): SourceQuota => ({
+    source_id, vendor, display_name, account_label: null, plan: null, fetched_at: at(-1), state: 'ok', windows: [], ...over,
+  });
+  return {
+    refresh_interval_seconds: 300,
+    sources: [
+      source('src_gemini', 'gemini', 'Gemini', {
+        account_label: 'alex@example.com',
+        windows: [
+          group('bucket:gemini-5h', 'Gemini Models', 'model_session', 100, 70),
+          group('bucket:gemini-weekly', 'Gemini Models', 'model_weekly', 38, 4 * 24 * 60 + 300),
+          group('bucket:3p-5h', 'Claude and GPT models', 'model_session', 12, 200),
+          group('bucket:3p-weekly', 'Claude and GPT models', 'model_weekly', 0, null),
+        ],
+      }),
+      source('src_grok', 'xai', 'Grok', {
+        windows: [quotaWindow({ id: 'credits', kind: 'monthly', label: 'monthly', used_pct: 37.5, window_seconds: 30 * 86_400, resets_at: at(11 * 24 * 60) })],
+      }),
+      source('src_kimi', 'kimi', 'Kimi', { fetched_at: null, state: 'unsupported', error_key: 'models.quota.error.unsupported' }),
+    ],
+  };
+};
 
 const event = (minutesAgo: number, over: Omit<ResolutionEvent, 'id' | 'ts'>): ResolutionEvent => ({ id: `evt_${minutesAgo}`, ts: at(-minutesAgo), ...over });
 

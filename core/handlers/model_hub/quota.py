@@ -1,7 +1,8 @@
 """Subscription quota: parse the vendors' own usage reports into rate-limit windows.
 
-A logged-in subscription (Claude, ChatGPT/Codex) exposes how much of each of its
-rate-limit windows is used through a model-free account endpoint. The engine that
+A logged-in subscription (Claude, ChatGPT/Codex, Gemini through Antigravity, Grok)
+exposes how much of each of its rate-limit windows is used through a model-free
+account endpoint. Kimi's account sign-in has no such report. The engine that
 holds the grant makes the call; this module only turns the returned body into the
 `quota-summary.schema.json` window shape. It is a report, like usage metering:
 resolution and admission never read it. The one reader is the refresh the user
@@ -28,7 +29,9 @@ from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Optional, 
 
 logger = logging.getLogger(__name__)
 
-QuotaWindowKind = Literal["session", "weekly", "model_weekly", "other"]
+# `session`, `weekly` and `monthly` stop the whole account when spent; the
+# `model_*` kinds stop only the models `scope_model` names.
+QuotaWindowKind = Literal["session", "weekly", "monthly", "model_session", "model_weekly", "other"]
 QuotaFailure = Literal["auth_expired", "rate_limited", "unsupported", "unavailable", "malformed"]
 
 SESSION_WINDOW_SECONDS: Final = 5 * 3600
@@ -42,7 +45,7 @@ _MAX_UPSTREAM_ROWS: Final = 64
 # A usage report is a few KiB; refuse anything far larger before decoding it.
 _MAX_BODY_BYTES: Final = 256 * 1024
 
-QUOTA_VENDORS: Final = frozenset({"anthropic", "openai", "codex"})
+QUOTA_VENDORS: Final = frozenset({"anthropic", "openai", "codex", "gemini", "xai"})
 
 # Claude's legacy top-level keys. `seven_day_oauth_apps` is an app-surface limit
 # Claude Code itself does not present, so it is deliberately not a window here.
@@ -108,16 +111,23 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _iso_timestamp(value: object) -> Optional[str]:
+def _moment(value: object) -> Optional[datetime]:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
         moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
-        return _iso(moment)
+        # Only a moment that can be written back in UTC is readable.
+        _iso(moment)
     except (OverflowError, ValueError):
         return None
+    return moment
+
+
+def _iso_timestamp(value: object) -> Optional[str]:
+    moment = _moment(value)
+    return _iso(moment) if moment is not None else None
 
 
 def _unix_timestamp(value: object) -> Optional[str]:
@@ -410,7 +420,151 @@ def parse_codex_quota(body: object) -> dict[str, Any]:
     return {"plan": plan, "windows": _ordered(windows)}
 
 
-_KIND_ORDER: Final = {"session": 0, "weekly": 1, "model_weekly": 2, "other": 3}
+# Antigravity meters Gemini per model group ("Gemini Models", "Claude and GPT
+# models"), each with its own 5-hour and weekly bucket; no bucket stops the
+# whole account, so every known one is model-scoped.
+_GEMINI_WINDOWS: Final[Mapping[str, tuple[QuotaWindowKind, int]]] = {
+    "5h": ("model_session", SESSION_WINDOW_SECONDS),
+    "weekly": ("model_weekly", WEEKLY_WINDOW_SECONDS),
+}
+_GEMINI_WINDOW_SUFFIXES: Final = ("-5h", "-weekly", "_5h", "_weekly")
+_GEMINI_ROW_ORDER: Final = {"model_session": 0, "model_weekly": 1, "other": 2}
+
+
+def _gemini_reading(bucket: Mapping[str, Any]) -> Optional[tuple[float, Optional[str]]]:
+    """(used %, reset) of one bucket, or None when it carries no reading."""
+
+    resets_at = _iso_timestamp(bucket.get("resetTime"))
+    if "remainingFraction" not in bucket:
+        # Proto3 JSON omits a zero: a spent bucket arrives with only its reset.
+        return (100.0, resets_at) if resets_at is not None else None
+    remaining = _number(bucket.get("remainingFraction"))
+    if remaining is None:
+        return None
+    remaining = min(1.0, max(0.0, remaining))
+    used = _percent((1.0 - remaining) * 100)
+    if used is None:
+        return None
+    # An untouched bucket reports a rolling "full window from now" reset that
+    # moves with every read; it has nothing to give back, so it has no reset.
+    return used, None if remaining >= 1.0 else resets_at
+
+
+def _gemini_group_key(bucket_id: str) -> str:
+    for suffix in _GEMINI_WINDOW_SUFFIXES:
+        if bucket_id.lower().endswith(suffix) and len(bucket_id) > len(suffix):
+            return bucket_id[: -len(suffix)]
+    return bucket_id
+
+
+def parse_gemini_quota(body: object) -> dict[str, Any]:
+    """Parse `POST {cloudcode-pa}/v1internal:retrieveUserQuotaSummary`.
+
+    `groups[]` name the models that share their buckets; an older answer lists
+    bare top-level `buckets[]`. A group's own name is display text; without one,
+    the bucket id (less its window suffix) stands in, marked as a key. An empty
+    answer (`{}`, the proto3 form of no groups) is a report of no quota.
+    """
+
+    payload = _load_object(body)
+    groups = payload.get("groups", [])
+    loose = payload.get("buckets", [])
+    if not isinstance(groups, list) or not isinstance(loose, list):
+        raise SubscriptionQuotaError("malformed")
+    rows: list[Mapping[str, Any]] = [group for group in groups[:_MAX_UPSTREAM_ROWS] if isinstance(group, dict)]
+    if not any(isinstance(group.get("buckets"), list) and group["buckets"] for group in rows):
+        rows = [{"buckets": loose}]
+    windows: list[dict[str, Any]] = []
+    for group_index, group in enumerate(rows):
+        buckets = group.get("buckets")
+        if not isinstance(buckets, list):
+            continue
+        group_name = _label(group.get("displayName"))
+        group_windows: list[dict[str, Any]] = []
+        for index, bucket in enumerate(buckets[:_MAX_UPSTREAM_ROWS]):
+            if not isinstance(bucket, dict) or bucket.get("disabled") is True:
+                continue
+            reading = _gemini_reading(bucket)
+            if reading is None:
+                continue
+            used, resets_at = reading
+            bucket_id = _label(bucket.get("bucketId"))
+            scope = group_name or (_gemini_group_key(bucket_id) if bucket_id else None)
+            if scope is None:
+                continue
+            window_name = bucket.get("window")
+            known = _GEMINI_WINDOWS.get(window_name) if isinstance(window_name, str) else None
+            if known is not None:
+                kind, seconds = known
+                label = scope
+            else:
+                kind, seconds = "other", None
+                named = _label(window_name) or _label(bucket.get("displayName"))
+                label = f"{scope} · {named}" if named else scope
+            group_windows.append(
+                _window(
+                    window_id=f"bucket:{bucket_id or f'{group_index}:{index}'}",
+                    kind=kind,
+                    label=label,
+                    used_pct=used,
+                    window_seconds=seconds,
+                    resets_at=resets_at,
+                    scope_model=scope[:_MAX_LABEL_CHARS] if kind != "other" else None,
+                    label_is_key=group_name is None,
+                )
+            )
+        # Each group reads 5-hour first, then weekly, then anything unrecognised.
+        group_windows.sort(key=lambda window: _GEMINI_ROW_ORDER[window["kind"]])
+        windows.extend(group_windows)
+    return {"plan": None, "windows": _ordered(windows)}
+
+
+_GROK_PERIODS: Final[Mapping[str, QuotaWindowKind]] = {"WEEKLY": "weekly", "MONTHLY": "monthly"}
+
+
+def parse_grok_quota(body: object) -> dict[str, Any]:
+    """Parse `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`.
+
+    One account-wide credit window: weekly or monthly by `currentPeriod.type`,
+    resetting at the period's end. Grok omits a zero percentage, so a missing
+    one reads as 0 only beside a well-formed weekly or monthly period.
+    """
+
+    payload = _load_object(body)
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        raise SubscriptionQuotaError("malformed")
+    period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
+    period_type = period.get("type")
+    period_key = period_type.strip().upper().removeprefix("USAGE_PERIOD_TYPE_") if isinstance(period_type, str) else ""
+    kind: QuotaWindowKind = _GROK_PERIODS.get(period_key, "other")
+    start, end = _moment(period.get("start")), _moment(period.get("end"))
+    span = _seconds((end - start).total_seconds()) if start is not None and end is not None else None
+    if "creditUsagePercent" in config:
+        used = _percent(config["creditUsagePercent"])
+    else:
+        used = 0.0 if kind != "other" and span is not None else None
+    if used is None:
+        return {"plan": None, "windows": []}
+    if kind != "other":
+        label, label_is_key = kind, False
+    else:
+        label, label_is_key = (_span_label(span), False) if span is not None else ("credit_usage", True)
+    window = _window(
+        window_id="credits",
+        kind=kind,
+        label=label,
+        used_pct=used,
+        window_seconds=span,
+        resets_at=_iso(end) if end is not None else None,
+        label_is_key=label_is_key,
+    )
+    return {"plan": None, "windows": [window]}
+
+
+# The two model-scoped kinds share a rank: a parser emits them model by model,
+# and the stable sort keeps each model's windows together.
+_KIND_ORDER: Final = {"session": 0, "weekly": 1, "monthly": 2, "model_session": 3, "model_weekly": 3, "other": 4}
 
 
 def _ordered(windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -431,6 +585,10 @@ def parse_subscription_quota(vendor: str, body: object) -> dict[str, Any]:
         return parse_claude_quota(body)
     if normalized in {"openai", "codex"}:
         return parse_codex_quota(body)
+    if normalized == "gemini":
+        return parse_gemini_quota(body)
+    if normalized == "xai":
+        return parse_grok_quota(body)
     raise SubscriptionQuotaError("unsupported")
 
 
