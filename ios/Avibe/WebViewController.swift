@@ -1108,6 +1108,8 @@ final class WebViewController: UIViewController {
         else {
             return nil
         }
+        // The first load is this one: the cache serves no later load.
+        hasUsedCache = true
         return url
     }
 
@@ -1420,10 +1422,6 @@ final class WebViewController: UIViewController {
         )
     }
 
-    /// Tells every instance-origin document this runtime shows, the primary
-    /// and instance-origin child windows, the current `direct` state for this
-    /// runtime's instance origin: what new connections prefer, and how many
-    /// times connections were closed because their path was lost.
     /// `direct.preferenceChanged` to this instance's documents: the App
     /// changed this device's path choice itself.
     func deliverDirectPreferenceChanged(_ preference: DirectPathPreference) {
@@ -1443,6 +1441,11 @@ final class WebViewController: UIViewController {
         }
     }
 
+
+    /// Tells every instance-origin document this runtime shows, the primary
+    /// and instance-origin child windows, the current `direct` state for this
+    /// runtime's instance origin: what new connections prefer, and how many
+    /// times connections were closed because their path was lost.
     func deliverDirectTransportChanged(
         statusFor status: (WebOrigin) -> DirectPathStatus
     ) {

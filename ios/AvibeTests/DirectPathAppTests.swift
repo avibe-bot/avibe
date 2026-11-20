@@ -5402,6 +5402,43 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .automatic)
         try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > failed.id }
         _ = try await waitForBrowser("instance-1", in: app)
+
+        // Not the tunnel's doing: a sign-in page failing, and a cached page
+        // shown uncovered running out of time. Unchanged.
+        let two = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
+        store.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: two.serialized)
+        let second = try await select("instance-2", in: app)
+        let signIn = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .started, destination: .authentication),
+            attemptID: signIn.id,
+            runtime: second
+        )
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .authentication),
+            attemptID: signIn.id,
+            runtime: second
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, signIn.id)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: two.serialized).mode, .tunnel)
+
+        _ = try await select("instance-1", in: app)
+        let cachedSecond = try await select("instance-2", in: app)
+        let cached = try XCTUnwrap(app.runtimeOpenAttempt)
+        for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+            app.handleRuntimeNavigation(
+                RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                attemptID: cached.id,
+                runtime: cachedSecond
+            )
+        }
+        app.runtimeCachedPageKeepsShell(attemptID: cached.id, runtime: cachedSecond)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, cached.id)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: two.serialized).mode, .tunnel)
     }
 
     /// The bridge surface: `directPreference` 1 only with a provider; the

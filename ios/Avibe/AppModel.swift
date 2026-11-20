@@ -326,7 +326,7 @@ final class AppModel: ObservableObject {
     private let networkPath: NetworkPathReading
     /// Where the next open of this runtime starts: a reopen after this
     /// device's path choice changed, at the page that changed it.
-    private var runtimeStartURL: (runtime: MobileRuntimeContext, url: URL)?
+    private var runtimeStartURL: (runtime: MobileRuntimeContext, identity: Int, url: URL)?
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -2140,11 +2140,14 @@ final class AppModel: ObservableObject {
             if attempt.phase == .documentLoaded {
                 setRuntimeOpenPhase(.failed, attemptID: attemptID)
             } else {
+                let revertible = !isAuthenticationDestination(event.destination)
+                    && attempt.phase != .authenticating
+                    && attempt.phase != .awaitingUser
                 finishRuntimeOpenAutomaticBudget(
                     phase: .failed,
                     attemptID: attemptID
                 )
-                if revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
+                if revertible, revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
                     // Opened again, automatic, once this callback has
                     // returned; the failed attempt waits for nothing else.
                     let runtime = attempt.runtime
@@ -2224,15 +2227,22 @@ final class AppModel: ObservableObject {
             else {
                 return
             }
-            self.runtimeStartURL = (runtime, url)
-            self.openRuntime(runtime)
+            // For this reopen's attempt only: an open that never reaches
+            // its first load leaves nothing for a later one.
+            if self.openRuntime(runtime) {
+                self.runtimeStartURL = (runtime, self.runtimeIdentity, url)
+            }
         }
         return next
     }
 
     /// The URL the new controller of `runtime` starts at, once.
     func takeRuntimeStartURL(for runtime: MobileRuntimeContext) -> URL? {
-        guard let start = runtimeStartURL, start.runtime == runtime else {
+        guard
+            let start = runtimeStartURL,
+            start.runtime == runtime,
+            start.identity == runtimeIdentity
+        else {
             return nil
         }
         runtimeStartURL = nil
@@ -2240,10 +2250,12 @@ final class AppModel: ObservableObject {
     }
 
     /// "Cloudflare tunnel only", and this open of the instance ran out of
-    /// time or failed to load, while the device has a network and avibe.bot
-    /// lists the instance online: the path is what fails, so the choice
-    /// goes back to automatic (once; it stays automatic until chosen
-    /// again), and the page is told. The caller opens it again.
+    /// time or its document failed to load, while the device has a network
+    /// and avibe.bot lists the instance online: the path is what fails, so
+    /// the choice goes back to automatic (once; it stays automatic until
+    /// chosen again), and the page is told. The caller opens it again.
+    /// Not while a sign-in page is in front (its host is not the tunnel),
+    /// nor over a cached page shown uncovered (it stays, with its banner).
     private func revertTunnelOnlyIfUnreachable(attemptID: Int) -> Bool {
         guard
             directPathController != nil,
@@ -2251,8 +2263,10 @@ final class AppModel: ObservableObject {
             runtimeIdentity == attemptID,
             let attempt = runtimeOpenAttempt,
             attempt.id == attemptID,
+            ![.authenticating, .awaitingUser, .showingCachedLive].contains(attempt.phase),
             route.runtime == attempt.runtime,
-            sessionCoordinator.isSelectedRuntime(attempt.runtime),
+            // As the reopen requires.
+            sessionCoordinator.keepsSelectedRuntime(attempt.runtime),
             networkPath.isSatisfied,
             sessionCoordinator.currentInstances
                 .first(where: { $0.id == attempt.runtime.instance.id })?.available == true,
