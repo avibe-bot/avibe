@@ -1,4 +1,3 @@
-import { StandaloneAppRoute } from './components/apps/StandaloneAppRoute';
 import { useAppLaunch } from './apps/useAppLaunch';
 import {
   createBrowserRouter,
@@ -46,6 +45,7 @@ import {
   UserList,
   VaultsPage,
   Wizard,
+  StandaloneAppRoute,
 } from './routePages';
 import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
 import { StatusProvider } from './context/StatusProvider';
@@ -954,8 +954,22 @@ const WorkbenchRouteSurface = () => {
         </Suspense>
       }
     />
-    <Route path="/apps/library" element={<StandaloneAppRoute appId="library"><LibraryRoute /></StandaloneAppRoute>} />
-    <Route path="/apps/preview" element={<StandaloneAppRoute appId="preview" />} />
+    <Route
+      path="/apps/library"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <StandaloneAppRoute appId="library"><LibraryRoute /></StandaloneAppRoute>
+        </Suspense>
+      }
+    />
+    <Route
+      path="/apps/preview"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <StandaloneAppRoute appId="preview" />
+        </Suspense>
+      }
+    />
     <Route
       path="/apps/show/:sessionId"
       element={
