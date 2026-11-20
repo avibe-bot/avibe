@@ -1,4 +1,4 @@
-// 订阅额度 · 重置卡 (proposal): the shipped quota tab, with each account's reset cards drawn inside
+// 订阅额度 · 重置卡 (approved by the owner 2026-11-20, 「按这稿做」): the shipped quota tab, with each account's reset cards drawn inside
 // its card and a refresh on the card. One frame per state the owner asked for: none, one kind,
 // both kinds, the line before a use, using, used, not used, an answer that never arrived, and a
 // card the vendor does not let through yet.
@@ -59,10 +59,10 @@ const quota = ({ claude = [], chatgpt: gpt = [], state, refreshing }: Held, rese
 };
 
 const desktop = (name: string, title: string, held: Held, reset = false): FrameSpec => ({
-  name, title: `订阅额度 · 重置卡 · ${title}`, width: 1280, height: 1080, status: 'proposed', fixtures: { api: baseApi }, render: quota(held, reset),
+  name, title: `订阅额度 · 重置卡 · ${title}`, width: 1280, height: 1080, status: 'approved', fixtures: { api: baseApi }, render: quota(held, reset),
 });
 const phone = (name: string, title: string, held: Held, reset = false): FrameSpec => ({
-  name: `${name}-phone`, title: `订阅额度 · 重置卡 · ${title} · 手机`, width: 390, height: 2000, status: 'proposed', fixtures: { api: baseApi }, render: quota(held, reset),
+  name: `${name}-phone`, title: `订阅额度 · 重置卡 · ${title} · 手机`, width: 390, height: 2000, status: 'approved', fixtures: { api: baseApi }, render: quota(held, reset),
 });
 
 const both = [full, fable];
