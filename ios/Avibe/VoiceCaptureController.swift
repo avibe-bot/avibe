@@ -363,6 +363,10 @@ final class VoiceCaptureController {
         /// not a no. The take is kept on the phone for Retry, which asks
         /// again before anything is sent.
         var transient = false
+        /// Unreachable until Avibe is opened again (the App's local
+        /// listener failed for this process): sending again by itself
+        /// cannot help.
+        var untilReopened = false
     }
 
     /// The App's state at the press that is starting, for the message.
@@ -450,9 +454,10 @@ final class VoiceCaptureController {
         var endedAt: Date?
         /// Kept once transcribed, so Retry does not transcribe again.
         var text: String?
-        /// When it was first kept unsent, and why it is kept now.
+        /// When it was first kept unsent, and whether it is sent again by
+        /// itself.
         var keptAt: Date?
-        var keptReason: VoiceCaptureAttributes.Reason?
+        var keptAutomatic = false
         /// Sends tried again since it was kept.
         var retries = 0
     }
@@ -618,6 +623,9 @@ final class VoiceCaptureController {
             if case .idle = state { _ = await endLeftovers(reason: .interrupted) }
             return
         }
+        // Already being sent again by itself: one send at a time, so the
+        // message cannot be posted twice.
+        guard automaticSend != take.id else { return }
         take.retries += 1
         await deliver(take)
     }
@@ -1051,6 +1059,8 @@ final class VoiceCaptureController {
             case .consentRequired: return Refusal(reason: .consent, needsApp: true)
             case .olderAvibe: return Refusal(reason: .updateAvibe, needsApp: false)
             case .unavailable: return Refusal(reason: .voiceUnavailable, needsApp: false)
+            case .directFault:
+                return Refusal(reason: .offline, needsApp: false, transient: true, untilReopened: true)
             default: return Refusal(reason: .offline, needsApp: false, transient: true)
             }
         } catch {
@@ -1065,7 +1075,9 @@ final class VoiceCaptureController {
         case refused(Refusal)
         /// Nothing was posted, so sending again is safe: the instance could
         /// not be reached (`offline`), or the take was not turned into text.
-        case kept(VoiceCaptureAttributes.Reason)
+        /// `automatic`: sending again by itself can help (the instance was
+        /// unreachable, and not because this process's listener failed).
+        case kept(VoiceCaptureAttributes.Reason, automatic: Bool)
         case nothingHeard
         /// The App must ask again (voice consent, sign-in).
         case needsApp(VoiceCaptureAttributes.Reason)
@@ -1081,18 +1093,22 @@ final class VoiceCaptureController {
     /// now, not reused.
     private func send(_ take: inout Take) async -> Sent {
         let sendGeneration = generation
+        let id = take.id
+        // Given up meanwhile (an account change closed its client; it was
+        // discarded or replaced while an automatic send was under way):
+        // nothing more is asked or posted.
+        var current: Bool { generation == sendGeneration && !ended.contains(id) }
         var answer = await take.consent.value
-        // An account change meanwhile closed this take's client: ask nothing.
-        guard generation == sendGeneration else { return .superseded }
+        guard current else { return .superseded }
         if answer?.transient == true {
             answer = await Self.refusal(from: take.instance)
             let fresh = answer
             take.consent = Task { fresh }
-            guard generation == sendGeneration else { return .superseded }
+            guard current else { return .superseded }
         }
         if let refusal = answer {
             // Unreachable is not a no: the take stays on the phone.
-            return refusal.transient ? .kept(.offline) : .refused(refusal)
+            return refusal.transient ? .kept(.offline, automatic: !refusal.untilReopened) : .refused(refusal)
         }
         // Once the message POST has been made, its outcome may be unknown
         // (a lost response): it is never repeated, so sending again cannot
@@ -1105,10 +1121,10 @@ final class VoiceCaptureController {
                     audio: audio, name: "voice.m4a", mime: "audio/mp4"
                 )
             }
-            guard generation == sendGeneration else { return .superseded }
+            guard current else { return .superseded }
             guard let text = take.text else { throw VoiceCaptureInstanceClient.Failure.nothingHeard }
             let path = try await take.instance.mainBotMessagesPath()
-            guard generation == sendGeneration else { return .superseded }
+            guard current else { return .superseded }
             posted = true
             let earlier = environment.earlier()
             try await take.instance.postMessage(
@@ -1121,24 +1137,29 @@ final class VoiceCaptureController {
             return .sent(text)
         } catch let failure as VoiceCaptureInstanceClient.Failure {
             record("deliver: failed \(failure) posted=\(posted)")
-            guard generation == sendGeneration else { return .superseded }
+            guard posted ? generation == sendGeneration : current else { return .superseded }
             if posted, failure != .consentRequired, failure != .signIn { return .unknown }
             switch failure {
             case .nothingHeard: return .nothingHeard
             // A "no" given since: stop, send nothing, keep nothing.
             case .consentRequired: return .needsApp(.consent)
             case .signIn: return .needsApp(.signIn)
+            case .directFault:
+                return .kept(.offline, automatic: false)
             default:
-                let unreachable = failure == .offline || failure == .directFault
-                return .kept(take.text == nil && !unreachable ? .transcriptionFailed : .offline)
+                let reason: VoiceCaptureAttributes.Reason =
+                    take.text == nil && failure != .offline ? .transcriptionFailed : .offline
+                return .kept(reason, automatic: reason == .offline)
             }
         } catch {
             record("deliver: failed \(error)")
-            guard generation == sendGeneration else { return .superseded }
-            return posted ? .unknown : .kept(.transcriptionFailed)
+            guard posted ? generation == sendGeneration : current else { return .superseded }
+            return posted ? .unknown : .kept(.transcriptionFailed, automatic: false)
         }
     }
 
+    /// A send the user asked for (the stop, the island's Send or Retry):
+    /// the island says it is sending, and nothing else starts meanwhile.
     private func deliver(_ initial: Take) async {
         var take = initial
         let deliverGeneration = generation
@@ -1148,8 +1169,36 @@ final class VoiceCaptureController {
         await take.activity.update(content(for: take, phase: .sending))
         let result = await send(&take)
         guard generation == deliverGeneration else { return }
-        if case .kept(let reason) = result {
-            await keepForRetry(take, reason: reason)
+        await settle(result, of: take)
+    }
+
+    /// A kept take sent again by itself. It stays kept while this runs (its
+    /// island goes on saying it will send), so a new press or the island's
+    /// Discard is never swallowed: either ends the take, and this send then
+    /// asks and posts nothing more.
+    private func sendKeptAgain(_ kept: Take) async {
+        var take = kept
+        take.retries += 1
+        state = .failed(take)
+        automaticSend = take.id
+        let result = await send(&take)
+        if automaticSend == take.id { automaticSend = nil }
+        guard case .failed(let current) = state, current.id == take.id, !ended.contains(take.id) else {
+            return
+        }
+        retryTask = nil
+        await settle(result, of: take)
+    }
+
+    /// The kept take an automatic send is under way for.
+    private var automaticSend: UUID?
+    /// Takes that are over (`end`): a send still under way for one stops.
+    private var ended: Set<UUID> = []
+
+    /// What a finished send means for its take and island.
+    private func settle(_ result: Sent, of take: Take) async {
+        if case .kept(let reason, let automatic) = result {
+            await keepForRetry(take, reason: reason, automatic: automatic)
             return
         }
         stopRetrying()
@@ -1172,6 +1221,7 @@ final class VoiceCaptureController {
         case .refused(let refusal):
             record("deliver: consent refused \(refusal.reason); discarded unsent")
             note("refused:\(refusal.reason.rawValue)", for: take)
+            ended.insert(take.id)
             take.audio.discard()
             take.instance.close()
             state = .idle
@@ -1208,11 +1258,13 @@ final class VoiceCaptureController {
     }
 
     /// Keeps a take that was not sent, nothing of it posted. One the
-    /// instance could not be reached for is sent again by itself (and when
-    /// Avibe comes to the front) until it arrives; after `failedDismissal`
-    /// it gets one last send and is then dropped with its island. Any other
-    /// waits for Retry until then.
-    private func keepForRetry(_ kept: Take, reason: VoiceCaptureAttributes.Reason) async {
+    /// instance could not be reached for (`automatic`) is sent again by
+    /// itself, and when Avibe comes to the front, until it arrives; after
+    /// `failedDismissal` it gets one last send and is then dropped with its
+    /// island. Any other waits for Retry until then: one that could not be
+    /// turned into text, or one this process cannot send until Avibe is
+    /// opened again.
+    private func keepForRetry(_ kept: Take, reason: VoiceCaptureAttributes.Reason, automatic: Bool) async {
         var take = kept
         let now = environment.now()
         if let keptAt = take.keptAt, now.timeIntervalSince(keptAt) >= Self.failedDismissal / .seconds(1) {
@@ -1223,8 +1275,7 @@ final class VoiceCaptureController {
             take.keptAt = now
             note("kept:\(reason.rawValue)\(unreached(take))", for: take)
         }
-        take.keptReason = reason
-        let automatic = reason == .offline
+        take.keptAutomatic = automatic
         if !automatic {
             // Waiting for the user's Retry needs no running process.
             releaseRetryHold?()
@@ -1248,25 +1299,28 @@ final class VoiceCaptureController {
         let sleep = environment.sleep
         retryTask = Task { [weak self] in
             await sleep(delay)
-            guard !Task.isCancelled, let self, case .failed(var current) = self.state, current.id == id else {
+            guard !Task.isCancelled, let self, case .failed(let current) = self.state, current.id == id,
+                  self.automaticSend != id
+            else {
                 return
             }
-            self.retryTask = nil
             if automatic {
-                current.retries += 1
-                await self.deliver(current)
+                await self.sendKeptAgain(current)
             } else {
+                self.retryTask = nil
                 await self.drop(current)
             }
         }
     }
 
     /// Avibe came to the front: a take kept for an unreachable instance is
-    /// sent again now.
+    /// sent again now, unless a send of it is already under way.
     func retryKeptNow() async {
-        guard case .failed(var take) = state, take.keptReason == .offline else { return }
-        take.retries += 1
-        await deliver(take)
+        guard case .failed(let take) = state, take.keptAutomatic, automaticSend != take.id else { return }
+        retryTask?.cancel()
+        let task = Task { await self.sendKeptAgain(take) }
+        retryTask = task
+        await task.value
     }
 
     /// The take's requests that did not reach the instance, for a note.
@@ -1314,7 +1368,9 @@ final class VoiceCaptureController {
         dismissal: ActivityUIDismissalPolicy,
         final: VoiceCaptureAttributes.ContentState? = nil
     ) async {
-        // Any ask still pending for this take asks nothing once it is over.
+        // Any ask still pending for this take asks nothing once it is over,
+        // and a send still under way for it posts nothing.
+        ended.insert(take.id)
         take.consent.cancel()
         take.instance.close()
         take.audio.discard()

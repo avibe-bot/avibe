@@ -886,6 +886,53 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.retryTask == nil, true)
     }
 
+    /// While a kept take is being sent again by itself it stays kept: a new
+    /// press, Discard or Retry is never swallowed, and a take given up
+    /// meanwhile asks and posts nothing more.
+    func testAnAutomaticSendNeverSwallowsAPressDiscardOrRetry() async {
+        for action in ["discard", "press", "retry"] {
+            let world = World()
+            world.instance.statusResult = .failure(Failure.offline)
+            let controller = world.controller()
+            _ = await controller.toggle()
+            world.audio?.duration = 3
+            _ = await controller.toggle()
+            let kept = world.audio
+            // The automatic send's ask is on its way to an instance that now answers.
+            world.instance.statusResult = .success(.init(available: true, consent: .granted))
+            world.instance.holdStatus = true
+            let retry = controller.retryTask
+            await world.wakeRetry()
+            while !world.instance.isHolding { await Task.yield() }
+            XCTAssertEqual(controller.phase, .failed, "\(action): still kept, not busy")
+            world.instance.holdStatus = false
+
+            switch action {
+            case "discard":
+                await controller.finish(send: false)
+                XCTAssertEqual(controller.phase, .idle)
+            case "press":
+                let outcome = await controller.toggle()
+                XCTAssertEqual(outcome, .started, "the press records")
+            default:
+                await controller.retry()
+                XCTAssertEqual(controller.phase, .failed, "one send at a time")
+            }
+            world.instance.release()
+            await retry?.value
+
+            if action == "retry" {
+                XCTAssertEqual(world.instance.sent, ["hello"], "sent once, by the send already under way")
+                XCTAssertEqual(world.instance.posts, 1)
+            } else {
+                XCTAssertEqual(world.instance.transcribed, 0, "\(action): the take given up is not sent")
+                XCTAssertTrue(world.instance.sent.isEmpty)
+                XCTAssertEqual(kept?.discarded, true)
+            }
+            XCTAssertEqual(world.retryHolds, 0, action)
+        }
+    }
+
     func testTheRetryScheduleBacksOffToAMinute() {
         XCTAssertEqual((0..<7).map(VoiceCaptureController.retryDelay(after:)),
                        [2, 5, 10, 20, 30, 60, 60].map { Duration.seconds($0) })
@@ -1137,7 +1184,34 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()
         world.audio?.duration = 3
         _ = await controller.toggle()
-        XCTAssertEqual(world.activities.first?.states.last?.reason, .willSend)
+        // This process cannot reach it until Avibe is opened again: kept for
+        // Retry, with no promise to send by itself and no retries.
+        XCTAssertEqual(controller.phase, .failed)
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
+        XCTAssertEqual(world.retryHolds, 0)
+        await controller.retryKeptNow()
+        XCTAssertEqual(world.instance.transcribed, 0, "not sent again by itself")
+
+        // The same when the consent ask meets the fault.
+        let asked = World()
+        asked.instance.statusResult = .failure(Failure.directFault)
+        let other = asked.controller()
+        _ = await other.toggle()
+        asked.audio?.duration = 3
+        _ = await other.toggle()
+        XCTAssertEqual(asked.activities.first?.states.last?.reason, .offline)
+        XCTAssertEqual(asked.retryHolds, 0)
+    }
+
+    func testOnlyAFirstLoadInFrontAroundAHeldGateIsMadeAgain() {
+        typealias Client = VoiceCaptureInstanceClient
+        XCTAssertTrue(Client.loadsAgain(attempt: 0, closed: false, active: true, heldBefore: true, heldAfter: false))
+        XCTAssertTrue(Client.loadsAgain(attempt: 0, closed: false, active: true, heldBefore: false, heldAfter: true))
+        XCTAssertFalse(Client.loadsAgain(attempt: 1, closed: false, active: true, heldBefore: true, heldAfter: true))
+        // In the background the gate is always held: nothing is made twice.
+        XCTAssertFalse(Client.loadsAgain(attempt: 0, closed: false, active: false, heldBefore: true, heldAfter: true))
+        XCTAssertFalse(Client.loadsAgain(attempt: 0, closed: true, active: true, heldBefore: true, heldAfter: true))
+        XCTAssertFalse(Client.loadsAgain(attempt: 0, closed: false, active: true, heldBefore: false, heldAfter: false))
     }
 
     func testOnlyTheLastFewLinesAreKeptEachCutShort() {
@@ -1720,9 +1794,14 @@ private final class World {
     private var wakes = 0
     private var retryWaits = 0
 
-    /// Ends the retry wait under way, once one is.
-    func wakeRetry() async {
-        while retryWaits == 0 { await Task.yield() }
+    /// Ends the retry wait under way, once one is (a retry that was never
+    /// scheduled fails the test instead of hanging it).
+    func wakeRetry(file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<400 where retryWaits == 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        guard retryWaits > 0 else {
+            XCTFail("no retry is waiting", file: file, line: line)
+            return
+        }
         wakes += 1
     }
 

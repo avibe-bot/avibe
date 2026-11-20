@@ -177,6 +177,13 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         return gate()
     }
 
+    /// Whether a load that failed is made once more: only the first, only
+    /// in front, only when the gate was held around it, and never for a
+    /// client that was closed meanwhile.
+    static func loadsAgain(attempt: Int, closed: Bool, active: Bool, heldBefore: Bool, heldAfter: Bool) -> Bool {
+        attempt == 0 && !closed && active && (heldBefore || heldAfter)
+    }
+
     private func gaveUp(_ request: String, _ cause: String) {
         failures = Self.adding(
             "\(request) \(cause) +\(Int(Date().timeIntervalSince(madeAt) * 1000))ms", to: failures
@@ -476,12 +483,17 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     private func makeReady(for label: String) async throws {
         loadingFor = label
         let closesAtStart = closes
-        // A load that failed while the listener was held (it was issued, or
-        // it ended, in the return's window) is made once more after the
-        // gate settles.
+        // In front, a load that failed while the listener was held (it was
+        // issued, or it ended, in the return's window) is made once more
+        // after the gate settles; both waits share one `gateWait`. In the
+        // background the gate is always held and nothing is made twice.
+        let deadline = ContinuousClock.now + Self.gateWait
         for attempt in 0..<2 {
             let waitedFrom = Date()
-            let settled = await Self.settledGate(gate: gate, isActive: isActive, sleep: sleep)
+            let settled = await Self.settledGate(
+                gate: gate, isActive: isActive, sleep: sleep,
+                limit: max(deadline - ContinuousClock.now, .zero)
+            )
             let waited = Int(Date().timeIntervalSince(waitedFrom) * 1000)
             guard closes == closesAtStart else {
                 gaveUp(label, "closed")
@@ -496,8 +508,10 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
                 try await load()
                 ready = true
                 return
-            } catch Failure.offline where attempt == 0 && closes == closesAtStart
-                && (settled == .held || gate() == .held) {
+            } catch Failure.offline where Self.loadsAgain(
+                attempt: attempt, closed: closes != closesAtStart, active: isActive(),
+                heldBefore: settled == .held, heldAfter: gate() == .held
+            ) {
                 continue
             }
         }
