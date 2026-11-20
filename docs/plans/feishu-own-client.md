@@ -120,16 +120,22 @@ nothing by default.
 - The setup wizard's temporary connection refuses every event (answer 500), as
   the SDK's empty dispatcher did, so that Feishu sends it again and a running
   adapter receives it.
-- While the SDK's socket client remains, it is loaded with the package's
-  `__init__` deferred (`modules/im/feishu_sdk_ws.py`): the package is a real
-  module object that runs its body the first time something it lacks is asked
-  of it, so code that imports and uses the SDK the ordinary way still gets all
-  of it. If the loader ever fails, the adapter logs a warning and imports the
-  whole SDK.
-- In an Avibe process the SDK's connections run only through
-  `SdkLongConnection`, one at a time, each on a thread and loop of its own. The
-  SDK shares one module-level loop between all clients and never ends a
-  client's tasks; a stopped client could come back on it.
+- While the SDK's socket client remains, the adapter runs a private copy of
+  it (`modules/im/feishu_sdk_ws.py`): the client's files and the about 65 it
+  imports, compiled with the package name replaced by `_avibe_lark_oapi`, under
+  a package of ours with an empty body. The real `lark_oapi` is never imported
+  or altered, so anything else that imports the SDK gets it whole. Python has
+  no safe way to share a half-imported package under its own name; two designs
+  that tried were dropped in review. The copy is compiled at each start (about
+  0.08 s) and not cached. If loading it fails, the adapter logs a warning and
+  imports the whole SDK.
+- The SDK's connections run only through `SdkLongConnection`, one at a time,
+  each on a thread and loop of its own. The SDK shares one module-level loop
+  between all clients, never ends a client's tasks, and asks for its endpoint
+  with a blocking request that has no timeout; a stopped client could come
+  back, and a silent endpoint held its thread for good. The request is bounded
+  at 15 seconds in our copy; a connection that is not gone when asked to stop
+  is reported as not stopped, and the next one waits up to 20 seconds for it.
 - The event shapes are those of lark-oapi 1.7.5, the release the lock file
   pins; `pyproject.toml` now asks for no older one.
 - A malformed envelope (a schema or uuid that is not text, a 2.0 event without

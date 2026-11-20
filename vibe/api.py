@@ -15940,7 +15940,8 @@ def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> 
     domain = domain or _stored_platform_field("lark", "domain", "feishu")
     with _temp_ws_lock:
         # Stop any existing temp connection first
-        _stop_temp_ws_internal()
+        if not _stop_temp_ws_internal():
+            return {"ok": False, "error": _TEMP_WS_STILL_CLOSING}
 
         try:
             from modules.im.feishu_sdk_ws import SdkLongConnection
@@ -15963,19 +15964,27 @@ def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> 
 def lark_temp_ws_stop() -> dict:
     """Stop the temporary WebSocket connection."""
     with _temp_ws_lock:
-        _stop_temp_ws_internal()
+        if not _stop_temp_ws_internal():
+            return {"ok": False, "error": _TEMP_WS_STILL_CLOSING}
     return {"ok": True}
 
 
-def _stop_temp_ws_internal():
-    """Internal helper to stop temp WS (caller must hold _temp_ws_lock)."""
+_TEMP_WS_STILL_CLOSING = "The temporary WebSocket connection is still closing"
+
+
+def _stop_temp_ws_internal() -> bool:
+    """Stop the temp connection (caller must hold _temp_ws_lock); it is kept until it is really gone."""
     global _temp_ws_connection
-    connection, _temp_ws_connection = _temp_ws_connection, None
-    if connection is not None:
-        try:
-            connection.stop(timeout=5.0)
-        except Exception:
-            pass
+    connection = _temp_ws_connection
+    if connection is None:
+        return True
+    try:
+        stopped = connection.stop(timeout=5.0)
+    except Exception:
+        stopped = False
+    if stopped:
+        _temp_ws_connection = None
+    return stopped
 
 
 # --- Agent Skills (askill CLI shell) --------------------------------------

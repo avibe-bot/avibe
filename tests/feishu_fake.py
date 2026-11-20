@@ -77,6 +77,8 @@ class FakeFeishu:
         # Refusals for the next handshakes, before the normal upgrade: (HTTP status, headers).
         self.handshake_refusals: List[Any] = []
         self.handshakes_refused = 0
+        # Seconds to withhold the next endpoint replies, before answering as usual.
+        self.endpoint_delays: List[float] = []
         self.connections_opened = 0
         self.close_codes: List[Optional[int]] = []
         # The configuration sent with each pong; ``None`` repeats the endpoint's.
@@ -133,6 +135,8 @@ class FakeFeishu:
 
     async def _endpoint(self, request: web.Request) -> web.Response:
         self.endpoint_requests.append({"body": await request.json(), "locale": request.headers.get("locale")})
+        if self.endpoint_delays:
+            await asyncio.sleep(self.endpoint_delays.pop(0))
         if self.endpoint_replies:
             reply = self.endpoint_replies.pop(0)
             status, body = reply if isinstance(reply, tuple) else (200, reply)

@@ -18,10 +18,16 @@ from __future__ import annotations
 
 import base64
 import json
+import asyncio
 import threading
 from typing import Any, Dict, Iterator, List, Optional
+from unittest.mock import patch
 
 import pytest
+
+from config.v2_config import LarkConfig
+from modules.im import feishu_sdk_ws
+from modules.im.feishu import FeishuBot
 
 from modules.im.feishu_events import FeishuEventDispatcher, FeishuEventError
 from tests.feishu_fake import FakeFeishu, card_action_event, message_event, running_adapter
@@ -346,6 +352,89 @@ def test_the_client_s_own_clean_up_runs_on_the_loop_that_runs_the_client(fake: F
         assert connection._loop.is_running()
 
 
+def test_an_adapter_stopped_before_its_connection_exists_never_connects(fake: FakeFeishu):
+    """A stop during a slow start (here: the bot-info lookup) finds no connection to stop; none may follow."""
+    reached, release = threading.Event(), threading.Event()
+
+    async def slow_bot_info() -> None:
+        reached.set()
+        await asyncio.to_thread(release.wait, 5)
+
+    with patch.object(LarkConfig, "api_base_url", property(lambda _self: fake.url)):
+        bot = FeishuBot(LarkConfig(app_id="cli_app", app_secret="socket-secret"))
+        bot._fetch_bot_info = slow_bot_info  # type: ignore[method-assign]
+        thread = threading.Thread(target=bot.run, daemon=True)
+        thread.start()
+        assert reached.wait(5)
+
+        bot.stop()
+        release.set()
+        thread.join(timeout=5)
+        threading.Event().wait(0.5)
+
+    assert not thread.is_alive()
+    assert bot.verify_stopped() is True
+    assert (fake.connections_opened, fake.endpoint_requests) == (0, [])
+
+
+def test_an_endpoint_that_does_not_answer_is_given_up_and_asked_again(fake: FakeFeishu):
+    """The SDK asks for its endpoint with a blocking request and no timeout; nothing can stop a thread in it."""
+    fake.endpoint_delays = [4.0]
+
+    def retry_at_once(_sdk: Any, client: Any) -> None:
+        # The client's own defaults (up to 30 s, then every 120 s) hold until an endpoint has answered.
+        client._reconnect_nonce, client._reconnect_interval = 0, 0.05
+
+    connection = feishu_sdk_ws.SdkLongConnection(
+        app_id="cli_app",
+        app_secret="socket-secret",
+        domain=fake.url,
+        event_handler=FeishuEventDispatcher(),
+        on_client=retry_at_once,
+    )
+    with patch.object(feishu_sdk_ws, "_ENDPOINT_TIMEOUT", (1.0, 0.5)):
+        connection.start()
+        try:
+            fake.wait_connected(timeout=3)  # sooner than the withheld reply would have come
+            assert len(fake.endpoint_requests) == 2
+        finally:
+            assert connection.stop() is True
+
+
+def test_a_connection_stopped_while_its_endpoint_does_not_answer_ends_within_the_bound(fake: FakeFeishu):
+    fake.endpoint_delays = [4.0]
+    connection = feishu_sdk_ws.SdkLongConnection(
+        app_id="cli_app", app_secret="socket-secret", domain=fake.url, event_handler=FeishuEventDispatcher()
+    )
+    with patch.object(feishu_sdk_ws, "_ENDPOINT_TIMEOUT", (1.0, 0.5)):
+        connection.start()
+        fake.wait_until(lambda: fake.endpoint_requests, what="the endpoint request")
+
+        assert connection.stop(timeout=3) is True
+
+    # The slot is free again: the next connection starts at once.
+    with running_adapter(fake):
+        pass
+    assert fake.connections_opened == 1
+
+
+def test_stopping_twice_and_from_two_threads_ends_once_and_cleanly(fake: FakeFeishu):
+    uncaught: List[Any] = []
+    with patch.object(threading, "excepthook", uncaught.append):
+        with running_adapter(fake) as adapter:
+            connection = adapter.bot._sdk_connection
+            stoppers = [threading.Thread(target=connection.stop) for _ in range(3)]
+            for stopper in stoppers:
+                stopper.start()
+            for stopper in stoppers:
+                stopper.join(timeout=10)
+            assert connection.stop() is True
+
+    assert uncaught == []
+    assert connection._loop.is_closed()
+    assert fake.wait_until(lambda: fake.close_codes, what="the close") == [1000]
+
+
 def test_the_setup_wizard_s_temporary_connection_refuses_events(fake: FakeFeishu, monkeypatch: pytest.MonkeyPatch):
     """Feishu gives an event to one connection of the app; one that lands here must be sent again, not swallowed."""
     from vibe import api
@@ -364,3 +453,18 @@ def test_the_setup_wizard_s_temporary_connection_refuses_events(fake: FakeFeishu
     # Stopping it ends its thread; it used to stay in the SDK's loop for good.
     assert connection.is_alive() is False
     assert api._temp_ws_connection is None
+
+
+def test_a_wizard_connection_that_has_not_stopped_is_kept_and_said_so(monkeypatch: pytest.MonkeyPatch):
+    from vibe import api
+
+    class _Stuck:
+        def stop(self, timeout: float = 5.0) -> bool:
+            return False
+
+    stuck = _Stuck()
+    monkeypatch.setattr(api, "_temp_ws_connection", stuck)
+
+    assert api.lark_temp_ws_stop()["ok"] is False
+    assert api.lark_temp_ws_start("cli_wizard", "wizard-secret", "feishu")["ok"] is False
+    assert api._temp_ws_connection is stuck

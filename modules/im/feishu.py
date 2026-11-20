@@ -139,6 +139,8 @@ class FeishuBot(BaseIMClient):
         self._api = FeishuApi(config.api_base_url, self._tenant_token)
         # The long connection that delivers events (lark-oapi's client)
         self._sdk_connection: Optional[SdkLongConnection] = None
+        # Set by stop(), which may come at any point of the start.
+        self._stop_requested = threading.Event()
         # Event handler
         self._event_handler = None
         # Bot open_id (populated on startup)
@@ -2937,6 +2939,8 @@ class FeishuBot(BaseIMClient):
         async def start():
             self._loop = asyncio.get_running_loop()
             self._stop_event = asyncio.Event()
+            if self._stop_requested.is_set():
+                return
 
             # Fetch bot info
             await self._fetch_bot_info()
@@ -2944,13 +2948,17 @@ class FeishuBot(BaseIMClient):
             # Pre-populate DM chat IDs from persisted user settings
             self._populate_dm_chat_ids()
 
-            # Start the long connection on a thread of its own
+            # Start the long connection on a thread of its own. It is published
+            # before the check, so that a stop from here on finds it; one that
+            # came earlier is seen by the check.
             self._sdk_connection = SdkLongConnection(
                 app_id=self.config.app_id,
                 app_secret=self.config.app_secret,
                 domain=self.config.api_base_url,
                 event_handler=event_handler,
             )
+            if self._stop_requested.is_set():
+                return
             self._sdk_connection.start()
 
             logger.info("Feishu WebSocket client started")
@@ -2969,9 +2977,13 @@ class FeishuBot(BaseIMClient):
             asyncio.run(start())
         except KeyboardInterrupt:
             logger.info("Feishu bot shutting down...")
+        finally:
+            # However the start ended, no connection it made outlives it.
+            self._stop_connection()
 
     def stop(self) -> None:
         """Signal the bot to stop."""
+        self._stop_requested.set()
         self._stop_connection()
         if self._loop and self._loop.is_running() and self._stop_event is not None:
             self._loop.call_soon_threadsafe(self._stop_event.set)

@@ -3,8 +3,8 @@
 ``adapter``: run the adapter against the fake long connection and report what it
 received, what it acknowledged, and how much of the SDK the process imported.
 
-``beside-an-ordinary-import``: load the client on its own while another thread
-imports and uses the SDK the ordinary way, and report what each of them got.
+``beside-an-ordinary-import``: load the adapter's copy of the client while
+another thread imports the SDK the ordinary way, and report what each got.
 
 Driven by ``tests/test_feishu_sdk_footprint.py``.
 """
@@ -18,8 +18,8 @@ from typing import Any, Dict
 from unittest.mock import patch
 
 
-def _sdk_modules() -> list:
-    return sorted(name for name in sys.modules if name == "lark_oapi" or name.startswith("lark_oapi."))
+def _modules(package: str) -> list:
+    return sorted(name for name in sys.modules if name == package or name.startswith(package + "."))
 
 
 def adapter() -> Dict[str, Any]:
@@ -43,13 +43,14 @@ def adapter() -> Dict[str, Any]:
     finally:
         fake.close()
 
-    modules = _sdk_modules()
+    private = _modules("_avibe_lark_oapi")
     return {
         "received_chat": received[0]["message"]["chat_id"] if received else None,
         "acknowledged": acknowledgement.json(),
-        "sdk_modules": len(modules),
-        "sdk_api_modules": [name for name in modules if name.startswith("lark_oapi.api")][:5],
         "adapter_stopped": not thread.is_alive() and bot.verify_stopped(),
+        "sdk_modules_under_its_own_name": len(_modules("lark_oapi")),
+        "sdk_modules_in_our_copy": len(private),
+        "api_modules_in_our_copy": [name for name in private if name.startswith("_avibe_lark_oapi.api")][:5],
     }
 
 
@@ -59,53 +60,36 @@ def beside_an_ordinary_import() -> Dict[str, Any]:
     report: Dict[str, Any] = {}
     go = threading.Event()
 
-    def load_the_client_alone() -> None:
+    def load_our_copy() -> None:
         go.wait()
-        report["client_alone_has_client"] = hasattr(sdk_ws_client_module(), "Client")
+        report["our_copy_has_client"] = hasattr(sdk_ws_client_module(), "Client")
 
     def import_the_ordinary_way() -> None:
         go.wait()
-        import lark_oapi
+        # A submodule first, which holds that module's import lock while the package loads.
+        import lark_oapi.ws.client
+        from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
-        # The reference is used as it was handed over, as any caller would.
         report["ordinary_import_has_client"] = hasattr(lark_oapi, "Client")
-        report["ordinary_import_builds_a_dispatcher"] = type(
-            lark_oapi.EventDispatcherHandler.builder("", "").build()
-        ).__name__
+        report["ordinary_import_builds_a_dispatcher"] = type(EventDispatcherHandler.builder("", "").build()).__name__
 
-    threads = [threading.Thread(target=load_the_client_alone), threading.Thread(target=import_the_ordinary_way)]
+    threads = [threading.Thread(target=load_our_copy), threading.Thread(target=import_the_ordinary_way)]
     for thread in threads:
         thread.start()
     go.set()
     for thread in threads:
         thread.join(timeout=60)
+    report["both_finished"] = not any(thread.is_alive() for thread in threads)
 
     import lark_oapi
-    import lark_oapi.core
-    from lark_oapi.event.dispatcher_handler import EventDispatcherHandler
 
-    report["package_knows_its_children"] = all(
-        getattr(lark_oapi, child, None) is sys.modules[f"lark_oapi.{child}"] for child in ("core", "ws", "api")
+    ours = sdk_ws_client_module()
+    report["the_sdk_s_client_module_is_its_own"] = lark_oapi.ws.client is not ours
+    report["the_sdk_s_client_names_the_real_dispatcher"] = (
+        lark_oapi.ws.client.EventDispatcherHandler is lark_oapi.EventDispatcherHandler
     )
-    report["dispatcher_is_the_real_class"] = EventDispatcherHandler is lark_oapi.EventDispatcherHandler
-    report["client_module_is_the_package_s"] = sdk_ws_client_module() is lark_oapi.ws.client
-    report["sdk_modules"] = len(_sdk_modules())
-    return report
-
-
-def alone_then_ordinary() -> Dict[str, Any]:
-    from modules.im.feishu_sdk_ws import sdk_ws_client_module
-
-    client_module = sdk_ws_client_module()
-    report: Dict[str, Any] = {"sdk_modules_after_the_client_alone": len(_sdk_modules())}
-
-    import lark_oapi.core  # a submodule first: its parent must know it
-
-    report["package_knows_core"] = lark_oapi.core is sys.modules["lark_oapi.core"]
-    report["sdk_modules_after_a_submodule"] = len(_sdk_modules())
-    report["has_client"] = hasattr(lark_oapi, "Client")  # the first thing the package lacks: the whole SDK arrives
-    report["sdk_modules_after_using_the_package"] = len(_sdk_modules())
-    report["client_module_is_the_package_s"] = client_module is lark_oapi.ws.client
+    report["sdk_modules_under_its_own_name"] = len(_modules("lark_oapi"))
+    report["sdk_modules_in_our_copy"] = len(_modules("_avibe_lark_oapi"))
     return report
 
 
@@ -113,9 +97,5 @@ if __name__ == "__main__":
     from tests import network_guard
 
     sys.addaudithook(network_guard.audit)  # loopback only, as in the pytest process
-    scenario = {
-        "adapter": adapter,
-        "beside-an-ordinary-import": beside_an_ordinary_import,
-        "alone-then-ordinary": alone_then_ordinary,
-    }[sys.argv[1]]
+    scenario = {"adapter": adapter, "beside-an-ordinary-import": beside_an_ordinary_import}[sys.argv[1]]
     print(json.dumps(scenario()))

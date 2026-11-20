@@ -1,23 +1,27 @@
-"""``lark-oapi``'s long-connection client, without the rest of the SDK, and run safely.
+"""``lark-oapi``'s long-connection client: a private copy, without the rest of the SDK, run safely.
 
 Two things about the SDK are handled here, and only here. Both go away with it
 (``docs/plans/feishu-own-client.md``).
 
 **Its size.** ``import lark_oapi.ws.client`` runs the package ``__init__``
 first, which imports every generated API: about 10,600 modules for a client
-that needs about 60. ``sdk_ws_client_module`` puts the package into
-``sys.modules`` *unexecuted*, through the import system: a real module object,
-made from the package's own spec, whose ``__init__`` runs the first time anybody
-asks it for something it does not have yet. Submodules import under it as usual. The client's one
-import from outside its own needs, the SDK's event dispatcher, is deferred the
-same way. Nobody ever sees a stand-in: code that does ``import lark_oapi`` and
-uses it gets the whole SDK, at that moment and at the full cost.
+that needs about 65. Python offers no way to import half a package under its
+own name that is safe beside other importers of that name. So the client and
+what it imports are loaded as a *private copy* under another name,
+``_avibe_lark_oapi``: the same files, compiled with the package name replaced,
+under a package of ours whose body is empty. The real ``lark_oapi`` is not
+touched: not imported, not put into ``sys.modules``, not altered. Code that
+imports the SDK the ordinary way gets the SDK, whenever it likes, with every
+guarantee the import system gives. The client's one import from outside its
+needs, the SDK's event dispatcher (named in a signature), is a module of ours
+in that private package.
 
-**Its event loop.** The SDK runs every client on one module-level loop and
-never ends a client's tasks; a stopped client's reconnect, left on that loop,
-comes back when the next client runs it. ``SdkLongConnection`` gives each
-connection a loop of its own for its whole life and ends every task on it
-when the connection stops.
+**Its event loop and its waits.** The SDK runs every client on one module-level
+loop, never ends a client's tasks, and asks for its endpoint with a blocking
+request that has no timeout. ``SdkLongConnection`` gives each connection a
+thread and a loop of its own for its whole life, bounds that request, and ends
+every task on the loop when the connection stops, so that a stopped connection
+cannot come back.
 
 ``tests/test_feishu_sdk_footprint.py`` guards the first, ``tests/test_feishu_events.py``
 the second.
@@ -29,155 +33,144 @@ import asyncio
 import importlib
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import logging
+import re
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-_PACKAGE = "lark_oapi"
-_DISPATCHER = "lark_oapi.event.dispatcher_handler"
-_CLIENT = "lark_oapi.ws.client"
+_REAL = "lark_oapi"
+_PRIVATE = "_avibe_lark_oapi"
+_PRIVATE_DISPATCHER = f"{_PRIVATE}.event.dispatcher_handler"
+_REAL_NAME = re.compile(rf"\b{_REAL}\b")
 
-# One lock for loading the client and for running a deferred body: the two take
-# the import system's per-module locks in opposite orders, and must not overlap.
-_load_lock = threading.RLock()
+_load_lock = threading.Lock()
 _loaded: Any = None
-# On the thread that loads the client: ``loading`` for the whole of it,
-# ``active`` while the client module itself is being imported.
-_importing_client = threading.local()
 
 
 def sdk_ws_client_module() -> Any:
-    """Return the SDK's ``ws.client`` module (``Client``, ``LogLevel``, ``Frame``)."""
+    """Return our copy of the SDK's ``ws.client`` module (``Client``, ``LogLevel``, ``Frame``)."""
     global _loaded
+    # Nothing but this function imports the private names, so holding the lock
+    # across the import cannot cross anybody else's import.
     with _load_lock:
         if _loaded is None:
-            _loaded = _load()
+            if not any(isinstance(finder, _PrivateSdkFinder) for finder in sys.meta_path):
+                # First in line: the ordinary path finder would find these files too, and load them unrenamed.
+                sys.meta_path.insert(0, _PrivateSdkFinder())
+            try:
+                _loaded = importlib.import_module(f"{_PRIVATE}.ws.client")
+            except Exception:
+                logger.warning(
+                    "Feishu/Lark adapter: could not load the lark-oapi long-connection client on its own; "
+                    "importing the whole SDK instead.",
+                    exc_info=True,
+                )
+                _loaded = importlib.import_module(f"{_REAL}.ws.client")
         return _loaded
 
 
-def _load() -> Any:
-    finder = _DeferringFinder()
-    sys.meta_path.insert(0, finder)
-    _importing_client.loading = True
-    try:
-        # Through the import system, so that its own locks decide between this
-        # and any other thread's ``import lark_oapi``: there is one package
-        # object, deferred if we came first and whole if they did.
-        importlib.import_module(_PACKAGE)
-        importlib.import_module(_DISPATCHER)
-        _importing_client.active = True
-        try:
-            return importlib.import_module(_CLIENT)
-        finally:
-            _importing_client.active = False
-    except Exception:
-        logger.warning(
-            "Feishu/Lark adapter: could not load the lark-oapi long-connection client on its own; "
-            "importing the whole SDK instead.",
-            exc_info=True,
-        )
-        # Make whatever was deferred real, in place, and import the client the ordinary way.
-        for name in (_DISPATCHER, _PACKAGE):
-            complete = getattr(sys.modules.get(name), "_avibe_complete", None)
-            if complete is not None:
-                complete()
-        return importlib.import_module(_CLIENT)
-    finally:
-        _importing_client.loading = False
-        sys.meta_path.remove(finder)
+class _PrivateSdkFinder(importlib.abc.MetaPathFinder):
+    """Finds ``_avibe_lark_oapi[.x.y]`` in the files of ``lark_oapi[.x.y]``; knows no other name.
 
+    It stays installed: the SDK's modules import some of their own lazily, at
+    run time.
+    """
 
-class _DeferringFinder(importlib.abc.MetaPathFinder):
-    """Finds the SDK's package and its dispatcher module as usual, and loads them without running their bodies."""
-
-    def find_spec(self, fullname: str, path: Any, target: Any = None) -> Any:
-        # Only for the thread that loads the client: an ordinary import that is
-        # under way on another thread stays ordinary to its end.
-        if fullname not in (_PACKAGE, _DISPATCHER) or not getattr(_importing_client, "loading", False):
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        if fullname == _PRIVATE:
+            real = importlib.machinery.PathFinder.find_spec(_REAL)  # looks the files up; imports nothing
+            if real is None or not real.submodule_search_locations:
+                return None
+            spec = importlib.machinery.ModuleSpec(_PRIVATE, _OursLoader({}), is_package=True)
+            spec.submodule_search_locations = list(real.submodule_search_locations)
+            return spec
+        if not fullname.startswith(_PRIVATE + "."):
             return None
+        if fullname == _PRIVATE_DISPATCHER:
+            # Only named in the client's signature; any object with the handler method serves.
+            return importlib.machinery.ModuleSpec(fullname, _OursLoader({"EventDispatcherHandler": object}))
+        # The import system hands over the parent's search path, and file lookup
+        # goes by the last part of the name, which is the same in both packages.
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is None or spec.loader is None:
-            return None
-        spec.loader = _DeferringLoader(spec.loader)
+        if spec is not None and isinstance(spec.loader, importlib.machinery.SourceFileLoader) and spec.origin:
+            spec.loader = _RenamingLoader(spec.origin)
         return spec
 
 
-class _DeferringLoader(importlib.abc.Loader):
-    """Leaves a module unexecuted; its body runs on the first attribute it lacks.
+class _OursLoader(importlib.abc.Loader):
+    """A module of ours in the private package: the given names and nothing else."""
 
-    The module object is the real one, made from its own spec, and it stays:
-    what is imported under it, before or after its body runs, is bound to it.
-    Nobody is handed a stand-in for anything, with one exception: the client
-    module's own import, which names the dispatcher class in a signature, gets
-    ``object`` for it.
-    """
+    def __init__(self, names: dict) -> None:
+        self._names = names
 
-    def __init__(self, real: Any) -> None:
-        self._real = real
-
-    def create_module(self, spec: Any) -> Any:
-        return self._real.create_module(spec)
+    def create_module(self, spec: Any) -> None:
+        return None
 
     def exec_module(self, module: Any) -> None:
-        real = self._real
-        name = module.__name__
-        state = {"done": False, "running_on": None}
-
-        def complete() -> None:
-            with _load_lock:
-                if state["done"]:
-                    return
-                state["running_on"] = threading.get_ident()
-                try:
-                    real.exec_module(module)
-                finally:
-                    state["running_on"] = None
-                state["done"] = True
-                for leftover in ("__getattr__", "_avibe_complete"):
-                    module.__dict__.pop(leftover, None)
-                module.__loader__ = real
-                module.__spec__.loader = real
-
-        def __getattr__(attribute: str) -> Any:  # PEP 562: asked only for what the module lacks
-            if state["running_on"] == threading.get_ident() or (
-                attribute.startswith("__") and attribute.endswith("__") and attribute != "__all__"
-            ):
-                # The body itself probing for a name not bound yet, or the import system
-                # asking what kind of module this is (``__path__``): neither is a use of it.
-                raise AttributeError(f"module {name!r} has no attribute {attribute!r}")
-            if (
-                name == _DISPATCHER
-                and attribute == "EventDispatcherHandler"
-                and getattr(_importing_client, "active", False)
-            ):
-                return object
-            complete()
-            try:
-                return module.__dict__[attribute]
-            except KeyError:
-                raise AttributeError(f"module {name!r} has no attribute {attribute!r}") from None
-
-        module.__getattr__ = __getattr__
-        module._avibe_complete = complete
+        module.__dict__.update(self._names)
 
 
-# --- one connection, on a loop of its own -------------------------------------------
+class _RenamingLoader(importlib.abc.Loader):
+    """Runs an SDK source file with the package name replaced by the private one.
+
+    Compiled on each start and not cached: a cache would sit beside the SDK's
+    own, under the same file name, for different code.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def create_module(self, spec: Any) -> None:
+        return None
+
+    def get_source(self, fullname: str) -> str:
+        return _REAL_NAME.sub(_PRIVATE, importlib.util.decode_source(Path(self._path).read_bytes()))
+
+    def exec_module(self, module: Any) -> None:
+        code = compile(self.get_source(module.__name__), self._path, "exec", dont_inherit=True)
+        exec(code, module.__dict__)
+
+
+# --- one connection, on a thread and loop of its own ---------------------------------
 
 # The SDK's functions find their loop in a module global, so one process can run
 # one of its connections at a time. A second waits here for the first to end.
 _slot = threading.Lock()
-_SLOT_WAIT_SECONDS = 10.0
+_SLOT_WAIT_SECONDS = 20.0
+# (connect, read) for the endpoint request; together shorter than the wait for the slot.
+_ENDPOINT_TIMEOUT = (5.0, 10.0)
+_CLOSE_SECONDS = 3.0
+
+
+class _BoundedRequests:
+    """``requests`` as the client module sees it, with a timeout on the endpoint request."""
+
+    def __init__(self, requests: Any) -> None:
+        self._requests = requests
+
+    def post(self, url: str, **kwargs: Any) -> Any:
+        kwargs.setdefault("timeout", _ENDPOINT_TIMEOUT)
+        return self._requests.post(url, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._requests, name)
 
 
 class SdkLongConnection:
-    """One ``lark_oapi.ws.Client``, started on a thread and loop of its own, and stoppable for good.
+    """One SDK client, started on a thread and loop of its own, and stoppable for good.
 
     ``event_handler`` is called with each event payload by the SDK's client
     (``_do_without_validation``). ``on_client`` is called with the SDK module
     and the client once it exists, before it connects.
+
+    ``stop`` may be called at any time, from any thread, any number of times,
+    before ``start`` included. It only asks: the connection's own thread does
+    the ending, once.
     """
 
     def __init__(
@@ -195,9 +188,10 @@ class SdkLongConnection:
         self._domain = domain
         self._event_handler = event_handler
         self._on_client = on_client
-        self._stopping = False
+        self._stop_requested = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._client: Any = None
+        self._watcher: Optional[asyncio.Task] = None
         self._thread = threading.Thread(target=self._serve, daemon=True, name=thread_name)
 
     def start(self) -> None:
@@ -207,56 +201,44 @@ class SdkLongConnection:
         return self._thread.is_alive()
 
     def stop(self, timeout: float = 5.0) -> bool:
-        """End the connection, its tasks and its thread; returns whether the thread is gone."""
-        self._stopping = True
-        client, loop = self._client, self._loop
-        if client is not None:
-            client._auto_reconnect = False
-        if loop is not None:
-            try:
-                loop.call_soon_threadsafe(self._cancel_all, loop)
-            except RuntimeError:
-                pass  # the loop closed between the check and the call
+        """Ask the connection to end and wait for its thread; returns whether the thread is gone."""
+        self._stop_requested.set()
         if self._thread.is_alive() and self._thread is not threading.current_thread():
             self._thread.join(timeout=timeout)
         return not self._thread.is_alive()
 
-    @staticmethod
-    def _cancel_all(loop: asyncio.AbstractEventLoop) -> None:
-        for task in asyncio.all_tasks(loop):
-            task.cancel()
-
     async def _watch_for_stop(self) -> None:
-        """End everything on the loop once ``stop`` was called, however early it was."""
-        while not self._stopping:
+        """The one place a stop takes effect: cancel everything else on the loop, once."""
+        while not self._stop_requested.is_set():
             await asyncio.sleep(0.2)
-        loop = asyncio.get_running_loop()
-        for task in asyncio.all_tasks(loop):
-            if task is not asyncio.current_task():
+        this = asyncio.current_task()
+        for task in asyncio.all_tasks():
+            if task is not this:
                 task.cancel()
 
     def _serve(self) -> None:
-        # One at a time; give up quietly if stopped while waiting for the slot.
+        # One at a time; give up if stopped, or if the one before never ends.
         waited = 0.0
         while not _slot.acquire(timeout=0.1):
             waited += 0.1
-            if self._stopping:
+            if self._stop_requested.is_set():
                 return
             if waited >= _SLOT_WAIT_SECONDS:
                 logger.error(
                     "Feishu WS thread not started: another lark-oapi connection is still running in this process"
                 )
                 return
-        loop: Optional[asyncio.AbstractEventLoop] = None
+        loop = asyncio.new_event_loop()
         try:
-            if self._stopping:
-                return
-            sdk = sdk_ws_client_module()
-            loop = asyncio.new_event_loop()
-            # The client's fragment cache schedules its clean-up on the thread's
-            # current loop, and its functions use the module's: make both this one.
+            # Before the SDK is imported and its client built: the module takes its
+            # loop, and the client's fragment cache its clean-up loop, from this thread.
             asyncio.set_event_loop(loop)
+            sdk = sdk_ws_client_module()
             sdk.loop = loop
+            if sdk.__name__.startswith(_PRIVATE) and not isinstance(sdk.requests, _BoundedRequests):
+                sdk.requests = _BoundedRequests(sdk.requests)
+            if self._stop_requested.is_set():
+                return
             self._loop = loop
             self._client = sdk.Client(
                 app_id=self._app_id,
@@ -267,33 +249,33 @@ class SdkLongConnection:
             )
             if self._on_client is not None:
                 self._on_client(sdk, self._client)
-            loop.create_task(self._watch_for_stop())
+            self._watcher = loop.create_task(self._watch_for_stop())
             logger.info("Feishu WS thread starting, domain=%s", self._domain)
             self._client.start()
         except asyncio.CancelledError:
             pass  # stopped
         except Exception as exc:
-            if not self._stopping:
+            if not self._stop_requested.is_set():
                 logger.error("Feishu WS thread crashed: %s", exc, exc_info=True)
         finally:
             try:
-                if loop is not None:
-                    self._close(loop)
+                self._close(loop)
             finally:
                 _slot.release()
 
     def _close(self, loop: asyncio.AbstractEventLoop) -> None:
         """Close the socket, end whatever the client left on the loop, and close the loop."""
-        self._stopping = True
         client = self._client
         try:
+            if self._watcher is not None:
+                # From here on nothing cancels but this method: a stop that arrives now only waits.
+                self._watcher.cancel()
             if client is not None:
-                # No reconnect from here on, then the socket, then every task still there.
                 client._auto_reconnect = False
                 connection = getattr(client, "_conn", None)
                 if connection is not None:
-                    loop.run_until_complete(asyncio.wait_for(connection.close(), 3.0))
-        except Exception:
+                    loop.run_until_complete(asyncio.wait_for(connection.close(), _CLOSE_SECONDS))
+        except (Exception, asyncio.CancelledError):
             logger.debug("Feishu WS: closing the connection failed", exc_info=True)
         finally:
             try:
@@ -304,7 +286,8 @@ class SdkLongConnection:
                     # Their exceptions are read here, so that none is reported as never retrieved.
                     loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
                 loop.run_until_complete(loop.shutdown_asyncgens())
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.debug("Feishu WS: ending the loop's tasks failed", exc_info=True)
-            asyncio.set_event_loop(None)
-            loop.close()
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
