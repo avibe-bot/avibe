@@ -5513,6 +5513,24 @@ async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/models/sources/{source_id}/reset-cards/use", include_in_schema=False)
+async def model_hub_use_reset_card(source_id: str, starlette_request: FastAPIRequest):
+    # Spends a consumable that cannot be given back. Admitted like every other
+    # Owner-level change (`http_authorization_policy`): a signed-in Owner, or a
+    # caller the instance treats as its Owner by where the request comes from.
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            # The client checks the body in this process: only a Source id, one kind and a count reach the controller.
+            result = await _model_hub_service().use_reset_card(source_id, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**result)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.get("/api/models/hosted-tools", include_in_schema=False)
 async def model_hub_hosted_tools_get(starlette_request: FastAPIRequest):
     async def handler():

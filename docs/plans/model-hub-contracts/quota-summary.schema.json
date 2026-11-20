@@ -479,7 +479,35 @@
           ]
         },
         "lock": {
-          "type": "null"
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "reason",
+                "since"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/ResetCard/properties/kind"
+                },
+                "reason": {
+                  "enum": [
+                    "in_flight",
+                    "unconfirmed"
+                  ]
+                },
+                "since": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          ]
         },
         "cards": {
           "type": "array",

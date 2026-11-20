@@ -70,6 +70,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. Search-service requests are reported in `services[]`, never in `sources[]` (see Search-service usage). The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
+| POST `/api/models/sources/<source_id>/reset-cards/use` | `{kind, count}` → `{quota: QuotaSummary, use: {kind, outcome, reason, cleared}}` | Uses one reset card of `kind` on the Source's account (see Reset card use). Needs the Owner role: a signed-in Owner, or a caller the instance treats as its Owner by where the request comes from. The body is exactly `{kind, count}`, where `count` is the positive number of cards of that kind the page was showing; no card identifier is accepted or returned. `400 invalid_parameter` for any other body. Three refusals answer `409` with `quota`, the latest summary the server has, so the page can redraw: `reset_card_locked` while the account has a use being handled or an unknown outcome, `reset_card_count_changed` when the account now holds another number of cards of that kind than `count`, `reset_card_unavailable` when no card of that kind can be used now or its count cannot be read. No refusal uses a card. Not offered by the `vibe` CLI, an RPC operation, or any Agent or MCP tool. |
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. The forced read also resumes each Source paused for quota or rate (`cooldown` with `quota_exhausted` or `rate_limited`, or its live deadline) unless its fresh report shows an account-wide window (5-hour, weekly, or monthly) used up; an unreadable report lifts the pause so the next request asks the vendor, while `auth_expired` and a Source still `pending` are left as they are. Clients read Sources again afterwards. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
@@ -1708,11 +1709,23 @@ tiers, new tiers, nor credential material.
 
 For Anthropic and ChatGPT the optional `reset_cards` block is independent of quota windows.
 `{"state":"ok","lock":null,"cards":[]}` means no cards; `state:"unread"` with an empty list
-means the inventory could not be read. Other vendors omit the block. Each held kind
+means the inventory could not be read. Only the vendor's own recognised report says "no
+cards" or gives a count: it is recognised by what only that report carries (its card block,
+or the members its usage report always names), no member may be named twice, and a field
+that could remove a card from the count is read with its type checked. Nor may the answer
+contradict what was asked or itself in a field it carries: a ChatGPT usage answer that
+names an account names the one the grant is bound to (left out or null, it names none; the
+quota windows of that answer are shown either way), a total the card details carry
+themselves equals the usage report's count, one grant is one row, and no number is `NaN` or
+an infinity. Anything else, such as an empty object or a body that merely looks like
+usage, is `unread`.
+Other vendors omit the block. Each held kind
 (`all`, `fable`, `session`, `weekly`, or ChatGPT's `account`) has a positive `count`,
 `expires_at` (first known expiry or null), `stated` (vendor states the effect),
 `usable`, `blocked` (null, `needs_limit`, `cooldown`, `unavailable`) and `blocked_until`
-(cooldown end or null). Times are UTC. Reads never use cards.
+(cooldown end or null). Times are UTC. Reads never use cards. `lock` is null, or
+`{reason: "in_flight" | "unconfirmed", kind, since}` while the account's cards are locked
+(see Reset card use).
 
 Quota is a report, never a control input, exactly like usage metering: nothing in
 resolution, admission, or cooldown reads it. It covers hub-held subscription
@@ -1772,6 +1785,69 @@ that misses it keeps running and lands in the cache. Those Sources are listed in
 the root `pending` array, and the settings page re-reads after about five seconds,
 with a bounded number of retries, showing them as loading rather than unavailable.
 It stops re-reading once `pending` is empty or absent.
+
+### Reset card use
+
+Using a card cannot be undone, so the server holds every guarantee and the page only shows
+them. No card was ever used to build or test this: the vendors' requests and answers follow
+other clients of the same endpoints.
+
+- **One request per press.** The use reads the inventory fresh, picks the usable card of
+  `kind` that expires first and sends the vendor one request. It is never repeated and never
+  replaced by another card. Anthropic may refuse a card that is not the one it would use
+  next; that is `not_used` with `reason: "refused"`.
+- **One card per intention.** A press is being handled from the moment it arrives until its
+  answer is assembled, whatever has been settled meanwhile; another press on that Source or
+  on another Source of the same account in that time answers `409 reset_card_locked`. A
+  press also carries `count`, the number of cards of that kind the page was showing. The
+  server reads the count fresh and, before anything is recorded or sent, answers
+  `409 reset_card_count_changed` when it differs: a second tab that still shows the count
+  from before the first tab's use spends nothing, redraws from `quota`, and its next
+  confirmation is a press of its own. That fresh count can itself lag behind the vendor, so
+  `count` is compared once more with the inventory the use reads last before its request;
+  if they differ nothing is sent, the lock is released, the Source is read again and the
+  answer is the same `409 reset_card_count_changed`.
+- **One use per account at a time.** While an account is locked, `reset_cards.lock` is set
+  on every Source of that account: `in_flight` while a use is being handled, `unconfirmed`
+  when its outcome is not known. Another use of that account answers `409 reset_card_locked`.
+  The lock is recorded on disk before the request is sent, so a reload, a second page and a
+  restart see it; a use found in flight at startup is `unconfirmed`. When the lock cannot be
+  recorded the use is refused with `reset_card_locked` and nothing is sent. A row whose account has
+  not been read yet, and every row when the record cannot be read, shows `unconfirmed`
+  rather than free.
+- **An outcome is the vendor's statement, confirmed by a count.** After the request the
+  account's cards are read again by themselves. `used` needs the vendor's acknowledgement
+  and fewer cards of that kind than before. `not_used` needs a stated refusal (`reason`:
+  `not_limited`, `cooldown`, `refused` or `unavailable`) and the same count. Everything else
+  is `unconfirmed` with `reason: null`, and the account stays locked: no answer, a timeout,
+  a status other than 200, a body that is not recognised, names a member twice or contradicts
+  itself, a refusal that carries anything that could be evidence of a redemption (a credit, a
+  cleared limit, or a member this client does not know), an acknowledgement that names
+  another credit than the one sent or carries a status other than `redeemed`, a count that
+  could not be read, that is another account's, or that disagrees with the statement.
+  `cleared` lists the known limits the vendor reported as cleared (`five_hour`, `seven_day`,
+  `seven_day_overage_included`) and is empty unless `used`.
+- **Only the user's refresh lifts an unknown outcome, and not at once.** `POST
+  /api/models/quota/refresh` reads each account with cards again. A reading that began at
+  least 60 seconds of elapsed time after that account's outcome became unknown (setting the
+  machine's clock does not change it), that the vendor's own report established
+  (`state: "ok"`) and that was made under the same account removes the lock. An earlier
+  refresh reads as usual and shows the count but leaves the lock: a vendor that did not
+  answer may still finish the request, and a count read seconds later would look untouched.
+  A read that was not forced, a reading that was already under way and an `unread` inventory
+  do not lift it either. Concurrent refreshes share one reading, and a vendor's rate-limit
+  cooldown is waited out with the lock in place. Nothing in the payload changes for the
+  wait: the lock simply stays. After a restart the wait counts from when the lock is found.
+- **What is taken as true from the provider.** An answer that is well formed, of the
+  expected shape, and does not contradict what was sent or itself in a field it carries. A
+  field it leaves out is not required. A provider that answers consistently but wrongly is
+  not defended against.
+- The `quota` returned with a use is read after it. The `quota` of a refusal is the latest
+  summary the server has when it refuses: `reset_card_count_changed` follows a fresh read
+  of that Source, `reset_card_locked` reads nothing, and a Source whose read failed shows
+  its cards as `unread`. Both report what is known at that moment without waiting for
+  another account's reading; a Source still being read is named in `pending`. After a use,
+  an account paused for quota or rate is resumed by the rule of a forced read.
 
 ### Subscription value
 
