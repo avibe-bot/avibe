@@ -46,13 +46,39 @@ enum VoiceCaptureAlert {
         presenter.present(alert, animated: true)
     }
 
-    /// What the unsent alert says: 有一条语音没能发出去。 or, for several,
-    /// 有 3 条语音没能发出去。
-    static func unsentMessage(count: Int) -> String {
-        count == 1
-            ? String(localized: VoiceCaptureCopy.text("voiceCapture.unsent.one"))
+    /// How long ago a take was spoken, in minutes under an hour and whole
+    /// hours from there (a take is kept a day at most), never less than a
+    /// minute. Chinese as Product writes it, with a space between the
+    /// number and the unit (25 分钟前, 3 小时前); otherwise the system's
+    /// relative wording (25 minutes ago, 3 hours ago).
+    static func age(
+        of spoken: Date,
+        now: Date = Date(),
+        language: String = Bundle.main.preferredLocalizations.first ?? "en"
+    ) -> String {
+        let minutes = max(1, Int(now.timeIntervalSince(spoken) / 60))
+        if language.hasPrefix("zh") {
+            return minutes < 60 ? "\(minutes) 分钟前" : "\(minutes / 60) 小时前"
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: language)
+        formatter.unitsStyle = .full
+        formatter.dateTimeStyle = .numeric
+        return formatter.localizedString(
+            fromTimeInterval: -Double(minutes < 60 ? minutes * 60 : minutes / 60 * 3600)
+        )
+    }
+
+    /// What the unsent alert says: 有一条 3 小时前的语音没能发出去。 or, for
+    /// several, 有 3 条语音没能发出去，最早的是 3 小时前。
+    static func unsentMessage(count: Int, oldest: Date, now: Date = Date()) -> String {
+        let age = age(of: oldest, now: now)
+        return count == 1
+            ? String(localized: LocalizedStringResource(
+                String.LocalizationValue("voiceCapture.unsent.one \(age)"), table: "VoiceCapture"
+            ))
             : String(localized: LocalizedStringResource(
-                String.LocalizationValue("voiceCapture.unsent.many \(count)"), table: "VoiceCapture"
+                String.LocalizationValue("voiceCapture.unsent.many \(count) \(age)"), table: "VoiceCapture"
             ))
     }
 
@@ -67,7 +93,9 @@ enum VoiceCaptureAlert {
     /// default) and Discard, which deletes them and asks nothing more.
     /// `answer` gets `true` for Retry, `false` for Discard, and nil when
     /// the alert could not be shown.
-    static func presentUnsent(count: Int, answer: @escaping (Bool?) -> Void, attempt: Int = 0) {
+    static func presentUnsent(
+        count: Int, oldest: Date, answer: @escaping (Bool?) -> Void, attempt: Int = 0
+    ) {
         guard let presenter = topViewController() else {
             guard attempt < 20 else {
                 // Never shown: it is asked again the next time Avibe comes
@@ -77,13 +105,13 @@ enum VoiceCaptureAlert {
             }
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(250))
-                presentUnsent(count: count, answer: answer, attempt: attempt + 1)
+                presentUnsent(count: count, oldest: oldest, answer: answer, attempt: attempt + 1)
             }
             return
         }
         let alert = UIAlertController(
             title: String(localized: VoiceCaptureCopy.text("voiceCapture.phase.failed")),
-            message: unsentMessage(count: count),
+            message: unsentMessage(count: count, oldest: oldest),
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(

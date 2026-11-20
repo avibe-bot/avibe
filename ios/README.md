@@ -366,28 +366,39 @@ the main Bot acts on the user's computer.
   instead.
 - Takes that are not sent yet are kept in order (`VoiceCaptureOutbox`): in
   `Application Support/VoiceOutbox`, excluded from backup, each a record
-  (`<sequence>-<id>.json`: where it goes, its transcription id, its
-  `capture_attempt` and `capture_timing`, its words once transcribed, and
-  whether its POST was begun) next to its audio. A new press never
-  discards one: the earlier take gives its island up and goes on being
-  sent. They are sent oldest first, one at a time, each as its own message;
-  a take that stops while an earlier one is on its way waits behind it. One
-  that needs the user does not hold the others up. While a take is sent
-  again it stays kept, so a press, Discard or Retry is never swallowed; one
-  send of a take runs at a time, and a take given up meanwhile makes no
-  more requests (only a POST already on its way cannot be taken back, and
-  `capture_earlier` then says `sentAfterEnd`). The order survives the App
-  being ended: the next launch (or press) reads the outbox and sends what
-  is there, asking about voice input afresh; a take whose POST was begun
-  is never posted again. Ten minutes after a take was kept its island goes
-  and a lasting notification says 没发出去 · 这条语音没能发出去，打开 Avibe
-  可以重试。 (scheduled when the take is kept, so it shows whether or not the
-  App runs then; removed once nothing is unsent). When Avibe comes to the
-  front with unsent takes they are sent once more, silently; if any is
-  still unsent, one alert says 有一条语音没能发出去。 (or 有 3 条语音没能发出去。)
-  with 重试 / 全部重试 and 放弃, which deletes them. An unsent take is deleted
-  after 24 hours, and at once on a sign-out or account change; a voice
-  consent "no" discards it. At most 20 are kept. No
+  (`<sequence>-<id>.json`: where it goes, when it was spoken, its
+  transcription id, its `capture_attempt` and `capture_timing`, its words
+  once transcribed, and whether its POST was begun) next to its audio. A
+  new press never discards one: the earlier take gives its island up and
+  goes on being sent. They are sent oldest first, one at a time, each as
+  its own message; a take that stops while an earlier one is on its way
+  waits behind it. While a take is sent again it stays kept, so a press,
+  Discard or Retry is never swallowed; one send of a take runs at a time,
+  and a take given up meanwhile makes no more requests (only a POST already
+  on its way cannot be taken back, and `capture_earlier` then says
+  `sentAfterEnd`). The order survives the App being ended: the next launch
+  reads the outbox, asking about voice input afresh; a take whose POST was
+  begun is never posted again.
+- A take is sent without the user asking only within ten minutes of the
+  end of speaking (`automaticWindow`): the schedule above, and once more,
+  silently, when Avibe comes to the front. Then its island goes, and a
+  lasting notification says 没发出去 · 这条语音没能发出去，打开 Avibe 可以重试。
+  (scheduled when the take is kept, so it shows whether or not the App runs
+  then; removed once nothing is unsent). From then only Retry sends it, a
+  relaunch included, and it no longer holds newer takes back; neither does
+  one that could not be turned into text. When Avibe comes to the front
+  and something is still unsent, one alert says 有一条 3 小时前的语音没能发出去。
+  (or 有 3 条语音没能发出去，最早的是 3 小时前。) with 重试 / 全部重试, which sends
+  all of them oldest first, and 放弃, which deletes them. An unsent take is
+  deleted after 24 hours, and at once on a sign-out or account change; a
+  voice consent "no" discards it. At most 20 are kept.
+- A take sent more than a minute after it was spoken tells the main Bot so:
+  its message begins with one line, （这条语音说于今天 08:44，刚刚才送达。） (another
+  day: （这条语音说于 11 月 19 日 23:10，刚刚才送达。）; in the phone's local time and
+  the App's language), then a line break and the words, and
+  `metadata.spoken_at` carries the time (ISO 8601). The model sees a
+  message's text and a few rendered header lines, not its metadata, so the
+  line is what tells it the instruction was not given just now. No
   sign-in, no microphone permission, or Live Activities turned off bring the
   App to the main Bot's conversation before anything records. A later
   `403 voice_consent_required` stops the take and keeps nothing. The take's

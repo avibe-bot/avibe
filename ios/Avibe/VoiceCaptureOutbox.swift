@@ -8,6 +8,9 @@ struct VoiceOutboxEntry: Codable, Equatable {
     /// Its place in the order takes were recorded in: lower is earlier.
     let sequence: Int
     let createdAt: Date
+    /// When it was spoken (the end of its recording): what "ten minutes"
+    /// and the alert's "3 hours ago" are counted from.
+    let spokenAt: Date
     /// The account and instance it was spoken to; it is never sent anywhere
     /// else.
     let accountID: String
@@ -169,4 +172,50 @@ struct VoiceCaptureOutbox {
         decoder.dateDecodingStrategy = .millisecondsSince1970
         return decoder
     }()
+}
+
+/// The line a take that is sent late carries before its words, so the main
+/// Bot (and the conversation) know it was not said just now:
+/// （这条语音说于今天 08:44，刚刚才送达。） or, for another day,
+/// （这条语音说于 11 月 19 日 23:10，刚刚才送达。）, in the phone's local time
+/// and the App's language.
+enum VoiceCaptureLateNote {
+    /// The time as 08:44, and the day as 11 月 19 日 or Nov 19.
+    static func parts(
+        spoken: Date, language: String, calendar: Calendar = .current
+    ) -> (time: String, day: String) {
+        let fields = calendar.dateComponents([.month, .day, .hour, .minute], from: spoken)
+        let time = String(format: "%02d:%02d", fields.hour ?? 0, fields.minute ?? 0)
+        if language.hasPrefix("zh") {
+            return (time, "\(fields.month ?? 1) 月 \(fields.day ?? 1) 日")
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "MMM d"
+        return (time, formatter.string(from: spoken))
+    }
+
+    static func line(
+        spoken: Date,
+        now: Date,
+        language: String = Bundle.main.preferredLocalizations.first ?? "en",
+        calendar: Calendar = .current
+    ) -> String {
+        let (time, day) = parts(spoken: spoken, language: language, calendar: calendar)
+        if calendar.isDate(spoken, inSameDayAs: now) {
+            return String(localized: LocalizedStringResource(
+                String.LocalizationValue("voiceCapture.late.today \(time)"), table: "VoiceCapture"
+            ))
+        }
+        return String(localized: LocalizedStringResource(
+            String.LocalizationValue("voiceCapture.late.day \(day) \(time)"), table: "VoiceCapture"
+        ))
+    }
+
+    /// The message a late take is sent as: the line, a line break, the words.
+    static func message(_ words: String, spoken: Date, now: Date) -> String {
+        "\(line(spoken: spoken, now: now))\n\(words)"
+    }
 }

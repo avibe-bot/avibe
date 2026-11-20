@@ -177,6 +177,38 @@
         }
       }
     },
+    "voiceCapture.late.day %@ %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "(Spoken on %1$@ at %2$@; delivered just now.)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "（这条语音说于 %1$@ %2$@，刚刚才送达。）"
+          }
+        }
+      }
+    },
+    "voiceCapture.late.today %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "(Spoken today at %@; delivered just now.)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "（这条语音说于今天 %@，刚刚才送达。）"
+          }
+        }
+      }
+    },
     "voiceCapture.phase.failed" : {
       "localizations" : {
         "en" : {
@@ -657,18 +689,18 @@
         }
       }
     },
-    "voiceCapture.unsent.many %lld" : {
+    "voiceCapture.unsent.many %lld %@" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%lld voice messages couldn't be sent."
+            "value" : "%1$lld voice messages couldn't be sent; the oldest is from %2$@."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "有 %lld 条语音没能发出去。"
+            "value" : "有 %1$lld 条语音没能发出去，最早的是 %2$@。"
           }
         }
       }
@@ -689,18 +721,18 @@
         }
       }
     },
-    "voiceCapture.unsent.one" : {
+    "voiceCapture.unsent.one %@" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "One voice message couldn't be sent."
+            "value" : "A voice message from %@ couldn't be sent."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "有一条语音没能发出去。"
+            "value" : "有一条 %@的语音没能发出去。"
           }
         }
       }

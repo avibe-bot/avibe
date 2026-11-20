@@ -25,7 +25,7 @@ final class VoiceCaptureOutboxTests: XCTestCase {
 
     private func entry(createdAt: Date = Date(timeIntervalSince1970: 1_795_135_000)) -> VoiceOutboxEntry {
         VoiceOutboxEntry(
-            id: UUID(), sequence: outbox.nextSequence(), createdAt: createdAt,
+            id: UUID(), sequence: outbox.nextSequence(), createdAt: createdAt, spokenAt: createdAt,
             accountID: "account-1", instanceID: "instance-1", origin: "https://instance-one.example",
             storeIdentifier: UUID(), dictationID: "ios-action-\(UUID().uuidString.lowercased())",
             capture: "0 [background warm]", timing: "island=10 record=190", inBackground: true

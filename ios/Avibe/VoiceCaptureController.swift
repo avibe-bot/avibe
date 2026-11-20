@@ -16,8 +16,11 @@ protocol VoiceCaptureInstance: AnyObject {
     /// for the first-words question), in the metadata only.
     /// `earlier`: presses before this one that left no message (what
     /// happened to each; no audio, no words), in the metadata only.
+    /// `spokenAt`: when the words were spoken, for a take that is sent
+    /// later than that (ISO 8601 with the phone's offset).
     func postMessage(
-        _ text: String, to sessionPath: String, capture: String?, timing: String?, earlier: String?
+        _ text: String, to sessionPath: String, capture: String?, timing: String?, earlier: String?,
+        spokenAt: String?
     ) async throws
     func close()
     var releaseBarrier: WebsiteDataStoreReleaseBarrier? { get }
@@ -196,9 +199,10 @@ struct VoiceCaptureEnvironment {
     /// Schedules the lasting notification 这条语音没能发出去，打开 Avibe 可以重试。
     /// for `date` (replacing one already scheduled), or with nil removes it.
     var scheduleUnsentNotice: (Date?) -> Void
-    /// In front: one alert that `count` takes are not sent, with Retry
-    /// (`true`) and Discard (`false`); nil when it could not be shown.
-    var presentUnsent: (_ count: Int, _ answer: @escaping (Bool?) -> Void) -> Void
+    /// In front: one alert that `count` takes are not sent, the oldest
+    /// spoken at `oldest`, with Retry (`true`) and Discard (`false`); nil
+    /// when it could not be shown.
+    var presentUnsent: (_ count: Int, _ oldest: Date, _ answer: @escaping (Bool?) -> Void) -> Void
     /// Says a line in front, where the island is not drawn.
     var sayInFront: (VoiceCaptureAttributes.Reason) -> Void
     var now: () -> Date
@@ -268,7 +272,7 @@ struct VoiceCaptureEnvironment {
         dropEarlier: { VoiceCaptureEarlier.drop($0) },
         outbox: (try? VoiceCaptureOutbox.standardDirectory()).map(VoiceCaptureOutbox.init(directory:)),
         scheduleUnsentNotice: { VoiceCaptureFailureNotification.scheduleUnsent(at: $0) },
-        presentUnsent: { VoiceCaptureAlert.presentUnsent(count: $0, answer: $1) },
+        presentUnsent: { VoiceCaptureAlert.presentUnsent(count: $0, oldest: $1, answer: $2) },
         sayInFront: { VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.reason($0))) },
         now: Date.init,
         sleep: { try? await Task.sleep(for: $0) }
@@ -488,7 +492,6 @@ final class VoiceCaptureController {
     /// How long the island keeps a sent take before it goes.
     static let sentDismissal: TimeInterval = 4
     /// How long a failed take stays offered for Retry.
-    static let failedDismissal: Duration = .seconds(10 * 60)
     /// How long a notice (needs the App, an older Avibe) stays.
     static let noticeDismissal: TimeInterval = 30
 
@@ -685,7 +688,7 @@ final class VoiceCaptureController {
             // Earlier takes are still on their way: this one waits its
             // turn behind them, and is never sent before them.
             await keep(take, reason: .offline, automatic: true)
-            await sendKept(all: false)
+            await sendKept(.byItself)
         } else {
             await deliver(take)
         }
@@ -698,7 +701,7 @@ final class VoiceCaptureController {
             if case .idle = state, keptTakes.isEmpty { _ = await endLeftovers(reason: .interrupted) }
             return
         }
-        await sendKept(all: true, showSending: true)
+        await sendKept(.retry, showSending: true)
     }
 
     /// At launch: whatever this process does not hold is a leftover.
@@ -1249,9 +1252,16 @@ final class VoiceCaptureController {
                 take.entry = entry
             }
             let earlier = environment.earlier()
+            // Sent later than it was spoken: its first line says when, so
+            // the main Bot does not take it for an instruction given now.
+            let stamp = lateStamp(of: take)
+            let message = stamp == nil
+                ? text
+                : VoiceCaptureLateNote.message(text, spoken: spokenAt(take), now: environment.now())
             try await take.instance.postMessage(
-                text, to: path, capture: take.capture, timing: timing(of: take),
-                earlier: earlier.isEmpty ? nil : earlier.joined(separator: " | ")
+                message, to: path, capture: take.capture, timing: timing(of: take),
+                earlier: earlier.isEmpty ? nil : earlier.joined(separator: " | "),
+                spokenAt: stamp
             )
             // They went with a message that arrived.
             environment.dropEarlier(earlier)
@@ -1426,7 +1436,7 @@ final class VoiceCaptureController {
             return
         }
         let entry = VoiceOutboxEntry(
-            id: take.id, sequence: outbox.nextSequence(), createdAt: take.startedAt,
+            id: take.id, sequence: outbox.nextSequence(), createdAt: take.startedAt, spokenAt: spokenAt(take),
             accountID: take.target.accountID, instanceID: take.target.instanceID,
             origin: take.target.origin.serialized, storeIdentifier: take.target.storeIdentifier,
             dictationID: take.instance.dictationID, capture: take.capture, timing: recordedTiming(of: take),
@@ -1449,8 +1459,8 @@ final class VoiceCaptureController {
     /// Keeps the take the state holds: it was not sent and nothing of it
     /// was posted. It is written to the outbox and stays on its island
     /// (还没发出去，连上你的 Avibe 后会自动发送。 when it is sent again by itself)
-    /// with Retry and Discard, for `failedDismissal`; then the island goes
-    /// and the take waits in the outbox.
+    /// with Retry and Discard, until `automaticWindow` after it was spoken;
+    /// then the island goes and the take waits in the outbox for Retry.
     private func keep(_ kept: Take, reason: VoiceCaptureAttributes.Reason, automatic: Bool) async {
         var take = kept
         let first = take.keptAt == nil
@@ -1474,8 +1484,9 @@ final class VoiceCaptureController {
     private func scheduleIslandEnd(of take: Take) {
         islandTask?.cancel()
         let id = take.id
-        let elapsed = Duration.seconds(environment.now().timeIntervalSince(take.keptAt ?? environment.now()))
-        let remaining = max(Self.failedDismissal - elapsed, Duration.zero)
+        // The island promises a send by itself: it goes when that ends.
+        let elapsed = environment.now().timeIntervalSince(spokenAt(take))
+        let remaining = Duration.seconds(max(Self.automaticWindow - elapsed, 0))
         let sleep = environment.sleep
         islandTask = Task { [weak self] in
             await sleep(remaining)
@@ -1488,8 +1499,8 @@ final class VoiceCaptureController {
         }
     }
 
-    /// The take gives its island up (to a newer press, or after
-    /// `failedDismissal`) and goes on waiting to be sent, in its turn.
+    /// The take gives its island up (to a newer press, or when its
+    /// `automaticWindow` ends) and goes on waiting to be sent, in its turn.
     private func park(_ kept: Take) async {
         var take = kept
         let island = take.activity
@@ -1502,9 +1513,63 @@ final class VoiceCaptureController {
         await island?.end(nil, dismissal: .immediate)
     }
 
+    /// A take sent more than this long after it was spoken says when it
+    /// was spoken: a first line before its words (`VoiceCaptureLateNote`)
+    /// and `metadata.spoken_at`.
+    static let lateAfter: TimeInterval = 60
+
+    /// When a take that is sent late was spoken, as it goes in the message.
+    private func lateStamp(of take: Take) -> String? {
+        let spoken = spokenAt(take)
+        guard environment.now().timeIntervalSince(spoken) > Self.lateAfter else { return nil }
+        return Self.stamp.string(from: spoken)
+    }
+
+    private static let stamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = .current
+        return formatter
+    }()
+
+    /// How long after the end of speaking a take may still be sent without
+    /// the user asking: the island's schedule, and the silent send when
+    /// Avibe comes to the front. After it only Retry in the alert sends the
+    /// take, so the main Bot is never handed an old instruction unasked
+    /// (Product, 11-20).
+    static let automaticWindow: TimeInterval = 10 * 60
+
+    /// When the take was spoken: the end of its recording.
+    private func spokenAt(_ take: Take) -> Date {
+        take.endedAt ?? take.startedAt
+    }
+
+    private func isRecent(_ take: Take) -> Bool {
+        environment.now().timeIntervalSince(spokenAt(take)) < Self.automaticWindow
+    }
+
+    /// Which kept takes a pass sends.
+    enum KeptScope {
+        /// The schedule: those an unreachable instance kept, still within
+        /// `automaticWindow`.
+        case byItself
+        /// Avibe coming to the front: every take still within the window.
+        case comingForward
+        /// Retry (the alert's, the island's): every take.
+        case retry
+    }
+
+    private func belongs(_ take: Take, to scope: KeptScope) -> Bool {
+        switch scope {
+        case .byItself: return take.keptAutomatic && isRecent(take)
+        case .comingForward: return isRecent(take)
+        case .retry: return true
+        }
+    }
+
     /// The oldest take that is sent by itself.
     private var nextAutomatic: Take? {
-        keptTakes.first { $0.keptAutomatic }
+        keptTakes.first { belongs($0, to: .byItself) }
     }
 
     /// Plans the next automatic send, for the oldest take that has one,
@@ -1528,24 +1593,24 @@ final class VoiceCaptureController {
             // Not this task's to cancel from here on: a send asks nothing
             // once its task is cancelled.
             self.retryTask = nil
-            await self.sendKept(all: false)
+            await self.sendKept(.byItself)
         }
     }
 
     private var draining = false
 
-    /// Sends the takes that are not sent yet, oldest first, one at a time.
-    /// By itself (`all` false) only those an unreachable instance kept,
-    /// stopping at the first that still cannot reach it, so a later take
-    /// never arrives before an earlier one that is on its way. A take that
-    /// needs the user (it could not be turned into text) does not hold the
-    /// others up; `all` (Retry, Avibe coming to the front) sends those too.
-    func sendKept(all: Bool, showSending: Bool = false) async {
+    /// Sends the takes that are not sent yet and belong to `scope`, oldest
+    /// first, one at a time, stopping at the first that still cannot reach
+    /// the instance, so a later take never arrives before an earlier one
+    /// that is on its way. A take that needs the user (it could not be
+    /// turned into text, or it was spoken more than `automaticWindow` ago)
+    /// does not hold the others up.
+    func sendKept(_ scope: KeptScope, showSending: Bool = false) async {
         guard !draining else { return }
         draining = true
         var tried: Set<UUID> = []
         while let next = keptTakes.first(where: {
-            !tried.contains($0.id) && sending != $0.id && (all || $0.keptAutomatic)
+            !tried.contains($0.id) && sending != $0.id && belongs($0, to: scope)
         }) {
             tried.insert(next.id)
             guard await sendOneKept(next.id, showSending: showSending) else { break }
@@ -1677,7 +1742,7 @@ final class VoiceCaptureController {
                 startedAt: entry.createdAt, capture: entry.capture,
                 // Asked afresh before anything is sent.
                 consent: Task { unreachable }, inBackground: entry.inBackground,
-                marks: [], pressAt: entry.createdAt, text: entry.text,
+                marks: [], pressAt: entry.createdAt, endedAt: entry.spokenAt, text: entry.text,
                 keptAt: entry.createdAt, keptReason: .offline, keptAutomatic: true,
                 entry: entry, retries: entry.retries
             ))
@@ -1685,7 +1750,8 @@ final class VoiceCaptureController {
         parked.sort { ($0.entry?.sequence ?? .max) < ($1.entry?.sequence ?? .max) }
         guard !parked.isEmpty else { return }
         record("outbox: \(parked.count) kept from an earlier run")
-        await sendKept(all: false)
+        await sendKept(.byItself)
+        scheduleRetry()
     }
 
     private var restored = false
@@ -1719,23 +1785,24 @@ final class VoiceCaptureController {
 
     private var unsentAlertShown = false
 
-    /// Avibe came to the front. Takes that are not sent yet are sent once
-    /// more, silently; if any is still unsent, one alert says how many,
-    /// with Retry (all, oldest first) and Discard (all).
+    /// Avibe came to the front. Takes spoken within `automaticWindow` are
+    /// sent once more, silently; if any take is still unsent, one alert
+    /// says how many and how long ago the oldest was spoken, with Retry
+    /// (all, oldest first) and Discard (all).
     func activated() async {
         await restoreOutbox()
         await removeExpired()
         guard !keptTakes.isEmpty else { return }
-        await sendKept(all: true)
-        let count = keptTakes.count
-        guard count > 0, !unsentAlertShown, environment.isInFront() else { return }
+        await sendKept(.comingForward)
+        let unsent = keptTakes
+        guard let oldest = unsent.map(spokenAt).min(), !unsentAlertShown, environment.isInFront() else { return }
         unsentAlertShown = true
-        environment.presentUnsent(count) { [weak self] retry in
+        environment.presentUnsent(unsent.count, oldest) { [weak self] retry in
             Task { @MainActor in
                 guard let self else { return }
                 self.unsentAlertShown = false
                 switch retry {
-                case true?: await self.sendKept(all: true, showSending: true)
+                case true?: await self.sendKept(.retry, showSending: true)
                 case false?: await self.discardAllKept()
                 case nil: break
                 }
@@ -1753,18 +1820,19 @@ final class VoiceCaptureController {
         updateUnsentNotice()
     }
 
-    /// The lasting notification that a take was not sent: `failedDismissal`
-    /// after the oldest was kept, and gone once none is left. The system
-    /// shows it whether or not the App is running then.
+    /// The lasting notification that a take was not sent: when the oldest
+    /// one's `automaticWindow` ends (from then only Retry sends it), and
+    /// gone once none is left. The system shows it whether or not the App
+    /// is running then.
     private func updateUnsentNotice() {
-        guard let oldest = keptTakes.compactMap(\.keptAt).min() else {
+        guard let oldest = keptTakes.map(spokenAt).min() else {
             if unsentNoticeFor != nil { environment.scheduleUnsentNotice(nil) }
             unsentNoticeFor = nil
             return
         }
         guard unsentNoticeFor != oldest else { return }
         unsentNoticeFor = oldest
-        let date = oldest.addingTimeInterval(Self.failedDismissal / .seconds(1))
+        let date = oldest.addingTimeInterval(Self.automaticWindow)
         // One that is already due was shown (or scheduled) by the run that
         // kept the take.
         if date > environment.now() { environment.scheduleUnsentNotice(date) }

@@ -1104,9 +1104,10 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertTrue(other.unsentAlerts.isEmpty, "everything went: nothing is shown")
     }
 
-    /// Ten minutes unsent: the island goes, the take stays and is still
-    /// sent; the lasting notification was scheduled for that moment when
-    /// the take was kept, and is removed once nothing is unsent.
+    /// Ten minutes after it was spoken: the island goes and the take stays,
+    /// but is no longer sent by itself. The lasting notification was
+    /// scheduled for that moment when the take was kept, and is removed
+    /// once nothing is unsent.
     func testAfterTenMinutesTheIslandGoesAndTheTakeStays() async {
         let world = World()
         let start = Date()
@@ -1134,11 +1135,27 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.unsentCount, 1, "kept, without its island")
         XCTAssertEqual(world.audio?.discarded, false)
 
+        // From here it is never sent by itself, reachable or not: only Retry
+        // in the alert sends it.
         world.instance.statusResult = .success(.init(available: true, consent: .granted))
-        let retry = controller.retryTask
-        await world.wakeRetry()
-        await retry?.value
-        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertNil(controller.retryTask)
+        XCTAssertEqual(world.retryHolds, 0)
+        await controller.sendKept(.byItself)
+        world.inFront = true
+        await controller.activated()
+        XCTAssertTrue(world.instance.sent.isEmpty, "not sent silently after ten minutes")
+        XCTAssertEqual(world.unsentAlerts.map(\.count), [1])
+        XCTAssertEqual(world.unsentAlerts.first?.oldest, start, "when it was spoken")
+
+        world.unsentAlerts[0].answer(true)
+        for _ in 0..<400 where controller.unsentCount > 0 { try? await Task.sleep(for: .milliseconds(5)) }
+        // Its first line says when it was spoken; the words follow.
+        XCTAssertEqual(world.instance.sent.count, 1)
+        XCTAssertEqual(
+            world.instance.sent.first,
+            VoiceCaptureLateNote.message("hello", spoken: start, now: clock)
+        )
+        XCTAssertNotNil(world.instance.spokenAts.first ?? nil)
         XCTAssertEqual(controller.unsentCount, 0)
         XCTAssertEqual(world.unsentNotices.count, 2)
         XCTAssertNil(world.unsentNotices.last ?? Date(), "removed once nothing is unsent")
@@ -1281,7 +1298,7 @@ final class VoiceCaptureTests: XCTestCase {
         await keepATake(before, ended)
         reachable(before)
         before.instance.holdPost = true
-        let send = Task { await ended.sendKept(all: false) }
+        let send = Task { await ended.sendKept(.byItself) }
         await before.instance.untilHolding()
         XCTAssertEqual(VoiceCaptureOutbox(directory: before.outboxDirectory).entries().first?.posted, true)
 
@@ -1398,7 +1415,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.unsentCount, 1)
         // Retry (the alert's, or coming forward) sends the first too.
         world.instance.transcribeResult = .success("one")
-        await controller.sendKept(all: true)
+        await controller.sendKept(.retry)
         XCTAssertEqual(world.instance.sent, ["two", "one"])
         XCTAssertEqual(controller.unsentCount, 0)
     }
@@ -1435,18 +1452,145 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertTrue(after.earlier.contains { $0.contains("expired") }, "\(after.earlier)")
     }
 
+    /// A take found after a relaunch more than ten minutes after it was
+    /// spoken is not sent by itself either: the alert asks.
+    func testATakeOlderThanTenMinutesWaitsForRetryAfterARelaunch() async {
+        let before = World()
+        // A whole second, as the outbox keeps it.
+        let spoken = Date(timeIntervalSince1970: 1_795_200_000)
+        before.now = { spoken }
+        await keepATake(before, before.controller())
+
+        let after = World()
+        after.outboxDirectory = before.outboxDirectory
+        after.now = { spoken.addingTimeInterval(3 * 3600 + 5) }
+        after.inFront = true
+        let controller = after.controller()
+        await controller.restoreOutbox()
+        XCTAssertEqual(controller.unsentCount, 1)
+        XCTAssertNil(controller.retryTask)
+        XCTAssertEqual(after.instance.statusCalls, 0, "nothing was asked or sent by itself")
+        await controller.activated()
+        XCTAssertEqual(after.instance.statusCalls, 0)
+        XCTAssertEqual(after.unsentAlerts.map(\.count), [1])
+        XCTAssertEqual(after.unsentAlerts.first?.oldest, spoken)
+
+        // A newer take does not wait behind it.
+        _ = await controller.toggle()
+        after.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(after.instance.sent, ["hello"])
+        XCTAssertNil(after.instance.spokenAts.last ?? nil, "said just now: no note")
+        XCTAssertEqual(controller.unsentCount, 1)
+    }
+
+    /// A take sent more than a minute after it was spoken says when, in its
+    /// first line and in `spoken_at`; one sent sooner does not.
+    func testATakeSentLateSaysWhenItWasSpoken() async {
+        let world = World()
+        let start = Date()
+        var clock = start
+        world.now = { clock }
+        let controller = world.controller()
+        await keepATake(world, controller)
+        clock = start.addingTimeInterval(59)
+        reachable(world)
+        await controller.sendKept(.byItself)
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertNil(world.instance.spokenAts.last ?? nil)
+
+        clock = start.addingTimeInterval(120)
+        await keepATake(world, controller)
+        let spoken = clock
+        clock = clock.addingTimeInterval(61)
+        reachable(world)
+        await controller.sendKept(.byItself)
+        XCTAssertEqual(world.instance.sent.last, VoiceCaptureLateNote.message("hello", spoken: spoken, now: clock))
+        XCTAssertTrue(world.instance.sent.last?.hasSuffix("\nhello") == true)
+        XCTAssertEqual(world.instance.spokenAts.last ?? nil, ISO8601DateFormatter.string(
+            from: spoken, timeZone: .current, formatOptions: [.withInternetDateTime]
+        ))
+        // The island still shows the words, not the note.
+        XCTAssertEqual(world.activities.last?.ended?.heard, "hello")
+    }
+
+    func testTheLateNoteReadsAsDecided() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        func date(_ day: Int, _ hour: Int, _ minute: Int) throws -> Date {
+            try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: minute)))
+        }
+        let zh = VoiceCaptureLateNote.parts(spoken: try date(19, 23, 10), language: "zh-Hans", calendar: calendar)
+        XCTAssertEqual(zh.time, "23:10")
+        XCTAssertEqual(zh.day, "11 月 19 日")
+        let en = VoiceCaptureLateNote.parts(spoken: try date(19, 8, 44), language: "en", calendar: calendar)
+        XCTAssertEqual(en.time, "08:44")
+        XCTAssertEqual(en.day, "Nov 19")
+
+        func format(_ language: String, _ key: String) throws -> String {
+            let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
+            return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: "VoiceCapture")
+        }
+        XCTAssertEqual(
+            String(format: try format("zh-Hans", "voiceCapture.late.today %@"), "08:44"),
+            "（这条语音说于今天 08:44，刚刚才送达。）"
+        )
+        XCTAssertEqual(
+            String(format: try format("zh-Hans", "voiceCapture.late.day %@ %@"), zh.day, zh.time),
+            "（这条语音说于 11 月 19 日 23:10，刚刚才送达。）"
+        )
+        XCTAssertEqual(
+            String(format: try format("en", "voiceCapture.late.today %@"), "08:44"),
+            "(Spoken today at 08:44; delivered just now.)"
+        )
+        XCTAssertEqual(
+            String(format: try format("en", "voiceCapture.late.day %@ %@"), "Nov 19", "23:10"),
+            "(Spoken on Nov 19 at 23:10; delivered just now.)"
+        )
+        // Today or another day, by the phone's calendar.
+        let today = VoiceCaptureLateNote.line(
+            spoken: try date(20, 8, 44), now: try date(20, 11, 52), language: "en", calendar: calendar
+        )
+        let other = VoiceCaptureLateNote.line(
+            spoken: try date(19, 23, 10), now: try date(20, 0, 5), language: "en", calendar: calendar
+        )
+        XCTAssertNotEqual(today, other)
+        XCTAssertTrue(today.contains("08:44"), today)
+        XCTAssertTrue(other.contains("23:10"), other)
+    }
+
     func testTheUnsentAlertAndNoticeReadAsDecided() throws {
         func format(_ language: String, _ key: String) throws -> String {
             let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
             return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: "VoiceCapture")
         }
-        XCTAssertEqual(try format("zh-Hans", "voiceCapture.unsent.one"), "有一条语音没能发出去。")
-        XCTAssertEqual(try format("en", "voiceCapture.unsent.one"), "One voice message couldn't be sent.")
+        let now = Date(timeIntervalSince1970: 1_795_200_000)
+        func age(_ seconds: TimeInterval, _ language: String) -> String {
+            VoiceCaptureAlert.age(of: now.addingTimeInterval(-seconds), now: now, language: language)
+        }
+        // Chinese with a space between the number and the unit.
+        XCTAssertEqual(age(3 * 3600 + 120, "zh-Hans"), "3 小时前")
+        XCTAssertEqual(age(25 * 60 + 30, "zh-Hans"), "25 分钟前")
+        XCTAssertEqual(age(20, "zh-Hans"), "1 分钟前", "never less than a minute")
+        XCTAssertEqual(age(3 * 3600 + 120, "en"), "3 hours ago")
+        XCTAssertEqual(age(25 * 60 + 30, "en"), "25 minutes ago")
+        XCTAssertEqual(age(20, "en"), "1 minute ago")
+
         XCTAssertEqual(
-            String(format: try format("zh-Hans", "voiceCapture.unsent.many %lld"), 3), "有 3 条语音没能发出去。"
+            String(format: try format("zh-Hans", "voiceCapture.unsent.one %@"), "3 小时前"),
+            "有一条 3 小时前的语音没能发出去。"
         )
         XCTAssertEqual(
-            String(format: try format("en", "voiceCapture.unsent.many %lld"), 3), "3 voice messages couldn't be sent."
+            String(format: try format("en", "voiceCapture.unsent.one %@"), "3 hours ago"),
+            "A voice message from 3 hours ago couldn't be sent."
+        )
+        XCTAssertEqual(
+            String(format: try format("zh-Hans", "voiceCapture.unsent.many %lld %@"), 3, "3 小时前"),
+            "有 3 条语音没能发出去，最早的是 3 小时前。"
+        )
+        XCTAssertEqual(
+            String(format: try format("en", "voiceCapture.unsent.many %lld %@"), 3, "3 hours ago"),
+            "3 voice messages couldn't be sent; the oldest is from 3 hours ago."
         )
         XCTAssertEqual(try format("zh-Hans", "voiceCapture.action.retryAll"), "全部重试")
         XCTAssertEqual(try format("en", "voiceCapture.action.retryAll"), "Retry all")
@@ -2264,7 +2408,7 @@ private final class World {
     /// The unsent notice as scheduled (nil: removed), the alerts shown in
     /// front (how many takes, and the answer to give), and lines said.
     var unsentNotices: [Date?] = []
-    var unsentAlerts: [(count: Int, answer: (Bool?) -> Void)] = []
+    var unsentAlerts: [(count: Int, oldest: Date, answer: (Bool?) -> Void)] = []
     var said: [VoiceCaptureAttributes.Reason] = []
 
     /// Waits asked for; a retry's wait is held until `wakeRetry()`, and a
@@ -2363,7 +2507,7 @@ private final class World {
             dropEarlier: { self.earlier = VoiceCaptureEarlier.removing($0, from: self.earlier) },
             outbox: VoiceCaptureOutbox(directory: self.outboxDirectory),
             scheduleUnsentNotice: { self.unsentNotices.append($0) },
-            presentUnsent: { count, answer in self.unsentAlerts.append((count, answer)) },
+            presentUnsent: { count, oldest, answer in self.unsentAlerts.append((count, oldest, answer)) },
             sayInFront: { self.said.append($0) },
             now: { self.now() },
             sleep: { duration in
@@ -2467,12 +2611,16 @@ private final class FakeInstance: VoiceCaptureInstance {
 
     var earliers: [String?] = []
 
+    var spokenAts: [String?] = []
+
     func postMessage(
-        _ text: String, to sessionPath: String, capture: String?, timing: String?, earlier: String?
+        _ text: String, to sessionPath: String, capture: String?, timing: String?, earlier: String?,
+        spokenAt: String?
     ) async throws {
         captures.append(capture)
         timings.append(timing)
         earliers.append(earlier)
+        spokenAts.append(spokenAt)
         if holdPost {
             await withCheckedContinuation { held = $0 }
         }
