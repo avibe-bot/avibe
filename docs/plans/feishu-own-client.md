@@ -117,10 +117,16 @@ nothing by default.
 - Calls that miss the token cache together share one token request; the SDK
   got the same effect by blocking the loop while it fetched.
 - The configured `proxy_url` is still not applied to Feishu traffic.
+- The setup wizard's temporary connection refuses every event (answer 500), as
+  the SDK's empty dispatcher did, so that Feishu sends it again and a running
+  adapter receives it.
+- While the SDK's socket client remains, it is loaded past the package
+  `__init__` (`modules/im/feishu_sdk_ws.py`); if that ever fails, the adapter
+  logs a warning and imports the whole SDK.
 
 ## Todo
 
-- [ ] 1. Message calls and the 7-hour event memory
+- [x] 1. Message calls and the 7-hour event memory (#4047)
 - [ ] 2. Event parsing; SDK socket client loaded without the API tree
 - [ ] 3. Own long connection, fake server, differential tests, switch, probe
 - [ ] 4. Shadow stages on a live instance

@@ -15913,6 +15913,20 @@ def auto_bind_wechat_user(user_id: str) -> dict:
 # active WebSocket connection exists.  During the setup wizard we start a
 # temporary WS client so the user can configure event subscriptions.
 
+class _TempWsEvents:
+    """The temporary connection handles nothing.
+
+    Feishu gives each event to one of an app's connections. Refusing an event
+    that lands here makes Feishu send it again, so a running adapter still gets
+    it; acknowledging it would swallow it.
+    """
+
+    def _do_without_validation(self, payload: bytes) -> None:
+        raise RuntimeError("the temporary Feishu connection does not handle events")
+
+    do_without_validation = _do_without_validation
+
+
 _temp_ws_lock = __import__("threading").Lock()
 _temp_ws_client = None
 _temp_ws_thread = None
@@ -15930,19 +15944,16 @@ def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> 
         _stop_temp_ws_internal()
 
         try:
-            import lark_oapi as lark
+            from modules.im.feishu_sdk_ws import sdk_ws_client_module
 
-            sdk_domain = lark.LARK_DOMAIN if domain == "lark" else lark.FEISHU_DOMAIN
+            sdk_ws = sdk_ws_client_module()
 
-            # Minimal event handler (does nothing, just keeps the connection alive)
-            handler = lark.EventDispatcherHandler.builder("", "").build()
-
-            client = lark.ws.Client(
+            client = sdk_ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
-                event_handler=handler,
-                log_level=lark.LogLevel.INFO,
-                domain=sdk_domain,
+                event_handler=_TempWsEvents(),
+                log_level=sdk_ws.LogLevel.INFO,
+                domain=_lark_api_base(domain),
             )
 
             import threading
@@ -15978,8 +15989,9 @@ def _stop_temp_ws_internal():
         try:
             # Prevent auto-reconnect and close the underlying connection
             _temp_ws_client._auto_reconnect = False
-            from lark_oapi.ws.client import loop as ws_loop
+            from modules.im.feishu_sdk_ws import sdk_ws_client_module
 
+            ws_loop = sdk_ws_client_module().loop
             ws_loop.call_soon_threadsafe(ws_loop.create_task, _temp_ws_client._disconnect())
         except Exception:
             pass

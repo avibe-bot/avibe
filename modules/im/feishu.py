@@ -1,7 +1,8 @@
 """Feishu/Lark implementation of the IM client.
 
-Message calls go over plain HTTPS (``feishu_api``); the long connection that
-delivers events is still ``lark-oapi``'s.
+Message calls go over plain HTTPS (``feishu_api``) and events are read by
+``feishu_events``; the long connection that delivers them is still
+``lark-oapi``'s, loaded on its own (``feishu_sdk_ws``).
 """
 
 import asyncio
@@ -33,6 +34,8 @@ from .message_facts import (
 )
 from .download_target import open_download_target
 from .feishu_api import FeishuApi
+from .feishu_events import FeishuEventDispatcher
+from .feishu_sdk_ws import sdk_ws_client_module
 from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
@@ -235,14 +238,6 @@ class FeishuBot(BaseIMClient):
             platform_specific=context.platform_specific,
             files=context.files,
         )
-
-    def _get_sdk_domain(self) -> str:
-        """Return the lark-oapi SDK domain constant based on config."""
-        import lark_oapi as lark
-
-        if getattr(self.config, "domain", "feishu") == "lark":
-            return lark.LARK_DOMAIN
-        return lark.FEISHU_DOMAIN
 
     def format_markdown(self, text: str) -> str:
         """Feishu card Markdown from the Markdown every surface shares.
@@ -2889,111 +2884,52 @@ class FeishuBot(BaseIMClient):
             self._on_ready = kwargs["on_ready"]
 
     def register_handlers(self):
-        """Register Feishu event handlers via lark-oapi SDK.
-
-        This sets up the event dispatcher for WebSocket events.
-        The actual handler registration happens in the SDK's EventDispatcherHandler.
-        """
-        # Handlers are registered during _build_event_handler, called in run()
+        """Nothing to register ahead of time: ``run()`` builds the event dispatcher."""
         pass
 
     # ------------------------------------------------------------------
     # Run / lifecycle
     # ------------------------------------------------------------------
-    def _build_event_handler(self):
-        """Build the lark-oapi event dispatcher handler."""
-        import lark_oapi as lark
+    def _build_event_handler(self) -> FeishuEventDispatcher:
+        """Build the dispatcher for the events the long connection delivers."""
 
-        def on_message_receive(data):
-            """Callback for im.message.receive_v1 events."""
+        def on_message_receive(event_id: Optional[str], event: Dict[str, Any]) -> None:
+            """im.message.receive_v1"""
             try:
-                if hasattr(data, "event") and data.event:
-                    event_dict = {}
-                    event = data.event
-                    # Convert SDK event object to dict
-                    if hasattr(event, "__dict__"):
-                        event_dict = self._event_to_dict(event)
-                    elif isinstance(event, dict):
-                        event_dict = event
-
-                    # Deduplication
-                    event_id = None
-                    if hasattr(data, "header") and data.header:
-                        event_id = getattr(data.header, "event_id", None)
-                    if self._is_duplicate_event(event_id):
-                        return
-
-                    self._handle_message_event(event_dict)
+                if self._is_duplicate_event(event_id):
+                    return
+                self._handle_message_event(event)
             except Exception as exc:
                 logger.error("Error in on_message_receive: %s", exc, exc_info=True)
 
-        def on_card_action(data):
-            """Callback for card.action.trigger events.
-
-            Must return a P2CardActionTriggerResponse so the SDK can
-            reply to Feishu within the 3-second window.
-            """
-            from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
-
+        def on_card_action(event: Dict[str, Any]) -> None:
+            """card.action.trigger; the dispatcher answers Feishu within its 3-second window."""
             try:
-                event_dict = {}
-                if hasattr(data, "event") and data.event:
-                    event = data.event
-                    if hasattr(event, "__dict__"):
-                        event_dict = self._event_to_dict(event)
-                    elif isinstance(event, dict):
-                        event_dict = event
-                self._handle_card_action(event_dict)
+                self._handle_card_action(event)
             except Exception as exc:
                 logger.error("Error in on_card_action: %s", exc, exc_info=True)
-            # Always return a response to avoid Feishu "request failed" toast
-            return P2CardActionTriggerResponse({})
 
-        def on_reaction_event(data):
-            """Callback for message reaction events we do not actively process yet."""
+        def on_reaction_event(event_id: Optional[str], event_type: str) -> None:
+            """Message reaction events we do not actively process yet."""
             try:
-                event_id = None
-                event_type = None
-                if hasattr(data, "header") and data.header:
-                    event_id = getattr(data.header, "event_id", None)
-                    event_type = getattr(data.header, "event_type", None)
                 if self._is_duplicate_event(event_id):
                     return
                 logger.debug("Ignoring Feishu reaction event: %s", event_type or "unknown")
             except Exception as exc:
                 logger.error("Error in on_reaction_event: %s", exc, exc_info=True)
 
-        handler = (
-            lark.EventDispatcherHandler.builder("", "")
-            .register_p2_im_message_receive_v1(on_message_receive)
-            .register_p2_card_action_trigger(on_card_action)
-            .register_p2_im_message_reaction_created_v1(on_reaction_event)
-            .register_p2_im_message_reaction_deleted_v1(on_reaction_event)
-            .build()
+        return FeishuEventDispatcher(
+            on_message=on_message_receive,
+            on_card_action=on_card_action,
+            on_reaction=on_reaction_event,
         )
-        return handler
-
-    def _event_to_dict(self, obj: Any) -> Dict[str, Any]:
-        """Recursively convert SDK event object to a plain dict."""
-        if isinstance(obj, dict):
-            return {k: self._event_to_dict(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [self._event_to_dict(item) for item in obj]
-        if hasattr(obj, "__dict__"):
-            result = {}
-            for key, value in obj.__dict__.items():
-                if key.startswith("_"):
-                    continue
-                result[key] = self._event_to_dict(value)
-            return result
-        return obj
 
     def run(self):
         """Start the Feishu bot with WebSocket long connection."""
         if not self.config.app_id or not self.config.app_secret:
             raise ValueError("Feishu app_id and app_secret are required")
 
-        import lark_oapi as lark
+        sdk_ws = sdk_ws_client_module()
 
         logger.info("Starting Feishu/Lark bot with WebSocket...")
 
@@ -3012,17 +2948,17 @@ class FeishuBot(BaseIMClient):
             self._populate_dm_chat_ids()
 
             # Start WebSocket client in a background thread
-            self._ws_client = lark.ws.Client(
+            self._ws_client = sdk_ws.Client(
                 app_id=self.config.app_id,
                 app_secret=self.config.app_secret,
                 event_handler=event_handler,
-                log_level=lark.LogLevel.INFO,
-                domain=self._get_sdk_domain(),
+                log_level=sdk_ws.LogLevel.INFO,
+                domain=self.config.api_base_url,
             )
 
             def _ws_thread_target():
                 try:
-                    logger.info("Feishu WS thread starting, domain=%s", self._get_sdk_domain())
+                    logger.info("Feishu WS thread starting, domain=%s", self.config.api_base_url)
                     self._ws_client.start()
                 except Exception as exc:
                     logger.error("Feishu WS thread crashed: %s", exc, exc_info=True)
@@ -3065,8 +3001,13 @@ class FeishuBot(BaseIMClient):
         if not callable(disconnect):
             logger.warning("Feishu WS client has no disconnect hook; nested WS thread may leak")
             return
+        # A stopped client must stay stopped. Its receive loop answers a closed
+        # connection by reconnecting, and that task lives on the SDK's shared
+        # loop: the next Feishu client started in this process would wake it,
+        # and the old client would take a share of the app's events and drop them.
+        ws_client._auto_reconnect = False
         try:
-            import lark_oapi.ws.client as ws_client_module
+            ws_client_module = sdk_ws_client_module()
 
             ws_loop = getattr(ws_client_module, "loop", None)
             if ws_loop is not None and ws_loop.is_running():

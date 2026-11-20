@@ -5,11 +5,12 @@ import threading
 
 from config.v2_config import LarkConfig
 from modules.im.feishu import FeishuBot
+from modules.im.feishu_sdk_ws import sdk_ws_client_module
 from modules.im.multi import IMClientRemovalError, MultiIMClient
 
 
 def test_feishu_stop_disconnects_nested_ws_client(monkeypatch):
-    import lark_oapi.ws.client as ws_client_module
+    ws_client_module = sdk_ws_client_module()
 
     loop = asyncio.new_event_loop()
     disconnected = []
@@ -32,7 +33,7 @@ def test_feishu_stop_disconnects_nested_ws_client(monkeypatch):
 
 
 def test_feishu_stop_stops_running_lark_ws_loop(monkeypatch):
-    import lark_oapi.ws.client as ws_client_module
+    ws_client_module = sdk_ws_client_module()
 
     loop = asyncio.new_event_loop()
     disconnected = []
