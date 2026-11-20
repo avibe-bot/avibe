@@ -125,15 +125,21 @@ page, a new desktop app can update an old instance.
 Implementation gate: confirm the native client's session passes the instance's
 origin and CSRF checks for these POSTs without weakening them.
 
-## A later shell change worth making
+## The shell says whether it follows an install
 
-The popup decides whether an install the shell sent is still under way from the
-shell's receipt, the instance's last answer and the time elapsed
-(`ui/src/desktop/instanceUpdateModel.ts`), mirroring the shell's own rule
-(`unsettled` in `instance_update.rs`) from less than the shell knows: it is not
-told the version the install started from. A test walks every combination and
-holds the section to that rule as far as the page can know it. Having the shell
-state it (`request.following: boolean`) would replace the mirror with the fact.
+The popup offers the instance's Update, check and switches exactly when the
+shell would take them, on the shell's own word: `instance_update.request`
+carries `following` (the shell would refuse another action for this instance
+now, because what it sent is still on its way or still being followed) and,
+for an install, `installed_from` (the version the instance ran when the
+install was accepted). The page no longer works either out from the receipt,
+the last answer and the time elapsed (`ui/src/desktop/instanceUpdateModel.ts`).
+
+The shell stops following a standalone install that evidently did not take:
+when the Runtime has answered on `installed_from`, with no `install` report of
+its own, five minutes after acceptance. The section then says the update did
+not finish, and its retry is one the shell takes. A test walks every
+combination of what the shell can report and holds the section to those rules.
 
 ## Also needed
 
