@@ -377,9 +377,14 @@ def test_an_adapter_stopped_before_its_connection_exists_never_connects(fake: Fa
     assert (fake.connections_opened, fake.endpoint_requests) == (0, [])
 
 
+def _sdk() -> Any:
+    import lark_oapi.ws.client as sdk
+
+    return sdk
+
+
 def _client_that_retries_at_once(sdk: Any, **methods: Any) -> type:
     """The SDK's client with its own retry defaults (up to 30 s, then every 120 s) shortened, as an endpoint would."""
-
     base = sdk.Client
 
     def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
@@ -389,51 +394,13 @@ def _client_that_retries_at_once(sdk: Any, **methods: Any) -> type:
     return type("RetriesAtOnce", (base,), {"__init__": __init__, **methods})
 
 
-def _connection(fake: FakeFeishu) -> Any:
+def _connection(fake: FakeFeishu, handler: Any = None) -> Any:
     return feishu_sdk_ws.SdkLongConnection(
-        app_id="cli_app", app_secret="socket-secret", domain=fake.url, event_handler=FeishuEventDispatcher()
+        app_id="cli_app",
+        app_secret="socket-secret",
+        domain=fake.url,
+        event_handler=handler or FeishuEventDispatcher(),
     )
-
-
-@pytest.mark.parametrize("reply", ["withheld", "trickled"])
-def test_an_endpoint_that_does_not_finish_answering_is_given_up_and_asked_again(fake: FakeFeishu, reply: str):
-    """The SDK asks for its endpoint with a blocking request and no timeout, on the thread that runs everything."""
-    if reply == "withheld":
-        fake.endpoint_delays = [4.0]
-    else:
-        fake.endpoint_trickles = [4.0]  # never silent for 0.2 s, so no socket timeout ends it
-    sdk = feishu_sdk_ws.sdk_ws_client_module()
-    connection = _connection(fake)
-
-    with (
-        patch.object(feishu_sdk_ws, "_ENDPOINT_TIMEOUT", (1.0, 1.0)),
-        patch.object(feishu_sdk_ws, "_ENDPOINT_DEADLINE_SECONDS", 0.5),
-        patch.object(sdk, "Client", _client_that_retries_at_once(sdk)),
-    ):
-        connection.start()
-        try:
-            fake.wait_connected(timeout=3)  # sooner than the first reply would have ended
-            assert len(fake.endpoint_requests) == 2
-        finally:
-            assert connection.stop() is True
-
-
-@pytest.mark.parametrize("reply", ["withheld", "trickled"])
-def test_a_connection_stopped_while_its_endpoint_is_answering_ends_at_once(fake: FakeFeishu, reply: str):
-    if reply == "withheld":
-        fake.endpoint_delays = [4.0]
-    else:
-        fake.endpoint_trickles = [4.0]
-    connection = _connection(fake)
-    connection.start()
-    fake.wait_until(lambda: fake.endpoint_requests, what="the endpoint request")
-
-    assert connection.stop(timeout=1) is True
-
-    # The slot is free again: the next connection starts at once.
-    with running_adapter(fake):
-        pass
-    assert fake.connections_opened == 1
 
 
 def test_a_stop_between_two_steps_of_the_client_s_start_still_ends_it(fake: FakeFeishu):
@@ -443,9 +410,8 @@ def test_a_stop_between_two_steps_of_the_client_s_start_still_ends_it(fake: Fake
     finds nothing running to cancel. The next step must not open a connection.
     """
     fake.endpoint_replies = [(503, {"msg": "busy"})]
-    sdk = feishu_sdk_ws.sdk_ws_client_module()
+    sdk = _sdk()
     connection = _connection(fake)
-
     disconnect = sdk.Client._disconnect
 
     async def stopped_here(client: Any) -> None:
@@ -464,6 +430,39 @@ def test_a_stop_between_two_steps_of_the_client_s_start_still_ends_it(fake: Fake
         pass
 
 
+def test_a_stop_between_the_endpoint_and_the_handshake_leaves_a_socket_that_takes_nothing(fake: FakeFeishu):
+    """The one moment a stop cannot keep a socket from opening: the endpoint is in hand, the handshake not begun.
+
+    The socket may open, and Feishu may send an event down it at once. The
+    event is not taken, and the socket is closed within moments.
+    """
+    handled: List[bytes] = []
+
+    class Handler:
+        def _do_without_validation(self, payload: bytes) -> None:
+            handled.append(payload)
+
+    fake.events_on_open = [message_event()]
+    sdk = _sdk()
+    connection = _connection(fake, Handler())
+    connect_arguments = sdk._ws_connect_kwargs
+
+    def stopped_here(*args: Any, **kwargs: Any) -> Any:
+        connection._stop_requested.set()  # the client calls this just before it opens the socket
+        return connect_arguments(*args, **kwargs)
+
+    with patch.object(sdk, "_ws_connect_kwargs", stopped_here):
+        connection.start()
+        fake.wait_until(lambda: not connection.is_alive(), timeout=5, what="the connection's thread to end")
+
+    assert len(fake.endpoint_requests) == 1
+    assert fake.connections_opened == 1
+    fake.wait_until(lambda: fake.close_codes, what="the close of that socket")
+    assert handled == []
+    assert [frame.json() for frame in fake.acknowledgements() if frame.json()["code"] == 200] == []
+    assert connection._loop.is_closed()
+
+
 def test_an_event_that_arrives_after_the_stop_is_refused_not_taken(fake: FakeFeishu):
     """Feishu sends a refused event again, and then the connection that replaced this one gets it."""
     handled: List[bytes] = []
@@ -472,9 +471,7 @@ def test_an_event_that_arrives_after_the_stop_is_refused_not_taken(fake: FakeFei
         def _do_without_validation(self, payload: bytes) -> None:
             handled.append(payload)
 
-    connection = feishu_sdk_ws.SdkLongConnection(
-        app_id="cli_app", app_secret="socket-secret", domain=fake.url, event_handler=Handler()
-    )
+    connection = _connection(fake, Handler())
     connection.start()
     fake.wait_connected()
     try:

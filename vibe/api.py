@@ -15941,7 +15941,7 @@ def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> 
     with _temp_ws_lock:
         # Stop any existing temp connection first
         if not _stop_temp_ws_internal():
-            return {"ok": False, "error": _TEMP_WS_STILL_CLOSING}
+            return {"ok": False, "code": _TEMP_WS_STILL_CLOSING}
 
         try:
             from modules.im.feishu_sdk_ws import SdkLongConnection
@@ -15965,11 +15965,12 @@ def lark_temp_ws_stop() -> dict:
     """Stop the temporary WebSocket connection."""
     with _temp_ws_lock:
         if not _stop_temp_ws_internal():
-            return {"ok": False, "error": _TEMP_WS_STILL_CLOSING}
+            return {"ok": False, "code": _TEMP_WS_STILL_CLOSING}
     return {"ok": True}
 
 
-_TEMP_WS_STILL_CLOSING = "The temporary WebSocket connection is still closing"
+# A code, not a sentence: the wizard does not show it, and backend text for users goes through vibe/i18n.
+_TEMP_WS_STILL_CLOSING = "temp_ws_still_closing"
 
 
 def _stop_temp_ws_internal() -> bool:

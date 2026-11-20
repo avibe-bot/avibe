@@ -23,11 +23,10 @@ from unittest.mock import patch
 
 from aiohttp import WSMsgType, web
 
-from modules.im.feishu_sdk_ws import sdk_ws_client_module
-
-
 def _frame_class() -> Any:
-    return sdk_ws_client_module().Frame
+    from lark_oapi.ws.pb.pbbp2_pb2 import Frame
+
+    return Frame
 
 
 @dataclass
@@ -77,6 +76,8 @@ class FakeFeishu:
         # Refusals for the next handshakes, before the normal upgrade: (HTTP status, headers).
         self.handshake_refusals: List[Any] = []
         self.handshakes_refused = 0
+        # Events sent down every socket the moment it opens.
+        self.events_on_open: List[Dict[str, Any]] = []
         # Seconds to withhold the next endpoint replies, before answering as usual.
         self.endpoint_delays: List[float] = []
         # Seconds over which to send the next endpoint replies, a few bytes at a time.
@@ -179,6 +180,9 @@ class FakeFeishu:
         index = self.connections_opened
         self.connections_opened += 1
         self._sockets.append(socket)
+        for number, body in enumerate(self.events_on_open):
+            for frame in self.event_frames(body, message_id=f"on-open-{index}-{number}"):
+                await socket.send_bytes(frame)
         async for message in socket:
             if message.type != WSMsgType.BINARY:
                 continue

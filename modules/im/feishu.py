@@ -2,7 +2,7 @@
 
 Message calls go over plain HTTPS (``feishu_api``) and events are read by
 ``feishu_events``; the long connection that delivers them is still
-``lark-oapi``'s, loaded on its own (``feishu_sdk_ws``).
+``lark-oapi``'s (``feishu_sdk_ws``).
 """
 
 import asyncio
