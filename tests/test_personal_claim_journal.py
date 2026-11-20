@@ -33,6 +33,119 @@ def test_legacy_prepared_survives_refusal_then_can_be_superseded_by_matching_acc
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
 
 
+@pytest.mark.parametrize("status,replace", [(422, True), (400, True), (429, False), (408, False), (503, False)])
+def test_fresh_owner_can_exit_rejected_request_but_not_transient_failure(claim_peer, monkeypatch, status, replace):
+    def reject(*_args, **_kwargs):
+        raise remote_access.BackendRequestError(status, {"error": "fixture-private-backend-reason"})
+    monkeypatch.setattr(remote_access, "_json_request", reject)
+    assert _claim()["code"] == "pairing_recovery_required"
+    original = remote_access._read_pending_pairing_record()
+    refused = _claim("wrong")
+    assert refused["state"] == ("declined" if replace else "error")
+    assert original == remote_access._read_pending_pairing_record()
+    assert len(claim_peer.challenges) == (2 if replace else 1)
+    if replace:
+        requests = []
+        def redeem(_url, request, **_kw):
+            requests.append(request["redeem_request_id"])
+            if len(requests) == 1:
+                reject()
+            return _response()
+        monkeypatch.setattr(remote_access, "_json_request", redeem)
+        assert _claim()["state"] == "bound"
+        assert requests[0] == original[0]["redeem_request"]["redeem_request_id"] != requests[1]
+
+
+def test_missing_installation_id_uses_its_journal_identity_not_a_new_uuid(claim_peer, monkeypatch):
+    from vibe import desktop_local_instance as local
+    with monkeypatch.context() as patch:
+        def unavailable(*_, **__):
+            raise OSError
+        patch.setattr(remote_access, "_json_request", unavailable)
+        assert _claim()["code"] == "pairing_recovery_required"
+    installed = local._installation_id()
+    local._identity_path().unlink()
+    assert _claim()["code"] == "already_bound"
+    assert local._installation_id() == installed
+    assert len(claim_peer.challenges) == 1
+
+
+def test_changed_source_only_supersedes_on_owner_accept(claim_peer, monkeypatch):
+    with monkeypatch.context() as patch:
+        def unavailable(*_, **__):
+            raise OSError
+        patch.setattr(remote_access, "_json_request", unavailable)
+        assert _claim()["code"] == "pairing_recovery_required"
+    original = remote_access._read_pending_pairing_record()
+    cfg = V2Config.load()
+    cfg.remote_access.vibe_cloud.enabled = not cfg.remote_access.vibe_cloud.enabled
+    cfg.save()
+    assert _claim("wrong")["state"] == "declined"
+    assert remote_access._read_pending_pairing_record() == original
+    assert _claim()["state"] == "bound"
+    assert len(claim_peer.challenges) == 3
+
+
+@pytest.mark.parametrize("via", ["legacy", "fresh_start", "explicit_recovery"])
+def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, monkeypatch, via):
+    from tests.test_pairing_recovery import _fail_config_publication_once
+    from tests.test_personal_claims import _start
+    from vibe import ui_server
+    _fail_config_publication_once(monkeypatch)
+    assert _claim()["code"] == "pairing_recovery_required"
+    ident = claim_peer.id
+    assert remote_access._read_pending_pairing_record()[0]["phase"] == "redeemed"
+    client = ui_server.app.test_client()
+    route = "/api/remote-access/claims/" + ident
+    assert client.get(route).get_json()["code"] == "pairing_recovery_required"
+    if via == "legacy":
+        assert remote_access.pair("", "https://avibe.bot")["ok"]
+    elif via == "fresh_start":
+        calls = []
+        monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: calls.append(V2Config.load().remote_access.vibe_cloud.instance_id))
+        assert _start(client).get_json()["code"] == "already_bound"
+        assert calls == ["inst_A"]
+    else:
+        assert claims.recover_pairing(ident)["state"] == "bound"
+    assert len(claim_peer.challenges) == 1 and client.get(route).get_json() == {"state": "bound"}
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    assert client.get(route).get_json() == {"state": "bound"}
+    config.remote_access.vibe_cloud.instance_secret = "different-binding"
+    config.save()
+    assert client.get(route).get_json()["code"] == "local_binding_changed"
+
+
+def test_live_redirect_status_observes_legacy_resume(claim_peer, monkeypatch):
+    from tests.test_pairing_recovery import _fail_config_publication_once
+    from tests.test_personal_claims import _start, callback_proof
+    from vibe import ui_server
+    _fail_config_publication_once(monkeypatch)
+    client = ui_server.app.test_client()
+    start = _start(client).get_json()
+    ident = start["claim_id"]
+    ret = client.get(f"/remote/claim/callback?claim_id={ident}&state={callback_proof(start)}", base_url="http://localhost")
+    assert ret.status_code == 303
+    flow = claims.redirect_claims._get(ident)
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view["state"] == "error", timeout=3)
+    assert flow.view["code"] == "pairing_recovery_required"
+    assert remote_access.pair("", "https://avibe.bot")["ok"]
+    assert client.get("/api/remote-access/claims/" + ident).get_json() == {"state": "bound"}
+
+
+def test_bad_journal_does_not_turn_status_into_http_500(claim_peer):
+    from vibe import ui_server
+    path = remote_access._pending_pairing_path()
+    path.parent.mkdir(exist_ok=True, parents=True)
+    path.write_text("invalid journal")
+    response = ui_server.app.test_client().get("/api/remote-access/claims/unknown")
+    assert response.status_code == 503
+    assert response.get_json() == {"code": "local_enrollment_unavailable", "state": "error"}
+    assert not claim_peer.calls
+
+
 @pytest.mark.parametrize("replay,expected", [("complete", "already_bound"), ("pending", "pairing_recovery_required"),
                                             ("transport", "pairing_recovery_required"), ("changed", "bound")])
 def test_fresh_start_resumes_journal_before_conditional_replacement(claim_peer, monkeypatch, replay, expected):

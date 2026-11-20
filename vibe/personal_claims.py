@@ -26,10 +26,10 @@ class _Source:
     backend: str
 
     @classmethod
-    def load(cls):
+    def load(cls, on_bound):
         # Only an explicit start reaches this reconciliation. Do not retire a still-usable
         # predecessor when a new start, browser grant or mode gate might subsequently fail.
-        replaceable = _recover_before_start()
+        replaceable = _recover_before_start(on_bound)
         with config_file_lock():
             config, pending = local._config(), local._pending()
             cloud = config.remote_access.vibe_cloud
@@ -39,7 +39,7 @@ class _Source:
                 raise ClaimError("already_bound")
             if any((cloud.instance_id, cloud.instance_secret, cloud.tunnel_token, cloud.client_id, cloud.session_secret)):
                 raise ClaimError("local_binding_unavailable")
-            installation = local.ensure_installation_id()
+            installation = local.ensure_installation_id(recover_from=(pending or {}).get("personal_claim"))
             return cls(installation, local.claim_revision(config, installation, pending), socket.gethostname(), cloud.backend_url)
 
     def validate(self):
@@ -49,7 +49,7 @@ class _Source:
                 raise ClaimError("local_binding_changed")
 
 
-def _recover_before_start():
+def _recover_before_start(on_bound):
     """Return the *exact* still-prepared record an explicit new claim may supersede."""
     with config_file_lock():
         pending = local._pending()
@@ -70,14 +70,25 @@ def _recover_before_start():
                 return pending
             if not pending.get("personal_claim"):
                 raise ClaimError("local_instance_conflict")
+            # A missing correlation file need not make a saved request unreplayable.
+            # Restore the same ID only if the claim still has its original binding source.
+            identity = remote_access._pairing_identity_from_cloud(local._config().remote_access.vibe_cloud)
+            if remote_access._pairing_identity_fingerprint(identity) == pending["source_fingerprint"]:
+                local.ensure_installation_id(recover_from=pending["personal_claim"])
     if phase == "prepared":
         result = remote_access._retry_installation_pairing(pending)
-        if (result.get("status") == 409 and result.get("error") == "pairing_redeem_indeterminate"
-                and result.get("pairing", {}).get("cause") == "registration_indeterminate"):
-            return pending  # Caller verifies it did not advance while this request was in flight.
+        code, status = result.get("error"), result.get("status")
+        cause = result.get("pairing", {}).get("cause")
+        if (code == "local_binding_changed" or code == "pairing_redeem_indeterminate" and (
+            (status == 409 and cause == "registration_indeterminate") or
+            (status in (400, 401, 403, 404, 409, 410, 422) and cause == "pairing_request_failed")
+        )):
+            return pending  # Snapshot must still match both at start and at accepted handoff.
     else:
         result = remote_access._persist_pairing(None, device_name=pending["device_name"], operation_id=pending["operation_id"])
     if result.get("ok"):
+        if on_bound:
+            on_bound()
         raise ClaimError("already_bound")
     if result.get("error") in ("pairing_failure_retired", "pairing_key_expired"):
         return None
@@ -88,9 +99,39 @@ def _marker():
     return paths.get_state_dir() / "personal-claim-outcome.json"
 
 
-def _record(claim_id, state, code=None, *, expiry=None, instance_id=None):
-    write_atomic(_marker(), json.dumps({"claim_id": claim_id, "state": state, "expires_at": expiry,
-                                       "instance_id": instance_id, **({"code": code} if code else {})}))
+def _outcome():
+    try:
+        saved = json.loads(_marker().read_text(encoding="utf-8"))
+        bound = saved.get("bound", {}) if isinstance(saved, dict) else None
+        if not isinstance(bound, dict) or (bound and not all(isinstance(bound.get(k), str) for k in ("claim_id", "generation"))):
+            raise ValueError
+        return saved
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, RecursionError):
+        raise ClaimError("local_claim_unavailable") from None
+
+
+def _record_attempt(ticket):
+    with config_file_lock():
+        saved = _outcome()
+        saved.update(claim_id=ticket.id, expires_at=ticket.expiry)
+        write_atomic(_marker(), json.dumps(saved))
+
+
+def _binding_stamp(identity):
+    # Off is still bound. Connector preferences and browser-session rotation aren't a rebind.
+    return remote_access._pairing_identity_fingerprint({k: identity[k] for k in ("backend_url", "instance_id", "instance_secret")})
+
+
+def record_bound(claim_id, identity):
+    """Called under the publication lock before retirement, including by legacy Resume."""
+    saved = _outcome()
+    saved["bound"] = {"claim_id": claim_id, "generation": _binding_stamp(identity)}
+    if saved.get("claim_id") == claim_id:
+        saved.pop("claim_id")
+        saved.pop("expires_at", None)
+    write_atomic(_marker(), json.dumps(saved))
 
 
 def redirect_origin_allows_auto_accept(origin: str, *, direct_loopback: bool) -> bool:
@@ -103,9 +144,10 @@ def redirect_origin_allows_auto_accept(origin: str, *, direct_loopback: bool) ->
 
 
 class _Flow:
-    def __init__(self, mode, locale, *, origin="", direct_loopback=False, expected=None, confirm=None, show=None):
-        # Only independently authenticated local origins may skip separate consent.
-        # Do not treat a passive cleartext observer as an owner.
+    def __init__(self, mode, locale, *, origin="", direct_loopback=False, expected=None, confirm=None, show=None, on_bound=None):
+        # This delivery enables automatic redirect acceptance only for direct loopback.
+        self.on_bound = on_bound
+        self.previous_expiry = None
         self.direct_loopback = direct_loopback
         self._cleanup_client = None
         self._decline_attempted = False
@@ -122,6 +164,8 @@ class _Flow:
     def update(self, state, **values):
         with self.lock:
             self.view = {"state": state, **values}
+            if self.previous_expiry:
+                self.view["previous_claim_expires_at"] = self.previous_expiry
             if self.ticket:
                 self.view.update(claim_id=self.ticket.id, expires_at=self.ticket.expiry)
             self.lock.notify_all()
@@ -162,7 +206,8 @@ class _Flow:
 
         if self.locale not in ("en", "zh"):
             raise ClaimError("invalid_request")
-        source = _Source.load()
+        source = _Source.load(self.on_bound)
+        self.previous_expiry = _outcome().get("expires_at")
         if not text(source.device, 120):
             raise ClaimError("invalid_device_name")
         client = ClaimsClient(source.backend)
@@ -179,6 +224,8 @@ class _Flow:
                     "method": "POST", "action": client.base + "/api/v1/claims/redirect-entry",
                     "fields": {"user_code": ticket.code, "redirect_state": state}, "referrer_policy": "strict-origin",
                 }}, self._browser)
+                if self.previous_expiry:
+                    self.first[0]["previous_claim_expires_at"] = self.previous_expiry
             self.ready.set()
         del state
         if self.show is not None:
@@ -237,7 +284,7 @@ class _Flow:
                                 continue
                             self._check_time()
                             # Write before sending: a crash from here until durable pairing handoff is ambiguous.
-                            _record(ticket.id, "error", "fresh_claim_required", expiry=ticket.expiry)
+                            _record_attempt(ticket)
                             self.accepting, grant = True, result
                             self.update("accepting", account={"email": grant.email}, hostname=grant.hostname)
                         continue
@@ -255,7 +302,8 @@ class _Flow:
                             if paired.get("error") in ("local_binding_changed", "pairing_superseded_after_redeem"):
                                 raise ClaimError("local_binding_changed")
                             raise ClaimError("pairing_recovery_required" if _journal_for(ticket.id) else "fresh_claim_required")
-                        _record(ticket.id, "bound", instance_id=result.instance_id)
+                        if self.on_bound:
+                            self.on_bound()
                         self.update("bound", account={"email": grant.email}, hostname=grant.hostname)
                         return
                 delay = max(ticket.interval, result.delay)
@@ -319,7 +367,6 @@ def recover_pairing(claim_id: str) -> dict:
             result = remote_access._persist_pairing(None, device_name=record["device_name"], operation_id=record["operation_id"])
         if not result.get("ok"):
             return {"state": "error", "code": "pairing_recovery_required" if _journal_for(claim_id) else "fresh_claim_required"}
-        _record(claim_id, "bound", instance_id=record["personal_claim"]["instance_id"])
         return {"state": "bound", "claim_id": claim_id}
 
 
@@ -343,13 +390,16 @@ class RedirectClaims:
         self._lock = threading.Lock()
         self._flow = None
 
-    def start(self, origin: str, locale: str, *, direct_loopback: bool):
+    def start(self, origin: str, locale: str, *, direct_loopback: bool, on_bound=None):
         if not redirect_origin_allows_auto_accept(origin, direct_loopback=direct_loopback):
             raise ClaimError("link_required")
         with self._lock:
             if self._flow and self._flow.view["state"] not in ("bound", "error", "declined"):
-                raise ClaimError("claim_in_progress")
-            flow = self._flow = _Flow("redirect", locale, origin=origin, direct_loopback=direct_loopback)
+                with self._flow.lock:
+                    ticket = self._flow.ticket
+                    raise ClaimError("claim_in_progress", 0 if ticket else 1,
+                                     claim_id=ticket.id if ticket else None, expires_at=ticket.expiry if ticket else None)
+            flow = self._flow = _Flow("redirect", locale, origin=origin, direct_loopback=direct_loopback, on_bound=on_bound)
             threading.Thread(target=flow.run, name="personal-claim", daemon=True).start()
         flow.ready.wait()
         with flow.lock:
@@ -369,21 +419,27 @@ class RedirectClaims:
         try:
             f = self._get(claim_id)
         except ClaimError:
+            view = None
+        else:
+            with f.lock:
+                view = dict(f.view)
+            if view["state"] not in ("bound", "error"):
+                return view
+        with config_file_lock():
             if _journal_for(claim_id):
                 return {"state": "error", "code": "pairing_recovery_required"}
-            try:
-                saved = json.loads(_marker().read_text())
-                if saved.get("claim_id") == claim_id:
-                    if saved.get("state") == "bound":
-                        if local._config().remote_access.vibe_cloud.instance_id == saved.get("instance_id"):
-                            return {"state": "bound"}
-                        return {"state": "error", "code": "local_binding_changed"}
-                    return {"state": "error", "code": "fresh_claim_required", "expires_at": saved.get("expires_at")}
-            except (FileNotFoundError, ValueError, TypeError):
-                pass
-            raise
-        with f.lock:
-            return dict(f.view)
+            saved = _outcome()
+            bound = saved.get("bound", {})
+            if bound.get("claim_id") == claim_id:
+                identity = remote_access._pairing_identity_from_cloud(local._config().remote_access.vibe_cloud)
+                if _binding_stamp(identity) != bound["generation"]:
+                    return {"state": "error", "code": "local_binding_changed"}
+                return view if view and view["state"] == "bound" else {"state": "bound"}
+            if saved.get("claim_id") == claim_id and (view is None or view.get("code") == "pairing_recovery_required"):
+                return {"state": "error", "code": "fresh_claim_required", "expires_at": saved.get("expires_at")}
+        if view is not None:
+            return {"state": "error", "code": "local_binding_changed"} if view["state"] == "bound" else view
+        raise ClaimError("claim_unavailable")
 
     def cancel(self, claim_id):
         return self._get(claim_id).cancel()

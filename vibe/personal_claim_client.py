@@ -23,10 +23,11 @@ from vibe import remote_access
 class ClaimError(Exception):
     """Only local, allowlisted codes may cross the caller boundary."""
 
-    def __init__(self, code: str, retry_after: int = 0):
+    def __init__(self, code: str, retry_after: int = 0, *, claim_id=None, expires_at=None):
         super().__init__(code)
         self.code = code
         self.retry_after = retry_after
+        self.claim_id, self.expires_at = claim_id, expires_at
 
 
 def _b64(value: bytes) -> str:
@@ -141,7 +142,7 @@ class ClaimsClient:
         self._verifier = secrets.token_urlsafe(32)
 
     def _post(self, suffix: str, payload: dict, *, accepting: bool = False):
-        """Pinned TLS. One send: never fail over or follow a redirect after writing the body."""
+        """Try each pinned address at connect time. Never duplicate an ambiguous start POST."""
         target = self._target
         url = self.base + "/api/v1/claims" + suffix
         connection = None
@@ -149,7 +150,17 @@ class ClaimsClient:
             proxy = remote_access._validated_backend_proxy_url(url)
             if target.requires_proxy and not proxy:
                 raise ClaimError("control_plane_unreachable", 5)
-            connection = remote_access._validated_backend_connection(target.connect_hosts[0], target, 20, proxy)
+            for host in target.connect_hosts:
+                try:
+                    connection = remote_access._validated_backend_connection(host, target, 20, proxy)
+                    connection.connect()
+                    break
+                except (OSError, http.client.HTTPException):
+                    if connection is not None:
+                        connection.close()
+                        connection = None
+            else:
+                raise ClaimError("control_plane_unreachable", 5)
             connection.request("POST", urlsplit(url).path, json.dumps(payload).encode(), {
                 "Host": target.host_header, "Content-Type": "application/json", "Accept": "application/json",
             })

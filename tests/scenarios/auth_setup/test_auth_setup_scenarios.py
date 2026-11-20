@@ -111,15 +111,17 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     CliCommandObservations().bind(monkeypatch)
 
 
-def test_personal_claim_redirect_through_pairing_journal(claim_peer):
+def test_personal_claim_redirect_through_pairing_journal(claim_peer, monkeypatch):
     """AUTH-SETUP-914: browser return, subject acceptance, key redemption and local publication."""
     import hashlib
     import base64
     import time
-    from tests.test_personal_claims import _start, callback_proof
-    from vibe import remote_access
+    from tests.test_personal_claims import _assert_bad_return, _start, callback_proof
+    from vibe import remote_access, ui_server
     from config.v2_config import V2Config
 
+    monitored = []
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: monitored.append(V2Config.load().remote_access.vibe_cloud.instance_id))
     client = app.test_client()
     start = _start(client)
     assert start.status_code == 201 and start.headers["Cache-Control"] == "no-store"
@@ -137,7 +139,7 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer):
     callback = client.get(url, base_url="http://localhost")
     assert callback.status_code == 303 and callback.headers["Location"] == "/settings/remote-access"
     assert callback.headers["Referrer-Policy"] == "no-referrer"
-    assert client.get(url, base_url="http://localhost").status_code == 403
+    _assert_bad_return(client.get(url, base_url="http://localhost"))
     end = time.monotonic() + 8
     while time.monotonic() < end:
         outcome = client.get("/api/remote-access/claims/" + ident).get_json()
@@ -145,6 +147,7 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer):
             break
         time.sleep(.02)
     assert outcome["state"] == "bound", outcome
+    assert monitored == ["inst_A"]
     assert outcome["account"] == {"email": "actual@fixture.test"} and outcome["hostname"] == "fixture.avibe.bot"
     assert claim_peer.decisions == ["owner-id"]
     cloud = V2Config.load().remote_access.vibe_cloud

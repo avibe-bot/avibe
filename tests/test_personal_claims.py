@@ -32,6 +32,9 @@ class Peer:
     def connection(self, *_args):
         return self
 
+    def connect(self):
+        pass
+
     def close(self):
         pass
 
@@ -142,6 +145,80 @@ def test_backoff_and_lost_accept_reply_require_fresh_claim(claim_peer, caplog):
     assert claims.RedirectClaims().state(claim_peer.id)["code"] == "fresh_claim_required"
     assert claim_peer.key not in caplog.text and claim_peer.key not in json.dumps(result)
     assert remote_access._read_pending_pairing_record() == (None, None)
+    client = ui_server.app.test_client()
+    previous_id = claim_peer.id
+    next_start = _start(client).get_json()
+    assert next_start["claim_id"] != previous_id and next_start["previous_claim_expires_at"] == claim_peer.expiry
+    path = "/api/remote-access/claims/" + next_start["claim_id"]
+    client.post(path + "/cancel", json={}, headers=csrf_headers(client))
+    flow = claims.redirect_claims._get(next_start["claim_id"])
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view["state"] == "declined", timeout=3)
+
+
+def test_pinned_connect_fails_over_without_reposting_an_ambiguous_start(claim_peer, monkeypatch):
+    import ipaddress
+    from vibe.personal_claim_client import ClaimError, ClaimsClient
+    hosts = (ipaddress.ip_address("2606:4700:4700::1111"), ipaddress.ip_address("1.1.1.1"))
+    monkeypatch.setattr(remote_access, "_resolve_pairing_backend_addresses", lambda *_: hosts)
+    attempts = []
+    class Offline:
+        def connect(self):
+            raise OSError("unavailable address family")
+        def close(self):
+            pass
+    def dial(host, target, _timeout, _proxy):
+        assert target.hostname == "avibe.bot"
+        attempts.append(host)
+        return Offline() if host == str(hosts[0]) else claim_peer
+    monkeypatch.setattr(remote_access, "_validated_backend_connection", dial)
+    client = ClaimsClient("https://avibe.bot")
+    assert client.start(str(uuid4()), "device", "link", "en").id == claim_peer.id
+    assert attempts == list(map(str, hosts)) and len(claim_peer.calls) == 1
+    attempts.clear()
+    monkeypatch.setattr(remote_access, "_validated_backend_connection", lambda host, *_: (attempts.append(host), claim_peer)[1])
+    def lost():
+        raise OSError("post dispatched")
+    monkeypatch.setattr(claim_peer, "getresponse", lost)
+    with pytest.raises(ClaimError, match="control_plane_unreachable"):
+        client.start(str(uuid4()), "device", "link", "en")
+    assert attempts == [str(hosts[0])] and len(claim_peer.calls) == 2
+
+
+def test_ui_policy_workers_notice_link_pairing_without_ui_restart(claim_peer, monkeypatch):
+    # Capture the UI startup worker entry points, not real threads, HTTP or host state.
+    workers, requests, acl_reads = [], [], []
+    class Worker:
+        def __init__(self, *, target, **_):
+            self.target = target
+        def start(self):
+            workers.append(self.target)
+    with monkeypatch.context() as startup:
+        startup.setattr(remote_access.threading, "Thread", Worker)
+        startup.setattr(remote_access, "_AUTHORIZATION_REVISION_POLL_STARTED", False)
+        startup.setattr(remote_access, "_RESOURCE_ACL_SYNC_POLL_STARTED", False)
+        for _ in range(2):
+            remote_access.start_authorization_revision_polling()
+            remote_access.start_resource_acl_sync_polling()
+        assert len(workers) == 2
+    from storage import resource_access_service
+    monkeypatch.setattr(remote_access, "_device_json_request", lambda cfg, *args: (requests.append((cfg.remote_access.vibe_cloud.instance_id, *args)), {"authorization_revision": 1})[1])
+    monkeypatch.setattr(resource_access_service, "list_resource_organization_ids", lambda: (acl_reads.append(True), [])[1])
+    class TickDone(Exception):
+        pass
+    def stop_tick(_):
+        raise TickDone
+    def tick():
+        with monkeypatch.context() as clock:
+            clock.setattr(remote_access.time, "sleep", stop_tick)
+            for worker in workers:
+                with pytest.raises(TickDone):
+                    worker()
+    tick()
+    assert not requests and not acl_reads
+    assert claims.run_link(show_link=lambda _: None, expected_subject="owner-id")["state"] == "bound"
+    tick()
+    assert requests == [("inst_A", "GET", "authorization-revision")] and acl_reads == [True]
 
 
 def test_unpublished_accept_continues_only_the_original_decision(claim_peer):
@@ -164,7 +241,7 @@ def test_valid_browser_return_before_grant_is_not_armed(claim_peer):
     while time.monotonic() < deadline and not claim_peer.decisions:
         time.sleep(.01)
     assert claim_peer.decisions == ["decline"]
-    assert client.get(url, base_url="http://localhost").status_code == 403
+    _assert_bad_return(client.get(url, base_url="http://localhost"))
 
 
 def test_expiry_does_not_invent_a_browser_decision(claim_peer):
@@ -224,19 +301,30 @@ def callback_proof(body):
     return base64.urlsafe_b64encode(hmac.digest(state.encode(), ("avibe-claim-return:v1:" + body["claim_id"]).encode(), "sha256")).decode().rstrip("=")
 
 
+def _assert_bad_return(response, code="invalid_return"):
+    assert response.status_code == 303
+    assert response.headers["Location"] == f"/settings/remote-access?claim_error={code}"
+    assert response.headers["Referrer-Policy"] == "no-referrer" and response.headers["Cache-Control"] == "no-store"
+
+
 def test_cancel_and_return_require_current_browser_and_claim(claim_peer):
     client, stranger = ui_server.app.test_client(), ui_server.app.test_client()
     response = _start(client)
     assert response.status_code == 201, response.get_json()
     body = response.get_json()
     url = "/remote/claim/callback?claim_id=" + body["claim_id"] + "&state=" + callback_proof(body)
-    assert stranger.get(url, base_url="http://localhost").status_code == 403
-    assert client.get(url + "x", base_url="http://localhost").status_code == 403
-    assert client.get(url + "&state=duplicate", base_url="http://localhost").status_code == 403
-    path = "/api/remote-access/claims/" + body["claim_id"]
+    _assert_bad_return(stranger.get(url, base_url="http://localhost"))
+    _assert_bad_return(client.get(url + "x", base_url="http://localhost"))
+    _assert_bad_return(client.get(url + "&state=duplicate", base_url="http://localhost"))
+    _assert_bad_return(client.get(url.replace(body["claim_id"], str(uuid4())), base_url="http://localhost"), "claim_unavailable")
+    conflict = _start(stranger)
+    assert conflict.status_code == 409
+    assert conflict.get_json() == {"state": "error", "code": "claim_in_progress", "claim_id": body["claim_id"], "expires_at": body["expires_at"]}
+    assert "avibe_claim_browser" not in str(conflict.headers)
+    path = "/api/remote-access/claims/" + conflict.get_json()["claim_id"]
     assert "form" not in client.get(path).get_json()
-    assert client.post(path + "/cancel", json={}, headers=csrf_headers(client)).status_code == 200
-    assert client.get(url, base_url="http://localhost").status_code == 403
+    assert stranger.post(path + "/cancel", json={}, headers=csrf_headers(stranger)).status_code == 200
+    _assert_bad_return(client.get(url, base_url="http://localhost"))
     assert not any(d.get("accepted_subject") for _, d in claim_peer.calls)
 
 

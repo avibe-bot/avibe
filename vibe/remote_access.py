@@ -2247,14 +2247,9 @@ def start_authorization_revision_polling(
 ) -> None:
     """Start the paired-device authorization watermark poller once."""
 
+    # The UI owns this worker even if a different process binds the data root later.
+    # sync_authorization_revision_once reloads config and makes no request while unpaired.
     global _AUTHORIZATION_REVISION_POLL_STARTED
-    if config is None:
-        try:
-            config = V2Config.load()
-        except Exception:
-            return
-    if not _authorization_revision_sync_configured(config):
-        return
 
     def loop() -> None:
         while True:
@@ -2806,14 +2801,8 @@ def start_resource_acl_sync_polling(
 ) -> None:
     """Start the paired-device ACL poller once for the UI process."""
 
+    # As with the revision poller, the per-tick check owns admission, not startup.
     global _RESOURCE_ACL_SYNC_POLL_STARTED
-    if config is None:
-        try:
-            config = V2Config.load()
-        except Exception:
-            return
-    if not _resource_acl_sync_configured(config):
-        return
 
     def loop() -> None:
         while True:
@@ -6373,6 +6362,16 @@ def _persist_pairing_impl(
                     "pairing": {"ok": False, "reconciling": True},
                 }
             record = applied_record
+        if personal := record.get("personal_claim"):
+            # Every completion path (including the old Resume route) passes here.
+            # Preserve durable attribution before retiring the only journal that links
+            # this claim to this exact credential generation. A failed write is resumable.
+            from vibe.personal_claim_client import ClaimError
+            from vibe.personal_claims import record_bound
+            try:
+                record_bound(personal["claim_id"], persisted_identity)
+            except (OSError, ClaimError):
+                return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         if not _retire_pending_pairing(operation_id=str(record["operation_id"])):
             return {
                 **status(config),

@@ -42,12 +42,20 @@ def _installation_id() -> str | None:
         raise LocalInstanceError("local_identity_unavailable", 503) from exc
 
 
-def ensure_installation_id() -> str:
-    """Initialize the data-root identity under the shared config lock. Never rotate it."""
+def ensure_installation_id(*, recover_from: Mapping | None = None) -> str:
+    """Initialize once; if a claim journal still identifies this root, restore that same ID."""
     with config_file_lock():
         current = _installation_id()
         if current is None:
-            current = str(uuid4())
+            if recover_from is None:
+                current = str(uuid4())
+            else:
+                current = recover_from.get("installation_id")
+                try:
+                    if str(UUID(current)) != current:
+                        raise ValueError
+                except (ValueError, TypeError, AttributeError):
+                    raise LocalInstanceError("local_identity_unavailable", 503) from None
             write_atomic(_identity_path(), json.dumps({"schema_version": 1, "installation_id": current}))
         return current
 
