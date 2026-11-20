@@ -225,6 +225,7 @@ enum AppRoute: Equatable {
 private enum PendingInstanceOpen {
     case pushTap(PushNotificationTap)
     case selectedInstance(path: String)
+    case liveActivity(URL)
 }
 
 private struct PendingPushOpened {
@@ -434,17 +435,21 @@ final class AppModel: ObservableObject {
             // Signing out or another account: the badge counted this
             // account's Inbox. (A session refresh of the same account keeps it.)
             self?.nativeBadge.clear()
+            await self?.turnActivities.endAll(reason: reason == .accountChanged ? "account_switch" : "logout")
             await self?.nativePushCoordinator.prepareForLogout(reason: reason)
         },
         onReconcileInstancePush: { [weak self] liveOrigins, accountID in
             // Instances that left the account's list lose only their own
             // registrations; the account keeps the rest.
+            await self?.turnActivities.removeInstances(outside: liveOrigins, accountID: accountID)
             await self?.nativePushCoordinator.revokeRegistrations(
                 outside: liveOrigins,
                 accountID: accountID
             )
         }
     )
+
+    private lazy var turnActivities = TurnActivityCoordinator(defaults: defaults)
 
     private lazy var nativePushCoordinator = NativePushCoordinator(
         keychain: pushKeychain,
@@ -738,6 +743,61 @@ final class AppModel: ObservableObject {
     func connectHealth(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
         guard !route.coversRuntime, let healthSync else { return "failed" }
         return await healthSync.connect(requestID: requestID, pairingCode: pairingCode, origin: origin)
+    }
+
+    private var liveActivityTarget: TurnActivityCoordinator.Target? {
+        guard let account = sessionCoordinator.currentAccount,
+              let instance = sessionCoordinator.selectedInstance,
+              let origin = WebOrigin(url: instance.url) else { return nil }
+        return .init(accountID: account.id, instanceOrigin: origin.serialized, storeID: websiteDataStore.identifier)
+    }
+
+    func handleLiveActivity(_ request: NativeBridgeRequest, origin: WebOrigin) async throws -> [String: Any] {
+        guard let runtime = route.runtime, sessionCoordinator.isSelectedRuntime(runtime),
+              let target = liveActivityTarget, target.instanceOrigin == origin.serialized else {
+            throw NativeBridgeError.forbidden
+        }
+        if request.method == .liveActivityOpenSettings {
+            guard request.params.isEmpty else { throw NativeBridgeError.invalidRequest }
+            await UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+            return ["ok": true]
+        }
+        guard let sessionID = request.params["sessionId"] as? String,
+              !sessionID.isEmpty, sessionID.count <= 256 else { throw NativeBridgeError.invalidRequest }
+        switch request.method {
+        case .liveActivityStatus:
+            guard request.params.count == 1 else { throw NativeBridgeError.invalidRequest }
+            return turnActivities.status(sessionID: sessionID, target: target)
+        case .liveActivityStop:
+            guard request.params.count == 1 else { throw NativeBridgeError.invalidRequest }
+            await turnActivities.stop(sessionID: sessionID, target: target)
+            return ["ok": true]
+        case .liveActivityStart:
+            guard request.params.count == 3, let name = request.params["agentName"] as? String,
+                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  request.params["sessionTitle"] is String || request.params["sessionTitle"] is NSNull else {
+                throw NativeBridgeError.invalidRequest
+            }
+            return await turnActivities.start(sessionID: sessionID, agentName: name,
+                sessionTitle: request.params["sessionTitle"] as? String, target: target,
+                registrationID: nativePushCoordinator.liveActivityRegistrationID(
+                    accountID: target.accountID, instanceOrigin: target.instanceOrigin))
+        default: throw NativeBridgeError.unsupported
+        }
+    }
+
+    func openLiveActivity(_ url: URL) {
+        guard TurnActivityAttributes.activityID(from: url) != nil else { return }
+        guard hasCompletedBootstrap else { pendingInstanceOpen = .liveActivity(url); return }
+        guard let attributes = turnActivities.attributes(for: url) else { return }
+        let pathComponent = attributes.sessionID.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        if let target = liveActivityTarget, target.accountID == attributes.accountID,
+           target.instanceOrigin == attributes.instanceOrigin {
+            openSelectedInstance(path: "/chat/" + pathComponent)
+        } else {
+            _ = openInstance(accountID: attributes.accountID, instanceOrigin: attributes.instanceOrigin,
+                             path: "/chat/" + pathComponent)
+        }
     }
 
     func selectedInstanceName() -> String? {
@@ -1482,8 +1542,13 @@ final class AppModel: ObservableObject {
                 handlePushTap(tap)
             case .selectedInstance(let path):
                 openSelectedInstance(path: path)
+            case .liveActivity(let url):
+                openLiveActivity(url)
             }
         }
+        if !AvibeAppDelegate.isRunningTests { turnActivities.observeAuthorization() }
+        turnActivities.selectTarget(liveActivityTarget)
+        await turnActivities.reconcile(target: liveActivityTarget)
         await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
     }
 
@@ -2151,6 +2216,10 @@ final class AppModel: ObservableObject {
     /// remainder. A timer that could not fire on time (no background
     /// interval was reported) ends its attempt here.
     private func runtimeOpenWillEnterForeground() {
+        if hasCompletedBootstrap {
+            turnActivities.selectTarget(liveActivityTarget)
+            Task { await turnActivities.reconcile(target: liveActivityTarget) }
+        }
         Task { await healthSync?.resume(foreground: true) }
         Task { [weak self] in
             await self?.systemScheduleCoordinator.retryPendingCleanup()
@@ -2180,6 +2249,9 @@ final class AppModel: ObservableObject {
         {
             clearPendingPushOpened()
         }
+        let turnTarget = liveActivityTarget
+        turnActivities.selectTarget(turnTarget)
+        Task { await turnActivities.reconcile(target: turnTarget) }
         nativePushCoordinator.resumeAfterAccountActivation()
         if let previous = runtimeOpenAttempt {
             lastRuntimeOpenTermination = RuntimeOpenTermination(
@@ -2715,6 +2787,7 @@ final class AppModel: ObservableObject {
         }
         // A background voice take belongs to the account that is going.
         let barriers = pendingRuntimeReleaseBarriers
+            + turnActivities.invalidateRequests()
             + VoiceCaptureController.shared.cancelForAccountTransition()
         pendingRuntimeReleaseBarriers.removeAll()
         return barriers

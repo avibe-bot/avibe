@@ -46,6 +46,12 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
+			<string>bot.avibe.ios.live-activity</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>avibe-app</string></array>
+		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
 			<string>bot.avibe.ios.diagnostics</string>
 			<key>CFBundleURLSchemes</key>
 			<array>

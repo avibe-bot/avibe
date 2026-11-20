@@ -1599,3 +1599,37 @@ fixture document, including query strings. Both HTTP entrypoints reject every
 method except GET. The Vite proxy target is the process-owned fixture backend,
 and local `.env` files are disabled; no real account, running Avibe service, or
 production instance is used.
+
+
+## Turn Live Activities
+
+The `liveActivities: 1` bridge exposes `liveActivity.status`, `start`, `stop`, and
+`openSettings`. A person explicitly tracks one running Turn. Its immutable Agent
+name and session title stay in local ActivityAttributes; only phase and Unix
+seconds reach the instance tracking API and APNs. The exact wire contract and
+shared vectors live in `docs/plans/2026-11-20-ios-live-activity-contract.md` and
+`tests/fixtures/live_activity/contract_vectors.json`.
+
+`TurnActivityCoordinator` owns start admission, initial and rotated activity push
+tokens, foreground reconciliation, system dismissal, and account/instance
+cleanup. A phone-local ledger lets it retire server tracking for a card removed
+while the App was away. A dismissed Turn is not recreated. It uses the account's
+WebKit store and existing same-origin CSRF transport, and releases those WebViews
+through the account transition's existing release barriers. A 503 preserves an
+existing card; the next foreground or token update retries registration. Local
+HTTP responses never advance stale deadlines without instance confirmation.
+
+`TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
+renders the reviewed `ios/live-activity/*` frames in English and Simplified
+Chinese. A stale running card stops its timer; terminal cards show total time and
+remain for one hour. The `avibe-app://live-activity/<activityID>` private scheme
+resolves only local ActivityKit activities and routes through the existing
+account/instance chat opener. Voice capture activities remain a separate type.
+
+Owning validation is `AvibeTests/TurnActivityTests`: relay-vector decoding, local
+privacy boundaries, dismissal/relaunch, token rotation, 503 recovery, cleanup,
+selection races, terminal retention, deep links, and card render attachments.
+Physical-device acceptance still needs the runtime publisher and deployed relay:
+lock the TestFlight device, observe needsYou -> working -> terminal APNs updates,
+verify screen lighting, tap back into the correct conversation, and verify stale
+and one-hour dismissal behavior. Simulator tests do not establish APNs delivery.
