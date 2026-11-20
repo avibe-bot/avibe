@@ -540,23 +540,6 @@ def test_stopping_while_waiting_to_reconnect_does_not_wait_out_the_interval(fake
     assert adapter.bot.verify_stopped()
 
 
-async def test_an_app_refused_at_the_first_connect_ends_with_the_reason_and_without_the_secret(
-    fake: FakeFeishu, caplog: pytest.LogCaptureFixture
-):
-    fake.endpoint_code, fake.endpoint_msg = 10014, "app secret invalid: socket-secret"
-    connection = FeishuLongConnection(
-        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
-    )
-
-    with pytest.raises(ConnectionRefused) as refusal:
-        await connection.run()
-
-    assert str(refusal.value) == "10014: app secret invalid: ***"
-    assert "Feishu long connection refused, not trying again: 10014: app secret invalid: ***" in caplog.text
-    assert "socket-secret" not in caplog.text
-    assert len(fake.endpoint_requests) == 1
-
-
 def test_the_connection_s_ticket_is_not_logged(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
     with caplog.at_level("INFO", logger="modules.im.feishu_ws"):
         with running_adapter(fake, long_connection="own"):
@@ -584,13 +567,16 @@ def test_the_number_of_attempts_is_the_one_in_force_when_reconnecting_began(fake
 
 
 @pytest.mark.parametrize("mode", BOTH)
+@pytest.mark.parametrize(
+    "proxy_spelling", [lambda url: url, lambda url: url.split("://")[1]], ids=["with its scheme", "host and port alone"]
+)
 def test_the_endpoint_is_asked_for_through_the_environment_s_proxy(
-    fake: FakeFeishu, mode: str, monkeypatch: pytest.MonkeyPatch
+    fake: FakeFeishu, mode: str, proxy_spelling: Any, monkeypatch: pytest.MonkeyPatch
 ):
     """A deployment that reaches Feishu's API only through its proxy must still get an endpoint."""
     # The fake stands in for the proxy: a proxied request names the whole URL, and the fake answers by its path.
-    monkeypatch.setenv("HTTP_PROXY", fake.url)
-    monkeypatch.setenv("http_proxy", fake.url)
+    monkeypatch.setenv("HTTP_PROXY", proxy_spelling(fake.url))
+    monkeypatch.setenv("http_proxy", proxy_spelling(fake.url))
     unreachable = "http://feishu-open-platform.invalid"
     received: List[bytes] = []
 
@@ -728,23 +714,23 @@ def test_a_stop_before_or_during_start_is_not_an_error_and_wins(fake: FakeFeishu
     assert before.is_alive() is False
 
 
-def test_what_feishu_or_the_network_says_is_logged_without_the_secret_and_the_ticket(
-    fake: FakeFeishu, caplog: pytest.LogCaptureFixture
-):
+def test_nothing_feishu_or_the_network_says_reaches_the_log(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
+    """A refusal can quote the secret or the ticket back, in any spelling; so none of its text is logged."""
     with socket.socket() as placeholder:  # a loopback port with nothing behind it
         placeholder.bind(("127.0.0.1", 0))
         closed_port = placeholder.getsockname()[1]
+    ticket = "T%2FICKET%3DMARK"  # as it travels; decoded it reads T/ICKET=MARK
     fake.endpoint_replies = [
         (503, {"msg": "bad credentials for socket-secret"}),
         {"code": 1000040343, "msg": "internal error near socket-secret"},
-        {
-            "code": 0,
-            "data": {"URL": f"ws://127.0.0.1:{closed_port}/ws/v2?device_id=1&service_id=2&ticket=TICKET-MARK&access_key=KEY-MARK"},
-        },
-        {"code": 0, "data": {"URL": "ws://127.0.0.1:1/ws/v2?ticket=TICKET-MARK"}},  # names no device
+        {"code": 0, "data": {"URL": f"ws://127.0.0.1:{closed_port}/ws/v2?device_id=1&service_id=2&ticket={ticket}"}},
+        {"code": 0, "data": {"URL": f"ws://127.0.0.1:1/ws/v2?ticket={ticket}"}},  # names no device
     ]
-    # Then a real endpoint, whose ticket the handshake's refusal quotes back, once.
-    fake.handshake_refusals = [(400, {"Handshake-Status": "500", "Handshake-Msg": "invalid ticket: once"})]
+    # Then a real endpoint, whose handshake is refused twice with the ticket quoted back, both ways.
+    fake.handshake_refusals = [
+        (400, {"Handshake-Status": "500", "Handshake-Msg": "invalid ticket: once and T%2FICKET%3DMARK"}),
+        (400, {"Handshake-Status": "500", "Handshake-Msg": "invalid ticket: T/ICKET=MARK"}),
+    ]
     connection = FeishuLongConnection(
         base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
     )
@@ -757,13 +743,66 @@ def test_what_feishu_or_the_network_says_is_logged_without_the_secret_and_the_ti
         finally:
             assert connection.stop() is True
 
-    ours = "\n".join(record.getMessage() for record in caplog.records if record.name.startswith("modules.im"))
-    assert ours.count("connect failed") == 5
-    assert "500: invalid ticket: ***" in ours
+    ours = [record.getMessage() for record in caplog.records if record.name.startswith("modules.im")]
+    failures = [line.split("err: ")[1] for line in ours if "connect failed" in line]
+    assert failures[:2] == ["the endpoint answered HTTP 503", "the endpoint failed (code 1000040343)"]
+    assert failures[2].startswith("the handshake failed (ConnectionRefusedError")  # a kind and a number, no text
+    assert failures[3:] == [
+        "the endpoint URL is unusable or names no device or service",
+        "the handshake was refused (status 500, auth code 0)",
+        "the handshake was refused (status 500, auth code 0)",
+    ]
     # Every logger but the fake server's own access log, which is Feishu's side of the wire.
     client_side = "\n".join(record.getMessage() for record in caplog.records if record.name != "aiohttp.access")
-    for marker in ("socket-secret", "TICKET-MARK", "KEY-MARK", "ticket=once", "access_key=key"):
+    for marker in ("socket-secret", "ICKET", "ticket=", "invalid ticket", "bad credentials", "internal error near"):
         assert marker not in client_side
+
+
+def test_an_app_the_endpoint_refuses_is_told_by_code_alone(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
+    fake.endpoint_code, fake.endpoint_msg = 10014, "app secret invalid: socket-secret"
+    connection = FeishuLongConnection(
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+    )
+
+    connection.start()
+    fake.wait_until(lambda: not connection.is_alive(), what="the connection to give up")
+
+    assert "Feishu long connection refused, not trying again: 10014: the endpoint refused the app" in caplog.text
+    assert "socket-secret" not in caplog.text and "app secret invalid" not in caplog.text
+    assert len(fake.endpoint_requests) == 1
+
+
+def test_a_stop_does_not_wait_for_an_endpoint_that_is_slow_to_answer(fake: FakeFeishu):
+    fake.endpoint_delays = [3.0]
+    connection = FeishuLongConnection(
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+    )
+    connection.start()
+    fake.wait_until(lambda: fake.endpoint_requests, what="the endpoint request")
+
+    assert connection.stop(timeout=1) is True
+
+    threading.Event().wait(3.5)  # the reply comes after all, to nobody
+    assert fake.connections_opened == 0
+
+
+def test_endpoint_requests_that_do_not_end_do_not_pile_up(fake: FakeFeishu):
+    """One at a time: while a request given up on is still out, no other is sent."""
+    fake.endpoint_delays = [2.0]
+    connection = FeishuLongConnection(
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+    )
+    connection.config.reconnect_nonce, connection.config.reconnect_interval = 0, 0.05
+    with patch.object(feishu_ws, "_ENDPOINT_TIMEOUT_SECONDS", 0.3):
+        connection.start()
+        try:
+            threading.Event().wait(1.5)  # given up on after 0.3 s; some twenty attempts since
+            assert len(fake.endpoint_requests) == 1
+            fake.wait_connected(timeout=8)  # the first one ended, and the next went out
+        finally:
+            assert connection.stop() is True
+
+    assert len(fake.endpoint_requests) == 2
 
 
 # --- the two clients side by side ----------------------------------------------------

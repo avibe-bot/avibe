@@ -133,10 +133,20 @@ nothing by default.
   got the same effect by blocking the loop while it fetched.
 - The configured `proxy_url` is still not applied to Feishu traffic.
 - Our connection differs from the SDK's client where the SDK was at fault:
-  the endpoint request has a 30-second limit and can be cancelled (the SDK's
-  blocks its thread without a timeout), the connection's ticket is not
-  logged, a stop is a cancellation of the one task that runs the connection,
-  and an event whose last piece is delivered twice is handled once.
+  the endpoint request has a 30-second limit and does not hold up a stop (the
+  SDK's blocks its thread without a timeout), a stop is a cancellation of the
+  one task that runs the connection, and an event whose last piece is
+  delivered twice is handled once.
+- The endpoint request is still sent with `requests`, on a helper thread, one
+  at a time: the proxy it goes through or past and the certificates it trusts
+  then follow from the environment exactly as with the SDK. It carries the
+  app secret, so that is not a place for a second implementation of those
+  rules.
+- Nothing the peer says in words is logged by our connection, only kinds of
+  failure and numbers: a refusal can quote the secret or the ticket back in
+  spellings no filter can list.
+- On bytes that are not well-formed protobuf our codec is stricter than the
+  SDK's parser; such a frame is logged as unreadable and not answered.
 - `long_connection` is not validated when the config is loaded: an unknown
   value means `sdk`, with a warning, so that a slip in a temporary field
   cannot take Feishu down.

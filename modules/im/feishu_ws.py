@@ -24,14 +24,12 @@ import base64
 import json
 import logging
 import random
-import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
-import aiohttp
 import websockets
 from websockets.exceptions import InvalidStatus
 
@@ -55,6 +53,8 @@ _PIECES_KEPT_SECONDS = 5.0
 # Feishu sends an event again when it is not answered within this.
 ANSWER_WINDOW_SECONDS = 3.0
 _ENDPOINT_TIMEOUT_SECONDS = 30.0
+# (connect, read) for the sockets of that request; the 30 seconds are for all of it.
+_ENDPOINT_SOCKET_TIMEOUT = (5.0, 10.0)
 _CLOSE_SECONDS = 3.0
 
 
@@ -343,9 +343,6 @@ class EventPieces:
 _handshake_log = logging.getLogger(__name__ + ".handshake")
 _handshake_log.setLevel(logging.INFO)
 
-_URL_QUERY = re.compile(r"((?:wss?|https?)://[^\s?'\"<>]+)\?[^\s'\"<>]*")
-
-
 async def close_socket(socket: Any) -> None:
     """Close a WebSocket politely, and in any case have its TCP connection gone on return."""
     try:
@@ -362,19 +359,15 @@ async def close_socket(socket: Any) -> None:
         logger.debug("Feishu long connection: the connection was not released in time", exc_info=True)
 
 
-def _environment_proxy(url: str) -> Optional[str]:
-    """The proxy the environment names for ``url``, chosen exactly as the SDK's request chose it.
+def _kind(failure: BaseException) -> str:
+    """A failure as it may be logged: what kind it is, and its number if it has one.
 
-    The request carries the app secret, so which proxy sees it, and when none
-    does (``NO_PROXY``), must not differ from before: the rules are
-    ``requests``'s own.
+    Never its text. What Feishu, a proxy or a library puts into a message can
+    carry the app secret or the connection's ticket, in spellings no filter
+    can list.
     """
-    from requests.utils import get_environ_proxies, select_proxy
-
-    proxy = select_proxy(url, get_environ_proxies(url))
-    if proxy and not proxy.lower().startswith(("http://", "https://")):
-        raise OSError("the environment's proxy for the endpoint is not an HTTP proxy")
-    return proxy or None
+    number = getattr(failure, "errno", None)
+    return f"{type(failure).__name__} {number}" if isinstance(number, int) else type(failure).__name__
 
 
 class ConnectionRefused(Exception):
@@ -470,8 +463,8 @@ class FeishuLongConnection:
         self._cancel_sent = False
         # A socket that was opened and is not yet known to be closed.
         self._held: Any = None
-        # The values of the current endpoint URL's query that are not names of things: the ticket.
-        self._tickets: set = set()
+        # The thread of the last endpoint request, which may outlast the wait for it.
+        self._endpoint_request: Optional[threading.Thread] = None
 
     @property
     def connected(self) -> bool:
@@ -586,11 +579,6 @@ class FeishuLongConnection:
         except (KeyError, IndexError, ValueError):
             # Not said with the URL: it is the ticket. Feishu may do better next time.
             raise _Retry("the endpoint URL is unusable or names no device or service") from None
-        # Whatever else the URL carries is the ticket, in one spelling or another: never to be logged,
-        # also not when a refusal quotes it back.
-        self._tickets = {
-            value for key, values in query.items() if key not in ("device_id", "service_id") for value in values if value
-        }
         try:
             # ``proxy=None``: straight to Feishu, as the adapter has always connected.
             # ``close_timeout``: a peer that does not complete a close is cut off after it.
@@ -600,7 +588,7 @@ class FeishuLongConnection:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            raise self._retry(exc) from None
+            raise _Retry(f"the handshake failed ({_kind(exc)})") from None
         # Ours from this line on, before anything can be awaited or cancelled.
         self._held = self._socket = socket
         if self._stopping:
@@ -612,40 +600,68 @@ class FeishuLongConnection:
         logger.info("Feishu long connection: connected to %s", self._label)
 
     async def _fetch_endpoint(self) -> str:
-        body = json.dumps({"AppID": self._app_id, "AppSecret": self._app_secret}).encode("utf-8")
-        headers = {"Content-Type": "application/json", "locale": "zh"}
-        timeout = aiohttp.ClientTimeout(total=_ENDPOINT_TIMEOUT_SECONDS)
-        target = self._base_url + ENDPOINT_PATH
-        try:
-            proxy = _environment_proxy(target)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+        """Ask Feishu where to connect.
+
+        Sent with ``requests``, as the SDK's client sends it: which proxy it
+        goes through, when it goes past one, and which certificates are
+        trusted are then decided by the same library, from the same
+        environment, as before. It runs beside the loop, so that a stop does
+        not wait for it, and one at a time, so that requests that do not end
+        cannot pile up.
+        """
+        if self._endpoint_request is not None and self._endpoint_request.is_alive():
+            raise _Retry("the previous endpoint request has not ended")
+        loop = asyncio.get_running_loop()
+        answered: "asyncio.Future[Any]" = loop.create_future()
+        url = self._base_url + ENDPOINT_PATH
+        body = {"AppID": self._app_id, "AppSecret": self._app_secret}
+
+        def deliver(outcome: Any) -> None:
+            if not answered.done():
+                answered.set_result(outcome)
+
+        def send() -> None:
+            try:
+                import requests
+
                 # The app secret goes to Feishu and nowhere a redirect points.
-                async with session.post(
-                    target, data=body, headers=headers, allow_redirects=False, proxy=proxy
-                ) as reply:
-                    status = reply.status
-                    raw = await reply.read()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            raise self._retry(exc) from None
+                reply = requests.post(
+                    url, headers={"locale": "zh"}, json=body, timeout=_ENDPOINT_SOCKET_TIMEOUT, allow_redirects=False
+                )
+                outcome: Any = (reply.status_code, reply.content)
+            except BaseException as exc:
+                outcome = exc
+            try:
+                loop.call_soon_threadsafe(deliver, outcome)
+            except RuntimeError:
+                pass  # the connection ended meanwhile and took its loop with it
+
+        self._endpoint_request = threading.Thread(target=send, daemon=True, name="feishu-ws-endpoint")
+        self._endpoint_request.start()
+        try:
+            outcome = await asyncio.wait_for(answered, _ENDPOINT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise _Retry(f"no endpoint within {_ENDPOINT_TIMEOUT_SECONDS:g} s") from None
+        if isinstance(outcome, BaseException):
+            raise _Retry(f"the endpoint request failed ({_kind(outcome)})")
+        status, raw = outcome
         try:
             answer = json.loads(raw.decode("utf-8"))
         except ValueError:
             answer = None
         if status != 200:
-            message = answer.get("msg") if isinstance(answer, dict) else None
-            raise self._retry(f"{status}: {message or 'system busy'}")
+            raise _Retry(f"the endpoint answered HTTP {status}")
         if not isinstance(answer, dict):
             # Not Feishu's answer (a gateway's page, say): nothing final can be read from it.
             raise _Retry("the endpoint reply is not a JSON object")
         code = answer.get("code")
         if code == _SYSTEM_BUSY:
-            raise _Retry(f"{code}: system busy")
+            raise _Retry("the endpoint is busy (code 1)")
         if code == _INTERNAL_ERROR:
-            raise self._retry(f"{code}: {answer.get('msg')}")
+            raise _Retry(f"the endpoint failed (code {_INTERNAL_ERROR})")
         if code != 0:
-            raise ConnectionRefused(code if isinstance(code, int) else -1, self._scrub(answer.get("msg")))
+            # The code says why; Feishu's sentence about it is not repeated (see ``_kind``).
+            raise ConnectionRefused(code if isinstance(code, int) else -1, "the endpoint refused the app")
         data = answer.get("data")
         url = data.get("URL") if isinstance(data, dict) else None
         if not isinstance(url, str) or not url:
@@ -655,29 +671,15 @@ class FeishuLongConnection:
 
     def _handshake_refusal(self, refusal: InvalidStatus) -> Exception:
         headers = refusal.response.headers
-        status = headers.get("Handshake-Status")
-        message = headers.get("Handshake-Msg")
-        if status is None or message is None:
-            return self._retry(f"the handshake was refused with HTTP {refusal.response.status_code}")
         try:
-            code = int(status)
+            code = int(headers["Handshake-Status"])
+            headers["Handshake-Msg"]  # the SDK's client reads the refusal only when both are there
             auth_code = int(headers.get("Handshake-Autherrcode") or 0)
-        except ValueError:
-            return self._retry(f"{status}: {message}")
+        except (KeyError, ValueError):
+            return _Retry(f"the handshake was refused (HTTP {refusal.response.status_code})")
         if code == _FORBIDDEN or (code == _AUTH_FAILED and auth_code == _EXCEED_CONNECTION_LIMIT):
-            return ConnectionRefused(code, self._scrub(message))
-        return self._retry(f"{code}: {message}")
-
-    def _scrub(self, text: Any) -> str:
-        """``text`` as it may be logged: without the app secret, and without the query of any URL (the ticket)."""
-        text = str(text) or type(text).__name__
-        for secret in (self._app_secret, *self._tickets):
-            if secret:
-                text = text.replace(secret, "***")
-        return _URL_QUERY.sub(r"\1", text)
-
-    def _retry(self, reason: Any) -> "_Retry":
-        return _Retry(self._scrub(reason))
+            return ConnectionRefused(code, f"the handshake was refused for good (auth code {auth_code})")
+        return _Retry(f"the handshake was refused (status {code}, auth code {auth_code})")
 
     async def _reconnect(self) -> None:
         if self.config.reconnect_nonce > 0:
@@ -715,7 +717,7 @@ class FeishuLongConnection:
                     await self._send(ping_frame(self._service))
                     self.counts.pings += 1
                 except Exception as exc:
-                    logger.warning("Feishu long connection: ping failed, err: %s", self._scrub(exc))
+                    logger.warning("Feishu long connection: ping failed, err: %s", _kind(exc))
             await asyncio.sleep(self.config.ping_interval)
 
     async def _receive(self) -> None:
@@ -729,7 +731,8 @@ class FeishuLongConnection:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            reason = self._scrub(exc)
+            closed = getattr(exc, "rcvd", None) or getattr(exc, "sent", None)
+            reason = _kind(exc) + (f", close code {closed.code}" if closed is not None else "")
         if not self._stopping:
             logger.error("Feishu long connection: receive loop exit, err: %s", reason)
         await self._disconnect()
@@ -750,7 +753,7 @@ class FeishuLongConnection:
             self.counts.unreadable_frames += 1
             logger.error("Feishu long connection: unreadable frame: %s", exc)
         except Exception as exc:
-            logger.error("Feishu long connection: handle message failed, err: %s", self._scrub(exc))
+            logger.error("Feishu long connection: handle message failed, err: %s", _kind(exc))
 
     def _on_control(self, frame: Frame) -> None:
         if frame.header("type") != "pong":
@@ -782,7 +785,7 @@ class FeishuLongConnection:
                 "Feishu long connection: handle message failed, message_id: %s, trace_id: %s, err: %s",
                 message_id,
                 frame.header("trace_id"),
-                self._scrub(exc),
+                exc if isinstance(exc, ValueError) else _kind(exc),  # the dispatcher's own words, or a kind
             )
         elapsed = time.monotonic() - started
         handled_ms = int(round(elapsed * 1000)) if code == 200 else None
@@ -853,15 +856,42 @@ class FrameTap:
         # (when, message id, the frame to answer, what the dispatcher returned, whether it raised).
         self._handled: List[Tuple[float, str, Frame, Any, bool]] = []
         self.counts = TapCounts()
+        # The other client's thread reports frames; the adapter's loop asks for a check.
+        self._lock = threading.RLock()
 
     def received(self, raw: bytes) -> None:
         """A frame the other client is about to handle."""
+        with self._lock:
+            self._received(raw)
+
+    def handled(self, payload: bytes, result: Any, failed: bool) -> None:
+        """A whole event payload the other client handed to the dispatcher, and what came of it."""
+        with self._lock:
+            self._was_handled(payload, result, failed)
+
+    def sent(self, raw: bytes) -> None:
+        """A frame the other client sent: a ping or an answer."""
+        with self._lock:
+            self._sent(raw)
+
+    def _received(self, raw: bytes) -> None:
         try:
             self.counts.frames_in += 1
             self.check()
             reference = self._reference_frame()
-            reference.ParseFromString(raw)
-            frame = decode_frame(raw)
+            try:
+                reference.ParseFromString(raw)
+            except Exception:
+                reference = None
+            try:
+                frame = decode_frame(raw)
+            except FrameError:
+                if reference is not None:
+                    self._mismatch("a frame the other client reads is refused here", self._id_of(raw))
+                return  # refused by both: agreement
+            if reference is None:
+                self._mismatch("a frame the other client refuses is read here", frame.header("message_id"))
+                return
             try:
                 theirs: Optional[bytes] = reference.SerializeToString()
             except Exception:
@@ -885,8 +915,7 @@ class FrameTap:
         except Exception as exc:
             self._mismatch(f"a received frame could not be read here ({type(exc).__name__})", self._id_of(raw))
 
-    def handled(self, payload: bytes, result: Any, failed: bool) -> None:
-        """A whole event payload the other client handed to the dispatcher, and what came of it."""
+    def _was_handled(self, payload: bytes, result: Any, failed: bool) -> None:
         try:
             self.counts.events += 1
             self.check()
@@ -900,8 +929,7 @@ class FrameTap:
         except Exception as exc:
             self._mismatch(f"a handed-on event could not be followed here ({type(exc).__name__})", None)
 
-    def sent(self, raw: bytes) -> None:
-        """A frame the other client sent: a ping or an answer."""
+    def _sent(self, raw: bytes) -> None:
         try:
             self.counts.frames_out += 1
             self.check()
@@ -933,13 +961,14 @@ class FrameTap:
         Called on every frame, and by the adapter's periodic report, so that a
         quiet connection is judged too.
         """
-        now = time.monotonic()
-        for table, what in (
-            (self._joined, "an event this codec joined was not handed on"),
-            (self._handled, "an event that was handled was not answered"),
-        ):
-            while table and (now - table[0][0] > _TAP_PENDING_SECONDS or len(table) > _TAP_PENDING_LIMIT):
-                self._mismatch(what, table.pop(0)[1])
+        with self._lock:
+            now = time.monotonic()
+            for table, what in (
+                (self._joined, "an event this codec joined was not handed on"),
+                (self._handled, "an event that was handled was not answered"),
+            ):
+                while table and (now - table[0][0] > _TAP_PENDING_SECONDS or len(table) > _TAP_PENDING_LIMIT):
+                    self._mismatch(what, table.pop(0)[1])
 
     def _id_of(self, raw: bytes) -> Optional[str]:
         """The message id as the other client's class reads it, for a frame this codec could not read."""
