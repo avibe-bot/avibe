@@ -130,7 +130,7 @@ class FeishuEventDispatcher:
         self,
         *,
         on_message: Optional[Callable[[Optional[str], Dict[str, Any]], None]] = None,
-        on_card_action: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_card_action: Optional[Callable[[Optional[str], Dict[str, Any]], None]] = None,
         on_reaction: Optional[Callable[[Optional[str], str], None]] = None,
     ) -> None:
         self._on_message = on_message
@@ -169,7 +169,7 @@ class FeishuEventDispatcher:
         if event_type == CARD_ACTION:
             shaped = shape(event, CARD_ACTION_EVENT)
             if self._on_card_action is not None:
-                self._on_card_action(shaped if shaped is not None else {})
+                self._on_card_action(event_id, shaped if shaped is not None else {})
             return {}
         if event_type in REACTION_EVENTS:
             shape(event, REACTION_EVENT)  # read for its shape only: a malformed one is refused

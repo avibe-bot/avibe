@@ -1,7 +1,7 @@
 """The Feishu/Lark OpenAPI message calls the adapter sends, over plain HTTPS.
 
 Five IM v1 endpoints: create, reply, patch and delete a message, and add a
-reaction. Each request is the one ``lark-oapi`` produced for the same call
+reaction (and one more, read-only, for the history check). Each request is the one ``lark-oapi`` produced for the same call
 (method, path, query and JSON body), and a reply is read the way that SDK read
 it: the body is parsed as JSON whatever the HTTP status or content type, and
 ``code == 0`` means success. A redirect is not followed. ``tests/test_feishu_api.py``
@@ -98,6 +98,22 @@ class FeishuApi:
             body={"reaction_type": {"emoji_type": emoji_type}},
             data_is_read=True,
         )
+
+    async def list_messages(
+        self, chat_id: str, start_time: int, end_time: int, page_token: Optional[str] = None
+    ) -> FeishuApiResponse:
+        """One page of a chat's history between two times (seconds), oldest first."""
+        params = {
+            "container_id_type": "chat",
+            "container_id": chat_id,
+            "start_time": str(start_time),
+            "end_time": str(end_time),
+            "sort_type": "ByCreateTimeAsc",
+            "page_size": "50",
+        }
+        if page_token:
+            params["page_token"] = page_token
+        return await self._request("GET", "/open-apis/im/v1/messages", params=params, data_is_read=True)
 
     async def _request(
         self,

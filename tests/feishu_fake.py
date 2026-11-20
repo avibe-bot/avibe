@@ -87,6 +87,12 @@ class FakeFeishu:
         self.endpoint_trickles: List[float] = []
         self.connections_opened = 0
         self.close_codes: List[Optional[int]] = []
+        self.history: Dict[str, List[Any]] = {}
+        self.history_refused: set = set()
+        self.history_delay = 0.0
+        # Answers for the next history requests, before the normal one: (HTTP status, body).
+        self.history_replies: List[Any] = []
+        self.history_requests: List[Dict[str, str]] = []
         # The configuration sent with each pong; ``None`` repeats the endpoint's.
         self.pong_config: Optional[Dict[str, Any]] = None
         self.url = ""
@@ -130,6 +136,7 @@ class FakeFeishu:
         app.router.add_get("/ws/v2", self._socket)
         app.router.add_post("/open-apis/auth/v3/tenant_access_token/internal", self._token)
         app.router.add_get("/open-apis/bot/v3/info", self._bot_info)
+        app.router.add_get("/open-apis/im/v1/messages", self._history)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", 0, shutdown_timeout=1)
@@ -169,6 +176,31 @@ class FakeFeishu:
 
     async def _token(self, _request: web.Request) -> web.Response:
         return web.json_response({"code": 0, "msg": "ok", "tenant_access_token": "t-fake", "expire": 7200})
+
+    async def _history(self, request: web.Request) -> web.Response:
+        """A chat's history: ``self.history[chat_id]`` is a list of (message id, sender type, seconds)."""
+        query = request.query
+        self.history_requests.append(dict(query))
+        if self.history_delay:
+            await asyncio.sleep(self.history_delay)
+        chat_id = query["container_id"]
+        if self.history_replies:
+            status, body = self.history_replies.pop(0)
+            return web.json_response(body, status=status)
+        if chat_id in self.history_refused:
+            return web.json_response({"code": 230027, "msg": "Lack of necessary permissions"}, status=400)
+        start, end = int(query["start_time"]), int(query["end_time"])
+        items = [
+            {"message_id": message_id, "sender": {"sender_type": sender_type}, "create_time": str(at * 1000)}
+            for message_id, sender_type, at in self.history.get(chat_id, [])
+            if start <= at <= end
+        ]
+        offset = int(query.get("page_token") or 0)
+        page = items[offset : offset + 2]  # small pages, so that paging is exercised
+        more = offset + 2 < len(items)
+        return web.json_response(
+            {"code": 0, "msg": "ok", "data": {"items": page, "has_more": more, "page_token": str(offset + 2) if more else ""}}
+        )
 
     async def _bot_info(self, _request: web.Request) -> web.Response:
         return web.json_response({"code": 0, "msg": "ok", "bot": {"open_id": self.bot_open_id}})
@@ -230,7 +262,9 @@ class FakeFeishu:
         self.push_frames(self.event_frames(body, pieces=pieces, message_id=message_id), connection=connection)
         return message_id
 
-    def event_frames(self, body: Dict[str, Any], *, pieces: int = 1, message_id: str) -> List[bytes]:
+    def event_frames(
+        self, body: Dict[str, Any], *, pieces: int = 1, message_id: str, without_header: Optional[str] = None
+    ) -> List[bytes]:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         size = max(1, -(-len(payload) // pieces))
         chunks = [payload[start : start + size] for start in range(0, len(payload), size)] or [b""]
@@ -248,6 +282,8 @@ class FakeFeishu:
                 ("seq", str(seq)),
                 ("trace_id", f"trace-{message_id}"),
             ):
+                if key == without_header:
+                    continue
                 header = frame.headers.add()
                 header.key = key
                 header.value = value
