@@ -936,3 +936,67 @@ def test_two_dispatches_that_end_before_the_receipt_get_one_receipt_with_the_lat
     assert not h.lane._notify(_pair(h))
     [notice] = _notices(h)
     assert notice["prompt"].split("\n", 1)[1] == "second reply"
+
+
+# ----- 3.2.8rc2 upgrade backfill (11-20 08:27: 24 receipts for old dispatches) -----
+
+def _set_watermark(h, value):
+    from storage.models import state_meta
+    with h.engine.begin() as conn:
+        conn.execute(state_meta.delete().where(state_meta.c.key == "delegation_receipts_since"))
+        conn.execute(state_meta.insert().values(key="delegation_receipts_since", value_json=json.dumps(value),
+                                                updated_at=NOW))
+
+
+def test_an_upgraded_instance_sends_nothing_for_dispatches_that_ended_before_it(harness):
+    """Old open pairs (Turns that ended before this version first ran) are history:
+    they are retired silently, never answered with a receipt."""
+    h = harness
+    old = _send(h)
+    _accept(h, old)  # its Turn ends now, i.e. before the upgrade below
+    old_pair = _pair(h)
+    _accept(h, _send(h, sender="sesC", recipient="sesD"))
+    _set_watermark(h, "2999-01-01T00:00:00.000000Z")  # first start of the new version: later
+    items, _ = h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
+    for item in items:
+        h.lane._notify(item.observation)
+    assert _notices(h) == []
+    assert _pair(h)["state"] == "unavailable" and _pair(h, "sesC", "sesD")["state"] == "unavailable"
+    assert old_pair["state"] == "open"
+
+
+def test_the_first_scan_sets_the_watermark_once_and_later_dispatches_get_receipts(harness):
+    from storage.models import state_meta
+    h = harness
+    h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
+    with h.engine.connect() as conn:
+        first = conn.execute(select(state_meta.c.value_json).where(
+            state_meta.c.key == "delegation_receipts_since")).scalar_one()
+    h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
+    with h.engine.connect() as conn:
+        assert conn.execute(select(state_meta.c.value_json).where(
+            state_meta.c.key == "delegation_receipts_since")).scalar_one() == first
+    _accept(h, _send(h))
+    assert h.lane._notify(_pair(h))
+    assert len(_notices(h)) == 1
+
+
+def test_a_dispatch_its_sender_cancelled_gets_no_receipt(harness):
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="canceled", cancel_requested=1))
+    assert not h.lane._notify(_pair(h))
+    assert _notices(h) == [] and _pair(h)["state"] == "unavailable"
+
+
+def test_a_recipient_that_wrote_back_later_owes_no_receipt(harness):
+    """B ended a later Turn that did write back to A (its report finished): A heard."""
+    h = harness
+    _accept(h, _send(h))
+    back = _send(h, sender="sesB", recipient="sesA")
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == back.id).values(status="succeeded"))
+    assert not h.lane._notify(_pair(h))
+    assert _notices(h) == [] and _pair(h)["state"] == "answered"
