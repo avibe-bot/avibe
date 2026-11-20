@@ -43,6 +43,7 @@ from vibe.upgrade import (
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
+    record_install_restart_locked,
     is_desktop_managed_runtime,
 )
 
@@ -774,6 +775,10 @@ def schedule_restart(
             # serialized by this lock, which it therefore does not take.
             handed_over = _hand_over_to_service(arguments)
             if handed_over is not None:
+                # A released service can seed the job without writing our new
+                # display metadata. The caller still holds activation here.
+                if trigger == "upgrade" and isinstance(handed_over.get("job_id"), str):
+                    record_install_restart_locked(job_id=handed_over["job_id"])
                 return handed_over
             print(OUTSIDE_DESKTOP_SESSION_WARNING, file=sys.stderr)
         return _schedule_restart_locked(
@@ -890,6 +895,8 @@ def _schedule_restart_locked(
         "error": None,
         "created_at": _now_iso(),
     }
+    if trigger == "upgrade":
+        record_install_restart_locked(job_id=job_id)
     _write_status(payload)
     try:
         with log_path.open("a", encoding="utf-8") as log:

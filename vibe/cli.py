@@ -18051,6 +18051,7 @@ def cmd_upgrade():
         get_safe_cwd,
         is_desktop_managed_runtime,
         launcher_is_current_process,
+        record_install_locked,
         restart_is_pending,
         should_skip_show_runtime_prepare,
         upgrade_download_help,
@@ -18113,6 +18114,7 @@ def cmd_upgrade():
             if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
                 print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
                 return 1
+            record_install_locked(info.get("latest"))
             result = execute_upgrade_plan(
                 plan,
                 run=subprocess.run,
@@ -21321,6 +21323,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         activation_block_reason,
         atomic_upgrade_lock,
         discard_atomic_uv_install_generation,
+        resume_deferred_install_locked,
     )
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -21365,6 +21368,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
                 discard_atomic_uv_install_generation(activation.candidate_launcher)
                 print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
                 return 1
+            resume_deferred_install_locked(activation.candidate_launcher)
             try:
                 activation_outcome = activate_upgrade_candidate(activation)
                 activated = True
