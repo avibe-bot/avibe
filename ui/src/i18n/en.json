@@ -866,6 +866,7 @@
       "unavailable": "Unavailable",
       "missingTitle": "The selected microphone is unavailable",
       "missingDescription": "Your choice is kept. The next test or recording uses the system input. Reconnect the microphone to use it again.",
+      "recordingFallbackDescription": "Using the system input for this recording.",
       "notTested": "Not tested yet",
       "microphoneOff": "Microphone is off",
       "testingHeard": "Testing · Sound detected",

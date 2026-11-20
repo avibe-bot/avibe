@@ -866,6 +866,7 @@
       "unavailable": "不可用",
       "missingTitle": "所选麦克风当前不可用",
       "missingDescription": "已保留你的选择。下一次测试或录音将使用系统输入；设备重新连接后可恢复使用。",
+      "recordingFallbackDescription": "这次录音改用系统输入。",
       "notTested": "尚未测试",
       "microphoneOff": "麦克风未开启",
       "testingHeard": "正在测试 · 已收到声音",

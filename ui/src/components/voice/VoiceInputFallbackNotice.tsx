@@ -14,7 +14,7 @@ export function VoiceInputFallbackNotice(): null {
   const { showToast } = useToast();
   useEffect(() => {
     const notify = () => showToast(
-      `${t('settings.microphone.missingTitle')}\n${t('settings.microphone.missingDescription')}`,
+      `${t('settings.microphone.missingTitle')}\n${t('settings.microphone.recordingFallbackDescription')}`,
       'warning',
     );
     window.addEventListener(VOICE_INPUT_FALLBACK_EVENT, notify);

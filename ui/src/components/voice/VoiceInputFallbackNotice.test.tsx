@@ -21,7 +21,7 @@ describe('VoiceInputFallbackNotice', () => {
     act(() => { window.dispatchEvent(new Event(VOICE_INPUT_FALLBACK_EVENT)); });
     expect(showToast).toHaveBeenCalledOnce();
     expect(showToast).toHaveBeenCalledWith(
-      'settings.microphone.missingTitle\nsettings.microphone.missingDescription',
+      'settings.microphone.missingTitle\nsettings.microphone.recordingFallbackDescription',
       'warning',
     );
     unmount();
