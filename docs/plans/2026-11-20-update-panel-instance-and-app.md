@@ -146,8 +146,10 @@ relays (`remote_request`) is the receipt of this shell's install or of a later
 one from another surface; the shell can, by request id. So the section relays
 an unsettled receipt as the host reports it, and waits with it. A host whose
 receipt stays `completed` without ever reaching its target therefore reads
-"confirming" until the host's own request expires. If that shows up in
-practice, the shell should say which receipt is its own.
+"confirming", with Update, the check and the switches off, until the host
+reports another receipt or reaches that version; a `completed` receipt does
+not expire, and nothing in the section ends it. If that shows up in practice,
+the shell should say which receipt is its own.
 
 ## Also needed
 
