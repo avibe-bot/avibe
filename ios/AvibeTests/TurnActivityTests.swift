@@ -74,7 +74,7 @@ final class TurnActivityTests: XCTestCase {
         XCTAssertEqual(card.attributes.agentName, "首席安全官")
         XCTAssertEqual(card.attributes.sessionTitle, "依赖审计 · avault 🔒")
         let put = try XCTUnwrap(calls.first { $0.0 == "PUT" }?.2)
-        XCTAssertEqual(Set(put.keys), ["session_id", "turn_id", "push_registration_id", "activity_token"])
+        XCTAssertEqual(Set(put.keys), ["session_id", "turn_id", "push_registration_id", "activity_token", "requested_at"])
         XCTAssertEqual(put["activity_token"] as? String, "0102ff")
         await owner.endAll(reason: "logout")
     }
@@ -207,7 +207,7 @@ final class TurnActivityTests: XCTestCase {
         card.tokenContinuation?.yield(card.token!)
         await fulfillment(of: [rotated], timeout: 2)
         for call in calls where call.0 == "PUT" {
-            XCTAssertEqual(Set(call.2!.keys), ["session_id", "turn_id", "push_registration_id", "activity_token"])
+            XCTAssertEqual(Set(call.2!.keys), ["session_id", "turn_id", "push_registration_id", "activity_token", "requested_at"])
         }
         await owner.endAll(reason: "logout")
     }
@@ -327,7 +327,8 @@ final class TurnActivityTests: XCTestCase {
         for (status, error, expected) in [(403, "registration_not_owned", "push_unavailable"),
                                           (404, "not_found", "failed"),
                                           (400, "invalid_live_activity", "failed"),
-                                          (409, "activity_conflict", "failed")] {
+                                          (409, "activity_conflict", "failed"),
+                                          (409, "activity_expired", "failed")] {
             let owner = coordinator(response: { _, _, path, _ in
                 if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
                 return .init(status: status, json: ["error": error], redirected: false)
@@ -338,6 +339,47 @@ final class TurnActivityTests: XCTestCase {
             _ = owner.invalidateRequests()
             cards.removeAll()
         }
+    }
+
+    func testRequestedAtStaysFixedAcrossRelaunchRetriesAndRotation() async throws {
+        var clock = Date(timeIntervalSince1970: 1795001000.9)
+        let owner = coordinator(now: { clock }, response: { _, _, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            return .init(status: 503, json: ["error": "service_unavailable"], redirected: false)
+        })
+        _ = await start(owner)
+        XCTAssertEqual(calls.first { $0.0 == "PUT" }?.2?["requested_at"] as? Int, 1795001000)
+        _ = owner.invalidateRequests()
+        clock = clock.addingTimeInterval(7200)
+        let rotated = expectation(description: "new token carries original request time")
+        let relaunched = coordinator(now: { clock }, response: { _, method, _, body in
+            if method == "PUT", body?["activity_token"] as? String == "aabb" { rotated.fulfill() }
+            return .init(status: 200, json: ["activity": self.initial], redirected: false)
+        })
+        await relaunched.reconcile(target: target)
+        let card = try XCTUnwrap(cards.first)
+        card.token = Data([0xaa, 0xbb])
+        card.tokenContinuation?.yield(card.token!)
+        await fulfillment(of: [rotated], timeout: 2)
+        let puts = calls.filter { $0.0 == "PUT" }
+        XCTAssertEqual(puts.count, 3)
+        XCTAssertTrue(puts.allSatisfy { $0.2?["requested_at"] as? Int == 1795001000 })
+        await relaunched.endAll(reason: "logout")
+    }
+
+    func testPutStoppedRetiresCardImmediatelyEvenWithTerminalContent() async throws {
+        let owner = coordinator(response: { _, _, path, _ in
+            if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
+            return .init(status: 200, json: ["activity": ["status": "stopped", "phase": "done",
+                "started_at": 1795000000, "ended_at": 1795001000, "confirmed_at": 1795001000]], redirected: false)
+        })
+        _ = await start(owner)
+        let card = try XCTUnwrap(cards.first)
+        XCTAssertEqual(card.state, .dismissed)
+        XCTAssertTrue(card.endedImmediately)
+        calls.removeAll()
+        await owner.reconcile(target: target)
+        XCTAssertTrue(calls.isEmpty)
     }
 
     func testRegisteredStoppedOverridesNewerContentAndTerminalPhase() async throws {

@@ -1617,11 +1617,12 @@ while the App was away. Only an explicit start can create a card, including afte
 a prior dismissal or stop of the same still-running Turn. It uses the account's
 WebKit store and existing same-origin CSRF transport, and releases those WebViews
 through the account transition's existing release barriers. The ledger persists
-whether PUT has returned 200 for the current token. A token rotation clears that
-registration mark until its PUT succeeds. An unregistered card survives a 503 or lost
-response, retries PUT on foreground or token rotation, and ends after eight hours
-without registration. Registered cards only GET on foreground; actual token
-updates still PUT. A refused registration ends immediately, except a terminal
+the Activity.request Unix second (requested_at on every PUT) and whether PUT has
+returned 200 for the current token. A token rotation clears that registration mark
+until its PUT succeeds. An unregistered card survives a 503 or lost response,
+retries PUT on foreground or token rotation, and ends if still unregistered eight
+hours after Activity.request. Registered cards only GET on foreground; actual
+token updates still PUT. A refused registration ends immediately, except a terminal
 Turn response retains its final card for one hour. Local HTTP responses never
 advance stale deadlines without instance confirmation.
 

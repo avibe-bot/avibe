@@ -68,7 +68,7 @@ final class TurnActivityCoordinator {
         let sessionID: String
         let turnID: String
         let registrationID: String
-        var createdAt: Date?
+        let requestedAt: Int
         var registeredAt: Date?
         var observedToken: Data?
     }
@@ -173,10 +173,11 @@ final class TurnActivityCoordinator {
                 agentName: TurnActivityAttributes.displayName(agentName, limit: 40),
                 sessionTitle: TurnActivityAttributes.displayTitle(sessionTitle, agentName: agentName),
                 accountID: target.accountID, instanceOrigin: target.instanceOrigin, sessionID: sessionID, turnID: turnID)
+            let requestedAt = Int(now().timeIntervalSince1970)
             let activity = try create(attributes, content)
             created = activity
             let record = Record(id: activity.id, target: target, sessionID: sessionID,
-                                turnID: turnID, registrationID: registrationID, createdAt: now())
+                                turnID: turnID, registrationID: registrationID, requestedAt: requestedAt)
             ledger.records[record.id] = record
             save()
             observeState(activity, record: record)
@@ -287,7 +288,7 @@ final class TurnActivityCoordinator {
                 if record.registeredAt == nil {
                     // A terminal PUT response already supplied the final one-hour card.
                     if activity.state == .ended { continue }
-                    if now().timeIntervalSince(record.createdAt ?? Date(timeIntervalSince1970: Double(activity.content.startedAt))) >= 28800 {
+                    if now().timeIntervalSince1970 >= Double(record.requestedAt + 28800) {
                         await finish(activity, record: record, reason: "system_ended")
                     } else if let token = activity.token {
                         _ = try await register(token, activity: activity, record: record, generation: generation)
@@ -415,7 +416,7 @@ final class TurnActivityCoordinator {
         do {
             response = try await request(record.target, "PUT", Self.base + "/" + record.id, [
                 "session_id": record.sessionID, "turn_id": record.turnID,
-                "push_registration_id": record.registrationID,
+                "push_registration_id": record.registrationID, "requested_at": record.requestedAt,
                 "activity_token": token.map { String(format: "%02x", $0) }.joined(),
             ])
         } catch { throw Failure.unavailable }
@@ -427,7 +428,7 @@ final class TurnActivityCoordinator {
             return false
         }
         if response.status == 503 || response.status == 0 && !response.redirected { throw Failure.unavailable }
-        if [400, 403, 404].contains(response.status) || response.status == 409 && response.errorCode == "activity_conflict" {
+        if [400, 403, 404].contains(response.status) || response.status == 409 && ["activity_conflict", "activity_expired"].contains(response.errorCode ?? "") {
             // Retire locally here; remove() awaits this mutation and would deadlock.
             await retire(activity, record: record)
             throw Failure.rejected(response.status == 403 ? "push_unavailable" : "failed")
