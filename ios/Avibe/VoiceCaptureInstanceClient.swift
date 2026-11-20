@@ -324,7 +324,8 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         webView = nil
         ready = false
         if loadContinuation != nil { gaveUp(loadingFor, "closed") }
-        loadContinuation?.resume(throwing: Failure.offline)
+        // The request this load was for was never made.
+        loadContinuation?.resume(throwing: Failure.closed)
         loadContinuation = nil
     }
 
