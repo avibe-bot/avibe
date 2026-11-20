@@ -112,6 +112,12 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
 @theme {
   --text-health-metric: 13px;
 }
+/* The Dynamic Island is the hardware's black cut-out in either theme; the iOS Live Activity frames
+   draw it and what sits on it (ui/design: ios/live-activity/island). */
+@theme {
+  --color-island: #000000;
+  --color-island-foreground: #ffffff;
+}
 
 /* Motion (docs/plans/web-ui-motion.md §4; ui/design: motion/tokens/sheet). A
    moment picks one duration and one curve from here; nothing animates on a
