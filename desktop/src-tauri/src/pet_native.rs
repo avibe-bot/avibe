@@ -49,59 +49,80 @@ pub fn set_frame(window: &WebviewWindow, origin: (f64, f64), size: (f64, f64)) {
     let _ = window.set_position(tauri::LogicalPosition::new(origin.0, origin.1));
 }
 
-/// Starts the native window drag from where the pointer is now. On macOS the
-/// drag keeps the press's offset measured from the window's bottom edge, so a
-/// press that came before a resize would drag the window by the change in
-/// height; the shell gives AppKit a press measured in the current frame.
-pub fn start_drag(window: &WebviewWindow) -> Result<(), String> {
+/// How the shell drags the window once it has shrunk to the drag strip.
+pub enum Drag {
+    /// The platform's own window drag runs until the button is released.
+    Native,
+    /// The shell moves the window itself, keeping this offset between the
+    /// pointer and the window (`follow_pointer`, on every poll of the button).
+    Follow(PointerOffset),
+}
+
+/// The pointer's place in the window, measured from its origin in AppKit's
+/// global points (which span every display).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerOffset {
+    x: f64,
+    y: f64,
+}
+
+/// Starts dragging the window from where the pointer is now.
+///
+/// On macOS the shell moves the window itself rather than handing the drag to
+/// AppKit (`performWindowDragWithEvent`): a system window drag takes part in
+/// the window manager's edge tiling, so a pointer that reaches a display's
+/// side, the Dock or the menu bar has the system move the pet away on release
+/// (to a whole-window place, or to the middle of the display) before the shell
+/// can place it. Elsewhere the platform drags the window.
+pub fn start_drag(window: &WebviewWindow) -> Result<Drag, String> {
     #[cfg(target_os = "macos")]
-    if start_drag_macos(window) {
-        return Ok(());
+    if let Some(offset) = pointer_offset_macos(window) {
+        return Ok(Drag::Follow(offset));
     }
-    window.start_dragging().map_err(|error| error.to_string())
+    window.start_dragging().map_err(|error| error.to_string())?;
+    Ok(Drag::Native)
+}
+
+/// Moves the window so the pointer keeps `offset` in it. The window's own
+/// frame setter, not a system drag: no tiling, and no constraint below the
+/// menu bar while dragging (the drop is placed by the shell).
+pub fn follow_pointer(window: &WebviewWindow, offset: PointerOffset) {
+    #[cfg(target_os = "macos")]
+    follow_pointer_macos(window, offset);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, offset);
 }
 
 #[cfg(target_os = "macos")]
-fn start_drag_macos(window: &WebviewWindow) -> bool {
-    use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
-    use objc2::{msg_send, ClassType, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow};
-    use objc2_foundation::NSPoint;
-
-    let (Some(mtm), Ok(pointer)) = (MainThreadMarker::new(), window.ns_window()) else {
-        return false;
+fn native_window(window: &WebviewWindow) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+    let (Some(_mtm), Ok(pointer)) = (objc2::MainThreadMarker::new(), window.ns_window()) else {
+        return None;
     };
     // SAFETY: as in `set_frame_macos`.
-    let Some(native) = (unsafe { Retained::retain(pointer.cast::<NSWindow>()) }) else {
-        return false;
+    unsafe { objc2::rc::Retained::retain(pointer.cast::<objc2_app_kit::NSWindow>()) }
+}
+
+#[cfg(target_os = "macos")]
+fn pointer_offset_macos(window: &WebviewWindow) -> Option<PointerOffset> {
+    let native = native_window(window)?;
+    let mouse = objc2_app_kit::NSEvent::mouseLocation();
+    let origin = native.frame().origin;
+    Some(PointerOffset {
+        x: mouse.x - origin.x,
+        y: mouse.y - origin.y,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn follow_pointer_macos(window: &WebviewWindow, offset: PointerOffset) {
+    let Some(native) = native_window(window) else {
+        return;
     };
-    let mouse = NSEvent::mouseLocation();
-    let frame = native.frame();
-    let current = NSApplication::sharedApplication(mtm).currentEvent();
-    let (flags, timestamp) = current.map_or((NSEventModifierFlags::empty(), 0.0), |event| {
-        (event.modifierFlags(), event.timestamp())
-    });
-    // SAFETY: the documented NSEvent constructor, with a nil graphics context.
-    let press: Option<Retained<NSEvent>> = unsafe {
-        msg_send![
-            NSEvent::class(),
-            mouseEventWithType: NSEventType::LeftMouseDown,
-            location: NSPoint::new(mouse.x - frame.origin.x, mouse.y - frame.origin.y),
-            modifierFlags: flags,
-            timestamp: timestamp,
-            windowNumber: native.windowNumber(),
-            context: std::ptr::null_mut::<AnyObject>(),
-            eventNumber: 0isize,
-            clickCount: 1isize,
-            pressure: 1.0f32
-        ]
-    };
-    let Some(press) = press else {
-        return false;
-    };
-    native.performWindowDragWithEvent(&press);
-    true
+    let mouse = objc2_app_kit::NSEvent::mouseLocation();
+    let origin = objc2_foundation::NSPoint::new(mouse.x - offset.x, mouse.y - offset.y);
+    if native.frame().origin != origin {
+        native.setFrameOrigin(origin);
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -837,6 +837,16 @@ already communicate activity. Keep the upper-right red unread badge.
   native drag. Both layouts draw Vibey at the same place in the strip, and the
   page hides the column in any window that short (a sliver otherwise). If the
   native drag cannot start, the window goes back as it was.
+  - **macOS: the shell moves the window itself (decision 2026-11-20).** A
+    system window drag (`performWindowDragWithEvent`) takes part in macOS edge
+    tiling: a pointer that reaches a display's side or the Dock had the system
+    put the whole 500px window back on the display (Vibey ~192px from the
+    edge), and one that reached the menu bar had it moved to the display's
+    middle, before the shell could place the drop. Instead the shell records
+    the pointer's offset in the strip and, on every 16ms poll of the button,
+    sets the window's origin to follow the pointer; the drop is then placed by
+    the rule below. Press-and-hold for voice is unchanged (the page decides
+    hold vs drag). Windows keeps the platform drag.
   - The shell says it can drag the pet before any page script runs: an
     initialization script defines `window.__AVIBE_PET_DRAG__`. Shells without
     the marker keep the page's old `start_dragging` path. The shell drags
