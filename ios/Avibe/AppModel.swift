@@ -2444,12 +2444,12 @@ final class AppModel: ObservableObject {
     /// `device.describe` for the selected instance's page: nil for any
     /// other instance, or when no account is signed in. Health's id is an
     /// alias only for the instance Health is paired with, on this account.
-    /// A restored account counts before its check confirms it, as for push:
-    /// a cold start opens the instance first, and a different account
-    /// replaces the page.
+    /// A restored account counts before its check confirms it (a cold start
+    /// opens the instance first); nothing is answered while the account is
+    /// signing out, resetting or changing.
     func describeDevice(instanceID: String) -> [String: Any]? {
         guard
-            let accountID = sessionCoordinator.currentAccount?.id,
+            let accountID = sessionCoordinator.settledAccountID,
             sessionCoordinator.selectedInstance?.id == instanceID
         else {
             return nil

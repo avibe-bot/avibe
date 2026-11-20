@@ -2005,6 +2005,35 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNil(otherAccount.restorableRuntime(from: otherState))
     }
 
+    /// `device.describe` answers only for a settled account: a session read
+    /// that answers signed-out keeps the selection while it revokes push.
+    func testNoAccountIsSettledWhileASignedOutReadRevokesPush() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var duringRevoke: [(account: String?, selected: String?)] = []
+        var coordinator: MobileSessionCoordinator!
+        coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+            onPreparePushLogout: { _ in
+                duringRevoke.append((coordinator.settledAccountID, coordinator.selectedInstance?.id))
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        XCTAssertEqual(coordinator.settledAccountID, "account-1")
+
+        transport.session = nil
+        _ = try? await coordinator.refresh()
+
+        XCTAssertEqual(duringRevoke.count, 1)
+        XCTAssertNil(duringRevoke.first?.account)
+        XCTAssertEqual(duringRevoke.first?.selected, instance.id)
+        XCTAssertNil(coordinator.settledAccountID)
+    }
+
     func testSignedOutBootstrapPreparesPushLogoutBeforeStoreReplacement()
         async throws
     {
