@@ -1258,6 +1258,19 @@ class SessionTurnManager:
         with self._sqlite_engine().connect() as conn:
             return delivery_store.turn_last_reply(conn, turn_id)
 
+    def with_idle_turn_ledger(self, action: Callable[[], None]) -> None:
+        """Off-loop trial only. Fence durable admissions through the short action.
+
+        A takeover/recovered Turn may be absent from ``in_flight``. Never freeze
+        from an old read snapshot; no await, logging or IPC while holding SQLite.
+        The action rechecks transient owners and cancellation at the final cut.
+        """
+        with self._sqlite_engine().connect() as conn:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            if not delivery_store.session_ids_with_live_turns(conn):
+                action()
+            # Connection close rolls back this read-only reservation.
+
     def busy_session_ids(self) -> set[str]:
         """Sessions whose gate is occupied by a live turn RIGHT NOW.
 
