@@ -221,6 +221,93 @@ final class DeviceDescriptionTests: XCTestCase {
     }
 
     @MainActor
+    func testDescribeAsksForAHealthBindingTicketOnlyWhenTheReportDoes() async throws {
+        let instance = try XCTUnwrap(WebOrigin.parseConfigured(one))
+        // Synthetic: 43 base64url characters.
+        let issued = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-"
+        var answer: [String: Any]? = ["kind": "iphone_app", "display_name": "iPhone 16 Pro", "aliases": []]
+        var ticket: String? = issued
+        var asked = 0
+        var duringTheWait: () -> Void = {}
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                deviceDescription: { answer },
+                healthBindingTicket: {
+                    asked += 1
+                    duringTheWait()
+                    return ticket
+                }
+            )
+        )
+        let probe = DeviceWebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <iframe id="child" srcdoc="<p>subframe</p>"></iframe>
+            """,
+            baseURL: try XCTUnwrap(URL(string: one)),
+            in: webView
+        )
+        let script = """
+            const code = async (params) => {
+              try {
+                await window.avibeNative.call("device.describe", params);
+                return "ok";
+              } catch (error) {
+                return error.code;
+              }
+            };
+            const plain = await window.avibeNative.call("device.describe");
+            const report = await window.avibeNative.call("device.describe", {health_binding: true});
+            const subframe = await document.querySelector("#child").contentWindow.webkit
+              .messageHandlers.avibeNative.postMessage({method: "device.describe", params: {health_binding: true}});
+            return JSON.stringify({
+              plain: "health_binding_ticket" in plain,
+              ticket: report.health_binding_ticket ?? null,
+              name: report.display_name,
+              asFalse: await code({health_binding: false}),
+              asNumber: await code({health_binding: 1}),
+              withMore: await code({health_binding: true, name: "x"}),
+              subframe: subframe?.error?.code ?? "ok"
+            });
+            """
+        let payload = try await run(script, in: webView)
+        XCTAssertEqual(payload["plain"] as? Bool, false)
+        XCTAssertEqual(payload["ticket"] as? String, issued)
+        XCTAssertEqual(payload["name"] as? String, "iPhone 16 Pro")
+        XCTAssertEqual(payload["asFalse"] as? String, "invalid_argument")
+        XCTAssertEqual(payload["asNumber"] as? String, "invalid_argument")
+        XCTAssertEqual(payload["withMore"] as? String, "invalid_argument")
+        XCTAssertEqual(payload["subframe"] as? String, "forbidden")
+        XCTAssertEqual(asked, 1)
+
+        let ask = """
+            try {
+              const report = await window.avibeNative.call("device.describe", {health_binding: true});
+              return JSON.stringify({code: "ok", ticket: "health_binding_ticket" in report});
+            } catch (error) {
+              return JSON.stringify({code: error.code});
+            }
+            """
+        // No ticket: the property is left out, not null.
+        ticket = nil
+        let without = try await run(ask, in: webView)
+        XCTAssertEqual(without["code"] as? String, "ok")
+        XCTAssertEqual(without["ticket"] as? Bool, false)
+
+        // No longer the selected instance once the ticket is back: refused.
+        ticket = issued
+        duringTheWait = { answer = nil }
+        let moved = try await run(ask, in: webView)
+        XCTAssertEqual(moved["code"] as? String, "forbidden")
+        XCTAssertEqual(asked, 3)
+    }
+
+    @MainActor
     private func run(_ script: String, in webView: WKWebView) async throws -> [String: Any] {
         let result = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
         let data = try XCTUnwrap((result as? String)?.data(using: .utf8))

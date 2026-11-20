@@ -397,6 +397,7 @@ enum NativeBridgeConfiguration {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         deviceDescription: @escaping () -> [String: Any]? = { nil },
+        healthBindingTicket: @escaping @MainActor () async -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
@@ -487,6 +488,7 @@ enum NativeBridgeConfiguration {
             instanceID: instanceID,
             deviceID: deviceID,
             deviceDescription: deviceDescription,
+            healthBindingTicket: healthBindingTicket,
             directStatus: directStatus,
             directHandover: directHandover,
             directPreference: directPreference,
@@ -769,6 +771,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let deviceDescription: () -> [String: Any]?
+    private let healthBindingTicket: @MainActor () async -> String?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
     private let directPreference: DirectPreferenceProvider?
@@ -829,6 +832,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         instanceID: @escaping () -> String?,
         deviceID: @escaping () -> String?,
         deviceDescription: @escaping () -> [String: Any]? = { nil },
+        healthBindingTicket: @escaping @MainActor () async -> String? = { nil },
         directStatus: DirectStatusProvider?,
         directHandover: DirectHandoverProvider?,
         directPreference: DirectPreferenceProvider?,
@@ -890,6 +894,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.deviceDescription = deviceDescription
+        self.healthBindingTicket = healthBindingTicket
         self.directStatus = directStatus
         self.directHandover = directHandover
         self.directPreference = directPreference
@@ -1328,11 +1333,20 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
             reply(replyHandler, result: info)
         case .deviceDescribe:
-            guard request.params.isEmpty else {
+            // `health_binding: true` (the page's report only) also asks the
+            // paired instance for a one-use Health binding ticket.
+            let healthBinding: Bool
+            if request.params.isEmpty {
+                healthBinding = false
+            } else if request.params.count == 1,
+                      let flag = request.params["health_binding"] as? NSNumber,
+                      CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue {
+                healthBinding = true
+            } else {
                 reply(
                     replyHandler,
                     error: .invalidArgument(
-                        "device.describe does not accept parameters."
+                        "device.describe accepts only an optional health_binding: true."
                     )
                 )
                 return
@@ -1343,7 +1357,25 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 reply(replyHandler, error: .forbidden)
                 return
             }
-            reply(replyHandler, result: description)
+            guard healthBinding else {
+                reply(replyHandler, result: description)
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                let ticket = await self.healthBindingTicket()
+                // Described again after the wait: the same instance must
+                // still be the selected one, on the same account.
+                guard var fresh = self.deviceDescription() else {
+                    self.reply(replyHandler, error: .forbidden)
+                    return
+                }
+                if let ticket { fresh["health_binding_ticket"] = ticket }
+                self.reply(replyHandler, result: fresh)
+            }
         case .appOpenExternal:
             guard
                 let rawURL = request.params["url"] as? String,
