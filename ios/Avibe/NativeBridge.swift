@@ -4,6 +4,8 @@ import Foundation
 import UIKit
 import WebKit
 
+typealias LiveActivityAction = @MainActor (NativeBridgeRequest, WebOrigin) async throws -> [String: Any]
+
 typealias HealthConnectAction = @MainActor (String, String, WebOrigin) async -> String
 
 struct NativeBridgePolicy {
@@ -31,6 +33,7 @@ struct NativeShellMetadata: Equatable {
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
+        "liveActivities": 1,
         "push": 1,
         "systemSchedule": 1,
         "viewport": 1,
@@ -210,6 +213,10 @@ enum NativeBridgeMethod: String, CaseIterable {
     case deviceDescribe = "device.describe"
     case directStatus = "direct.status"
     case directHandover = "direct.handover"
+    case liveActivityStatus = "liveActivity.status"
+    case liveActivityStart = "liveActivity.start"
+    case liveActivityStop = "liveActivity.stop"
+    case liveActivityOpenSettings = "liveActivity.openSettings"
     case healthConnect = "health.connect"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
@@ -375,6 +382,7 @@ enum NativeBridgeConfiguration {
         deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         showShare: ShowShareCoordinator? = nil,
         appLock: AppLockBridging? = nil,
@@ -459,6 +467,7 @@ enum NativeBridgeConfiguration {
             deviceDescription: deviceDescription,
             directStatus: directStatus,
             directHandover: directHandover,
+            liveActivity: liveActivity,
             healthConnect: healthConnect,
             showShare: showShare,
             appLock: appLock,
@@ -732,6 +741,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let liveActivity: LiveActivityAction
     private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
@@ -797,6 +807,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider?,
         directHandover: DirectHandoverProvider?,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction,
         showShare: ShowShareCoordinator?,
         appLock: AppLockBridging?,
@@ -856,6 +867,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.deviceDescription = deviceDescription
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.showShare = showShare
         self.appLock = appLock
@@ -1163,6 +1175,25 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
+        case .liveActivityStatus, .liveActivityStart, .liveActivityStop, .liveActivityOpenSettings:
+            let origin = policy.instanceOrigin
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self, let url = sourceWebView?.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                do {
+                    let result = try await self.liveActivity(request, origin)
+                    guard let url = sourceWebView?.url, WebOrigin(url: url, requiresHTTPS: false) == origin else {
+                        self.reply(replyHandler, error: .forbidden)
+                        return
+                    }
+                    self.reply(replyHandler, result: result)
+                } catch {
+                    self.reply(replyHandler, error: (error as? NativeBridgeError) ?? .failed("Live Activity request failed."))
+                }
+            }
         case .healthConnect:
             guard request.params.count == 2,
                   let requestID = request.params["requestId"] as? String, !requestID.isEmpty, requestID.count <= 256,

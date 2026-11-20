@@ -95,13 +95,17 @@ it('AUTH-SETUP-178 current version offers no install; account entry stays separa
   expect(mock.present).toHaveBeenCalledWith('instances');
 });
 
-it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local or remote update IPC', async () => {
+// ui/design: update/instance-and-app. The version beside another computer's name is that instance's, read by
+// its own page; the page's API mock has `getVersion` alone, so any install or updater call from here throws.
+it("AUTH-SETUP-178 remote Runtime shows the instance's own version and presents the shell's panel without update IPC", async () => {
   mock.remote = true;
+  mock.getVersion.mockResolvedValue({ current: '3.2.5', latest: '3.2.7', has_update: true });
   mount();
-  fireEvent.click(screen.getByRole('button', { name: 'Local Desktop version v3.2.6rc12' }));
+  // The app is on 3.2.6rc12: that version is no longer shown beside the instance's name.
+  fireEvent.click(await screen.findByRole('button', { name: 'Studio is on v3.2.5' }));
+  expect(screen.queryByText(/3\.2\.6rc12/)).toBeNull();
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
   expect(mock.invoke).not.toHaveBeenCalled();
-  expect(mock.getVersion).not.toHaveBeenCalled();
   expect(document.querySelector('[data-update-menu]')).toBeNull();
   mock.present.mockClear();
   const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
@@ -119,7 +123,7 @@ it('the bottom row reads the same locally and on another computer: status, then 
     const view = mount();
     const row = document.querySelector('[data-sidebar-status-row]')!;
     const version = remote
-      ? screen.getByRole('button', { name: 'Local Desktop version v3.2.6rc12' })
+      ? await screen.findByRole('button', { name: 'Studio is on v3.2.6rc12' })
       : await screen.findByTitle('v3.2.6rc12');
     expect(version.hasAttribute('data-version-chip')).toBe(true);
     expect(row.lastElementChild!.contains(version)).toBe(true);

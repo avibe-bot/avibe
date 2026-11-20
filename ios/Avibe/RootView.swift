@@ -399,6 +399,7 @@ private struct BrowserScreen: View {
                         deviceDescription: { appModel.describeDevice(instanceID: instance.id) },
                         directStatus: appModel.directStatusProvider,
                         directHandover: appModel.directHandoverProvider,
+                        liveActivity: appModel.handleLiveActivity,
                         healthConnect: appModel.connectHealth,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,

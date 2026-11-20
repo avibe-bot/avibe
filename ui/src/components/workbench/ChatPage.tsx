@@ -1,3 +1,4 @@
+import { LiveActivityEntry } from './LiveActivityEntry';
 import { HealthRequestCard } from '../health/HealthRequest';
 import { readHealthRequest } from '../../lib/healthRequests';
 import { desktopDragRegion } from '../../lib/desktopShell';
@@ -3696,6 +3697,13 @@ export const ChatPage: React.FC = () => {
             ) : null
           }
         />
+        {sessionId && <LiveActivityEntry
+          key={sessionId}
+          sessionId={sessionId}
+          running={runtimeState.foreground === 'running'}
+          agentName={conversationBotName || agentDisplayName || session.agent_name || ''}
+          sessionTitle={botConversation ? null : session.title || null}
+        />}
         <ActivityStrip
           state={runtimeState}
           sessionId={sessionId ?? ''}

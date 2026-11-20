@@ -1802,6 +1802,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNil(NativeShellMetadata.capabilities["navigation"])
         XCTAssertEqual(NativeShellMetadata.capabilities["systemSchedule"], 1)
         XCTAssertEqual(NativeShellMetadata.capabilities["device"], 1)
+        XCTAssertEqual(NativeShellMetadata.capabilities["liveActivities"], 1)
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
             [
@@ -1821,6 +1822,10 @@ final class MobileOnboardingTests: XCTestCase {
                 "haptics.notify",
                 "haptics.selection",
                 "health.connect",
+                "liveActivity.openSettings",
+                "liveActivity.start",
+                "liveActivity.status",
+                "liveActivity.stop",
                 "navigation.historyChanged",
                 "notifications.reconcile",
                 "push.status",

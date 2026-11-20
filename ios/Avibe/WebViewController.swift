@@ -331,6 +331,7 @@ final class WebViewFactory {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let liveActivity: LiveActivityAction
     private let healthConnect: HealthConnectAction
     private let showShare = ShowShareCoordinator.shared
     private let instanceID: () -> String?
@@ -381,6 +382,7 @@ final class WebViewFactory {
         deviceDescription: deviceDescription,
         directStatus: directStatus,
         directHandover: directHandover,
+        liveActivity: liveActivity,
         healthConnect: healthConnect,
         showShare: showShare,
         pushStatus: { [weak self] vapidPublicKey, origin in
@@ -448,6 +450,7 @@ final class WebViewFactory {
         deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -483,6 +486,7 @@ final class WebViewFactory {
         self.deviceDescription = deviceDescription
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
@@ -676,6 +680,7 @@ final class WebViewController: UIViewController {
     /// The App's own sign-in screen, for a Google, GitHub or Apple sign-in tapped inside the page.
     private let showSignIn: () -> Void
     private let instanceName: () -> String?
+    private let liveActivity: LiveActivityAction
     private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
@@ -784,6 +789,10 @@ final class WebViewController: UIViewController {
             },
             directStatus: directStatus,
             directHandover: directHandover,
+            liveActivity: { [weak self] request, origin in
+                guard let self, !self.isInvalidatedForAccountTransition else { throw NativeBridgeError.forbidden }
+                return try await self.liveActivity(request, origin)
+            },
             healthConnect: { [weak self] requestID, pairingCode, origin in
                 guard let self, !self.isInvalidatedForAccountTransition else { return "failed" }
                 return await self.healthConnect(requestID, pairingCode, origin)
@@ -884,6 +893,7 @@ final class WebViewController: UIViewController {
         deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
@@ -924,6 +934,7 @@ final class WebViewController: UIViewController {
         self.deviceDescription = deviceDescription
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
