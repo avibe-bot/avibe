@@ -55,7 +55,8 @@ def service_for(engine):
     return service, now, sent
 
 
-def test_public_http_register_rotate_end_and_owner_isolation(state, monkeypatch):
+@pytest.mark.parametrize("stop_reason", ["instance_switch", "replaced"])
+def test_public_http_register_rotate_end_and_owner_isolation(state, monkeypatch, stop_reason):
     from vibe import internal_client, ui_server
 
     service, now, sent = service_for(state)
@@ -76,8 +77,16 @@ def test_public_http_register_rotate_end_and_owner_isolation(state, monkeypatch)
     assert client.get(f"{base}/activity-1").status_code == 404
     assert client.put(f"{base}/activity-2", json=BODY, headers=headers).status_code == 403
     monkeypatch.setattr(ui_server, "_web_push_user_key", lambda: "local")
-    assert client.delete(f"{base}/activity-1", json={"reason": "instance_switch"}, headers=headers).status_code == 200
+    response = client.delete(f"{base}/activity-1", json={"reason": stop_reason}, headers=headers)
+    assert response.status_code == 200
+    assert response.get_json()["stopped"] is True
     assert client.get(f"{base}/activity-1").get_json()["activity"]["status"] == "stopped"
+    from storage.live_activity_service import get
+    with state.connect() as conn:
+        assert get(conn, "activity-1")["stop_reason"] == stop_reason
+    assert client.delete(
+        f"{base}/activity-1", json={"reason": stop_reason}, headers=headers
+    ).get_json()["stopped"] is False
     assert client.put(f"{base}/activity-1", json=BODY, headers=headers).get_json()["activity"]["status"] == "stopped"
 
 

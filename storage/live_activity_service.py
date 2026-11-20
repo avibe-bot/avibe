@@ -13,7 +13,9 @@ from storage.models import live_activity_trackings as tracks, session_turns, vau
 from storage import web_push_service
 
 PHASE_MAP = {"completed": "done", "failed": "failed", "not_written": "failed", "canceled": "stopped"}
-STOP_REASONS = {"user_stopped", "dismissed", "system_ended", "logout", "account_switch", "instance_switch", "disabled"}
+STOP_REASONS = {
+    "user_stopped", "dismissed", "system_ended", "logout", "account_switch", "instance_switch", "disabled", "replaced"
+}
 ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}\Z")
 TOKEN_RE = re.compile(r"(?:[0-9a-f]{2}){8,256}\Z")
 REGISTRATION_RE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
