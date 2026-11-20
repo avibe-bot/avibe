@@ -783,7 +783,9 @@ export const SettingsModelsPage: React.FC = () => {
       ...(data.pending ?? []),
       ...(data.value?.pending ? ['\u0001pricing'] : []),
       // A reset card in use (from this page or another) settles on the server; read its answer soon.
-      ...data.sources.filter((source) => source.reset_cards?.lock?.reason === 'in_flight').map((source) => `\u0002${source.source_id}`),
+      ...data.sources
+        .filter((source) => source.reset_cards?.lock?.reason === 'in_flight')
+        .map((source) => `\u0002${source.source_id}`),
     ].join('\u0000'),
     unread: () => null,
     degraded: () => null,
