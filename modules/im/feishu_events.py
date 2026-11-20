@@ -7,8 +7,9 @@ The adapter and everything behind it have always received an event as the
 ``lark-oapi`` models rendered it: the fields the model knows, each one present
 (``None`` when Feishu left it out), nested objects as plain dicts, and nothing
 the model does not know. ``MESSAGE_EVENT`` and ``CARD_ACTION_EVENT`` are those
-shapes, so nothing downstream sees a difference.
-``tests/test_feishu_events.py`` holds them against the SDK's models.
+shapes, as of lark-oapi 1.7.5, so nothing downstream sees a difference. A
+payload the SDK's models refused (a list where an object belongs) is refused
+here too. ``tests/test_feishu_events.py`` holds all of it against the SDK.
 """
 
 from __future__ import annotations
@@ -71,6 +72,16 @@ CARD_ACTION_EVENT = {
 }
 
 
+REACTION_EVENT = {
+    "message_id": VALUE,
+    "reaction_type": {"emoji_type": VALUE},
+    "operator_type": VALUE,
+    "user_id": _USER_ID,
+    "app_id": VALUE,
+    "action_time": VALUE,
+}
+
+
 class FeishuEventError(Exception):
     """An event that cannot be read; the frame is answered as failed, so Feishu sends it again."""
 
@@ -94,6 +105,16 @@ def shape(value: Any, fields: Any, name: str = "event") -> Any:
     if not isinstance(value, dict):
         raise FeishuEventError(f"{name} is not an object")
     return {key: shape(value.get(key), sub, key) for key, sub in fields.items()}
+
+
+def _has_text(value: Any, name: str) -> bool:
+    """Whether an envelope field that holds text is there and not empty; a number in its place is malformed."""
+    if value is None:
+        return False
+    try:
+        return len(value) != 0
+    except TypeError:
+        raise FeishuEventError(f"{name} is not text") from None
 
 
 class FeishuEventDispatcher:
@@ -126,20 +147,32 @@ class FeishuEventDispatcher:
         header = body.get("header")
         if header is not None and not isinstance(header, dict):
             raise FeishuEventError("header is not an object")
-        # Only schema 2.0 events carry a header; the four we handle are all 2.0.
-        event_type = (header or {}).get("event_type") if body.get("schema") else None
-        event_id = (header or {}).get("event_id")
         event = body.get("event")
+        event_id = (header or {}).get("event_id")
+
+        if not _has_text(body.get("schema"), "schema"):
+            # A 1.0 event (it carries a ``uuid`` and names its type inside ``event``) or
+            # nothing we know. We handle no 1.0 event, but it must still be one.
+            if _has_text(body.get("uuid"), "uuid") and "event" in body and not isinstance(event, dict):
+                raise FeishuEventError("event is not an object")
+            logger.debug("Ignoring Feishu event without a 2.0 schema")
+            return None
+        if header is None:
+            raise FeishuEventError("a 2.0 event without a header")
+        event_type = header.get("event_type")
 
         if event_type == MESSAGE_RECEIVED:
-            if self._on_message is not None and event is not None:
-                self._on_message(event_id, shape(event, MESSAGE_EVENT))
+            shaped = shape(event, MESSAGE_EVENT)
+            if self._on_message is not None and shaped is not None:
+                self._on_message(event_id, shaped)
             return None
         if event_type == CARD_ACTION:
+            shaped = shape(event, CARD_ACTION_EVENT)
             if self._on_card_action is not None:
-                self._on_card_action(shape(event, CARD_ACTION_EVENT) if event is not None else {})
+                self._on_card_action(shaped if shaped is not None else {})
             return {}
         if event_type in REACTION_EVENTS:
+            shape(event, REACTION_EVENT)  # read for its shape only: a malformed one is refused
             if self._on_reaction is not None:
                 self._on_reaction(event_id, event_type)
             return None

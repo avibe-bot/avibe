@@ -15928,13 +15928,12 @@ class _TempWsEvents:
 
 
 _temp_ws_lock = __import__("threading").Lock()
-_temp_ws_client = None
-_temp_ws_thread = None
+_temp_ws_connection = None
 
 
 def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> dict:
     """Start a temporary WebSocket connection so the Feishu console shows the long-connection option."""
-    global _temp_ws_client, _temp_ws_thread
+    global _temp_ws_connection
 
     app_id = app_id or _stored_platform_field("lark", "app_id")
     app_secret = app_secret or _stored_platform_secret("lark", "app_secret")
@@ -15944,31 +15943,17 @@ def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> 
         _stop_temp_ws_internal()
 
         try:
-            from modules.im.feishu_sdk_ws import sdk_ws_client_module
+            from modules.im.feishu_sdk_ws import SdkLongConnection
 
-            sdk_ws = sdk_ws_client_module()
-
-            client = sdk_ws.Client(
+            connection = SdkLongConnection(
                 app_id=app_id,
                 app_secret=app_secret,
-                event_handler=_TempWsEvents(),
-                log_level=sdk_ws.LogLevel.INFO,
                 domain=_lark_api_base(domain),
+                event_handler=_TempWsEvents(),
+                thread_name="lark-temp-ws",
             )
-
-            import threading
-
-            def _run():
-                try:
-                    client.start()
-                except Exception:
-                    pass  # Thread exits silently on stop
-
-            t = threading.Thread(target=_run, daemon=True, name="lark-temp-ws")
-            t.start()
-
-            _temp_ws_client = client
-            _temp_ws_thread = t
+            connection.start()
+            _temp_ws_connection = connection
 
             return {"ok": True, "message": "Temporary WebSocket connection started"}
         except Exception as exc:
@@ -15984,19 +15969,13 @@ def lark_temp_ws_stop() -> dict:
 
 def _stop_temp_ws_internal():
     """Internal helper to stop temp WS (caller must hold _temp_ws_lock)."""
-    global _temp_ws_client, _temp_ws_thread
-    if _temp_ws_client is not None:
+    global _temp_ws_connection
+    connection, _temp_ws_connection = _temp_ws_connection, None
+    if connection is not None:
         try:
-            # Prevent auto-reconnect and close the underlying connection
-            _temp_ws_client._auto_reconnect = False
-            from modules.im.feishu_sdk_ws import sdk_ws_client_module
-
-            ws_loop = sdk_ws_client_module().loop
-            ws_loop.call_soon_threadsafe(ws_loop.create_task, _temp_ws_client._disconnect())
+            connection.stop(timeout=5.0)
         except Exception:
             pass
-        _temp_ws_client = None
-        _temp_ws_thread = None
 
 
 # --- Agent Skills (askill CLI shell) --------------------------------------

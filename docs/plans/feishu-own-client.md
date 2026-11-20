@@ -120,9 +120,21 @@ nothing by default.
 - The setup wizard's temporary connection refuses every event (answer 500), as
   the SDK's empty dispatcher did, so that Feishu sends it again and a running
   adapter receives it.
-- While the SDK's socket client remains, it is loaded past the package
-  `__init__` (`modules/im/feishu_sdk_ws.py`); if that ever fails, the adapter
-  logs a warning and imports the whole SDK.
+- While the SDK's socket client remains, it is loaded with the package's
+  `__init__` deferred (`modules/im/feishu_sdk_ws.py`): the package is a real
+  module object that runs its body the first time something it lacks is asked
+  of it, so code that imports and uses the SDK the ordinary way still gets all
+  of it. If the loader ever fails, the adapter logs a warning and imports the
+  whole SDK.
+- In an Avibe process the SDK's connections run only through
+  `SdkLongConnection`, one at a time, each on a thread and loop of its own. The
+  SDK shares one module-level loop between all clients and never ends a
+  client's tasks; a stopped client could come back on it.
+- The event shapes are those of lark-oapi 1.7.5, the release the lock file
+  pins; `pyproject.toml` now asks for no older one.
+- A malformed envelope (a schema or uuid that is not text, a 2.0 event without
+  a header, a body of the wrong shape) is refused as the SDK refused it. Only
+  a well-formed event of a type we do not handle is acknowledged and ignored.
 
 ## Todo
 

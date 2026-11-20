@@ -35,7 +35,7 @@ from .message_facts import (
 from .download_target import open_download_target
 from .feishu_api import FeishuApi
 from .feishu_events import FeishuEventDispatcher
-from .feishu_sdk_ws import sdk_ws_client_module
+from .feishu_sdk_ws import SdkLongConnection
 from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
@@ -137,8 +137,8 @@ class FeishuBot(BaseIMClient):
 
         # Message calls (create, reply, patch, delete, reaction)
         self._api = FeishuApi(config.api_base_url, self._tenant_token)
-        # WebSocket client (for event subscription)
-        self._ws_client = None
+        # The long connection that delivers events (lark-oapi's client)
+        self._sdk_connection: Optional[SdkLongConnection] = None
         # Event handler
         self._event_handler = None
         # Bot open_id (populated on startup)
@@ -157,7 +157,6 @@ class FeishuBot(BaseIMClient):
         self._routing_cache: Dict[str, Dict[str, Any]] = {}
         self._stop_event: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._ws_thread: Optional[threading.Thread] = None
         # Event id (or card-click key) -> the time it may be forgotten. Read and
         # written from the long connection's thread and from the adapter's loop.
         self._recent_event_ids: Dict[str, float] = {}
@@ -2929,8 +2928,6 @@ class FeishuBot(BaseIMClient):
         if not self.config.app_id or not self.config.app_secret:
             raise ValueError("Feishu app_id and app_secret are required")
 
-        sdk_ws = sdk_ws_client_module()
-
         logger.info("Starting Feishu/Lark bot with WebSocket...")
 
         self._warn_proxy_bypassed()
@@ -2947,25 +2944,14 @@ class FeishuBot(BaseIMClient):
             # Pre-populate DM chat IDs from persisted user settings
             self._populate_dm_chat_ids()
 
-            # Start WebSocket client in a background thread
-            self._ws_client = sdk_ws.Client(
+            # Start the long connection on a thread of its own
+            self._sdk_connection = SdkLongConnection(
                 app_id=self.config.app_id,
                 app_secret=self.config.app_secret,
-                event_handler=event_handler,
-                log_level=sdk_ws.LogLevel.INFO,
                 domain=self.config.api_base_url,
+                event_handler=event_handler,
             )
-
-            def _ws_thread_target():
-                try:
-                    logger.info("Feishu WS thread starting, domain=%s", self.config.api_base_url)
-                    self._ws_client.start()
-                except Exception as exc:
-                    logger.error("Feishu WS thread crashed: %s", exc, exc_info=True)
-
-            ws_thread = threading.Thread(target=_ws_thread_target, daemon=True, name="feishu-ws")
-            self._ws_thread = ws_thread
-            ws_thread.start()
+            self._sdk_connection.start()
 
             logger.info("Feishu WebSocket client started")
 
@@ -2986,65 +2972,26 @@ class FeishuBot(BaseIMClient):
 
     def stop(self) -> None:
         """Signal the bot to stop."""
-        self._stop_ws_client()
+        self._stop_connection()
         if self._loop and self._loop.is_running() and self._stop_event is not None:
             self._loop.call_soon_threadsafe(self._stop_event.set)
         elif self._stop_event is not None:
             self._stop_event.set()
-        self._join_ws_thread(timeout=5.0)
 
-    def _stop_ws_client(self) -> None:
-        ws_client = self._ws_client
-        if ws_client is None:
-            return
-        disconnect = getattr(ws_client, "_disconnect", None)
-        if not callable(disconnect):
-            logger.warning("Feishu WS client has no disconnect hook; nested WS thread may leak")
-            return
-        # A stopped client must stay stopped. Its receive loop answers a closed
-        # connection by reconnecting, and that task lives on the SDK's shared
-        # loop: the next Feishu client started in this process would wake it,
-        # and the old client would take a share of the app's events and drop them.
-        ws_client._auto_reconnect = False
-        try:
-            ws_client_module = sdk_ws_client_module()
-
-            ws_loop = getattr(ws_client_module, "loop", None)
-            if ws_loop is not None and ws_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(disconnect(), ws_loop)
-                future.result(timeout=5.0)
-                # lark-oapi keeps the nested thread inside module-level
-                # _select(), which is just an infinite sleep loop. Stopping the
-                # SDK loop is the only available way to release Client.start().
-                ws_loop.call_soon_threadsafe(ws_loop.stop)
-            else:
-                loop = ws_loop if ws_loop is not None and not ws_loop.is_closed() else asyncio.new_event_loop()
-                if ws_loop is None:
-                    ws_client_module.loop = loop
-                loop.run_until_complete(disconnect())
-        except Exception:
-            logger.exception("Failed to disconnect Feishu WS client")
-
-    def _join_ws_thread(self, timeout: float) -> None:
-        thread = self._ws_thread
-        if thread is None or thread is threading.current_thread():
-            return
-        thread.join(timeout=timeout)
-        if thread.is_alive():
-            logger.warning("Feishu WS thread did not stop within %.1fs", timeout)
-        else:
-            self._ws_thread = None
+    def _stop_connection(self) -> None:
+        connection = self._sdk_connection
+        if connection is not None and not connection.stop(timeout=5.0):
+            logger.warning("Feishu WS thread did not stop within %.1fs", 5.0)
 
     def verify_stopped(self) -> bool:
-        thread = self._ws_thread
-        return thread is None or not thread.is_alive()
+        connection = self._sdk_connection
+        return connection is None or not connection.is_alive()
 
     async def shutdown(self) -> None:
         """Best-effort async shutdown."""
-        self._stop_ws_client()
+        await asyncio.to_thread(self._stop_connection)
         if self._stop_event is not None:
             self._stop_event.set()
-        await asyncio.to_thread(self._join_ws_thread, 5.0)
 
     # ------------------------------------------------------------------
     # Misc required implementations

@@ -48,6 +48,15 @@ class ReceivedFrame:
     def json(self) -> Any:
         return json.loads(self.payload.decode("utf-8"))
 
+    def bytes_without_timing(self) -> bytes:
+        """The frame as sent, with the handling time (the one field two runs cannot share) set to zero."""
+        frame = _frame_class()()
+        frame.ParseFromString(self.raw)
+        for header in frame.headers:
+            if header.key == "biz_rt":
+                header.value = "0"
+        return frame.SerializeToString()
+
 
 @dataclass
 class FakeFeishu:
@@ -63,7 +72,15 @@ class FakeFeishu:
     def __post_init__(self) -> None:
         self.received: List[ReceivedFrame] = []
         self.endpoint_requests: List[Dict[str, Any]] = []
+        # Answers for the next endpoint requests, before the normal one: a body, or (HTTP status, body).
+        self.endpoint_replies: List[Any] = []
+        # Refusals for the next handshakes, before the normal upgrade: (HTTP status, headers).
+        self.handshake_refusals: List[Any] = []
+        self.handshakes_refused = 0
         self.connections_opened = 0
+        self.close_codes: List[Optional[int]] = []
+        # The configuration sent with each pong; ``None`` repeats the endpoint's.
+        self.pong_config: Optional[Dict[str, Any]] = None
         self.url = ""
         self._sockets: List[web.WebSocketResponse] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -116,6 +133,10 @@ class FakeFeishu:
 
     async def _endpoint(self, request: web.Request) -> web.Response:
         self.endpoint_requests.append({"body": await request.json(), "locale": request.headers.get("locale")})
+        if self.endpoint_replies:
+            reply = self.endpoint_replies.pop(0)
+            status, body = reply if isinstance(reply, tuple) else (200, reply)
+            return web.json_response(body, status=status)
         if self.endpoint_code != 0:
             return web.json_response({"code": self.endpoint_code, "msg": self.endpoint_msg})
         socket_url = (
@@ -132,7 +153,11 @@ class FakeFeishu:
     async def _bot_info(self, _request: web.Request) -> web.Response:
         return web.json_response({"code": 0, "msg": "ok", "bot": {"open_id": self.bot_open_id}})
 
-    async def _socket(self, request: web.Request) -> web.WebSocketResponse:
+    async def _socket(self, request: web.Request) -> web.StreamResponse:
+        if self.handshake_refusals:
+            status, headers = self.handshake_refusals.pop(0)
+            self.handshakes_refused += 1
+            return web.Response(status=status, headers=headers)
         socket = web.WebSocketResponse()
         await socket.prepare(request)
         index = self.connections_opened
@@ -153,7 +178,9 @@ class FakeFeishu:
             )
             self.received.append(received)
             if received.method == 0 and received.type == "ping":
-                await socket.send_bytes(self._control("pong", json.dumps(self.client_config).encode()))
+                config = self.client_config if self.pong_config is None else self.pong_config
+                await socket.send_bytes(self._control("pong", json.dumps(config).encode()))
+        self.close_codes.append(socket.close_code)
         return socket
 
     async def _close_sockets(self) -> None:
@@ -163,10 +190,12 @@ class FakeFeishu:
 
     # --- what a test does -----------------------------------------------------
 
-    def push_event(self, body: Dict[str, Any], *, pieces: int = 1, message_id: Optional[str] = None) -> str:
-        """Send one event to the newest connection, split into ``pieces`` frames; returns its message id."""
+    def push_event(
+        self, body: Dict[str, Any], *, pieces: int = 1, message_id: Optional[str] = None, connection: int = -1
+    ) -> str:
+        """Send one event down a connection (the newest by default), in ``pieces`` frames; returns its message id."""
         message_id = message_id or uuid.uuid4().hex
-        self.push_frames(self.event_frames(body, pieces=pieces, message_id=message_id))
+        self.push_frames(self.event_frames(body, pieces=pieces, message_id=message_id), connection=connection)
         return message_id
 
     def event_frames(self, body: Dict[str, Any], *, pieces: int = 1, message_id: str) -> List[bytes]:
@@ -194,12 +223,12 @@ class FakeFeishu:
             frames.append(frame.SerializeToString())
         return frames
 
-    def push_frames(self, frames: List[bytes]) -> None:
-        self._call(self._send(frames))
+    def push_frames(self, frames: List[bytes], *, connection: int = -1) -> None:
+        self._call(self._send(frames, connection))
 
-    def drop_connection(self) -> None:
-        """Close the newest connection from the server side."""
-        self._call(self._sockets[-1].close())
+    def drop_connection(self, connection: int = -1) -> None:
+        """Close a connection (the newest by default) from the server side."""
+        self._call(self._sockets[connection].close())
 
     def acknowledgements(self, message_id: Optional[str] = None) -> List[ReceivedFrame]:
         return [
@@ -243,8 +272,8 @@ class FakeFeishu:
             frame.payload = payload
         return frame.SerializeToString()
 
-    async def _send(self, frames: List[bytes]) -> None:
-        socket = self._sockets[-1]
+    async def _send(self, frames: List[bytes], connection: int = -1) -> None:
+        socket = self._sockets[connection]
         for frame in frames:
             await socket.send_bytes(frame)
 

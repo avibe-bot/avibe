@@ -1,5 +1,8 @@
 """Feishu events read by our own dispatcher, held against ``lark-oapi``'s.
 
+The reference is the release the lock file pins (1.7.5): its models define the
+shape the adapter has received, and ``pyproject.toml`` asks for no older one.
+
 Two contracts:
 
 - the adapter's callbacks receive exactly what they received when the SDK
@@ -152,6 +155,10 @@ EVENTS: Dict[str, Dict[str, Any]] = {
     "a click with a null event": {**card_action_event(), "event": None},
     "a reaction added": _reaction_event("created"),
     "a reaction removed": _reaction_event("deleted"),
+    "a reaction with a null event": {**_reaction_event("created"), "event": None},
+    "a reaction without an event": {key: value for key, value in _reaction_event("deleted").items() if key != "event"},
+    "a reaction with fields the SDK does not know": _with(_reaction_event("created"), brand_new={"x": 1}),
+    "a message whose schema is another version": {**message_event(), "schema": "3.0"},
 }
 
 UNREADABLE: Dict[str, bytes] = {
@@ -166,6 +173,16 @@ UNREADABLE: Dict[str, bytes] = {
     "a form value that is a list": json.dumps(card_action_event(form_value=["a"])).encode(),
     "options that are a string": json.dumps(card_action_event(options="a")).encode(),
     "a click context that is a list": json.dumps(_with(card_action_event(), context=[1])).encode(),
+    "a reaction event that is a string": json.dumps({**_reaction_event("created"), "event": "text"}).encode(),
+    "a reaction type that is a string": json.dumps(_with(_reaction_event("created"), reaction_type="OK")).encode(),
+    "a reaction's user that is a string": json.dumps(_with(_reaction_event("deleted"), user_id="ou_user")).encode(),
+    "a schema that is a number": json.dumps({**message_event(), "schema": 2}).encode(),
+    "a schema that is false": json.dumps({**message_event(), "schema": False}).encode(),
+    "a 2.0 event without a header": json.dumps({"schema": "2.0", "event": {}}).encode(),
+    "a 1.0 event whose event is null": json.dumps({"uuid": "u", "event": None}).encode(),
+    "a uuid that is a number": json.dumps({"uuid": 7, "event": {"type": "p2p_chat_create"}}).encode(),
+    "a body that is a list": b"[]",
+    "a body that is null": b"null",
 }
 
 
@@ -193,9 +210,10 @@ def test_a_payload_of_the_wrong_shape_fails_as_it_did_and_reaches_no_callback(na
     [
         {"schema": "2.0", "header": {"event_id": "e", "event_type": "im.chat.updated_v1"}, "event": {}},
         {"uuid": "u", "type": "event_callback", "event": {"type": "p2p_chat_create"}},
-        {"schema": "2.0", "event": {}},
+        {"uuid": "u", "type": "event_callback"},
+        {"token": "t"},
     ],
-    ids=["a 2.0 event we do not handle", "a 1.0 event", "an event without a header"],
+    ids=["a 2.0 event we do not handle", "a 1.0 event", "a 1.0 event with no body", "neither"],
 )
 def test_an_event_we_do_not_handle_is_acknowledged_and_ignored(body: Dict[str, Any]):
     """The one intended difference: the SDK failed these, and Feishu then sent each four more times."""
@@ -213,7 +231,10 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeFeishu]:
     # The SDK fetches its endpoint with ``requests``, which reads proxy settings from the environment.
     for name in ("NO_PROXY", "no_proxy"):
         monkeypatch.setenv(name, "127.0.0.1,localhost")
-    server = FakeFeishu().start()
+    # Reconnect at once and try again quickly; a real server says 30 and 120 seconds.
+    server = FakeFeishu(
+        client_config={"PingInterval": 120, "ReconnectCount": -1, "ReconnectInterval": 0.05, "ReconnectNonce": 0}
+    ).start()
     yield server
     server.close()
 
@@ -268,13 +289,11 @@ def test_an_unreadable_event_is_answered_as_failed_and_an_unknown_one_as_handled
 
 
 def test_a_stopped_adapter_does_not_come_back_when_the_next_one_starts(fake: FakeFeishu):
-    """The SDK's clients share one event loop per process; a stopped client's reconnect must not ride the next start."""
     with running_adapter(fake, "cli_first"):
         pass
     with running_adapter(fake, "cli_second") as second:
         acknowledged = fake.wait_acknowledged(fake.push_event(message_event()))
-        # Give a revived first client time to show up: the fake lets it reconnect at once.
-        threading.Event().wait(1.0)
+        threading.Event().wait(0.5)  # ten of the fake's retry intervals
 
         assert [request["body"]["AppID"] for request in fake.endpoint_requests] == ["cli_first", "cli_second"]
         assert fake.connections_opened == 2
@@ -282,26 +301,66 @@ def test_a_stopped_adapter_does_not_come_back_when_the_next_one_starts(fake: Fak
         assert len(second.messages) == 1
 
 
+def test_an_adapter_stopped_while_it_waits_to_reconnect_does_not_come_back_either(fake: FakeFeishu):
+    """The SDK decides to reconnect once and then only sleeps and retries; stopping must end that too."""
+    fake.client_config["ReconnectInterval"] = 2
+    with running_adapter(fake, "cli_first") as first:
+        fake.endpoint_replies = [{"code": 1, "msg": "system busy"}]
+        fake.drop_connection()
+        fake.wait_until(lambda: len(fake.endpoint_requests) == 2, what="the failed reconnect")
+        # Stopped here, two seconds before its next attempt.
+    fake.client_config["ReconnectInterval"] = 0.05
+    with running_adapter(fake, "cli_second") as second:
+        threading.Event().wait(2.5)  # past the moment the first one would have tried again
+        acknowledged = fake.wait_acknowledged(fake.push_event(message_event()))
+
+        assert [request["body"]["AppID"] for request in fake.endpoint_requests] == [
+            "cli_first",
+            "cli_first",
+            "cli_second",
+        ]
+        assert acknowledged.json() == {"code": 200}
+        assert (len(first.messages), len(second.messages)) == (0, 1)
+
+
+def test_stopping_leaves_no_thread_and_reports_no_error(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
+    with caplog.at_level("WARNING"):
+        with running_adapter(fake) as adapter:
+            fake.wait_acknowledged(fake.push_event(message_event()))
+        connection = adapter.bot._sdk_connection
+
+    assert connection.is_alive() is False
+    assert fake.wait_until(lambda: fake.close_codes, what="the close") == [1000]
+    # Not "Event loop stopped before Future completed", not "Task exception was never retrieved".
+    assert [record.getMessage() for record in caplog.records if record.name != "Lark"] == []
+    assert [record for record in caplog.records if "disconnected" not in record.getMessage()] == []
+
+
+def test_the_client_s_own_clean_up_runs_on_the_loop_that_runs_the_client(fake: FakeFeishu):
+    """The SDK schedules its fragment-cache sweep on the constructing thread's loop; a loop nobody runs never sweeps."""
+    with running_adapter(fake) as adapter:
+        connection = adapter.bot._sdk_connection
+        client = fake.wait_until(lambda: connection._client, what="the client")
+
+        assert client._cache._cron.get_loop() is connection._loop
+        assert connection._loop.is_running()
+
+
 def test_the_setup_wizard_s_temporary_connection_refuses_events(fake: FakeFeishu, monkeypatch: pytest.MonkeyPatch):
     """Feishu gives an event to one connection of the app; one that lands here must be sent again, not swallowed."""
-    from modules.im.feishu_sdk_ws import sdk_ws_client_module
     from vibe import api
 
     monkeypatch.setattr(api, "_lark_api_base", lambda _domain="feishu": fake.url)
-    thread = None
     try:
         assert api.lark_temp_ws_start("cli_wizard", "wizard-secret", "feishu")["ok"] is True
-        thread = api._temp_ws_thread
+        connection = api._temp_ws_connection
         fake.wait_connected()
         refused = fake.wait_acknowledged(fake.push_event(message_event()))
-        assert api.lark_temp_ws_stop() == {"ok": True}
     finally:
-        # The temporary client's thread sits in the SDK's shared loop for good; release it for the next test.
-        loop = sdk_ws_client_module().loop
-        loop.call_soon_threadsafe(loop.stop)
-        if thread is not None:
-            thread.join(timeout=10)
+        assert api.lark_temp_ws_stop() == {"ok": True}
 
     assert refused.json() == {"code": 500}
     assert fake.endpoint_requests[0]["body"] == {"AppID": "cli_wizard", "AppSecret": "wizard-secret"}
-
+    # Stopping it ends its thread; it used to stay in the SDK's loop for good.
+    assert connection.is_alive() is False
+    assert api._temp_ws_connection is None
