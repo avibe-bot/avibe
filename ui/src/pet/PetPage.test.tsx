@@ -3620,6 +3620,35 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(invoke).toHaveBeenCalledWith('pet_drag', { x: 10, y: 10 });
   });
 
+  // A freshly shown window can deliver the press but none of the moves after
+  // it; the hold timer asks the shell where the pointer is before it holds.
+  for (const [name, pointer, expected] of [
+    ['a pointer that moved is a drag', { x: 40, y: 10, down: true }, 'drag'],
+    ['a released button is nothing', { x: 10, y: 10, down: false }, 'nothing'],
+    ['a pointer that stayed is a hold', { x: 11, y: 10, down: true }, 'hold'],
+  ] as const) {
+    it(`asks the shell before a hold: ${name}`, async () => {
+      const invoke = recording((command, args) => {
+        if (command === 'pet_ready') return ready();
+        if (command === 'pet_pointer') return pointer;
+        if (command === 'pet_drag') return new Promise(() => {});
+        return { revision: args?.revision ?? 1, layout: bottom };
+      });
+      shell(invoke);
+      mainSession('S'); render(<PetPage />);
+      const avatar = await screen.findByLabelText('pet.recentTurns');
+      await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending')).toBe(false));
+      fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_pointer'));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const dragged = invoke.mock.calls.some(([command]) => command === 'pet_drag');
+      expect(dragged).toBe(expected === 'drag');
+      if (expected === 'drag') expect(invoke).toHaveBeenCalledWith('pet_drag', { x: 10, y: 10 });
+      // Only a hold opens the hold's surface (the composer without voice).
+      expect(screen.queryByRole('textbox') !== null).toBe(expected === 'hold');
+    });
+  }
+
   it('draws a published snapshot before acknowledging it, and ignores an older one', async () => {
     const invoke = recording((command, args) => command === 'pet_ready' ? ready() : { revision: args?.revision ?? 1, layout: top });
     shell(invoke);

@@ -43,6 +43,8 @@ import { FencedSource } from './fencedSource';
 import './pet-mini.css';
 
 const HOLD_MS = 320;
+/** How far (CSS px) a press moves before it is a drag rather than a click or hold. */
+const DRAG_SLOP = 4;
 const DOUBLE_CLICK_DETECTION_MS = 450;
 const DISMISS_EXIT_MS = 500;
 const STOP_CONFIRM_MS = 3000;
@@ -326,6 +328,15 @@ const PetSurface: React.FC = () => {
   const composerBeforeClickRef = useRef(false);
   const doubleOpenedRef = useRef(false);
   const allowDoubleEventRef = useRef(false);
+  const beginDrag = (press: { dragged: boolean; x: number; y: number; timer: number }) => {
+    press.dragged = true;
+    window.clearTimeout(press.timer);
+    lastClickAtRef.current = 0;
+    doubleOpenedRef.current = false;
+    allowDoubleEventRef.current = false;
+    // The drop's layout arrives as the shell's snapshot (petShell).
+    void petBridge.drag({ x: press.x, y: press.y }).catch(() => undefined);
+  };
   const dismissTimers = useRef<Record<string, number>>({});
   const closeComposer = useCallback(() => {
     setComposing(false);
@@ -1024,10 +1035,16 @@ const PetSurface: React.FC = () => {
             double: isSecondClick,
             x: event.clientX,
             y: event.clientY,
-            timer: window.setTimeout(() => {
+            timer: window.setTimeout(() => void (async () => {
+              // A freshly shown window can get the press but none of the moves
+              // after it, so before calling this a hold, ask the shell where the
+              // pointer is: moved means a drag, released means nothing.
+              const pointer = petBridge.shellDrags() ? await petBridge.pointer().catch(() => null) : null;
               if (!epoch.isCurrent()) return;
               const press = pressRef.current;
-              if (!press) return;
+              if (!press || press.held || press.dragged) return;
+              if (pointer?.down === false) { pressRef.current = null; return; }
+              if (pointer && Math.hypot(pointer.x - press.x, pointer.y - press.y) >= DRAG_SLOP) { beginDrag(press); return; }
               press.held = true;
               lastClickAtRef.current = 0;
               doubleOpenedRef.current = false;
@@ -1037,7 +1054,7 @@ const PetSurface: React.FC = () => {
               if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
               if (voice.available) voice.start();
               else openComposer(draft);
-            }, HOLD_MS),
+            })(), HOLD_MS),
           };
         }}
         onMouseDown={(event) => {
@@ -1060,14 +1077,8 @@ const PetSurface: React.FC = () => {
         onPointerMove={(event) => {
           const press = pressRef.current;
           if (!press || press.held || press.dragged || event.buttons !== 1) return;
-          if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < 4) return;
-          press.dragged = true;
-          window.clearTimeout(press.timer);
-          lastClickAtRef.current = 0;
-          doubleOpenedRef.current = false;
-          allowDoubleEventRef.current = false;
-          // The drop's layout arrives as the shell's snapshot (petShell).
-          void petBridge.drag({ x: press.x, y: press.y }).catch(() => undefined);
+          if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < DRAG_SLOP) return;
+          beginDrag(press);
         }}
         onPointerCancel={() => {
           const press = pressRef.current;

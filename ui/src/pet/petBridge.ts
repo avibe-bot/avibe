@@ -182,6 +182,16 @@ export const petBridge = {
    * the pet (resolves once the drop is placed; its layout arrives as a
    * snapshot), else with the window's own `start_dragging`.
    */
+  /** Where the pointer is in this window and whether the primary button is
+   * down, as the shell sees it; `null` from a shell that cannot say. */
+  pointer: async (): Promise<{ x: number; y: number; down: boolean | null } | null> => {
+    const invoke = shellInvoke();
+    if (!invoke) return null;
+    const value = await invoke('pet_pointer') as { x?: unknown; y?: unknown; down?: unknown } | null;
+    if (!value || typeof value.x !== 'number' || typeof value.y !== 'number') return null;
+    return { x: value.x, y: value.y, down: typeof value.down === 'boolean' ? value.down : null };
+  },
+
   /** `press`: where the press was, in the window's CSS px; the shell keeps
    * that point of Vibey under the pointer for the whole drag. */
   drag: async (press?: { x: number; y: number }): Promise<void> => {

@@ -2978,6 +2978,7 @@ pub fn run() {
             pet::pet_context_menu,
             pet::pet_set_expanded,
             pet::pet_drag,
+            pet::pet_pointer,
             pet::pet_settle,
             pet::pet_hit_regions,
             pet::pet_set_dismissed,

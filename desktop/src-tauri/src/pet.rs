@@ -1253,6 +1253,38 @@ pub async fn pet_drag(window: WebviewWindow, x: Option<f64>, y: Option<f64>) -> 
     placed?
 }
 
+/// Where the pointer is in the pet window (its points from the top-left) and
+/// whether the primary button is down (`None` where the shell cannot tell).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PetPointer {
+    x: f64,
+    y: f64,
+    down: Option<bool>,
+}
+
+/// The pointer as the shell sees it. The page asks before it treats a press
+/// as a hold: a freshly shown window can get the press but none of the moves
+/// that follow it, so the page cannot tell a drag from a hold by itself.
+#[tauri::command]
+pub fn pet_pointer(window: WebviewWindow) -> Result<Option<PetPointer>, String> {
+    ensure_pet_page(&window)?;
+    let app = window.app_handle();
+    let (Ok(cursor), Ok(origin), Ok(window_scale), Ok(size)) = (
+        app.cursor_position(),
+        window.outer_position(),
+        window.scale_factor(),
+        window.inner_size(),
+    ) else {
+        return Ok(None);
+    };
+    let pointer = cursor_in_window(cursor, cursor_scale(app, window_scale), origin, window_scale, size);
+    Ok(Some(PetPointer {
+        x: pointer.x,
+        y: pointer.y,
+        down: primary_button_down(),
+    }))
+}
+
 fn abandon_drag(app: &AppHandle, generation: u64) {
     let pet = app.state::<Pet>();
     if pet.drag_generation.load(Ordering::SeqCst) != generation {
