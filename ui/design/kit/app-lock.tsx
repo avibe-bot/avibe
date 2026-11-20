@@ -51,14 +51,14 @@ export function LockScreen({
 
   let status: ReactNode = null;
   if (state === 'failed') {
-    status = <p role="alert" className="text-[13px] text-destructive-ink">{t('appLock.lock.verificationFailed')}</p>;
+    status = <p role="alert" className="text-sm text-destructive-ink">{t('appLock.lock.verificationFailed')}</p>;
   } else if (state === 'lockout') {
-    status = <p className="text-[13px] text-muted">{device === 'iphone' ? t('appLock.lock.iphone.faceIDLockout') : t('appLock.lock.macLockout')}</p>;
+    status = <p className="text-sm text-muted">{device === 'iphone' ? t('appLock.lock.iphone.faceIDLockout') : t('appLock.lock.macLockout')}</p>;
   } else if (state === 'passcodeOnly') {
     const text = device === 'iphone'
       ? reason === 'denied' ? t('appLock.lock.iphone.faceIDDenied') : t('appLock.lock.iphone.faceIDNotEnrolled')
       : reason === 'notEnrolled' ? t('appLock.lock.macNotEnrolled') : t('appLock.lock.macUnavailable');
-    status = <p className="text-[13px] text-muted">{text}</p>;
+    status = <p className="text-sm text-muted">{text}</p>;
   }
 
   if (state === 'cover') {
@@ -71,11 +71,11 @@ export function LockScreen({
 
   return (
     <div className={cn('flex h-full w-full flex-col items-center justify-center bg-background px-8 text-foreground page-glow-console', className)}>
-      <div className={cn('flex w-full flex-col items-center text-center', compact ? 'max-w-[300px] gap-4' : 'max-w-[340px] gap-5')}>
+      <div className={cn('flex w-full flex-col items-center text-center', compact ? 'max-w-xs gap-4' : 'max-w-sm gap-5')}>
         <img src={logo} alt="" className={compact ? 'size-12' : 'size-16'} />
         <div className="flex flex-col gap-1.5">
-          <h1 className={cn('font-semibold tracking-tight', compact ? 'text-[17px]' : 'text-[22px]')}>{t('appLock.lock.lockedTitle')}</h1>
-          {compact && <p className="text-[12px] text-muted">{t('appLock.lock.restoreAllWindows')}</p>}
+          <h1 className={cn('font-semibold tracking-tight', compact ? 'text-lg' : 'text-2xl')}>{t('appLock.lock.lockedTitle')}</h1>
+          {compact && <p className="text-xs text-muted">{t('appLock.lock.restoreAllWindows')}</p>}
         </div>
         {pending && <PendingNote kind={pending} />}
         <Button
@@ -84,10 +84,10 @@ export function LockScreen({
           disabled={state === 'verifying'}
           className={cn('w-full', compact ? '' : 'rounded-full')}
         >
-          {state === 'verifying' ? <Loader2 className="size-4 animate-spin" /> : <Icon className="size-[18px]" />}
+          {state === 'verifying' ? <Loader2 className="size-4 animate-spin" /> : <Icon className="size-4.5" />}
           {state === 'verifying' ? t('appLock.lock.verifying') : action}
         </Button>
-        <div className="min-h-[20px]">{status}</div>
+        <div className="min-h-5">{status}</div>
       </div>
     </div>
   );
@@ -97,8 +97,8 @@ function PendingNote({ kind }: { kind: 'askVibey' | 'link' }) {
   const { t } = useTranslation();
   // Says what is waiting, never its content: the selection itself stays hidden until unlock.
   return (
-    <div className="flex w-full items-start gap-2.5 rounded-lg border border-edge bg-field px-3.5 py-2.5 text-left text-[12px] leading-relaxed text-muted">
-      <Info className="mt-[2px] size-[14px] shrink-0" />
+    <div className="flex w-full items-start gap-2.5 rounded-lg border border-edge bg-field px-3.5 py-2.5 text-left text-xs leading-relaxed text-muted">
+      <Info className="mt-0.5 size-3.5 shrink-0" />
       <span>{kind === 'askVibey' ? t('appLock.lock.pendingContent') : t('appLock.lock.pendingLink')}</span>
     </div>
   );

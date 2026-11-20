@@ -22,7 +22,8 @@ final class AppLockWindow: UIWindow {
     override var canBecomeKey: Bool { false }
 }
 
-/// The Web UI's tokens, as native chrome draws them (ui/src/index.css).
+/// The Web UI's tokens, as native chrome draws them (ui/src/index.css). Sizes follow the
+/// frame's Tailwind scale: title text-2xl (24), status text-sm (14), column max-w-sm (384).
 enum AppLockPalette {
     static let background = UIColor { $0.userInterfaceStyle == .dark
         ? UIColor(red: 0x08 / 255, green: 0x08 / 255, blue: 0x12 / 255, alpha: 1)
@@ -92,7 +93,7 @@ struct AppLockView: View {
         return VStack(spacing: 20) {
             AppLockLogo()
             Text("appLock.lock.lockedTitle")
-                .font(.system(size: 22, weight: .semibold))
+                .font(.system(size: 24, weight: .semibold))
                 .foregroundStyle(Color(uiColor: AppLockPalette.foreground))
                 .multilineTextAlignment(.center)
             Button {
@@ -127,11 +128,11 @@ struct AppLockView: View {
                         .foregroundStyle(Color(uiColor: AppLockPalette.muted))
                 }
             }
-            .font(.system(size: 13))
+            .font(.system(size: 14))
             .multilineTextAlignment(.center)
             .frame(minHeight: 20)
         }
-        .frame(maxWidth: 340)
+        .frame(maxWidth: 384)
         .padding(.horizontal, 32)
     }
 }
