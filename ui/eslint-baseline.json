@@ -36,7 +36,7 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/RemoteAccess.tsx": {
-      "avibe/localized-user-text": 7,
+      "avibe/localized-user-text": 6,
       "react-hooks/purity": 1,
       "react-hooks/set-state-in-effect": 2
     },

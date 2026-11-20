@@ -1,12 +1,15 @@
-// Proposed 2026-11-20 (frames only, a draft for the owner to discuss; no implementation):
-// Settings · Devices takes the place of Settings · Remote access. One page answers "which devices
-// can open this Avibe, from where, and what may each do": how this Avibe is reached (set once, no
-// pairing key), the devices (one row each; a detail with its functions and one way out), and recent
-// activity. Facts, reasons and open questions: the Show Page of the Session that drew these.
+// Settings · Devices (src/components/devices/DevicesPageView.tsx) takes the place of Settings ·
+// Remote access. One page answers "which devices can open this Avibe, from where, and what may each
+// do": how this Avibe is reached (set once, no pairing key), the devices (one row each; a detail
+// with its functions and one way out), and recent activity. The view is not routed yet; the frames
+// draw it at the route it will take over. The section's new name is proposed copy (`copy`) until
+// the page is routed.
 import type { WorkbenchFixtures } from '../../shell/fixtures';
 import { IOS_APP_CAPABILITIES, IPHONE_17_PRO } from '../../shell/fixtures';
+import { DESIGN_NOW } from '../../shell/clock';
 import { frames, type FrameSpec } from '../../frame';
-import { DevicesPage, type Activity, type Device, type DevicesPageProps, type Reach } from '../../kit/devices';
+import { DevicesPageView, type DevicesPageViewProps } from '@/components/devices/DevicesPageView';
+import type { Device, DeviceActivity, DeviceCapability, Reach } from '@/components/devices/types';
 import { settingsFixtures, settingsPage } from './fixtures';
 
 const route = '/settings/remote-access';
@@ -17,64 +20,65 @@ const host = 'max-app.avibe.bot';
 const copy = { 'settings.sections.remoteAccess': { zh: '设备', en: 'Devices' } };
 const fixtures = (extra: WorkbenchFixtures = {}) => settingsFixtures({}, { copy, ...extra });
 
-const t = (zh: string, en: string) => ({ zh, en });
+/** An instant `minutes` before the design clock. */
+const ago = (minutes: number) => new Date(DESIGN_NOW - minutes * 60_000).toISOString();
+const DAY = 24 * 60;
 
 const macbook = (extra: Partial<Device> = {}): Device => ({
-  id: 'host', kind: 'host', name: 'Max 的 MacBook Pro', app: 'Avibe 3.2.8 · macOS', online: {},
-  capabilities: [
-    { kind: 'computerUse', on: true, detail: t('Agent 可以查看并操作这台 Mac。', 'Agents can see and operate this Mac.') },
-    { kind: 'notifications', on: true, detail: t('Vault 审批和后台任务完成时的系统通知。', 'System notifications for Vault approvals and finished background work.') },
-  ],
+  id: 'host', kind: 'host', name: 'Max 的 MacBook Pro', client: { kind: 'runtime', version: '3.2.8', platform: 'macOS' }, online: {},
+  capabilities: [{ kind: 'computerUse', on: true }, { kind: 'notifications', on: true }],
   ...extra,
 });
 
+const iphoneCapabilities: DeviceCapability[] = [
+  { kind: 'notifications', on: true },
+  { kind: 'health', on: true, data: ['steps', 'activity', 'workouts', 'sleep'], syncedAt: ago(468) },
+  { kind: 'schedule', on: true },
+];
+
 const iphone = (extra: Partial<Device> = {}): Device => ({
-  id: 'iphone', kind: 'iphone', name: 'Max 的 iPhone', app: 'Avibe App 3.2.8 · iOS 26.1',
-  online: { path: 'punched', ms: 38 }, signedIn: t('11 月 12 日', 'Nov 12'),
-  capabilities: [
-    { kind: 'notifications', on: true, detail: t('伙伴和会话的消息会推送到这台 iPhone。', 'Messages from Bots and Sessions are pushed to this iPhone.') },
-    { kind: 'health', on: true, detail: t('步数、活动、锻炼、睡眠 · 今天 08:12 同步', 'Steps, activity, workouts, sleep · synced today 08:12') },
-    { kind: 'schedule', on: true, detail: t('由 Agent 提出，每次都由你在这台 iPhone 上确认。', 'An Agent asks; you confirm each one on this iPhone.') },
-  ],
+  id: 'iphone', kind: 'iphone', name: 'Max 的 iPhone', client: { kind: 'app', version: '3.2.8', platform: 'iOS 26.1' },
+  online: { path: 'punched', family: 'ipv6', ms: 38 }, signedInAt: ago(10 * DAY),
+  capabilities: iphoneCapabilities,
   recent: [
-    { at: t('今天 08:12', 'Today 08:12'), text: t('Agent 读取了近 7 天的步数和睡眠 ·「晨间简报」', 'An Agent read 7 days of steps and sleep · “Morning brief”') },
-    { at: t('昨天 22:40', 'Yesterday 22:40'), text: t('创建闹钟「06:30 起床」，已在 iPhone 上确认', 'Alarm “06:30 Wake up” created, confirmed on the iPhone') },
+    { id: 'r1', at: ago(468), event: { kind: 'healthRead', days: 7, data: ['steps', 'sleep'], task: '晨间简报' } },
+    { id: 'r2', at: ago(1040), event: { kind: 'alarmCreated', label: '06:30 起床', confirmedOn: 'iPhone' } },
   ],
   ...extra,
 });
 
 const macMini: Device = {
-  id: 'mini', kind: 'desktop', name: 'Mac mini（办公室）', app: 'Avibe Desktop 3.2.8 · macOS',
-  online: { path: 'tunnel', ms: 120 }, signedIn: t('今天 09:41', 'Today 09:41'), capabilities: [],
+  id: 'mini', kind: 'desktop', name: 'Mac mini（办公室）', client: { kind: 'desktop', version: '3.2.8', platform: 'macOS' },
+  online: { path: 'tunnel', ms: 120 }, signedInAt: ago(379), capabilities: [],
 };
 const chrome: Device = {
-  id: 'chrome', kind: 'browser', name: 'Chrome · Windows', app: '浏览器',
-  lastActive: t('3 天前', '3 days ago'), signedIn: t('11 月 17 日', 'Nov 17'), capabilities: [],
+  id: 'chrome', kind: 'browser', name: 'Chrome · Windows', client: { kind: 'browser' },
+  lastActiveAt: ago(3 * DAY + 60), signedInAt: ago(14 * DAY), capabilities: [],
 };
 const safari: Device = {
-  id: 'safari', kind: 'browser', name: 'Safari · iPad', app: '主屏幕 App',
-  lastActive: t('昨天 21:15', 'Yesterday 21:15'), signedIn: t('10 月 30 日', 'Oct 30'),
-  capabilities: [{ kind: 'notifications', on: true, detail: t('伙伴和会话的消息会推送到这台 iPad。', 'Messages from Bots and Sessions are pushed to this iPad.') }],
+  id: 'safari', kind: 'browser', name: 'Safari · iPad', client: { kind: 'homeScreen' },
+  lastActiveAt: ago(1125), signedInAt: ago(30 * DAY),
+  capabilities: [{ kind: 'notifications', on: true }],
 };
 const sara: Device = {
-  id: 'sara', kind: 'browser', name: 'Chrome · macOS', app: '浏览器', person: 'sara@example.test',
-  online: { path: 'tunnel' }, signedIn: t('今天 10:02', 'Today 10:02'), capabilities: [],
+  id: 'sara', kind: 'browser', name: 'Chrome · macOS', client: { kind: 'browser' }, person: 'sara@example.test',
+  online: { path: 'tunnel' }, signedInAt: ago(358), capabilities: [],
 };
 
-const activity: Activity[] = [
-  { at: t('今天 09:41', 'Today 09:41'), text: t('Mac mini（办公室）登录', 'Mac mini (office) signed in'), device: 'Avibe Desktop' },
-  { at: t('今天 08:12', 'Today 08:12'), text: t('Agent 读取了近 7 天的步数和睡眠 ·「晨间简报」', 'An Agent read 7 days of steps and sleep · “Morning brief”'), device: 'Max 的 iPhone' },
-  { at: t('昨天 22:40', 'Yesterday 22:40'), text: t('创建闹钟「06:30 起床」，已在 iPhone 上确认', 'Alarm “06:30 Wake up” created, confirmed on the iPhone'), device: 'Max 的 iPhone' },
-  { at: t('昨天 19:03', 'Yesterday 19:03'), text: t('已退出 Firefox · Linux', 'Firefox · Linux signed out'), device: 'Max 的 MacBook Pro' },
+const activity: DeviceActivity[] = [
+  { id: 'a1', at: ago(379), event: { kind: 'signedIn', device: 'Mac mini（办公室）' }, source: 'Avibe Desktop' },
+  { id: 'a2', at: ago(468), event: { kind: 'healthRead', days: 7, data: ['steps', 'sleep'], task: '晨间简报' }, source: 'Max 的 iPhone' },
+  { id: 'a3', at: ago(1040), event: { kind: 'alarmCreated', label: '06:30 起床', confirmedOn: 'iPhone' }, source: 'Max 的 iPhone' },
+  { id: 'a4', at: ago(1257), event: { kind: 'signedOut', device: 'Firefox · Linux' }, source: 'Max 的 MacBook Pro' },
 ];
-const fullActivity: Activity[] = [
+const fullActivity: DeviceActivity[] = [
   ...activity,
-  { at: t('11 月 17 日 14:20', 'Nov 17 14:20'), text: t('Chrome · Windows 登录', 'Chrome · Windows signed in'), device: '浏览器' },
-  { at: t('11 月 15 日 20:31', 'Nov 15 20:31'), text: t('直连已开启', 'Direct turned on'), device: 'Max 的 MacBook Pro' },
-  { at: t('11 月 12 日 09:06', 'Nov 12 09:06'), text: t('Max 的 iPhone 已连接健康：步数、活动、锻炼、睡眠', 'Max’s iPhone connected Health: steps, activity, workouts, sleep'), device: 'Max 的 iPhone' },
-  { at: t('11 月 12 日 09:02', 'Nov 12 09:02'), text: t('Max 的 iPhone 登录', 'Max’s iPhone signed in'), device: 'Avibe App' },
-  { at: t('10 月 30 日 18:44', 'Oct 30 18:44'), text: t('Safari · iPad 登录', 'Safari · iPad signed in'), device: '主屏幕 App' },
-  { at: t('10 月 30 日 18:40', 'Oct 30 18:40'), text: t('远程访问已开启：max-app.avibe.bot', 'Remote access turned on: max-app.avibe.bot'), device: 'Max 的 MacBook Pro' },
+  { id: 'a5', at: ago(14 * DAY + 100), event: { kind: 'signedIn', device: 'Chrome · Windows' }, source: 'Chrome · Windows' },
+  { id: 'a6', at: ago(16 * DAY + 200), event: { kind: 'directOn' }, source: 'Max 的 MacBook Pro' },
+  { id: 'a7', at: ago(10 * DAY + 30), event: { kind: 'healthConnected', device: 'Max 的 iPhone', data: ['steps', 'activity', 'workouts', 'sleep'] }, source: 'Max 的 iPhone' },
+  { id: 'a8', at: ago(10 * DAY + 34), event: { kind: 'signedIn', device: 'Max 的 iPhone' }, source: 'Avibe App' },
+  { id: 'a9', at: ago(30 * DAY + 200), event: { kind: 'signedIn', device: 'Safari · iPad' }, source: 'Safari · iPad' },
+  { id: 'a10', at: ago(30 * DAY + 204), event: { kind: 'remoteAccessOn', host }, source: 'Max 的 MacBook Pro' },
 ];
 
 const on: Reach = { state: 'on', host, account, tunnel: 'good', ms: 120, direct: true };
@@ -87,7 +91,7 @@ function frame(
   name: string,
   title: string,
   size: { width: number; height: number; safeArea?: { top: number; bottom: number } },
-  props: DevicesPageProps,
+  props: DevicesPageViewProps,
   extra: Partial<FrameSpec> & { app?: boolean } = {},
 ): FrameSpec {
   const { app, ...spec } = extra;
@@ -95,11 +99,11 @@ function frame(
     name,
     title,
     ...size,
-    status: 'proposed',
+    status: 'shipped',
     themes: ['light'],
     route,
     fixtures: fixtures(app ? { nativeShell: IOS_APP_CAPABILITIES } : {}),
-    render: settingsPage('remote-access', <DevicesPage ownerEmail={account} {...props} />),
+    render: settingsPage('remote-access', <DevicesPageView ownerEmail={account} {...props} />),
     ...spec,
   };
 }
@@ -127,7 +131,7 @@ const designFrames = frames([
   frame('on-shared', '已开启 · 共享实例的所有者：别人的设备单独一组', at(1180),
     { reach: on, devices: [...all('host'), sara], activity }),
   frame('member', '共享实例的成员：只看到自己的设备', at(600),
-    { reach: on, viewer: 'member', devices: [{ ...sara, person: undefined, self: true }, { ...iphone({ id: 'sara-phone', name: 'Sara 的 iPhone', online: undefined, lastActive: t('昨天 18:20', 'Yesterday 18:20'), capabilities: [iphone().capabilities[0]] }) }] }),
+    { reach: on, viewer: 'member', devices: [{ ...sara, person: undefined, self: true }, iphone({ id: 'sara-phone', name: 'Sara 的 iPhone', online: undefined, lastActiveAt: ago(1300), capabilities: [iphoneCapabilities[0]] })] }),
 
   // 4. A device's detail.
   frame('detail-iphone', '设备详情 · iPhone：连接、三项功能各一个开关、最近、退出这台设备', TALL,
@@ -141,10 +145,9 @@ const designFrames = frames([
   frame('detail-host', '设备详情 · 运行 Avibe 的电脑：没有「退出」', at(860),
     { reach: on, devices: all('host'), activity, detail: 'host' }),
   frame('detail-host-remote', '设备详情 · 从别的设备看主机：电脑操作只能在那台电脑上改', at(860),
-    { reach: on, activity, detail: 'host', devices: all('mini').map((each) => (each.id === 'host' ? macbook({ capabilities: [
-      { kind: 'computerUse', on: true, detail: t('', ''), fixed: t('已就绪。在那台 Mac 的 Avibe 里开关。', 'Ready. Turn it on or off in Avibe on that Mac.') },
-      macbook().capabilities[1],
-    ] }) : each)) }),
+    { reach: on, activity, detail: 'host', devices: all('mini').map((each) => (each.id === 'host'
+      ? macbook({ capabilities: [{ kind: 'computerUse', on: true, fixed: true }, { kind: 'notifications', on: true }] })
+      : each)) }),
   frame('detail-other-person', '设备详情 · 别人的设备：只结束这次访问', at(1080),
     { reach: on, devices: [...all('host'), sara], activity, detail: 'sara' }),
 
@@ -162,9 +165,9 @@ const designFrames = frames([
   frame('add', '已有其他设备后：标题旁一个安静的「添加设备」，点开是同一块内容', TALL,
     { reach: on, devices: all('host'), activity, add: 'iphone' }),
   frame('tunnel-down', '已开启，但连不上 Cloudflare', at(760),
-    { reach: { ...on, tunnel: 'down' } as Reach, devices: [macbook({ self: true }), iphone({ online: undefined, lastActive: t('12 分钟前', '12 min ago') }), { ...macMini, online: undefined, lastActive: t('12 分钟前', '12 min ago') }] }),
+    { reach: { ...on, tunnel: 'down' }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
   frame('paused', '关闭后：域名保留，一个开关就能再开', at(700),
-    { reach: { state: 'paused', host, account }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActive: t('2 小时前', '2 h ago') })] }),
+    { reach: { state: 'paused', host, account }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(120) })] }),
   frame('turn-off-remote', '远程关闭远程访问：会把自己关在外面，所以先确认', at(860),
     { reach: on, devices: all('mini'), activity, confirm: 'turn-off' }),
   frame('remove-others', '退出其他所有设备：确认', at(860),
