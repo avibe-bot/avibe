@@ -307,6 +307,42 @@ describe('RemoteAccess', () => {
     }
   });
 
+  it("reads the App's path again while shown, so a move within one family is followed", async () => {
+    vi.useFakeTimers();
+    const call = vi.fn((method: string) => Promise.resolve(method === 'direct.status'
+      ? { preferred: 'direct', sequence: 3, closure: 0, path: 'ipv4', path_scope: 'local', rtt_ms: 3 }
+      : null));
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: {
+        contract: 1, platform: 'ios', shellVersion: '1.0 (1)', capabilities: { direct: 3 }, call,
+        on: vi.fn(() => () => undefined),
+      },
+    });
+    const reads = () => call.mock.calls.filter(([method]) => method === 'direct.status').length;
+    try {
+      api.remoteAccessStatus.mockResolvedValue(runningStatus({
+        direct: { enabled: true, state: 'running', reason: 'published', certificate_not_after: null, transport_running: true, direct_access_allowed: true },
+      }));
+      act(() => setLiveStreamVia('direct'));
+      await act(async () => { renderPage(); });
+      const first = reads();
+      expect(first).toBeGreaterThan(0);
+      await act(async () => { vi.advanceTimersByTime(5_000); });
+      expect(reads()).toBe(first + 1);
+
+      // Not while the page is hidden.
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      await act(async () => { vi.advanceTimersByTime(10_000); });
+      expect(reads()).toBe(first + 1);
+    } finally {
+      Reflect.deleteProperty(document, 'visibilityState');
+      Reflect.deleteProperty(window, 'avibeNative');
+      vi.useRealTimers();
+      act(() => setLiveStreamVia(null));
+    }
+  });
+
   it('RA-TQ-032 shows technical details when the remote status includes a network path', async () => {
     renderPage();
 
