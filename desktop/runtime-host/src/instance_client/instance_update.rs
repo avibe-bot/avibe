@@ -1,0 +1,427 @@
+//! The selected instance's update state, as the shell's trusted pages read it.
+//!
+//! Everything here is display data rebuilt from the instance's released
+//! `/api/version` answer: fields are allow-listed, versions must parse as
+//! versions, phases are enumerated and errors are codes. Nothing the instance
+//! writes as free text (an error description, a package URL, installer output)
+//! reaches the bridge. A field this module does not know is dropped.
+use super::protocol::ClientError;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct InstanceUpdate {
+    pub instance_id: String,
+    pub status: Status,
+    pub snapshot: Option<Value>,
+    pub can_manage: bool,
+    pub request: Option<Receipt>,
+    pub fetched_at: Option<String>,
+    /// A read that started after `request` settled has been published: the
+    /// snapshot can show that request's effect. Native only.
+    #[serde(skip)]
+    pub(crate) request_seen: bool,
+    /// For an install: the version the instance reported when it was sent,
+    /// and a desktop-managed host's request id. Native only.
+    #[serde(skip)]
+    pub(crate) install_from: Option<String>,
+    #[serde(skip)]
+    pub(crate) install_ref: Option<String>,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    Loading,
+    Ready,
+    Unreachable,
+    Unauthorized,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Receipt {
+    pub action: Action,
+    pub phase: Phase,
+    pub target: Option<String>,
+    pub error_code: Option<String>,
+    pub updated_at: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Install,
+    Check,
+    Prereleases,
+    AutoUpdate,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Sending,
+    Accepted,
+    Failed,
+}
+
+/// How long the shell keeps following an install it sent before it stops
+/// rereading on its own. A standalone install takes about a minute; a
+/// desktop-managed host's request expires after 30 minutes.
+const FOLLOW_INSTALL: chrono::Duration = chrono::Duration::minutes(30);
+
+impl InstanceUpdate {
+    pub fn loading(instance_id: String) -> Self {
+        Self {
+            instance_id,
+            status: Status::Loading,
+            snapshot: None,
+            can_manage: false,
+            request: None,
+            fetched_at: None,
+            request_seen: false,
+            install_from: None,
+            install_ref: None,
+        }
+    }
+
+    /// Whether something this shell sent has not settled, so the shell keeps
+    /// rereading without the popup open. Bounded: it stops on its own.
+    pub fn unsettled(&self, now: DateTime<Utc>) -> bool {
+        let Some(request) = &self.request else {
+            return false;
+        };
+        let Ok(at) = DateTime::parse_from_rfc3339(&request.updated_at) else {
+            return false;
+        };
+        if now.signed_duration_since(at) >= FOLLOW_INSTALL || self.status == Status::Unauthorized {
+            return false;
+        }
+        let seen = self.request_seen;
+        match (request.phase, request.action) {
+            (Phase::Sending, _) => true,
+            (Phase::Failed, _) => false,
+            // An accepted install is followed until the instance reports another
+            // version (a standalone Runtime answers before its scheduled
+            // restart, still on the old one) or its own request ends.
+            (Phase::Accepted, Action::Install) => !self.install_ended(),
+            (Phase::Accepted, _) => {
+                !seen
+                    || self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| running(snapshot, request.action))
+            }
+        }
+    }
+
+    fn install_ended(&self) -> bool {
+        let Some(snapshot) = self.snapshot.as_ref().filter(|_| self.status == Status::Ready) else {
+            return false;
+        };
+        if running(snapshot, Action::Install) {
+            return false;
+        }
+        let remote = &snapshot["remote_request"];
+        let refused = self.install_ref.is_some()
+            && remote["request_id"].as_str() == self.install_ref.as_deref()
+            && matches!(remote["phase"].as_str(), Some("failed" | "declined" | "expired"));
+        refused || snapshot["current"].as_str() != self.install_from.as_deref()
+    }
+
+    /// A receipt left `sending` by a reply that could not be published (its
+    /// generation ended while the instance stayed selected) is marked
+    /// interrupted, never resent. What was installed is the snapshot's
+    /// `current`; no result is inferred here.
+    pub(crate) fn reconcile(&mut self, in_flight: bool) {
+        if let Some(request) = self.request.as_mut().filter(|request| request.phase == Phase::Sending) {
+            if !in_flight {
+                request.phase = Phase::Failed;
+                request.error_code = Some("interrupted".into());
+                request.updated_at = now();
+            }
+        }
+    }
+}
+
+/// The instance reports the accepted action still running.
+fn running(snapshot: &Value, action: Action) -> bool {
+    match action {
+        Action::Install => {
+            let remote = &snapshot["remote_request"];
+            !snapshot["install"].is_null()
+                || (remote.is_object()
+                    && !matches!(
+                        remote["phase"].as_str(),
+                        Some("completed" | "failed" | "declined" | "expired")
+                    ))
+        }
+        _ => snapshot["control_request"]["phase"] == "checking" || snapshot["phase"] == "checking",
+    }
+}
+
+/// chrono is built without its clock here; read the system's.
+pub(crate) fn utc_now() -> DateTime<Utc> {
+    DateTime::<Utc>::from(std::time::SystemTime::now())
+}
+pub(crate) fn now() -> String {
+    utc_now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Error codes the bridge may carry. Anything else the instance answers becomes
+/// `request_failed`; its own text never crosses.
+const CODES: &[&str] = &[
+    "check_failed",
+    "confirmation_required",
+    "desktop_managed_runtime",
+    "desktop_shell_unavailable",
+    "download_failed",
+    "expired",
+    "install_failed",
+    "instance_unauthorized",
+    "instance_unreachable",
+    "interrupted",
+    "invalid_request",
+    "no_update_available",
+    "not_desktop_managed",
+    "request_failed",
+    "requires_host",
+    "target_mismatch",
+    "update_check_failed",
+    "update_in_progress",
+];
+pub(crate) fn error_code(value: Option<&str>) -> String {
+    value
+        .filter(|code| CODES.contains(code))
+        .unwrap_or("request_failed")
+        .to_owned()
+}
+
+fn invalid() -> ClientError {
+    ClientError::new("invalid_response")
+}
+
+/// SemVer (the desktop app's `3.2.8-rc.4`) or the PEP 440 forms an Avibe
+/// Runtime reports (`3.2.8rc4`, `3.2.8.post1`, `3.2.9.dev5+g1a2b3c4`).
+pub fn is_version(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 {
+        return false;
+    }
+    if semver::Version::parse(value).is_ok() {
+        return true;
+    }
+    let (public, local) = match value.split_once('+') {
+        Some((public, local)) => (public, Some(local)),
+        None => (value, None),
+    };
+    if local.is_some_and(|local| {
+        local.is_empty()
+            || local
+                .split('.')
+                .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_alphanumeric()))
+    }) {
+        return false;
+    }
+    pep440_public(public)
+}
+fn pep440_public(value: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.len() <= 9 && s.bytes().all(|b| b.is_ascii_digit());
+    let release_end = value
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(value.len());
+    let (release, mut rest) = value.split_at(release_end);
+    // `3.2.8.post1` puts its separator inside the digit run.
+    let mut release = release.to_owned();
+    for marker in [".post", ".dev"] {
+        if rest.starts_with(&marker[1..]) && release.ends_with('.') {
+            release.pop();
+            rest = &value[release.len()..];
+        }
+    }
+    let parts: Vec<_> = release.split('.').collect();
+    if !(2..=4).contains(&parts.len()) || !parts.iter().all(|part| digits(part)) {
+        return false;
+    }
+    for prefix in ["a", "b", "rc"] {
+        if let Some(n) = rest.strip_prefix(prefix) {
+            let end = n.find('.').unwrap_or(n.len());
+            if !digits(&n[..end]) {
+                return false;
+            }
+            rest = &n[end..];
+            break;
+        }
+    }
+    for marker in [".post", ".dev"] {
+        if let Some(n) = rest.strip_prefix(marker) {
+            let end = n.find('.').unwrap_or(n.len());
+            if !digits(&n[..end]) {
+                return false;
+            }
+            rest = &n[end..];
+        }
+    }
+    rest.is_empty()
+}
+
+fn version(v: &Value) -> bool {
+    v.as_str().is_some_and(is_version)
+}
+fn date(v: &Value) -> bool {
+    v.as_str()
+        .is_some_and(|s| s.len() <= 64 && DateTime::parse_from_rfc3339(s).is_ok())
+}
+fn request_id(v: &Value) -> bool {
+    v.as_str()
+        .is_some_and(|s| !s.trim().is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_graphic()))
+}
+fn one(v: &Value, allowed: &[&str]) -> bool {
+    v.as_str().is_some_and(|s| allowed.contains(&s))
+}
+fn nullable(v: &Value, check: impl Fn(&Value) -> bool) -> bool {
+    v.is_null() || check(v)
+}
+fn field(source: &Value, key: &str, check: impl Fn(&Value) -> bool) -> Result<Value, ClientError> {
+    let value = source.get(key).unwrap_or(&Value::Null);
+    if check(value) {
+        Ok(value.clone())
+    } else {
+        Err(invalid())
+    }
+}
+fn code(v: &Value) -> Result<Value, ClientError> {
+    match v {
+        Value::Null => Ok(Value::Null),
+        Value::String(code) => Ok(json!(error_code(Some(code)))),
+        _ => Err(invalid()),
+    }
+}
+
+const HOST_ACTIONS: [&str; 4] = ["check", "prereleases", "auto_update", "install"];
+
+fn remote_request(v: &Value) -> Result<Value, ClientError> {
+    if v.is_null() {
+        return Ok(Value::Null);
+    }
+    Ok(json!({
+        "request_id": field(v, "request_id", request_id)?,
+        "target": field(v, "target", version)?,
+        "phase": field(v, "phase", |v| one(v, &[
+            "requested", "acknowledged", "checking", "awaiting_host", "downloading", "installing",
+            "restarting", "completed", "failed", "declined", "expired",
+        ]))?,
+        "progress": field(v, "progress", |v| nullable(v, |v| v.as_u64().is_some_and(|n| n <= 100)))?,
+        "error_code": code(v.get("error_code").unwrap_or(&Value::Null))?,
+        "updated_at": field(v, "updated_at", date)?,
+    }))
+}
+fn control_request(v: &Value) -> Result<Value, ClientError> {
+    if v.is_null() {
+        return Ok(Value::Null);
+    }
+    Ok(json!({
+        "request_id": field(v, "request_id", request_id)?,
+        "action": field(v, "action", |v| one(v, &HOST_ACTIONS[..3]))?,
+        "enabled": field(v, "enabled", |v| nullable(v, Value::is_boolean))?,
+        "phase": field(v, "phase", |v| one(v, &["checking", "completed", "failed", "expired"]))?,
+        "error_code": code(v.get("error_code").unwrap_or(&Value::Null))?,
+        "updated_at": field(v, "updated_at", date)?,
+    }))
+}
+fn install(v: &Value) -> Result<Value, ClientError> {
+    if v.is_null() {
+        return Ok(Value::Null);
+    }
+    Ok(json!({
+        "phase": field(v, "phase", |v| one(v, &["installing", "restarting"]))?,
+        "target": field(v, "target", |v| nullable(v, version))?,
+        "started_at": field(v, "started_at", date)?,
+    }))
+}
+/// Only the kind: a revision or a dirty tree is the instance's business.
+fn build(v: &Value) -> Result<Value, ClientError> {
+    Ok(json!({"kind": field(v, "kind", |v| one(v, &["package", "source"]))?}))
+}
+
+/// Rebuilds an `UpdateSnapshot` (ui/src/components/update/types.ts) plus the
+/// Runtime's optional `install`. Fails on any malformed known field.
+pub fn snapshot(v: &Value) -> Result<Value, ClientError> {
+    let object = v.as_object().ok_or_else(invalid)?;
+    let mut out = Map::new();
+    out.insert("current".into(), field(v, "current", version)?);
+    out.insert("latest".into(), field(v, "latest", |v| nullable(v, version))?);
+    out.insert("has_update".into(), field(v, "has_update", Value::is_boolean)?);
+    // A check failure is reported, never the instance's description of it.
+    out.insert(
+        "error".into(),
+        match object.get("error").unwrap_or(&Value::Null) {
+            Value::Null => Value::Null,
+            Value::String(_) => json!("error"),
+            _ => return Err(invalid()),
+        },
+    );
+    for (key, value) in object {
+        let value = match key.as_str() {
+            "managed_by" => field(v, key, |v| v == "desktop")?,
+            "phase" => field(v, key, |v| {
+                nullable(v, |v| {
+                    one(v, &["current", "available", "disabled", "error", "checking"])
+                })
+            })?,
+            "desktop_version" => field(v, key, |v| nullable(v, version))?,
+            "checked_at" => field(v, key, |v| nullable(v, date))?,
+            "prereleases" | "auto_update" => field(v, key, |v| nullable(v, Value::is_boolean))?,
+            "remote_install_allowed" => field(v, key, Value::is_boolean)?,
+            "host_actions" => {
+                let listed = value.as_array().filter(|a| a.len() <= 16).ok_or_else(invalid)?;
+                json!(HOST_ACTIONS
+                    .iter()
+                    .filter(|action| listed.iter().any(|item| item == **action))
+                    .collect::<Vec<_>>())
+            }
+            "remote_request" => remote_request(value)?,
+            "control_request" => control_request(value)?,
+            "install" => install(value)?,
+            "build" => build(value)?,
+            _ => continue,
+        };
+        out.insert(key.clone(), value);
+    }
+    Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_are_semver_or_runtime_pep440() {
+        for ok in [
+            "3.2.8",
+            "3.2.8-rc.4",
+            "3.2.8rc4",
+            "3.2.8a1",
+            "3.2.8b2",
+            "3.2.8.post1",
+            "3.2.9.dev5",
+            "3.2.9.dev5+g1a2b3c4.d20261120",
+            "3.2.8rc4.post1",
+            "1.0",
+        ] {
+            assert!(is_version(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "v3.2.8",
+            "3.2.8 ",
+            "3.2.8rc",
+            "3.2.8-rc 4",
+            "latest",
+            "3.2.8+",
+            "3.2.8+a..b",
+            "<b>3.2.8</b>",
+            "3",
+            "3.2.8\n",
+            "https://x/3.2.8",
+            "3.2.8rc4x",
+        ] {
+            assert!(!is_version(bad), "{bad}");
+        }
+    }
+}

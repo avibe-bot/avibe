@@ -2819,6 +2819,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             instance_client::desktop_client_request,
+            update_popover::update_popover_fit,
             bootstrap_status,
             bootstrap_retry,
             open_install_docs,

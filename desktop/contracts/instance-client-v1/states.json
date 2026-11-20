@@ -50,7 +50,8 @@
     },
     "consent": null,
     "remote_auxiliary": "local",
-    "current_instance": null
+    "current_instance": null,
+    "instance_update": null
   },
   "signed_in": {
     "version": 1,
@@ -116,7 +117,8 @@
     },
     "consent": null,
     "remote_auxiliary": "local",
-    "current_instance": null
+    "current_instance": null,
+    "instance_update": null
   },
   "challenge": {
     "version": 1,
@@ -172,7 +174,8 @@
     },
     "consent": null,
     "remote_auxiliary": "local",
-    "current_instance": null
+    "current_instance": null,
+    "instance_update": null
   },
   "enroll": {
     "version": 1,
@@ -228,7 +231,8 @@
     },
     "consent": null,
     "remote_auxiliary": "local",
-    "current_instance": null
+    "current_instance": null,
+    "instance_update": null
   },
   "consent": {
     "version": 1,
@@ -304,7 +308,8 @@
       "scope": "openid profile email"
     },
     "remote_auxiliary": "local",
-    "current_instance": null
+    "current_instance": null,
+    "instance_update": null
   },
   "remote_connected": {
     "version": 1,
@@ -379,6 +384,41 @@
       "relationship": "shared",
       "owner_email": "owner@example.test",
       "available": true
+    },
+    "instance_update": {
+      "instance_id": "studio-1",
+      "status": "ready",
+      "snapshot": {
+        "current": "3.2.8rc3",
+        "latest": "3.2.8rc4",
+        "has_update": true,
+        "error": null,
+        "prereleases": true,
+        "auto_update": false,
+        "host_actions": [
+          "check",
+          "prereleases",
+          "auto_update",
+          "install"
+        ],
+        "build": {
+          "kind": "package"
+        },
+        "install": {
+          "phase": "installing",
+          "target": "3.2.8rc4",
+          "started_at": "2026-11-20T07:03:17Z"
+        }
+      },
+      "can_manage": true,
+      "request": {
+        "action": "install",
+        "phase": "sending",
+        "target": "3.2.8rc4",
+        "error_code": null,
+        "updated_at": "2026-11-20T07:03:16.000Z"
+      },
+      "fetched_at": "2026-11-20T07:03:20.000Z"
     }
   }
 }
