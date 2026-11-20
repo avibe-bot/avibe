@@ -665,7 +665,10 @@ final class VoiceCaptureController {
 
     /// The island's Send (`send: true`) or Cancel, or the second press.
     /// Cancel on a failed take discards it.
-    func finish(send: Bool, cause: String = "island") async {
+    /// Returns whether a take went on to be sent (false: none was
+    /// recording, it was cancelled, or it was too short to be one).
+    @discardableResult
+    func finish(send: Bool, cause: String = "island") async -> Bool {
         guard case .listening(var take) = state else {
             if !send, case .failed(let take) = state {
                 // The island's Discard: this take only.
@@ -677,7 +680,7 @@ final class VoiceCaptureController {
                 // The island's button for a take no process holds.
                 _ = await endLeftovers(reason: send ? .interrupted : nil)
             }
-            return
+            return false
         }
         stopObservingInterruptions()
         maximumDurationTask?.cancel()
@@ -690,7 +693,7 @@ final class VoiceCaptureController {
             note(send ? "short:\(String(format: "%.1f", duration))" : "cancel", for: take)
             state = .idle
             await end(take, dismissal: .immediate)
-            return
+            return false
         }
         if nextAutomatic != nil || draining {
             // Earlier takes are still on their way: this one waits its
@@ -702,6 +705,7 @@ final class VoiceCaptureController {
         } else {
             await deliver(take)
         }
+        return true
     }
 
     /// Retry on the island of a take that is not sent yet: it is sent
@@ -1016,7 +1020,10 @@ final class VoiceCaptureController {
                 // nobody speaks on into nothing, but what was said is not
                 // lost. It is kept until the App is signed in again.
                 guard let self, case .listening(let take) = self.state, take.id == id else { return }
-                await self.finish(send: true, cause: "signIn")
+                // Too short to be a take: nothing is kept, and the press
+                // still says why it ended.
+                let kept = await self.finish(send: true, cause: "signIn")
+                if !kept { self.surface(refusal) }
                 return
             }
             await self?.consentRefused(refusal, takeID: id)
@@ -1770,6 +1777,11 @@ final class VoiceCaptureController {
         // What the send learned stays with the take where it is held now
         // (it may have given its island up meanwhile).
         replaceKept(take)
+        if byUser, case .needsApp(.signIn) = result, parked.contains(where: { $0.id == id }) {
+            // Retry was tapped while still signed out: say so, where the
+            // App can sign in (the island take says it in `settle`).
+            surface(Refusal(reason: .signIn, needsApp: true))
+        }
         guard let now = kept(id) else { return true }
         if case .failed(let current) = state, current.id == id {
             await settle(result, of: now)

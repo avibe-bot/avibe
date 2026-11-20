@@ -1619,6 +1619,23 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.activities.first?.ended?.reason, .signIn)
         XCTAssertEqual(world.instance.transcribed, 0)
         XCTAssertTrue((VoiceCaptureOutbox(directory: world.outboxDirectory).entries().first?.timing ?? "").contains(":signIn"))
+
+        // Answered before anything was said: nothing to keep, and the press
+        // still says why it ended.
+        let quick = World()
+        quick.instance.statusResult = .failure(Failure.signIn)
+        quick.instance.holdStatus = true
+        let other = quick.controller()
+        _ = await other.toggle()
+        await quick.instance.untilHolding()
+        quick.audio?.duration = 0.3
+        quick.instance.holdStatus = false
+        quick.instance.release()
+        await other.consentWatch?.value
+        XCTAssertEqual(other.phase, .idle)
+        XCTAssertEqual(other.unsentCount, 0)
+        XCTAssertEqual(quick.activities.last?.states.first?.reason, .signIn, "a notice says to sign in")
+        XCTAssertEqual(quick.activities.last?.states.first?.phase, .needsApp)
     }
 
     /// In front, a sign-in refusal said during the silent send is not
@@ -1636,6 +1653,11 @@ final class VoiceCaptureTests: XCTestCase {
         await controller.activated()
         XCTAssertEqual(world.unsentAlerts.map(\.count), [1])
         XCTAssertEqual(world.presented.count, 1)
+        // Retry while still signed out says so, rather than closing with no word.
+        world.unsentAlerts[0].answer(true)
+        for _ in 0..<400 where world.presented.count < 2 { try? await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(world.presented.map(\.0), [.signIn, .signIn])
+        XCTAssertEqual(controller.unsentCount, 1, "still kept")
     }
 
     /// The POST is not made unless its marker reached the disk: a POST that
