@@ -6,7 +6,7 @@
 // name, one of five states, and times. Never message text, tool names, file paths, or the instance name.
 // The title and name are written on the phone when tracking starts; pushes carry only the state.
 import type { ReactNode } from 'react';
-import { Check, Clock3, Hand, LockKeyhole, Settings, Square, X } from 'lucide-react';
+import { AlertTriangle, Check, Clock3, Hand, LockKeyhole, Settings, Square, X, XCircle } from 'lucide-react';
 import clsx from 'clsx';
 
 import logo from '@/assets/logo.png';
@@ -217,6 +217,33 @@ export function TrackChip({ state }: { state: TrackChipState }) {
         <LockKeyhole className="size-3.5" />
         {t('在锁屏上显示进度', 'Show on Lock Screen')}
       </Button>
+    </div>
+  );
+}
+
+export type StartRefusal = 'no_active_turn' | 'push_unavailable' | 'failed';
+
+/** What `liveActivity.start` answers when it cannot start, as the shipped toast shows it
+ *  (ToastProvider's card, drawn statically: warning for the two the person can act on, error for a
+ *  failure). `disabled` never reaches a toast: the entry shows its Settings state instead. */
+export function StartRefusalToast({ code }: { code: StartRefusal }) {
+  const t = useDraft();
+  const message = {
+    no_active_turn: t('这一轮已结束。', 'This turn has ended.'),
+    push_unavailable: t('开启通知后才能在锁屏上显示。', 'Turn on notifications to show this on the Lock Screen.'),
+    failed: t('未能更新锁屏显示，请重试。', "Couldn't update the Lock Screen. Try again."),
+  }[code];
+  const warning = code !== 'failed';
+  return (
+    <div
+      className={clsx(
+        'flex items-center gap-3 rounded-lg border border-edge bg-popover px-4 py-3 shadow-elevation-2',
+        warning ? 'bg-linear-to-r from-gold/10 to-gold/10 text-gold-ink' : 'bg-linear-to-r from-destructive/10 to-destructive/10 text-destructive-ink',
+      )}
+    >
+      {warning ? <AlertTriangle size={18} /> : <XCircle size={18} />}
+      <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{message}</span>
+      <X size={14} className="ml-2 opacity-60" />
     </div>
   );
 }

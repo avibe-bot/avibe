@@ -13,6 +13,7 @@ import {
   LockScreen,
   Specimen,
   SpecimenSheet,
+  StartRefusalToast,
   TrackChip,
   type TrackChipState,
 } from '../../kit/live-activity';
@@ -110,6 +111,21 @@ const designFrames = frames([
         <Specimen label="offer · a Turn is running"><TrackChip state="offer" /></Specimen>
         <Specimen label="tracking"><TrackChip state="tracking" /></Specimen>
         <Specimen label="systemOff · areActivitiesEnabled = false"><TrackChip state="systemOff" /></Specimen>
+      </SpecimenSheet>
+    ),
+  },
+  {
+    name: 'app-start-refused',
+    title: 'App 内入口 · 开始失败时的提示条：这一轮已结束 / 没开通知 / 没能更新（系统关闭实时活动走「去设置」，不弹提示条）',
+    width: 460,
+    height: 300,
+    status: 'proposed',
+    fixtures: runningChat,
+    render: () => (
+      <SpecimenSheet>
+        <Specimen label="no_active_turn · warning"><StartRefusalToast code="no_active_turn" /></Specimen>
+        <Specimen label="push_unavailable · warning"><StartRefusalToast code="push_unavailable" /></Specimen>
+        <Specimen label="failed · error"><StartRefusalToast code="failed" /></Specimen>
       </SpecimenSheet>
     ),
   },

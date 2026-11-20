@@ -48,6 +48,14 @@ struct TurnActivityAttributes: ActivityAttributes {
 | `liveActivity.stop` | `{sessionId}` | `{ok: true}`. Ends the activity `.immediate` and DELETEs with `user_stopped`. |
 | `liveActivity.openSettings` | `{}` | `{ok: true}`. Opens this App's page in Settings. |
 
+When `start` is refused, the Web shows the shipped toast:
+- `no_active_turn` (warning): 「这一轮已结束。」 / "This turn has ended."
+- `push_unavailable` (warning): 「开启通知后才能在锁屏上显示。」 / "Turn on notifications to show this on the Lock Screen."
+- `failed` (error): 「未能更新锁屏显示，请重试。」 / "Couldn't update the Lock Screen. Try again." (ASCII apostrophe)
+- `disabled` never shows a toast; the entry switches to its Settings state instead.
+
+These strings are drawn in `ui/design: ios/live-activity/app-start-refused`.
+
 The Web passes the title it already shows in the conversation header; for a Bot's session (no title) it passes `null`. The Web shows the entry only when the capability is present and the session's Turn is in flight. When `enabled` is false it shows the Settings entry and never calls `start`.
 
 ### 2.3 Lifecycle owned by the App
