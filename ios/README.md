@@ -380,7 +380,8 @@ the main Bot acts on the user's computer.
   reads the outbox, asking about voice input afresh; a take whose POST was
   begun is never posted again, and no POST is made unless that marker
   reached the disk first. An expired instance session destroys nothing: a
-  take found signed out waits for Retry.
+  take found signed out waits for Retry, and one being recorded when that
+  is found is stopped at once and kept.
 - A take is sent without the user asking only within ten minutes of the
   end of speaking (`automaticWindow`): the schedule above, and once more,
   silently, when Avibe comes to the front. Then its island goes, and a

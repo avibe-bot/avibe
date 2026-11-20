@@ -1599,6 +1599,45 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.activities.first?.ended?.reason, .signIn)
     }
 
+    /// Signed out while a take is being recorded: recording stops at once,
+    /// and what was said is kept, not discarded.
+    func testATakeBeingRecordedWhenSignedOutIsStoppedAndKept() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.signIn)
+        world.instance.holdStatus = true
+        let controller = world.controller()
+        _ = await controller.toggle()
+        await world.instance.untilHolding()
+        world.audio?.duration = 2
+        world.instance.holdStatus = false
+        world.instance.release()
+        await controller.consentWatch?.value
+        XCTAssertEqual(controller.phase, .idle, "recording stopped")
+        XCTAssertEqual(world.audio?.stops, 1)
+        XCTAssertEqual(world.audio?.discarded, false, "what was said is kept")
+        XCTAssertEqual(controller.unsentCount, 1)
+        XCTAssertEqual(world.activities.first?.ended?.reason, .signIn)
+        XCTAssertEqual(world.instance.transcribed, 0)
+        XCTAssertTrue((VoiceCaptureOutbox(directory: world.outboxDirectory).entries().first?.timing ?? "").contains(":signIn"))
+    }
+
+    /// In front, a sign-in refusal said during the silent send is not
+    /// covered by the unsent alert; the next coming forward asks.
+    func testTheUnsentAlertDoesNotCoverARefusalJustSaid() async {
+        let world = World()
+        world.inFront = true
+        let controller = world.controller()
+        await keepATake(world, controller)
+        world.instance.statusResult = .failure(Failure.signIn)
+        await controller.activated()
+        XCTAssertEqual(world.presented.map(\.0), [.signIn], "the sign-in alert")
+        XCTAssertTrue(world.unsentAlerts.isEmpty, "not covered by the unsent one")
+        XCTAssertEqual(controller.unsentCount, 1)
+        await controller.activated()
+        XCTAssertEqual(world.unsentAlerts.map(\.count), [1])
+        XCTAssertEqual(world.presented.count, 1)
+    }
+
     /// The POST is not made unless its marker reached the disk: a POST that
     /// began without one could be made again after a relaunch.
     func testNoPostWithoutItsMarkerOnDisk() async throws {

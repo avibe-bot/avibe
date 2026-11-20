@@ -1011,6 +1011,14 @@ final class VoiceCaptureController {
             // A transient failure is not a no: the take records on, and its
             // send keeps it for Retry instead.
             guard let refusal = await consent.value, !refusal.transient else { return }
+            guard refusal.reason != .signIn else {
+                // Signed out of the instance: recording stops at once, so
+                // nobody speaks on into nothing, but what was said is not
+                // lost. It is kept until the App is signed in again.
+                guard let self, case .listening(let take) = self.state, take.id == id else { return }
+                await self.finish(send: true, cause: "signIn")
+                return
+            }
             await self?.consentRefused(refusal, takeID: id)
         }
         observeInterruptions()
@@ -1937,7 +1945,11 @@ final class VoiceCaptureController {
         await restoreOutbox()
         await removeExpired()
         guard !keptTakes.isEmpty else { return }
+        let notices = noticeCount
         await sendKept(.comingForward)
+        // A refusal said during that pass (sign in, say) is what is on
+        // screen now: the question waits for the next time.
+        guard noticeCount == notices else { return }
         let unsent = keptTakes
         guard let oldest = unsent.map(spokenAt).min(), environment.isInFront(),
               !environment.unsentAlertIsShown()
