@@ -1201,8 +1201,8 @@ async def test_history_longer_than_one_reading_is_continued_not_skipped(
         assert [request.get("page_token", "") for request in fake.history_requests][:3] == ["", "2", "4"]
 
 
-async def test_a_history_that_could_not_be_read_for_hours_is_still_judged_fairly(fake: FakeFeishu, clock: _Clock):
-    """What arrived is remembered until the history has been read past it; beyond a week there is no verdict."""
+async def test_what_arrived_is_not_forgotten_with_time(fake: FakeFeishu, clock: _Clock):
+    """Neither an outage of the history nor quiet hours turn a delivered message into a missing one, or back."""
     with running_adapter(fake, long_connection="own") as adapter:
         bot = adapter.bot
         bot._dm_chat_ids.add("oc_dm")
@@ -1221,15 +1221,42 @@ async def test_a_history_that_could_not_be_read_for_hours_is_still_judged_fairly
         counts = bot._history_check.counts
         assert (counts.people_messages, counts.matched, counts.missing) == (1, 1, 0)
 
-        # A second chat whose history opens up only after eight days: its old messages get no verdict,
-        # while one sent minutes ago, with no event, is as missing as in any other chat.
+        # Eight days on, a chat becomes known whose history holds an old and a recent message, neither
+        # with an event: both are missing, since nothing that arrived has been forgotten.
         bot._dm_chat_ids.add("oc_late")
-        bot._history_check._checked_until["oc_late"] = base
         clock.now += 8 * 24 * 3600
-        fake.history["oc_late"] = [("om_ancient", "user", base + 20), ("om_recent", "user", int(clock.now) - 180)]
+        fake.history["oc_late"] = [("om_old", "user", base + 1800), ("om_recent", "user", int(clock.now) - 180)]
         await bot._report_connections()
 
-        assert (counts.missing, counts.not_checkable) == (1, 1)
+        assert (counts.matched, counts.missing, counts.not_checkable) == (1, 2, 0)
+
+
+async def test_only_a_message_older_than_a_forgotten_event_is_not_checkable(fake: FakeFeishu, clock: _Clock):
+    """More events than are remembered: what was sent before the newest forgotten one arrived gets no verdict."""
+    remember_two = patch("modules.im.feishu_history_check._REMEMBERED_EVENTS", 2)
+    with remember_two, running_adapter(fake, long_connection="own") as adapter:
+        bot = adapter.bot
+        bot._dm_chat_ids.add("oc_dm")
+        base = int(clock.now) + 60
+        clock.now = base + 100
+        for number in (1, 2, 3):
+            fake.wait_acknowledged(fake.push_event(message_event(event_id=f"e{number}", message_id=f"om_{number}")))
+            clock.now += 1000
+        # om_1 arrived at base + 100 and is forgotten. In the history: om_1 itself, one sent just
+        # after it and never delivered, and one sent much later and never delivered.
+        fake.history = {
+            "oc_dm": [
+                ("om_1", "user", base + 90),
+                ("om_near", "user", base + 200),
+                ("om_2", "user", base + 1090),
+                ("om_lost", "user", base + 1500),
+            ]
+        }
+        await bot._report_connections()
+
+        counts = bot._history_check.counts
+        assert (counts.matched, counts.not_checkable, counts.missing) == (1, 2, 1)
+        assert "om_lost" in bot._history_check._missing
 
 
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):

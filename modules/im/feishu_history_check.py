@@ -26,12 +26,11 @@ logger = logging.getLogger(__name__)
 
 # A message is looked for once it is this old: time for the event to arrive.
 _SETTLE_SECONDS = 120
-# An event is remembered until every chat's history has been read past the time it arrived
-# (and for as long as Feishu may still send it again), but not for ever: a chat that cannot
-# be read for longer than this is, for that stretch, not checkable.
-_REMEMBER_SECONDS = 8 * 3600
-_EVIDENCE_SECONDS = 7 * 24 * 3600
-# How far Feishu's clock and ours may differ when a message's time is held against what is remembered.
+# Message events are remembered for as long as the check lives, whatever the time: only
+# when more than this many have arrived are the oldest forgotten. A message sent before the
+# newest forgotten event arrived is then not checkable, and is said to be so.
+_REMEMBERED_EVENTS = 50_000
+# How far Feishu's clock and ours may differ when a message's time is held against that.
 _CLOCK_SECONDS = 300
 # Pages (of 50) read of one chat in one go; a longer history is gone on with next time.
 _PAGE_LIMIT = 40
@@ -57,14 +56,14 @@ class FeishuHistoryCheck:
         self._lock = threading.Lock()
         self._event_at: Dict[str, float] = {}
         self._missing: Dict[str, str] = {}  # message id -> chat id
-        self._judged: Dict[str, float] = {}  # message id -> when it was matched or reported
+        self._judged: Dict[str, None] = {}  # message ids matched or reported, oldest first
         self._checked_until: Dict[str, int] = {}
         # A reading that stopped at the page limit: chat id -> (its interval, where to go on).
         self._unfinished: Dict[str, Tuple[int, int, str]] = {}
         # What was last said about a chat that could not be read, so that it is said once.
         self._said: Dict[str, str] = {}
         self._started_at = int(time.time()) + 60  # the connection needs a moment to be there
-        # Events that arrived before this time may have been forgotten; from it on, all are remembered.
+        # When the newest event that was forgotten had arrived; nothing has been forgotten while it is 0.
         self._remembered_from = 0.0
 
     def message_event(self, message_id: Optional[str]) -> None:
@@ -73,6 +72,9 @@ class FeishuHistoryCheck:
             return
         with self._lock:
             self._event_at[message_id] = time.time()
+            while len(self._event_at) > _REMEMBERED_EVENTS:
+                forgotten = self._event_at.pop(next(iter(self._event_at)))
+                self._remembered_from = max(self._remembered_from, forgotten)
             chat_id = self._missing.pop(message_id, None)
         if chat_id is not None:
             self.counts.arrived_late += 1
@@ -111,7 +113,7 @@ class FeishuHistoryCheck:
             for message_id, sent_at in sent_by_people:
                 if message_id in self._judged:
                     continue  # read before: an interval begun again, or the edge of two
-                self._judged[message_id] = time.time()
+                self._judged[message_id] = None
                 self.counts.people_messages += 1
                 with self._lock:
                     arrived = message_id in self._event_at
@@ -123,7 +125,7 @@ class FeishuHistoryCheck:
                 if arrived:
                     self.counts.matched += 1
                 elif not checkable:
-                    # Sent before the time from which events are remembered: no verdict.
+                    # Sent before the newest forgotten event arrived: no verdict.
                     self.counts.not_checkable += 1
                     logger.warning(
                         "Feishu history check: message %s in chat %s is too old to be checked", message_id, chat_id
@@ -135,18 +137,8 @@ class FeishuHistoryCheck:
                         message_id,
                         chat_id,
                     )
-        now = time.time()
-        # Nothing is forgotten that a history not yet read may still be held against.
-        read_up_to = min(
-            (self._checked_until.get(chat_id, self._started_at) for chat_id in set(direct_chats)), default=now
-        )
-        forget_before = max(min(now - _REMEMBER_SECONDS, read_up_to - _REMEMBER_SECONDS), now - _EVIDENCE_SECONDS)
-        with self._lock:
-            self._remembered_from = max(self._remembered_from, forget_before)
-            for message_id in [key for key, at in self._event_at.items() if at < forget_before]:
-                del self._event_at[message_id]
-        for message_id in [key for key, at in self._judged.items() if at < forget_before]:
-            del self._judged[message_id]
+        while len(self._judged) > _REMEMBERED_EVENTS:
+            del self._judged[next(iter(self._judged))]
 
     async def _people_messages(
         self, chat_id: str, start: int, end: int, page_token: Optional[str]
