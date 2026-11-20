@@ -597,8 +597,22 @@ async def test_a_new_phase_replaces_pending_work_and_terminal_pending_survives_r
     restarted.clock = service.clock
     restarted.sender = lambda **kwargs: sent.append(kwargs["body"])
     now[0] += 5
-    # A missing or changed source cannot overwrite a terminal state already attempted.
-    next_state = None if source_gone else {
+    # Source deletion is a stop rule, even with an end pending.
+    if source_gone:
+        from storage.models import message_deliveries as deliveries
+        with state.begin() as conn:
+            conn.execute(deliveries.delete().where(deliveries.c.turn_id == TURN))
+            conn.execute(session_turns.delete().where(session_turns.c.id == TURN))
+        count = len(sent)
+        await restarted.tick()
+        assert len(sent) == count
+        with state.connect() as conn:
+            row = tracking_store.get(conn, "activity-1")
+            assert row["status"] == "stopped" and row["stop_reason"] == "turn_unavailable"
+            assert row["pending_state"] is None
+        return
+    # A changed source cannot overwrite a terminal state already attempted.
+    next_state = {
         "phase": "failed", "started_at": saved_end["started_at"] + 1,
         "ended_at": saved_end["ended_at"] + 1, "confirmed_at": now[0], "turn_id": TURN,
     }
@@ -753,3 +767,54 @@ async def test_terminal_put_settles_pending_end_locally_without_another_push(sta
     now[0] += 900
     await service.tick()
     assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [True, False])
+async def test_confirmed_owner_revocation_stops_but_authority_outage_only_defers(state, monkeypatch, revoked):
+    from core import web_push_notifications as notifications
+    from storage import live_activity_service as tracking_store
+
+    service, _, sent = service_for(state)
+    owner = "remote:reader"
+    with state.begin() as conn:
+        conn.execute(web_push_subscriptions.update().values(user_key=owner))
+    await service.handle("put", owner, "activity-1", BODY)
+    decision = notifications.OwnerAuthorizationDecision(
+        user_key=owner, policy="organization", context=None, authorized=False,
+        disposition=notifications.WEB_PUSH_DISPOSITION_REVOKED if revoked
+        else notifications.WEB_PUSH_DISPOSITION_CONFIG_UNAVAILABLE,
+        reason="test",
+    )
+    monkeypatch.setattr(notifications, "_resolve_owner_authorization_decisions", lambda *args, **kwargs: {owner: decision})
+    service.pending_question = lambda sid: True
+    await service.tick()
+    assert sent == []
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["status"] == ("stopped" if revoked else "tracking")
+        assert row["stop_reason"] == ("session_unavailable" if revoked else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["registration", "session"])
+async def test_missing_local_source_permanently_stops_delivery(state, source):
+    from storage import live_activity_service as tracking_store
+    from storage.models import agent_sessions, message_deliveries as deliveries
+
+    service, _, sent = service_for(state)
+    await service.handle("put", "local", "activity-1", BODY)
+    with state.begin() as conn:
+        if source == "registration":
+            web_push_service.disable_subscription(conn, endpoint=f"https://avibe.bot/api/push/apns/{REGISTRATION}")
+        else:
+            conn.execute(deliveries.delete().where(deliveries.c.turn_id == TURN))
+            conn.execute(session_turns.delete().where(session_turns.c.id == TURN))
+            conn.execute(agent_sessions.delete().where(agent_sessions.c.id == SESSION))
+    service.pending_question = lambda sid: True
+    await service.tick()
+    assert sent == []
+    with state.connect() as conn:
+        row = tracking_store.get(conn, "activity-1")
+        assert row["status"] == "stopped"
+        assert row["stop_reason"] == f"{source}_unavailable"

@@ -124,13 +124,15 @@ class LiveActivityService:
             if subscription is None:
                 store.stop(conn, activity_id, "registration_unavailable", now)
                 return None
+            from storage.workbench_sessions_service import get_session
+
+            context = None
             if row["owner_user_key"] != "local":
                 from core.web_push_notifications import (
                     _resolve_owner_authorization_decisions,
                     WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
+                    WEB_PUSH_DISPOSITION_REVOKED,
                 )
-                from storage.workbench_sessions_service import get_session
-
                 decisions = _resolve_owner_authorization_decisions(
                     {
                         WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA: [json.loads(row["authorization_json"] or "null")],
@@ -139,18 +141,21 @@ class LiveActivityService:
                 )
                 decision = decisions.get(row["owner_user_key"])
                 if decision is None or not decision.authorized:
+                    if decision is not None and decision.disposition == WEB_PUSH_DISPOSITION_REVOKED:
+                        store.stop(conn, activity_id, "session_unavailable", now)
                     return None
-                try:
-                    get_session(conn, row["session_id"], authorization_context=decision.context)
-                except LookupError:
-                    store.stop(conn, activity_id, "session_unavailable", now)
-                    return None
+                context = decision.context
+            try:
+                get_session(conn, row["session_id"], authorization_context=context)
+            except LookupError:
+                store.stop(conn, activity_id, "session_unavailable", now)
+                return None
             state = store.snapshot(conn, row["session_id"], now, pending, row["turn_id"])
             queued = json.loads(row["pending_state"]) if row["pending_state"] else None
-            if state is None and not (queued and queued["ended_at"] is not None):
+            if state is None:
                 store.stop(conn, activity_id, "turn_unavailable", now)
                 return None
-            replace = state is not None and (
+            replace = (
                 (queued is not None and queued["ended_at"] is None and queued["phase"] != state["phase"])
                 or (queued is None and row["last_phase"] != state["phase"])
             )
