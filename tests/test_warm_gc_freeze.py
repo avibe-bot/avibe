@@ -89,3 +89,21 @@ def test_a_heartbeat_answered_after_stop_does_not_freeze(monkeypatch):
     w.stop()  # a queued answer may still run after this
     w._answer()
     assert not calls
+
+
+def test_a_foreign_freeze_after_arm_is_not_taken_over(monkeypatch):
+    calls, frozen = [], [0]
+    monkeypatch.setattr(wd.gc, "freeze", lambda: calls.append("freeze"))
+    monkeypatch.setattr(wd.gc, "unfreeze", lambda: calls.append("unfreeze"))
+    monkeypatch.setattr(wd.gc, "get_freeze_count", lambda: frozen[0])
+    monkeypatch.setattr(wd, "_active_requests", 0)
+    w = wd.EventLoopWatchdog(SimpleNamespace(), monotonic=lambda: 10_000.0)
+    w._watchdog_birth = 0.0
+    assert w.arm_warm_freeze() == "armed"
+    frozen[0] = 1234  # another component froze the heap meanwhile
+    info = dict(generation=2, collected=0, uncollectable=0)
+    w._observe_gc("start", info)
+    w._observe_gc("stop", info)
+    w._answer()
+    assert w._freeze_state == "armed" and not calls
+    assert w.rollback_warm_freeze() == "retired" and not calls  # never unfreezes what it did not freeze

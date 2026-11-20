@@ -148,9 +148,11 @@ class EventLoopWatchdog:
     def _apply_warm_freeze(self) -> None:
         # On the loop thread, which alone opens and closes model streams, so the
         # stream count cannot change between this check and the freeze.
-        # No gc.get_freeze_count() here: it walks the whole permanent generation.
+        # The count before freezing is cheap (empty unless another component froze
+        # first, which this trial must not take over); after freezing it would walk
+        # the whole permanent generation, so it is not logged.
         with self._freeze_lock:
-            if self._freeze_state != "armed" or _active_requests or self._stopped.is_set():
+            if self._freeze_state != "armed" or _active_requests or self._stopped.is_set() or gc.get_freeze_count():
                 return
             gc.freeze()
             self._freeze_state = "frozen"
