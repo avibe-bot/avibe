@@ -727,6 +727,15 @@ final class MobileSessionCoordinator {
         snapshot?.account
     }
 
+    /// The account signed in, restored or confirmed, outside any sign-out,
+    /// reset or change of account (which keeps the snapshot and selection
+    /// while it revokes push).
+    var settledAccountID: String? {
+        guard authoritativeTransition == nil else { return nil }
+        if case .resetting = phase { return nil }
+        return snapshot?.account.id
+    }
+
     var controlPlaneURL: URL {
         controlPlane.baseURL
     }
