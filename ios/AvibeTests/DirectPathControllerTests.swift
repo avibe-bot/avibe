@@ -285,6 +285,52 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(harness.status("instance-1").jsonObject["rtt_ms"])
     }
 
+    /// `direct.status()` carries how often the transport checked its path
+    /// again, and why: counts only, for the selected host only, never in
+    /// the event, and no change of the status.
+    @MainActor
+    func testTheStatusCarriesTheTransportsCountsForTheSelectedHostOnly() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+
+        // Nothing counted: nothing said.
+        let quiet = harness.status("instance-1")
+        XCTAssertNil(quiet.jsonObject["counts"])
+
+        harness.transport.counts = DirectPathCounts(
+            verifications: 2,
+            probesAfterPathUpdate: 2,
+            probesAfterCandidateFailure: 1,
+            probesAfterRenewal: 0,
+            dials: 3,
+            pathUpdates: 2,
+            pathUpdatesIgnored: 41
+        )
+        let counted = harness.status("instance-1")
+        XCTAssertEqual(counted, quiet, "counts are no change of the status")
+        XCTAssertNil(counted.eventObject["counts"])
+        let counts = try XCTUnwrap(counted.jsonObject["counts"] as? [String: Any])
+        XCTAssertEqual(counts["verifications"] as? Int, 2)
+        XCTAssertEqual(counts["dials"] as? Int, 3)
+        XCTAssertEqual(counts["path_updates"] as? Int, 2)
+        XCTAssertEqual(counts["path_updates_ignored"] as? Int, 41)
+        XCTAssertEqual(
+            counts["probes"] as? [String: Int],
+            ["path_update": 2, "candidate_failed": 1, "renewal": 0]
+        )
+        // Numbers and nothing else.
+        XCTAssertEqual(
+            Set(counts.keys),
+            ["verifications", "probes", "dials", "path_updates", "path_updates_ignored"]
+        )
+
+        // Another host is told nothing of this host's path.
+        XCTAssertNil(harness.status("instance-2").jsonObject["counts"])
+    }
+
     @MainActor
     func testThePathKindIsPublishedAndADirectAddressMakesPlansStickyUntilAMiss() async throws {
         let harness = try Harness(test: self)
@@ -1680,10 +1726,17 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
     @MainActor var currentPath: DirectPathKind?
     /// That path's class and round-trip time, as the transport reads them.
     @MainActor var selectedPath: DirectSelectedPath?
+    /// How often the stand-in says it checked its path again.
+    @MainActor var counts = DirectPathCounts.zero
 
     @MainActor
     var pathDiagnostics: DirectPathDiagnostics {
         DirectPathDiagnostics(current: currentPath, attempts: [], selected: selectedPath)
+    }
+
+    @MainActor
+    var pathCounts: DirectPathCounts {
+        counts
     }
 
     @MainActor
