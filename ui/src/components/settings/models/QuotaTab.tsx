@@ -289,7 +289,9 @@ const AccountCard: React.FC<{
   /** The read is still running: a gap is loading, not a failure. */
   pending?: boolean;
   onRequestReauth?: (sourceId: string) => void;
-}> = ({ source, now, text, pending = false, onRequestReauth }) => {
+  action?: React.ReactNode;
+  section?: React.ReactNode;
+}> = ({ source, now, text, pending = false, onRequestReauth, action, section }) => {
   const { t } = useTranslation();
   const retained = quotaIsRetained(source);
   const status = sourceStatus(source, now);
@@ -321,6 +323,7 @@ const AccountCard: React.FC<{
         <span className={cn('model-hub-quota-status flex shrink-0 items-center gap-1.5', toneClass(statusTone))}>
           <span className="model-hub-quota-dot" aria-hidden />{statusText}
         </span>
+        {action}
       </header>
       {retained && !Number.isNaN(fetchedAt) && (
         <div className="model-hub-quota-stale flex items-center gap-2" role="status">
@@ -371,6 +374,7 @@ const AccountCard: React.FC<{
               {scoped.map((window) => <WindowRow key={window.id} window={window} now={now} retained={retained} nested text={text} />)}
             </div>
           )}
+      {section}
       {source.value && <ValueStrip value={source.value} text={text} />}
     </article>
   );
@@ -406,7 +410,10 @@ export const QuotaTab: React.FC<{
   onRequestReauth?: (sourceId: string) => void;
   /** Fixes the clock the projection reads; the tab ticks its own when absent. */
   now?: number;
-}> = ({ quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow }) => {
+  /** Per-account slots: a control beside the status, and a block between the limits and the valuation. */
+  accountAction?: (source: SourceQuota) => React.ReactNode;
+  accountSection?: (source: SourceQuota) => React.ReactNode;
+}> = ({ quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow, accountAction, accountSection }) => {
   const { t } = useTranslation();
   const now = useNow(fixedNow);
   const text = useQuotaText(now);
@@ -553,6 +560,8 @@ export const QuotaTab: React.FC<{
                     text={text}
                     pending={pending.has(source.source_id)}
                     onRequestReauth={onRequestReauth}
+                    action={accountAction?.(source)}
+                    section={accountSection?.(source)}
                   />
                 ))}
               </div>

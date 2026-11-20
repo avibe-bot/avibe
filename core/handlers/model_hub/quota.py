@@ -168,7 +168,7 @@ def _window(
     return window
 
 
-def _load_object(body: object) -> dict[str, Any]:
+def _load_object(body: object, *, allow_array: bool = False) -> Any:
     if not isinstance(body, (str, bytes, bytearray)):
         raise SubscriptionQuotaError("malformed")
     size = len(body.encode("utf-8", "surrogatepass")) if isinstance(body, str) else len(body)
@@ -178,7 +178,7 @@ def _load_object(body: object) -> dict[str, Any]:
         payload = json.loads(body)
     except (TypeError, UnicodeDecodeError, ValueError):
         raise SubscriptionQuotaError("malformed") from None
-    if not isinstance(payload, dict) or "error" in payload:
+    if not (allow_array and isinstance(payload, list)) and (not isinstance(payload, dict) or "error" in payload):
         raise SubscriptionQuotaError("malformed")
     try:
         # An escaped lone surrogate decodes but cannot be served as UTF-8 JSON.
@@ -749,6 +749,8 @@ class SubscriptionQuotaCache:
             # a built-in fee included, replaces it.
             plan = entry.snapshot["plan"]
         entry.snapshot = {"plan": plan, "windows": windows}
+        if "reset_cards" in parsed:
+            entry.snapshot["reset_cards"] = parsed["reset_cards"]
         entry.fetched_at = self._now()
         entry.failure = None
         entry.cooldown_until = None
@@ -772,6 +774,11 @@ class SubscriptionQuotaCache:
                 windows=entry.snapshot["windows"],
                 fetched_at=_iso(entry.fetched_at) if entry.fetched_at else None,
             )
+        from . import reset_cards
+
+        if source.vendor in reset_cards.VENDORS:
+            snapshot = entry.snapshot if entry and entry.snapshot and not entry.failure else {}
+            payload['reset_cards'] = snapshot.get('reset_cards', reset_cards.unread())
         failure = entry.failure if entry is not None else None
         if failure is None:
             if entry is None or entry.snapshot is None:

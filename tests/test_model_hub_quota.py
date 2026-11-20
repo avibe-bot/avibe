@@ -786,9 +786,10 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
         {_PROFILE_URL: {"status_code": 200, "body": "{}"}},
     )
     parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
-    assert set(parsed) == {"plan", "windows"}
-    usage_calls = [call for call in client.calls if (call[2] or {}).get("url") != _PROFILE_URL]
-    method, path, payload = usage_calls[-1]
+    assert set(parsed) == {"plan", "windows", "reset_cards"}
+    usage_calls = [call for call in client.calls if call[1] == '/api-call' and call[2]['url'] != _PROFILE_URL]
+    method, path, payload = usage_calls[0]
+    assert usage_calls[1][2] == {**payload, 'url': payload['url'] + '?cedar_ember=1&skip_spend=1'}
     assert (method, path) == ("POST", "/api-call")
     assert payload["auth_index"] == "7"
     assert payload["url"] == "https://api.anthropic.com/api/oauth/usage"
@@ -804,6 +805,171 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
     assert payload["header"]["ChatGPT-Account-ID"] == "acct_123"
     assert payload["header"]["User-Agent"] == "codex-cli"
     assert "anthropic-beta" not in payload["header"]
+
+
+async def test_chatgpt_cards_use_usage_count_and_only_available_codex_details():
+    """MH-QUOTA-042: ChatGPT reports its usage count, not a detail row count, and never promises a stated effect."""
+    usage = {**CODEX_REPORT, "rate_limit_reset_credits": {"available_count": 3}}
+    credit = {
+        "id": "private-marker",
+        "status": "available",
+        "reset_type": "codex_rate_limits",
+        "expires_at": "2090-01-01T00:00:00Z",
+    }
+    details = {
+        "credits": [
+            credit,
+            {**credit, "reset_type": "other", "expires_at": "2080-01-01T00:00:00Z"},
+            {**credit, "status": "redeemed", "expires_at": "2070-01-01T00:00:00Z"},
+        ]
+    }
+    adapter, client = _adapter(
+        {"status_code": 200, "body": json.dumps(usage)},
+        _METADATA,
+        {
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits": {
+                "status_code": 200,
+                "body": json.dumps(details),
+            }
+        },
+    )
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=_Clock())
+    summary = await cache.summary([QuotaSourceRef("src_codex", "openai", "cred_b", "Personal", None)])
+    assert summary["sources"][0]["reset_cards"] == {
+        "state": "ok",
+        "lock": None,
+        "cards": [
+            {
+                "kind": "account",
+                "count": 3,
+                "usable": True,
+                "blocked": None,
+                "stated": False,
+                "blocked_until": None,
+                "expires_at": "2090-01-01T00:00:00Z",
+            }
+        ],
+    }
+    serialized = json.dumps(summary)
+    for sentinel in ("private-marker", "acct_123", "$TOKEN$", "auth_index"):
+        assert sentinel not in serialized
+    assert all(call[2]["method"] == "GET" for call in client.calls if call[1] == "/api-call")
+    Draft7Validator(QUOTA_SCHEMA).validate(summary)
+
+
+async def test_card_details_failure_preserves_current_windows(caplog):
+    """MH-QUOTA-044: A cards-only failure returns unread without discarding quota or exposing the error."""
+    usage = {**CODEX_REPORT, "rate_limit_reset_credits": {"available_count": 2}}
+    from vibe.model_hub_runtime.client import EngineClientError
+
+    adapter, client = _adapter(
+        {"status_code": 200, "body": json.dumps(usage)},
+        _METADATA,
+        {
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits": EngineClientError("private-marker"),
+        },
+    )
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=_Clock())
+    source = QuotaSourceRef("src_codex", "openai", "cred_b", "Personal", None)
+    summary = await cache.summary([source])
+    row = summary["sources"][0]
+    assert row["state"] == "ok" and row["windows"]
+    assert row["reset_cards"] == {"state": "unread", "lock": None, "cards": []}
+    assert "private-marker" not in json.dumps(summary) + caplog.text
+    assert all(payload["method"] == "GET" for _, path, payload in client.calls if path == "/api-call")
+
+
+async def test_claude_cards_group_by_kind_without_exposing_grants():
+    """MH-QUOTA-043: A grouped card has only closed fields and counts held grants, not vendor labels or identities."""
+    grant = {
+        "id": "private-marker",
+        "label": "private-marker",
+        "type": "full",
+        "resets_left": 2,
+        "usable_now": True,
+        "clears": ["five_hour", "seven_day"],
+        "ends_at": "2090-01-01T00:00:00Z",
+    }
+    program = {
+        "eligible": True,
+        "at_limit": True,
+        "grants": [
+            grant,
+            {**grant, "id": "second", "resets_left": 3},
+            {**grant, "id": "third", "paused": True},
+            {**grant, "ends_at": "2000-01-01T00:00:00Z"},
+        ],
+    }
+    adapter, _ = _adapter(
+        {"status_code": 200, "body": json.dumps({**CLAUDE_LEGACY, "cedar_ember": program})}, _METADATA
+    )
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=_Clock())
+    summary = await cache.summary([QuotaSourceRef("src_claude", "anthropic", "cred_a", "Personal", None)])
+    cards = summary["sources"][0]["reset_cards"]
+    assert cards == {
+        "state": "ok",
+        "lock": None,
+        "cards": [
+            {
+                "kind": "all",
+                "count": 5,
+                "expires_at": "2090-01-01T00:00:00Z",
+                "stated": True,
+                "usable": True,
+                "blocked": None,
+                "blocked_until": None,
+            }
+        ],
+    }
+    assert "private-marker" not in json.dumps(summary)
+    Draft7Validator(QUOTA_SCHEMA).validate(summary)
+
+
+@pytest.mark.parametrize(
+    ("patch", "extra", "kind", "blocked", "stated"),
+    [
+        ({"clears": ["five_hour"]}, {}, "session", "needs_limit", True),
+        ({"clears": ["seven_day"]}, {}, "weekly", "needs_limit", True),
+        ({"type": "full", "clears": ["seven_day"]}, {}, "all", "needs_limit", False),
+        ({"gives_back_weekly": True}, {"cooldown_until": "2090-01-01T00:00:00Z"}, "fable", "cooldown", True),
+        ({"use_requires_limit": False, "blocking": ["private-marker"]}, {}, "session", "unavailable", True),
+    ],
+)
+async def test_cards_keep_blocked_grants_and_report_only_vendor_stated_effects(patch, extra, kind, blocked, stated):
+    grant = {"id": "private-marker", "resets_left": 1, "usable_now": True, "clears": ["five_hour"], **patch}
+    block = {"eligible": True, "at_limit": False, "grants": [grant], **extra}
+    adapter, _ = _adapter({"status_code": 200, "body": json.dumps({**CLAUDE_LEGACY, "cedar_ember": block})}, _METADATA)
+    parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
+    assert parsed["reset_cards"]["cards"] == [
+        dict(
+            kind=kind,
+            count=1,
+            usable=False,
+            blocked=blocked,
+            blocked_until=extra.get("cooldown_until"),
+            expires_at=None,
+            stated=stated,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        False,
+        [],
+        {"grants": {}},
+        {"grants": [{"resets_left": True}]},
+        {"grants": [], "cooldown_until": "private-marker"},
+    ],
+)
+async def test_hostile_card_fields_never_escape_or_break_windows(malformed, caplog):
+    adapter, _ = _adapter(
+        {"status_code": 200, "body": json.dumps({**CLAUDE_LEGACY, "cedar_ember": malformed})}, _METADATA
+    )
+    parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
+    assert parsed["reset_cards"] == {"state": "unread", "lock": None, "cards": []}
+    assert parsed["windows"] and "private-marker" not in json.dumps(parsed) + caplog.text
 
 
 async def test_adapter_reads_gemini_and_grok_quota_as_the_engine_itself_would():

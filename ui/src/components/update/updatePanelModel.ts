@@ -241,8 +241,13 @@ export function modelFromRuntime(info: VersionInfo, {
 }): UpdatePanelModel {
   const latest = info.latest ? normalizeVersion(info.latest) : null;
   const stable = awaitingStable(info.current, latest, info.has_update);
+  // An install the Runtime reports is running wherever it was started: another page, the CLI, the automatic update.
+  const reported = info.install ?? null;
+  const reportedTarget = reported?.target ? normalizeVersion(reported.target) : latest;
   const status: UpdatePanelStatus = restarting ? { kind: 'updated', version: latest, restarting: true }
     : installing ? { kind: 'installing' }
+      : reported?.phase === 'restarting' ? { kind: 'updated', version: reportedTarget, restarting: true }
+      : reported ? { kind: 'installing' }
       : result && !result.ok ? { kind: 'update-failed', reason: 'install', retry: true }
         : result?.ok ? { kind: 'updated', version: result.target ? normalizeVersion(result.target) : null }
           : checking ? { kind: 'checking' }
