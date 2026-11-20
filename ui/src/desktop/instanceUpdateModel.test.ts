@@ -155,6 +155,16 @@ describe('a desktop-managed instance', () => {
     expect(stuck.busy).toBe(false);
   });
 
+  it('relays a later install started from another surface as what it is, after its own has settled', () => {
+    // This shell's install of 3.2.7 is done; the host now downloads 3.2.8, asked for from a browser.
+    const later = instanceSection(state({
+      snapshot: { ...takesAll, current: '3.2.7', desktop_version: '3.2.7', latest: '3.2.8', remote_request: { ...receipt('downloading'), request_id: 'r2', target: '3.2.8' } },
+      request: sent('accepted', false),
+    }), NOW);
+    expect(later.model?.status).toEqual({ kind: 'downloading', progress: 42 });
+    expect(later).toMatchObject({ canUpdate: false, canCheck: false, busy: true });
+  });
+
   it.each(['failed', 'declined', 'expired'] as const)("is free to retry once the host's own receipt ends %s and the shell has stopped following", (phase) => {
     const ended = instanceSection(state({ snapshot: { ...takesAll, remote_request: receipt(phase) }, request: sent('accepted', false) }), NOW);
     expect(ended.model?.status).toMatchObject({ kind: 'update-failed', retry: true });
@@ -178,6 +188,8 @@ describe('every combination of what the shell can report', () => {
     ...(['checking', 'awaiting_host', 'downloading', 'restarting', 'completed', 'failed', 'declined', 'expired'] as const)
       .map((phase) => ({ ...host, remote_request: receipt(phase) })),
     { ...host, current: '3.2.8rc4', desktop_version: '3.2.8rc4', has_update: false, phase: 'current' as const, remote_request: receipt('completed') },
+    // A later install of another version, asked for from another surface.
+    { ...host, current: '3.2.8rc4', desktop_version: '3.2.8rc4', latest: '3.2.8rc5', remote_request: { ...receipt('downloading'), request_id: 'r2', target: '3.2.8rc5' } },
   ];
   const other = (action: 'check' | 'prereleases', phase: Request['phase'], following: boolean): Request =>
     ({ action, phase, target: null, error_code: phase === 'failed' ? 'request_failed' : null, updated_at: AT, following, installed_from: null });
@@ -216,7 +228,7 @@ describe('every combination of what the shell can report', () => {
       // action for it meanwhile. A host's receipt left unsettled after the shell stopped following its own
       // install is the one exception: that can no longer be confirmed from here, and is said so.
       const unconfirmed = c.request?.action === 'install' && c.request.phase === 'accepted' && !following
-        && c.snapshot.managed_by === 'desktop' && running(c.snapshot);
+        && c.snapshot.managed_by === 'desktop' && running(c.snapshot) && c.snapshot.remote_request?.request_id === 'r1';
       if (c.status === 'ready' && running(c.snapshot) && !unconfirmed) expect(shown, where).toMatchObject({ ...nothing, busy: true });
       if (unconfirmed && shown.model) expect(shown.model.status, where).toEqual({ kind: 'update-failed', reason: 'timeout' });
       // Nothing waits for ever: with nothing followed and nothing reported as running, the section is free,

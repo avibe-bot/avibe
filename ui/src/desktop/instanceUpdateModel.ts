@@ -62,7 +62,10 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
   const ownInstall = snapshot.install ? now - Date.parse(snapshot.install.started_at) < OWN_INSTALL_MS : false;
   // A desktop-managed host whose receipt of this shell's install is still unsettled after the shell has stopped
   // following it: whether it finished cannot be confirmed from here, as the single panel says after its wait.
-  const timedOut = managed && accepted && !followed && installRunning(snapshot);
+  // The shell keeps its own receipt until its next action, so the host's is taken for this install's only
+  // when it is for the same version; a later install from another surface is relayed as what it is.
+  const timedOut = managed && accepted && !followed && installRunning(snapshot)
+    && normalizeVersion(snapshot.remote_request?.target ?? '') === normalizeVersion(install.target ?? '');
   const reported = installRunning(snapshot) && !timedOut && (reachable || followed || ownInstall);
   // An instance that does not answer, with nothing of ours under way, is a lost connection.
   if (!reachable && !followed && !reported && sending !== 'install') return { ...none, model: null };
