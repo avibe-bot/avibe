@@ -2490,6 +2490,11 @@ def recoverable_reservations(
     ]
 
 
+def has_live_turn(conn: Connection) -> bool:
+    stmt = select(literal_column("1")).select_from(session_turns).where(text(_LIVE_TURN_INDEX_PREDICATE)).limit(1)
+    return conn.execute(stmt).first() is not None
+
+
 def session_ids_with_live_turns(conn: Connection) -> set[str]:
     return {
         str(value)
