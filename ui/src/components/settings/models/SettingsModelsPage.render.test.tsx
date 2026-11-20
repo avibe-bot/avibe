@@ -2661,6 +2661,37 @@ describe('SettingsModelsPage quota region', () => {
     expect(clear).toHaveBeenCalled();
   });
 
+  // The detail's refresh is pressed with the quota tab hidden behind the dialog, so
+  // a failed read is said where the user is, and the providers are still read again.
+  it('MH-QUOTA-035: a paused account\'s refresh forces the quota read, reads providers again, and says when the read failed', async () => {
+    const pausedAccount: Source = {
+      ...retainedSource,
+      id: 'src_paused_account',
+      kind: 'subscription',
+      display_name: 'Paused account',
+      billing: 'monthly',
+      state: { status: 'cooldown', retry_at: null, detail_key: 'models.source.cooldown.quota_exhausted' },
+    };
+    renderPage([pausedAccount]);
+    const user = userEvent.setup();
+    await user.click((await screen.findByText('Paused account')).closest('button') as HTMLButtonElement);
+    const detail = await screen.findByRole('dialog', { name: 'Paused account' });
+    const force = vi.mocked(modelsApi.refreshQuota);
+    const providerReads = () => vi.mocked(modelsApi.listSources).mock.calls.length;
+
+    let before = providerReads();
+    await user.click(within(detail).getByRole('button', { name: /^Refresh quota$|^刷新额度$/ }));
+    await waitFor(() => expect(force).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(providerReads()).toBeGreaterThan(before));
+    expect(screen.queryByText(/^Couldn't refresh, please retry$|^刷新失败，请重试$/)).toBeNull();
+
+    force.mockRejectedValueOnce(new Error('offline'));
+    before = providerReads();
+    await user.click(await within(detail).findByRole('button', { name: /^Refresh quota$|^刷新额度$/ }));
+    expect(await screen.findByText(/^Couldn't refresh, please retry$|^刷新失败，请重试$/)).toBeTruthy();
+    await waitFor(() => expect(providerReads()).toBeGreaterThan(before));
+  });
+
   // A vendor slower than the page deadline must not read as a failure for a whole
   // poll: the service names it pending, and the page re-reads soon, a bounded
   // number of times, until the reading lands.

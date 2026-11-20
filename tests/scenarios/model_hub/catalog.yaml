@@ -1896,6 +1896,7 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_account_refresh.py::test_refresh_resumes_a_paused_account_once_the_vendor_reports_quota
     related_tests:
+      - tests/test_model_hub_account_refresh.py::test_refresh_resumes_every_shape_of_a_quota_pause
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-016
   - id: MH-QUOTA-032
     name: A refresh keeps the pause only while the vendor still reports an account-wide limit used up or the sign-in has expired; an unreadable reading lets the next request ask the vendor
@@ -1915,6 +1916,18 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-QUOTA-034
+  - id: MH-QUOTA-035
+    name: A paused account's refresh in its detail forces the quota read, reads providers again, and says when the read failed
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-035
+  - id: MH-QUOTA-036
+    name: A refusal admitted before the refresh cannot pause the account again when it settles afterwards
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_account_refresh.py::test_a_refusal_from_before_the_refresh_cannot_pause_the_account_again
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

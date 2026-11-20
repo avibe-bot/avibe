@@ -8,7 +8,9 @@ from datetime import timedelta
 
 import pytest
 
+from config.v2_config import ModelHubSourceStateConfig
 from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.quota import SubscriptionQuotaError
 from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE
 from core.handlers.model_hub.service import ModelHubError
@@ -28,19 +30,29 @@ def _window(kind: str, used_pct: float, *, resets_in: int = RESET_SECONDS) -> di
     }
 
 
-def _capped_account(tmp_path, vendor: str, protocol: str):
+def _capped(code: str = "usage_limit_reached"):
+    return replace(
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=429, code=code, source_id=SOURCE_ID),
+        retry_after=str(RESET_SECONDS), response_received_at=NOW,
+    )
+
+
+def _capped_account(tmp_path, vendor: str, protocol: str, *, code: str = "usage_limit_reached"):
     """An account whose first request met the vendor's cap; the vendor serves again afterwards."""
 
     account = replace(
         _source(SOURCE_ID, "Account", vendor=vendor, protocol=protocol), kind="subscription", billing="monthly",
     )
-    capped = replace(
-        _outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="usage_limit_reached", source_id=SOURCE_ID),
-        retry_after=str(RESET_SECONDS), response_received_at=NOW,
-    )
     return clock_service(tmp_path, sources=[account], outcomes=[
-        capped, _outcome(RawOutcomeKind.SUCCESS, source_id=SOURCE_ID, stream_started=True),
+        _capped(code), _outcome(RawOutcomeKind.SUCCESS, source_id=SOURCE_ID, stream_started=True),
     ])
+
+
+def _vendor_reports(service, windows) -> None:
+    async def vendor_quota(_source_id, _vendor, _credential_ref):
+        return {"plan": None, "windows": windows}
+
+    service.adapter.subscription_quota = vendor_quota
 
 
 async def _request(service):
@@ -100,6 +112,8 @@ def test_refresh_resumes_a_paused_account_once_the_vendor_reports_quota(tmp_path
     # The vendor still reports the shared window used up: the pause and its reset time stay.
     ([_window("session", 100.0), _window("weekly", 41.0)], False),
     ([_window("session", 12.0), _window("weekly", 100.0)], False),
+    # A used-up window that names no reset time is still used up.
+    ([{**_window("session", 100.0), "resets_at": None}], False),
     # A used-up window whose reset has passed has given its quota back.
     ([_window("session", 100.0, resets_in=-60), _window("weekly", 41.0)], True),
     # One model's own limit never pauses the whole account.
@@ -110,7 +124,7 @@ def test_refresh_resumes_a_paused_account_once_the_vendor_reports_quota(tmp_path
     (SubscriptionQuotaError("unavailable"), True),
     # A sign-in that has expired needs the sign-in, not a request.
     (SubscriptionQuotaError("auth_expired"), False),
-], ids=["session-used-up", "week-used-up", "reset-passed", "model-limit", "unreadable-vendor", "read-limited", "read-failed", "signed-out"])
+], ids=["session-used-up", "week-used-up", "no-reset-time", "reset-passed", "model-limit", "unreadable-vendor", "read-limited", "read-failed", "signed-out"])
 def test_refresh_keeps_the_pause_only_while_the_vendor_reports_it(tmp_path, reading, resumed):
     """MH-QUOTA-032: the vendor's current reading decides; an unreadable one lets the next request ask."""
 
@@ -160,5 +174,60 @@ def test_listing_models_leaves_a_paused_account_paused_where_requests_look(tmp_p
         assert _state(service) == ("cooldown", PAUSED)
         await _refused(service)
         assert len(service.adapter.invocations) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("shape", ["rate-limited", "saved-standby"])
+def test_refresh_resumes_every_shape_of_a_quota_pause(tmp_path, shape):
+    """MH-QUOTA-031: a rate pause, and a pause only the live deadline still holds, are lifted the same way."""
+
+    async def run():
+        service, _clock = _capped_account(
+            tmp_path, "openai", "openai_responses",
+            code="rate_limit_exceeded" if shape == "rate-limited" else "usage_limit_reached",
+        )
+        _vendor_reports(service, [_window("session", 3.0), _window("weekly", 41.0)])
+        await _refused(service)
+        if shape == "rate-limited":
+            assert _state(service) == ("cooldown", "models.source.cooldown.rate_limited")
+        else:
+            # What a model listing left behind before it kept the pause, and what
+            # an upgraded install can still hold: standby on disk, the deadline live.
+            config = service.store.load()
+            config.sources[0].state = ModelHubSourceStateConfig(status="standby")
+            service.store.save(config)
+            await _refused(service)
+        assert len(service.adapter.invocations) == 1
+
+        await service.quota_summary(force=True)
+
+        assert _state(service) == ("standby", None)
+        assert (await _request(service)).outcome.kind is RawOutcomeKind.SUCCESS
+        assert len(service.adapter.invocations) == 2
+
+    asyncio.run(run())
+
+
+def test_a_refusal_from_before_the_refresh_cannot_pause_the_account_again(tmp_path):
+    """MH-QUOTA-036: the refresh outranks every attempt admitted before it, as a verified response does."""
+
+    async def run():
+        service, _clock = _capped_account(tmp_path, "anthropic", "anthropic")
+        _vendor_reports(service, [_window("session", 3.0), _window("weekly", 41.0)])
+        await _refused(service)
+        account = service.store.load().sources[0]
+        # A request admitted while the account was paused, still in flight.
+        in_flight = service._reserve_settlement_generation(SOURCE_ID)
+
+        await service.quota_summary(force=True)
+        # Its refusal, which the vendor gave before the reset, settles afterwards.
+        await service._settle_fallback_source(
+            account, ResolutionDecision("fallback", reason="quota_exhausted", cooldown_seconds=300),
+            backend="codex", model_id="shared-model", settlement_generation=in_flight, outcome=_capped(),
+        )
+
+        assert _state(service) == ("standby", None)
+        assert (await _request(service)).outcome.kind is RawOutcomeKind.SUCCESS
 
     asyncio.run(run())

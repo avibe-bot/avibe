@@ -916,7 +916,7 @@ export const SourceDetailPanel: React.FC<{
             {state.key && <span className={cn('model-hub-source-state model-hub-pill flex items-center gap-1.5 border', state.textClass)}><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}{state.hint && <ModelHubInfoHint label={t(state.hint.labelKey) as string} content={t(state.hint.bodyKey)} className="size-[13px]" />}</span>}
             {/* A cooldown waits for the next request; a passing test is that request. */}
             {testable && source.state.status === 'cooldown' && <button type="button" disabled={busy} onClick={() => setTesting(true)} className="model-hub-source-state font-semibold text-foreground underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceTest.testNow')}</button>}
-            {quotaPaused && onRefreshQuota && <button type="button" disabled={busy || refreshingQuota} onClick={() => void refreshQuota()} className="model-hub-source-state font-semibold text-foreground underline underline-offset-2 disabled:opacity-50">{t(refreshingQuota ? 'settings.models.quota.refreshing' : 'settings.models.quota.refresh')}</button>}
+            {quotaPaused && onRefreshQuota && <button type="button" disabled={busy || refreshingQuota} onClick={() => void refreshQuota()} className="model-hub-source-state font-semibold text-foreground underline underline-offset-2 disabled:opacity-50">{t(refreshingQuota ? 'settings.models.quota.refreshing' : 'settings.models.quota.refreshAccount')}</button>}
           </div>
           <p className="model-hub-source-summary truncate">{usageSummary}</p>
         </div>

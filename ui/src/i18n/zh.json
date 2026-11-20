@@ -1733,6 +1733,7 @@
         "autoRefresh": "每 5 分钟自动刷新",
         "refresh": "立即刷新",
         "refreshing": "刷新中…",
+        "refreshAccount": "刷新额度",
         "empty": "还没有已登录的订阅账号。在「供应商与路由」里添加 Claude 或 ChatGPT 订阅后，这里会显示它们的额度。",
         "left": "剩余",
         "window": {

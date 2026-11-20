@@ -66,6 +66,7 @@ import {
   loadingRegion,
   readRegion,
   readyRegion,
+  regionFailed,
   settleRegionRead,
   unreadRegion,
   type RegionRead,
@@ -750,9 +751,15 @@ export const SettingsModelsPage: React.FC = () => {
     setQuotaSettled((count) => count + 1);
   }));
 
-  const readQuota = React.useCallback(async (force: boolean) => {
+  /** Resolves to the read this call landed, or `null` when a newer read superseded it. */
+  const readQuota = React.useCallback(async (force: boolean): Promise<RegionRead<QuotaSummary> | null> => {
     setQuotaRead(beginRegionRead);
-    await quotaReadAuthority.run(() => readRegion(() => (force ? modelsApi.refreshQuota() : modelsApi.getQuota())));
+    const landed: { read: RegionRead<QuotaSummary> | null } = { read: null };
+    const outcome = await quotaReadAuthority.run(async () => {
+      landed.read = await readRegion(() => (force ? modelsApi.refreshQuota() : modelsApi.getQuota()));
+      return landed.read;
+    });
+    return outcome === 'landed' ? landed.read : null;
   }, [quotaReadAuthority]);
 
   /**
@@ -795,7 +802,7 @@ export const SettingsModelsPage: React.FC = () => {
     resetQuotaRereads();
     setRefreshingQuota(true);
     try {
-      await readQuota(true);
+      return await readQuota(true);
     } finally {
       if (aliveRef.current) setRefreshingQuota(false);
     }
@@ -868,10 +875,16 @@ export const SettingsModelsPage: React.FC = () => {
 
   // The forced quota read resumes an account the vendor reports quota for, so
   // the Sources and routes it changed are read with it.
-  const refreshQuotaAndSources = React.useCallback(async () => {
-    await refreshQuotaNow();
-    if (aliveRef.current) await refresh();
-  }, [refresh, refreshQuotaNow]);
+  // The quota tab draws a failed read itself. A press from a provider's detail
+  // has that tab hidden behind it, so there the failure is said in a toast.
+  const refreshQuotaAndSources = React.useCallback(async (announceFailure = false) => {
+    const read = await refreshQuotaNow();
+    if (!aliveRef.current) return;
+    if (announceFailure && read !== null && regionFailed(read)) {
+      showToast(t('settings.models.toast.refreshFailed') as string, 'error');
+    }
+    await refresh();
+  }, [refresh, refreshQuotaNow, showToast, t]);
 
   const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
     let result!: T;
@@ -1613,7 +1626,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'quota' ? <QuotaTab
                       quota={quotaRead}
                       refreshing={refreshingQuota}
-                      onRefresh={refreshQuotaAndSources}
+                      onRefresh={() => refreshQuotaAndSources()}
                       onRetry={retryQuota}
                       onRequestReauth={(sourceId) => {
                         const target = sources.find((source) => source.id === sourceId);
@@ -1758,7 +1771,7 @@ export const SettingsModelsPage: React.FC = () => {
                 serviceView={serviceDetailView}
                 onManageSource={() => setServiceDetailView(false)}
                 onOpenUsage={() => { selectSource(null); setTab('usage'); }}
-                onRefreshQuota={refreshQuotaAndSources}
+                onRefreshQuota={() => refreshQuotaAndSources(true)}
                 onSaveFetch={(body) => void hostedTools.save('web_fetch', body)}
                 onRetryFetch={(sourceId) => void hostedTools.retryFetch(sourceId)}
                 onSaveSearch={(body) => void hostedTools.save('web_search', body)}

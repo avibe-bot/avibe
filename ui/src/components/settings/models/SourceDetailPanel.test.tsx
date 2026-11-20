@@ -1124,7 +1124,7 @@ describe('SourceDetailPanel', () => {
         onRefreshQuota={refreshQuota}
       />
     </I18nextProvider></ToastProvider>);
-    const refresh = screen.queryByRole('button', { name: locale.t('settings.models.quota.refresh') });
+    const refresh = screen.queryByRole('button', { name: locale.t('settings.models.quota.refreshAccount') });
     expect(Boolean(refresh)).toBe(offered);
     if (!refresh) return;
     await userEvent.click(refresh);
@@ -1133,7 +1133,7 @@ describe('SourceDetailPanel', () => {
     const reading = screen.getByRole('button', { name: locale.t('settings.models.quota.refreshing') }) as HTMLButtonElement;
     expect(reading.disabled).toBe(true);
     await act(async () => { landed(); });
-    expect(screen.getByRole('button', { name: locale.t('settings.models.quota.refresh') })).toBeTruthy();
+    expect(screen.getByRole('button', { name: locale.t('settings.models.quota.refreshAccount') })).toBeTruthy();
   });
 
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {

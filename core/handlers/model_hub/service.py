@@ -3324,8 +3324,8 @@ class ModelHubService:
             and source_identity(listed) == source_identity(source)
         ):
             # A listing proves the credential and endpoint, so it retires an
-            # error. It says nothing about quota or rate: the pause of an
-            # unchanged Source stays where requests read it.
+            # error. It is not inference evidence: any pause of an unchanged
+            # Source (quota, rate, upstream) stays, as its live deadline does.
             source.state = ModelHubSourceStateConfig(status="standby")
         removed_hops, interrupted = self._guard_inventory_mutation(
             previous,
@@ -9172,6 +9172,10 @@ class ModelHubService:
                 ):
                     continue
                 # The same retirement a verified response makes, on the user's word.
+                # Like it, the refresh outranks every attempt admitted before it:
+                # a refusal the vendor gave before the reset must not pause the
+                # account again when it settles afterwards.
+                self._latest_source_attempt_generation[source.id] = self._mint_settlement_generation()
                 self.recovery.succeeded(source)
                 resumed.append(source)
                 if source.state.status == "cooldown":
