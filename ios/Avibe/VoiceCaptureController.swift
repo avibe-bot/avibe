@@ -737,6 +737,25 @@ final class VoiceCaptureController {
     /// Whether Avibe is in front now.
     var isInFront: Bool { environment.isInFront() }
 
+    /// What an alert says when a start in front ended without recording:
+    /// the start's failure if it is new since `before` (read before the
+    /// press's first start), else the notice shown since, else nothing.
+    nonisolated static func stoppedAlert(
+        before: VoiceCaptureAttributes.ContentState?,
+        after: VoiceCaptureAttributes.ContentState?,
+        noticesBefore: Int,
+        noticesAfter: Int,
+        lastNoticeReason: VoiceCaptureAttributes.Reason?
+    ) -> (reason: VoiceCaptureAttributes.Reason, failure: VoiceCaptureAttributes.ContentState?)? {
+        if let after, after != before {
+            return (.recordingFailed, after)
+        }
+        if noticesAfter != noticesBefore, let lastNoticeReason {
+            return (lastNoticeReason, nil)
+        }
+        return nil
+    }
+
     /// Opens the main Bot's conversation, where the Web UI asks for
     /// whatever is missing (voice consent, the microphone, sign-in).
     func openMainBotChat() {

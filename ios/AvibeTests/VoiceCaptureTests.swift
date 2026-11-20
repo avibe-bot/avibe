@@ -1046,7 +1046,7 @@ final class VoiceCaptureTests: XCTestCase {
         let notices = controller.noticeCount
         let outcome = await controller.startTake(inFront: controller.isInFront, foregroundFallback: false)
         XCTAssertEqual(outcome, .stopped)
-        let alert = SpeakToMainBotIntent.stoppedAlert(
+        let alert = VoiceCaptureController.stoppedAlert(
             before: before, after: controller.lastFailure,
             noticesBefore: notices, noticesAfter: controller.noticeCount,
             lastNoticeReason: controller.lastNoticeReason
@@ -1057,12 +1057,12 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.events.filter { $0.hasPrefix("prepare") }, ["prepare1"], "the exclusive session, in front")
 
         // Read after the start (as the regression did), the failure is not new.
-        XCTAssertNil(SpeakToMainBotIntent.stoppedAlert(
+        XCTAssertNil(VoiceCaptureController.stoppedAlert(
             before: controller.lastFailure, after: controller.lastFailure,
             noticesBefore: notices, noticesAfter: controller.noticeCount, lastNoticeReason: nil
         ))
         // A notice said since is the alert otherwise.
-        XCTAssertEqual(SpeakToMainBotIntent.stoppedAlert(
+        XCTAssertEqual(VoiceCaptureController.stoppedAlert(
             before: nil, after: nil, noticesBefore: 0, noticesAfter: 1, lastNoticeReason: .voiceUnavailable
         )?.reason, .voiceUnavailable)
     }
