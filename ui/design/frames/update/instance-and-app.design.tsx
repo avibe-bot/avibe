@@ -204,7 +204,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     name: `states-${lang}`,
     title: `面板的各个状态 · ${lang}`,
     width: 1472,
-    height: 1240,
+    height: 1560,
     status: 'shipped',
     fixtures: { copy: copy(lang) },
     render: () => <States lang={lang} states={states} />,

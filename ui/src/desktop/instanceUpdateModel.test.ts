@@ -7,6 +7,8 @@ import { instanceSection } from './instanceUpdateModel';
 const AT = '2026-11-20T07:03:17Z';
 // A minute and a half after the action below was sent.
 const NOW = Date.parse(AT) + 90_000;
+// A read the shell made after that action was accepted.
+const READ = '2026-11-20T07:03:30Z';
 const state = (extra: Partial<InstanceUpdateState> = {}): InstanceUpdateState => ({
   instance_id: 'alex', status: 'ready', can_manage: true, request: null, fetched_at: AT,
   snapshot: { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, prereleases: true, auto_update: false },
@@ -19,13 +21,14 @@ describe('a standalone instance', () => {
   it('offers the version on screen to an account that can manage it', () => {
     const shown = instanceSection(state(), NOW);
     expect(shown.model?.status).toEqual({ kind: 'available', version: '3.2.8rc4' });
-    expect(shown).toMatchObject({ target: '3.2.8rc4', canUpdate: true, canSet: { prereleases: true, autoUpdate: true } });
+    expect(shown).toMatchObject({ target: '3.2.8rc4', canUpdate: true, canCheck: true, canSet: { prereleases: true, autoUpdate: true } });
   });
 
   it('shows its state to a member and offers nothing to change', () => {
     const shown = instanceSection(state({ can_manage: false }), NOW);
     expect(shown.model?.status?.kind).toBe('available');
-    expect(shown).toMatchObject({ canUpdate: false, canSet: { prereleases: false, autoUpdate: false } });
+    // The shell refuses a member's check, so the panel's check only reads the instance again.
+    expect(shown).toMatchObject({ canUpdate: false, canCheck: false, canSet: { prereleases: false, autoUpdate: false } });
     expect(shown.model?.prereleases).toBeNull();
   });
 
@@ -58,10 +61,27 @@ describe('a standalone instance', () => {
     expect(later).toMatchObject({ model: null, busy: false });
   });
 
-  it('says the install did not take once the shell has stopped following it and nothing changed', () => {
-    const late = instanceSection(state({ request: install('accepted') }), Date.parse(AT) + 31 * 60_000);
-    expect(late.model?.status).toEqual({ kind: 'update-failed', reason: 'install', retry: true });
-    expect(late).toMatchObject({ canUpdate: true, busy: false });
+  it('says the install did not finish when the Runtime keeps answering on the old version and offer', () => {
+    // Accepted, and it never restarted (it could not schedule one, or it predates its own install report).
+    const still = (minutes: number) => instanceSection(state({ request: install('accepted') }), Date.parse(AT) + minutes * 60_000);
+    expect(still(4).model?.status).toMatchObject({ kind: 'updated', restarting: true });
+    expect(still(6).model?.status).toEqual({ kind: 'update-failed', reason: 'install', retry: true });
+    expect(still(6)).toMatchObject({ canUpdate: true, busy: false });
+  });
+
+  it('waits for a restart it cannot see only as long as the shell follows the install', () => {
+    const silent = (minutes: number) => instanceSection(state({ status: 'unreachable', request: install('accepted') }), Date.parse(AT) + minutes * 60_000);
+    expect(silent(29).model?.status).toMatchObject({ kind: 'updated', restarting: true });
+    expect(silent(31)).toMatchObject({ model: null, busy: false });
+  });
+
+  it("takes the Runtime's own word for its restart when it reports one", () => {
+    const reported = instanceSection(state({
+      request: install('accepted'),
+      snapshot: { current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true, error: null, install: { phase: 'restarting', target: '3.2.8rc4', started_at: AT } },
+    }), Date.parse(AT) + 10 * 60_000);
+    expect(reported.model?.status).toEqual({ kind: 'updated', version: '3.2.8rc4', restarting: true });
+    expect(reported.busy).toBe(true);
   });
 
   it('offers a release that appeared after the install it sent, instead of repeating that result', () => {
@@ -90,7 +110,7 @@ describe('a standalone instance', () => {
 
 describe('an instance that cannot be read', () => {
   it('is a lost connection when it does not answer and nothing of ours is under way', () => {
-    expect(instanceSection(state({ status: 'unreachable' }), NOW)).toMatchObject({ model: null, canUpdate: false });
+    expect(instanceSection(state({ status: 'unreachable' }), NOW)).toMatchObject({ model: null, canUpdate: false, canCheck: false });
     expect(instanceSection(state({ status: 'unreachable', snapshot: null }), NOW)).toMatchObject({ model: null });
   });
 
@@ -109,17 +129,32 @@ describe('a desktop-managed instance', () => {
   it('offers only what its desktop app takes from here', () => {
     const old = instanceSection(state({ snapshot: managed }), NOW);
     expect(old.model?.subject).toBe('host-desktop');
-    expect(old).toMatchObject({ canUpdate: false, canSet: { prereleases: false, autoUpdate: false } });
+    expect(old).toMatchObject({ canUpdate: false, canCheck: false, canSet: { prereleases: false, autoUpdate: false } });
     const current = instanceSection(state({ snapshot: { ...managed, host_actions: ['check', 'prereleases', 'auto_update', 'install'] } }), NOW);
-    expect(current).toMatchObject({ target: '3.2.7', canUpdate: true, canSet: { prereleases: true, autoUpdate: true } });
+    expect(current).toMatchObject({ target: '3.2.7', canUpdate: true, canCheck: true, canSet: { prereleases: true, autoUpdate: true } });
+  });
+
+  it('shows a member its state and no switches', () => {
+    const member = instanceSection(state({ can_manage: false, snapshot: { ...managed, host_actions: ['check', 'prereleases', 'auto_update', 'install'] } }), NOW);
+    expect(member.model?.status?.kind).toBe('available');
+    expect(member.model).toMatchObject({ prereleases: null, autoUpdate: null });
+    expect(member).toMatchObject({ canUpdate: false, canCheck: false });
   });
 
   it('shows the request on its way, then the progress its own receipt relays', () => {
     const snapshot = { ...managed, host_actions: ['check' as const, 'prereleases' as const, 'auto_update' as const, 'install' as const] };
     expect(instanceSection(state({ snapshot, request: { ...install('sending'), target: '3.2.7' } }), NOW).model?.status).toEqual({ kind: 'requesting' });
-    const relayed = instanceSection(state({ snapshot: { ...snapshot, remote_request: { request_id: 'r1', target: '3.2.7', phase: 'downloading', progress: 42, error_code: null, updated_at: AT } }, request: { ...install('accepted'), target: '3.2.7' } }), NOW);
+    const relayed = instanceSection(state({ fetched_at: READ, snapshot: { ...snapshot, remote_request: { request_id: 'r1', target: '3.2.7', phase: 'downloading', progress: 42, error_code: null, updated_at: AT } }, request: { ...install('accepted'), target: '3.2.7' } }), NOW);
     expect(relayed.model?.status).toEqual({ kind: 'downloading', progress: 42 });
     expect(relayed).toMatchObject({ canUpdate: false, busy: true });
+  });
+
+  it('keeps the request on its way until a read made after it was accepted shows what the host did with it', () => {
+    const snapshot = { ...managed, host_actions: ['check' as const, 'prereleases' as const, 'auto_update' as const, 'install' as const] };
+    // The answer on screen was read before the request: it cannot show the host's receipt yet.
+    const before = instanceSection(state({ snapshot, fetched_at: AT, request: { ...install('accepted'), target: '3.2.7' } }), NOW);
+    expect(before.model?.status).toEqual({ kind: 'requesting' });
+    expect(before).toMatchObject({ canUpdate: false, busy: true });
   });
 
   it.each(['checking', 'awaiting_host'] as const)("is still running while the host's receipt is %s", (phase) => {
@@ -127,7 +162,7 @@ describe('a desktop-managed instance', () => {
       ...managed, host_actions: ['check' as const, 'prereleases' as const, 'auto_update' as const, 'install' as const],
       remote_request: { request_id: 'r1', target: '3.2.7', phase, progress: null, error_code: null, updated_at: AT },
     };
-    expect(instanceSection(state({ snapshot, request: { ...install('accepted'), target: '3.2.7' } }), NOW)).toMatchObject({ canUpdate: false, busy: true });
+    expect(instanceSection(state({ snapshot, fetched_at: READ, request: { ...install('accepted'), target: '3.2.7' } }), NOW)).toMatchObject({ canUpdate: false, busy: true });
   });
 
   it.each(['failed', 'declined', 'expired'] as const)("is free to retry once the host's own receipt ends %s, though the shell's stays accepted", (phase) => {
@@ -135,7 +170,7 @@ describe('a desktop-managed instance', () => {
       ...managed, host_actions: ['check' as const, 'prereleases' as const, 'auto_update' as const, 'install' as const],
       remote_request: { request_id: 'r1', target: '3.2.7', phase, progress: null, error_code: null, updated_at: AT },
     };
-    const ended = instanceSection(state({ snapshot, request: { ...install('accepted'), target: '3.2.7' } }), NOW);
+    const ended = instanceSection(state({ snapshot, fetched_at: READ, request: { ...install('accepted'), target: '3.2.7' } }), NOW);
     expect(ended.model?.status).toMatchObject({ kind: 'update-failed', retry: true });
     expect(ended).toMatchObject({ target: '3.2.7', canUpdate: true, busy: false });
   });

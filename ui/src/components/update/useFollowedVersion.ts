@@ -9,6 +9,9 @@ import { installRunning, normalizeVersion } from './versions';
 // A standalone Runtime looks its latest release up on every version read, so these stay unhurried.
 const FOLLOW_POLL_MS = 3000;
 const WATCH_POLL_MS = 5000;
+// Both end by themselves: an install the Runtime never finishes reporting, or a panel that never opened.
+const FOLLOW_LIMIT_MS = 30 * 60_000;
+const WATCH_LIMIT_MS = 2 * 60_000;
 /** A read on return to the window is skipped when the last one is this fresh. */
 const REFRESH_MIN_INTERVAL_MS = 5000;
 
@@ -21,7 +24,17 @@ export function useFollowInstall(info: VersionInfo | null, onRead: (info: Versio
   receive: (fresh: VersionInfo) => void;
 } {
   const api = useApi();
-  const running = enabled && installRunning(info);
+  // The install being reported, by what tells it from the next one.
+  const reported = enabled && installRunning(info)
+    ? info?.install?.started_at ?? info?.remote_request?.request_id ?? 'install' : null;
+  // Following one install stops after its limit; another install is followed afresh.
+  const [gaveUpOn, setGaveUpOn] = useState<string | null>(null);
+  const running = reported !== null && reported !== gaveUpOn;
+  useEffect(() => {
+    if (reported === null) return;
+    const timer = window.setTimeout(() => setGaveUpOn(reported), FOLLOW_LIMIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [reported]);
   // What the callbacks below read, without being rebuilt on every read.
   const latest = useRef({ info, onRead });
   useEffect(() => { latest.current = { info, onRead }; });
@@ -103,7 +116,12 @@ export function useFollowedVersion(): { info: VersionInfo | null; updating: bool
     if (!watching) return;
     const back = () => setWatching(false);
     window.addEventListener('focus', back);
-    return () => window.removeEventListener('focus', back);
+    // The shell may not have presented the panel at all; the watch does not outlast it by long.
+    const limit = window.setTimeout(back, WATCH_LIMIT_MS);
+    return () => {
+      window.removeEventListener('focus', back);
+      window.clearTimeout(limit);
+    };
   }, [watching]);
   // A followed install has its own, faster reads.
   useEffect(() => {

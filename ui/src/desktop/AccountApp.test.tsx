@@ -8,12 +8,12 @@ import { AccountApp } from './AccountApp';
 
 const send = vi.hoisted(() => vi.fn(async () => null));
 const update = vi.hoisted(() => ({ value: {} as Record<string, unknown> }));
-const bridge = vi.hoisted(() => ({ failed: false }));
+const bridge = vi.hoisted(() => ({ failed: false, error: null as string | null }));
 // What the shell reports for the selected instance; absent from a shell that predates it.
 const shown = vi.hoisted(() => ({ instance: undefined as unknown }));
 vi.mock('./useAccountClient', () => ({
   useAccountClient: () => bridge.failed ? { error: 'bridge_unavailable', send, state: null } : ({
-    error: null,
+    error: bridge.error,
     send,
     state: {
       version: 1, revision: 1, generation: 4,
@@ -32,7 +32,7 @@ vi.mock('./useAccountClient', () => ({
     },
   }),
 }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); update.value = {}; bridge.failed = false; shown.instance = undefined; window.history.replaceState(null, '', '/'); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); update.value = {}; bridge.failed = false; bridge.error = null; shown.instance = undefined; window.history.replaceState(null, '', '/'); });
 
 // ui/design: update/panel/trusted-view
 it('AUTH-SETUP-178 the trusted update view acts on this computer\'s desktop app with the same panel', async () => {
@@ -150,6 +150,31 @@ it('one check in the popup asks both updaters', async () => {
   await openPopup();
   fireEvent.click(screen.getByRole('button', { name: en.update.action.check }));
   await waitFor(() => expect(send.mock.calls.map(([action]) => (action as { type: string }).type)).toEqual(['update_check', 'instance_update_check']));
+});
+
+it("a member's check reads the instance again instead of asking for a check the shell would refuse", async () => {
+  shown.instance = instanceReady({ can_manage: false });
+  await openPopup();
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.check }));
+  await waitFor(() => expect(send.mock.calls.map(([action]) => (action as { type: string }).type)).toEqual(['update_check', 'instance_update_refresh']));
+});
+
+it("a failed action on the instance is told by its section, not by this page's connection notice", async () => {
+  shown.instance = instanceReady();
+  // The client reports the last action's refusal as an error code.
+  bridge.error = 'install_failed';
+  await openPopup();
+  // For this computer's own actions the page says so itself.
+  expect(screen.getByText(en.desktopClient.errors.request)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Update Studio' }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: 'instance_update_install', target_version: '3.2.7' }));
+  expect(screen.queryByText(en.desktopClient.errors.request)).toBeNull();
+});
+
+it('the update popup does not tell an enrollment failure', async () => {
+  shown.instance = instanceReady();
+  await openPopup();
+  expect(screen.queryByRole('alert')).toBeNull();
 });
 
 it('an instance install sent from the popup shows as running, with no second Update for it', async () => {

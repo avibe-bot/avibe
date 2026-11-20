@@ -42,7 +42,8 @@ const desktopInvoke = vi.hoisted(() => vi.fn(defaultDesktopInvoke));
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 const authorization = vi.hoisted(() => ({ remote: true, capabilities: { can_manage_instance: true, is_instance_owner: true } }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
-vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
+const viewport = vi.hoisted(() => ({ desktop: true }));
+vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));
 // The page's request to the shell to present a view, past the unsaved-changes guard.
 const presented = vi.hoisted(() => vi.fn());
 vi.mock('../context/useUnsavedChangesActionGuard', () => ({
@@ -54,6 +55,7 @@ vi.mock('../desktop/bridge', async (original) => ({
 }));
 
 beforeEach(() => {
+  viewport.desktop = true;
   authorization.capabilities.can_manage_instance = true;
   authorization.capabilities.is_instance_owner = true;
   api.getVersion.mockReset().mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' });
@@ -1195,7 +1197,18 @@ describe("another computer's instance in the desktop app", () => {
   const remote = { ...localCompletion, connection: { ...localCompletion.connection, status: 'remote_connected',
     committed: { kind: 'remote', name: 'alex', instance_id: 'alex', canonical_origin: 'https://alex.example' } } };
 
+  it('draws nothing at desktop width, where the bottom row carries the chip and this badge is only kept mounted', async () => {
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', remote);
+    api.getVersion.mockResolvedValue({ current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true });
+    renderInShell('3.2.8-rc.4', '3.2.8rc2', null, true);
+    await act(async () => {});
+    expect(document.querySelector('[data-version-chip]')).toBeNull();
+  });
+
   it("shows the instance's own version under its name and leaves the panel to the shell", async () => {
+    // A narrow window: the sidebar and its bottom row are gone, and the Settings header's badge is what is left.
+    viewport.desktop = false;
     vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
     vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', remote);
     api.getVersion.mockResolvedValue({ current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true });

@@ -42,9 +42,9 @@ carries only the desktop app's last check (`vibe/desktop_update_status.py`).
   Known limit: an install started at a desktop-managed host itself is not
   reported by that host today (see Background); relaying it is a later shell
   change, outside these three PRs. Pressing Update from another surface
-  during such an install does no harm: the host's updater is busy, refuses the
-  request (`update_in_progress`), and the panel says another update is in
-  progress.
+  during such an install installs nothing twice: the host's updater is busy
+  and does not take the request, which expires unanswered, and the panel says
+  the host's desktop app did not respond (not that another update is running).
 - No new setting, no confirmation dialog, and the existing boundary holds: the
   panel is drawn by the local shell, and a remote page never drives this
   computer's updater.

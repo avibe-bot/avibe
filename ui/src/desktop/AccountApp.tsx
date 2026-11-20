@@ -148,9 +148,11 @@ export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>
         settingsBusy: busy,
       },
     }}
-    // One check asks both updaters: this computer's, then the instance's.
+    // One check asks both updaters: this computer's, then the instance's. Where the shell would refuse the
+    // instance's check (a member, an instance that does not answer, a host too old to take one), it reads
+    // the instance again instead, which any reader may.
     check={{
-      run: () => void act({ type: 'update_check' }).then(() => act({ type: 'instance_update_check' })),
+      run: () => void act({ type: 'update_check' }).then(() => act({ type: shown.canCheck ? 'instance_update_check' : 'instance_update_refresh' })),
       disabled: busy || appChecking || shown.busy,
     }}
     close={close}
@@ -177,6 +179,9 @@ export function AccountApp() {
   const [editEmail, setEditEmail] = useState(false);
   const [method, setMethod] = useState<'totp' | 'recovery'>('totp');
   const [busy, setBusy] = useState(false);
+  // Whether the last action was sent to the selected instance's updater: its section says how that went, so a
+  // refusal or a failure there is not repeated as this page's own "could not be completed" notice.
+  const [instanceAction, setInstanceAction] = useState(false);
   const [reviewChange, setReviewChange] = useState(false);
   const [selection, setSelection] = useState<{ id: string; generation: number; error: string | null } | null>(null);
   const [material, setMaterial] = useState<{ generation: number; result: DesktopClientDirectResult } | null>(null);
@@ -216,6 +221,7 @@ export function AccountApp() {
   }, [i18n, popover]);
   const act = useCallback(async (action: DesktopClientAction): Promise<boolean> => {
     if (requestBusy.current) return false;
+    setInstanceAction(action.type.startsWith('instance_update_'));
     requestBusy.current = true;
     setBusy(true);
     const ticket = epoch.current;
@@ -298,7 +304,8 @@ export function AccountApp() {
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
   };
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
-  const displayedError = error ?? (view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
+  // The update views, the popup included, are not where an enrollment failure is told.
+  const displayedError = (instanceAction ? null : error) ?? (popover || view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
   const errorMessage = displayedError ? explainError(displayedError) : null;
   const activeSelection = selection?.generation === state?.generation ? selection : null;
   const failedPending = activeSelection?.error && activeSelection.id === state?.connection.pending?.instance_id;

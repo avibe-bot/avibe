@@ -97,6 +97,26 @@ it('stops reading for the panel once the window is back in front, also when that
   expect(api.getVersion.mock.calls.length).toBe(reads);
 });
 
+it('ends its reads by itself: the watch when no panel came, the follow when an install never ends', async () => {
+  api.getVersion.mockResolvedValue(idle);
+  mount();
+  await tick();
+  await act(async () => { chip().click(); });
+  await tick(3 * 60_000);
+  const afterWatch = api.getVersion.mock.calls.length;
+  await tick(60_000);
+  expect(api.getVersion.mock.calls.length).toBe(afterWatch);
+
+  api.getVersion.mockResolvedValue(installing);
+  vi.setSystemTime(Date.now() + 10_000);
+  await act(async () => { window.dispatchEvent(new Event('focus')); });
+  await tick(31 * 60_000);
+  const afterFollow = api.getVersion.mock.calls.length;
+  await tick(60_000);
+  expect(api.getVersion.mock.calls.length).toBe(afterFollow);
+  expect(chip().querySelector('.animate-spin')).toBeNull();
+});
+
 it('loads the page again when a read on return finds the new version before the next poll does', async () => {
   api.getVersion.mockResolvedValueOnce(installing);
   mount();

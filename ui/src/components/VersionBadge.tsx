@@ -799,6 +799,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   // On another computer's instance the shell owns the panel; this page keeps no popover and no updater IPC.
   if (client?.connection.committed.kind === 'remote') {
+    // At desktop width the bottom row carries that chip; a badge kept mounted but hidden there (the Settings
+    // header's) would only read the version a second time.
+    if (isDesktop) return null;
     return <ShownInstanceVersion name={client.connection.committed.name} appUpdate={client.desktop.update.phase === 'available'} />;
   }
 
