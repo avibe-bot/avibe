@@ -468,11 +468,13 @@ def test_a_stop_while_the_endpoint_request_is_out_opens_no_socket_when_the_reply
     fake.endpoint_delays = [1.0]
     fake.events_on_open = [message_event()]
     connection = _connection(fake)
-    connection.start()
-    fake.wait_until(lambda: fake.endpoint_requests, what="the endpoint request")
+    # The cancelling sweep is kept out of it: it would usually, not always, end the handshake in time.
+    with patch.object(feishu_sdk_ws, "_STOP_TICK_SECONDS", 30):
+        connection.start()
+        fake.wait_until(lambda: fake.endpoint_requests, what="the endpoint request")
 
-    connection.stop(timeout=0)
-    fake.wait_until(lambda: not connection.is_alive(), timeout=5, what="the connection's thread to end")
+        connection.stop(timeout=0)
+        fake.wait_until(lambda: not connection.is_alive(), timeout=5, what="the connection's thread to end")
 
     assert len(fake.endpoint_requests) == 1
     assert fake.connections_opened == 0
