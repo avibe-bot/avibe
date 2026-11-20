@@ -92,6 +92,10 @@ const states: PanelState[] = [
   },
   { name: 'details', zh: '点名字展开：这一项的上次检查和开关', en: 'A name opens its own last check and switches', subjects: pair(instance(), appCurrent(), 'instance') },
   { name: 'offline', zh: 'alex 连接断开', en: 'alex cannot be reached', subjects: pair(null, appCurrent()) },
+  {
+    name: 'long-name', zh: '实例名字很长：名字和按钮都截断', en: 'A long instance name truncates, in its row and in its button',
+    subjects: { instance: { name: 'mac-mini-in-the-studio-upstairs-office', model: instance() }, app: { model: appCurrent() } },
+  },
 ];
 
 const badgeRows = (lang: SubjectLang): [string, ReactNode][] => {
@@ -193,7 +197,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     name: `states-${lang}`,
     title: `提议 · 面板的各个状态 · ${lang}`,
     width: 1472,
-    height: 1120,
+    height: 1580,
     status: 'proposed',
     fixtures: { copy: copy(lang) },
     render: () => <States lang={lang} states={states} />,

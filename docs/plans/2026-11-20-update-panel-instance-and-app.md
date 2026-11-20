@@ -1,8 +1,7 @@
 # The update panel names whose version it shows
 
-Status: **proposed**, waiting for the owner's review of the frames
-(`ui/design: update/instance-and-app`). Date: 2026-11-20. No product code
-changes in this proposal.
+Status: **approved** by the owner on 2026-11-20 (`ui/design:
+update/instance-and-app`); implementation follows this plan.
 
 ## Background
 
@@ -56,7 +55,13 @@ Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
 2. **Panel.** One panel with a section per subject: the instance first, under
    its own name, then "This computer's app" (zh: 这台电脑上的桌面应用). A
    section is the shipped panel's body with the subject's name in place of
-   "Current version", and its button directly under its state. The last check
+   "Current version", and its button directly under its state. With two
+   sections each button names its target ("Update alex", "Update this app");
+   one section alone keeps "Update". An offer says what installing it does to
+   that subject: the instance restarts, usually within a minute or two, its
+   sessions and settings are kept, and work in progress may be interrupted
+   (Vibey continues its own Turn after the restart; a Claude Code or Codex Turn
+   ends with a Retry notice). The last check
    and the two switches are behind the subject's name, closed by default.
    The header's check asks both updaters.
 3. **Result.** A finished update reads "<name> updated to <version>". After
@@ -66,8 +71,9 @@ Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
    version and asks the shell for the same panel; the page draws no popover of
    its own inside the desktop app.
 
-New copy: the app's section name, the named result, and the chip's tooltip
-("<name> is on v<version>"). Everything else is shipped `update.*` copy.
+New copy: the app's section name, the two named buttons, the instance's offer
+sentence, the named result, and the chip's tooltip ("<name> is on
+v<version>"). Everything else is shipped `update.*` copy.
 
 ## Trust boundary
 
@@ -111,18 +117,24 @@ origin and CSRF checks for these POSTs without weakening them.
 - The version-skew warning (`dashboard.runtimeVersionSkew`) stays for an
   instance on the same computer; two computers on different versions is normal.
 
-## Choices made here, open to the owner
+## Decided
 
 - The last check and the switches are closed by default in the two-section
-  panel (both open is about 650 px tall). Alternative: the instance's open by
-  default.
+  panel (both open is about 650 px tall).
 - After the desktop app updates and restarts, the panel does not reopen by
   itself; the chip then shows the instance's version, with its dot if the
   instance is behind.
 
+## Delivery
+
+Two PRs. The Runtime's in-progress report is its own backend PR. The main PR
+carries the panel, the shell and the bottom row, and reaches a user in two
+halves: the shell's two-section panel with the next desktop app build, and the
+bottom row once the instance runs a build that contains it.
+
 ## Todo
 
-- [ ] Owner reviews the frames; status becomes `approved` in this PR.
+- [x] Owner reviews the frames.
 - [ ] Runtime: in-progress report for standalone installs.
 - [ ] Shell: instance update actions on the account bridge; popup sizing.
 - [ ] UI: `UpdatePanel` sections, bottom row, narrow-window badge, i18n; the

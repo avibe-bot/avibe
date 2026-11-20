@@ -30,7 +30,7 @@ type Draft = (zh: string, en: string) => string;
 const draft = (lang: SubjectLang): Draft => (zh, en) => (lang === 'en' ? en : zh);
 
 export type UpdateSubjectSection = {
-  /** The instance's own name, or this computer's desktop app. */
+  /** The instance's own name. */
   name: string;
   /** What the shipped mapping makes of this subject's updater; none while the instance cannot be reached. */
   model: UpdatePanelModel | null;
@@ -50,8 +50,11 @@ const TONE_CLASS: Record<Tone, string> = {
 };
 type Copy = { tone: Tone; title: string; detail?: string; spin?: boolean; offer?: boolean };
 
-/** UpdatePanel's `useStatusCopy`, with one change: a finished update names what was updated. */
-function useStatusCopy(status: UpdatePanelStatus | null, section: UpdateSubjectSection, d: Draft): Copy | null {
+type Subject = UpdateSubjectSection & { kind: 'instance' | 'app' };
+
+/** UpdatePanel's `useStatusCopy`, with two changes: an offer says what installing it does to this subject, and a
+ *  finished update names what was updated. */
+function useStatusCopy(status: UpdatePanelStatus | null, section: Subject, d: Draft): Copy | null {
   const { t } = useTranslation();
   const subject = section.model?.subject;
   if (!status) return null;
@@ -59,7 +62,20 @@ function useStatusCopy(status: UpdatePanelStatus | null, section: UpdateSubjectS
     case 'checking': return { tone: 'info', spin: true, title: t('update.status.checking') };
     case 'current': return { tone: 'success', title: t(status.awaitingStable ? 'dashboard.awaitingStableRelease' : 'update.status.current') };
     case 'available':
-      return { tone: 'info', offer: true, title: t('update.status.available'), detail: subject === 'runtime' ? undefined : t('update.status.availableDetail') };
+      return {
+        tone: 'info',
+        offer: true,
+        title: t('update.status.available'),
+        // New for the instance, in its own words: it restarts (about a minute and a half on the owner's computer,
+        // the install included), sessions and settings stay, and a Turn that is running then may be cut
+        // (Vibey continues its own after the restart; a Claude Code or Codex Turn ends with a Retry notice).
+        detail: section.kind === 'instance'
+          ? d(
+            `更新时 ${section.name} 会重新启动，通常一两分钟。会话和设置都会保留，正在进行的工作可能中断。`,
+            `${section.name} restarts to finish, usually within a minute or two. Sessions and settings are kept; work in progress may be interrupted.`,
+          )
+          : t('update.status.availableDetail'),
+      };
     case 'not-checked': return { tone: 'neutral', title: t('update.status.notChecked') };
     case 'unknown': return { tone: 'neutral', title: t('dashboard.desktopManagedUpdate') };
     case 'disabled': return { tone: 'neutral', title: t('update.status.disabled'), detail: t('update.status.disabledDetail') };
@@ -91,10 +107,10 @@ function useStatusCopy(status: UpdatePanelStatus | null, section: UpdateSubjectS
 }
 
 // UpdatePanel's Row and Setting.
-function Row({ label, children }: { label: ReactNode; children: ReactNode }) {
+function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-3 text-sm">
-      {typeof label === 'string' ? <span className="shrink-0 text-muted">{label}</span> : label}
+      <span className="shrink-0 text-muted">{label}</span>
       <span className="flex min-w-0 items-center justify-end gap-1.5 text-right">{children}</span>
     </div>
   );
@@ -111,7 +127,7 @@ function Setting({ label, hint, enabled }: { label: string; hint: string; enable
   );
 }
 
-function Section({ section, lang, first }: { section: UpdateSubjectSection; lang: SubjectLang; first: boolean }) {
+function Section({ section, lang, first }: { section: Subject; lang: SubjectLang; first: boolean }) {
   const { t } = useTranslation();
   const d = draft(lang);
   const { model, open = false, canUpdate = true } = section;
@@ -119,23 +135,25 @@ function Section({ section, lang, first }: { section: UpdateSubjectSection; lang
   const copy = useStatusCopy(status, section, d);
   const offered = model?.latest ?? null;
   const lead = !canUpdate ? null
-    : status?.kind === 'available' ? { label: t('update.action.update'), icon: <Download /> }
+    // Two buttons in one panel each say what they update; one section alone keeps the shipped "Update".
+    : status?.kind === 'available'
+      ? { label: section.kind === 'instance' ? d(`更新 ${section.name}`, `Update ${section.name}`) : d('更新桌面应用', 'Update this app'), icon: <Download /> }
       : (status?.kind === 'update-failed' && status.retry) || status?.kind === 'check-failed' ? { label: t('update.action.retry'), icon: <RefreshCw /> }
         : null;
   const failed = status?.kind === 'check-failed' || status?.kind === 'update-failed';
   return (
-    <section data-update-subject className={cn('space-y-3 p-4', !first && 'border-t border-border')}>
+    // The shipped panel keeps 16 px under its body and 12 px under its button; a section ends in one or the other.
+    <section data-update-subject className={cn('space-y-3 px-4 pt-4', lead && !open ? 'pb-3' : 'pb-4', !first && 'border-t border-border')}>
       {/* The subject's name where the shipped panel says "Current version": every version has its owner beside it.
           The name opens and closes this subject's last check and switches. */}
-      <Row label={(
+      <div className="flex items-center justify-between gap-3 text-sm">
         <button type="button" aria-expanded={open} title={section.name}
           className="flex min-w-0 items-center gap-1 rounded-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <span className="truncate">{section.name}</span>
           <ChevronDown size={14} aria-hidden="true" className={cn('shrink-0 text-muted transition-transform', open && 'rotate-180')} />
         </button>
-      )}>
         {model?.current && <span className="shrink-0 font-mono font-medium text-foreground">{model.current}</span>}
-      </Row>
+      </div>
       {offered && (
         <Row label={t(model?.latestIsStable ? 'update.row.latestStable' : 'update.row.offered')}>
           {isPrereleaseVersion(offered) && <span className={badgeVariants({ variant: 'info' })}>{t('dashboard.prereleaseBadge')}</span>}
@@ -176,7 +194,11 @@ function Section({ section, lang, first }: { section: UpdateSubjectSection; lang
       {/* The button sits under the state it acts on, in its own subject's section. */}
       {lead && (
         <div className="flex items-center justify-end gap-2">
-          <Button variant="brand" size="xs">{lead.icon}{lead.label}</Button>
+          {/* A long instance name truncates inside its button. */}
+          <Button variant="brand" size="xs" className="max-w-full min-w-0" title={lead.label}>
+            {lead.icon}
+            <span className="truncate">{lead.label}</span>
+          </Button>
         </div>
       )}
       {open && model && (model.checkedAt || model.prereleases || model.autoUpdate) && (
@@ -201,7 +223,10 @@ export function UpdateSubjectsPanel({ lang, instance, app }: {
   instance: UpdateSubjectSection;
   app: Omit<UpdateSubjectSection, 'name'>;
 }) {
-  const sections: UpdateSubjectSection[] = [instance, { ...app, name: draft(lang)('这台电脑上的桌面应用', "This computer's app") }];
+  const sections: Subject[] = [
+    { ...instance, kind: 'instance' },
+    { ...app, kind: 'app', name: draft(lang)('这台电脑上的桌面应用', "This computer's app") },
+  ];
   const { t } = useTranslation();
   const checking = sections.some((section) => section.model?.status?.kind === 'checking');
   return (
@@ -242,7 +267,9 @@ export function InstanceVersionRow({ lang, name, version, attention = false, upd
     <Button data-account-trigger type="button" variant="ghost" title={name}
       className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md border border-transparent pl-4 pr-1.5 text-left text-xs [--press-scale:1]">
       <StatusGlyph label={name}>
-        {offline ? <WifiOff data-status-indicator className="size-3 shrink-0 text-gold-ink" aria-label={t('desktopClient.disconnected')} />
+        {/* The icon fills its box where the dot leaves 2 px, so it sits 2 px left: the same clear space before the
+            name in both states, and the name does not move. The shipped row draws it flush, touching the name. */}
+        {offline ? <WifiOff data-status-indicator className="-ml-0.5 size-3 shrink-0 text-gold-ink" aria-label={t('desktopClient.disconnected')} />
           : <StatusDot tone="running" label={t('desktopClient.connected')} />}
       </StatusGlyph>
       <span data-account-label className="min-w-0 truncate">{name}</span>
