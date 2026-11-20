@@ -1,6 +1,7 @@
 ---
 name: use-mobile-health
 description: Read steps, activity, workouts and sleep synced from the user's iPhone to their own Avibe instance, or connect, refresh and revoke that synchronization.
+requires: mobile-device
 ---
 
 # Mobile health

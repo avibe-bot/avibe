@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -4318,6 +4319,7 @@ class ScheduledTaskService:
         self._mobile_subscription: int | None = None
         self._mobile_probe: asyncio.Task | None = None
         self._mobile_dirty = False
+        self._mobile_deliver = False
         self._mobile_probe_after = 0.0
         self._mobile_policy_check_at = 0.0
         self._job_signatures: Dict[str, tuple[Any, ...]] = {}
@@ -5095,11 +5097,13 @@ class ScheduledTaskService:
 
             def pairing_changed(event, data):
                 if event == DEFINITIONS_UPDATED_EVENT and data == {"definition_type": "mobile-health"}:
-                    loop.call_soon_threadsafe(self._request_mobile_probe)
+                    # Every Health commit that may owe a continuation publishes this hint.
+                    loop.call_soon_threadsafe(functools.partial(self._request_mobile_probe, deliver=True))
 
             # Subscribe before reading: a concurrent commit cannot fall between the two.
             self._mobile_subscription = bus.subscribe_callback(pairing_changed)
-            self._request_mobile_probe()
+            # Startup also delivers what a previous process committed but never sent.
+            self._request_mobile_probe(deliver=True)
             self.scheduler.start()
         except BaseException:
             self._begin_stop()
@@ -5120,7 +5124,7 @@ class ScheduledTaskService:
         except Exception as exc:
             logger.error("Harness definition binding audit failed: %s", exc, exc_info=True)
 
-    def _request_mobile_probe(self, *, periodic: bool = False) -> None:
+    def _request_mobile_probe(self, *, periodic: bool = False, deliver: bool = False) -> None:
         # Definitions hints are best effort. Reuse the scheduler's existing reconciliation
         # tick to recover lost IPC, without installing an idle Health timer.
         now = time.monotonic()
@@ -5128,6 +5132,7 @@ class ScheduledTaskService:
             return
         self._mobile_probe_after = now + 60
         self._mobile_dirty = True
+        self._mobile_deliver = self._mobile_deliver or deliver
         if self._mobile_probe is None or self._mobile_probe.done():
             self._mobile_probe = asyncio.create_task(self._reconcile_mobile_jobs())
 
@@ -5141,7 +5146,9 @@ class ScheduledTaskService:
                 if self._mobile_dirty:
                     continue  # A newer commit arrived during the read.
                 for wanted, job_id, seconds in (
-                    ("paired", _MOBILE_PAIRED_JOB, 2),
+                    # Delivery follows commits; these sweeps only recover what no commit announces
+                    # (time-based expiry, a crashed waiter, a lost hint) and run cleanup/eligibility.
+                    ("paired", _MOBILE_PAIRED_JOB, 60),
                     ("callbacks", _MOBILE_RECOVERY_JOB, 60),
                 ):
                     job = self.scheduler.get_job(job_id)
@@ -5156,6 +5163,10 @@ class ScheduledTaskService:
                         )
                     elif mode != wanted and job is not None:
                         self.scheduler.remove_job(job_id)
+                if self._mobile_deliver and not self._mobile_dirty:
+                    self._mobile_deliver = False
+                    if mode is not None:
+                        await self._mobile_maintenance(callbacks_only=True)
         except Exception:
             logger.warning("mobile maintenance code=schedule_reconcile_failed", exc_info=True)
 

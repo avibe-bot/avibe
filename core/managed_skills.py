@@ -53,7 +53,7 @@ _LEGACY_SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _TOP_LEVEL_FIELD_RE = re.compile(r"^[^ \t#][^:]*:")
 _BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[1-9]?$|^[|>][1-9]?[+-]?$")
-_CATALOG_FIELDS = frozenset({"name", "description", "disable-model-invocation"})
+_CATALOG_FIELDS = frozenset({"name", "description", "disable-model-invocation", "requires"})
 _WINDOWS_RESERVED = {
     "con",
     "prn",
@@ -82,6 +82,7 @@ class ManagedSkill:
     source_directory_identity: tuple[int, int] | None = None
     frontmatter_bytes: int = 0
     disable_model_invocation: bool = False
+    requires: str = ""
 
 
 @dataclass
@@ -537,6 +538,7 @@ def _read_skill_path(
         "true",
         "yes",
     }
+    requires = fields.get("requires", "").strip()
     if not description or not 1 <= len(name) <= 64 or _PORTABLE_NAME_RE.fullmatch(name) is None:
         return None, body_start
     if len(description) > CATALOG_DESCRIPTION_MAX_CHARS:
@@ -581,6 +583,7 @@ def _read_skill_path(
             source_directory_identity=source_directory_identity or directory_identity,
             frontmatter_bytes=body_start,
             disable_model_invocation=disable_model_invocation,
+            requires=requires,
         ),
         body_start,
     )
@@ -1017,7 +1020,35 @@ def resolve_skills(
         current = winners.get(candidate.name)
         if current is None or candidate.priority < current.priority:
             winners[candidate.name] = candidate
-    return sorted(winners.values(), key=lambda skill: skill.name)
+    return sorted((_with_availability(skill) for skill in winners.values()), key=lambda skill: skill.name)
+
+
+def _mobile_device_paired() -> bool:
+    from storage.mobile_store import mobile_job_mode
+
+    return mobile_job_mode() == "paired"
+
+
+#: Capabilities a built-in Skill may declare with ``requires:``. An unmet or unknown
+#: requirement keeps the Skill loadable by name but out of every advertised catalog, the
+#: same as ``disable-model-invocation``; the check runs whenever a catalog is resolved,
+#: so a prompt built for the next Turn reflects pairing changes.
+BUILTIN_SKILL_REQUIREMENTS: dict[str, Callable[[], bool]] = {
+    "mobile-device": _mobile_device_paired,
+}
+
+
+def _with_availability(skill: ManagedSkill) -> ManagedSkill:
+    # Only Avibe's own catalog may declare availability; other ecosystems' frontmatter is not ours to read.
+    if not skill.requires or skill.priority[:1] != (0,) or skill.disable_model_invocation:
+        return skill
+    check = BUILTIN_SKILL_REQUIREMENTS.get(skill.requires)
+    try:
+        available = check is not None and check()
+    except Exception:
+        logger.info("Skill availability unknown, not advertised: %s", skill.name)
+        available = False
+    return skill if available else replace(skill, disable_model_invocation=True)
 
 
 def catalog_page_of(
@@ -1211,6 +1242,7 @@ def load_skill(
             source_directory_identity=winner.source_directory_identity,
             frontmatter_bytes=loaded.frontmatter_bytes,
             disable_model_invocation=loaded.disable_model_invocation,
+            requires=loaded.requires,
         )
     except OSError:
         return None
