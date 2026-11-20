@@ -125,14 +125,11 @@ export function DesktopSignIn({
     followed.current = key;
     // At first sight only a step past signed out moves the flow; later, every change does.
     if (first && step.status === 'signedOut') return;
-    // Native starts every first factor from signed out, which drops a code attempt the page
-    // stepped back from. On a step that holds no native attempt, signed out changes nothing, and
-    // the running call's own reply (its error) settles that step; only the code and second-factor
-    // steps end with their attempt.
-    if (step.status === 'signedOut' && flow.screen !== 'code' && flow.screen !== 'secondFactor') return;
+    // Native commits a first factor only when it succeeds, so a change the page did not ask for
+    // is someone else's: a cancel, another window, a relaunch.
     retireOperation();
     follow(step);
-  }, [flow.screen, follow, key, retireOperation, step]);
+  }, [follow, key, retireOperation, step]);
 
   return (
     <LocalExit.Provider value={onLocal}>

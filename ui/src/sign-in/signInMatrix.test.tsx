@@ -234,13 +234,10 @@ function createDesktopNative(
   const send = vi.fn(async (action: DesktopClientAction) => {
     const started = generation;
     switch (action.type) {
-      // Native starts every first factor from signed out, which drops a code attempt the page
-      // stepped back from, and publishes that state even when the call then fails.
+      // Native commits a first factor only when it succeeds: a refused one publishes nothing and
+      // leaves a code already sent as it was.
       case 'request_otp':
-        if (account.sendRetryAfter) {
-          publish(signedOutAccount, true);
-          return reply(false, 'rate_limited', account.sendRetryAfter);
-        }
+        if (account.sendRetryAfter) return reply(false, 'rate_limited', account.sendRetryAfter);
         publish({ ...signedOutAccount, status: 'verifying', email: action.email }, true);
         return reply(true);
       case 'verify_otp':
@@ -252,10 +249,7 @@ function createDesktopNative(
         firstFactor();
         return reply(true);
       case 'sign_in_password':
-        if (action.password !== PASSWORD) {
-          publish(signedOutAccount, true);
-          return reply(false, 'invalid_credentials');
-        }
+        if (action.password !== PASSWORD) return reply(false, 'invalid_credentials');
         firstFactor();
         return reply(true);
       case 'verify_second_factor':
@@ -456,6 +450,29 @@ describe.each(HARNESSES)('shared sign-in on $name', ({ name, back, mount }) => {
     click(en.mobileApp.password.signIn);
     expect(await screen.findByText(en.mobileApp.password.invalid)).toBeTruthy();
     expect(screen.getByLabelText(en.mobileApp.password.label)).toBeTruthy();
+  });
+
+  it(title('keeps a refused resend on the code step with its wait'), async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const account = service();
+      mount(account);
+      startEmail();
+      click(en.mobileApp.email.send);
+      await screen.findByText(en.mobileApp.code.title);
+      // Past the send's own wait, avibe.bot refuses the resend.
+      await act(async () => {
+        vi.advanceTimersByTime(61_000);
+      });
+      account.sendRetryAfter = 30;
+      click(en.mobileApp.code.resend);
+      expect(await screen.findByText(en.mobileApp.code.rateLimited)).toBeTruthy();
+      expect(screen.getByText(en.mobileApp.code.title)).toBeTruthy();
+      expect(screen.getByLabelText(en.mobileApp.code.label)).toBeTruthy();
+      expect(screen.getByRole('button', { name: /Resend in 30s/ })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it(title('keeps a refused send on its step after stepping back from a sent code'), async () => {

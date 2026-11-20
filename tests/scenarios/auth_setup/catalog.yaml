@@ -1376,8 +1376,13 @@ scenarios:
       Cases cover email code, wrong code, send cooldown, password with an
       authenticator code, wrong password, a closed passkey prompt then a
       recovery code, the second-factor wait, leaving for another account, a
-      late result after an account change, passkey sign-in with no email, and
-      one capability matrix: each app offers exactly the ways its native side
+      late result after an account change, passkey sign-in with no email, a
+      refused resend or a wrong password after stepping back from a sent code
+      (native commits a first factor only when it succeeds, so a refusal
+      leaves the code already sent and the step as they were;
+      desktop/runtime-host tests/instance_coordinator.rs and
+      instance_sign_in.rs own that side, including escapes and a later first
+      factor winning), and one capability matrix: each app offers exactly the ways its native side
       reports avibe.bot switched on (only Google, Apple off, all off, missing,
       only passkey, every way). Fakes prove the wiring, not real accounts, providers
       or devices; the existing MobileOnboarding cases still own the iPhone

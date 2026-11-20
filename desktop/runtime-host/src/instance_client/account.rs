@@ -83,14 +83,14 @@ pub struct AccountFlow {
     /// The stored account this flow continues: the one restored at launch,
     /// or the one it signed in. Only that account's key may hold an
     /// unfinished sign-in (a second factor still owed); a new first factor
-    /// clears it.
+    /// that succeeds clears it.
     pub resumes: Option<String>,
-    /// avibe.bot accepted a passkey sign-in's verify and its session cookie is
-    /// in this jar, but reading that session failed: the next passkey sign-in
-    /// reads it again rather than asking for another passkey (backend
-    /// passkey-sign-in §6, as the iPhone does). A new first factor replaces
-    /// the jar and drops it; so does an answer to the read.
-    accepted_passkey: bool,
+    /// The jar of a passkey sign-in avibe.bot accepted whose session read
+    /// failed, kept beside the current attempt: the next passkey sign-in reads
+    /// that session again rather than asking for another passkey (backend
+    /// passkey-sign-in §6, as the iPhone does). Any first factor that succeeds
+    /// drops it; so does a `401` on the read.
+    accepted_passkey: Option<NativeSession>,
 }
 
 #[derive(Deserialize)]
@@ -117,7 +117,7 @@ impl AccountFlow {
             transport,
             passkey_sheet,
             resumes: None,
-            accepted_passkey: false,
+            accepted_passkey: None,
         }
     }
 
@@ -135,15 +135,34 @@ impl AccountFlow {
         self.enrollment_token = None;
     }
 
+    /// A first factor runs on a copy of this flow and of the account state,
+    /// with a jar of its own: a replacement attempt never carries the previous
+    /// email's verifier or MFA cookie. Only its success replaces the flow and
+    /// the state (`commit`). A failure leaves the previous attempt, its jar,
+    /// its code and the published state exactly as they were. The caller's
+    /// generation still fences both: an attempt that something newer replaced
+    /// (another first factor, an escape) commits nothing.
+    fn first_factor(&self, epoch: Epoch, state: &ClientState) -> Result<(AccountFlow, ClientState), ClientError> {
+        let mut flow = self.clone();
+        let mut next = state.clone();
+        flow.begin_first_factor(epoch, &mut next)?;
+        Ok((flow, next))
+    }
+
+    /// A first factor succeeded: its flow and its account state replace these.
+    fn commit(&mut self, flow: AccountFlow, next: ClientState, state: &mut ClientState) {
+        *self = flow;
+        state.account = next.account;
+        state.catalog = next.catalog;
+    }
+
     fn begin_first_factor(&mut self, epoch: Epoch, state: &mut ClientState) -> Result<(), ClientError> {
         if state.account.status == AccountStatus::SignedIn {
             return Err(ClientError::new("invalid_action"));
         }
         self.clear_transient();
         self.resumes = None;
-        self.accepted_passkey = false;
-        // A replacement attempt cannot carry the previous email's verifier or
-        // MFA cookie. Failure leaves a usable signed-out state on reload.
+        self.accepted_passkey = None;
         self.session = NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), self.transport.clone());
         self.session.fence(epoch);
         self.server_order.clear();
@@ -167,7 +186,13 @@ impl AccountFlow {
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
-        self.begin_first_factor(epoch.clone(), state)?;
+        let (mut flow, mut next) = self.first_factor(epoch.clone(), state)?;
+        flow.send_otp(email, epoch, &mut next).await?;
+        self.commit(flow, next, state);
+        Ok(())
+    }
+
+    async fn send_otp(&mut self, email: String, epoch: Epoch, state: &mut ClientState) -> Result<(), ClientError> {
         let email = validated_email(email)?;
         let (mut provider, key) = self.provider(epoch).await?;
         let mut path = Url::parse("https://placeholder.test/auth/v1/otp").expect("fixed URL");
@@ -248,7 +273,19 @@ impl AccountFlow {
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
-        self.begin_first_factor(epoch.clone(), state)?;
+        let (mut flow, mut next) = self.first_factor(epoch.clone(), state)?;
+        flow.redeem_provider_code(attempt, code, epoch, &mut next).await?;
+        self.commit(flow, next, state);
+        Ok(())
+    }
+
+    async fn redeem_provider_code(
+        &mut self,
+        attempt: ProviderAttempt,
+        code: String,
+        epoch: Epoch,
+        state: &mut ClientState,
+    ) -> Result<(), ClientError> {
         let ProviderAttempt {
             mut supabase,
             key,
@@ -299,13 +336,31 @@ impl AccountFlow {
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
-        if self.accepted_passkey {
-            if state.account.status == AccountStatus::SignedIn {
-                return Err(ClientError::new("invalid_action"));
-            }
-            return self.read_accepted_passkey(state).await;
+        let (mut flow, mut next) = self.first_factor(epoch.clone(), state)?;
+        if let Some(accepted) = self.accepted_passkey.clone() {
+            flow.session = accepted;
+            flow.session.fence(epoch);
+        } else {
+            flow.run_primary_passkey(passkeys, epoch).await?;
         }
-        self.begin_first_factor(epoch.clone(), state)?;
+        // avibe.bot accepted the passkey: its session is in this jar. A read that
+        // fails keeps the jar aside for the next attempt, not in place of the
+        // current one; a `401` ends it.
+        match flow.discover(&mut next).await {
+            Ok(()) => {
+                self.commit(flow, next, state);
+                Ok(())
+            }
+            Err(error) => {
+                self.accepted_passkey = (error.code != "signed_out").then_some(flow.session);
+                Err(error)
+            }
+        }
+    }
+
+    /// avibe.bot's primary passkey options, the system sheet and verify, in
+    /// this attempt's jar. Success means avibe.bot accepted the passkey.
+    async fn run_primary_passkey(&mut self, passkeys: &dyn Passkeys, epoch: Epoch) -> Result<(), ClientError> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         let response = self
@@ -359,19 +414,7 @@ impl AccountFlow {
         if !response.success() {
             return Err(primary_passkey_error(&response));
         }
-        self.accepted_passkey = true;
-        self.read_accepted_passkey(state).await
-    }
-
-    /// Reads the session an accepted passkey verify left in this jar. An
-    /// answer ends that (signed in, a second factor owed, or `401`); a failed
-    /// read keeps it for the next attempt.
-    async fn read_accepted_passkey(&mut self, state: &mut ClientState) -> Result<(), ClientError> {
-        let read = self.discover(state).await;
-        if read.as_ref().map_or_else(|error| error.code == "signed_out", |_| true) {
-            self.accepted_passkey = false;
-        }
-        read
+        Ok(())
     }
 
     pub async fn sign_in_password(
@@ -381,7 +424,19 @@ impl AccountFlow {
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
-        self.begin_first_factor(epoch.clone(), state)?;
+        let (mut flow, mut next) = self.first_factor(epoch.clone(), state)?;
+        flow.password_first_factor(email, password, epoch, &mut next).await?;
+        self.commit(flow, next, state);
+        Ok(())
+    }
+
+    async fn password_first_factor(
+        &mut self,
+        email: String,
+        password: String,
+        epoch: Epoch,
+        state: &mut ClientState,
+    ) -> Result<(), ClientError> {
         let email = validated_email(email)?;
         if password.is_empty() || password.len() > 4096 {
             return Err(ClientError::new("invalid_credentials"));

@@ -283,22 +283,16 @@ impl Coordinator {
         }
     }
 
-    /// An attempt that ended without a code leaves the account signed out, as a
-    /// failed first factor does, unless something newer owns the account now.
+    /// An attempt that ended without a code changes nothing of the account, as
+    /// any failed first factor: the previous attempt and its code stay. It
+    /// publishes the generation it advanced to, unless something newer owns
+    /// the account now.
     fn end_provider_attempt(&self, epoch: &Epoch) {
         let state = {
             let mut inner = self.inner.lock().expect("client state");
-            if epoch.check().is_err() || inner.state.account.status == AccountStatus::SignedIn {
+            if epoch.check().is_err() {
                 return;
             }
-            inner.account = AccountFlow::new(self.transport.clone(), self.passkeys.supported());
-            inner.state.account = AccountState {
-                status: AccountStatus::SignedOut,
-                identity: None,
-                email: None,
-                gate: None,
-                methods: vec![],
-            };
             inner.state.revision += 1;
             inner.state.clone()
         };

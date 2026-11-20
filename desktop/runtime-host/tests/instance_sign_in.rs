@@ -677,7 +677,8 @@ async fn an_accepted_passkey_whose_session_read_failed_is_read_again() {
 }
 
 /// A `401` on that read answers it: the attempt after runs the whole passkey
-/// sign-in again. So does any other first factor in between.
+/// sign-in again. So does another first factor that succeeds in between; one
+/// that fails changes nothing, so the accepted session is still read.
 #[tokio::test]
 async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
     let keys = passkeys(Ok(json!({"id":"cred","rawId":"cred","type":"public-key"})));
@@ -718,6 +719,9 @@ async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
                 "/auth/v1/token",
                 reply(400, json!({"error_code":"invalid_credentials"}), None),
             ),
+            ("/api/mobile/session", reply(503, json!({"error":"unavailable"}), None)),
+            ("/api/config/auth", config(true)),
+            ("/auth/v1/otp", reply(200, json!({}), None)),
             ("/api/passkey-primary/options", primary_options()),
             ("/api/passkey-primary/verify", primary_verified()),
             ("/api/mobile/session", reply(200, signed_in(), None)),
@@ -733,8 +737,97 @@ async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
         act(&f.client, password).await.error.unwrap().code,
         "invalid_credentials"
     );
+    // The failed password left the accepted session: this attempt reads it again (still down).
+    assert!(!act(&f.client, ClientAction::SignInWithPasskey).await.ok);
+    assert_eq!(keys.options.lock().unwrap().len(), 1);
+    // An email code that is sent replaces it: the next passkey sign-in starts over.
+    assert!(act(&f.client, email_code("max@example.test")).await.ok);
     assert!(act(&f.client, ClientAction::SignInWithPasskey).await.ok);
     assert_eq!(keys.options.lock().unwrap().len(), 2);
+}
+
+fn email_code(address: &str) -> ClientAction {
+    ClientAction::RequestOtp { email: address.into() }
+}
+fn code_sent() -> Vec<(&'static str, Response)> {
+    vec![
+        ("/api/config/auth", config(true)),
+        ("/auth/v1/otp", reply(200, json!({}), None)),
+    ]
+}
+fn code_verified() -> Vec<(&'static str, Response)> {
+    vec![
+        ("/auth/v1/verify", tokens()),
+        (
+            "/api/desktop/session",
+            reply(200, signed_in(), Some("account=fixture; Path=/; Secure; HttpOnly")),
+        ),
+    ]
+}
+
+/// AUTH-SETUP-184/183: after an email code was sent, a passkey sign-in or a provider sign-in that
+/// does not finish changes nothing: the email step and its code stay, and that code still signs
+/// in (#4034, main 2026-11-20: a first factor commits only on success).
+#[tokio::test]
+async fn a_failed_passkey_or_provider_after_a_code_keeps_that_code() {
+    let _ports = PORTS.lock().await;
+    let mut replies = code_sent();
+    replies.extend([
+        ("/api/passkey-primary/options", primary_options()),
+        ("/api/passkey-primary/cancel", reply(200, json!({"ok":true}), None)),
+    ]);
+    replies.extend(code_verified());
+    let f = fixture(replies, None, passkeys(Err("passkey_cancelled")));
+    assert!(act(&f.client, email_code("old@example.test")).await.ok);
+    let cancelled = act(&f.client, ClientAction::SignInWithPasskey).await;
+    assert_eq!(cancelled.error.unwrap().code, "passkey_cancelled");
+    assert_eq!(cancelled.state.account.status, AccountStatus::Verifying);
+    assert_eq!(cancelled.state.account.email.as_deref(), Some("old@example.test"));
+    let done = act(&f.client, ClientAction::VerifyOtp { code: "123456".into() }).await;
+    assert!(done.ok, "{:?}", done.error);
+
+    let mut replies = code_sent();
+    replies.push(("/api/config/auth", config(true)));
+    replies.extend(code_verified());
+    let f = fixture(
+        replies,
+        Some(browser(Browsing::Error("error=access_denied&error_description=x"))),
+        passkeys(Err("x")),
+    );
+    assert!(act(&f.client, email_code("old@example.test")).await.ok);
+    let refused = act(&f.client, google()).await;
+    assert!(!refused.ok);
+    assert_eq!(f.client.state().account.status, AccountStatus::Verifying);
+    assert_eq!(f.client.state().account.email.as_deref(), Some("old@example.test"));
+    let done = act(&f.client, ClientAction::VerifyOtp { code: "123456".into() }).await;
+    assert!(done.ok, "{:?}", done.error);
+}
+
+/// Two first factors in flight: the later one wins, as the generation says. A provider sign-in
+/// still waiting in the browser when an email code is sent ends without committing, and it never
+/// replaces the code attempt that started after it.
+#[tokio::test]
+async fn the_later_first_factor_wins_over_one_still_waiting() {
+    let _ports = PORTS.lock().await;
+    let browser = browser(Browsing::Nothing);
+    let mut replies = vec![("/api/config/auth", config(true))];
+    replies.extend(code_sent());
+    replies.extend(code_verified());
+    let f = fixture(replies, Some(browser.clone()), passkeys(Err("x")));
+    let client = f.client.clone();
+    let waiting = tokio::spawn(async move { act(&client, google()).await });
+    browser.redirected.notified().await;
+    let sent = act(&f.client, email_code("new@example.test")).await;
+    assert!(sent.ok, "{:?}", sent.error);
+    let ended = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.error.unwrap().code, "stale_generation");
+    assert_eq!(f.client.state().account.status, AccountStatus::Verifying);
+    assert_eq!(f.client.state().account.email.as_deref(), Some("new@example.test"));
+    let done = act(&f.client, ClientAction::VerifyOtp { code: "123456".into() }).await;
+    assert!(done.ok, "{:?}", done.error);
 }
 
 /// An account change while the system sheet is up drops its late assertion.
