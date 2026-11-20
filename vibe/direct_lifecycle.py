@@ -31,11 +31,13 @@ PERMISSION_MAX_AGE_SECONDS = 15 * 60
 CONFIG_POLL_INTERVAL_SECONDS = 0.5
 BINARY_REFRESH_INTERVAL_SECONDS = 5.0
 BINARY_OBSERVATION_MAX_AGE_SECONDS = 15.0
+INSTALL_RETRY_INITIAL_SECONDS = 30.0
+INSTALL_RETRY_MAX_SECONDS = 900.0
 TICK_SECONDS = 0.1
 _MANAGED_HOSTNAME = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-app\.avibe\.bot$")
 DIRECT_STATES = frozenset({
     "disabled", "waiting-permission", "waiting-certificate", "transport-not-installed",
-    "starting", "running", "stopping", "error",
+    "installing", "starting", "running", "stopping", "error",
 })
 
 
@@ -176,6 +178,10 @@ class DirectAccessLifecycle:
         self._config_task: asyncio.Task | None = None
         self._config_read_task: asyncio.Task | None = None
         self._binary_task: asyncio.Task | None = None
+        self._install_task: asyncio.Task | None = None
+        self._install_at = 0.0
+        self._install_delay = INSTALL_RETRY_INITIAL_SECONDS
+        self._install_failed = False
         self._binary: str | None = None
         self._binary_valid_until = 0.0
         self._next_binary_check = 0.0
@@ -264,6 +270,7 @@ class DirectAccessLifecycle:
         if signature == self._signature:
             return
         previous = self._signature
+        self._install_failed = False
         self._next_binary_check = 0.0
         self._clear_binary()
         self._invalidate()
@@ -394,14 +401,44 @@ class DirectAccessLifecycle:
                     self._config_read_task = None
             await asyncio.sleep(CONFIG_POLL_INTERVAL_SECONDS)
 
-    def _resolve_binary(self, generation: int, started: float, config: V2Config) -> tuple[int, float, str | None]:
+    def _install_pin(self, generation: int, signature: tuple[Any, ...]) -> tuple[int, bool]:
+        from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+        try:
+            persisted = self._config_loader()
+            if _config_signature(persisted) != signature:
+                return generation, False
+            with self._state_lock:
+                if self._shutdown or generation != self._generation:
+                    return generation, False
+            # Admission is not cancellation: an already admitted download may
+            # finish after OFF. Its path is never used to start the supervisor.
+            logger.info("Direct transport install started")
+            ok = DirectTransportRuntimeManager().ensure().get("ok") is True
+        except Exception:
+            ok = False
+        if ok:
+            logger.info("Direct transport install succeeded")
+        else:
+            logger.warning("Direct transport install failed")
+        return generation, ok
+
+    def _resolve_binary(self, generation: int, started: float, config: V2Config) -> tuple[int, float, str | None, bool]:
         binary = None
+        missing = False
         try:
             resolved = self._binary_resolver(config)
             binary = str(resolved) if resolved else None
+            if not binary:
+                # An installed pin rejected only by trial policy isn't missing.
+                if config.remote_access.vibe_cloud.public_relay_trial:
+                    config.remote_access.vibe_cloud.public_relay_trial = False
+                    missing = self._binary_resolver(config) is None
+                else:
+                    missing = True
         except Exception:
             pass  # An unreadable optional runtime is unavailable, not a Web UI failure.
-        return generation, started, binary
+        return generation, started, binary, missing
 
     def _binary_check_done(self, task: asyncio.Task) -> None:
         if not task.cancelled():
@@ -412,12 +449,36 @@ class DirectAccessLifecycle:
         # The loop only collects/schedules work. One retained binary slot stays
         # occupied until the actual worker ends, across opt-out and stop/start.
         # Neither this worker nor its completion can block the config observer.
+        if self._install_task is not None:
+            if not self._install_task.done():
+                return
+            task, self._install_task = self._install_task, None
+            if not task.cancelled():
+                generation, ok = task.result()
+                if generation == self._generation:
+                    self._install_failed = not ok
+                # Backoff belongs to this packaged pin, not a permission grant.
+                self._install_at = self._loop.time() + self._install_delay
+                self._install_delay = min(self._install_delay * 2, INSTALL_RETRY_MAX_SECONDS)
+            self._next_binary_check = 0.0  # Always verify normally after ensure.
         if self._binary_task is not None and self._binary_task.done():
             task, self._binary_task = self._binary_task, None
             if not task.cancelled():
-                generation, started, binary = task.result()
+                generation, started, binary, missing = task.result()
                 if generation == self._generation and not self._shutdown:
                     self._observe_binary(binary, started)
+                    now = self._loop.time()
+                    if self._binary:
+                        self._install_failed = False
+                        self._install_at = 0.0
+                        self._install_delay = INSTALL_RETRY_INITIAL_SECONDS
+                    elif (missing and not self._pairing_suspended and now >= self._install_at
+                            and now < started + BINARY_OBSERVATION_MAX_AGE_SECONDS):
+                        self._install_task = asyncio.create_task(asyncio.to_thread(
+                            self._install_pin, self._generation, self._signature,
+                        ), name="direct-transport-install")
+                        self._install_task.add_done_callback(self._binary_check_done)
+                        return
         config = self._config
         if (self._binary_task is not None or self._shutdown or self._pairing_suspended
                 or config is None or not config.remote_access.vibe_cloud.direct
@@ -473,6 +534,10 @@ class DirectAccessLifecycle:
             return "error", "hostname_not_direct", None
         binary = self._binary if self._loop is not None and self._loop.time() < self._binary_valid_until else None
         if not binary:
+            if self._install_task is not None:
+                return "installing", "transport_installing", None
+            if self._install_failed:
+                return "error", "transport_install_failed", None
             return "transport-not-installed", "transport_not_installed", None
         if not _subprocess_loop_supported():
             return "error", "windows_proactor_required", None

@@ -220,15 +220,63 @@ async def test_off_is_literal_no_listener_child_order_or_file(reports, monkeypat
     assert set(paths.get_state_dir().rglob("*")) == before
 
 
-async def test_product_without_binary_never_orders_even_with_fresh_permission(reports):
+@pytest.mark.parametrize("bad_pin", ["pending", "tampered"])
+async def test_failed_auto_install_backs_off_without_starting(reports, published, monkeypatch, bad_pin):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    payload, manifest, downloads, sources = published
+    if bad_pin == "pending":
+        payload["release_state"] = "pending"
+        manifest.write_text(json.dumps(payload))
+    else:
+        source = sources[payload["archives"]["linux-x64"]["url"]]
+        source.write_bytes(b"x" * source.stat().st_size)
+    attempts = []
+    ensure = DirectTransportRuntimeManager.ensure
+    def counted(manager):
+        attempts.append(time.monotonic())
+        return ensure(manager)
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", counted)
+    monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.3)
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
     config = _config()
     async with _owner(config, reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
-        await _wait(lambda: owner.status().state == "transport-not-installed")
+        await _wait(lambda: owner.status().reason == "transport_install_failed")
         await _permission(owner, config)
-        await asyncio.sleep(0.12)
-        assert not cert.calls
-        assert "ingress_start" not in calls and "supervisor_start" not in calls
-        assert rv.endpoint is None and rv.reason == "transport_not_installed"
+        await _wait(lambda: len(attempts) >= 2 and owner.status().reason == "transport_install_failed" and owner._install_task is None)
+        assert attempts[1] - attempts[0] >= 0.3
+        assert not cert.calls and rv.endpoint is None and "supervisor_start" not in calls
+        assert DirectTransportRuntimeManager().resolve_binary() is None
+        assert not downloads if bad_pin == "pending" else len(downloads) == 2
+
+
+async def test_auto_install_once_only_when_enabled(reports, published, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    config = _config(direct=False)
+    attempts = []
+    entered, release = threading.Event(), threading.Event()
+    ensure = DirectTransportRuntimeManager.ensure
+    def slow(manager):
+        attempts.append(1)
+        entered.set()
+        assert release.wait(4)
+        return ensure(manager)
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", slow)
+    async with _owner(config, reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
+        assert not attempts and not published[2]
+        config.remote_access.vibe_cloud.direct = True
+        owner.notify_config_changed(config)
+        try:
+            await _wait(entered.is_set)
+            await _wait(lambda: owner.status().state == "installing")
+            await _permission(owner, config)
+            await asyncio.sleep(0.15)
+            assert not cert.calls and rv.endpoint is None and attempts == [1]
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().state == "running")
+        assert attempts == [1] and len(published[2]) == 1 and rv.endpoint is not None
 
 
 async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_then_retires_on_off(reports, published, monkeypatch):
@@ -305,10 +353,9 @@ async def test_managed_install_reaches_publication_only_after_all_lifecycle_gate
             # Removing integrity approval, without changing pairing or permission,
             # withdraws the ready answer. Repair resumes the normal gated path.
             binary.write_bytes(b"tampered test fixture")
-            await _wait(lambda: owner.status().state == "transport-not-installed")
-            assert rv.endpoint is None and not owner.status().transport_running
-            assert manager.ensure()["ok"] is True
+            await _wait(lambda: calls.count("supervisor_stop") == 1)
             await _wait(lambda: owner.status().state == "running")
+            assert manager.resolve_binary() == binary and binary.read_bytes() != b"tampered test fixture"
             assert calls.count("supervisor_start") == 2
     finally:
         release.set()
@@ -474,8 +521,10 @@ async def test_binary_recovery_waits_for_certificate_after_discarded_renewal_ret
             await _permission(owner, config)
             await _wait(lambda: owner.status().state == "running")
             await _wait(renewal_entered.is_set)
+            from core.direct_transport_runtime import DirectTransportRuntimeManager
+            monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", lambda self: {"ok": False})
             available[0] = False
-            await _wait(lambda: owner.status().state == "transport-not-installed")
+            await _wait(lambda: owner.status().reason == "transport_install_failed")
             renewal_release.set()
             await _wait(lambda: owner._poll_task is None and not old_chain.exists())
             available[0] = True
