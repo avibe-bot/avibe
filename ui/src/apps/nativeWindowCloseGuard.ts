@@ -31,21 +31,29 @@ function pendingConfirmation(): NativeWindowCloseConfirmation | null {
 }
 
 /**
- * Registers this document's unsaved state with the native window close. A
- * browser tab or the Workbench window has no native close to guard, so the
- * hook is inert there; those surfaces keep their own unload and route guards.
+ * Adds a source of unsaved state to this native App window's close and quit
+ * question, and returns its removal. A browser tab or the Workbench window has
+ * no native close to guard, so this is inert there; those surfaces keep their
+ * own unload and route guards.
  */
+export function registerNativeWindowCloseConfirmation(
+  read: () => NativeWindowCloseConfirmation | null,
+): () => void {
+  if (!isNativeAppWindow()) return () => undefined;
+  confirmations.add(read);
+  window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ = pendingConfirmation;
+  return () => {
+    confirmations.delete(read);
+  };
+}
+
+/** A page body's own unsaved state, for a body that is the native window's route. */
 export function useNativeWindowCloseGuard(confirmation: NativeWindowCloseConfirmation | null): void {
   const message = confirmation?.message ?? null;
   const confirm = confirmation?.confirm ?? '';
   const cancel = confirmation?.cancel ?? '';
   useEffect(() => {
-    if (!message || !isNativeAppWindow()) return;
-    const read = () => ({ message, confirm, cancel });
-    confirmations.add(read);
-    window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ = pendingConfirmation;
-    return () => {
-      confirmations.delete(read);
-    };
+    if (!message) return;
+    return registerNativeWindowCloseConfirmation(() => ({ message, confirm, cancel }));
   }, [message, confirm, cancel]);
 }

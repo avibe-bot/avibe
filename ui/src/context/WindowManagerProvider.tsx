@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { APP_REGISTRY } from '../apps/registry';
+import { registerNativeWindowCloseConfirmation } from '../apps/nativeWindowCloseGuard';
 import {
   WINDOW_RESTORE_PARAM,
   loadWorkbenchWindows,
@@ -128,6 +130,18 @@ export const WindowManagerProvider: React.FC<{
     if (getMessage) closeGuards.current.set(id, getMessage);
     else closeGuards.current.delete(id);
   }, []);
+
+  // Inside a native App window, closing or quitting that window discards every
+  // window managed here, so any managed window's unsaved work is the native
+  // window's too: its own confirm message, with the shared button labels.
+  const { t } = useTranslation();
+  useEffect(() => registerNativeWindowCloseConfirmation(() => {
+    for (const read of closeGuards.current.values()) {
+      const message = read();
+      if (message) return { message, confirm: t('apps.editor.discardAndClose'), cancel: t('common.cancel') };
+    }
+    return null;
+  }), [t]);
 
   const setStateProvider = useCallback((id: string, getState: (() => unknown) | null) => {
     if (getState) stateProviders.current.set(id, getState);

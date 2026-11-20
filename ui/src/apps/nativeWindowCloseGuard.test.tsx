@@ -1,8 +1,18 @@
 /** @vitest-environment jsdom */
-import { renderHook } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { render, renderHook } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { useWindowCloseGuard } from '../context/WindowManagerContext';
+import { WindowManagerProvider } from '../context/WindowManagerProvider';
 
 import { useNativeWindowCloseGuard, type NativeWindowCloseConfirmation } from './nativeWindowCloseGuard';
+
+vi.mock('react-i18next', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('react-i18next')>()),
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
 
 const discard: NativeWindowCloseConfirmation = {
   message: 'Discard unsaved changes and close this window?',
@@ -47,6 +57,42 @@ describe('useNativeWindowCloseGuard', () => {
 
   it('leaves browser tabs and the Workbench to their own unload guards', () => {
     renderHook(() => useNativeWindowCloseGuard(discard));
+    expect(window.__AVIBE_APP_WINDOW_CLOSE_GUARD__).toBeUndefined();
+  });
+});
+
+function ManagedBody({ id, message }: { id: string; message: string | null }) {
+  useWindowCloseGuard(id, message);
+  return null;
+}
+const managed = (children: ReactNode) => (
+  <MemoryRouter><WindowManagerProvider standalone>{children}</WindowManagerProvider></MemoryRouter>
+);
+
+describe('windows managed inside a native App window', () => {
+  it('make the native close and quit ask while any managed window is unsaved', () => {
+    nativeWindow();
+    const view = render(managed(<>
+      <ManagedBody id="win-files" message={null} />
+      <ManagedBody id="win-editor" message="Discard unsaved changes and close this window?" />
+    </>));
+    expect(window.__AVIBE_APP_WINDOW_CLOSE_GUARD__?.()).toEqual({
+      message: 'Discard unsaved changes and close this window?',
+      confirm: 'apps.editor.discardAndClose',
+      cancel: 'common.cancel',
+    });
+    view.rerender(managed(<>
+      <ManagedBody id="win-files" message={null} />
+      <ManagedBody id="win-editor" message={null} />
+    </>));
+    expect(window.__AVIBE_APP_WINDOW_CLOSE_GUARD__?.()).toBeNull();
+    view.rerender(managed(<ManagedBody id="win-editor" message="unsaved" />));
+    view.unmount();
+    expect(window.__AVIBE_APP_WINDOW_CLOSE_GUARD__?.()).toBeNull();
+  });
+
+  it('leave the Workbench window to its own guards', () => {
+    render(managed(<ManagedBody id="win-editor" message="unsaved" />));
     expect(window.__AVIBE_APP_WINDOW_CLOSE_GUARD__).toBeUndefined();
   });
 });

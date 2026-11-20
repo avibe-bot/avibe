@@ -267,6 +267,53 @@ for (const lang of ['en', 'zh'] as const) {
   });
 }
 
+// The exact question the shell asks on a user close and on a quit (app_windows.rs CLOSE_GUARD_QUERY).
+const SHELL_CLOSE_QUESTION = "(()=>{try{const g=window.__AVIBE_APP_WINDOW_CLOSE_GUARD__;const c=typeof g==='function'?g():null;return c?JSON.stringify({message:c.message,confirm:c.confirm,cancel:c.cancel}):''}catch(_){return ''}})()";
+
+// Every native App window type renders the same window manager, so these are the hosts
+// from which a user can open an in-page Editor fallback today.
+const EDITOR_HOSTS = [
+  {
+    host: 'Files',
+    open: async (page: Page) => {
+      await page.route('**/api/files/list?**', route => route.fulfill({ json: { ok: true, path: '/fixture/work', parent: '/fixture', entries: [] } }));
+      await page.goto('/apps/files?standalone=1');
+      await page.getByRole('button', { name: 'New File', exact: true }).first().click();
+    },
+  },
+  {
+    host: 'Preview',
+    open: async (page: Page) => {
+      await page.route('**/api/files/meta?**', route => route.fulfill({ json: { ok: true, path: '/fixture/notes.md', mtime: 1 } }));
+      await page.route('**/api/files/content?**', route => route.fulfill({ contentType: 'text/markdown', body: '# Notes' }));
+      await page.route('**/api/files/list?**', route => route.fulfill({ json: { ok: true, path: '/fixture', parent: '/', entries: [] } }));
+      await nativeSnapshot(page, { appId: 'preview', requestId: 'preview-host', windowId: 'native-preview', source: 'file-browser', params: { path: '/fixture/notes.md', name: 'notes.md' } });
+      await page.goto('/apps/preview?standalone=1');
+      await page.getByRole('button', { name: 'Open in Editor', exact: true }).click();
+    },
+  },
+] as const;
+
+for (const { host, open } of EDITOR_HOSTS) {
+  test(`W1 a native ${host} window asks on close and quit before discarding an unsaved Editor it hosts`, async ({ page }) => {
+    await page.setViewportSize({ width: 1100, height: 760 });
+    await serveProduct(page);
+    await page.addInitScript(() => {
+      if (window.self === window.top && !('__AVIBE_NATIVE_APP_WINDOW__' in window)) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });
+    });
+    await open(page);
+    // Close and quit ask this same question, and the shell's Rust tests own what each does with the answer.
+    const ask = () => page.evaluate(question => (0, eval)(question) as string, SHELL_CLOSE_QUESTION);
+    const editorWindow = page.getByRole('dialog', { name: 'Editor', exact: true });
+    await expect(editorWindow).toBeVisible();
+    expect(await ask()).toBe('');
+    await editorWindow.locator('.monaco-editor .view-lines').first().click({ position: { x: 12, y: 10 } });
+    await page.keyboard.insertText('hosted draft');
+    const expected: NativeWindowCloseConfirmation = { message: 'Discard unsaved changes and close this window?', confirm: 'Discard and Close', cancel: 'Cancel' };
+    await expect.poll(async () => JSON.parse(await ask() || 'null')).toEqual(expected);
+  });
+}
+
 test('W1 complete Library/Preview/Show bodies consume snapshots without command route recursion', async ({ context }) => {
   const library = await context.newPage();
   await library.setViewportSize({ width: 880, height: 600 });
