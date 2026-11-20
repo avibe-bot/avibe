@@ -27,30 +27,48 @@ struct DirectPathStatus: Equatable, Sendable {
     /// path the App's own direct connection runs on, and its last attempts.
     /// Families and counts, never an address. Nil when there is nothing.
     var diagnostics: DirectPathDiagnostics? = nil
+    /// The kind of path the App's own direct connection runs on while
+    /// `preferred` is `direct` for this host: through the relay, or straight
+    /// to an IPv4 or IPv6 address. Nil when not direct, or not known. A
+    /// change of it advances `sequence`.
+    var path: DirectPathKind? = nil
+    /// For diagnosis: the last few CONNECTs' races, oldest first.
+    var races: [DirectRaceRecord] = []
 
     static let initial = DirectPathStatus(preferred: .tunnel, sequence: 0, closure: 0)
 
     /// Diagnostics are not part of what a status says: two statuses with
-    /// the same preference, sequence, and closure are the same.
+    /// the same preference, path, sequence, and closure are the same.
     static func == (lhs: DirectPathStatus, rhs: DirectPathStatus) -> Bool {
-        lhs.preferred == rhs.preferred && lhs.sequence == rhs.sequence && lhs.closure == rhs.closure
+        lhs.preferred == rhs.preferred && lhs.sequence == rhs.sequence
+            && lhs.closure == rhs.closure && lhs.path == rhs.path
     }
 
-    /// What `direct.transportChanged` carries: no diagnostics.
+    /// What `direct.transportChanged` carries: the status, with `path` when
+    /// it is known, and no diagnostics.
     var eventObject: [String: Any] {
-        [
+        var object: [String: Any] = [
             "preferred": preferred.rawValue,
             "sequence": sequence,
             "closure": closure,
         ]
+        if let path {
+            object["path"] = path.rawValue
+        }
+        return object
     }
 
     /// What `direct.status()` answers: the status, and the diagnostics if any.
     var jsonObject: [String: Any] {
         var object = eventObject
         if let diagnostics {
-            object["path"] = diagnostics.current.map { $0.rawValue as Any } ?? NSNull()
+            if path == nil {
+                object["path"] = NSNull()
+            }
             object["attempts"] = diagnostics.attempts.map(\.jsonObject)
+        }
+        if !races.isEmpty {
+            object["connections"] = races.map(\.jsonObject)
         }
         return object
     }
@@ -380,6 +398,15 @@ final class DirectPathController {
     /// The transport reported the accepted generation usable, and nothing
     /// has suspended that since.
     private var isUsable = false
+    /// The kind of path the usable transport's connection runs on, as last
+    /// reported; nil when none is usable or the transport cannot tell.
+    private var currentPath: DirectPathKind?
+    /// A sticky plan's direct candidate missed its bound: plans hedge again
+    /// until a direct candidate wins, or the path changes.
+    private var stickyDropped = false
+    /// The last few CONNECTs' races, oldest first; for diagnosis.
+    private var races: [DirectRaceRecord] = []
+    static let raceLimit = 5
     private var pathGeneration = 0
     private var accountEpoch = 0
     private var isInBackground: Bool
@@ -476,22 +503,24 @@ final class DirectPathController {
     /// What `direct.status()` answers for `origin` now. `preferred` is
     /// `direct` only for the selected instance's host.
     func currentStatus(for origin: WebOrigin) -> DirectPathStatus {
+        let selected = origin.host == target?.authority.host
         var diagnostics: DirectPathDiagnostics?
-        if origin.host == target?.authority.host {
+        if selected {
             let read = transport.pathDiagnostics
             // The current path only while new connections prefer it.
             let shown = DirectPathDiagnostics(
-                current: preferred == .direct ? read.current : nil,
+                current: preferred == .direct ? currentPath : nil,
                 attempts: read.attempts
             )
             diagnostics = shown == .empty ? nil : shown
         }
         return DirectPathStatus(
-            preferred: preferred == .direct && origin.host == target?.authority.host
-                ? .direct : .tunnel,
+            preferred: preferred == .direct && selected ? .direct : .tunnel,
             sequence: sequence,
             closure: closures[origin.host] ?? 0,
-            diagnostics: diagnostics
+            diagnostics: diagnostics,
+            path: preferred == .direct && selected ? currentPath : nil,
+            races: selected ? races : []
         )
     }
 
@@ -792,6 +821,9 @@ final class DirectPathController {
 
     private func deselect(stoppingTransport: Bool = true) {
         isUsable = false
+        currentPath = nil
+        stickyDropped = false
+        races.removeAll()
         acceptedGeneration = nil
         replacedGenerations.removeAll()
         guard target != nil else {
@@ -826,13 +858,40 @@ final class DirectPathController {
             }
             acceptedGeneration = generation
             isUsable = true
+            let previous = currentPath
+            currentPath = transport.pathDiagnostics.current
+            stickyDropped = false
+            let wasDirect = preferred == .direct
+            updatePreference()
+            // The same preference on another kind of path is a change too.
+            if wasDirect, preferred == .direct, previous != currentPath {
+                sequence += 1
+                notify()
+            }
+            return
+        case .pathChanged(let kind):
+            // The connection moved between the relay and a direct address.
+            // Nothing is closed; the page is told, so it can move its stream
+            // onto a direct path, and plans may stay on it (section 6).
+            guard isUsable, kind != currentPath else {
+                return
+            }
+            currentPath = kind
+            stickyDropped = false
+            if preferred == .direct {
+                sequence += 1
+                notify()
+            }
+            return
         case .verifying:
             // A network callback is not proof of loss: only the preference
             // changes until the transport validates the path again.
             isUsable = false
+            currentPath = nil
             advanceGeneration()
         case .lost:
             isUsable = false
+            currentPath = nil
             advanceGeneration()
             // The preference is published before the closure, which is now
             // published in this turn: no status says `direct` for a path
@@ -885,7 +944,14 @@ final class DirectPathController {
         // A plan with a direct candidate also needs the lease to be current
         // at its commit point; a public-only plan needs only the fence.
         let lease = directTag?.target.runtime
-        return DirectConnectPlan(
+        // Sticky: the App's own path is a direct address, and no sticky
+        // attempt has missed since. The direct candidate then runs alone for
+        // its bound instead of racing the public origin from the hedge on.
+        let sticky = directTag != nil
+            && (currentPath == .ipv4 || currentPath == .ipv6)
+            && !stickyDropped
+        let generation = pathGeneration
+        var plan = DirectConnectPlan(
             scope: scope,
             generation: pathGeneration,
             openDirect: openDirect,
@@ -904,6 +970,46 @@ final class DirectPathController {
                 }
             }
         )
+        plan.sticky = sticky
+        plan.path = directTag == nil ? nil : currentPath
+        plan.recordRace = { [weak self] record in
+            Task { @MainActor in
+                self?.raceDidFinish(record, generation: generation, selection: fence.selection)
+            }
+        }
+        return plan
+    }
+
+    /// One CONNECT's race ended. Kept for diagnosis; and it decides
+    /// stickiness: a direct candidate that failed drops it (the next plans
+    /// hedge again), and one that won restores it.
+    private func raceDidFinish(_ record: DirectRaceRecord, generation: Int, selection raced: Int) {
+        guard raced == selection else {
+            return
+        }
+        races.append(record)
+        if races.count > Self.raceLimit {
+            races.removeFirst(races.count - Self.raceLimit)
+        }
+        let directLeg = String(describing: record.direct.jsonValue)
+        let publicLeg = String(describing: record.publicOrigin.jsonValue)
+        let winner = record.winner == .direct ? "direct" : record.winner == .publicOrigin ? "public" : "none"
+        let path = record.path?.rawValue ?? "none"
+        let sticky = record.sticky
+        Self.logger.info(
+            """
+            Direct connection: direct \(directLeg, privacy: .public) public \(publicLeg, privacy: .public) \
+            winner \(winner, privacy: .public) path \(path, privacy: .public) sticky \(sticky, privacy: .public)
+            """
+        )
+        guard generation == pathGeneration else {
+            return
+        }
+        if record.direct == .failed {
+            stickyDropped = true
+        } else if record.winner == .direct {
+            stickyDropped = false
+        }
     }
 
     /// The selection and account new plans are made under.

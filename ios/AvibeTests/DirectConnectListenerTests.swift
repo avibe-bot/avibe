@@ -371,6 +371,101 @@ final class DirectConnectListenerTests: XCTestCase {
         client.close()
     }
 
+    // MARK: Stickiness and the race record
+
+    func testAStickyPlanRunsDirectAloneAndFallsBackWithinItsBound() async throws {
+        // The hedge alone would dial the public origin after 50 ms.
+        let fixture = try await makeListener(
+            limits: limits(hedgeSeconds: 0.05, stickySeconds: 0.6),
+            direct: .hang
+        )
+        fixture.plans.setSticky(true)
+        let client = LoopbackClient(port: fixture.port)
+        let started = ContinuousClock.now
+
+        try await client.send(canonicalHead)
+        try await Task.sleep(for: .milliseconds(300))
+        // Still inside the sticky bound: the direct path runs alone.
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+
+        // A direct path that stops answering falls back at the bound.
+        _ = try await fixture.publicOrigin.waitForStream()
+        let answer = try await client.receive(count: established.utf8.count)
+        let elapsed = started.duration(to: .now)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(550))
+        XCTAssertLessThan(elapsed, .seconds(3))
+        // The miss is a failure of the path: the transport is told.
+        try await eventually { fixture.plans.directFailures == 1 }
+        try await eventually { fixture.plans.races.count == 1 }
+        let race = try XCTUnwrap(fixture.plans.races.first)
+        XCTAssertEqual(race.direct, .failed)
+        XCTAssertEqual(race.winner, .publicOrigin)
+        XCTAssertEqual(race.path, .ipv4)
+        XCTAssertTrue(race.sticky)
+        guard case .ready(let publicMs) = race.publicOrigin else {
+            return XCTFail("the public origin was not ready: \(race.publicOrigin)")
+        }
+        XCTAssertGreaterThanOrEqual(publicMs, 550)
+        client.close()
+    }
+
+    func testAStickyPlanAnsweredByDirectNeverDialsThePublicOrigin() async throws {
+        let fixture = try await makeListener(limits: limits(hedgeSeconds: 0.05, stickySeconds: 5))
+        fixture.plans.setSticky(true, path: .ipv6)
+        let client = LoopbackClient(port: fixture.port)
+
+        try await client.send(canonicalHead)
+        let stream = try await fixture.direct.waitForStream()
+        // Well past the hedge: the public origin is still not dialled.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+        stream.instanceSends(Data(established.utf8))
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+
+        try await eventually { fixture.plans.races.count == 1 }
+        let race = try XCTUnwrap(fixture.plans.races.first)
+        XCTAssertEqual(race.winner, .direct)
+        XCTAssertEqual(race.publicOrigin, DirectRaceRecord.Leg.none)
+        XCTAssertEqual(race.path, .ipv6)
+        guard case .ready(let directMs) = race.direct else {
+            return XCTFail("the direct path was not ready: \(race.direct)")
+        }
+        XCTAssertGreaterThanOrEqual(directMs, 250)
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+        XCTAssertEqual(fixture.plans.directFailures, 0)
+        client.close()
+    }
+
+    func testAHedgedRaceRecordsBothLegsAndTheWinner() async throws {
+        let fixture = try await makeListener(
+            limits: limits(hedgeSeconds: 0.2),
+            direct: .hang
+        )
+        let client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        _ = try await fixture.publicOrigin.waitForStream()
+        _ = try await client.receive(count: established.utf8.count)
+
+        try await eventually { fixture.plans.races.count == 1 }
+        let race = try XCTUnwrap(fixture.plans.races.first)
+        // The direct candidate was still trying when the public origin won.
+        XCTAssertEqual(race.direct, .cancelled)
+        XCTAssertEqual(race.winner, .publicOrigin)
+        XCTAssertFalse(race.sticky)
+        XCTAssertNil(race.path)
+        guard case .ready = race.publicOrigin else {
+            return XCTFail("the public origin was not ready: \(race.publicOrigin)")
+        }
+        XCTAssertEqual(
+            race.jsonObject["winner"] as? String,
+            "public"
+        )
+        XCTAssertEqual(race.jsonObject["direct"] as? String, "cancelled")
+        client.close()
+    }
+
     func testAFencedPlanIsReplannedOnceAndThenRefusedWithoutA200() async throws {
         let fixture = try await makeListener()
         fixture.plans.set(current: false)
@@ -2510,7 +2605,8 @@ final class DirectConnectListenerTests: XCTestCase {
         lingerSeconds: TimeInterval = 60,
         chunkBytes: Int = 64 * 1024,
         earlyBytes: Int = 16 * 1024,
-        hedgeSeconds: TimeInterval = 60
+        hedgeSeconds: TimeInterval = 60,
+        stickySeconds: TimeInterval = 1.5
     ) -> DirectConnectLimits {
         DirectConnectLimits(
             headBytes: 4096,
@@ -2521,7 +2617,8 @@ final class DirectConnectListenerTests: XCTestCase {
             lingerSeconds: lingerSeconds,
             chunkBytes: chunkBytes,
             earlyBytes: earlyBytes,
-            hedgeSeconds: hedgeSeconds
+            hedgeSeconds: hedgeSeconds,
+            stickySeconds: stickySeconds
         )
     }
 
@@ -2651,6 +2748,22 @@ final class StandInPlans: @unchecked Sendable {
     private var generation = 0
     private var validations = 0
     private var validationActions: [Int: () -> Void] = [:]
+    private var isSticky = false
+    private var path: DirectPathKind?
+    private var storedRaces: [DirectRaceRecord] = []
+
+    /// The races recorded so far, in order.
+    var races: [DirectRaceRecord] {
+        lock.withLock { storedRaces }
+    }
+
+    /// Makes the next plans sticky, as on a direct address.
+    func setSticky(_ sticky: Bool, path: DirectPathKind? = .ipv4) {
+        lock.withLock {
+            isSticky = sticky
+            self.path = sticky ? path : nil
+        }
+    }
 
     init(direct: StandInStreamSource, publicOrigin: StandInStreamSource) {
         self.direct = direct
@@ -2708,7 +2821,7 @@ final class StandInPlans: @unchecked Sendable {
                 try await direct.open()
             }
         }
-        return DirectConnectPlan(
+        var plan = DirectConnectPlan(
             scope: scope,
             generation: generation,
             openDirect: openDirect,
@@ -2722,6 +2835,16 @@ final class StandInPlans: @unchecked Sendable {
                 self?.recordDirectFailure()
             }
         )
+        let (sticky, path) = lock.withLock { (isSticky, self.path) }
+        plan.sticky = sticky
+        plan.path = path
+        plan.recordRace = { [weak self] record in
+            guard let self else {
+                return
+            }
+            self.lock.withLock { self.storedRaces.append(record) }
+        }
+        return plan
     }
 
     /// How many times a plan of this stand-in was validated.

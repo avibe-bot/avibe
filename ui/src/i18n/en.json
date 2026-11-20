@@ -3153,7 +3153,12 @@
       "deviceOn": "on",
       "pathRelay": "relay",
       "pathIpv4": "direct IPv4",
-      "pathIpv6": "direct IPv6"
+      "pathIpv6": "direct IPv6",
+      "lastConnection": "Last connection: direct {{direct}} / Cloudflare {{public}}",
+      "legMs": "{{ms}} ms",
+      "legNone": "—",
+      "legFailed": "failed",
+      "legCancelled": "not used"
     }
   },
   "models": {

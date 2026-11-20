@@ -224,8 +224,12 @@ const installDirectShell = (capabilities: Record<string, number> = { direct: 1 }
       answers[index]({ preferred: 'direct' });
       await vi.advanceTimersByTimeAsync(0);
     },
-    emit: (payload: { preferred: 'tunnel' | 'direct'; sequence: number; closure: number }) =>
-      deliver(payload),
+    emit: (payload: {
+      preferred: 'tunnel' | 'direct';
+      sequence: number;
+      closure: number;
+      path?: 'relay' | 'ipv4' | 'ipv6';
+    }) => deliver(payload),
   };
 };
 
@@ -909,6 +913,70 @@ describe('ApiProvider workbench stream liveness', () => {
     await early;
     await vi.advanceTimersByTimeAsync(0);
     expect(pageConnectionsQuiet()).toBe(true);
+  });
+
+  // A shell that reports its path (`direct` version 3).
+
+  const pathShell = async () => {
+    const shell = installDirectShell({ direct: 3 });
+    await mountDirectPage();
+    await shell.answer(0, 0);
+    emitHandshake(1);
+    emitControllerLeg(true);
+    return shell;
+  };
+
+  it('never hands over while the shell is on the relay, and does once it reaches a direct address', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'relay' });
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(shell.handovers()).toBe(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    // A path the shell cannot name is not a direct address either.
+    shell.emit({ preferred: 'direct', sequence: 2, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(0);
+
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  it('re-arms once for the upgrade without the spacing, and keeps the spacing after that', async () => {
+    const shell = await pathShell();
+    // The shell keeps a busy connection every time, so each hand-over arms again.
+    shell.call.mockImplementation((method: string) =>
+      Promise.resolve(method === 'direct.handover' ? { closed: 0, kept: 1 } : null),
+    );
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+
+    // Lost and back, first over the relay: nothing. Then the direct address,
+    // seconds after the last hand-over: once more, not held to the spacing.
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 1, path: 'relay' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shell.handovers()).toBe(1);
+    shell.emit({ preferred: 'direct', sequence: 4, closure: 1, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+
+    // Flapping between the relay and the address in the same stretch: armed
+    // (the shell kept a connection), but held to the spacing.
+    for (let sequence = 5; sequence < 15; sequence += 2) {
+      shell.emit({ preferred: 'direct', sequence, closure: 1, path: 'relay' });
+      shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 1, path: 'ipv4' });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(shell.handovers()).toBe(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    shell.emit({ preferred: 'direct', sequence: 15, closure: 1, path: 'relay' });
+    shell.emit({ preferred: 'direct', sequence: 16, closure: 1, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(3);
   });
 
   it('never hands over without direct version 2', async () => {

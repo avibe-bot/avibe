@@ -3153,7 +3153,12 @@
       "deviceOn": "已开启",
       "pathRelay": "中继",
       "pathIpv4": "直连 IPv4",
-      "pathIpv6": "直连 IPv6"
+      "pathIpv6": "直连 IPv6",
+      "lastConnection": "最近一次连接：直连 {{direct}} / Cloudflare {{public}}",
+      "legMs": "{{ms}} ms",
+      "legNone": "—",
+      "legFailed": "失败",
+      "legCancelled": "未用上"
     }
   },
   "models": {

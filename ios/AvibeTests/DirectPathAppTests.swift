@@ -6002,7 +6002,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(
             result as? String,
-            #"{"capability":2,"answer":[2,1],"refused":"invalid_argument"}"#
+            #"{"capability":3,"answer":[2,1],"refused":"invalid_argument"}"#
         )
         XCTAssertEqual(asked.count, 1)
         XCTAssertEqual(asked.first?.0, instance)

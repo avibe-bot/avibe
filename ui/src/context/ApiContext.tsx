@@ -37,10 +37,13 @@ import {
   nativeDirectBaselineState,
   nativeDirectHandover,
   nativeDirectHandoverAvailable,
+  nativeDirectPathKind,
+  nativeDirectPathReported,
   nativeDirectPreference,
   onNativeDirectClosure,
   onNativeDirectPreference,
   subscribeNativeDirectBaseline,
+  type NativeDirectPathKind,
 } from '../lib/native';
 import { holdPageRequests, installPageFetchCounting, pageConnectionsQuiet } from '../lib/pageConnections';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
@@ -666,6 +669,11 @@ export type TunnelNetworkPath = {
 // its first mount is counted too. The shell defines its bridge at document
 // start, so the capability is known here.
 if (typeof window !== 'undefined' && nativeDirectHandoverAvailable()) installPageFetchCounting();
+
+/** The shell's connection runs straight to an address, not through the relay. */
+function isDirectAddressPath(path: NativeDirectPathKind | null): boolean {
+  return path === 'ipv4' || path === 'ipv6';
+}
 
 /** At most one direct hand-over this often. */
 const DIRECT_HANDOVER_SPACING_MS = 30_000;
@@ -2880,7 +2888,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const rebuildWorkbenchEventsRef = useRef<() => void>(() => {});
   // One hand-over per usable stretch of the direct path: re-armed when the
   // preference goes back to the public path.
-  const directHandoverRef = useRef({ armed: true, running: false, lastAt: -Infinity });
+  const directHandoverRef = useRef({
+    armed: true,
+    running: false,
+    lastAt: -Infinity,
+    // The shell's path is a direct address (not the relay), as last heard.
+    onDirectPath: false,
+    // The one re-arm for the relay-to-direct upgrade of this usable stretch
+    // was given; and the next hand-over is not held to the spacing.
+    upgradeUsed: false,
+    skipSpacingOnce: false,
+  });
   const attemptDirectHandoverRef = useRef<() => Promise<void>>(async () => {});
   const openWorkbenchEventsRef = useRef<() => void>(() => {});
   const syncSessionDraftsRef = useRef<() => void>(() => {});
@@ -3815,7 +3833,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const attemptDirectHandover = async () => {
     const state = directHandoverRef.current;
     if (!state.armed || state.running || !nativeDirectHandoverAvailable()) return;
-    if (Date.now() - state.lastAt < DIRECT_HANDOVER_SPACING_MS) return;
+    // With a shell that reports its path: only onto a direct address, never
+    // while its connection runs through the relay. A stream moved there would
+    // race the public path over the relay and lose, and nothing would move it
+    // again when the direct address comes.
+    if (nativeDirectPathReported() && !isDirectAddressPath(nativeDirectPathKind())) return;
+    if (!state.skipSpacingOnce && Date.now() - state.lastAt < DIRECT_HANDOVER_SPACING_MS) return;
     if (nativeDirectBaselineState() !== 'ready' || eventHandlersRef.current.size === 0) return;
     // Already there: the live stream said it came in through the direct
     // ingress.
@@ -3825,6 +3848,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const quiet = await waitForQuietPage(DIRECT_HANDOVER_QUIET_WAIT_MS);
       if (!quiet || !state.armed) return;
       state.armed = false;
+      state.skipSpacingOnce = false;
       state.lastAt = Date.now();
       closeActiveWorkbenchEventSource();
       setWorkbenchEventConnectionState('reconnecting');
@@ -3867,11 +3891,25 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const stopReactivation = onPageReactivated(wakeIfVisible);
     window.addEventListener('online', wakeFromNetwork);
     const stopDirectClosures = onNativeDirectClosure(() => rebuildWorkbenchEventsRef.current());
-    const stopDirectPreference = onNativeDirectPreference((preferred) => {
+    const stopDirectPreference = onNativeDirectPreference((preferred, path) => {
+      const state = directHandoverRef.current;
       if (preferred === 'tunnel') {
-        directHandoverRef.current.armed = true;
+        state.armed = true;
+        state.onDirectPath = false;
+        state.upgradeUsed = false;
+        state.skipSpacingOnce = false;
         return;
       }
+      const onDirectPath = isDirectAddressPath(path);
+      // The shell's connection moved from the relay (or an unknown path) to a
+      // direct address: armed once more for this usable stretch, and that one
+      // hand-over is not held to the spacing. Later changes keep the spacing.
+      if (nativeDirectPathReported() && onDirectPath && !state.onDirectPath && !state.upgradeUsed) {
+        state.upgradeUsed = true;
+        state.armed = true;
+        state.skipSpacingOnce = true;
+      }
+      state.onDirectPath = onDirectPath;
       void attemptDirectHandoverRef.current();
     });
     const stopDirectBaseline = subscribeNativeDirectBaseline(() => openWorkbenchEventsRef.current());

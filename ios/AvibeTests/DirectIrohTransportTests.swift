@@ -574,6 +574,52 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(harness.transport.pathDiagnostics, .empty)
     }
 
+    func testAChangeOfTheConnectionsPathIsReportedOnceAndOnlyWhileThePathIsLive() async throws {
+        let harness = Harness()
+        let endpoint = harness.engine.prepare()
+        let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        connection.selectedPath = .relay
+        endpoint.connection.resolve(connection)
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(
+                generation: "boot:1", client: harness.engine.key.endpointID, addresses: [], relay: Self.relayA
+            )
+        )
+        harness.select()
+        try await eventually("the path comes up") { harness.reports == [.usable(generation: "boot:1")] }
+
+        // A stream opened while the connection still runs through the relay.
+        let early = try await harness.transport.openStream(for: harness.tag("boot:1"))
+
+        // The relayed connection reaches a direct address: reported once.
+        connection.movePath(to: .ipv4)
+        connection.movePath(to: .ipv4)
+        try await eventually("the upgrade is reported") {
+            harness.reports == [.usable(generation: "boot:1"), .pathChanged(.ipv4)]
+        }
+        XCTAssertEqual(harness.transport.pathDiagnostics.current, .ipv4)
+        // The change is a migration inside the one connection: nothing was
+        // closed, the stream opened before it still carries bytes, and new
+        // streams open on the same connection.
+        XCTAssertEqual(harness.log.count(of: "connection.close"), 0)
+        try await early.write(Data("still".utf8))
+        _ = try await harness.transport.openStream(for: harness.tag("boot:1"))
+        XCTAssertEqual(harness.engine.bound.count, 1)
+        connection.movePath(to: .relay)
+        try await eventually("the way back is reported") {
+            harness.reports.last == .pathChanged(.relay)
+        }
+        XCTAssertEqual(harness.reports.count, 3)
+
+        // Once the selection ends the watch is stopped, and a late change of
+        // the old connection is reported to nobody.
+        harness.transport.deselect()
+        try await eventually("the watch is stopped") { harness.log.count(of: "watch.stop") == 1 }
+        connection.movePath(to: .ipv6)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(harness.reports.count, 3)
+    }
+
     func testAnAnswerWithoutAKnownRelayBindsNoRelayAtAll() async throws {
         let harness = Harness()
         _ = try await harness.bringUp(

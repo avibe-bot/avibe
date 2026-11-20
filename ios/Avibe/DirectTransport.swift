@@ -100,6 +100,11 @@ enum DirectPathReport: Equatable, Sendable {
     /// (`remote-direct-ios.md` section 9), whichever of the two heard the
     /// background first, so its closure waits for the return.
     case lostToBackground
+    /// The usable path's connection now runs on another kind of path:
+    /// through the relay, or straight to an IPv4 or IPv6 address. Nothing
+    /// is closed; the page is told, and new connections may stay on a direct
+    /// path (section 6, stickiness).
+    case pathChanged(DirectPathKind?)
 }
 
 /// One byte stream to the instance, as the strict ingress sees it
@@ -186,6 +191,50 @@ struct DirectDialAttempt: Equatable, Sendable {
             object["local"] = local.jsonObject
         }
         return object
+    }
+}
+
+/// One CONNECT's race between the direct path and the public origin, for
+/// diagnosis: how long each took from the CONNECT's plan to being ready, or
+/// what became of it, which won, and the App's path then. Timings and
+/// families only.
+struct DirectRaceRecord: Equatable, Sendable {
+    enum Leg: Equatable, Sendable {
+        /// Not part of this race: no direct candidate, or the public origin
+        /// was never dialled.
+        case none
+        /// Ready after this many milliseconds.
+        case ready(Int)
+        case failed
+        /// Started, and cancelled when the other won.
+        case cancelled
+
+        var jsonValue: Any {
+            switch self {
+            case .none: return "none"
+            case .ready(let ms): return ms
+            case .failed: return "failed"
+            case .cancelled: return "cancelled"
+            }
+        }
+    }
+
+    let direct: Leg
+    let publicOrigin: Leg
+    /// `direct`, `public`, or nil when neither won.
+    let winner: DirectRelayBackend?
+    let path: DirectPathKind?
+    /// The plan went straight to the direct path (section 6, stickiness).
+    let sticky: Bool
+
+    var jsonObject: [String: Any] {
+        [
+            "direct": direct.jsonValue,
+            "public": publicOrigin.jsonValue,
+            "winner": winner.map { $0 == .direct ? "direct" : "public" } ?? "none",
+            "path": path.map { $0.rawValue as Any } ?? NSNull(),
+            "sticky": sticky,
+        ]
     }
 }
 

@@ -232,6 +232,94 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(harness.controller.plan(for: authority)?.openDirect)
     }
 
+    // MARK: The path's kind, stickiness, and the race record
+
+    @MainActor
+    func testThePathKindIsPublishedAndADirectAddressMakesPlansStickyUntilAMiss() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let authority = try XCTUnwrap(DirectAuthority(host: one))
+
+        // Usable through the relay: the page is told so, and plans hedge.
+        harness.transport.currentPath = .relay
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        var status = harness.status("instance-1")
+        XCTAssertEqual(status.preferred, .direct)
+        XCTAssertEqual(status.path, .relay)
+        XCTAssertEqual(status.sequence, 1)
+        XCTAssertEqual(status.eventObject["path"] as? String, "relay")
+        var plan = try XCTUnwrap(harness.controller.plan(for: authority))
+        XCTAssertFalse(plan.sticky)
+        XCTAssertEqual(plan.path, .relay)
+
+        // The connection reaches a direct address: a new sequence, nothing
+        // closed, and plans are sticky. The same path again is no change.
+        harness.transport.report(.pathChanged(.ipv4), for: target)
+        harness.transport.report(.pathChanged(.ipv4), for: target)
+        // A CONNECT planned before the change is still current across it: it
+        // is answered by whichever candidate is ready, never dropped.
+        let stillCurrent = await plan.isCurrent()
+        XCTAssertTrue(stillCurrent)
+        status = harness.status("instance-1")
+        XCTAssertEqual(status.preferred, .direct)
+        XCTAssertEqual(status.path, .ipv4)
+        XCTAssertEqual(status.sequence, 2)
+        XCTAssertEqual(status.closure, 0)
+        plan = try XCTUnwrap(harness.controller.plan(for: authority))
+        XCTAssertTrue(plan.sticky)
+        XCTAssertEqual(plan.path, .ipv4)
+
+        // A sticky attempt missed its bound: plans hedge again.
+        plan.recordRace?(DirectRaceRecord(
+            direct: .failed, publicOrigin: .ready(1_520), winner: .publicOrigin, path: .ipv4, sticky: true
+        ))
+        try await eventually { harness.status("instance-1").races.count == 1 }
+        XCTAssertFalse(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
+        // A direct candidate won a hedged race: sticky again.
+        plan.recordRace?(DirectRaceRecord(
+            direct: .ready(40), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: false
+        ))
+        try await eventually { harness.status("instance-1").races.count == 2 }
+        XCTAssertTrue(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
+        let connections = harness.status("instance-1").jsonObject["connections"] as? [[String: Any]]
+        XCTAssertEqual(connections?.last?["direct"] as? Int, 40)
+        XCTAssertEqual(connections?.last?["public"] as? String, "none")
+        XCTAssertEqual(connections?.first?["winner"] as? String, "public")
+        // Another host's page learns nothing of it.
+        XCTAssertNil(harness.status("instance-2").path)
+        XCTAssertEqual(harness.status("instance-2").races, [])
+
+        // Only the last few races are kept.
+        for _ in 0..<8 {
+            plan.recordRace?(DirectRaceRecord(
+                direct: .ready(40), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: true
+            ))
+        }
+        try await eventually {
+            harness.status("instance-1").races.count == DirectPathController.raceLimit
+        }
+
+        // Back through the relay: told, and no longer sticky.
+        harness.transport.report(.pathChanged(.relay), for: target)
+        XCTAssertEqual(harness.status("instance-1").path, .relay)
+        XCTAssertEqual(harness.status("instance-1").sequence, 3)
+        XCTAssertFalse(try XCTUnwrap(harness.controller.plan(for: authority)).sticky)
+
+        // Lost: no path is claimed, and the next selection starts clean.
+        harness.transport.report(.pathChanged(.ipv6), for: target)
+        harness.transport.report(.lost, for: target)
+        XCTAssertEqual(harness.status("instance-1").preferred, .tunnel)
+        XCTAssertNil(harness.status("instance-1").path)
+        XCTAssertNil(harness.status("instance-1").eventObject["path"])
+        let after = try XCTUnwrap(harness.controller.plan(for: authority))
+        XCTAssertNil(after.openDirect)
+        XCTAssertFalse(after.sticky)
+        harness.controller.runtimeDidStop()
+        XCTAssertEqual(harness.status("instance-1").races, [])
+    }
+
     // MARK: Closing relays
 
     @MainActor
@@ -1440,6 +1528,13 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
     @MainActor private(set) var deselectCount = 0
     @MainActor private(set) var failedTags: [DirectStreamTag] = []
     @MainActor private var reporters: [Int: @MainActor (DirectPathReport) -> Void] = [:]
+    /// The kind of path the stand-in says its connection runs on.
+    @MainActor var currentPath: DirectPathKind?
+
+    @MainActor
+    var pathDiagnostics: DirectPathDiagnostics {
+        DirectPathDiagnostics(current: currentPath, attempts: [])
+    }
 
     @MainActor
     func select(

@@ -29,7 +29,7 @@ import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
 import { liveStreamVia, subscribeLiveStreamVia, type LiveStreamVia } from '../lib/liveStreamVia';
-import { deviceDirectLine, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import { deviceDirectLine, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
 import { onNativeDirectPreference, readNativeDirectPath, type NativeDirectPathSnapshot } from '../lib/native';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { useDeadlineClock } from './settings/models/useDeadlineClock';
@@ -985,6 +985,14 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
       ? t('remoteAccess.direct.deviceWithPath', { state: t(device.stateKey), path: t(device.pathKey) })
       : t('remoteAccess.direct.device', { state: t(device.stateKey) })
     : null;
+  const legs = lastConnectionLegs(devicePath);
+  const leg = (value: number | 'none' | 'failed' | 'cancelled') => (
+    typeof value === 'number'
+      ? t('remoteAccess.direct.legMs', { ms: value })
+      : t(value === 'none'
+        ? 'remoteAccess.direct.legNone'
+        : value === 'failed' ? 'remoteAccess.direct.legFailed' : 'remoteAccess.direct.legCancelled')
+  );
   const detail = certificate && page
     ? t('remoteAccess.direct.detail', { certificate, page })
     : certificate ?? page;
@@ -996,6 +1004,11 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
       </div>
       {detail && <div className="mt-1.5 text-[12px] text-muted">{detail}</div>}
       {deviceText && <div className="mt-0.5 text-[12px] text-muted">{deviceText}</div>}
+      {legs && (
+        <div className="mt-0.5 text-[12px] tabular-nums text-muted">
+          {t('remoteAccess.direct.lastConnection', { direct: leg(legs.direct), public: leg(legs.public) })}
+        </div>
+      )}
     </div>
   );
 };
