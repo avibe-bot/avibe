@@ -1,4 +1,4 @@
-// Proposed 2026-11-20. The desktop app connected to an instance on another computer shows two
+// Approved 2026-11-20 (owner). The desktop app connected to an instance on another computer shows two
 // things that update separately: that instance, and this computer's desktop app. Today the
 // sidebar shows the app's version beside the instance's name, and its panel updates the app
 // without saying so (`now-*`, the shipped components). The proposal: the version beside the
@@ -174,7 +174,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     title: `提议 · 实例名旁边是实例的版本；面板里先是实例，再是这台电脑上的桌面应用，各有各的按钮 · ${lang}`,
     width: 1200,
     height: 800,
-    status: 'proposed',
+    status: 'approved',
     route: '/',
     fixtures: windowFixtures(lang),
     render: appWindow(
@@ -188,7 +188,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     title: `提议 · 实例更新中，面板已关：版本号上转圈，直到更新完成 · ${lang}`,
     width: 1200,
     height: 800,
-    status: 'proposed',
+    status: 'approved',
     route: '/',
     fixtures: windowFixtures(lang),
     render: appWindow(<InstanceVersionRow lang={lang} name={INSTANCE} version={OLD} updating />),
@@ -198,7 +198,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     title: `提议 · 面板的各个状态 · ${lang}`,
     width: 1472,
     height: 1580,
-    status: 'proposed',
+    status: 'approved',
     fixtures: { copy: copy(lang) },
     render: () => <States lang={lang} states={states} />,
   },
@@ -207,7 +207,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     title: `提议 · 侧边栏底部一行的各个状态（第一行是现在）· ${lang}`,
     width: 420,
     height: 440,
-    status: 'proposed',
+    status: 'approved',
     fixtures: { copy: copy(lang) },
     render: () => <Badges lang={lang} rows={badgeRows(lang)} />,
   },
@@ -216,7 +216,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     title: `提议 · 窗口变窄时，从实例页面自己的版本号打开的是同一块面板 · ${lang}`,
     width: 480,
     height: 800,
-    status: 'proposed',
+    status: 'approved',
     route: '/settings/general',
     fixtures: settingsFixtures({ '/api/version': info() }, { copy: copy(lang) }),
     render: () => (
@@ -235,7 +235,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     title: `对照 · 浏览器和手机不变：只有一样东西，面板就是它的；别处发起的更新这里也显示进行中 · ${lang}`,
     width: 800,
     height: 560,
-    status: 'proposed',
+    status: 'approved',
     fixtures: { copy: copy(lang) },
     render: () => {
       const l = label(lang);

@@ -125,17 +125,121 @@ origin and CSRF checks for these POSTs without weakening them.
   itself; the chip then shows the instance's version, with its dot if the
   instance is behind.
 
+## Contracts
+
+### A. The Runtime reports an install in progress (`/api/version`)
+
+A standalone Runtime's `get_version_info()` gains one additive field. A
+desktop-managed host does not carry it; its `remote_request` already says this.
+
+```json
+"install": null | {
+  "phase": "installing" | "restarting",
+  "target": "3.2.8rc4" | null,
+  "started_at": "2026-11-20T07:03:17Z"
+}
+```
+
+- `installing` while any installer holds the install lock
+  (`atomic_upgrade_lock`): `POST /api/upgrade`, `vibe upgrade`, and the
+  automatic update alike. `restarting` from a committed install until its
+  scheduled restart has finished (`restart_is_pending`). `null` otherwise,
+  including after a failed install.
+- The lock is the truth. `target` and `started_at` come from a record the
+  installer writes while it holds the lock; a record whose holder is gone
+  reports nothing.
+- Reading it never waits for the lock and adds no blocking work to the request.
+- Older Workbenches ignore the field. Nothing else in the answer changes, and
+  `POST /api/upgrade` keeps its released behaviour.
+
+### B1. The shell reads and updates the selected instance
+
+State. The full client state the bundled account pages read
+(`DesktopClientState`) gains `instance_update`; the projection a Workbench
+page receives (`runtime_projection`) does not.
+
+```ts
+instance_update: null | {            // null while the committed connection is local
+  instance_id: string;               // the committed remote instance
+  status: 'loading' | 'ready' | 'unreachable' | 'unauthorized';
+  snapshot: UpdateSnapshot | null;   // the instance's /api/version, allow-listed fields only
+  can_manage: boolean;               // /api/session capabilities.can_manage_instance
+  request: null | {                  // the last action sent from this shell
+    action: 'install' | 'check' | 'prereleases' | 'auto_update';
+    phase: 'sending' | 'accepted' | 'failed';
+    target: string | null;           // install only
+    error_code: string | null;       // a code, never upstream text
+    updated_at: string;
+  };
+  fetched_at: string | null;
+}
+```
+
+`snapshot` keeps exactly the `UpdateSnapshot` fields
+(`ui/src/components/update/types.ts`) plus contract A's `install`: versions
+that parse as versions, enumerated phases, booleans, timestamps, and bounded
+`host_actions`. Anything else is dropped; an answer that fails validation is
+`unreachable`.
+
+Actions, in the account bridge's v1 envelope, beside the four `update_*` ones:
+
+| Action | Request to the instance |
+| --- | --- |
+| `instance_update_refresh` | `GET /api/version`, `GET /api/session` |
+| `instance_update_check` | `POST /api/update/check` |
+| `instance_update_set_prereleases {enabled}` | `POST /api/update/prereleases` |
+| `instance_update_set_auto_update {enabled}` | `POST /api/update/auto-update` |
+| `instance_update_install {target_version}` | standalone: `POST /api/upgrade` with `confirm_interrupt: true`; desktop-managed: `POST /api/desktop/update/request` with the exact target and `confirm_interrupt: true` |
+
+- Callers: the bundled account page in the main window, and the update popup
+  on its own page (`update_popover::allows` grows by exactly these). A
+  Workbench document, local or remote, can call none of them, and still none
+  of the four `update_*` ones on a remote page.
+- Requests go through the shell's native HTTP client with the sign-in the app
+  made for that instance: its session cookie, `Origin` set to the instance's
+  origin, and the `vibe_csrf_token` cookie echoed in `X-Vibe-CSRF-Token`. The
+  instance's origin, CSRF and authorization checks are not changed.
+- Every action is fenced by the selection generation: a reply that arrives
+  after the selection changed is dropped, and no action is sent for an
+  instance that is no longer the committed one.
+- `install` requires `target_version` to equal the snapshot's `latest` at the
+  time of the click. A standalone install keeps its HTTP request open for the
+  whole install (about a minute); the shell does not treat a long wait as a
+  failure, and follows `install` and `current` in the snapshot to its end.
+- While the popup is open, or a request is not settled, the shell rereads the
+  snapshot every few seconds; otherwise it reads it when the popup opens.
+- The popup window is as tall as its panel needs, within the main window.
+
+### B2. The interface
+
+- `UpdatePanel` draws a section per subject; the popup draws two when
+  `instance_update` is not null, and today's single panel otherwise.
+- The bottom row and the narrow-window badge are the instance's page: they
+  read the page's own `/api/version`, and still only ask the shell to present
+  the panel.
+- A standalone Runtime's page reads `install` from `/api/version`: an install
+  started elsewhere shows as running, and Update is disabled until it ends.
+
 ## Delivery
 
-Two PRs. The Runtime's in-progress report is its own backend PR. The main PR
-carries the panel, the shell and the bottom row, and reaches a user in two
-halves: the shell's two-section panel with the next desktop app build, and the
-bottom row once the instance runs a build that contains it.
+Three PRs, each mergeable alone:
+
+1. **Runtime** (contract A): useful by itself, any surface.
+2. **Shell** (contract B1): the bridge actions and the state; no visible change
+   until the interface draws them.
+3. **Interface** (contract B2): the two-section panel, the bottom row, the
+   narrow-window badge and the copy. The frames switch to the shipped
+   components and the kit copy is deleted.
+
+It reaches a user in two halves: the two-section panel with the next desktop
+app build (2 and 3 are in the app's bundle), and the bottom row once the
+instance runs a build that contains 3.
 
 ## Todo
 
 - [x] Owner reviews the frames.
-- [ ] Runtime: in-progress report for standalone installs.
-- [ ] Shell: instance update actions on the account bridge; popup sizing.
-- [ ] UI: `UpdatePanel` sections, bottom row, narrow-window badge, i18n; the
-      frames switch to the shipped components and the kit copy is deleted.
+- [ ] Runtime: in-progress report for standalone installs (contract A).
+- [ ] Shell: instance update actions on the account bridge; popup sizing (B1).
+- [ ] Interface: `UpdatePanel` sections, bottom row, narrow-window badge, i18n;
+      the frames switch to the shipped components and the kit copy is deleted (B2).
+- [ ] One run on a real desktop app connected to a remote instance.

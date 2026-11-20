@@ -1,4 +1,4 @@
-// Proposed 2026-11-20: the update panel while the desktop app shows an instance on another
+// Approved 2026-11-20 (owner): the update panel while the desktop app shows an instance on another
 // computer. One panel, two sections: the instance in use, by its name, then this computer's
 // desktop app; each with its own version, state and button, so no version is shown without
 // saying whose it is. The owner updated this computer's app while meaning to update the
