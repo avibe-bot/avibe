@@ -860,6 +860,30 @@ pub(crate) fn is_current_runtime<R: tauri::Runtime>(view: &Webview<R>) -> bool {
     let state = client.view.presentation.lock().expect("presentation");
     role && !state.account && !state.staging && state.pending_commit.is_none() && client.view.windows.try_lock().is_ok()
 }
+/// The shown Workbench document and the Runtime origin it must have, while it
+/// is the current Runtime (no account page, not staging or committing) and its
+/// URL is at that origin. Ask Vibey (macOS Services) delivers into nothing else.
+#[cfg(target_os = "macos")]
+pub(crate) fn current_workbench(app: &AppHandle) -> Option<(Webview, Url)> {
+    let view = runtime_webview(app)?;
+    if !is_current_runtime(&view) {
+        return None;
+    }
+    let client = app.try_state::<Client>()?;
+    let origin = {
+        let state = client.view.presentation.lock().ok()?;
+        match &state.remote {
+            Some(remote) => remote.clone(),
+            None => client.view.local_origin.lock().ok()?.as_ref()?.navigation_url(),
+        }
+    };
+    let actual = view.url().ok()?;
+    let same = matches!(actual.scheme(), "http" | "https")
+        && actual.origin() == origin.origin()
+        && actual.username().is_empty()
+        && actual.password().is_none();
+    same.then_some((view, origin))
+}
 pub(crate) fn is_main_view(app: &AppHandle, label: &str) -> bool {
     if label == MAIN_WINDOW {
         return true;

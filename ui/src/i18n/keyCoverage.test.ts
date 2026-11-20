@@ -952,6 +952,7 @@ const NON_KEY_LITERALS = [
   'session.selectInstance',
   'systemSchedule.request',
   'systemSchedule.cancel',
+  'systemSchedule.capabilities',
   'push.opened',
   'push.status',
   'push.subscribe',

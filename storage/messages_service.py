@@ -121,6 +121,10 @@ def _row_to_payload(
         # A transcript row's model payload (the Avibe Agent's context) is not display:
         # no reader of a message payload uses it, and it can be large or private.
         content.pop("model", None)
+        if isinstance(content.get("quick_replies"), list) and content["quick_replies"]:
+            from core.message_answers import revision
+
+            content["quick_reply_revision"] = revision(content["quick_replies"])
     try:
         metadata = json.loads(row.get("metadata_json") or "{}")
     except json.JSONDecodeError:

@@ -291,6 +291,7 @@ dependencies = [
  "cookie",
  "cookie_store",
  "getrandom 0.4.3",
+ "libc",
  "minisign-verify",
  "reqwest 0.12.28",
  "semver",

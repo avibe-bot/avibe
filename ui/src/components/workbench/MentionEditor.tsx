@@ -94,8 +94,9 @@ export interface MentionEditorHandle {
    *  keyboard closes after a send), so no selection is put back: writing one to
    *  the DOM would focus the editor again. */
   clear: (options?: { blur?: boolean }) => void;
-  /** Append free text at the end (voice transcript) without disturbing chips. */
-  append: (text: string) => void;
+  /** Append free text at the end (voice transcript) without disturbing chips,
+   *  after ``separator`` (a space by default) when the editor is non-empty. */
+  append: (text: string, separator?: string) => void;
   /** Capture the serialized draft and logical selection before a toolbar click
    *  moves DOM focus away from the editor. */
   captureSelection: () => VoiceInsertionSnapshot;
@@ -595,11 +596,11 @@ function BootstrapPlugin({
             if (blur) $setSelection(null);
           });
         },
-        append: (text: string) =>
+        append: (text: string, separator = ' ') =>
           editor.update(() => {
             const root = $getRoot();
             const selection = root.selectEnd();
-            const prefix = root.getTextContent().length > 0 ? ' ' : '';
+            const prefix = root.getTextContent().length > 0 ? separator : '';
             selection.insertText(`${prefix}${text}`);
           }),
         captureSelection: () => editor.getEditorState().read(() => {

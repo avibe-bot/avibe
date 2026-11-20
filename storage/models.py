@@ -1703,3 +1703,17 @@ imported_state_tables = [
     show_session_events,
     web_push_subscriptions,
 ]
+
+# Answer receipts bind client retries to one existing Delivery, never a second execution.
+message_answer_operations = Table(
+    "message_answer_operations", metadata,
+    Column("session_id", String, primary_key=True),
+    Column("principal", String, primary_key=True),
+    Column("operation_id", String, primary_key=True),
+    Column("request_id", String, nullable=False),
+    Column("fingerprint", Text, nullable=False),
+    Column("choice", Text, nullable=False),
+    Column("delivery_id", String, nullable=True),
+    Column("receipt_json", Text, nullable=True),
+    Index("ix_message_answer_operations_winner", "session_id", "request_id", "delivery_id"),
+)
