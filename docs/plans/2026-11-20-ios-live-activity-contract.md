@@ -100,6 +100,15 @@ No installation management credential is required.
 
 ### 3.2 Body (≤ 1024 UTF-8 bytes, strict)
 
+**The raw bytes are judged before the object** (reference: `validate_relay_raw`):
+- The body is at most 1024 bytes as received. Check this before parsing, so whitespace padding or `\uXXXX` escapes cannot slip past it.
+- Decode it as strict UTF-8 without stripping a BOM. In TypeScript use `new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })`, then `JSON.parse`.
+- The top level must be a JSON object, with no trailing data and no `NaN` or `Infinity`.
+- Any failure here is `400 invalid_live_activity`.
+
+The vectors `relay_raw_accepts` and `relay_raw_rejections` give exact byte bodies (base64), including a body of exactly 1024 bytes and one of 1025.
+
+
 | Field | Required | Rule |
 | --- | --- | --- |
 | `activity_token` | yes | lowercase hex, even length, 16–512 characters |

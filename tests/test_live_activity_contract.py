@@ -11,6 +11,7 @@ relay implements the same rules in TypeScript; the iOS tests decode the
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from pathlib import Path
@@ -34,6 +35,26 @@ ALERT = {
     "body": {"loc-key": "AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY"},
     "sound": "default",
 }
+
+
+MAX_BODY_BYTES = 1024
+
+
+def _reject_constant(_name: str) -> Any:
+    raise ValueError("non-finite number")
+
+
+def validate_relay_raw(raw: bytes) -> bool:
+    """True when the raw request body is valid (section 3.2): the size limit and the decoding rules
+    are checked on the bytes, before and while parsing, then the parsed object is validated."""
+    if len(raw) > MAX_BODY_BYTES:
+        return False
+    try:
+        # Strict UTF-8 with no BOM stripping: a leading BOM stays in the text and json rejects it.
+        body = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return validate_relay_request(body)
 
 
 def _time(value: Any) -> bool:
@@ -119,9 +140,26 @@ def test_every_relay_case_is_valid_and_maps_to_its_exact_apns_request(vectors):
         assert built == case["apns"], case["name"]
 
 
+def _compact(body: Any) -> bytes:
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def test_every_rejection_is_invalid(vectors):
     for case in vectors["relay_rejections"]:
         assert not validate_relay_request(case["request"]), case["name"]
+        assert not validate_relay_raw(_compact(case["request"])), case["name"]
+        assert (case["status"], case["error"]) == (400, "invalid_live_activity")
+
+
+def test_raw_bodies_are_judged_on_their_bytes(vectors):
+    for case in vectors["relay_cases"]:
+        assert validate_relay_raw(_compact(case["request"])), case["name"]
+    for case in vectors["relay_raw_accepts"]:
+        raw = base64.b64decode(case["body_base64"])
+        assert validate_relay_raw(raw), case["name"]
+    for case in vectors["relay_raw_rejections"]:
+        raw = base64.b64decode(case["body_base64"])
+        assert not validate_relay_raw(raw), case["name"]
         assert (case["status"], case["error"]) == (400, "invalid_live_activity")
 
 

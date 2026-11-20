@@ -89,14 +89,14 @@ const statusTone = (a: TurnActivity) =>
  *  title, so its Agent name takes the first line. */
 function Heading({ activity, onBlack = false }: { activity: TurnActivity; onBlack?: boolean }) {
   const copy = useTurnCopy()(activity);
-  const muted = onBlack ? 'text-white/60' : 'text-muted';
-  const tone = onBlack && (activity.staleSince || activity.phase === 'stopped') ? 'text-white/60' : statusTone(activity);
+  const muted = onBlack ? 'text-island-foreground/60' : 'text-muted';
+  const tone = onBlack && (activity.staleSince || activity.phase === 'stopped') ? 'text-island-foreground/60' : statusTone(activity);
   return (
     <div className="min-w-0 flex-1">
       <div className="truncate text-base font-semibold leading-5">{activity.title ?? activity.agent}</div>
       {activity.title && <div className={clsx('truncate text-sm leading-5', muted)}>{activity.agent}</div>}
       <div className="mt-1 flex items-start gap-1.5 text-sm leading-5">
-        <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className={clsx('mt-0.5 size-3.5 shrink-0', onBlack && activity.staleSince && 'text-white/60')} />
+        <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className={clsx('mt-0.5 size-3.5 shrink-0', onBlack && activity.staleSince && 'text-island-foreground/60')} />
         <span>
           <span className={clsx('font-semibold', tone)}>{copy.status}</span>
           <span className={muted}>{' · '}{copy.detail}</span>
@@ -125,7 +125,7 @@ export function LockScreen({ children, time = '10:24' }: { children: ReactNode; 
   const t = useDraft();
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-background text-foreground" style={{ background: 'var(--gradient-wizard-platforms)' }}>
-      <div className="mx-auto mt-3 h-9 w-32 rounded-full bg-black" />
+      <div className="mx-auto mt-3 h-9 w-32 rounded-full bg-island" />
       <div className="mt-6 text-center text-lg font-semibold text-foreground/80">{t('11月20日 星期四', 'Thursday, November 20')}</div>
       <div className="text-center font-display text-8xl font-semibold leading-none tracking-tight">{time}</div>
       <div className="mt-auto flex flex-col gap-2 px-3 pb-24">{children}</div>
@@ -156,12 +156,12 @@ export function SpecimenSheet({ children }: { children: ReactNode }) {
 export function IslandCompact({ activity }: { activity: TurnActivity }) {
   const running = activity.phase === 'working' && !activity.staleSince;
   return (
-    <div className="flex h-9 w-64 items-center justify-between rounded-full bg-black pr-3 pl-1.5">
+    <div className="flex h-9 w-64 items-center justify-between rounded-full bg-island pr-3 pl-1.5">
       <Mark size="size-6" />
       {running ? (
         <span className="font-mono text-sm font-semibold tabular-nums text-mint">{activity.elapsed}</span>
       ) : (
-        <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className={clsx('size-4', activity.staleSince && 'text-white/60')} />
+        <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className={clsx('size-4', activity.staleSince && 'text-island-foreground/60')} />
       )}
     </div>
   );
@@ -170,7 +170,7 @@ export function IslandCompact({ activity }: { activity: TurnActivity }) {
 /** The minimal island, when another app's activity shares it. */
 export function IslandMinimal({ activity }: { activity: TurnActivity }) {
   return (
-    <div className="flex size-9 items-center justify-center rounded-full bg-black">
+    <div className="flex size-9 items-center justify-center rounded-full bg-island">
       <Glyph phase={activity.phase} stale={Boolean(activity.staleSince)} className="size-4" />
     </div>
   );
@@ -180,7 +180,7 @@ export function IslandMinimal({ activity }: { activity: TurnActivity }) {
 export function IslandExpanded({ activity }: { activity: TurnActivity }) {
   const running = activity.phase === 'working' || activity.phase === 'needsYou';
   return (
-    <div className="flex w-full items-start gap-3 rounded-4xl bg-black px-5 pt-4 pb-5 text-white">
+    <div className="flex w-full items-start gap-3 rounded-4xl bg-island px-5 pt-4 pb-5 text-island-foreground">
       <Mark size="size-9" />
       <Heading activity={activity} onBlack />
       {running && !activity.staleSince && <div className="pt-0.5 font-mono text-lg font-semibold tabular-nums">{activity.elapsed}</div>}
