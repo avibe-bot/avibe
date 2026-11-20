@@ -1,8 +1,9 @@
 """Feishu/Lark implementation of the IM client.
 
 Message calls go over plain HTTPS (``feishu_api``) and events are read by
-``feishu_events``; the long connection that delivers them is still
-``lark-oapi``'s (``feishu_sdk_ws``).
+``feishu_events``. The long connection that delivers them is ``lark-oapi``'s
+(``feishu_sdk_ws``), ours (``feishu_ws``) or both, as ``long_connection`` in the
+config says.
 """
 
 import asyncio
@@ -35,7 +36,9 @@ from .message_facts import (
 from .download_target import open_download_target
 from .feishu_api import FeishuApi
 from .feishu_events import FeishuEventDispatcher
+from .feishu_history_check import FeishuHistoryCheck
 from .feishu_sdk_ws import SdkLongConnection
+from .feishu_ws import FeishuLongConnection, FrameTap
 from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
@@ -55,6 +58,12 @@ _EVENT_ID_MEMORY_SECONDS = 7 * 3600
 # must go through, so the key is forgotten quickly.
 _CARD_ACTION_MEMORY_SECONDS = 30
 _EVENT_ID_SWEEP_SECONDS = 60
+
+# ``LarkConfig.long_connection``: which client holds the long connection.
+_SDK, _LISTEN, _PARALLEL, _OWN = "sdk", "listen", "parallel", "own"
+_LONG_CONNECTION_MODES = (_SDK, _LISTEN, _PARALLEL, _OWN)
+# How often the counts of a connection under comparison are logged.
+_CONNECTION_REPORT_SECONDS = 600
 
 
 # Feishu emoji name mapping (common reactions)
@@ -137,10 +146,16 @@ class FeishuBot(BaseIMClient):
 
         # Message calls (create, reply, patch, delete, reaction)
         self._api = FeishuApi(config.api_base_url, self._tenant_token)
-        # The long connection that delivers events (lark-oapi's client)
+        # The long connection that delivers events: lark-oapi's client, ours, or both
         self._sdk_connection: Optional[SdkLongConnection] = None
+        self._own_connection: Optional[FeishuLongConnection] = None
         # Set by stop(), which may come at any point of the start.
         self._stop_requested = threading.Event()
+        self._connection_mode = _SDK
+        self._frame_tap: Optional[FrameTap] = None
+        # Events seen per connection ("sdk", "own") while the two are compared.
+        self._connection_events: Dict[str, Dict[str, int]] = {}
+        self._history_check: Optional[FeishuHistoryCheck] = None
         # Event handler
         self._event_handler = None
         # Bot open_id (populated on startup)
@@ -2891,21 +2906,31 @@ class FeishuBot(BaseIMClient):
     # ------------------------------------------------------------------
     # Run / lifecycle
     # ------------------------------------------------------------------
-    def _build_event_handler(self) -> FeishuEventDispatcher:
-        """Build the dispatcher for the events the long connection delivers."""
+    def _build_event_handler(self, source: str = _SDK) -> FeishuEventDispatcher:
+        """Build the dispatcher for the events a long connection delivers.
+
+        ``source`` names the connection it serves. Both connections' dispatchers
+        end in the same entry points and the same event-id table, so an event
+        is handled once whichever of them Feishu gives it to.
+        """
 
         def on_message_receive(event_id: Optional[str], event: Dict[str, Any]) -> None:
             """im.message.receive_v1"""
             try:
-                if self._is_duplicate_event(event_id):
+                duplicate = self._is_duplicate_event(event_id)
+                self._note_event(source, "im.message.receive_v1", event_id, duplicate)
+                if self._history_check is not None:
+                    self._history_check.message_event((event.get("message") or {}).get("message_id"))
+                if duplicate:
                     return
                 self._handle_message_event(event)
             except Exception as exc:
                 logger.error("Error in on_message_receive: %s", exc, exc_info=True)
 
-        def on_card_action(event: Dict[str, Any]) -> None:
+        def on_card_action(event_id: Optional[str], event: Dict[str, Any]) -> None:
             """card.action.trigger; the dispatcher answers Feishu within its 3-second window."""
             try:
+                self._note_event(source, "card.action.trigger", event_id, False)
                 self._handle_card_action(event)
             except Exception as exc:
                 logger.error("Error in on_card_action: %s", exc, exc_info=True)
@@ -2913,7 +2938,9 @@ class FeishuBot(BaseIMClient):
         def on_reaction_event(event_id: Optional[str], event_type: str) -> None:
             """Message reaction events we do not actively process yet."""
             try:
-                if self._is_duplicate_event(event_id):
+                duplicate = self._is_duplicate_event(event_id)
+                self._note_event(source, event_type, event_id, duplicate)
+                if duplicate:
                     return
                 logger.debug("Ignoring Feishu reaction event: %s", event_type or "unknown")
             except Exception as exc:
@@ -2925,16 +2952,51 @@ class FeishuBot(BaseIMClient):
             on_reaction=on_reaction_event,
         )
 
+    def _note_event(self, source: str, event_type: str, event_id: Optional[str], duplicate: bool) -> None:
+        """While the two clients are compared, record which connection an event came by: ids and counts only."""
+        if self._connection_mode == _SDK:
+            return
+        counts = self._connection_events.setdefault(source, {"events": 0, "again": 0})
+        counts["events"] += 1
+        if duplicate:
+            counts["again"] += 1
+        logger.info(
+            "Feishu event %s (%s) via the %s connection%s", event_id, event_type, source, ", again" if duplicate else ""
+        )
+
+    async def _report_connections(self, check_history: bool = True) -> None:
+        """Check the history of the direct chats against the events received, and log every count."""
+        history = self._history_check
+        if history is not None and check_history:
+            try:
+                await history.run_once(list(self._dm_chat_ids))
+            except Exception as exc:
+                logger.error("Feishu history check failed: %s", exc, exc_info=True)
+        own = self._own_connection
+        tap = self._frame_tap
+        logger.info(
+            "Feishu long connection comparison: mode=%s events=%s own=%s tap=%s history=%s",
+            self._connection_mode,
+            self._connection_events,
+            vars(own.counts) if own is not None else None,
+            vars(tap.counts) if tap is not None else None,
+            vars(history.counts) if history is not None else None,
+        )
+
     def run(self):
         """Start the Feishu bot with WebSocket long connection."""
         if not self.config.app_id or not self.config.app_secret:
             raise ValueError("Feishu app_id and app_secret are required")
 
-        logger.info("Starting Feishu/Lark bot with WebSocket...")
+        mode = getattr(self.config, "long_connection", _SDK)
+        if mode not in _LONG_CONNECTION_MODES:
+            logger.warning("Feishu/Lark adapter: unknown long_connection %r; using %r", mode, _SDK)
+            mode = _SDK
+        self._connection_mode = mode
+
+        logger.info("Starting Feishu/Lark bot with WebSocket (long connection: %s)...", mode)
 
         self._warn_proxy_bypassed()
-        event_handler = self._build_event_handler()
-        self._event_handler = event_handler
 
         async def start():
             self._loop = asyncio.get_running_loop()
@@ -2948,18 +3010,39 @@ class FeishuBot(BaseIMClient):
             # Pre-populate DM chat IDs from persisted user settings
             self._populate_dm_chat_ids()
 
-            # Start the long connection on a thread of its own. It is published
-            # before the check, so that a stop from here on finds it; one that
-            # came earlier is seen by the check.
-            self._sdk_connection = SdkLongConnection(
-                app_id=self.config.app_id,
-                app_secret=self.config.app_secret,
-                domain=self.config.api_base_url,
-                event_handler=event_handler,
-            )
+            if mode != _SDK:
+                self._history_check = FeishuHistoryCheck(self._api.list_messages)
+
+            # The long connection(s), each on a thread of its own. They are
+            # published before the check, so that a stop from here on finds
+            # them; one that came earlier is seen by the check.
+            if mode != _OWN:
+                event_handler = self._build_event_handler(_SDK)
+                self._event_handler = event_handler
+                self._sdk_connection = SdkLongConnection(
+                    app_id=self.config.app_id,
+                    app_secret=self.config.app_secret,
+                    domain=self.config.api_base_url,
+                    event_handler=event_handler,
+                    on_client=(
+                        (lambda sdk, client: self._tap_sdk_connection(sdk, client, event_handler))
+                        if mode == _LISTEN
+                        else None
+                    ),
+                )
+            if mode in (_PARALLEL, _OWN):
+                self._own_connection = FeishuLongConnection(
+                    base_url=self.config.api_base_url,
+                    app_id=self.config.app_id,
+                    app_secret=self.config.app_secret,
+                    handle_event=self._build_event_handler(_OWN).handle,
+                )
             if self._stop_requested.is_set():
                 return
-            self._sdk_connection.start()
+            if self._sdk_connection is not None:
+                self._sdk_connection.start()
+            if self._own_connection is not None:
+                self._own_connection.start("feishu-ws-own")
 
             logger.info("Feishu WebSocket client started")
 
@@ -2970,8 +3053,15 @@ class FeishuBot(BaseIMClient):
                 except Exception as exc:
                     logger.error("on_ready callback failed: %s", exc, exc_info=True)
 
-            # Wait until stop is requested
-            await self._stop_event.wait()
+            # Wait until stop is requested, reporting on a comparison meanwhile
+            while not self._stop_event.is_set():
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), _CONNECTION_REPORT_SECONDS)
+                except asyncio.TimeoutError:
+                    if mode != _SDK:
+                        await self._report_connections()
+            if mode != _SDK:
+                await self._report_connections(check_history=False)
 
         try:
             asyncio.run(start())
@@ -2980,6 +3070,32 @@ class FeishuBot(BaseIMClient):
         finally:
             # However the start ended, no connection it made outlives it.
             self._stop_connection()
+
+    def _tap_sdk_connection(self, sdk_ws: Any, client: Any, dispatcher: FeishuEventDispatcher) -> None:
+        """Put a ``FrameTap`` on the three points where lark-oapi's client takes in, hands on and sends a frame.
+
+        The tap only looks: each wrapper calls the client's own method with the
+        same argument whatever the tap makes of it.
+        """
+        tap = FrameTap(sdk_ws.Frame)
+        handle_message, write_message, handle_event = client._handle_message, client._write_message, dispatcher.handle
+
+        async def tapped_handle_message(message: bytes) -> None:
+            tap.received(message)
+            await handle_message(message)
+
+        async def tapped_write_message(data: bytes) -> None:
+            tap.sent(data)
+            await write_message(data)
+
+        def tapped_handle_event(payload: bytes) -> Optional[Dict[str, Any]]:
+            tap.handled(payload)
+            return handle_event(payload)
+
+        client._handle_message = tapped_handle_message
+        client._write_message = tapped_write_message
+        dispatcher.handle = tapped_handle_event  # type: ignore[method-assign]
+        self._frame_tap = tap
 
     def stop(self) -> None:
         """Signal the bot to stop."""
@@ -2991,13 +3107,15 @@ class FeishuBot(BaseIMClient):
             self._stop_event.set()
 
     def _stop_connection(self) -> None:
-        connection = self._sdk_connection
-        if connection is not None and not connection.stop(timeout=5.0):
-            logger.warning("Feishu WS thread did not stop within %.1fs", 5.0)
+        for connection in (self._sdk_connection, self._own_connection):
+            if connection is not None and not connection.stop(timeout=5.0):
+                logger.warning("Feishu WS thread did not stop within %.1fs", 5.0)
 
     def verify_stopped(self) -> bool:
-        connection = self._sdk_connection
-        return connection is None or not connection.is_alive()
+        return all(
+            connection is None or not connection.is_alive()
+            for connection in (self._sdk_connection, self._own_connection)
+        )
 
     async def shutdown(self) -> None:
         """Best-effort async shutdown."""

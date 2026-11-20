@@ -85,7 +85,7 @@ def _through_ours(payload: bytes) -> Dict[str, Any]:
     seen: List[Any] = []
     dispatcher = FeishuEventDispatcher(
         on_message=lambda event_id, event: seen.append(("message", event_id, event)),
-        on_card_action=lambda event: seen.append(("card", event)),
+        on_card_action=lambda _event_id, event: seen.append(("card", event)),
         on_reaction=lambda event_id, event_type: seen.append(("reaction", event_id, event_type)),
     )
     try:
