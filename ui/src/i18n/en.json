@@ -7819,7 +7819,7 @@
       "current": "You're up to date",
       "available": "A new version is ready to install",
       "availableDetail": "Avibe restarts to finish. Your sessions and settings are kept.",
-      "availableInstanceDetail": "{{name}} restarts to finish, usually within a minute or two. Work in progress may be interrupted.",
+      "availableInstanceDetail": "{{name}} restarts to finish, usually within a minute or two. Running work may be interrupted.",
       "availableAppDetail": "Avibe on this computer restarts to finish. {{name}} is not affected.",
       "instanceUnauthorized": "Can't read {{name}}'s update status here.",
       "notChecked": "Not checked for updates yet",

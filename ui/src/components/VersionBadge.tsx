@@ -28,7 +28,7 @@ import { lazyPage } from '../lib/lazyPage';
 import type { UpdatePanelModel } from './update/updatePanelModel';
 import { normalizeVersion, remoteRequestSettled } from './update/versions';
 import { useAcceptedInstall } from './update/useAcceptedInstall';
-import { useFollowInstall, useReadOnReturn } from './update/useFollowedVersion';
+import { useFollowInstall, useReadOnReturn } from './update/useFollowInstall';
 import { useDesktopClientProjection, usePresentDesktopClient } from '../desktop/useDesktopClient';
 import { InstanceVersionChip } from '../desktop/InstanceVersionChip';
 
