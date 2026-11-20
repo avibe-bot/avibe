@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,7 @@ class FeishuHistoryCheck:
         self._lock = threading.Lock()
         self._event_at: Dict[str, float] = {}
         self._missing: Dict[str, str] = {}  # message id -> chat id
+        self._judged: Dict[str, float] = {}  # message id -> when it was matched or reported
         self._checked_until: Dict[str, int] = {}
         self._not_readable: set = set()
         self._started_at = int(time.time()) + 60  # the connection needs a moment to be there
@@ -75,14 +76,19 @@ class FeishuHistoryCheck:
             if end <= start:
                 continue
             try:
-                sent_by_people = await self._people_messages(chat_id, start, end)
+                read = await self._people_messages(chat_id, start, end)
             except Exception as exc:
                 logger.warning("Feishu history check: chat %s could not be read: %s", chat_id, exc)
                 continue
-            if sent_by_people is None:
+            if read is None:
                 continue
-            self._checked_until[chat_id] = end
+            sent_by_people, read_until = read
+            # Only as far as was really read: what a page limit left over is next time's.
+            self._checked_until[chat_id] = read_until
             for message_id in sent_by_people:
+                if message_id in self._judged:
+                    continue  # read again at the edge of two intervals
+                self._judged[message_id] = time.time()
                 self.counts.people_messages += 1
                 with self._lock:
                     arrived = message_id in self._event_at
@@ -101,11 +107,19 @@ class FeishuHistoryCheck:
         with self._lock:
             for message_id in [key for key, at in self._event_at.items() if at < forget_before]:
                 del self._event_at[message_id]
+        for message_id in [key for key, at in self._judged.items() if at < forget_before]:
+            del self._judged[message_id]
 
-    async def _people_messages(self, chat_id: str, start: int, end: int) -> Optional[List[str]]:
-        """Ids of the messages people sent in ``chat_id`` from ``start`` up to ``end``; ``None`` if it may not be read."""
+    async def _people_messages(self, chat_id: str, start: int, end: int) -> Optional[Tuple[List[str], int]]:
+        """Ids of the messages people sent in ``chat_id`` from ``start`` on, and the time read up to.
+
+        That time is ``end`` when the whole interval was read; when the page
+        limit cut the reading short, it is the time of the last message read.
+        ``None`` if the chat may not be read.
+        """
         found: List[str] = []
         page_token: Optional[str] = None
+        last_read = start
         for _ in range(_PAGE_LIMIT):
             reply = await self._list_messages(chat_id, start, end, page_token)
             if not reply.success():
@@ -124,7 +138,11 @@ class FeishuHistoryCheck:
                 sender = item.get("sender") or {}
                 if sender.get("sender_type") == "user" and item.get("message_id"):
                     found.append(item["message_id"])
+                try:
+                    last_read = max(last_read, int(item.get("create_time")) // 1000)
+                except (TypeError, ValueError):
+                    pass
             page_token = data.get("page_token")
             if not data.get("has_more") or not page_token:
-                break
-        return found
+                return found, end
+        return found, min(last_read, end)

@@ -648,6 +648,39 @@ async def test_a_chat_whose_history_may_not_be_read_is_left_out_and_said_once(
         assert caplog.text.count("chat oc_closed is not readable (code=230027") == 1
 
 
+async def test_history_longer_than_one_reading_is_continued_not_skipped(fake: FakeFeishu, clock: _Clock):
+    with running_adapter(fake, long_connection="own") as adapter:
+        bot = adapter.bot
+        bot._dm_chat_ids.add("oc_dm")
+        base = int(clock.now) + 60
+        # Five messages, two to a page; a reading stops after two pages.
+        fake.history = {"oc_dm": [(f"om_{number}", "user", base + 10 * number) for number in range(1, 6)]}
+
+        clock.now += 60 + 300
+        with patch("modules.im.feishu_history_check._PAGE_LIMIT", 2):
+            await bot._report_connections()
+            first = bot._history_check.counts.people_messages
+            await bot._report_connections()
+            await bot._report_connections()
+
+        assert first == 4
+        # All five were judged, each once, although the readings overlap at their edges.
+        assert bot._history_check.counts.people_messages == 5
+        assert bot._history_check.counts.missing == 5
+
+
+def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):
+    fake.history_delay = 20.0
+    with patch("modules.im.feishu._CONNECTION_REPORT_SECONDS", 0.2):
+        with running_adapter(fake, long_connection="own") as adapter:
+            adapter.bot._dm_chat_ids.add("oc_dm")
+            adapter.bot._history_check._started_at = 0  # a reading is due at once
+            fake.wait_until(lambda: fake.history_requests, what="a history reading under way")
+    # Leaving the block stopped the adapter and joined its thread within the harness's 10 s.
+
+    assert adapter.bot.verify_stopped()
+
+
 def test_no_history_is_read_while_the_sdk_s_client_is_the_only_one(fake: FakeFeishu):
     with running_adapter(fake) as adapter:
         fake.wait_acknowledged(fake.push_event(message_event()))

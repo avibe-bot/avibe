@@ -89,6 +89,7 @@ class FakeFeishu:
         self.close_codes: List[Optional[int]] = []
         self.history: Dict[str, List[Any]] = {}
         self.history_refused: set = set()
+        self.history_delay = 0.0
         self.history_requests: List[Dict[str, str]] = []
         # The configuration sent with each pong; ``None`` repeats the endpoint's.
         self.pong_config: Optional[Dict[str, Any]] = None
@@ -178,6 +179,8 @@ class FakeFeishu:
         """A chat's history: ``self.history[chat_id]`` is a list of (message id, sender type, seconds)."""
         query = request.query
         self.history_requests.append(dict(query))
+        if self.history_delay:
+            await asyncio.sleep(self.history_delay)
         chat_id = query["container_id"]
         if chat_id in self.history_refused:
             return web.json_response({"code": 230027, "msg": "Lack of necessary permissions"}, status=400)

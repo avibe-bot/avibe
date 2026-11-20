@@ -2964,6 +2964,16 @@ class FeishuBot(BaseIMClient):
             "Feishu event %s (%s) via the %s connection%s", event_id, event_type, source, ", again" if duplicate else ""
         )
 
+    async def _report_unless_stopped(self) -> None:
+        """Report, but not past a stop: the report reads from Feishu, and a stop must not wait for that."""
+        report = asyncio.ensure_future(self._report_connections())
+        stopped = asyncio.ensure_future(self._stop_event.wait())
+        await asyncio.wait({report, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        for task in (report, stopped):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(report, stopped, return_exceptions=True)
+
     async def _report_connections(self, check_history: bool = True) -> None:
         """Check the history of the direct chats against the events received, and log every count."""
         history = self._history_check
@@ -3059,7 +3069,7 @@ class FeishuBot(BaseIMClient):
                     await asyncio.wait_for(self._stop_event.wait(), _CONNECTION_REPORT_SECONDS)
                 except asyncio.TimeoutError:
                     if mode != _SDK:
-                        await self._report_connections()
+                        await self._report_unless_stopped()
             if mode != _SDK:
                 await self._report_connections(check_history=False)
 
