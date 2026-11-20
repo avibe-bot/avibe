@@ -525,6 +525,16 @@ fn shortcut_action(pet: &Pet, shortcut: &Shortcut, event: ShortcutState) -> Opti
 }
 
 pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
+    if crate::app_lock::is_locked(app) {
+        if event == ShortcutState::Pressed {
+            let shortcut = *shortcut;
+            crate::app_lock::defer(app, move |app| {
+                handle_shortcut(app, &shortcut, ShortcutState::Pressed);
+                handle_shortcut(app, &shortcut, ShortcutState::Released);
+            });
+        }
+        return;
+    }
     if !crate::instance_client::local_selected(app) {
         return;
     }

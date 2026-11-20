@@ -1,0 +1,329 @@
+//! Compiled solely by the explicit app-lock-e2e feature (forbidden in release).
+//! Uses the production native owner, presentation and completion handlers. Only
+//! time, foreground state and LA are deterministic. Browser tests communicate
+//! over stdio; nothing is listening on a socket or exposed to a shipped page.
+use super::*;
+use serde_json::{json, Value};
+use std::io::{BufRead, Write};
+
+struct Peer {
+    time: f64,
+    active: bool,
+    availability: Availability,
+    outcome: Option<Outcome>,
+    pending: Option<(u64, Authentication)>,
+    calls: usize,
+    executed: Vec<String>,
+    native_windows: Vec<Retained<NSWindow>>,
+}
+thread_local! { static PEER: RefCell<Option<Peer>> = const { RefCell::new(None) }; }
+pub(super) fn time() -> Option<f64> {
+    PEER.with_borrow(|p| p.as_ref().map(|p| p.time))
+}
+pub(super) fn active() -> Option<bool> {
+    PEER.with_borrow(|p| p.as_ref().map(|p| p.active))
+}
+pub(super) fn availability() -> Option<Availability> {
+    PEER.with_borrow(|p| p.as_ref().map(|p| p.availability))
+}
+pub(super) fn authenticate(_app: &AppHandle, epoch: u64, purpose: Authentication, _reply: &Option<Reply>) -> bool {
+    PEER.with_borrow_mut(|p| {
+        if let Some(p) = p {
+            p.calls += 1;
+            p.pending = Some((epoch, purpose));
+            true
+        } else {
+            false
+        }
+    })
+}
+pub(super) fn finish_if_ready(app: &AppHandle) {
+    let finish = PEER.with_borrow_mut(|p| {
+        let p = p.as_mut()?;
+        p.outcome
+            .and_then(|outcome| p.pending.take().map(|(epoch, purpose)| (epoch, purpose, outcome)))
+    });
+    if let Some((epoch, purpose, outcome)) = finish {
+        complete(app, epoch, purpose, outcome);
+    }
+}
+fn output(id: Value, result: Result<Value, String>) {
+    let response = match result {
+        Ok(value) => json!({"id":id,"value":value}),
+        Err(error) => json!({"id":id,"error":error}),
+    };
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{response}").expect("peer stdout");
+    stdout.flush().expect("peer flush");
+}
+fn native_window(app: &AppHandle, label: Option<&str>) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let window = if let Some(label) = label {
+        let window = tauri::WindowBuilder::new(app, label)
+            .title("App Lock fixture")
+            .visible(false)
+            .build()
+            .unwrap();
+        unsafe { Retained::retain(window.ns_window().unwrap().cast::<NSWindow>()) }.unwrap()
+    } else {
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                mtm.alloc(),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(500.0, 400.0)),
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe {
+            window.setReleasedWhenClosed(false);
+        }
+        PEER.with_borrow_mut(|p| p.as_mut().unwrap().native_windows.push(window.clone()));
+        window
+    };
+    let content = window.contentView().unwrap();
+    let private = NSTextField::labelWithString(&NSString::from_str("PRIVATE FIXTURE CONTENT"), mtm);
+    private.setFrame(content.bounds());
+    content.addSubview(&private);
+    sync_windows(app);
+}
+fn snapshot(app: &AppHandle) -> Value {
+    let state = status(app);
+    let (locked, verifying) = {
+        let owner = machine(app);
+        let state = owner.machine.lock().unwrap();
+        (state.locked, state.authenticating.is_some())
+    };
+    let (calls, executed) = PEER.with_borrow(|p| {
+        let p = p.as_ref().unwrap();
+        (p.calls, p.executed.clone())
+    });
+    let windows = PRESENTATION.with_borrow(|p| p.covers.iter().filter_map(|cover| {
+        let window = cover.window.load()?;
+        Some(json!({"covered": unsafe { cover.view.superview() }.is_some(),
+            "hidden":cover.hidden.iter().filter_map(Weak::load).all(|view| view.isHidden()),
+            "contentCount":cover.hidden.len(), "compact":cover.view.ivars().compact.get(),
+            "firstResponderIsCover":window.firstResponder().is_some_and(|r| std::ptr::eq(&*r, &*cover.view as &NSResponder)),
+            "button":cover.view.ivars().button.title().to_string(),
+            "pendingLabel":cover.view.ivars().pending.stringValue().to_string()}))
+    }).collect::<Vec<_>>());
+    json!({"status":state,"locked":locked,"verifying":verifying,"authCalls":calls,"executed":executed,"windows":windows,
+        "pending":machine(app).pending.lock().unwrap().is_some()})
+}
+fn handle(app: &AppHandle, request: Value) {
+    let id = request["id"].clone();
+    let op = request["op"].as_str().unwrap_or_default();
+    let result: Result<Value, String> = (|| {
+        match op {
+            "status" => {
+                refresh(app);
+                sync_windows(app);
+                Ok(serde_json::to_value(status(app)).unwrap())
+            }
+            "snapshot" => Ok(snapshot(app)),
+            "setPolicy" => {
+                let policy: Policy = serde_json::from_value(request["policy"].clone()).map_err(|e| e.to_string())?;
+                let (send, receive) = tokio::sync::oneshot::channel();
+                change_policy(app, policy, send);
+                let id = id.clone();
+                tauri::async_runtime::spawn(async move {
+                    output(id, receive.await.map_err(|e| e.to_string()));
+                });
+                return Ok(Value::Null);
+            }
+            "reset" => {
+                // Restore any preceding test's covers before replacing its machine.
+                {
+                    machine(app).machine.lock().unwrap().locked = false;
+                    machine(app).machine.lock().unwrap().policy = Policy::Off;
+                }
+                sync_windows(app);
+                let policy = serde_json::from_value(request.get("policy").cloned().unwrap_or(json!("off")))
+                    .map_err(|e| e.to_string())?;
+                let available = request
+                    .get("availability")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or(Availability {
+                        available: true,
+                        biometry: Biometry::TouchId,
+                        biometry_state: BiometryState::Usable,
+                    });
+                PEER.with_borrow_mut(|p| {
+                    let p = p.as_mut().unwrap();
+                    p.time = 0.0;
+                    p.active = true;
+                    p.availability = available;
+                    p.outcome = Some(Outcome::Success);
+                    p.pending = None;
+                    p.calls = 0;
+                    p.executed.clear();
+                });
+                *machine(app).machine.lock().unwrap() = Machine::new(policy, available);
+                *machine(app).pending.lock().unwrap() = None;
+                sync_windows(app);
+                Ok(snapshot(app))
+            }
+            "availability" => {
+                let available = serde_json::from_value(request["value"].clone()).map_err(|e| e.to_string())?;
+                PEER.with_borrow_mut(|p| p.as_mut().unwrap().availability = available);
+                event(app, Event::Arrive);
+                Ok(snapshot(app))
+            }
+            "outcome" => {
+                let outcome = request
+                    .get("value")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| e.to_string())?;
+                PEER.with_borrow_mut(|p| p.as_mut().unwrap().outcome = outcome);
+                finish_if_ready(app);
+                Ok(snapshot(app))
+            }
+            "leave" | "arrive" | "tick" | "sleep" | "wake" => {
+                let time = request["time"].as_f64().ok_or("time required")?;
+                PEER.with_borrow_mut(|p| {
+                    let p = p.as_mut().unwrap();
+                    p.time = time;
+                    if op == "leave" {
+                        p.active = false;
+                    }
+                    if op == "arrive" {
+                        p.active = true;
+                    }
+                });
+                match op {
+                    "leave" => event(app, Event::Leave),
+                    "arrive" => event(app, Event::Arrive),
+                    "sleep" => event(app, Event::SystemLeave(1)),
+                    "wake" => event(app, Event::SystemReturn(1)),
+                    _ => {
+                        machine(app).machine.lock().unwrap().tick(time);
+                        sync_windows(app);
+                    }
+                }
+                Ok(snapshot(app))
+            }
+            "unlock" => {
+                let button = PRESENTATION
+                    .with_borrow(|p| p.covers.first().map(|c| c.view.ivars().button.clone()))
+                    .ok_or("no native lock button")?;
+                // Use the real native target/action installed on the lock view.
+                unsafe {
+                    button.performClick(None);
+                }
+                Ok(snapshot(app))
+            }
+            "entry" => {
+                let value = request["value"].as_str().ok_or("entry required")?.to_owned();
+                let deferred = value.clone();
+                if !queue_if_locked(app, move |_| {
+                    PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(deferred))
+                }) {
+                    PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(value));
+                }
+                sync_windows(app);
+                Ok(snapshot(app))
+            }
+            "newWindow" => {
+                native_window(app, None);
+                Ok(snapshot(app))
+            }
+            "newContent" => {
+                let window = app.get_window(crate::MAIN_WINDOW).unwrap();
+                let window = unsafe { &*window.ns_window().unwrap().cast::<NSWindow>() };
+                let label = NSTextField::labelWithString(
+                    &NSString::from_str("LATE PRIVATE CONTENT"),
+                    MainThreadMarker::new().unwrap(),
+                );
+                window.contentView().unwrap().addSubview(&label);
+                Ok(snapshot(app))
+            }
+            "decode" => {
+                // Every payload comes directly from APP_LOCK_FIXTURES in the
+                // shared TypeScript contract, serialized by the browser test.
+                let payload = &request["value"];
+                let status: Status = serde_json::from_value(payload.get("status").unwrap_or(payload).clone())
+                    .map_err(|e| e.to_string())?;
+                Ok(serde_json::to_value(status).unwrap())
+            }
+            "quit" => {
+                app.exit(0);
+                Ok(json!(true))
+            }
+            _ => Err(format!("unknown fixture operation: {op}")),
+        }
+    })();
+    if op != "setPolicy" || result.is_err() {
+        output(id, result);
+    }
+}
+pub(crate) fn run() {
+    let directory = tempfile::tempdir().expect("isolated App Lock store");
+    let path = directory.path().join("app-lock.json");
+    let available = Availability {
+        available: true,
+        biometry: Biometry::TouchId,
+        biometry_state: BiometryState::Usable,
+    };
+    PEER.with_borrow_mut(|p| {
+        *p = Some(Peer {
+            time: 0.0,
+            active: true,
+            availability: available,
+            outcome: Some(Outcome::Success),
+            pending: None,
+            calls: 0,
+            executed: Vec::new(),
+            native_windows: Vec::new(),
+        })
+    });
+    let app = tauri::Builder::default()
+        .setup(move |app| {
+            app.manage(Owner {
+                machine: Mutex::new(Machine::new(Policy::Off, available)),
+                pending: Mutex::new(None),
+                path: path.clone(),
+            });
+            PRESENTATION.with_borrow_mut(|p| p.app = Some(app.handle().clone()));
+            install_window_hooks();
+            for label in [
+                crate::MAIN_WINDOW,
+                "show-fixture",
+                crate::pet::PET_WINDOW,
+                crate::update_popover::UPDATE_POPOVER,
+            ] {
+                native_window(app.handle(), Some(label));
+            }
+            native_window(app.handle(), None);
+            Ok(())
+        })
+        .build(crate::desktop_context())
+        .expect("isolated native peer");
+    let handle = app.handle().clone();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            match serde_json::from_str::<Value>(&line) {
+                Ok(request) => {
+                    let app = handle.clone();
+                    if handle.run_on_main_thread(move || self::handle(&app, request)).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => output(Value::Null, Err(error.to_string())),
+            }
+        }
+        handle.exit(0);
+    });
+    app.run(|_, event| {
+        if matches!(event, tauri::RunEvent::Ready) {
+            output(json!(0), Ok(json!({"ready":true})));
+        }
+    });
+    drop(directory);
+}

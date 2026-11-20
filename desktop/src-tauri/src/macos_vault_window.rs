@@ -949,7 +949,12 @@ fn web_view_changed() {
         return;
     };
     for (key, webview) in openers {
-        if webview.is_none_or(|webview| in_place(&webview).is_none()) {
+        if webview.is_none_or(|webview| {
+            in_place(&webview).is_none()
+                && !(crate::app_lock::protects_view(&webview)
+                    && in_home_window(&webview).is_some()
+                    && !covered_by_a_web_view(&webview))
+        }) {
             close_children_of(key, Destroy::Now);
         }
     }
@@ -1150,6 +1155,15 @@ impl SandboxWindow {
     /// either: a click aimed at the card must not land on something else. The
     /// title bar keeps working, so the window can be moved or closed.
     fn admits(&self, event: &NSEvent) -> bool {
+        // App Lock replaces the content responder with its native unlock UI.
+        // The superclass routes only to that cover while the page is hidden.
+        if self.contentView().is_some_and(|view| {
+            view.subviews()
+                .iter()
+                .any(|child| crate::app_lock::protects_view(&child))
+        }) {
+            return true;
+        }
         let kind = event.r#type();
         if !is_input(kind) || self.is_live_for(event) {
             return true;

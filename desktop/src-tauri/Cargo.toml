@@ -18,6 +18,8 @@ bundled-runtime = []
 # Test-only builds may redirect Computer Use state and assets to a hermetic lane.
 # Release packaging never enables this feature.
 computer-use-test-overrides = []
+# Hermetic App Lock peer used by desktop-client tests; forbidden in release builds.
+app-lock-e2e = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -90,6 +92,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError", "LABiometryType"] }
 objc2-authentication-services = { version = "0.3.2", default-features = false, features = ["std", "ASFoundation", "ASPublicKeyCredential", "ASAuthorization", "ASAuthorizationController", "ASAuthorizationCredential", "ASAuthorizationProvider", "ASAuthorizationRequest", "ASAuthorizationPublicKeyCredentialAssertion", "ASAuthorizationPublicKeyCredentialAssertionRequest", "ASAuthorizationPublicKeyCredentialConstants", "ASAuthorizationPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialAssertion", "ASAuthorizationPlatformPublicKeyCredentialAssertionRequest", "ASAuthorizationPlatformPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialProvider"] }
 keyring = { version = "3.6", features = ["apple-native"] }
 block2 = "0.6.2"
@@ -109,6 +112,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSError",
   "NSGeometry",
   "NSNotification",
+  "NSDistributedNotificationCenter",
   "NSOperation",
   "NSProcessInfo",
   "NSString",
@@ -142,6 +146,11 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSTitlebarAccessoryViewController",
   "NSToolbar",
   "NSViewController",
+  "NSAlert",
+  "NSWorkspace",
+  "NSButtonCell",
+  "NSText",
+  "NSCell",
   "NSEvent",
   "NSGraphics",
   "NSPasteboard",
@@ -191,3 +200,8 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 # Reads the running app's own signed entitlements for the Vault passkey marker.
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecTask"] }
+
+[[example]]
+name = "app-lock-peer"
+path = "examples/app-lock-peer.rs"
+required-features = ["app-lock-e2e"]
