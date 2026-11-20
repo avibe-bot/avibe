@@ -96,8 +96,10 @@ foreground can present system health authorization; the Mac cannot do it.
 
 Additional rules:
 
-- Connect only to your own, unshared instance. Sync automatically pauses when
-  the instance becomes shared.
+- Any instance kind (personal or organization) and any sharing state may
+  connect. The instance owner pairs their own iPhone. Anyone who can reach the
+  instance, and therefore its Agents, can read synced data; the owner controls
+  that through the instance's access settings (Max, November 20, 09:01).
 - An iPhone syncs to only one instance at a time.
 - Option C constrains the request source, not the agent roster. Delegation,
   bots, turns with multiple initiators, and Task/Watch execution must preserve
@@ -178,7 +180,7 @@ Unchanged:
 
 - Read only.
 - Web pages cannot obtain health data.
-- Own, unshared instance only.
+- The instance owner's own iPhone, on any instance kind or sharing state.
 - No `mobile.invoke` or raw second-level samples.
 - Empty does not mean zero.
 - Access records contain no values.
@@ -214,7 +216,7 @@ all residual risks, or remove option C. Future sharing or IM changes require
 another assessment.
 
 **Current implementation status:** CLI caller/session environment values are
-audit labels. The CLI checks live personal-owner/unshared instance eligibility;
+audit labels. The CLI checks the live instance owner (any kind or sharing state);
 it does not yet enforce trusted original-owner provenance across delegation.
 That gap remains explicit. The bounded file-service repair does not require a
 cross-repository filesystem rewrite or whole-platform isolation project.
@@ -309,7 +311,6 @@ Authentication:
 - Every request checks:
   - Device has not been revoked.
   - Pairing user is still the instance owner.
-  - Instance is unshared.
 
 | Method and path | Request → response | Notes |
 | --- | --- | --- |
@@ -554,7 +555,7 @@ Sleep calculation:
   - Expired leases can be reclaimed without duplicate execution.
   - Late results after cancellation.
   - Revoke and cleanup.
-  - Pause after instance sharing.
+  - Sharing does not pause sync; a live owner change revokes and purges.
   - No values in logs or `vibe data query`.
   - Only one continuation owner across waiting and callbacks.
 - **Negative tests:** instance pages (including Show) receive `unsupported`
@@ -649,10 +650,23 @@ or freeform text.
 `pair` response `instance.id` is the instance ID from the Cloud instance catalog.
 The instance obtains it from `V2Config.remote_access.vibe_cloud.instance_id`,
 checks it against the live Permissions projection's `instance.id`, then returns
-that exact ID. No locally generated fallback ID is used. Missing catalog ID or
-incomplete runtime credentials rejects pairing with HTTP 403
-`instance_not_eligible`; unregistered and non-personal instances are also
-ineligible and the phone stops synchronization. A temporarily unavailable live eligibility answer
-returns HTTP 503 `instance_eligibility_unavailable` and `Retry-After: 30`.
+that exact ID. No locally generated fallback ID is used. Missing catalog ID, incomplete runtime credentials, a non-live or owner-less
+answer, or a mismatched instance ID returns HTTP 503
+`instance_eligibility_unavailable` with `Retry-After: 30`; the phone pauses and
+no data is purged. Only a live, confirmed owner change (HTTP 403
+`instance_not_eligible`), an explicit unpair or a user revoke revokes the
+device and purges its data. Instance kind and sharing are not checked.
 The pairing target comes only from the trusted instance currently selected in
 the iOS app; the webpage cannot supply a target.
+
+## Decision update (Max, November 20, 2026, 09:01)
+
+"组织实例接健康数据 不需要限制实例权限，权限用户自己限制": personal and
+organization instances, shared or not, let the instance owner pair their own
+iPhone and sync. Who may reach the instance (and its Agents, and therefore the
+synced data) is controlled by the owner through the instance's access settings.
+This supersedes the November 19 direction that organization instances must prove
+owner-only visibility or same-machine isolation. That design (owner attestation,
+Turn capability, private session scope), the isolation gap inventory and the
+isolation probe remain as history and are not release prerequisites. The
+November 18 rule that every Agent in the instance may read is unchanged.

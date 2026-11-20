@@ -1357,7 +1357,7 @@ scenarios:
       device checks after the backend exchange is deployed.
     owning_layer: iOS XCTest plus physical-device acceptance
   - id: AUTH-SETUP-186
-    name: A personal unshared instance pairs a fake health device with route-scoped credentials and local-only reads
+    name: A personal or shared organization instance owner pairs a fake health device with route-scoped credentials and local-only reads
     status: covered
     kind: authorization
     layer: scenario

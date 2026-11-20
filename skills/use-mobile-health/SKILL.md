@@ -6,8 +6,10 @@ requires: mobile-device
 
 # Mobile health
 
-Use the local CLI. Every Agent in the user's unshared instance may read. Reading
-puts values into the current model context and conversation. Read only the
+Use the local CLI. Every Agent in this instance may read. Anyone who can reach
+this instance and its Agents can see synced data; the owner controls that
+through the instance's access settings. Reading puts values into the current
+model context and conversation. Read only the
 metrics and dates relevant to the user's question.
 
 ```bash
@@ -40,8 +42,8 @@ run `read` to obtain the data.
 
 Use `revoke` when the user asks to stop synchronization: it revokes devices and
 deletes instance health data. Do not export values to Show Pages, memory, logs,
-or another service. Device access requires the instance to remain personal and
-unshared; health data rolls off after 30 days.
+or another service. Sync stays bound to the instance owner; health data rolls
+off after 30 days.
 
 中文：用本机命令按需读指标和日期，并说明数据时间。未连接时发起连接，请用户在
 iPhone 授权；空数据不代表零或拒绝。刷新超时使用已有数据，不声称刷新成功。

@@ -13,39 +13,38 @@ logger = logging.getLogger(__name__)
 
 
 def current_identity(store: MobileStore) -> dict:
-    """Use a live control-plane answer; a cached allowlist cannot prove privacy."""
+    """The instance owner, from a live control-plane answer.
+
+    Any instance kind and any sharing state qualifies: who may reach this
+    instance, and therefore its Agents and synced health data, is the owner's
+    own access setting. Health only binds the phone to the current owner.
+    An answer that cannot confirm the owner pauses this call; only a live,
+    confirmed owner change revokes and purges (explicit revoke/unpair aside).
+    """
     from config.v2_config import V2Config
     from vibe import permissions
 
+    unavailable = MobileError("instance_eligibility_unavailable", 503)
     try:
         config = V2Config.load()
         cloud = config.remote_access.vibe_cloud
         if cloud.runtime_credentials() is None:
-            store.revoke(caller="instance-policy")
-            raise MobileError("instance_not_eligible", 403)
+            raise unavailable
         result = permissions.get_current_permissions(config)
     except permissions.PermissionsError:
-        raise MobileError("instance_eligibility_unavailable", 503) from None
+        raise unavailable from None
     except (FileNotFoundError, OSError, ValueError):
-        raise MobileError("instance_eligibility_unavailable", 503) from None
+        raise unavailable from None
     if result.source != "live":
-        raise MobileError("instance_eligibility_unavailable", 503)
+        raise unavailable
     instance = result.projection["instance"]
-    owner = result.projection["access"]["owner"]["email"]
-    if (
-        cloud.instance_kind != "personal"
-        or instance.get("organization") is not None
-        or instance["access_mode"] != "allowlist"
-        or result.projection["access"]["entries"]
-        or not owner or instance["id"] != cloud.instance_id
-    ):
-        store.revoke(caller="instance-policy")
-        raise MobileError("instance_not_eligible", 403)
-    identity = {"id": instance["id"], "name": instance.get("name") or instance["id"],
-                "owner": owner.strip().casefold()}
+    owner = (result.projection["access"]["owner"].get("email") or "").strip().casefold()
+    if not owner or not cloud.instance_id or instance["id"] != cloud.instance_id:
+        raise unavailable
+    identity = {"id": instance["id"], "name": instance.get("name") or instance["id"], "owner": owner}
     device = store.active_device()
     if device and (device["instance_id"], device["owner"]) != (identity["id"], identity["owner"]):
-        store.revoke(caller="instance-policy")
+        store.revoke(caller="instance-policy")  # Live, confirmed: this is no longer the paired owner's instance.
     return identity
 
 

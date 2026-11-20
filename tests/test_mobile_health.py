@@ -466,11 +466,95 @@ def test_device_http_auth_scope_owner_pairing_and_no_cookie_health_read(store, m
     assert "987654321" not in caplog.text
     assert client.put("/api/mobile/device/v1/health/days", content=" " * (256 * 1024 + 1),
                       headers={**auth, "Content-Type": "application/json"}).status_code == 413
-    projection["access"]["entries"] = [{"kind": "email", "value": "other@example.test", "role": "viewer"}]
+    projection["access"]["owner"]["email"] = "next-owner@example.test"
     denied = client.put("/api/mobile/device/v1/health/days", json=upload, headers=auth)
-    assert denied.status_code == 403 and denied.get_json()["code"] == "instance_not_eligible"
+    # A live owner change revokes the previous owner's device before it authenticates.
+    assert denied.status_code == 403 and denied.get_json()["code"] == "device_revoked"
     with store.transaction() as conn:
         assert conn.execute("SELECT count(*) FROM health_days").fetchone()[0] == 0
+
+
+def _health_days(store) -> int:
+    with store.transaction() as conn:
+        return conn.execute("SELECT count(*) FROM health_days").fetchone()[0]
+
+
+def _set_instance_kind(kind: str) -> None:
+    from config.v2_config import V2Config
+
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.instance_kind = kind
+    config.save()
+
+
+ORG = {"id": "org_synthetic", "name": "Synthetic organization"}
+SHARED = [
+    {"kind": "email", "value": "colleague@example.test", "role": "member"},
+    {"kind": "organization_group", "value": "grp_synthetic", "role": "viewer"},
+]
+
+
+@pytest.mark.parametrize("kind, organization, access_mode, entries", [
+    ("personal", None, "allowlist", []),
+    ("personal", None, "allowlist", SHARED),
+    ("personal", None, "public", []),
+    ("organization", ORG, "allowlist", []),
+    ("organization", ORG, "allowlist", SHARED),
+    ("organization", ORG, "public", SHARED),
+], ids=["personal", "personal-shared", "personal-public", "org", "org-shared", "org-public"])
+def test_owner_syncs_on_any_instance_kind_or_sharing(store, mobile_http, kind, organization, access_mode, entries):
+    """Max 2026-11-20: who may reach the instance (and its Agents) is the owner's own access setting."""
+    client, projection = mobile_http
+    _set_instance_kind(kind)
+    projection["instance"].update({"organization": organization, "access_mode": access_mode})
+    projection["access"]["entries"] = entries
+    request, _ = store.create_request("health.connect", IDENTITY, names=["steps", "sleep"])
+    code = client.post("/api/mobile/pairings", json={"request_id": request["id"]}, headers=csrf_headers(client))
+    assert code.status_code == 200, code.text
+    pair = client.post("/api/mobile/device/v1/pair", json={
+        "pairing_code": code.get_json()["pairing_code"], "device_name": "假设备",
+        "platform": "ios", "app_version": "1", "metrics": ["steps", "sleep"],
+    })
+    assert pair.status_code == 200, pair.text
+    auth = {"Authorization": f"Bearer {pair.get_json()['credential']}"}
+    uploaded = client.put("/api/mobile/device/v1/health/days", json=upload_payload(), headers=auth)
+    assert uploaded.status_code == 200, uploaded.text
+    assert mobile_health.current_identity(store)["owner"] == "owner@example.test"
+    assert _health_days(store) > 0 and store.status()["connected"]
+
+
+@pytest.mark.parametrize("failure", [
+    "cached-projection", "permissions-unavailable", "missing-credentials", "no-owner", "other-instance",
+])
+def test_unconfirmed_eligibility_pauses_without_revoking_or_purging(store, mobile_http, monkeypatch, failure):
+    """Only a live, confirmed owner change (or an explicit revoke/unpair) may purge."""
+    client, projection = mobile_http
+    paired, _ = pair_device(store)
+    auth = {"Authorization": f"Bearer {paired['credential']}"}
+    assert client.put("/api/mobile/device/v1/health/days", json=upload_payload(), headers=auth).status_code == 200
+    before = _health_days(store)
+    if failure == "cached-projection":
+        monkeypatch.setattr(permissions, "get_current_permissions", lambda *_a: SimpleNamespace(source="cache"))
+    elif failure == "permissions-unavailable":
+        def unavailable(*_a):
+            raise permissions.PermissionsError("synthetic 403 without an owner answer")
+        monkeypatch.setattr(permissions, "get_current_permissions", unavailable)
+    elif failure == "missing-credentials":
+        from config.v2_config import V2Config
+        config = V2Config.load()
+        config.remote_access.vibe_cloud.instance_secret = ""
+        config.save()
+    elif failure == "no-owner":
+        projection["access"]["owner"]["email"] = None
+    else:
+        projection["instance"]["id"] = "inst_other"
+    response = client.put("/api/mobile/device/v1/health/days", json=upload_payload(seq=2), headers=auth)
+    assert response.status_code == 503, response.text
+    assert response.get_json()["code"] == "instance_eligibility_unavailable"
+    with pytest.raises(MobileError, match="instance_eligibility_unavailable"):
+        mobile_health.current_identity(store)
+    assert mobile_health.maintenance_pass(SimpleNamespace(), check_eligibility=True) is False
+    assert store.status()["connected"] and _health_days(store) == before
 
 
 def test_live_permissions_unavailability_pauses_and_device_signout_revokes(store, mobile_http, monkeypatch):
