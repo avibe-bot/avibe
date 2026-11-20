@@ -2128,6 +2128,9 @@ final class DirectPathAppTests: XCTestCase {
         } catch where first.page?.webContentProcessTerminated == true {
             print("[iOS fixture] stage=scenario run again, its page's process ended: \(error)")
         }
+        // A page whose first load failed was never handed to the scenario,
+        // which closes the ones it gets. Closing twice is harmless.
+        first.page?.close()
         try await sameOriginReturnScenario(recording: RuntimePageRecord())
     }
 
@@ -7400,14 +7403,15 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
     }
 }
 
-/// One runtime controller in a window, and its primary WebView.
-@MainActor
 /// The page a scenario showed, kept so its caller can ask afterwards
 /// whether WebKit ended that page's process.
+@MainActor
 private final class RuntimePageRecord {
     var page: RuntimePage?
 }
 
+/// One runtime controller in a window, and its primary WebView.
+@MainActor
 private final class RuntimePage {
     /// Records each transport change dispatched in it, with no use of the
     /// bridge, so it works in any document.
