@@ -729,6 +729,11 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(session.activations, 1, "the same session: no second start")
         XCTAssertTrue(session.active)
         XCTAssertEqual(recorder.report, "rec[engine vp=1 recorder=0 prep=1 \(reading)]")
+        // An input the engine lost and could not take up again is passed on.
+        var lost = 0
+        recorder.onInputLost = { lost += 1 }
+        second.onInputLost?()
+        XCTAssertEqual(lost, 1)
         recorder.stop()
         XCTAssertFalse(second.begun)
         XCTAssertFalse(session.active)
@@ -1342,6 +1347,31 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertFalse(Client.loadsAgain(attempt: 0, closed: false, active: false, heldBefore: true, heldAfter: true))
         XCTAssertFalse(Client.loadsAgain(attempt: 0, closed: true, active: true, heldBefore: true, heldAfter: true))
         XCTAssertFalse(Client.loadsAgain(attempt: 0, closed: false, active: true, heldBefore: false, heldAfter: false))
+    }
+
+    /// Lines noted while a message was on its way stay for the next one,
+    /// even when they pushed out lines that message carried.
+    func testOnlyTheLinesAMessageCarriedAreDropped() {
+        var lines = ["a", "b", "c", "d", "e"]
+        let carried = lines
+        lines = VoiceCaptureEarlier.adding("f", to: lines)
+        lines = VoiceCaptureEarlier.adding("g", to: lines)
+        XCTAssertEqual(lines, ["c", "d", "e", "f", "g"])
+        XCTAssertEqual(VoiceCaptureEarlier.removing(carried, from: lines), ["f", "g"])
+        // The same line twice is two lines.
+        XCTAssertEqual(VoiceCaptureEarlier.removing(["x"], from: ["x", "x", "y"]), ["x", "y"])
+    }
+
+    /// The second recorder losing its input sends the take as far as it got.
+    func testATakeThatLostItsInputIsSentAsFarAsItGot() async throws {
+        let world = World()
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        world.audio?.onInputLost?()
+        for _ in 0..<400 where world.instance.sent.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertTrue((world.instance.timings.first ?? nil)?.contains(":input") == true)
     }
 
     func testOnlyTheLastFewLinesAreKeptEachCutShort() {
@@ -1991,7 +2021,7 @@ private final class World {
             },
             noteEarlier: { self.earlier = VoiceCaptureEarlier.adding($0, to: self.earlier) },
             earlier: { self.earlier },
-            dropEarlier: { self.earlier = Array(self.earlier.dropFirst($0)) },
+            dropEarlier: { self.earlier = VoiceCaptureEarlier.removing($0, from: self.earlier) },
             now: { self.now() },
             sleep: { duration in
                 self.slept.append(duration)
@@ -2121,6 +2151,7 @@ private final class FakeAudio: VoiceCaptureAudio {
     var prepareErrors: [VoiceCaptureSessionCandidate: Error] = [:]
     var startErrors: [VoiceCaptureSessionCandidate: Error] = [:]
     var prepared: VoiceCaptureSessionCandidate?
+    var onInputLost: (() -> Void)?
     var log: (String) -> Void = { _ in }
     /// What each candidate's recorder reports (`rec[...]`).
     var reports: [VoiceCaptureSessionCandidate: String] = [:]
@@ -2220,6 +2251,7 @@ private final class FakePreparableEngine: VoiceCaptureRecordingEngine, VoiceCapt
 
 private final class FakeStartingEngine: VoiceCaptureStartingEngine {
     var detail = "vp=1"
+    var onInputLost: (() -> Void)?
     var failure: Error?
     var begun = false
     var currentTime: TimeInterval { begun ? 1 : 0 }

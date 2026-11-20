@@ -45,6 +45,10 @@ protocol VoiceCaptureAudio: AnyObject {
     /// Which recorder took the take, or what the session said when none
     /// would (`rec[...]`), for `capture_attempt`.
     var report: String? { get }
+    /// Called when the take lost its input and could not go on recording
+    /// (the second recorder, after the input changed under it): the take
+    /// is then sent as far as it got.
+    var onInputLost: (() -> Void)? { get set }
 }
 
 extension VoiceCaptureRecorder: VoiceCaptureAudio {}
@@ -159,10 +163,12 @@ struct VoiceCaptureEnvironment {
     var holdWhileRetrying: () -> () -> Void
     /// Presses that left no message, kept on the phone for the next
     /// message's `capture_earlier`: what happened to each, with no audio
-    /// and no words. Add one, read them, drop the first `n` once sent.
+    /// and no words. Add one, read them, and drop the ones a message that
+    /// arrived carried (those lines, not a count: others may have been
+    /// added, and old ones pushed out, while it was on its way).
     var noteEarlier: (String) -> Void
     var earlier: () -> [String]
-    var dropEarlier: (Int) -> Void
+    var dropEarlier: ([String]) -> Void
     var now: () -> Date
     var sleep: (Duration) async -> Void
 
@@ -265,8 +271,18 @@ enum VoiceCaptureEarlier {
         UserDefaults.standard.set(adding(line, to: lines), forKey: key)
     }
 
-    static func drop(_ count: Int) {
-        UserDefaults.standard.set(Array(lines.dropFirst(count)), forKey: key)
+    /// `lines` without the ones in `sent` (each once).
+    static func removing(_ sent: [String], from lines: [String]) -> [String] {
+        var left = sent
+        return lines.filter { line in
+            guard let index = left.firstIndex(of: line) else { return true }
+            left.remove(at: index)
+            return false
+        }
+    }
+
+    static func drop(_ sent: [String]) {
+        UserDefaults.standard.set(removing(sent, from: lines), forKey: key)
     }
 }
 
@@ -697,7 +713,7 @@ final class VoiceCaptureController {
         stopObservingInterruptions()
         stopRetrying()
         // What an account's presses left is not another account's.
-        environment.dropEarlier(.max)
+        environment.dropEarlier(environment.earlier())
         let take: Take?
         switch state {
         case .listening(let current), .sending(let current), .failed(let current):
@@ -861,6 +877,13 @@ final class VoiceCaptureController {
             )
             await activity.end(failed, dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal)))
             return .stopped
+        }
+        audio.onInputLost = { [weak self] in
+            Task { @MainActor in
+                guard let self, case .listening(let take) = self.state, take.id == id else { return }
+                self.record("the input was lost")
+                await self.finish(send: true, cause: "input")
+            }
         }
         environment.captureStarted(inFront)
         let capture = "\(number) [\(pressContext)]" + (backgroundAttempt.map {
@@ -1132,7 +1155,7 @@ final class VoiceCaptureController {
                 earlier: earlier.isEmpty ? nil : earlier.joined(separator: " | ")
             )
             // They went with a message that arrived.
-            environment.dropEarlier(earlier.count)
+            environment.dropEarlier(earlier)
             guard generation == sendGeneration else { return .superseded }
             return .sent(text)
         } catch let failure as VoiceCaptureInstanceClient.Failure {

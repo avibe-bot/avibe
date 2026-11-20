@@ -423,7 +423,7 @@ the main Bot acts on the user's computer.
   `metadata.capture_timing` gives each step's milliseconds from the press (its reservation, after the leftover check):
   `island=`, `session=`, `record=`, `audio=` (the recorder's first audio, or `none` if it stopped without), and
   for a press that came forward `refused=`, `front=`, `frontIsland=`,
-  `frontSession=`, `frontRecord=`; then `stop=<ms>:<press|island|interrupted|max>`,
+  `frontSession=`, `frontRecord=`; then `stop=<ms>:<press|island|interrupted|max|input>`,
   `tries=` (sends after it was kept), and what the audio session reported
   from the try's session on (at most eight): `intBegan=<ms>:r<reason>`,
   `intEnded=<ms>[:resume]`, `route<reason>=<ms>:<input port>`.
@@ -439,7 +439,10 @@ the main Bot acts on the user's computer.
   writing the same AAC file. It asks for voice processing first (`vp=1`;
   `vp=0(<code>)` when that would not start and the plain input records);
   whether that keeps another App's audio out of the take is only known on a
-  device. If the engine fails too, `engine=<code>` names the system's
+  device. When the input changes under it
+  (`AVAudioEngineConfigurationChange`) it takes the new input up into the
+  same file, or, if it cannot, the take is sent as far as it got
+  (`stop=…:input`). If the engine fails too, `engine=<code>` names the system's
   reason, and the press goes on in front as before; the refused try's
   `rec[...]` is kept with it.
 - A press that left no message leaves one line on the phone (the last five,

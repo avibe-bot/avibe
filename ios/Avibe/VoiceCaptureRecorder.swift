@@ -46,6 +46,8 @@ protocol VoiceCaptureStartingEngine: VoiceCaptureRecordingEngine {
     func begin() throws
     /// How it records, for the report (the engine: `vp=1`).
     var detail: String { get }
+    /// Called when it lost its input and could not go on recording.
+    var onInputLost: (() -> Void)? { get set }
 }
 
 /// Whether our audio session is active, for the press's diagnostics.
@@ -118,6 +120,8 @@ final class VoiceCaptureRecorder {
     /// first one would not record, for `capture_attempt`: `rec[recorder]`,
     /// `rec[engine <facts>]`, or `rec[<facts> engine=<code>]`.
     private(set) var report: String?
+    /// Called when the second recorder lost its input and stopped.
+    var onInputLost: (() -> Void)?
 
     init(
         url: URL,
@@ -236,6 +240,7 @@ final class VoiceCaptureRecorder {
             let engine = try makeFallback(url)
             defer { detail = engine.detail }
             try engine.begin()
+            engine.onInputLost = { [weak self] in self?.onInputLost?() }
             report = "rec[engine \(engine.detail) \(facts)]"
             return engine
         } catch {
@@ -347,6 +352,8 @@ final class VoiceCaptureEngineRecorder: VoiceCaptureStartingEngine, @unchecked S
     /// `vp=1`: voice processing is on; `vp=0(<code>)`: it would not start,
     /// and the plain input records.
     private(set) var detail = ""
+    var onInputLost: (() -> Void)?
+    private var observer: NSObjectProtocol?
 
     init(url: URL) {
         self.url = url
@@ -408,6 +415,31 @@ final class VoiceCaptureEngineRecorder: VoiceCaptureStartingEngine, @unchecked S
         }
         self.engine = engine
         lock.withLock { running = true }
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            self?.inputChanged()
+        }
+    }
+
+    /// The input changed under the take (a headset came or went, another
+    /// App changed the route): the engine stopped itself. Recording goes on
+    /// with the new input, into the same file; if it cannot, the take ends
+    /// here with what it has, and says so.
+    private func inputChanged() {
+        guard lock.withLock({ running }), let engine else { return }
+        let input = engine.inputNode
+        input.removeTap(onBus: 0)
+        let format = input.outputFormat(forBus: 0)
+        if let converter = NativeHoldPCMConverter(input: format) {
+            input.installTap(onBus: 0, bufferSize: 1024, format: format, block: tap(converter))
+            engine.prepare()
+            if (try? engine.start()) != nil { return }
+            input.removeTap(onBus: 0)
+        }
+        stop()
+        onInputLost?()
     }
 
     private func tap(_ converter: NativeHoldPCMConverter) -> AVAudioNodeTapBlock {
@@ -421,6 +453,8 @@ final class VoiceCaptureEngineRecorder: VoiceCaptureStartingEngine, @unchecked S
     }
 
     func stop() {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
         guard lock.withLock({ running }), let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
