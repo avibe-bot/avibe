@@ -6,10 +6,12 @@ Vectors shared byte for byte by every lane: `tests/fixtures/live_activity/contra
 
 ## 1. The flow, once
 
+This walkthrough only shows the happy path. Sections 2–5 are normative; where this walkthrough says less than they do, they decide.
+
 1. Max opens the 首席安全官 session in the iOS App while a Turn runs and taps **Show on Lock Screen**. The Web UI calls `liveActivity.start({sessionId, agentName, sessionTitle})`.
 2. The App reads the running Turn (`GET /api/web-push/live-activities/turn`), starts an `Activity<TurnActivityAttributes>` with `pushType: .token`, waits for its first push token, and registers it (`PUT /api/web-push/live-activities/<activity_id>`) together with this device's relay registration id.
 3. The instance's controller watches that Turn. On each state change it POSTs a relay request to `https://avibe.bot/api/push/apns/<registration_id>/live-activity`. The relay turns that request into one APNs `liveactivity` push to the activity token. While the Turn keeps running, the controller also sends a low-priority heartbeat every 15 minutes.
-4. The Turn ends. The controller sends `event: end` with a dismissal date one hour later and stops tracking.
+4. The Turn ends. The controller sends `event: end` with a dismissal date one hour later. Tracking stops once the relay accepts that end, or when a §4.3 stop rule applies; until then the end stays pending and is resent.
 
 The Agent name and session title stay on the phone (ActivityAttributes); they never reach the instance's tracking row, the relay, or Apple.
 
