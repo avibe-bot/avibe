@@ -943,6 +943,25 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(FakeEventSource.instances).toHaveLength(2);
   });
 
+  it('keeps the spacing when the path flaps between the public one and a direct address', async () => {
+    const shell = await pathShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // Each stretch starts on a direct address: no upgrade, so the spacing holds.
+    for (let sequence = 2; sequence < 12; sequence += 2) {
+      shell.emit({ preferred: 'tunnel', sequence, closure: 0 });
+      shell.emit({ preferred: 'direct', sequence: sequence + 1, closure: 0, path: 'ipv4' });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(shell.handovers()).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    shell.emit({ preferred: 'tunnel', sequence: 12, closure: 0 });
+    shell.emit({ preferred: 'direct', sequence: 13, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+  });
+
   it('checks the path again after waiting for a quiet page, and keeps its arm for the next direct address', async () => {
     const shell = await pathShell();
     const { beginPageRequest } = await import('../lib/pageConnections');

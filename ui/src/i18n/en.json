@@ -3158,7 +3158,8 @@
       "legMs": "{{ms}} ms",
       "legNone": "—",
       "legFailed": "failed",
-      "legCancelled": "not used"
+      "legCancelled": "not used",
+      "legTimeout": "timed out"
     }
   },
   "models": {

@@ -3158,7 +3158,8 @@
       "legMs": "{{ms}} ms",
       "legNone": "—",
       "legFailed": "失败",
-      "legCancelled": "未用上"
+      "legCancelled": "未用上",
+      "legTimeout": "超时"
     }
   },
   "models": {

@@ -395,11 +395,14 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
         XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(550))
         XCTAssertLessThan(elapsed, .seconds(3))
-        // The miss is a failure of the path: the transport is told.
-        try await eventually { fixture.plans.directFailures == 1 }
+        // No answer within the bound is a miss, not a failure of the path:
+        // stickiness is dropped, and nothing tells the transport to probe.
+        try await eventually { fixture.plans.stickyMisses == 1 }
         try await eventually { fixture.plans.races.count == 1 }
+        XCTAssertEqual(fixture.plans.directFailures, 0)
         let race = try XCTUnwrap(fixture.plans.races.first)
-        XCTAssertEqual(race.direct, .failed)
+        XCTAssertEqual(race.direct, .timedOut)
+        XCTAssertEqual(race.jsonObject["direct"] as? String, "timeout")
         XCTAssertEqual(race.winner, .publicOrigin)
         XCTAssertEqual(race.path, .ipv4)
         XCTAssertTrue(race.sticky)
@@ -407,6 +410,30 @@ final class DirectConnectListenerTests: XCTestCase {
             return XCTFail("the public origin was not ready: \(race.publicOrigin)")
         }
         XCTAssertGreaterThanOrEqual(publicMs, 550)
+        client.close()
+    }
+
+    func testAStickyPlanWhoseDirectCandidateFailsOutrightTellsTheTransportAndFallsBackAtOnce() async throws {
+        let fixture = try await makeListener(
+            limits: limits(hedgeSeconds: 30, stickySeconds: 30),
+            direct: .fail
+        )
+        fixture.plans.setSticky(true)
+        let client = LoopbackClient(port: fixture.port)
+        let started = ContinuousClock.now
+
+        try await client.send(canonicalHead)
+        _ = try await fixture.publicOrigin.waitForStream()
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(String(decoding: answer, as: UTF8.self), established)
+        // A real failure of the candidate does not wait out the bound.
+        XCTAssertLessThan(started.duration(to: .now), .seconds(5))
+        // And it is a failure of the path: the transport is told.
+        try await eventually { fixture.plans.directFailures == 1 }
+        XCTAssertEqual(fixture.plans.stickyMisses, 0)
+        try await eventually { fixture.plans.races.count == 1 }
+        XCTAssertEqual(fixture.plans.races.first?.direct, .failed)
+        XCTAssertEqual(fixture.plans.races.first?.winner, .publicOrigin)
         client.close()
     }
 
@@ -2751,6 +2778,12 @@ final class StandInPlans: @unchecked Sendable {
     private var isSticky = false
     private var path: DirectPathKind?
     private var storedRaces: [DirectRaceRecord] = []
+    private var misses = 0
+
+    /// How many sticky attempts passed their bound without an answer.
+    var stickyMisses: Int {
+        lock.withLock { misses }
+    }
 
     /// The races recorded so far, in order.
     var races: [DirectRaceRecord] {
@@ -2843,6 +2876,12 @@ final class StandInPlans: @unchecked Sendable {
                 return
             }
             self.lock.withLock { self.storedRaces.append(record) }
+        }
+        plan.stickyMissed = { [weak self] in
+            guard let self else {
+                return
+            }
+            self.lock.withLock { self.misses += 1 }
         }
         return plan
     }

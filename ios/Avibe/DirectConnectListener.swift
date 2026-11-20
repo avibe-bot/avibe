@@ -343,6 +343,9 @@ struct DirectConnectPlan: Sendable {
     var path: DirectPathKind?
     /// Hears how the race went, once it is decided.
     var recordRace: (@Sendable (DirectRaceRecord) -> Void)?
+    /// A sticky direct attempt did not answer within `stickySeconds`. Not a
+    /// failure of the path: `directFailed` is not called for it.
+    var stickyMissed: (@Sendable () -> Void)?
 }
 
 /// Decides each accepted CONNECT. `nil` refuses it.
@@ -1377,13 +1380,40 @@ actor DirectConnectListener {
                         }
                     }
                     do {
-                        let ready = sticky
-                            ? try await directDeadline(limits.stickySeconds, discard: { $0.stream.cancel() }, attempt)
-                            : try await attempt()
+                        let ready: DirectAttempt
+                        if sticky {
+                            // Set when the attempt failed by itself, and
+                            // not because the sticky bound cancelled it.
+                            let ownFailure = DirectSettledFlag()
+                            do {
+                                ready = try await directDeadline(
+                                    limits.stickySeconds,
+                                    discard: { $0.stream.cancel() },
+                                    {
+                                        do {
+                                            return try await attempt()
+                                        } catch {
+                                            if !(error is CancellationError), !Task.isCancelled {
+                                                ownFailure.set()
+                                            }
+                                            throw error
+                                        }
+                                    }
+                                )
+                            } catch DirectConnectError.timedOut where !ownFailure.isSet {
+                                throw DirectStickyMiss()
+                            }
+                        } else {
+                            ready = try await attempt()
+                        }
                         times.directReady()
                         return .ready(.direct, ready.stream, ready.leftover)
                     } catch {
-                        times.directFailed(cancelled: error is CancellationError || Task.isCancelled)
+                        if error is DirectStickyMiss {
+                            times.directTimedOut()
+                        } else {
+                            times.directFailed(cancelled: error is CancellationError || Task.isCancelled)
+                        }
                         // Lets the public candidate start now instead of
                         // waiting out the hedge.
                         directSettled.set()
@@ -1450,6 +1480,15 @@ actor DirectConnectListener {
                         !Task.isCancelled,
                         !(error is CancellationError)
                     else {
+                        continue
+                    }
+                    if error is DirectStickyMiss {
+                        // No answer within the sticky bound. The public
+                        // origin takes this CONNECT and plans hedge again;
+                        // the path itself is not reported as failed, so
+                        // nothing probes it or closes what it carries.
+                        directTimedOut = true
+                        plan.stickyMissed?()
                         continue
                     }
                     if case DirectConnectError.refused(let status) = error {
@@ -1774,6 +1813,9 @@ actor DirectConnectListener {
     }
 }
 
+/// A sticky direct attempt passed its bound without an answer.
+private struct DirectStickyMiss: Error {}
+
 /// When each leg of one race became ready, or what became of it, from the
 /// race's start, on the clock that never runs backwards.
 private final class DirectRaceTimes: @unchecked Sendable {
@@ -1794,6 +1836,10 @@ private final class DirectRaceTimes: @unchecked Sendable {
 
     func directFailed(cancelled: Bool) {
         lock.withLock { direct = cancelled ? .cancelled : .failed }
+    }
+
+    func directTimedOut() {
+        lock.withLock { direct = .timedOut }
     }
 
     func publicStarted() {

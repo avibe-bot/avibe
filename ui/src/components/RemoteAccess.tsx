@@ -986,12 +986,14 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
       : t('remoteAccess.direct.device', { state: t(device.stateKey) })
     : null;
   const legs = lastConnectionLegs(devicePath);
-  const leg = (value: number | 'none' | 'failed' | 'cancelled') => (
-    typeof value === 'number'
-      ? t('remoteAccess.direct.legMs', { ms: value })
-      : t(value === 'none'
-        ? 'remoteAccess.direct.legNone'
-        : value === 'failed' ? 'remoteAccess.direct.legFailed' : 'remoteAccess.direct.legCancelled')
+  const legKeys = {
+    none: 'remoteAccess.direct.legNone',
+    failed: 'remoteAccess.direct.legFailed',
+    timeout: 'remoteAccess.direct.legTimeout',
+    cancelled: 'remoteAccess.direct.legCancelled',
+  } as const satisfies Record<string, TranslationKey>;
+  const leg = (value: number | keyof typeof legKeys) => (
+    typeof value === 'number' ? t('remoteAccess.direct.legMs', { ms: value }) : t(legKeys[value])
   );
   const detail = certificate && page
     ? t('remoteAccess.direct.detail', { certificate, page })

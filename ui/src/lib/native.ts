@@ -1011,14 +1011,16 @@ export type NativeDirectPathSnapshot = {
 /** One new connection's race between the direct path and the public origin:
  *  how long each took to be ready (ms), or what became of it, and which won. */
 export type NativeDirectConnection = {
-  direct: number | 'none' | 'failed' | 'cancelled';
-  public: number | 'none' | 'failed' | 'cancelled';
+  direct: number | 'none' | 'failed' | 'timeout' | 'cancelled';
+  public: number | 'none' | 'failed' | 'timeout' | 'cancelled';
   winner: 'direct' | 'public' | 'none';
 };
 
 function parseDirectLeg(value: unknown): NativeDirectConnection['direct'] | null {
   if (isCounter(value)) return value;
-  return value === 'none' || value === 'failed' || value === 'cancelled' ? value : null;
+  return value === 'none' || value === 'failed' || value === 'timeout' || value === 'cancelled'
+    ? value
+    : null;
 }
 
 function parseDirectConnection(value: unknown): NativeDirectConnection | null {

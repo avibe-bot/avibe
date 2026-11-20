@@ -2894,6 +2894,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     lastAt: -Infinity,
     // The shell's path is a direct address (not the relay), as last heard.
     onDirectPath: false,
+    // In this usable stretch the shell was seen on the relay, or on a path
+    // it could not name: only then is reaching a direct address an upgrade.
+    sawOtherPath: false,
     // The one re-arm for the relay-to-direct upgrade of this usable stretch
     // was given; and the next hand-over is not held to the spacing.
     upgradeUsed: false,
@@ -3901,15 +3904,26 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (preferred === 'tunnel') {
         state.armed = true;
         state.onDirectPath = false;
+        state.sawOtherPath = false;
         state.upgradeUsed = false;
         state.skipSpacingOnce = false;
         return;
       }
       const onDirectPath = isDirectAddressPath(path);
+      if (!onDirectPath) state.sawOtherPath = true;
       // The shell's connection moved from the relay (or an unknown path) to a
-      // direct address: armed once more for this usable stretch, and that one
-      // hand-over is not held to the spacing. Later changes keep the spacing.
-      if (nativeDirectPathReported() && onDirectPath && !state.onDirectPath && !state.upgradeUsed) {
+      // direct address within this usable stretch: armed once more, and that
+      // one hand-over is not held to the spacing. A stretch that starts on a
+      // direct address is no upgrade, and every later change keeps the
+      // spacing, so flaps between the public path and a direct address
+      // cannot hand over more often than it allows.
+      if (
+        nativeDirectPathReported()
+        && onDirectPath
+        && !state.onDirectPath
+        && state.sawOtherPath
+        && !state.upgradeUsed
+      ) {
         state.upgradeUsed = true;
         state.armed = true;
         state.skipSpacingOnce = true;

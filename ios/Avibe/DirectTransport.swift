@@ -206,6 +206,9 @@ struct DirectRaceRecord: Equatable, Sendable {
         /// Ready after this many milliseconds.
         case ready(Int)
         case failed
+        /// A sticky direct attempt that did not answer within its bound.
+        /// No failure of the path is claimed for it.
+        case timedOut
         /// Started, and cancelled when the other won.
         case cancelled
 
@@ -214,6 +217,7 @@ struct DirectRaceRecord: Equatable, Sendable {
             case .none: return "none"
             case .ready(let ms): return ms
             case .failed: return "failed"
+            case .timedOut: return "timeout"
             case .cancelled: return "cancelled"
             }
         }
@@ -244,6 +248,17 @@ struct DirectRaceRecord: Equatable, Sendable {
 /// time means bytes were moving, so a request was probably cut; the listener
 /// cannot see requests themselves. Counts and durations only.
 struct DirectLossRecord: Equatable, Sendable {
+    enum Cause: String, Equatable, Sendable {
+        /// The transport reported the path lost. The one cause that says a
+        /// request in flight was probably cut.
+        case lost
+        /// A newer rendezvous answer replaced the endpoint the relays ran on.
+        case generationReplaced = "generation_replaced"
+        /// The App went to the background.
+        case background
+    }
+
+    let cause: Cause
     let relays: Int
     /// Milliseconds since each relay's last byte, shortest first, at most
     /// `quietLimit` of them.
@@ -255,6 +270,7 @@ struct DirectLossRecord: Equatable, Sendable {
 
     var jsonObject: [String: Any] {
         [
+            "cause": cause.rawValue,
             "relays": relays,
             "last_byte_ms": quietMs,
             "path": path.map { $0.rawValue as Any } ?? NSNull(),
