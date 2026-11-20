@@ -53,13 +53,16 @@ struct SpeakToMainBotIntent: AudioRecordingIntent, LiveActivityIntent {
         // (island, a mixable session, the recorder); if iOS refuses it,
         // Avibe comes forward and records there as soon as it is active.
         let active = controller.isInFront
+        // Taken before any start: a start in front that fails is said in
+        // an alert (the island is not drawn over the App), and that is told
+        // by the failure being new.
+        let before = controller.lastFailure
+        let notices = controller.noticeCount
         var outcome = await controller.startTake(
             inFront: active, foregroundFallback: !active && canComeForward, reservation: press
         )
         var inFront = active
-        let before = controller.lastFailure
-        let notices = controller.noticeCount
-        if outcome == .needsForeground || (canComeForward && outcome.isNeedsApp) {
+        if outcome == .needsForeground || (canComeForward && !inFront && outcome.isNeedsApp) {
             if #available(iOS 26.0, *) {
                 do {
                     try await continueInForeground(alwaysConfirm: false)
