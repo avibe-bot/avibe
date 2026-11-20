@@ -8,6 +8,7 @@ import { useUnsavedChanges } from '../../context/useUnsavedChanges';
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { MobileAppHeader } from '../apps/MobileAppHeader';
+import { useNativeWindowCloseGuard } from '../../apps/nativeWindowCloseGuard';
 
 // The Editor app as a full-page route (sibling of /apps/files and /apps/terminal). The same IDE is
 // used on desktop and phones so explorer, search, tabs, recent files, and save-as do not disappear
@@ -84,6 +85,12 @@ export const AppsEditorPage: React.FC<{ launchParams?: Record<string, unknown> }
   const fullBleed = standalone || !desktop;
   useUnsavedChanges(dirty ? t('apps.editor.confirmDiscardSwitch') : null);
   useUnloadWarning(dirty);
+  // A native App window closes without `beforeunload`, so its close asks here.
+  useNativeWindowCloseGuard(dirty ? {
+    message: t('apps.editor.confirmDiscardClose'),
+    confirm: t('apps.editor.discardAndClose'),
+    cancel: t('common.cancel'),
+  } : null);
 
   return (
     <div

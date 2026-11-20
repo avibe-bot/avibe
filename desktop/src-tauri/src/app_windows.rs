@@ -19,6 +19,12 @@ const MAX_REQUEST: usize = 32768;
 const SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const NATIVE_APP_WINDOW_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });";
+/// Asks the page whether a close would discard its unsaved state. The answer is
+/// a JSON string so the WebKit bridge never has to serialize a page object.
+const CLOSE_GUARD_QUERY: &str = "(()=>{try{const g=window.__AVIBE_APP_WINDOW_CLOSE_GUARD__;const c=typeof g==='function'?g():null;return c?JSON.stringify({message:c.message,confirm:c.confirm,cancel:c.cancel}):''}catch(_){return ''}})()";
+/// A page that does not answer in time closes as it did before it could ask.
+const CLOSE_GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const CLOSE_GUARD_TEXT: usize = 512;
 pub(crate) const PROTOCOL_SCRIPT: &str = "if(window.self===window.top){Object.defineProperty(window,'__AVIBE_APP_LAUNCH_PROTOCOL__',{value:1});Object.defineProperty(window,'__AVIBE_APP_DOCUMENT__',{value:crypto.randomUUID()});}";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -328,6 +334,8 @@ struct AppWindow {
     snapshot: Mutex<Snapshot>,
     directory: Mutex<Option<tempfile::TempDir>>,
     retired: AtomicBool,
+    /// A close or quit is asking this window's page; one question at a time.
+    asking: AtomicBool,
     cleanup: tokio::sync::Mutex<Option<Result<(), String>>>,
 }
 #[derive(Clone)]
@@ -700,6 +708,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         snapshot: Mutex::new(snapshot.clone()),
         directory: Mutex::new(directory),
         retired: AtomicBool::new(false),
+        asking: AtomicBool::new(false),
         cleanup: tokio::sync::Mutex::new(None),
     });
     registry(app)
@@ -789,15 +798,24 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
     let cleanup_entry = entry.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            // User close uses the same store-completion owner as replacement.
+            // User close uses the same store-completion owner as replacement,
+            // after the page agrees to lose any unsaved state.
             api.prevent_close();
-            cleanup_entry.retired.store(true, Ordering::SeqCst);
-            let app = cleanup_app.clone();
-            let label = cleanup_label.clone();
-            let entry = cleanup_entry.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = retire(&app, &label, &entry).await;
-            });
+            if !cleanup_entry.retired.load(Ordering::SeqCst) && !cleanup_entry.asking.swap(true, Ordering::SeqCst) {
+                let app = cleanup_app.clone();
+                let label = cleanup_label.clone();
+                let entry = cleanup_entry.clone();
+                tauri::async_runtime::spawn(async move {
+                    let discard = match app.get_webview_window(&label) {
+                        Some(window) => confirm_discard(&app, &window).await,
+                        None => true,
+                    };
+                    if discard {
+                        let _ = retire(&app, &label, &entry).await;
+                    }
+                    entry.asking.store(false, Ordering::SeqCst);
+                });
+            }
         }
         if matches!(event, tauri::WindowEvent::Destroyed) {
             // Destruction is not evidence of cookie erasure. Keep the receipt
@@ -896,6 +914,102 @@ async fn retire(app: &AppHandle, label: &str, entry: &Arc<AppWindow>) -> Result<
         }
     }
     result
+}
+#[derive(Debug, Deserialize, PartialEq)]
+struct CloseConfirmation {
+    message: String,
+    confirm: String,
+    cancel: String,
+}
+/// The page's confirmation, or `None` when it has nothing to lose or answered
+/// with something that cannot be shown as two distinct buttons.
+fn close_confirmation_result(raw: &str) -> Option<CloseConfirmation> {
+    let answer = serde_json::from_str::<String>(raw).ok()?;
+    let confirmation = serde_json::from_str::<CloseConfirmation>(&answer).ok()?;
+    let shown = |text: &str| !text.trim().is_empty() && bounded(text, CLOSE_GUARD_TEXT);
+    (shown(&confirmation.message)
+        && shown(&confirmation.confirm)
+        && shown(&confirmation.cancel)
+        && confirmation.confirm != confirmation.cancel)
+        .then_some(confirmation)
+}
+async fn close_confirmation(window: &WebviewWindow) -> Option<CloseConfirmation> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Mutex::new(Some(tx));
+    window
+        .as_ref()
+        .eval_with_callback(CLOSE_GUARD_QUERY, move |raw| {
+            if let Some(tx) = tx.lock().expect("close guard").take() {
+                let _ = tx.send(close_confirmation_result(&raw));
+            }
+        })
+        .ok()?;
+    tokio::time::timeout(CLOSE_GUARD_TIMEOUT, rx).await.ok()?.ok()?
+}
+/// Whether this window's page state may be discarded. A page with unsaved
+/// state gets a native dialog in front of its own window; only its confirm
+/// button discards. No answer, or nothing unsaved, discards as before.
+async fn confirm_discard(app: &AppHandle, window: &WebviewWindow) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let Some(confirmation) = close_confirmation(window).await else {
+        return true;
+    };
+    activate(window);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(confirmation.message)
+        .title(window.title().unwrap_or_default())
+        .kind(MessageDialogKind::Warning)
+        .parent(window)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            confirmation.confirm,
+            confirmation.cancel,
+        ))
+        .show(move |confirmed| {
+            let _ = tx.send(confirmed);
+        });
+    rx.await.unwrap_or(false)
+}
+/// Whether any App window is open, so a quit has page state it might discard.
+pub(crate) fn any_open(app: &AppHandle) -> bool {
+    registry(app)
+        .0
+        .lock()
+        .expect("app windows")
+        .windows
+        .values()
+        .any(|entry| !entry.retired.load(Ordering::SeqCst))
+}
+/// A quit asks every App window the same question its own close does, one
+/// window at a time. A single cancel keeps every window and ends the quit;
+/// a window already asking for its own close also ends it, since that answer
+/// is still the user's to give.
+pub(crate) async fn confirm_discard_all(app: &AppHandle) -> bool {
+    let entries: Vec<_> = registry(app)
+        .0
+        .lock()
+        .expect("app windows")
+        .windows
+        .iter()
+        .map(|(label, entry)| (label.clone(), entry.clone()))
+        .collect();
+    for (label, entry) in entries {
+        if entry.retired.load(Ordering::SeqCst) {
+            continue;
+        }
+        let Some(window) = app.get_webview_window(&label) else {
+            continue;
+        };
+        if entry.asking.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let discard = confirm_discard(app, &window).await;
+        entry.asking.store(false, Ordering::SeqCst);
+        if !discard {
+            return false;
+        }
+    }
+    true
 }
 pub(crate) fn close_all(app: &AppHandle) {
     let entries: Vec<_> = registry(app)
@@ -1044,6 +1158,35 @@ mod tests {
         for id in ["", "bad.id", "bad/id", &"x".repeat(129)] {
             input.request_id = Some(id.into());
             assert!(input.target(true).is_err());
+        }
+    }
+    #[test]
+    fn close_asks_only_for_a_showable_page_confirmation() {
+        let answer = |value: serde_json::Value| serde_json::to_string(&value.to_string()).unwrap();
+        assert_eq!(
+            close_confirmation_result(&answer(
+                json!({"message":"Discard unsaved changes and close this window?","confirm":"Discard and Close","cancel":"Cancel"})
+            )),
+            Some(CloseConfirmation {
+                message: "Discard unsaved changes and close this window?".into(),
+                confirm: "Discard and Close".into(),
+                cancel: "Cancel".into(),
+            })
+        );
+        // Nothing unsaved, no answer, a throwing guard and malformed answers
+        // all close the window as before.
+        for raw in [
+            "\"\"".to_owned(),
+            String::new(),
+            "null".to_owned(),
+            "{\"message\":\"m\",\"confirm\":\"c\",\"cancel\":\"x\"}".to_owned(),
+            answer(json!({"message":"m","confirm":"Close"})),
+            answer(json!({"message":"m","confirm":"Same","cancel":"Same"})),
+            answer(json!({"message":" ","confirm":"c","cancel":"x"})),
+            answer(json!({"message":"m","confirm":1,"cancel":"x"})),
+            answer(json!({"message":"m".repeat(CLOSE_GUARD_TEXT + 1),"confirm":"c","cancel":"x"})),
+        ] {
+            assert_eq!(close_confirmation_result(&raw), None, "{raw}");
         }
     }
     #[test]

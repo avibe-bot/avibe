@@ -3579,6 +3579,7 @@
       "openInWindow": "在编辑器窗口中打开",
       "saveBeforePopOut": "请先保存，再在新窗口中打开",
       "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
+      "discardAndClose": "放弃并关闭",
       "confirmDiscardSwitch": "放弃未保存的更改？",
       "conflict": {
         "message": "打开后该文件在磁盘上已被改动，可能是 agent 修改了它。",

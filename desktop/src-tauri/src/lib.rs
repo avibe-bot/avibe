@@ -1159,6 +1159,31 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
     if shell.dialog_pending.swap(true, Ordering::SeqCst) {
         return;
     }
+    if quit && app_windows::any_open(&app) {
+        // A quit closes every App window, so each one with unsaved page state
+        // is asked first, exactly as its own close would be. A cancel ends the
+        // quit before the Runtime question; the shell and Runtime keep going.
+        tauri::async_runtime::spawn(async move {
+            if app_windows::confirm_discard_all(&app).await {
+                continue_runtime_lifecycle(app, quit);
+            } else {
+                app.state::<Shell>().dialog_pending.store(false, Ordering::SeqCst);
+            }
+        });
+        return;
+    }
+    continue_runtime_lifecycle(app, quit);
+}
+
+/// The rest of a lifecycle request, once `dialog_pending` is claimed and any
+/// App window page state may be discarded.
+fn continue_runtime_lifecycle(app: AppHandle, quit: bool) {
+    let shell = app.state::<Shell>();
+    if !matches!(shell.activity.load(Ordering::SeqCst), ACTIVITY_IDLE | ACTIVITY_MONITOR) {
+        shell.dialog_pending.store(false, Ordering::SeqCst);
+        show_lifecycle_busy(&app);
+        return;
+    }
     if quit && !shell.host.has_owned_runtime() {
         if claim_runtime_stop(&shell.activity) {
             exit_shell(&app);

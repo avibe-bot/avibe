@@ -1,4 +1,5 @@
 import type { AppLaunchRequest, AppLaunchSnapshot } from '../../src/apps/appLaunchProtocol';
+import type { NativeWindowCloseConfirmation } from '../../src/apps/nativeWindowCloseGuard';
 import { expect, test, type Page } from '../support/browserTest';
 import { DESKTOP, serveProduct } from './support';
 
@@ -242,6 +243,27 @@ for (const lang of ['en', 'zh'] as const) {
     await expect(page.locator('.monaco-editor:visible .view-lines')).toContainText('unsaved W1 draft');
     await page.screenshot({ path: `/tmp/w1-ui-evidence/editor-reuse-${lang}.png` });
     expect(new URL(page.url()).searchParams.has('path')).toBe(false);
+  });
+}
+
+for (const lang of ['en', 'zh'] as const) {
+  test(`W1 ${lang}: a native Editor close asks only while a draft is unsaved`, async ({ page }) => {
+    await page.setViewportSize({ width: 880, height: 600 });
+    await serveProduct(page, lang);
+    await page.route('**/api/files/list?**', route => route.fulfill({ json: { ok: true, path: '/fixture', parent: '/', entries: [] } }));
+    await nativeSnapshot(page, { appId: 'editor', requestId: 'editor-close', windowId: 'native-editor', source: 'file-browser', params: { newFileDir: '/fixture' } });
+    await page.goto('/apps/editor?standalone=1');
+    const editor = page.locator('.monaco-editor .view-lines').first();
+    await expect(editor).toBeVisible();
+    // The same question the shell asks on close and quit.
+    const ask = () => page.evaluate(() => window.__AVIBE_APP_WINDOW_CLOSE_GUARD__?.() ?? null);
+    expect(await ask()).toBeNull();
+    await editor.click({ position: { x: 12, y: 10 } });
+    await page.keyboard.insertText('unsaved close draft');
+    const expected: NativeWindowCloseConfirmation = lang === 'en'
+      ? { message: 'Discard unsaved changes and close this window?', confirm: 'Discard and Close', cancel: 'Cancel' }
+      : { message: '放弃未保存的更改并关闭此窗口？', confirm: '放弃并关闭', cancel: '取消' };
+    await expect.poll(ask).toEqual(expected);
   });
 }
 
