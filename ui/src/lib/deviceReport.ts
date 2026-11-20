@@ -1,7 +1,7 @@
 import { nativeDeviceDescribe, type NativeDeviceDescription } from './native';
 
 /** What an older shell, or one that can't say, is called in push settings. */
-export const FALLBACK_NATIVE_DEVICE_LABEL = 'iPhone App';
+const FALLBACK_NATIVE_DEVICE_LABEL = 'iPhone App';
 
 const ALIAS_SOURCES = new Set(['health', 'schedule']);
 
@@ -9,7 +9,7 @@ const isText = (value: unknown, limit: number): value is string =>
   typeof value === 'string' && value.trim().length > 0 && value.length <= limit;
 
 /** The shell's answer, keeping only the fields of the instance's contract. */
-export function parseNativeDeviceDescription(value: unknown): NativeDeviceDescription | null {
+function parseNativeDeviceDescription(value: unknown): NativeDeviceDescription | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
   if (
@@ -62,7 +62,7 @@ function pageState(): PageState {
 }
 
 /** This page's one `device.describe`; null outside the iOS shell or on any failure. */
-export function nativeDeviceDescription(): Promise<NativeDeviceDescription | null> {
+function nativeDeviceDescription(): Promise<NativeDeviceDescription | null> {
   const state = pageState();
   if (state.description) return state.description;
   const pending = nativeDeviceDescribe()
