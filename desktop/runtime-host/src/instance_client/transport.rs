@@ -55,6 +55,9 @@ pub trait Transport: Send + Sync {
     async fn send(&self, request: Request) -> Result<Response, ClientError>;
 }
 
+/// The longest a standalone install request may stay open.
+pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 pub struct HttpTransport {
     client: reqwest::Client,
 }
@@ -73,15 +76,19 @@ impl HttpTransport {
 impl Transport for HttpTransport {
     async fn send(&self, request: Request) -> Result<Response, ClientError> {
         // The released standalone upgrade endpoint answers only after the
-        // installer finishes. Keep a bounded connect, not a 20s install limit.
+        // installer finishes (about a minute). Give it a long, finite limit
+        // rather than the 20 s every other request has.
         let long_install = request.method == Method::POST && request.url.path() == "/api/upgrade";
-        let mut builder = self
+        let builder = self
             .client
             .request(request.method, request.url)
-            .headers(request.headers);
-        if !long_install {
-            builder = builder.timeout(Duration::from_secs(20));
-        }
+            .headers(request.headers)
+            .timeout(if long_install {
+                INSTALL_TIMEOUT
+            } else {
+                Duration::from_secs(20)
+            });
+        let mut builder = builder;
         if let Some(body) = request.body {
             builder = builder.json(&body);
         }

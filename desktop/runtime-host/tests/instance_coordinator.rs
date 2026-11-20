@@ -1909,6 +1909,89 @@ async fn an_interrupted_receipt_settles_without_resending() {
     assert_eq!(calls.iter().filter(|path| *path == "/api/upgrade").count(), 1);
 }
 
+// Codex P2: a standalone Runtime answers before its scheduled restart, still
+// reporting the old version. The shell keeps following until another version
+// is reported, then stops on its own.
+#[tokio::test]
+async fn an_accepted_install_is_followed_past_the_pre_restart_read() {
+    let f = selected_for_update().await;
+    update_reads(&f, true, offer());
+    assert!(refresh(&f).await.ok);
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/upgrade", ok(json!({"ok": true, "restarting": true}))));
+    let reply = action(
+        &f.client,
+        ClientAction::InstanceUpdateInstall {
+            target_version: "3.2.8-rc.4".into(),
+        },
+    )
+    .await;
+    assert!(reply.ok, "{:?}", reply.error);
+    // Before the restart: same version, no install reported.
+    update_reads(&f, true, offer());
+    f.client.poll_instance_update(false).await;
+    // Restarting: the instance does not answer.
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/session", Reply::Failure));
+    f.client.poll_instance_update(false).await;
+    assert_eq!(update(&f)["status"], "unreachable");
+    let mut done = offer();
+    done["current"] = json!("3.2.8-rc.4");
+    done["has_update"] = json!(false);
+    update_reads(&f, true, done);
+    f.client.poll_instance_update(false).await;
+    assert_eq!(update(&f)["snapshot"]["current"], "3.2.8-rc.4");
+    let calls = f.http.calls.lock().unwrap().len();
+    f.client.poll_instance_update(false).await;
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+}
+
+// Codex P2: an install request whose generation ends is dropped promptly, so
+// the selected session is not left `busy` until the transport gives up.
+#[tokio::test]
+async fn an_install_request_is_dropped_when_its_generation_ends() {
+    let f = selected_for_update().await;
+    update_reads(&f, true, offer());
+    assert!(refresh(&f).await.ok);
+    let (_never, held) = oneshot::channel::<Response>();
+    let sent = Arc::new(Notify::new());
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/upgrade", Reply::Held(held, sent.clone())));
+    let client = f.client.clone();
+    let install = tokio::spawn(async move {
+        action(
+            &client,
+            ClientAction::InstanceUpdateInstall {
+                target_version: "3.2.8-rc.4".into(),
+            },
+        )
+        .await
+    });
+    sent.notified().await;
+    assert!(action(&f.client, ClientAction::Cancel).await.ok);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), install).await;
+    assert_eq!(ended.unwrap().unwrap().error.unwrap().code, "stale_generation");
+    // The session is free again: a check under the new generation is sent.
+    update_reads(&f, true, offer());
+    assert!(refresh(&f).await.ok);
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/update/check", ok(json!({"ok": true}))));
+    let reply = action(&f.client, ClientAction::InstanceUpdateCheck {}).await;
+    assert!(reply.ok, "{:?}", reply.error);
+}
+
 // An instance that answers but refuses the app's sign-in ends `unauthorized`:
 // no timer retries, no new sign-in; opening the popup reads it once more.
 #[tokio::test]

@@ -22,6 +22,12 @@ pub struct InstanceUpdate {
     /// snapshot can show that request's effect. Native only.
     #[serde(skip)]
     pub(crate) request_seen: bool,
+    /// For an install: the version the instance reported when it was sent,
+    /// and a desktop-managed host's request id. Native only.
+    #[serde(skip)]
+    pub(crate) install_from: Option<String>,
+    #[serde(skip)]
+    pub(crate) install_ref: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +76,8 @@ impl InstanceUpdate {
             request: None,
             fetched_at: None,
             request_seen: false,
+            install_from: None,
+            install_ref: None,
         }
     }
 
@@ -86,16 +94,35 @@ impl InstanceUpdate {
             return false;
         }
         let seen = self.request_seen;
-        match request.phase {
-            Phase::Sending => true,
-            Phase::Failed => false,
-            Phase::Accepted => {
+        match (request.phase, request.action) {
+            (Phase::Sending, _) => true,
+            (Phase::Failed, _) => false,
+            // An accepted install is followed until the instance reports another
+            // version (a standalone Runtime answers before its scheduled
+            // restart, still on the old one) or its own request ends.
+            (Phase::Accepted, Action::Install) => !self.install_ended(),
+            (Phase::Accepted, _) => {
                 !seen
-                    // Restarting after an install.
-                    || (request.action == Action::Install && self.status == Status::Unreachable)
-                    || self.snapshot.as_ref().is_some_and(|snapshot| running(snapshot, request.action))
+                    || self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| running(snapshot, request.action))
             }
         }
+    }
+
+    fn install_ended(&self) -> bool {
+        let Some(snapshot) = self.snapshot.as_ref().filter(|_| self.status == Status::Ready) else {
+            return false;
+        };
+        if running(snapshot, Action::Install) {
+            return false;
+        }
+        let remote = &snapshot["remote_request"];
+        let refused = self.install_ref.is_some()
+            && remote["request_id"].as_str() == self.install_ref.as_deref()
+            && matches!(remote["phase"].as_str(), Some("failed" | "declined" | "expired"));
+        refused || snapshot["current"].as_str() != self.install_from.as_deref()
     }
 
     /// A receipt left `sending` by a reply that could not be published (its

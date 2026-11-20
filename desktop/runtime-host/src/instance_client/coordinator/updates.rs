@@ -286,8 +286,10 @@ impl Coordinator {
                     .await?;
             }
         }
-        let in_flight = session.sending.try_lock().is_err();
         self.publish_instance(admitted, |update| {
+            // Observed in the same critical section as the receipt: an action
+            // publishes `sending` only while it holds this lock.
+            let in_flight = session.sending.try_lock().is_err();
             match &result {
                 Ok((snapshot, can_manage)) => {
                     update.status = Status::Ready;
@@ -381,6 +383,8 @@ impl Coordinator {
                 }
             }
             update.request_seen = false;
+            update.install_from = snapshot["current"].as_str().map(str::to_owned);
+            update.install_ref = None;
             update.request = Some(Receipt {
                 action: kind,
                 phase: Phase::Sending,
@@ -390,7 +394,16 @@ impl Coordinator {
             });
             Ok(())
         })?;
-        let outcome = session.http(&admitted.epoch, Method::POST, path, Some(body)).await;
+        // Ends when the instance answers, the transport's limit passes, or the
+        // generation it was sent under ends; dropping it releases `sending`.
+        let request = session.http(&admitted.epoch, Method::POST, path, Some(body));
+        tokio::pin!(request);
+        let outcome = loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), &mut request).await {
+                Ok(outcome) => break outcome,
+                Err(_) => admitted.epoch.check()?,
+            }
+        };
         let failure = match &outcome {
             Err(error) if error.code == "stale_generation" => return Err(error.clone()),
             Err(error) => Some(error.code.clone()),
@@ -420,6 +433,9 @@ impl Coordinator {
             };
             receipt.error_code = failure.clone();
             receipt.updated_at = instance_update::now();
+            if let Ok(Outcome::Ok(reply)) = &outcome {
+                update.install_ref = reply["request_id"].as_str().map(str::to_owned);
+            }
             if failure.as_deref() == Some("instance_unauthorized") {
                 update.status = Status::Unauthorized;
                 update.snapshot = None;
