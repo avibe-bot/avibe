@@ -64,7 +64,7 @@ impl HttpTransport {
             client: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(20))
+                .connect_timeout(Duration::from_secs(20))
                 .build()?,
         })
     }
@@ -72,10 +72,16 @@ impl HttpTransport {
 #[async_trait]
 impl Transport for HttpTransport {
     async fn send(&self, request: Request) -> Result<Response, ClientError> {
+        // The released standalone upgrade endpoint answers only after the
+        // installer finishes. Keep a bounded connect, not a 20s install limit.
+        let long_install = request.method == Method::POST && request.url.path() == "/api/upgrade";
         let mut builder = self
             .client
             .request(request.method, request.url)
             .headers(request.headers);
+        if !long_install {
+            builder = builder.timeout(Duration::from_secs(20));
+        }
         if let Some(body) = request.body {
             builder = builder.json(&body);
         }
@@ -162,6 +168,23 @@ impl NativeSession {
         cookie_store::serde::json::save_incl_expired_and_nonpersistent(&self.cookies, &mut bytes)
             .map_err(|_| ClientError::new("credentials_unavailable"))?;
         Ok(bytes)
+    }
+    /// Adopt cookies another store of this same origin holds (the selected
+    /// instance's WebView). Each is narrowed to this exact host, as responses are.
+    pub fn store_cookies(&mut self, cookies: Vec<cookie::Cookie<'static>>, url: &Url) {
+        if url.origin() != self.origin.origin() {
+            return;
+        }
+        for mut cookie in cookies {
+            if cookie
+                .domain()
+                .is_some_and(|domain| Some(domain.trim_start_matches('.')) != self.origin.host_str())
+            {
+                continue;
+            }
+            cookie.unset_domain();
+            self.cookies.store_response_cookies(std::iter::once(cookie), url);
+        }
     }
     pub fn cookie_value(&self, name: &str) -> Option<String> {
         self.cookies

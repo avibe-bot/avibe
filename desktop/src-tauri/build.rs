@@ -8,9 +8,11 @@ fn main() {
     // commands only to the pet window, `main-pet-bind.json` gives the
     // Workbench `pet_bind` alone, and `main-computer-use.json` gives it the
     // two Computer Use guide actions on macOS, and `main-window-focus.json`
-    // lets it bring its own window forward.
+    // lets it bring its own window forward; `update-popover.json` lets the
+    // update popup fit its own height.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "desktop_client_request",
+        "update_popover_fit",
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",

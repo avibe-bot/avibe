@@ -27,12 +27,43 @@ enum Reply {
 struct Http {
     replies: Mutex<VecDeque<(&'static str, Reply)>>,
     calls: Mutex<Vec<String>>,
+    cookies: Mutex<Vec<String>>,
 }
 #[async_trait]
 impl Transport for Http {
     async fn send(&self, request: Request) -> Result<Response, ClientError> {
         let path = request.url.path().to_owned();
         self.calls.lock().unwrap().push(path.clone());
+        self.cookies.lock().unwrap().push(
+            request
+                .headers
+                .get("cookie")
+                .map(|value| value.to_str().unwrap().to_owned())
+                .unwrap_or_default(),
+        );
+        if matches!(
+            path.as_str(),
+            "/api/update/check"
+                | "/api/update/prereleases"
+                | "/api/update/auto-update"
+                | "/api/upgrade"
+                | "/api/desktop/update/request"
+        ) {
+            assert_eq!(request.method, reqwest::Method::POST);
+            assert_eq!(request.headers["origin"], "https://one.avibe.bot");
+            assert_eq!(request.headers["x-vibe-csrf-token"], "csrf-from-instance");
+            let cookies = request.headers["cookie"].to_str().unwrap();
+            assert!(cookies.contains("vibe_csrf_token=csrf-from-instance"));
+            assert!(cookies.contains("__Host-vibe_remote_session=rotated-by-instance"));
+            assert!(!cookies.contains("private-account"));
+            let expected = match path.as_str() {
+                "/api/update/check" => json!({}),
+                "/api/upgrade" => json!({"confirm_interrupt": true}),
+                "/api/desktop/update/request" => json!({"target_version":"3.2.8-rc.4","confirm_interrupt":true}),
+                _ => json!({"enabled":true}),
+            };
+            assert_eq!(request.body.as_ref(), Some(&expected));
+        }
         if request.method == reqwest::Method::DELETE {
             return Ok(response(200, json!({}), None));
         }
@@ -41,7 +72,7 @@ impl Transport for Http {
             .lock()
             .unwrap()
             .pop_front()
-            .expect("unexpected HTTP request");
+            .unwrap_or_else(|| panic!("unexpected HTTP request {path}"));
         assert_eq!(path, expected);
         match reply {
             Reply::Failure => Err(ClientError::new("network_unavailable")),
@@ -112,6 +143,8 @@ struct View {
     update_calls: Mutex<Vec<(ClientAction, Epoch)>>,
     update_failure: Mutex<Option<String>>,
     retirement_failure: AtomicBool,
+    instance_cookies: Mutex<Option<Vec<cookie::Cookie<'static>>>>,
+    cookie_reads: std::sync::atomic::AtomicUsize,
     invalidation: Mutex<Option<(oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 #[async_trait]
@@ -123,6 +156,12 @@ impl ClientView for View {
             Some(code) => Err(ClientError::new(code)),
             None => Ok(()),
         }
+    }
+    fn instance_cookies(&self, epoch: &Epoch, origin: &url::Url) -> Option<Vec<cookie::Cookie<'static>>> {
+        epoch.check().ok()?;
+        assert_eq!(origin.as_str(), "https://one.avibe.bot/");
+        self.cookie_reads.fetch_add(1, Ordering::SeqCst);
+        self.instance_cookies.lock().unwrap().clone()
     }
     fn changed(&self, state: &ClientState) {
         self.states.lock().unwrap().push(state.clone());
@@ -182,6 +221,7 @@ fn fixture_in(root: tempfile::TempDir, replies: Vec<(&'static str, Reply)>) -> F
     let http = Arc::new(Http {
         replies: Mutex::new(replies.into()),
         calls: Mutex::new(vec![]),
+        cookies: Mutex::new(vec![]),
     });
     let private = Arc::new(Private::default());
     let view = Arc::new(View::default());
@@ -1504,6 +1544,429 @@ fn ready(account: &str, id: &str) -> Response {
 }
 async fn select(f: &Fixture, id: &str) -> ClientReply {
     action(&f.client, ClientAction::SelectInstance { instance_id: id.into() }).await
+}
+
+async fn selected_for_update() -> Fixture {
+    let f = fixture(vec![]);
+    let session = catalog("account-a", &["one"]);
+    sign_in(&f, session.clone()).await;
+    let mut ready = ready("account-a", "one");
+    ready.headers.append(
+        SET_COOKIE,
+        "vibe_csrf_token=csrf-from-instance; Secure; Path=/".parse().unwrap(),
+    );
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .extend(selection(&session, "one", Reply::Ready(ready)));
+    assert!(select(&f, "one").await.ok);
+    f
+}
+fn identity(can_manage: bool) -> Value {
+    let mut identity: Value = serde_json::from_slice(&ready("account-a", "one").body).unwrap();
+    identity["capabilities"]["can_manage_instance"] = json!(can_manage);
+    identity
+}
+/// The two reads of one refresh; the instance rotates its session on the second.
+fn update_reads(f: &Fixture, can_manage: bool, snapshot: Value) {
+    f.http.replies.lock().unwrap().extend([
+        ("/api/session", ok(identity(can_manage))),
+        (
+            "/api/version",
+            Reply::Ready(response(
+                200,
+                snapshot,
+                Some("__Host-vibe_remote_session=rotated-by-instance; HttpOnly; Secure; Path=/"),
+            )),
+        ),
+    ]);
+}
+fn offer() -> Value {
+    json!({
+        "current": "3.2.7rc1", "latest": "3.2.8-rc.4", "has_update": true,
+        "error": null, "package_spec": "https://mirror.example/private.whl",
+        "prereleases": true, "auto_update": false, "build": {"kind": "package"},
+        "host_actions": ["check", "install", "prereleases", "auto_update", "unlisted"],
+        "install": null,
+    })
+}
+async fn refresh(f: &Fixture) -> ClientReply {
+    action(&f.client, ClientAction::InstanceUpdateRefresh {}).await
+}
+fn update(f: &Fixture) -> Value {
+    serde_json::to_value(f.client.state().instance_update).unwrap()
+}
+
+// B1: the shell acts on the selected instance with the sign-in it made for
+// it, through the instance's own endpoints. A desktop-managed host gets the
+// exact target; a standalone Runtime gets its released `/api/upgrade`. The
+// instance jar is never written with the account credential.
+#[tokio::test]
+async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
+    let f = selected_for_update().await;
+    assert_eq!(update(&f)["status"], "loading");
+    let install = |target: &str| ClientAction::InstanceUpdateInstall {
+        target_version: target.into(),
+    };
+    // A viewer sees the section and cannot act; nothing is sent.
+    update_reads(&f, false, offer());
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["can_manage"], false);
+    assert_eq!(
+        action(&f.client, install("3.2.8-rc.4")).await.error.unwrap().code,
+        "instance_unauthorized"
+    );
+    for managed in [false, true] {
+        let mut data = offer();
+        if managed {
+            data["managed_by"] = json!("desktop");
+        }
+        update_reads(&f, true, data);
+        let reply = refresh(&f).await;
+        assert!(reply.ok, "{:?}", reply.error);
+        let state = update(&f);
+        assert_eq!(state["status"], "ready");
+        assert_eq!(state["can_manage"], true);
+        assert_eq!(
+            state["snapshot"]["host_actions"],
+            json!(["check", "prereleases", "auto_update", "install"])
+        );
+        assert!(state["snapshot"].get("package_spec").is_none());
+        assert!(reply.state.runtime_projection().get("instance_update").is_none());
+        // Only the exact version on screen.
+        let calls = f.http.calls.lock().unwrap().len();
+        assert_eq!(
+            action(&f.client, install("3.2.8")).await.error.unwrap().code,
+            "target_mismatch"
+        );
+        assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+        let path = if managed {
+            "/api/desktop/update/request"
+        } else {
+            "/api/upgrade"
+        };
+        for (action_, path) in [
+            (ClientAction::InstanceUpdateCheck {}, "/api/update/check"),
+            (
+                ClientAction::InstanceUpdateSetPrereleases { enabled: true },
+                "/api/update/prereleases",
+            ),
+            (
+                ClientAction::InstanceUpdateSetAutoUpdate { enabled: true },
+                "/api/update/auto-update",
+            ),
+            (install("3.2.8-rc.4"), path),
+        ] {
+            f.http
+                .replies
+                .lock()
+                .unwrap()
+                .push_back((path, ok(json!({"ok": true, "output": "installer log"}))));
+            let reply = action(&f.client, action_).await;
+            assert!(reply.ok, "{path}: {:?}", reply.error);
+            let receipt = &update(&f)["request"];
+            assert_eq!(receipt["phase"], "accepted");
+            assert!(!receipt.to_string().contains("installer log"));
+        }
+        assert_eq!(update(&f)["request"]["target"], "3.2.8-rc.4");
+        // A second install of the same target while the first runs is refused.
+        assert_eq!(
+            action(&f.client, install("3.2.8-rc.4")).await.error.unwrap().code,
+            "update_in_progress"
+        );
+    }
+    let saved = String::from_utf8(f.private.read("account-a").unwrap().unwrap()).unwrap();
+    for instance_only in ["instance-only", "rotated-by-instance", "csrf-from-instance"] {
+        assert!(!saved.contains(instance_only));
+    }
+    assert!(!std::fs::read_to_string(f._root.path().join("connection.json"))
+        .unwrap()
+        .contains("rotated-by-instance"));
+    // The local updater was never involved.
+    assert!(f.view.update_calls.lock().unwrap().is_empty());
+}
+
+// B1 display data: a known field that does not validate makes the answer
+// unreachable; upstream text is replaced by a code; unknown fields vanish.
+#[tokio::test]
+async fn instance_update_snapshot_is_display_data_only() {
+    let f = selected_for_update().await;
+    let mut data = offer();
+    data["error"] = json!("PyPI said <script>https://evil.example/?token=1</script>");
+    data["remote_request"] = json!({
+        "request_id": "r-1", "target": "3.2.8-rc.4", "phase": "failed", "progress": null,
+        "error_code": "Traceback: /Users/alex/.avibe secret", "updated_at": "2026-11-20T07:03:17Z",
+        "debug_url": "https://evil.example/",
+    });
+    data["install"] =
+        json!({"phase": "installing", "target": "3.2.8-rc.4", "started_at": "2026-11-20T07:03:17Z", "pid": 4});
+    data["control_request"] = Value::Null;
+    data["phase"] = json!("available");
+    data["unknown_future_field"] = json!({"cookie": "x"});
+    data["build"] = json!({"kind": "package", "revision": "1a2b3c4d", "dirty": true});
+    update_reads(&f, true, data);
+    assert!(refresh(&f).await.ok);
+    let snapshot = update(&f)["snapshot"].clone();
+    assert_eq!(snapshot["error"], "error");
+    assert_eq!(snapshot["build"], json!({"kind": "package"}));
+    assert_eq!(snapshot["remote_request"]["error_code"], "request_failed");
+    assert!(snapshot["remote_request"].get("debug_url").is_none());
+    assert_eq!(
+        snapshot["install"],
+        json!({"phase": "installing", "target": "3.2.8-rc.4", "started_at": "2026-11-20T07:03:17Z"})
+    );
+    assert!(snapshot.get("unknown_future_field").is_none());
+    let text = snapshot.to_string();
+    for leaked in ["evil.example", "Traceback", "token", "cookie"] {
+        assert!(!text.contains(leaked), "{leaked}");
+    }
+    // An install the instance reports as running cannot be started again.
+    let reply = action(
+        &f.client,
+        ClientAction::InstanceUpdateInstall {
+            target_version: "3.2.8-rc.4".into(),
+        },
+    )
+    .await;
+    assert_eq!(reply.error.unwrap().code, "update_in_progress");
+    for (key, bad) in [
+        ("current", json!("v3.2.8")),
+        ("latest", json!("<b>3.2.9</b>")),
+        ("has_update", json!("yes")),
+        ("phase", json!("hacked")),
+        ("checked_at", json!("yesterday")),
+        ("managed_by", json!("someone")),
+        (
+            "install",
+            json!({"phase": "installing", "target": null, "started_at": "now"}),
+        ),
+        (
+            "remote_request",
+            json!({"request_id": "r", "target": "3.2.8", "phase": "exploded", "progress": null, "error_code": null, "updated_at": "2026-11-20T07:03:17Z"}),
+        ),
+        ("host_actions", json!("install")),
+    ] {
+        let mut data = offer();
+        data[key] = bad;
+        update_reads(&f, true, data);
+        assert!(refresh(&f).await.ok, "{key}");
+        let state = update(&f);
+        assert_eq!(state["status"], "unreachable", "{key}");
+        // Display keeps the last valid answer across a restart; it is never
+        // replaced by the invalid one.
+        assert_eq!(state["snapshot"]["current"], "3.2.7rc1", "{key}");
+    }
+    // An account the instance no longer accepts shows nothing.
+    f.http.replies.lock().unwrap().push_back((
+        "/api/session",
+        Reply::Ready(response(401, json!({"error": "auth_required"}), None)),
+    ));
+    assert!(refresh(&f).await.ok);
+    let state = update(&f);
+    assert_eq!(
+        (
+            state["status"].clone(),
+            state["snapshot"].clone(),
+            state["can_manage"].clone()
+        ),
+        (json!("unauthorized"), Value::Null, json!(false))
+    );
+}
+
+// B1 fencing: a standalone install's request stays open for the whole install
+// while the shell keeps reading. A reply that arrives after the selection
+// changed publishes nothing, even after the same instance is opened again.
+#[tokio::test]
+async fn a_held_install_allows_reads_and_its_late_reply_changes_nothing() {
+    let f = selected_for_update().await;
+    update_reads(&f, true, offer());
+    assert!(refresh(&f).await.ok);
+    let (release, held) = oneshot::channel();
+    let sent = Arc::new(Notify::new());
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/upgrade", Reply::Held(held, sent.clone())));
+    let client = f.client.clone();
+    let install = tokio::spawn(async move {
+        action(
+            &client,
+            ClientAction::InstanceUpdateInstall {
+                target_version: "3.2.8-rc.4".into(),
+            },
+        )
+        .await
+    });
+    sent.notified().await;
+    assert_eq!(update(&f)["request"]["phase"], "sending");
+    // Reads go on while the install request is open; a second send is busy.
+    let mut installing = offer();
+    installing["install"] =
+        json!({"phase": "installing", "target": "3.2.8-rc.4", "started_at": "2026-11-20T07:03:17Z"});
+    update_reads(&f, true, installing);
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["install"]["phase"], "installing");
+    assert_eq!(update(&f)["request"]["phase"], "sending");
+    assert_eq!(
+        action(&f.client, ClientAction::InstanceUpdateCheck {})
+            .await
+            .error
+            .unwrap()
+            .code,
+        "busy"
+    );
+    // The user leaves and opens the same instance again: a new sign-in, a new
+    // section. The old reply then arrives.
+    let old_generation = f.client.state().generation;
+    assert!(action(&f.client, ClientAction::ReturnLocal).await.ok);
+    assert!(f.client.state().instance_update.is_none());
+    let mut ready = ready("account-a", "one");
+    ready.headers.append(
+        SET_COOKIE,
+        "vibe_csrf_token=csrf-from-instance; Secure; Path=/".parse().unwrap(),
+    );
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .extend(selection(&catalog("account-a", &["one"]), "one", Reply::Ready(ready)));
+    assert!(select(&f, "one").await.ok);
+    let fresh = update(&f);
+    let revision = f.client.state().revision;
+    release.send(response(200, json!({"ok": true}), None)).ok().unwrap();
+    assert_eq!(install.await.unwrap().error.unwrap().code, "stale_generation");
+    assert_eq!(update(&f), fresh);
+    assert_eq!(f.client.state().revision, revision);
+    // Nothing is sent for a generation that is no longer the committed one.
+    let calls = f.http.calls.lock().unwrap().len();
+    let late = f
+        .client
+        .request(ClientRequest {
+            version: 1,
+            request_id: "late".into(),
+            expected_generation: old_generation,
+            action: ClientAction::InstanceUpdateCheck {},
+        })
+        .await;
+    assert_eq!(late.error.unwrap().code, "stale_generation");
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+}
+
+// After a generation change that keeps the instance selected (Back to the
+// Workbench), the old receipt is marked interrupted from a later read: never
+// resent, and no install result is inferred; `current` says what is installed.
+#[tokio::test]
+async fn an_interrupted_receipt_settles_without_resending() {
+    let f = selected_for_update().await;
+    update_reads(&f, true, offer());
+    assert!(refresh(&f).await.ok);
+    let (release, held) = oneshot::channel();
+    let sent = Arc::new(Notify::new());
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/upgrade", Reply::Held(held, sent.clone())));
+    let client = f.client.clone();
+    let install = tokio::spawn(async move {
+        action(
+            &client,
+            ClientAction::InstanceUpdateInstall {
+                target_version: "3.2.8-rc.4".into(),
+            },
+        )
+        .await
+    });
+    sent.notified().await;
+    assert!(action(&f.client, ClientAction::Cancel).await.ok);
+    // Still in flight: a read leaves it sending.
+    update_reads(&f, true, offer());
+    f.client.poll_instance_update(false).await;
+    assert_eq!(update(&f)["request"]["phase"], "sending");
+    release.send(response(200, json!({"ok": true}), None)).ok().unwrap();
+    assert_eq!(install.await.unwrap().error.unwrap().code, "stale_generation");
+    let mut done = offer();
+    done["current"] = json!("3.2.9");
+    done["latest"] = json!("3.2.9");
+    done["has_update"] = json!(false);
+    update_reads(&f, true, done);
+    f.client.poll_instance_update(false).await;
+    let state = update(&f);
+    assert_eq!(
+        (
+            state["request"]["phase"].clone(),
+            state["request"]["error_code"].clone()
+        ),
+        (json!("failed"), json!("interrupted"))
+    );
+    assert_eq!(state["snapshot"]["current"], "3.2.9");
+    // Settled: the shell stops rereading on its own, and sent one install.
+    let calls = f.http.calls.lock().unwrap().clone();
+    f.client.poll_instance_update(false).await;
+    assert_eq!(*f.http.calls.lock().unwrap(), calls);
+    assert_eq!(calls.iter().filter(|path| *path == "/api/upgrade").count(), 1);
+}
+
+// An instance that answers but refuses the app's sign-in ends `unauthorized`:
+// no timer retries, no new sign-in; opening the popup reads it once more.
+#[tokio::test]
+async fn an_unauthorized_instance_is_not_retried_on_a_timer() {
+    let f = selected_for_update().await;
+    f.http.replies.lock().unwrap().extend([
+        ("/api/session", ok(identity(true))),
+        (
+            "/api/version",
+            Reply::Ready(response(403, json!({"error": "instance_access_forbidden"}), None)),
+        ),
+    ]);
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["status"], "unauthorized");
+    let calls = f.http.calls.lock().unwrap().len();
+    f.client.poll_instance_update(true).await;
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/session", Reply::Ready(response(401, json!({}), None))));
+    f.client.refresh_instance_update().await;
+    assert_eq!(f.http.calls.lock().unwrap()[calls..], ["/api/session"]);
+    assert_eq!(update(&f)["status"], "unauthorized");
+    assert_eq!(f.view.cookie_reads.load(Ordering::SeqCst), 2);
+    // No account or instance sign-in was started.
+    let after = f.http.calls.lock().unwrap()[calls..].to_vec();
+    assert!(!after
+        .iter()
+        .any(|path| path.starts_with("/auth/") || path.contains("authorization")));
+    assert_eq!(f.view.committed.lock().unwrap().len(), 1);
+}
+
+// The instance page renews or rotates its sign-in in the WebView; the shell's
+// jar recovers from that exact store once, rechecks identity, and only reads.
+#[tokio::test]
+async fn an_expired_instance_jar_recovers_from_the_webview_store() {
+    let f = selected_for_update().await;
+    *f.view.instance_cookies.lock().unwrap() = Some(vec![
+        cookie::Cookie::parse(
+            "__Host-vibe_remote_session=from-webview; Secure; HttpOnly; Path=/; Domain=one.avibe.bot",
+        )
+        .unwrap()
+        .into_owned(),
+        cookie::Cookie::parse("unrelated=1; Path=/").unwrap().into_owned(),
+    ]);
+    f.http.replies.lock().unwrap().extend([
+        ("/api/session", Reply::Ready(response(401, json!({}), None))),
+        ("/api/session", ok(identity(true))),
+        ("/api/version", ok(offer())),
+    ]);
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["status"], "ready");
+    let headers = f.http.cookies.lock().unwrap().clone();
+    assert!(headers[headers.len() - 2].contains("__Host-vibe_remote_session=from-webview"));
+    assert!(!headers.iter().any(|cookie| cookie.contains("unrelated")));
+    assert_eq!(f.view.cookie_reads.load(Ordering::SeqCst), 1);
 }
 
 // Desktop lists the current remote, then instances this account opened as the
