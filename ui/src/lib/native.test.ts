@@ -12,6 +12,7 @@ import {
   nativePushUnsubscribeOutcome,
   nativeSharePresent,
   nativeShowAccount,
+  nativeSystemScheduleKinds,
   nativeVoicePermission,
   onNativePushOpened,
   openNativeExternal,
@@ -401,5 +402,25 @@ describe('native Show sharing', () => {
       });
       expect(call).not.toHaveBeenCalledWith('share.present', expect.anything());
     }
+  });
+});
+
+
+describe('system schedule supported kinds', () => {
+  it.each([['alarm'], ['reminder'], []])('returns the native kinds %j', async (...kinds) => {
+    installBridge({ capabilities: { systemSchedule: 1 }, call: vi.fn().mockResolvedValue({ contract: 1, supportedKinds: kinds }) });
+    expect(await nativeSystemScheduleKinds()).toEqual(kinds);
+  });
+
+  it.each([null, { contract: 1 }, { contract: 2, supportedKinds: ['alarm'] }, { contract: 1, supportedKinds: ['calendar'] }])(
+    'allows only bound recovery when capabilities are unknown: %j', async (result) => {
+      installBridge({ capabilities: { systemSchedule: 1 }, call: vi.fn().mockResolvedValue(result) });
+      expect(await nativeSystemScheduleKinds()).toEqual([]);
+    },
+  );
+
+  it('preserves bound recovery when the capability probe is unavailable', async () => {
+    installBridge({ capabilities: { systemSchedule: 1 }, call: vi.fn().mockRejectedValue(new Error('bridge unavailable')) });
+    expect(await nativeSystemScheduleKinds()).toEqual([]);
   });
 });

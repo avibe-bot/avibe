@@ -164,6 +164,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "skill_catalogs",
     "system_schedule_operations",
     "system_schedule_attempts",
+    "message_answer_operations",
     "show_session_events",
     "media_objects",
     "media_object_references",

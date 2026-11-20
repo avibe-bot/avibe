@@ -1,5 +1,34 @@
 {
+  "appLock": {
+    "lock": {
+      "lockedTitle": "Avibe 已锁定",
+      "unlockTouchID": "使用触控 ID 解锁",
+      "unlockPassword": "使用登录密码解锁",
+      "verifying": "正在验证…",
+      "verificationFailed": "没有验证成功，再试一次。",
+      "macNotEnrolled": "这台 Mac 没有录入指纹。",
+      "macLockout": "触控 ID 多次未识别，请用登录密码解锁。",
+      "macUnavailable": "触控 ID 现在不可用，例如笔记本合盖时。",
+      "restoreAllWindows": "解锁后，所有 Avibe 窗口一起恢复。",
+      "pendingContent": "收到一段要发给 Vibey 的内容。解锁后会放进输入框，由你确认再发送。",
+      "pendingLink": "收到一个 Avibe 链接。解锁后会打开它。",
+      "changeReason": "确认更改 App 锁",
+      "unlockReason": "解锁 Avibe",
+      "iphone": {
+        "unlockFaceID": "使用面容 ID 解锁",
+        "unlockPasscode": "使用设备密码解锁",
+        "faceIDNotEnrolled": "这台 iPhone 没有录入面容 ID。",
+        "faceIDDenied": "Avibe 没有使用面容 ID 的权限。可在 iOS 设置 › Avibe 中允许。",
+        "faceIDLockout": "面容 ID 多次未识别，请用设备密码解锁。",
+        "touchIDLockout": "触控 ID 多次未识别，请用设备密码解锁。"
+      }
+    }
+  },
   "desktopBootstrap": {
+    "askVibey": {
+      "kept": "内容已留在本机，连上实例后会放进 Vibey 的输入框。",
+      "unavailable": "这个实例里打不开 Vibey 的对话，内容没有放进去。"
+    },
     "retry": "重试",
     "installationHelp": "安装帮助",
     "notRunningTitle": "Avibe — 未运行",
@@ -704,6 +733,24 @@
       "remoteInstallWarning": "远程安装可能在主机无人值守时重启 Avibe、中断正在运行的工作，并在更新失败时需要主机上的人修复。",
       "autosaved": "修改会自动保存",
       "languageSaveFailed": "语言已在本机切换，但未能保存到此实例",
+      "appLock": {
+        "title": "App 锁",
+        "descriptionFaceId": "打开 Avibe，或离开超过所选时间后回来，需要先用面容 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
+        "descriptionTouchIdPhone": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
+        "descriptionMac": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或 Mac 登录密码解锁。只对这台 Mac 生效，更改时需要验证一次。",
+        "off": "关闭",
+        "immediately": "立即",
+        "oneMinute": "1 分钟后",
+        "fiveMinutes": "5 分钟后",
+        "verifying": "正在验证…",
+        "failed": "没有验证成功，设置没有改变。",
+        "noPasscodePhone": "这台 iPhone 没有设置密码，App 锁无法使用。在 iOS 设置 › 面容 ID 与密码 中设置密码后即可开启。",
+        "noPasswordMac": "这个 Mac 用户没有登录密码，App 锁无法使用。在系统设置 › 用户与群组 中设置密码后即可开启。",
+        "faceIdDenied": "Avibe 没有使用面容 ID 的权限，会用设备密码解锁。可在 iOS 设置 › Avibe 中允许面容 ID。",
+        "passwordOnlyMac": "这台 Mac 现在没有可用的触控 ID，会用 Mac 登录密码解锁。",
+        "coversPhone": "App 锁只挡住 App 里的内容。通知预览由 iOS 设置 › 通知 决定；后台同步和提醒照常进行。",
+        "coversMac": "App 锁挡住 Avibe 的所有窗口。本机 Runtime 和 Agent 照常运行；通知预览由系统设置 › 通知 决定。"
+      },
       "desktopMini": {
         "title": "桌面迷你窗",
         "description": "在桌面上显示桌宠迷你窗。",

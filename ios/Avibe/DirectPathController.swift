@@ -36,6 +36,9 @@ struct DirectPathStatus: Equatable, Sendable {
     /// network, and its round-trip time. Read when the status is asked for;
     /// a change of it is not a change of the status.
     var selected: DirectSelectedPath? = nil
+    /// For diagnosis: how often the transport checked its path again, and
+    /// why, since the instance was selected. Counts only.
+    var counts: DirectPathCounts = .zero
     /// For diagnosis: the last few CONNECTs' races, oldest first.
     var races: [DirectRaceRecord] = []
     /// For diagnosis: the last few times committed direct relays were closed
@@ -83,6 +86,9 @@ struct DirectPathStatus: Equatable, Sendable {
                 object["path"] = NSNull()
             }
             object["attempts"] = diagnostics.attempts.map(\.jsonObject)
+        }
+        if counts != .zero {
+            object["counts"] = counts.jsonObject
         }
         if !races.isEmpty {
             object["connections"] = races.map(\.jsonObject)
@@ -532,9 +538,11 @@ final class DirectPathController {
         let selected = origin.host == target?.authority.host
         var diagnostics: DirectPathDiagnostics?
         var selectedPath: DirectSelectedPath?
+        var counts = DirectPathCounts.zero
         if selected {
             let read = transport.pathDiagnostics
             selectedPath = read.selected
+            counts = transport.pathCounts
             // The current path only while new connections prefer it.
             let shown = DirectPathDiagnostics(
                 current: preferred == .direct ? currentPath : nil,
@@ -549,6 +557,7 @@ final class DirectPathController {
             diagnostics: diagnostics,
             path: preferred == .direct && selected ? currentPath : nil,
             selected: preferred == .direct && selected ? selectedPath : nil,
+            counts: counts,
             races: selected ? races : [],
             losses: selected ? losses : []
         )

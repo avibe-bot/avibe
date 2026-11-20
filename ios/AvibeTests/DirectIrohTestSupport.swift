@@ -575,6 +575,8 @@ final class DirectIrohManualClock: @unchecked Sendable {
 @MainActor
 final class DirectIrohFakeNetwork: DirectIrohNetworkMonitoring {
     private var onChange: (@MainActor () -> Void)?
+    /// What the stand-in says the monitor ignored so far.
+    var ignoredUpdates = 0
 
     var isWatching: Bool {
         onChange != nil

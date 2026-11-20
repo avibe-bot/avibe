@@ -354,6 +354,43 @@ struct DirectLossRecord: Equatable, Sendable {
     }
 }
 
+/// How often the transport checked its path again, and why, since the
+/// instance was selected. For diagnosis: counts only.
+struct DirectPathCounts: Equatable, Sendable {
+    /// Times a usable path was suspended to be checked again (`verifying`).
+    var verifications = 0
+    /// Probes started after a network path update.
+    var probesAfterPathUpdate = 0
+    /// Probes started after a direct candidate failed.
+    var probesAfterCandidateFailure = 0
+    /// Probes started after an answer that had run out was renewed.
+    var probesAfterRenewal = 0
+    /// Connections to the instance attempted. One that connects sends one
+    /// probe of its own, not counted above.
+    var dials = 0
+    /// Updates of the system's network path that were acted on.
+    var pathUpdates = 0
+    /// Updates of the system's network path that changed nothing the
+    /// transport depends on, and were ignored.
+    var pathUpdatesIgnored = 0
+
+    static let zero = DirectPathCounts()
+
+    var jsonObject: [String: Any] {
+        [
+            "verifications": verifications,
+            "probes": [
+                "path_update": probesAfterPathUpdate,
+                "candidate_failed": probesAfterCandidateFailure,
+                "renewal": probesAfterRenewal,
+            ],
+            "dials": dials,
+            "path_updates": pathUpdates,
+            "path_updates_ignored": pathUpdatesIgnored,
+        ]
+    }
+}
+
 /// What the transport can say about its path, for diagnosis.
 struct DirectPathDiagnostics: Equatable, Sendable {
     /// The path the live connection runs on now, if one is usable.
@@ -399,9 +436,18 @@ protocol DirectTransporting: AnyObject, Sendable {
     /// The path the live connection runs on, and the last attempts.
     @MainActor
     var pathDiagnostics: DirectPathDiagnostics { get }
+
+    /// How often the path was checked again, and why.
+    @MainActor
+    var pathCounts: DirectPathCounts { get }
 }
 
 extension DirectTransporting {
+    @MainActor
+    var pathCounts: DirectPathCounts {
+        .zero
+    }
+
     @MainActor
     var pathDiagnostics: DirectPathDiagnostics {
         .empty

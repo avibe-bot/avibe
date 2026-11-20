@@ -1,6 +1,7 @@
 export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
+  | 'appLock'
   | 'app'
   | 'badge'
   | 'health'
@@ -289,6 +290,19 @@ export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
 /** Establishes a connection only; request completion comes from the instance API. */
 export async function nativeHealthConnect(params: { requestId: string; pairingCode: string }): Promise<{ state: 'connected' | 'declined' | 'failed' } | null> {
   return callNative('health', 'health.connect', params);
+}
+
+/** Kinds supported for NEW schedules; recovery/cancel retain device ownership. */
+export async function nativeSystemScheduleKinds(): Promise<Array<'alarm' | 'reminder'>> {
+  // Unknown capabilities prohibit NEW creates, while device-bound recovery and
+  // cancellation still reach Runtime with an empty kinds list.
+  const result = await callNative<{ contract: number; supportedKinds: unknown }>(
+    'systemSchedule', 'systemSchedule.capabilities',
+  ).catch(() => null);
+  const kinds = result?.supportedKinds;
+  if (result?.contract !== 1 || !Array.isArray(kinds)
+    || kinds.some((kind) => kind !== 'alarm' && kind !== 'reminder')) return [];
+  return [...new Set(kinds)] as Array<'alarm' | 'reminder'>;
 }
 
 export async function nativeSystemScheduleRequest(
@@ -1063,4 +1077,14 @@ export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot |
   } catch {
     return null;
   }
+}
+
+/** `appLock.status` (ui/src/lib/appLockContract.ts); the caller parses the payload. */
+export async function nativeAppLockStatus(): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.status');
+}
+
+/** `appLock.setPolicy`; the shell verifies the device owner before it saves. */
+export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.setPolicy', { policy });
 }

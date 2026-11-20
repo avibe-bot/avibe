@@ -36,6 +36,7 @@ pub mod origin;
 pub mod pet;
 pub mod private_runtime;
 pub mod receipt;
+pub mod selection;
 pub mod status;
 pub mod window_frame;
 

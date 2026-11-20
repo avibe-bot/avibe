@@ -114,6 +114,7 @@ A **session** is one endpoint and one connection for one accepted answer.
 | A newly accepted answer of the same generation, after that | Probed | `usable`, same generation, if the probe passes; `lost` if not | — |
 | The lifetime passes while the answer is still being dialled | — | — | The dial is closed; ladder |
 | A network change with no session | — | — | Whatever was under way stops; start over after 0.5 s |
+| An update of the system's path that changes nothing the transport depends on (`DirectIrohNetworkSnapshot`; remote-direct-ios.md section 7) | Unchanged | none | Counted as ignored; nothing else |
 | `deselect`, a new `select` | Ended | none | — |
 | The App enters the background | Ended | `lost` if a session was up | Start over on the return, if still selected |
 

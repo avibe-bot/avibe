@@ -18,6 +18,23 @@
         }
       }
     },
+    "NSFaceIDUsageDescription" : {
+      "comment" : "Explains the system Face ID permission prompt; App Lock is its only use.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use Face ID to unlock Avibe."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用面容 ID 解锁 Avibe。"
+          }
+        }
+      }
+    },
     "NSHealthShareUsageDescription" : {
       "comment" : "Explains the system HealthKit read permission prompt.",
       "localizations" : {
