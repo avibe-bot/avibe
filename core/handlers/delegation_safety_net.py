@@ -14,7 +14,9 @@ from storage.agent_session_rows import reserve_write_lock
 from storage.background import enqueue_run_in_connection, run_update_event_transaction
 from storage.models import agent_sessions, session_delegations
 from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
-from storage.session_delegations import IDLE_NOTICE_ACTOR_PREFIX, candidate_query, dispatched_turn_reply, eligible_pair
+from storage.session_delegations import (
+    IDLE_NOTICE_ACTOR_PREFIX, candidate_query, dispatched_turn_reply, eligible_pair, ensure_receipt_watermark,
+)
 
 if TYPE_CHECKING:
     from core.scheduled_tasks import ScheduledTaskService
@@ -48,6 +50,7 @@ def notice_message(session_id: str, reply: str) -> str:
 class DelegationSafetyNet:
     def __init__(self, service: ScheduledTaskService) -> None:
         self.service = service
+        self._watermarked = False
 
     def _eligible(self, conn, observation):
         return eligible_pair(conn, observation, sync_run_ids=self.service.sync_waiting_run_ids)
@@ -56,6 +59,11 @@ class DelegationSafetyNet:
         store = self.service.request_store.sqlite_backend
         if store is None:
             return [], False
+        if not self._watermarked:
+            # Armed once, at the first scan of this version: earlier endings are history.
+            with store.engine.begin() as conn:
+                ensure_receipt_watermark(conn)
+            self._watermarked = True
         with store.engine.connect() as conn:
             rows = list(conn.execute(candidate_query(limit=limit + 1, cursor=cursor, occupied=occupied)).mappings())
             items = [RuntimeWorkItem(
@@ -85,14 +93,15 @@ class DelegationSafetyNet:
             target = None
         with run_update_event_transaction(store.engine) as conn:
             reserve_write_lock(conn)
+            ensure_receipt_watermark(conn)
             pair = self._eligible(conn, observation)
             if pair is None:
                 return False
-            if pair.get("unavailable"):
+            if pair.get("unavailable") or pair.get("answered"):
                 conn.execute(update(session_delegations).where(
                     session_delegations.c.sender_session_id == pair["sender_session_id"],
                     session_delegations.c.recipient_session_id == pair["recipient_session_id"],
-                ).values(state="unavailable"))
+                ).values(state="answered" if pair.get("answered") else "unavailable"))
                 return False
             if target is None:
                 return False

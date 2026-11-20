@@ -43,6 +43,10 @@ def harness(tmp_path, monkeypatch):
                 agent_variant="vibey", agent_name="vibey", title=f"Title {session_id}", status="active",
                 visibility="foreground", agent_status="idle", metadata_json="{}", created_at=NOW, updated_at=NOW,
             ))
+    # The service starts before any of these dispatches end: arm the receipt watermark.
+    from storage.session_delegations import ensure_receipt_watermark
+    with engine.begin() as conn:
+        ensure_receipt_watermark(conn)
     yield SimpleNamespace(service=service, requests=requests, engine=engine, lane=DelegationSafetyNet(service))
     requests.sqlite_backend.close()
 

@@ -23,6 +23,10 @@ from storage.models import (
 )
 
 IDLE_NOTICE_ACTOR_PREFIX = "delegation-idle:"
+#: ``state_meta`` key: when this instance first ran receipts for ended Turns. A
+#: dispatched Turn that ended before it is history, never answered with a receipt:
+#: 3.2.8rc2 sent 24 receipts for dispatches up to ten days old on its first scan.
+RECEIPT_WATERMARK_KEY = "delegation_receipts_since"
 _PENDING_DELIVERIES = tuple(state for state, policy in DELIVERY_STATE_MATRIX.items() if policy.ordering != "terminal")
 _LIVE_RUN_STATUSES = ("queued", "pending", "running", "processing")
 
@@ -94,6 +98,45 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
             index_elements=[session_delegations.c.sender_session_id, session_delegations.c.recipient_session_id],
             set_={key: value for key, value in values.items() if key not in {"sender_session_id", "recipient_session_id"}},
         ))
+
+
+def ensure_receipt_watermark(conn: Connection) -> str:
+    """The receipt watermark, set to now the first time; idempotent."""
+    import json as _json
+
+    from storage.message_deliveries import turn_now_iso
+    from storage.models import state_meta
+
+    now = turn_now_iso()
+    conn.execute(insert(state_meta).values(
+        key=RECEIPT_WATERMARK_KEY, value_json=_json.dumps(now), updated_at=now,
+    ).on_conflict_do_nothing(index_elements=[state_meta.c.key]))
+    return receipt_watermark(conn) or now
+
+
+def _instant(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
+    except ValueError:
+        return None
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def receipt_watermark(conn: Connection) -> str | None:
+    import json as _json
+
+    from storage.models import state_meta
+
+    raw = conn.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == RECEIPT_WATERMARK_KEY)
+    ).scalar_one_or_none()
+    try:
+        value = _json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 def has_dispatch_pair(conn: Connection, sender_session_id: str, recipient_session_id: str) -> bool:
@@ -199,9 +242,9 @@ def eligible_pair(
     )).mappings().first()
     if pair is None:
         return None
-    run = conn.execute(select(agent_runs.c.metadata_json).where(
-        agent_runs.c.id == pair["run_id"],
-    )).mappings().first()
+    run = conn.execute(select(
+        agent_runs.c.metadata_json, agent_runs.c.status, agent_runs.c.cancel_requested, agent_runs.c.created_at,
+    ).where(agent_runs.c.id == pair["run_id"])).mappings().first()
     if run is None:
         return None
     metadata = _object(run["metadata_json"])
@@ -209,6 +252,23 @@ def eligible_pair(
         # An older same-epoch binary can open this pair during rollback.
         # Retire it even when pending work would otherwise defer the receipt.
         return {**dict(pair), "unavailable": True}
+    turn = conn.execute(dispatched_turn_query(str(pair["run_id"]))).mappings().first()
+    watermark = _instant(receipt_watermark(conn))
+    if watermark is None:
+        return None  # not armed yet: the first scan sets it
+    ended = _instant(turn["terminal_at"]) if turn is not None and turn["state"] == "terminal" else None
+    if ended is None and turn is None:
+        ended = _instant(pair["updated_at"])  # no Turn link: the dispatch's own acceptance
+    if ended is not None and ended < watermark:
+        # History: this dispatch ended before this instance sent receipts at all.
+        return {**dict(pair), "unavailable": True}
+    if _has_rows(conn, select(agent_runs.c.id).where(
+        agent_runs.c.source_kind == "agent", agent_runs.c.source_actor == pair["recipient_session_id"],
+        agent_runs.c.session_id == pair["sender_session_id"], agent_runs.c.created_at > run["created_at"],
+        agent_runs.c.status.in_(("succeeded", "completed")),
+    )):
+        # The recipient has since written back to the dispatcher.
+        return {**dict(pair), "answered": True}
     recipient = pair["recipient_session_id"]
     for session_id in (pair["sender_session_id"], recipient):
         session = conn.execute(select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)).first()
@@ -229,6 +289,9 @@ def eligible_pair(
         pair["sender_session_id"], recipient, str(pair["run_id"]),
     )):
         return None
+    if run["cancel_requested"] or str(run["status"] or "") in {"canceled", "cancelled"}:
+        # The dispatcher called it off; its failure notice, not a receipt, answers it.
+        return {**dict(pair), "unavailable": True}
     return {**dict(pair), "metadata": metadata}
 
 
@@ -260,7 +323,10 @@ def acknowledge_sync_return(engine, run_id: str) -> None:
 def dispatched_turn_query(run_id: str):
     """The Turn that took a dispatched Run's input: three primary-key lookups."""
     return (
-        select(session_turns.c.id, session_turns.c.terminal_evidence_json)
+        select(
+            session_turns.c.id, session_turns.c.state, session_turns.c.terminal_at,
+            session_turns.c.terminal_evidence_json,
+        )
         .select_from(
             agent_runs.join(message_deliveries, message_deliveries.c.id == agent_runs.c.delivery_id)
             .join(session_turns, session_turns.c.id == message_deliveries.c.turn_id)
