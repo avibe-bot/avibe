@@ -30,7 +30,7 @@ const lineCount = (locator: Locator) => locator.evaluate((element) => {
 });
 
 const reach = async (page: Page, state: State, lang: CopyLocale) => {
-  const claude = page.getByRole('article', { name: 'Claude Max' });
+  const claude = page.getByRole('article', { name: 'Claude Max', exact: true });
   const useFable = claude.getByRole('button', { name: hub('quota.resetCards.useNamed', { name: hub('quota.resetCards.kind.fable', {}, lang) }, lang), exact: true });
   if (state === 'refreshing') {
     await claude.getByRole('button', { name: hub('quota.refreshThisAccount', {}, lang), exact: true }).click();
