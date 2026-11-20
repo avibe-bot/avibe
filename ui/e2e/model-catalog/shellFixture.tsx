@@ -6,7 +6,7 @@ import { ToastProvider } from '../../src/context/ToastProvider';
 
 // Only reads at the API boundary are replaced. Layout and interactions render
 // the complete shipped Models page, with no account or credential data.
-function installShellFixture() {
+export function installShellFixture() {
   const backends = ['claude', 'codex', 'opencode', 'vibey'] as const;
   const sources: Source[] = ['Anthropic API', 'OpenAI API', 'Grok API', 'OpenAI'].map((name, index) => ({
     id: `src_shell${index}`, display_name: name, vendor: index === 0 ? 'anthropic' : 'openai',

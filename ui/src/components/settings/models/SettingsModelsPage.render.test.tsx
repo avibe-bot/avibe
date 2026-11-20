@@ -18,7 +18,7 @@ import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SUBSCRIPTION_VENDORS } from './subscriptionOptions';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type ResetCard, type ResetCardLock, type ResetCardUseResult, type Source, type UsageReport } from './types';
 
 // The page navigates to Agents when the user clicks an Agent that needs
 // attention, so it needs a router in scope. Every render site wants the same
@@ -2880,6 +2880,170 @@ describe('SettingsModelsPage quota region', () => {
     trigger.remove();
     await userEvent.click(await screen.findByRole('button', { name: /^Cancel$|^取消$/ }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ })));
+  });
+});
+
+// Using a reset card from the quota card (ui/design: models/quota-reset-cards/*): only the user's
+// confirmed press sends a use, exactly once; the server's lock holds the account on every page;
+// and what the answer leaves on screen is the server's own reading. What each state says is
+// `ResetCards.test.tsx`'s subject.
+describe('SettingsModelsPage reset cards', () => {
+  const openQuota = () => userEvent.click(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ }));
+  const account = () => screen.getByRole('article', { name: 'Claude Max' });
+  const cardUseButton = (kind: 'Fable' | 'Full') => within(account()).getByRole('button', {
+    name: kind === 'Fable' ? /^Use Fable reset$|^使用 Fable 重置卡$/ : /^Use Full reset$|^使用 全部额度重置卡$/,
+  }) as HTMLButtonElement;
+  const confirmButton = () => within(account()).getByRole('button', { name: /^Use it$|^确认使用$/ });
+  const cancelButton = () => within(account()).getByRole('button', { name: /^Cancel$|^取消$/ });
+  const refreshButton = (name: string) => within(screen.getByRole('article', { name })).getByRole('button', { name: /^Refresh this account$|^刷新这个账号$/ }) as HTMLButtonElement;
+  const card = (over: Partial<ResetCard> & Pick<ResetCard, 'kind'>): ResetCard => ({
+    count: 1, expires_at: '2026-11-28T09:00:00Z', stated: true, usable: true, blocked: null, blocked_until: null, ...over,
+  });
+  const quotaWith = ({ fable = 3, lock = null, used = 100 }: { fable?: number; lock?: ResetCardLock | null; used?: number } = {}): QuotaSummary => ({
+    refresh_interval_seconds: 300,
+    sources: [
+      {
+        source_id: 'src_claude', vendor: 'anthropic', display_name: 'Claude Max', account_label: null, plan: 'max',
+        fetched_at: new Date().toISOString(), state: 'ok',
+        windows: [{ id: 'five_hour', kind: 'session', label: 'five_hour', used_pct: used, window_seconds: 18_000, resets_at: new Date(Date.now() + 3_600_000).toISOString() }],
+        reset_cards: { state: 'ok', lock, cards: [card({ kind: 'all' }), card({ kind: 'fable', count: fable })] },
+      },
+      {
+        source_id: 'src_chatgpt', vendor: 'openai', display_name: 'ChatGPT Pro', account_label: null, plan: 'pro',
+        fetched_at: new Date().toISOString(), state: 'ok', windows: [],
+        reset_cards: { state: 'ok', lock: null, cards: [card({ kind: 'account', stated: false })] },
+      },
+    ],
+  });
+  const openWith = async (quota: QuotaSummary) => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    vi.mocked(modelsApi.getQuota).mockResolvedValue(quota);
+    vi.mocked(modelsApi.refreshQuota).mockResolvedValue(quota);
+    await openQuota();
+    await screen.findByRole('article', { name: 'Claude Max' });
+  };
+
+  it('MH-QUOTA-057: 「使用」 only asks, 取消 sends nothing, and 确认使用 sends exactly one use whose answer is the reading shown', async () => {
+    await openWith(quotaWith());
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const answer = deferred<ResetCardUseResult>();
+    redeem.mockReturnValue(answer.promise);
+    const user = userEvent.setup();
+
+    await user.click(cardUseButton('Fable'));
+    expect(redeem).not.toHaveBeenCalled();
+    expect(within(account()).getByRole('status').textContent).toMatch(/^Spends 1\. It can’t be undone\.$|^用掉 1 张，不能撤销。$/);
+    // Focus lands on the safe choice, so a second Enter cannot spend a card.
+    expect(document.activeElement).toBe(cancelButton());
+    await user.keyboard('{Enter}');
+    expect(redeem).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(cardUseButton('Fable'));
+
+    await user.click(cardUseButton('Fable'));
+    const providerReads = vi.mocked(modelsApi.listSources).mock.calls.length;
+    await user.dblClick(confirmButton());
+    expect(redeem).toHaveBeenCalledTimes(1);
+    expect(redeem).toHaveBeenCalledWith('src_claude', 'fable');
+    expect((within(account()).getByRole('button', { name: /^Using…$|^使用中…$/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(cardUseButton('Full').disabled).toBe(true);
+
+    answer.resolve({
+      quota: quotaWith({ fable: 2, used: 0 }),
+      use: { kind: 'fable', outcome: 'used', reason: null, cleared: ['five_hour'] },
+    });
+    expect((await within(account()).findByRole('status')).textContent).toMatch(/^1 used\. The weekly usage spent on Fable|^用了 1 张。本周用在 Fable 上的额度已退回/);
+    expect(within(account()).getByText('×2')).toBeTruthy();
+    expect(within(account()).getByRole('meter').getAttribute('aria-valuenow')).toBe('0');
+    expect(cardUseButton('Fable').disabled).toBe(false);
+    // A use can resume an account paused for quota: the providers are read behind it.
+    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(providerReads));
+    expect(redeem).toHaveBeenCalledTimes(1);
+  });
+
+  it('MH-QUOTA-058: a lock the server holds disables 「使用」 on a freshly opened page and again after a remount', async () => {
+    const quota = quotaWith({ lock: { reason: 'in_flight', kind: 'fable', since: new Date().toISOString() } });
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const check = () => {
+      expect((within(account()).getByRole('button', { name: /^Using…$|^使用中…$/ }) as HTMLButtonElement).disabled).toBe(true);
+      expect(cardUseButton('Full').disabled).toBe(true);
+      // Another account's cards are its own.
+      expect((within(screen.getByRole('article', { name: 'ChatGPT Pro' })).getByRole('button', { name: /^Use Limit reset$|^使用 重置卡$/ }) as HTMLButtonElement).disabled).toBe(false);
+    };
+    await openWith(quota);
+    check();
+    cleanup();
+    await openWith(quota);
+    check();
+    await userEvent.click(cardUseButton('Full'));
+    expect(redeem).not.toHaveBeenCalled();
+  });
+
+  it('MH-QUOTA-059: says not used only when the server does; a lost answer holds the account until its refresh lands', async () => {
+    await openWith(quotaWith());
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const user = userEvent.setup();
+    const use = async () => {
+      await user.click(cardUseButton('Fable'));
+      await user.click(confirmButton());
+    };
+
+    redeem.mockResolvedValueOnce({ quota: quotaWith(), use: { kind: 'fable', outcome: 'not_used', reason: 'cooldown', cleared: [] } });
+    await use();
+    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^Not used: one was used recently|^没有用掉：刚用过一张/);
+
+    // The server refused before asking the vendor: the account was busy, or holds no usable card.
+    const reads = () => vi.mocked(modelsApi.getQuota).mock.calls.length;
+    let before = reads();
+    redeem.mockRejectedValueOnce(new ApiCallError('reset_card_locked', undefined, true, [], [], [], 409));
+    await use();
+    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^Not used: this account can’t use this kind|^没有用掉：这个账号现在不能用这种卡/);
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+
+    // No answer: the card may be spent. Nothing is retried, and the quota is read again for the server's lock.
+    before = reads();
+    redeem.mockRejectedValueOnce(new ApiCallError('bad_response', 'Request deadline exceeded', false));
+    await use();
+    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    expect(cardUseButton('Fable').disabled).toBe(true);
+    expect(cardUseButton('Full').disabled).toBe(true);
+    expect(redeem).toHaveBeenCalledTimes(3);
+
+    // The account's own refresh lands a current reading: the count is the server's, and the cards are free again.
+    const force = vi.mocked(modelsApi.refreshQuota);
+    force.mockResolvedValueOnce(quotaWith({ fable: 2, used: 0 }));
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(within(account()).queryByRole('alert')).toBeNull());
+    expect(force).toHaveBeenCalledTimes(1);
+    expect(within(account()).getByText('×2')).toBeTruthy();
+    expect(cardUseButton('Fable').disabled).toBe(false);
+    expect(redeem).toHaveBeenCalledTimes(3);
+  });
+
+  it('MH-QUOTA-060: an account\'s own refresh forces one read of every account and spins only on that account', async () => {
+    await openWith(quotaWith());
+    const force = vi.mocked(modelsApi.refreshQuota);
+    const read = deferred<QuotaSummary>();
+    force.mockReturnValueOnce(read.promise);
+    const providerReads = vi.mocked(modelsApi.listSources).mock.calls.length;
+    await userEvent.click(refreshButton('Claude Max'));
+    expect(force).toHaveBeenCalledTimes(1);
+    const spins = (name: string) => refreshButton(name).querySelector('svg')!.getAttribute('class')!.includes('animate-spin');
+    expect(spins('Claude Max')).toBe(true);
+    expect(spins('ChatGPT Pro')).toBe(false);
+    expect(refreshButton('Claude Max').disabled).toBe(true);
+    expect(refreshButton('ChatGPT Pro').disabled).toBe(true);
+    // The page's own refresh is held, and does not claim the read as its own.
+    const pageRefresh = screen.getByRole('button', { name: /^Refresh now$|^立即刷新$/ }) as HTMLButtonElement;
+    expect(pageRefresh.disabled).toBe(true);
+
+    await act(async () => { read.resolve(quotaWith()); });
+    await waitFor(() => expect(refreshButton('Claude Max').disabled).toBe(false));
+    expect(spins('Claude Max')).toBe(false);
+    expect(pageRefresh.disabled).toBe(false);
+    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(providerReads));
+    expect(force).toHaveBeenCalledTimes(1);
   });
 });
 

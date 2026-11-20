@@ -49,6 +49,8 @@ import type {
   UsageReport,
   UsageWindowKey,
   QuotaSummary,
+  ResetCardKind,
+  ResetCardUseResult,
 } from './types';
 import { BACKEND_MODEL_INPUT_MODALITIES, BACKEND_MODEL_OUTPUT_MODALITIES, USAGE_DEFAULT_WINDOW } from './types';
 
@@ -174,6 +176,9 @@ export type ModelsApi = {
   getQuota(): Promise<QuotaSummary>;
   /** The same report, re-read now (the service bounds how often). */
   refreshQuota(): Promise<QuotaSummary>;
+  /** Spends one of the account's reset cards of `kind`, only on the user's own
+   *  confirmed press. Never retried: a lost answer may still have spent it. */
+  redeemResetCard(sourceId: string, kind: ResetCardKind): Promise<ResetCardUseResult>;
   /** The Tools tab read: each hosted tool's setting and what real use learned. */
   getHostedTools(): Promise<HostedToolsStatus>;
   /** Change the fields the body names; answers the whole status again. */
@@ -709,6 +714,9 @@ export const modelsApi: ModelsApi = {
     call<{ usage: UsageReport }>(`/api/models/usage?window=${window}`).then((r) => r.usage),
   getQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota').then((r) => r.quota),
   refreshQuota: () => call<{ quota: QuotaSummary }>('/api/models/quota/refresh', jsonInit('POST')).then((r) => r.quota),
+  redeemResetCard: (sourceId, kind) => call<ResetCardUseResult>(
+    `/api/models/sources/${encodeURIComponent(sourceId)}/reset-cards/use`, jsonInit('POST', { kind }),
+  ).then((r) => ({ quota: r.quota, use: r.use })),
   getHostedTools: () => call<{ hosted_tools: HostedToolsStatus }>('/api/models/hosted-tools').then((r) => r.hosted_tools),
   putHostedTool: (tool, body) => call<{ hosted_tools: HostedToolsStatus }>(
     `/api/models/hosted-tools/${encodeURIComponent(tool)}`, jsonInit('PUT', body),

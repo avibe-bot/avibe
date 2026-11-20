@@ -1101,7 +1101,59 @@ export type SourceQuota = {
   windows: QuotaWindow[];
   /** Absent means "not reported", never zero. */
   value?: SourceQuotaValue;
+  /** Absent for a vendor without reset cards. */
+  reset_cards?: ResetCards;
 };
+
+/** What a card resets. `all`, `fable`, `session` and `weekly` are Anthropic's
+ *  kinds; `account` is ChatGPT's one kind. */
+export type ResetCardKind = 'all' | 'fable' | 'session' | 'weekly' | 'account';
+
+/** Why no card of a kind can be used now. */
+export type ResetCardBlock = 'needs_limit' | 'cooldown' | 'unavailable';
+
+export type ResetCard = {
+  kind: ResetCardKind;
+  /** Positive: a kind the account holds none of is not listed. */
+  count: number;
+  /** The first of these to expire (UTC), or null when the vendor names none. */
+  expires_at: string | null;
+  /** Whether the vendor's own statement of what this kind does applies. */
+  stated: boolean;
+  usable: boolean;
+  blocked: ResetCardBlock | null;
+  /** When a cooldown ends (UTC); null otherwise or when unknown. */
+  blocked_until: string | null;
+};
+
+/** One use in flight per account, held by the server so every open page agrees.
+ *  `unconfirmed`: the vendor's answer never arrived, so the card may be spent;
+ *  it holds until the account is read again. */
+export type ResetCardLock = {
+  reason: 'in_flight' | 'unconfirmed';
+  kind: ResetCardKind;
+  since: string;
+};
+
+/** `{state:'ok', cards:[]}` holds none; `unread` could not read them. */
+export type ResetCards = {
+  state: 'ok' | 'unread';
+  lock: ResetCardLock | null;
+  cards: ResetCard[];
+};
+
+export type ResetCardOutcome = 'used' | 'not_used' | 'unconfirmed';
+export type ResetCardRefusal = 'not_limited' | 'cooldown' | 'refused' | 'unavailable';
+
+/** `POST /api/models/sources/{id}/reset-cards/use`: what happened, beside the
+ *  account's reading taken after it. */
+export type ResetCardUse = {
+  kind: ResetCardKind;
+  outcome: ResetCardOutcome;
+  reason: ResetCardRefusal | null;
+  cleared: string[];
+};
+export type ResetCardUseResult = { quota: QuotaSummary; use: ResetCardUse };
 
 export type QuotaValuePeriod = PricedUsage & {
   /** billing_cycle from a configured renewal day, else the trailing 30 days. */

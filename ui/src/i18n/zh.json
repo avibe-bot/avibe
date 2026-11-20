@@ -1925,6 +1925,54 @@
             "team": "Team",
             "enterprise": "Enterprise"
           }
+        },
+        "refreshThisAccount": "刷新这个账号",
+        "resetCards": {
+          "title": "重置卡",
+          "kind": {
+            "all": "全部额度重置卡",
+            "fable": "Fable 重置卡",
+            "session": "5 小时重置卡",
+            "weekly": "每周重置卡",
+            "account": "重置卡"
+          },
+          "effect": {
+            "all": "5 小时额度和每周额度回满",
+            "fable": "退回本周用在 Fable 上的额度，其他模型用掉的不退；5 小时额度回满",
+            "session": "5 小时额度回满",
+            "weekly": "每周额度回满"
+          },
+          "count": "×{{number}}",
+          "expires": "最早 {{date}} 到期",
+          "use": "使用",
+          "useNamed": "使用 {{name}}",
+          "confirm": "确认使用",
+          "cancel": "取消",
+          "confirmNote": "用掉 1 张，不能撤销。",
+          "using": "使用中…",
+          "used": "用了 1 张。",
+          "usedDone": "用了 1 张。{{done}}。",
+          "done": {
+            "all": "5 小时额度和每周额度已回满",
+            "fable": "本周用在 Fable 上的额度已退回，5 小时额度已回满",
+            "session": "5 小时额度已回满",
+            "weekly": "每周额度已回满"
+          },
+          "notUsed": {
+            "not_limited": "没有用掉：这个账号现在没到限额。",
+            "cooldown": "没有用掉：刚用过一张，要等一会儿才能再用。",
+            "refused": "没有用掉：供应商拒绝了这次请求。",
+            "unavailable": "没有用掉：供应商现在不让用这张卡。",
+            "held": "没有用掉：这个账号现在不能用这种卡。",
+            "other": "没有用掉。"
+          },
+          "unconfirmed": "没收到供应商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。",
+          "blocked": {
+            "needs_limit": "到限额后才能用",
+            "cooldown": "{{duration}}后可用",
+            "cooldownUnknown": "过一会儿才能用",
+            "unavailable": "供应商现在不让用"
+          }
         }
       },
       "usage": {

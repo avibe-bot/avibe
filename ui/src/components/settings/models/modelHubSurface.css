@@ -3149,6 +3149,12 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-quota-chip.model-hub-quota-tone--danger b { color: var(--model-hub-quota-tone); }
 .model-hub-quota-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .model-hub-quota-card { padding: 16px var(--model-hub-usage-padding-x) 18px; }
+/* Glyph, name, status, and the account's own refresh on one line. */
+.model-hub-quota-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .model-hub-quota-account { font-size: var(--model-hub-usage-title-size); }
 .model-hub-quota-plan {
   padding: 1px 7px;
@@ -3317,6 +3323,13 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   .model-hub-usage-details-actions { width: 100%; justify-content: flex-start; }
   /* One account per line; the pace and reset lines stack so neither truncates. */
   .model-hub-quota-grid { grid-template-columns: minmax(0, 1fr); }
+  /* The status goes under the name, so the name keeps the width the refresh takes. */
+  .model-hub-quota-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    row-gap: 6px;
+  }
+  .model-hub-quota-head > .model-hub-quota-status { grid-column: 2; grid-row: 2; justify-self: start; }
   .model-hub-quota-row-foot { flex-direction: column; gap: 4px; }
   .model-hub-quota-reset { white-space: normal; }
   .model-hub-quota-timeline-title { width: 100%; }

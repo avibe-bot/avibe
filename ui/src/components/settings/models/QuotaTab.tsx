@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { atLeast, formatCost, formatCount, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
+import { ResetCardsBlock, type ResetCardIntent, type ResetCardPhase } from './ResetCards';
 import type { PricedUsage, QuotaSummary, QuotaWindow, SourceQuota, SourceQuotaValue, UsagePricing } from './types';
 import { TimeHint } from './TimeHint';
 import { VendorGlyph } from './vendorGlyph';
@@ -289,9 +290,13 @@ const AccountCard: React.FC<{
   /** The read is still running: a gap is loading, not a failure. */
   pending?: boolean;
   onRequestReauth?: (sourceId: string) => void;
-  action?: React.ReactNode;
-  section?: React.ReactNode;
-}> = ({ source, now, text, pending = false, onRequestReauth, action, section }) => {
+  /** A quota refresh is running; `spinning` when it is this account's own. */
+  refreshing: boolean;
+  spinning: boolean;
+  onRefresh?: () => void;
+  resetCardPhase: ResetCardPhase | null;
+  onResetCardIntent?: (intent: ResetCardIntent) => void;
+}> = ({ source, now, text, pending = false, onRequestReauth, refreshing, spinning, onRefresh, resetCardPhase, onResetCardIntent }) => {
   const { t } = useTranslation();
   const retained = quotaIsRetained(source);
   const status = sourceStatus(source, now);
@@ -311,7 +316,7 @@ const AccountCard: React.FC<{
       aria-label={source.display_name}
       data-quota-source={source.source_id}
     >
-      <header className="flex items-center gap-2.5">
+      <header className="model-hub-quota-head">
         <VendorGlyph vendor={source.vendor} className="size-7 shrink-0" />
         <div className="min-w-0 flex-1">
           <strong className="model-hub-quota-account flex min-w-0 items-center gap-2 font-semibold text-foreground">
@@ -323,7 +328,17 @@ const AccountCard: React.FC<{
         <span className={cn('model-hub-quota-status flex shrink-0 items-center gap-1.5', toneClass(statusTone))}>
           <span className="model-hub-quota-dot" aria-hidden />{statusText}
         </span>
-        {action}
+        {/* ui/design: models/quota-reset-cards/refreshing — reads every account again; this one spins. */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="model-hub-quota-account-refresh size-7 shrink-0 text-muted"
+          disabled={refreshing}
+          aria-label={t('settings.models.quota.refreshThisAccount') as string}
+          onClick={() => onRefresh?.()}
+        >
+          <RefreshCw className={cn('size-3.5', spinning && 'animate-spin')} aria-hidden />
+        </Button>
       </header>
       {retained && !Number.isNaN(fetchedAt) && (
         <div className="model-hub-quota-stale flex items-center gap-2" role="status">
@@ -374,7 +389,7 @@ const AccountCard: React.FC<{
               {scoped.map((window) => <WindowRow key={window.id} window={window} now={now} retained={retained} nested text={text} />)}
             </div>
           )}
-      {section}
+      <ResetCardsBlock cards={source.reset_cards} phase={resetCardPhase} now={now} duration={text.duration} onIntent={onResetCardIntent} />
       {source.value && <ValueStrip value={source.value} text={text} />}
     </article>
   );
@@ -410,10 +425,16 @@ export const QuotaTab: React.FC<{
   onRequestReauth?: (sourceId: string) => void;
   /** Fixes the clock the projection reads; the tab ticks its own when absent. */
   now?: number;
-  /** Per-account slots: a control beside the status, and a block between the limits and the valuation. */
-  accountAction?: (source: SourceQuota) => React.ReactNode;
-  accountSection?: (source: SourceQuota) => React.ReactNode;
-}> = ({ quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow, accountAction, accountSection }) => {
+  /** The account whose own refresh is running; the read covers every account. */
+  refreshingSourceId?: string | null;
+  onRefreshAccount?: (sourceId: string) => void;
+  /** Each account's reset-card step on this page (ui/design: models/quota-reset-cards/confirm, …). */
+  resetCardPhases?: Readonly<Record<string, ResetCardPhase>>;
+  onResetCardIntent?: (sourceId: string, intent: ResetCardIntent) => void;
+}> = ({
+  quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow,
+  refreshingSourceId = null, onRefreshAccount, resetCardPhases, onResetCardIntent,
+}) => {
   const { t } = useTranslation();
   const now = useNow(fixedNow);
   const text = useQuotaText(now);
@@ -447,8 +468,8 @@ export const QuotaTab: React.FC<{
           </p>
         </div>
         <Button variant="outline" size="sm" className="shrink-0 self-start sm:self-auto" disabled={refreshing} onClick={() => void onRefresh?.()}>
-          <RefreshCw className={cn('size-[13px]', refreshing && 'animate-spin')} aria-hidden />
-          {refreshing ? t('settings.models.quota.refreshing') : t('settings.models.quota.refresh')}
+          <RefreshCw className={cn('size-[13px]', refreshing && refreshingSourceId === null && 'animate-spin')} aria-hidden />
+          {refreshing && refreshingSourceId === null ? t('settings.models.quota.refreshing') : t('settings.models.quota.refresh')}
         </Button>
       </div>
       {regionFailed(quotaRead) && (
@@ -560,8 +581,11 @@ export const QuotaTab: React.FC<{
                     text={text}
                     pending={pending.has(source.source_id)}
                     onRequestReauth={onRequestReauth}
-                    action={accountAction?.(source)}
-                    section={accountSection?.(source)}
+                    refreshing={refreshing}
+                    spinning={refreshing && refreshingSourceId === source.source_id}
+                    onRefresh={onRefreshAccount && (() => onRefreshAccount(source.source_id))}
+                    resetCardPhase={resetCardPhases?.[source.source_id] ?? null}
+                    onResetCardIntent={onResetCardIntent && ((intent) => onResetCardIntent(source.source_id, intent))}
                   />
                 ))}
               </div>
