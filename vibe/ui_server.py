@@ -5514,7 +5514,7 @@ async def model_hub_use_reset_card(source_id: str, starlette_request: FastAPIReq
         from core.handlers.model_hub import ModelHubError
 
         try:
-            # The client checks the body in this process: only a Source id and one kind reach the controller.
+            # The client checks the body in this process: only a Source id, one kind and a count reach the controller.
             result = await _model_hub_service().use_reset_card(source_id, _model_hub_json_object("invalid_parameter"))
             return _model_hub_success(**result)
         except ModelHubError as exc:

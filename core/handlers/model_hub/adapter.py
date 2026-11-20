@@ -845,7 +845,9 @@ class EngineAdapter(Protocol):
         account, or the inventory could not be read); ``unknown`` when the
         request was sent and its answer is not a recognised, self-consistent
         vendor result (no answer, a timeout, a status other than 200, a
-        malformed or contradictory body); otherwise ``ack``, ``not_limited``,
+        malformed or contradictory body, a member named twice, a refusal that
+        carries anything that could be evidence of a redemption); otherwise
+        ``ack``, ``not_limited``,
         ``cooldown``, ``refused`` or ``unavailable`` with ``before`` (the count
         of that kind read just before the request) and ``cleared`` (the known
         limit names the vendor reported). A statement is what the vendor said,
@@ -862,8 +864,9 @@ class EngineAdapter(Protocol):
         parsed ``plan``, ``windows`` and optional ``reset_cards`` (closed per-kind
         counts and eligibility from a separate read) cross this boundary, never the grant or
         the raw body. ``reset_cards`` is ``ok`` only when the vendor's own report
-        was recognised: an answer that says nothing about cards is ``unread``,
-        never "none". Beside it, optional ``reset_card_account`` is the opaque
+        was recognised by what only that report carries and every field a count
+        rests on was read with its type checked: anything else is ``unread``,
+        never "none" and never a lower count. Beside it, optional ``reset_card_account`` is the opaque
         key of the account this same reading was made under (as
         ``reset_card_account_key``), or None; it never reaches an API payload.
         ``plan`` is the plan this read named, one without a built-in

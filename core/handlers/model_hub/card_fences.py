@@ -25,7 +25,9 @@ Every way of not knowing fails closed:
 * An unknown outcome is lifted only by a reading of that account the user asked
   for, begun after the outcome became unknown and at least
   ``UNKNOWN_OUTCOME_WAIT`` later: a vendor that did not answer may still finish
-  the request, and a count read a few seconds on would look untouched.
+  the request, and a count read a few seconds on would look untouched. The wait
+  is elapsed time on the monotonic clock, each account's own, and starts again
+  when a restart finds the lock. Wall-clock time is only what is shown.
 
 All disk access happens under one mutex and belongs on a worker thread, never on
 the controller's event loop. The controller process is the only writer.
@@ -39,8 +41,9 @@ import os
 import re
 import stat
 import threading
+import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Optional
 from uuid import uuid4
@@ -80,9 +83,10 @@ class _Row:
     # Readings numbered above this began after the outcome became unknown.
     # In memory only: a row loaded from disk predates every reading of this process.
     mark: int = 0
-    # When the outcome became unknown, as far as this process can tell: when its press
-    # ended without an answer, or when the row was found at startup. None while in flight.
-    unknown_at: Optional[datetime] = None
+    # When the outcome became unknown, on the monotonic clock, as far as this process can
+    # tell: when its press ended without an answer, or when the row was found at startup.
+    # None while in flight.
+    unknown_at: Optional[float] = None
 
     def stored(self) -> dict[str, str]:
         return {"request_id": self.request_id, "kind": self.kind, "since": self.since, "reason": self.reason}
@@ -192,11 +196,11 @@ def _read(path: Path) -> dict[str, _Row]:
 class CardFences:
     """One account, one unsettled use. See the module docstring for what fails closed."""
 
-    def __init__(self, directory: Path, *, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+    def __init__(self, directory: Path, *, monotonic: Callable[[], float] = time.monotonic):
         # A directory of its own: its privacy is checked, and on Windows inherited by the file.
         self.directory = directory
         self.path = directory / "fences.json"
-        self._now = now
+        self._monotonic = monotonic
         self._mutex = threading.Lock()
         self._rows: dict[str, _Row] = {}
         self._damaged = False
@@ -215,7 +219,7 @@ class CardFences:
             _require_private(self.directory, directory, directory=True)
             rows = _read(self.path)
             # When each became unknown is not on disk. Found now is the latest it can be.
-            found_at = self._now()
+            found_at = self._monotonic()
             for row in rows.values():
                 row.unknown_at = found_at
             self._rows = rows
@@ -289,7 +293,7 @@ class CardFences:
                 else:
                     self._rows = remaining
                     return True
-            row.reason, row.mark, row.unknown_at = UNCONFIRMED, mark, self._now()
+            row.reason, row.mark, row.unknown_at = UNCONFIRMED, mark, self._monotonic()
             try:
                 self._publish(self._rows)
             except Exception:  # noqa: BLE001
@@ -297,27 +301,28 @@ class CardFences:
                 pass
             return False
 
-    def unknown_floor(self) -> Optional[CardReadingFloor]:
-        """What one reading must be to answer every unknown outcome; None when there is none to lift."""
+    def unknown_floors(self) -> dict[str, CardReadingFloor]:
+        """Per account with an unknown outcome, what a reading must be to answer it; empty when none can be lifted."""
 
         with self._mutex:
             self._load()
-            unknown = [row for row in self._rows.values() if row.reason == UNCONFIRMED and row.unknown_at is not None]
-            if self._damaged or not unknown:
-                return None
-            return CardReadingFloor(
-                sequence=max(row.mark for row in unknown),
-                ripe_at=max(row.unknown_at for row in unknown) + UNKNOWN_OUTCOME_WAIT,
-            )
+            if self._damaged:
+                return {}
+            wait = UNKNOWN_OUTCOME_WAIT.total_seconds()
+            return {
+                account: CardReadingFloor(sequence=row.mark, ripe_at=row.unknown_at + wait)
+                for account, row in self._rows.items()
+                if row.reason == UNCONFIRMED and row.unknown_at is not None
+            }
 
-    def release_after_readings(self, readings: Iterable[tuple[str, int, datetime]]) -> None:
+    def release_after_readings(self, readings: Iterable[tuple[str, int, float]]) -> None:
         """Lift each unconfirmed lock that a later reading of its own account answers.
 
         ``readings`` are (account, sequence, started_at) of authoritative card
         readings the user asked for. A lock is lifted only by a reading numbered
         above its mark, so begun after the outcome became unknown, that also began
-        at least ``UNKNOWN_OUTCOME_WAIT`` after that moment. A use still in flight
-        is never touched. A failed write lifts nothing.
+        at least ``UNKNOWN_OUTCOME_WAIT`` after that moment on the monotonic clock.
+        A use still in flight is never touched. A failed write lifts nothing.
         """
 
         with self._mutex:
@@ -325,6 +330,7 @@ class CardFences:
             if self._damaged:
                 return
             remaining = dict(self._rows)
+            wait = UNKNOWN_OUTCOME_WAIT.total_seconds()
             for account, sequence, started_at in readings:
                 row = remaining.get(account)
                 if (
@@ -332,7 +338,7 @@ class CardFences:
                     and row.reason == UNCONFIRMED
                     and row.unknown_at is not None
                     and sequence > row.mark
-                    and started_at >= row.unknown_at + UNKNOWN_OUTCOME_WAIT
+                    and started_at >= row.unknown_at + wait
                 ):
                     del remaining[account]
             if len(remaining) == len(self._rows):

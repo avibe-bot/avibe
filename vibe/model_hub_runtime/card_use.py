@@ -11,9 +11,12 @@ Two rules shape everything below.
   read means nothing was sent (``no_card``). After it there is no second
   attempt and no other card: whatever cannot be read as the vendor's own
   recognised answer is ``unknown``.
-* A statement is only what the vendor said. Whether a card was actually spent is
-  decided by the controller from a fresh count; an answer that contradicts
-  itself is ``unknown`` here so that it can never be half of that agreement.
+* A statement is only what the vendor said, read strictly. Whether a card was
+  actually spent is decided by the controller from a fresh count. An answer is
+  ``unknown`` here, so that it can never be half of that agreement, when it
+  names a member twice, when a field has the wrong type, when its result and
+  reason are not a known pair, and when a refusal carries anything that could
+  be evidence of a redemption, including a member this client does not know.
 
 The vendors' vocabulary comes from other clients of the same endpoints, not from
 a live call: no card was used to build this.
@@ -70,13 +73,23 @@ _CLAUDE_STATEMENTS: Mapping[tuple[str, Optional[str]], str] = {
     },
 }
 
-# ChatGPT answers `{code, credit?: {redeemed_at?}, windows_reset?}`. Its
+# ChatGPT answers `{code, credit?: {status?, redeemed_at?, ...}, windows_reset?}`. Its
 # `already_redeemed` is unknown for the same reason as Anthropic's `already_used`.
 _CHATGPT_STATEMENTS: Mapping[str, str] = {
     "reset": ACK,
     "nothing_to_reset": "not_limited",
     "no_credit": "unavailable",
 }
+
+# What a refusal may carry. Anything else beside it might be evidence that a card
+# went after all, in a member this client cannot read; that is not a refusal to
+# rely on.
+_CLAUDE_REFUSAL_MEMBERS = frozenset({"result", "reason", "cleared", "cooldown_until"})
+_CHATGPT_REFUSAL_MEMBERS = frozenset({"code", "windows_reset", "credit"})
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def binding_key(vendor: str, identity: object) -> str:
@@ -89,9 +102,9 @@ def binding_key(vendor: str, identity: object) -> str:
 
 
 def claude_organization(profile: object) -> str:
-    """The canonical organization uuid of an OAuth profile body; raises when it names none."""
+    """The canonical organization uuid of an OAuth profile body; raises when it names none, or names it twice."""
 
-    return str(UUID(_load_object(profile)["organization"]["uuid"]))
+    return str(UUID(_load_object(profile, unique=True)["organization"]["uuid"]))
 
 
 def account_key_or_none(vendor: str, *, profile: object = None, account_id: object = None) -> Optional[str]:
@@ -143,8 +156,8 @@ def _claude_statement(result: Mapping[str, Any]) -> tuple[str, list[str]]:
     ):
         return UNKNOWN, []
     statement = _CLAUDE_STATEMENTS.get((status, reason or None), UNKNOWN)
-    if statement != ACK and cleared:
-        # A refusal that also cleared a limit is not a refusal we can rely on.
+    if statement != ACK and (cleared or not _CLAUDE_REFUSAL_MEMBERS.issuperset(result)):
+        # A refusal that also cleared a limit, or says more than a refusal says.
         return UNKNOWN, []
     return statement, [limit for limit in LIMITS if limit in (cleared or ())]
 
@@ -153,14 +166,20 @@ def _chatgpt_statement(result: Mapping[str, Any]) -> tuple[str, list[str]]:
     code, windows, credit = result.get("code"), result.get("windows_reset"), result.get("credit")
     if type(code) is not str or not _optional(windows, int) or (windows or 0) < 0 or not _optional(credit, dict):
         return UNKNOWN, []
-    redeemed = (credit or {}).get("redeemed_at")
-    if redeemed is not None and _moment(redeemed) is None:
-        return UNKNOWN, []
     statement = _CHATGPT_STATEMENTS.get(code, UNKNOWN)
-    if statement == ACK and windows == 0:
-        return UNKNOWN, []
-    if statement in ("not_limited", "unavailable") and (windows or redeemed is not None):
-        # "Nothing was redeemed" beside evidence of a redemption.
+    if statement == ACK:
+        status, redeemed = (credit or {}).get("status"), (credit or {}).get("redeemed_at")
+        if (
+            windows == 0
+            or not _optional(status, str)
+            or status == "available"
+            or (redeemed is not None and _moment(redeemed) is None)
+        ):
+            # A reset that reset nothing, or whose credit is unreadable or still available.
+            return UNKNOWN, []
+    elif windows or credit is not None or not _CHATGPT_REFUSAL_MEMBERS.issuperset(result):
+        # "Nothing was redeemed" beside a credit, a window that was reset, or more
+        # than a refusal says. A credit's status alone can say it was redeemed.
         return UNKNOWN, []
     return statement, []
 
@@ -185,22 +204,22 @@ def _prepare(*, client, auth, vendor: str, kind: str, request_id: str, headers, 
 
     if not _REQUEST_ID.fullmatch(request_id):
         raise ValueError("request id")
-    now = datetime.now(timezone.utc)
     candidates: list[tuple[str, Optional[datetime], str]] = []
+    # Expiry is judged when each inventory arrives, not when it was asked for.
     if vendor == "anthropic":
         usage = _call(client, auth, headers, "GET", f"{CLAUDE}/oauth/usage?cedar_ember=1&skip_spend=1")
-        inventory = reset_cards.claude_cards(usage, now, candidates=candidates)
+        inventory = reset_cards.claude_cards(usage, _utcnow(), candidates=candidates)
     elif vendor in ("codex", "openai"):
         count = reset_cards.codex_count(_call(client, auth, headers, "GET", f"{CHATGPT}/usage"))
         details = _call(client, auth, headers, "GET", f"{CHATGPT}/rate-limit-reset-credits") if count else None
-        inventory = reset_cards.codex_cards(count, details, now, candidates=candidates)
+        inventory = reset_cards.codex_cards(count, details, _utcnow(), candidates=candidates)
     else:
         raise ValueError("vendor")
     before = next(card["count"] for card in inventory["cards"] if card["kind"] == kind and card["usable"])
     # The card the user chose by kind: usable now, earliest to expire. Never the vendor's
     # "next" card in its place, and never a second choice after a refusal.
     far = datetime.max.replace(tzinfo=timezone.utc)
-    _, handle = min(
+    expires, handle = min(
         (end or far, handle) for name, end, handle in candidates if name == kind and _HANDLE.fullmatch(handle)
     )
     # The claim is on one account: the grant must still be that account's, read now.
@@ -215,6 +234,9 @@ def _prepare(*, client, auth, vendor: str, kind: str, request_id: str, headers, 
             raise ValueError("another account")
         url = f"{CHATGPT}/rate-limit-reset-credits/consume"
         data = {"redeem_request_id": request_id, "credit_id": handle}
+    if expires <= _utcnow():
+        # It ran out during the reads above: not sent, rather than sent to be refused.
+        raise ValueError("expired")
     return url, data, before
 
 
@@ -237,7 +259,7 @@ def use_once(*, client, auth, vendor: str, kind: str, request_id: str, headers, 
     try:
         # The only write, made once. A transport error, a timeout, a status other than
         # 200 or an unreadable body leaves the outcome unknown; none of them is retried.
-        result = _load_object(_call(client, auth, headers, "POST", url, data))
+        result = _load_object(_call(client, auth, headers, "POST", url, data), unique=True)
     except Exception:
         return {"statement": UNKNOWN}
     try:

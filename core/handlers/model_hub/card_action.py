@@ -3,13 +3,17 @@
 A card is the user's consumable and using one cannot be undone, so this module
 is written around what must not happen:
 
-* Two vendor requests for one press, or for two presses that overlap on one
-  account. A press is one call into the adapter's use, never repeated. Presses
-  are admitted in arrival order: a press yields to every earlier press that was
-  still being handled when it arrived and turns out to be on the same account,
-  however late either account could be named (two Sources can share one). The
-  account itself is claimed durably before anything is sent (``card_fences``),
-  which covers a second page, a reload and a restart.
+* Two cards for one intention. A press is one call into the adapter's use,
+  never repeated. A press is being handled from the moment it arrives until its
+  answer is assembled and leaves this module, whatever has been settled
+  meanwhile. Presses are admitted in arrival order: a press yields to every
+  earlier press that was still being handled when it arrived and turns out to be
+  on the same account, however late either account could be named (two Sources
+  can share one). A press also says how many cards of its kind the page was
+  showing; if a fresh reading shows another number the page was out of date (a
+  second tab, after the first one's use) and the press is refused before
+  anything is claimed or sent. The account itself is claimed durably before
+  anything is sent (``card_fences``), which covers a reload and a restart.
 * "Used" or "not used" said wrongly. Either needs the vendor's own recognised
   statement and a fresh, recognised count of that same account that agrees with
   it. Everything else is ``unconfirmed``: the account stays locked.
@@ -50,6 +54,7 @@ LIMITS = ("five_hour", "seven_day", "seven_day_overage_included")
 _REFUSALS = frozenset({"not_limited", "cooldown", "refused", "unavailable"})
 _ACCOUNT = re.compile(r"[a-f0-9]{64}")
 _MAX_SOURCE_ID_CHARS = 128
+_MAX_COUNT = 2**53 - 1
 
 
 @dataclass(eq=False)
@@ -58,9 +63,14 @@ class Press:
 
     source_id: str
     kind: str
+    # How many cards of that kind the page was showing when the user confirmed.
+    count: int
     since: str
     # The account this press is on, once it could be named; None when it could not.
     account: "asyncio.Future[Optional[str]]"
+    # Its outcome is settled and its answer is being assembled. The summary then
+    # shows what the fence holds; admission stays closed until the answer has left.
+    settled: bool = False
 
 
 def _error(code: str, status: int) -> Exception:
@@ -69,21 +79,24 @@ def _error(code: str, status: int) -> Exception:
     return ModelHubError(code, status=status)
 
 
-def selection_kind(payload: object) -> str:
-    """The card kind of a use request, whose body is exactly ``{"kind": <kind>}``.
+def checked_selection(payload: object) -> tuple[str, int]:
+    """The kind and count of a use request, whose body is exactly ``{"kind": <kind>, "count": <positive integer>}``.
 
-    The Web route and the controller both call this, so nothing else is ever
-    carried between them or parsed on the controller's loop.
+    ``count`` is how many cards of that kind the page was showing. The Web route
+    and the controller both call this, so nothing else is ever carried between
+    them or parsed on the controller's loop.
     """
 
     if (
         type(payload) is not dict
-        or set(payload) != {"kind"}
+        or set(payload) != {"kind", "count"}
         or type(payload["kind"]) is not str
         or payload["kind"] not in KINDS
+        or type(payload["count"]) is not int
+        or not 1 <= payload["count"] <= _MAX_COUNT
     ):
         raise _error("invalid_parameter", 400)
-    return payload["kind"]
+    return payload["kind"], payload["count"]
 
 
 def checked_source_id(source_id: object) -> str:
@@ -196,8 +209,21 @@ async def _settle(service: "ModelHubService", account: str, request_id: str, *, 
         return False
 
 
+async def _summary(service: "ModelHubService") -> dict[str, Any]:
+    """The summary an answer carries: what is known now, without waiting on another account's reading.
+
+    Its failure must not hide what happened to the card.
+    """
+
+    try:
+        return await service.quota_summary(wait=False)
+    except Exception:  # noqa: BLE001
+        logger.warning("Model Hub could not read the quota summary for a reset card answer")
+        return empty_summary()
+
+
 async def _summary_after(service: "ModelHubService", fresh: Mapping[str, Any]) -> dict[str, Any]:
-    """The summary a settled use returns. Its failure must not hide what happened to the card."""
+    """The summary a settled use returns, after the resume its fresh reading allows."""
 
     if fresh:
         try:
@@ -205,11 +231,18 @@ async def _summary_after(service: "ModelHubService", fresh: Mapping[str, Any]) -
             await service._resume_accounts_with_quota({"sources": [fresh]})
         except Exception:  # noqa: BLE001
             logger.warning("Model Hub could not resume an account after a reset card use")
-    try:
-        return await service.quota_summary()
-    except Exception:  # noqa: BLE001
-        logger.warning("Model Hub could not read the quota summary after a reset card use")
-        return empty_summary()
+    return await _summary(service)
+
+
+async def _refused(service: "ModelHubService", code: str, press: Optional[Press] = None) -> Exception:
+    """A closed refusal: no card was used. It carries the summary as it now is, so the page can redraw."""
+
+    from .service import ModelHubError
+
+    if press is not None:
+        # Its own summary shows what holds the account, not this press.
+        press.settled = True
+    return ModelHubError(code, status=409, data={"quota": await _summary(service)})
 
 
 async def _transact(service: "ModelHubService", press: Press, source: QuotaSourceRef, account: str) -> dict[str, Any]:
@@ -217,7 +250,7 @@ async def _transact(service: "ModelHubService", press: Press, source: QuotaSourc
         request_id = await asyncio.to_thread(service.card_fences.claim, account, press.kind, service.now())
     except FenceUnavailable:
         # Already claimed, or the claim could not be made durable: nothing is sent.
-        raise _error("reset_card_locked", 409) from None
+        raise await _refused(service, "reset_card_locked", press) from None
     decision = unconfirmed_use(press.kind)
     nothing_sent = False
     fresh: Mapping[str, Any] = {}
@@ -236,22 +269,18 @@ async def _transact(service: "ModelHubService", press: Press, source: QuotaSourc
     released = await _settle(
         service, account, request_id, unknown=not nothing_sent and decision["outcome"] == "unconfirmed"
     )
-    # Settled: from here the summary shows what the fence holds, not a use in flight.
-    _retire(service, press)
+    # Settled: from here a summary shows what the fence holds, not a use in flight.
+    # The press itself is still being handled until its answer is assembled.
+    press.settled = True
     if not released:
         # Unknown, or established but the claim could not be released on disk: the
         # account stays locked, and the lock is what the user has to act on.
         decision = unconfirmed_use(press.kind)
     elif nothing_sent:
-        raise _error("reset_card_unavailable", 409)
+        raise await _refused(service, "reset_card_unavailable", press)
     outcome = decision["outcome"] if decision["reason"] is None else f"{decision['outcome']}:{decision['reason']}"
     logger.info("Model Hub reset card use: source=%s kind=%s outcome=%s", source.source_id, press.kind, outcome)
     return {"quota": await _summary_after(service, fresh), "use": decision}
-
-
-def _retire(service: "ModelHubService", press: Press) -> None:
-    if press in service._card_presses:
-        service._card_presses.remove(press)
 
 
 async def _handle(service: "ModelHubService", press: Press, earlier: tuple[Press, ...]) -> dict[str, Any]:
@@ -266,15 +295,31 @@ async def _handle(service: "ModelHubService", press: Press, earlier: tuple[Press
             # Later presses compare against it, whatever becomes of this one.
             press.account.set_result(account)
         if source is None or account is None:
-            raise _error("reset_card_unavailable", 409)
+            raise await _refused(service, "reset_card_unavailable", press)
         for other in earlier:
             # It was being handled when this press arrived. If it is on the same
             # account it wins, even when it has settled and released its claim since.
             if await other.account == account:
-                raise _error("reset_card_locked", 409)
+                raise await _refused(service, "reset_card_locked", press)
+        view = await asyncio.to_thread(service.card_fences.view)
+        if view.damaged or account in view.locks:
+            # Locked already: no vendor is asked on behalf of a press that cannot go on.
+            raise await _refused(service, "reset_card_locked", press)
+        # What the page was showing must be what is held now. A second tab that still
+        # shows the count from before the first one's use is refused here, before
+        # anything is claimed or sent.
+        fresh = await service.quota.reread(source)
+        reading = service.quota.card_reading(source) if fresh else None
+        held = _held(reading.cards) if reading is not None and reading.account == account else None
+        if held is None:
+            raise await _refused(service, "reset_card_unavailable", press)
+        if held.get(press.kind, 0) != press.count:
+            raise await _refused(service, "reset_card_count_changed", press)
         return await _transact(service, press, source, account)
     finally:
-        _retire(service, press)
+        # Only now may another press on this Source or this account be admitted: the
+        # answer, with its summary, is assembled.
+        service._card_presses.remove(press)
 
 
 def _observed(task: "asyncio.Task[Any]") -> None:
@@ -285,13 +330,13 @@ def _observed(task: "asyncio.Task[Any]") -> None:
 async def use(service: "ModelHubService", source_id: object, payload: object) -> dict[str, Any]:
     """Use one card of the requested kind on the Source's account. See the module docstring."""
 
-    kind = selection_kind(payload)
+    kind, count = checked_selection(payload)
     source_id = checked_source_id(source_id)
     presses = service._card_presses
     # No await between this check and the append: admission is one step on the loop.
     if any(press.source_id == source_id for press in presses):
-        raise _error("reset_card_locked", 409)
-    press = Press(source_id, kind, _iso(service.now()), asyncio.get_running_loop().create_future())
+        raise await _refused(service, "reset_card_locked")
+    press = Press(source_id, kind, count, _iso(service.now()), asyncio.get_running_loop().create_future())
     earlier = tuple(presses)
     presses.append(press)
     task = asyncio.create_task(_handle(service, press, earlier), name="model-hub-reset-card-use")
@@ -300,10 +345,10 @@ async def use(service: "ModelHubService", source_id: object, payload: object) ->
     return await asyncio.shield(task)
 
 
-async def unknown_floor(service: "ModelHubService") -> Optional[CardReadingFloor]:
-    """What a reading must be to answer every unknown use; None when there is none."""
+async def unknown_floors(service: "ModelHubService") -> dict[str, CardReadingFloor]:
+    """Per account with an unknown use, what a reading must be to answer it."""
 
-    return await asyncio.to_thread(service.card_fences.unknown_floor)
+    return await asyncio.to_thread(service.card_fences.unknown_floors)
 
 
 async def lift_unknown(service: "ModelHubService", sources: list[QuotaSourceRef]) -> None:
@@ -348,7 +393,7 @@ async def overlay(service: "ModelHubService", sources: list[QuotaSourceRef], sum
     """Put each account's lock on its rows, from memory and the fence: no vendor is asked here."""
 
     view = await asyncio.to_thread(service.card_fences.view)
-    presses = {press.source_id: press for press in service._card_presses}
+    presses = {press.source_id: press for press in service._card_presses if not press.settled}
     if not presses and not view.locked:
         return
     by_id = {source.source_id: source for source in sources}

@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 _COMPUTER_SCRIPT_REQUEST_MAX_BYTES = 8 * 1024 * 1024
-# `{"source_id": ..., "selection": {"kind": ...}}`: a Source id and one short word.
+# `{"source_id": ..., "selection": {"kind": ..., "count": ...}}`: a Source id, one short word and a number.
 _RESET_CARD_REQUEST_MAX_BYTES = 1024
 
 
@@ -1879,7 +1879,8 @@ def create_app(
         try:
             result = await service.use_reset_card(body["source_id"], body["selection"])
         except ModelHubError as exc:
-            return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code})
+            # A refusal carries the summary as it now is, and nothing else.
+            return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code, **exc.data})
         return {"ok": True, "result": result}
 
     @app.post("/internal/model-hub")

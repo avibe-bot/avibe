@@ -2092,8 +2092,9 @@ scenarios:
     kind: boundary
     layer: unit
     test:
-      - tests/test_model_hub_card_use.py::test_the_web_process_hands_the_controller_only_a_source_and_a_kind
+      - tests/test_model_hub_card_use.py::test_the_web_process_hands_the_controller_only_a_source_a_kind_and_a_count
       - tests/test_model_hub_card_use.py::test_the_controller_reads_a_use_request_bounded_and_exact
+      - tests/test_model_hub_card_use.py::test_the_controller_checks_the_kind_and_the_count_again
       - tests/test_model_hub_card_use.py::test_a_use_travels_from_the_web_client_to_the_service_once_and_comes_back_closed
   - id: MH-QUOTA-063
     name: A summary asks no vendor who an account is and shows an unnamed lock as locked
@@ -2124,6 +2125,55 @@ scenarios:
     kind: safety
     layer: unit
     test: tests/test_model_hub_card_use.py::test_an_unknown_outcome_is_lifted_only_by_a_reading_begun_after_it_and_a_minute_later
+  - id: MH-QUOTA-067
+    name: A card row or block that cannot be read makes the inventory unread, never smaller
+    status: covered
+    kind: safety
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_card_row_that_cannot_be_read_makes_the_inventory_unread_not_smaller
+      - tests/test_model_hub_card_use.py::test_a_card_block_that_cannot_be_read_is_unread
+      - tests/test_model_hub_card_use.py::test_a_credit_row_that_cannot_be_read_makes_the_inventory_unread
+  - id: MH-QUOTA-068
+    name: A press closes its Source and its account until its answer is assembled
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_a_press_is_being_handled_until_its_answer_is_assembled
+  - id: MH-QUOTA-069
+    name: A card that expires while it is read or before it is sent is not the one sent
+    status: covered
+    kind: guard
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_card_that_expires_while_the_inventory_is_read_is_not_the_one_sent
+      - tests/test_model_hub_card_use.py::test_a_card_that_expires_between_being_picked_and_being_sent_is_not_sent
+  - id: MH-QUOTA-070
+    name: A press from a page showing an outdated count claims and sends nothing
+    status: covered
+    kind: concurrency
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_second_tab_still_showing_the_count_from_before_a_use_spends_nothing
+      - tests/test_model_hub_card_use.py::test_a_press_from_a_page_that_is_out_of_date_claims_and_sends_nothing
+  - id: MH-QUOTA-071
+    name: The wait after an unknown outcome is elapsed time, not the wall clock
+    status: covered
+    kind: safety
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_the_wait_after_an_unknown_outcome_is_elapsed_time_not_the_wall_clock
+  - id: MH-QUOTA-072
+    name: Each account with an unknown outcome waits its own minute
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_each_account_waits_its_own_minute
+  - id: MH-QUOTA-073
+    name: The answer to a use does not wait for another account's reading
+    status: covered
+    kind: timeout_cancel
+    layer: unit
+    test: tests/test_model_hub_card_use.py::test_an_answer_does_not_wait_for_another_accounts_reading
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

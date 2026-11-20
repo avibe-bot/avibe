@@ -1792,9 +1792,15 @@ class ModelHubService:
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
         # Reset-card uses: the durable claim per account, and the presses being handled now.
-        self.card_fences = CardFences(paths.get_state_dir() / "model_hub_card_fences", now=lambda: self.now())
+        # Elapsed time for the wait after an unknown outcome: never the wall clock, which can be set.
+        self.monotonic: Callable[[], float] = time.monotonic
+        self.card_fences = CardFences(
+            paths.get_state_dir() / "model_hub_card_fences", monotonic=lambda: self.monotonic()
+        )
         self._card_presses: list[card_action.Press] = []
-        self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
+        self.quota = SubscriptionQuotaCache(
+            self._fetch_subscription_quota, now=lambda: self.now(), monotonic=lambda: self.monotonic()
+        )
         # A cached copy only: the picker read must not wait on the network.
         self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
             lambda: _cached_models_dev_catalog()
@@ -9143,7 +9149,7 @@ class ModelHubService:
 
         return await card_action.use(self, source_id, payload)
 
-    async def quota_summary(self, *, force: bool = False) -> dict:
+    async def quota_summary(self, *, force: bool = False, wait: bool = True) -> dict:
         """Report each hub-held subscription's rate-limit windows.
 
         A report, like usage metering: resolution never reads it. The cache
@@ -9153,18 +9159,21 @@ class ModelHubService:
         A forced read is the user's refresh, and it is the one place the report
         is acted on: an account paused for quota or rate is resumed unless the
         vendor's reading still shows the limit used up.
+
+        ``wait=False`` is for the answer to a reset-card use: what is known now,
+        without waiting for another account's reading.
         """
 
         sources = await asyncio.to_thread(self._quota_sources)
         # A reset-card use whose outcome is unknown is answered only here, by the
-        # user's own refresh: once the wait after it is over, each account with
-        # cards gets a reading begun since (shared by concurrent refreshes, held
-        # back by a vendor's rate-limit cooldown), and a recognised reading of the
-        # same account lifts its lock. An earlier refresh reads as usual and leaves
-        # the lock. A read that is not forced asks no vendor on a lock's behalf.
-        unknown = await card_action.unknown_floor(self) if force else None
-        summary = await self.quota.summary(sources, force=force, answering=unknown)
-        if unknown is not None:
+        # user's own refresh: once that account's wait is over, its Sources get a
+        # reading begun since (shared by concurrent refreshes, held back by a
+        # vendor's rate-limit cooldown), and a recognised reading of the same
+        # account lifts its lock. An earlier refresh reads as usual and leaves the
+        # lock. A read that is not forced asks no vendor on a lock's behalf.
+        unknown = await card_action.unknown_floors(self) if force else {}
+        summary = await self.quota.summary(sources, force=force, answering=unknown, wait=wait)
+        if unknown:
             await card_action.lift_unknown(self, sources)
         await card_action.overlay(self, sources, summary)
         if force:

@@ -24,6 +24,7 @@ import json
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Optional, Sequence
@@ -171,15 +172,29 @@ def _window(
     return window
 
 
-def _load_object(body: object, *, allow_array: bool = False) -> Any:
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    members = dict(pairs)
+    if len(members) != len(pairs):
+        raise ValueError("repeated member")
+    return members
+
+
+def _load_object(body: object, *, allow_array: bool = False, unique: bool = False) -> Any:
+    """Decode a vendor body that must be a JSON object (or array) and not an error envelope.
+
+    ``unique`` is for a body something will be decided on: an object that names
+    a member twice, at any depth, says two things and is refused, where an
+    ordinary decoder would quietly keep the last.
+    """
+
     if not isinstance(body, (str, bytes, bytearray)):
         raise SubscriptionQuotaError("malformed")
     size = len(body.encode("utf-8", "surrogatepass")) if isinstance(body, str) else len(body)
     if size > _MAX_BODY_BYTES:
         raise SubscriptionQuotaError("malformed")
     try:
-        payload = json.loads(body)
-    except (TypeError, UnicodeDecodeError, ValueError):
+        payload = json.loads(body, object_pairs_hook=_unique_members if unique else None)
+    except (TypeError, UnicodeDecodeError, ValueError, RecursionError):
         raise SubscriptionQuotaError("malformed") from None
     if not (allow_array and isinstance(payload, list)) and (not isinstance(payload, dict) or "error" in payload):
         raise SubscriptionQuotaError("malformed")
@@ -629,13 +644,13 @@ class CardReading:
     """One vendor reading of an account's reset cards, for the decisions that rest on it.
 
     ``sequence`` orders vendor readings against the moment a card use became
-    unknown and ``started_at`` is when this one began; ``forced`` says the user
-    asked for it; ``account`` is the opaque key of the account the same reading
-    was made under. None of it is serialized.
+    unknown and ``started_at`` is when this one began, on the monotonic clock;
+    ``forced`` says the user asked for it; ``account`` is the opaque key of the
+    account the same reading was made under. None of it is serialized.
     """
 
     sequence: int
-    started_at: datetime
+    started_at: float
     forced: bool
     account: Optional[str]
     cards: Mapping[str, Any]
@@ -643,10 +658,14 @@ class CardReading:
 
 @dataclass(frozen=True)
 class CardReadingFloor:
-    """What a reading must be to answer every unknown card use: numbered above ``sequence``, begun at or after ``ripe_at``."""
+    """What a reading must be to answer an account's unknown card use.
+
+    Numbered above ``sequence``, and begun at or after ``ripe_at`` on the
+    monotonic clock: the wait is elapsed time, whatever the wall clock does.
+    """
 
     sequence: int
-    ripe_at: datetime
+    ripe_at: float
 
 
 @dataclass
@@ -661,11 +680,11 @@ class _QuotaEntry:
     # The reading last started on this entry, whether or not it has answered.
     sequence: int = 0
     forced: bool = False
-    started_at: Optional[datetime] = None
+    started_at: Optional[float] = None
     # The reading the snapshot came from, and the account it was made under.
     snapshot_sequence: int = 0
     snapshot_forced: bool = False
-    snapshot_started_at: Optional[datetime] = None
+    snapshot_started_at: Optional[float] = None
     card_account: Optional[str] = None
 
 
@@ -686,9 +705,17 @@ class SubscriptionQuotaCache:
     `stale` (or `auth_expired`) with the windows it last had.
     """
 
-    def __init__(self, fetch: QuotaFetch, *, now: Callable[[], datetime]):
+    def __init__(
+        self,
+        fetch: QuotaFetch,
+        *,
+        now: Callable[[], datetime],
+        monotonic: Callable[[], float] = time.monotonic,
+    ):
         self._fetch = fetch
         self._now = now
+        # Elapsed time, for when a reading began; `now` is the wall clock of the throttles.
+        self._monotonic = monotonic
         self._entries: dict[str, _QuotaEntry] = {}
         self._fetch_slots = asyncio.Semaphore(QUOTA_MAX_CONCURRENT_FETCHES)
         self._sequence = itertools.count(1)
@@ -703,14 +730,19 @@ class SubscriptionQuotaCache:
         sources: Sequence[QuotaSourceRef],
         *,
         force: bool = False,
-        answering: Optional[CardReadingFloor] = None,
+        answering: Optional[Mapping[str, CardReadingFloor]] = None,
+        wait: bool = True,
     ) -> dict[str, Any]:
         """Report every Source, re-reading the ones that are due.
 
-        ``answering`` is for a forced read while a card use is unknown. Once
-        its floor can be met, an account with cards needs a reading the user
-        asked for that meets it, so the forced-refresh interval does not hold
-        that one back. A vendor's rate-limit cooldown still does.
+        ``answering`` is for a forced read while card uses are unknown: the
+        floor of each such account, by its opaque key. Once an account's floor
+        can be met, its Sources need a reading the user asked for that meets
+        it, so the forced-refresh interval does not hold that one back. A
+        vendor's rate-limit cooldown still does.
+
+        ``wait=False`` reports what is known now and names the Sources still
+        being read in ``pending``, for an answer that must not wait on them.
         """
 
         live = {source.source_id for source in sources}
@@ -722,7 +754,7 @@ class SubscriptionQuotaCache:
             for source in sources
             if (task := self._schedule(source, force=force, answering=answering)) is not None
         ]
-        if pending:
+        if pending and wait:
             # A slow vendor must not hold the page: whatever has not answered by
             # the deadline keeps running and lands in the next read.
             await asyncio.wait(pending, timeout=QUOTA_READ_DEADLINE_SECONDS)
@@ -764,24 +796,34 @@ class SubscriptionQuotaCache:
         source: QuotaSourceRef,
         *,
         force: bool,
-        answering: Optional[CardReadingFloor] = None,
+        answering: Optional[Mapping[str, CardReadingFloor]] = None,
     ) -> Optional[asyncio.Task[None]]:
         if source.vendor not in QUOTA_VENDORS:
             return None
         entry = self._entry(source)
         now = self._now()
+        floor: Optional[CardReadingFloor] = None
+        if force and answering and source.vendor in RESET_CARD_VENDORS:
+            if entry.card_account is not None:
+                # Its own account's unknown use, and nobody else's.
+                floor = answering.get(entry.card_account)
+            else:
+                # Not read under any account yet: held to what would answer every one
+                # of them. Until then the ordinary refresh limit applies to it.
+                floor = CardReadingFloor(
+                    sequence=max(each.sequence for each in answering.values()),
+                    ripe_at=max(each.ripe_at for each in answering.values()),
+                )
         # Whether this Source owes the user a reading that can answer an unknown card
         # use: the floor can be met by now, and the reading last started here does not.
         owed = (
-            force
-            and answering is not None
-            and source.vendor in RESET_CARD_VENDORS
-            and now >= answering.ripe_at
+            floor is not None
+            and self._monotonic() >= floor.ripe_at
             and not (
                 entry.forced
-                and entry.sequence > answering.sequence
+                and entry.sequence > floor.sequence
                 and entry.started_at is not None
-                and entry.started_at >= answering.ripe_at
+                and entry.started_at >= floor.ripe_at
             )
         )
         if entry.task is not None and not entry.task.done():
@@ -814,7 +856,7 @@ class SubscriptionQuotaCache:
 
     def _start(self, source: QuotaSourceRef, entry: _QuotaEntry, *, forced: bool) -> asyncio.Task[None]:
         # A reading begins here for the rules that rest on it; its vendor request follows.
-        entry.sequence, entry.forced, entry.started_at = self.tick(), forced, self._now()
+        entry.sequence, entry.forced, entry.started_at = self.tick(), forced, self._monotonic()
         entry.task = asyncio.create_task(
             self._refresh(source, entry, sequence=entry.sequence, forced=forced, started_at=entry.started_at),
             name=f"model-hub-quota-{source.source_id}",
@@ -828,7 +870,7 @@ class SubscriptionQuotaCache:
         *,
         sequence: int,
         forced: bool,
-        started_at: datetime,
+        started_at: float,
     ) -> None:
         try:
             async with self._fetch_slots:

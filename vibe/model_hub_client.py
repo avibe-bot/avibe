@@ -28,6 +28,7 @@ _RESET_CARD_USE_ANSWERS = frozenset(
         (404, "feature_disabled"),
         (409, "reset_card_locked"),
         (409, "reset_card_unavailable"),
+        (409, "reset_card_count_changed"),
     }
 )
 _REORDER_ORDER_UNSET = object()
@@ -335,19 +336,20 @@ class ModelHubRemoteService:
         """Ask the controller to use one reset card; only the Web route calls this.
 
         Checked here, in the Web process, before anything is sent: the controller
-        receives a Source id and exactly ``{"kind": <kind>}``, never the page's body.
-        Its own route, not an RPC operation: the CLI's dispatcher cannot reach it.
+        receives a Source id and exactly ``{"kind": <kind>, "count": <count>}``,
+        never the page's body. Its own route, not an RPC operation: the CLI's
+        dispatcher cannot reach it.
         """
 
         from core.handlers.model_hub.card_action import (
+            checked_selection,
             checked_source_id,
             empty_summary,
-            selection_kind,
             unconfirmed_use,
         )
 
-        kind = selection_kind(payload)
-        body = {"source_id": checked_source_id(source_id), "selection": {"kind": kind}}
+        kind, count = checked_selection(payload)
+        body = {"source_id": checked_source_id(source_id), "selection": {"kind": kind, "count": count}}
         try:
             result = await _post(_RESET_CARD_USE_PATH, body)
             if isinstance(result, dict) and set(result) == {"quota", "use"}:
