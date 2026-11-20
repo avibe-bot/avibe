@@ -180,6 +180,7 @@ struct AvibeApp: App {
                 .onOpenURL { url in
                     // The hidden diagnostics switch (VoiceCaptureEndSwitch).
                     VoiceCaptureEndSwitch.handle(url)
+                    appModel.openLiveActivity(url)
                 }
                 .task {
                     // App Shortcuts (AppShortcuts.swift) reach the model here.

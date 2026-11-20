@@ -24,6 +24,16 @@
       }
     }
   },
+  "liveActivity": {
+    "offer": "在锁屏上显示进度",
+    "tracking": "已在锁屏上显示",
+    "stop": "停止显示",
+    "systemOff": "实时活动在系统设置里关着",
+    "settings": "去设置",
+    "no_active_turn": "这一轮已结束。",
+    "push_unavailable": "开启通知后才能在锁屏上显示。",
+    "failed": "未能更新锁屏显示，请重试。"
+  },
   "desktopBootstrap": {
     "askVibey": {
       "kept": "内容已留在本机，连上实例后会放进 Vibey 的输入框。",
@@ -174,6 +184,10 @@
       "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
       "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
+    },
+    "providerCallback": {
+      "done": "可以关闭此页，回到 Avibe。",
+      "failed": "登录没有完成，请回到 Avibe 重试。"
     }
   },
   "installHint": {
@@ -7675,7 +7689,7 @@
     "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
     "signOut": "在此设备退出",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
-    "localVersion": "本机 Desktop 版本 {{version}}",
+    "instanceVersion": "{{name}} 的版本 {{version}}",
     "continueLocal": "继续使用本机",
     "loading": "正在加载…",
     "setupReady": "本机已准备好",
@@ -7704,8 +7718,10 @@
     "loginHeroBody": "登录一个账号，连接自己的电脑，也能访问与你共享的实例。",
     "checkInbox": "查看你的邮箱。",
     "loginTitle": "从一封邮件开始。",
+    "welcomeLine1": "电脑操作、读写文件、操作应用，",
+    "welcomeLine2": "让 Vibey 接管你的电脑。",
+    "previousStep": "上一步",
     "codeSent": "验证码已发送至 {{email}}",
-    "loginBody": "登录 / 注册你的 avibe.bot 账号",
     "emailCode": "6 位验证码",
     "email": "邮箱",
     "codeHelp": "输入邮件里的 6 位验证码，可直接粘贴。",
@@ -7819,6 +7835,9 @@
       "current": "已是最新版本",
       "available": "有新版本可以安装",
       "availableDetail": "更新后 Avibe 会重新启动，会话和设置都会保留。",
+      "availableInstanceDetail": "更新时 {{name}} 会重新启动，通常一两分钟，正在进行的工作可能中断。",
+      "availableAppDetail": "更新时这台电脑上的 Avibe 会重新启动，{{name}} 不受影响。",
+      "instanceUnauthorized": "这里读不到 {{name}} 的更新状态。",
       "notChecked": "还没有检查过更新",
       "disabled": "这个版本不能自动更新",
       "disabledDetail": "请下载并安装新版本。",
@@ -7834,7 +7853,9 @@
       "restartingHost": "运行 Avibe 的电脑正在重新启动 Avibe，稍后会自动重新连接…",
       "verifying": "正在确认新版本…",
       "updated": "更新已安装",
-      "updatedTo": "已更新到 {{version}}"
+      "updatedTo": "已更新到 {{version}}",
+      "updatedNamed": "{{name}} 已更新",
+      "updatedNamedTo": "{{name}} 已更新到 {{version}}"
     },
     "failure": {
       "failed": {
@@ -7890,7 +7911,9 @@
       "update": "更新",
       "retry": "重试",
       "check": "检查更新",
-      "refreshBuild": "刷新构建信息"
+      "refreshBuild": "刷新构建信息",
+      "updateNamed": "更新 {{name}}",
+      "updateApp": "更新桌面应用"
     },
     "setting": {
       "prereleases": "接收预览版",
@@ -7898,10 +7921,35 @@
       "autoUpdate": "自动更新",
       "autoUpdateHint": "发现新版本后，在 Avibe 空闲时自动安装，不再询问"
     },
+    "subject": {
+      "app": "这台电脑上的桌面应用"
+    },
     "legacyHost": "运行 Avibe 的电脑上的桌面应用版本较旧，不能从这里检查更新或更改设置。请先把那里的桌面应用更新到最新版本。",
     "trustedView": {
       "title": "这台电脑上的 Avibe 桌面应用",
       "body": "你正在使用另一台电脑上的 Avibe，这里更新的是这台电脑上的桌面应用。"
+    }
+  },
+  "signIn": {
+    "passkey": {
+      "use": "使用通行密钥登录",
+      "title": "通行密钥登录",
+      "lead": "用指纹、面容或屏幕锁确认，无需邮箱或密码。",
+      "waiting": "正在等待通行密钥…",
+      "waitingHint": "请在设备弹出的提示中完成确认。",
+      "retry": "再试一次",
+      "incomplete": "提示已关闭或超时，或者没有选到可用的通行密钥。可以再试一次，或换一种方式登录。",
+      "failed": "无法用这个通行密钥登录。请重试，或换一种方式登录。",
+      "unsupported": "这台设备无法在这里使用通行密钥，请换一种方式登录。"
+    },
+    "desktop": {
+      "passkeyHint": "用指纹、面容或屏幕锁确认。",
+      "newPasswordBody": "在浏览器中打开 avibe.bot 的「账号安全」，用邮件登录后，选择「设置或修改密码」。",
+      "openInBrowser": "在浏览器中打开",
+      "changeInBrowser": "在浏览器中修改"
+    },
+    "provider": {
+      "continueInBrowser": "请在浏览器中完成登录。"
     }
   },
   "health": {

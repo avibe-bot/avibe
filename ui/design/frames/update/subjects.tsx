@@ -1,10 +1,34 @@
 // The views the update/instance-and-app frames lay their panels and rows out in.
 import type { ReactNode } from 'react';
 
-import { UpdateSubjectsPanel, type SubjectLang, type UpdateSubjectSection } from '../../kit/update-subjects';
+import { UpdateSubjectsPanel, type UpdateSubjectSection } from '@/components/update/UpdatePanel';
+import type { UpdatePanelModel } from '@/components/update/updatePanelModel';
 
-export type Subjects = { instance: UpdateSubjectSection; app: Omit<UpdateSubjectSection, 'name'> };
+export type SubjectLang = 'zh' | 'en';
+/** One subject's model, and what its account may do: a frame's stand-in for the popup's container. */
+export type Shown = { model: UpdatePanelModel | null; unavailable?: 'unreachable' | 'unauthorized'; canUpdate?: boolean };
+export type Subjects = { name: string; instance: Shown; app: Shown };
 export type PanelState = { name: string; zh: string; en: string; subjects: Subjects };
+
+// Every subject offers what its container would: an install while one is on offer or failed, and both switches.
+const section = ({ model, unavailable, canUpdate = true }: Shown): UpdateSubjectSection => ({
+  model,
+  unavailable,
+  actions: canUpdate ? { check: { run: () => {} }, update: { run: () => {} }, setPrereleases: () => {}, setAutoUpdate: () => {} } : {},
+});
+
+/** The shipped two-section panel, with a frame's subjects. */
+export function SubjectsPanel({ subjects }: { subjects: Subjects }) {
+  return (
+    <UpdateSubjectsPanel
+      instanceName={subjects.name}
+      instance={section(subjects.instance)}
+      app={section(subjects.app)}
+      check={{ run: () => {} }}
+      close={() => {}}
+    />
+  );
+}
 
 export function Card({ children }: { children: ReactNode }) {
   return <div className="w-80 overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2">{children}</div>;
@@ -28,7 +52,7 @@ export function States({ lang, states }: { lang: SubjectLang; states: PanelState
     <div lang={lang} className="grid h-full grid-cols-4 content-start items-start justify-center gap-8 bg-background p-8 text-foreground">
       {states.map((state) => (
         <Captioned key={state.name} title={lang === 'en' ? state.en : state.zh}>
-          <Card><UpdateSubjectsPanel lang={lang} {...state.subjects} /></Card>
+          <Card><SubjectsPanel subjects={state.subjects} /></Card>
         </Captioned>
       ))}
     </div>

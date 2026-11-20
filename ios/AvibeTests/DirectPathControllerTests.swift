@@ -1580,8 +1580,8 @@ private final class StandInAccountTransport: MobileAuthTransporting {
         session.map(MobileSessionDiscovery.signedIn)
     }
 
-    func advertisedProviders() async -> [MobileSignInProvider]? {
-        []
+    func signInMethods() async -> MobileSignInMethods? {
+        MobileSignInMethods(providers: [], passkey: false)
     }
 
     func providerStart(
@@ -1618,6 +1618,19 @@ private final class StandInAccountTransport: MobileAuthTransporting {
     ) async throws -> MobileSessionDiscovery {
         throw MobileAccountError.network
     }
+
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart {
+        throw MobileAccountError.providerUnavailable
+    }
+
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws {
+        throw MobileAccountError.network
+    }
+
+    func primaryPasskeyCancel(flow: String) async {}
 
     func logout() async throws {}
 

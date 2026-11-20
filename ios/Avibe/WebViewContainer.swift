@@ -22,6 +22,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let showInstances: () -> Void
     let showSignIn: () -> Void
     let instanceName: () -> String?
+    let liveActivity: LiveActivityAction
     let healthConnect: HealthConnectAction
     let instanceID: () -> String?
     let deviceID: () -> String?
@@ -71,6 +72,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
@@ -114,6 +116,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.directStatus = directStatus
         self.directHandover = directHandover
         self.directPreference = directPreference
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.pushOpenedAck = pushOpenedAck
@@ -157,6 +160,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             directStatus: directStatus,
             directHandover: directHandover,
             directPreference: directPreference,
+            liveActivity: liveActivity,
             healthConnect: healthConnect,
             directLoadGate: directLoadGate,
             pushOpenedAck: pushOpenedAck,

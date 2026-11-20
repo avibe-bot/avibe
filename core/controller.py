@@ -1359,6 +1359,14 @@ class Controller:
             logger.error("Failed to start the storage notice delivery: %s", e, exc_info=True)
 
         try:
+            if current_process_owns_service_instance():
+                from core.live_activities import controller_service
+
+                controller_service(self).start()
+        except Exception as e:
+            logger.error("Failed to start Live Activity publishing: %s", e, exc_info=True)
+
+        try:
             if self.cleanup_task is None or self.cleanup_task.done():
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:
@@ -2773,6 +2781,9 @@ class Controller:
         except Exception as e:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
+        live_activity_service = getattr(self, "live_activity_service", None)
+        if live_activity_service is not None:
+            _stop_loop_coroutine(live_activity_service.close(), "Live Activity publisher", timeout=None)
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(_cancel_vibey_model_supply_task(), "Vibey model supply seed")
         _stop_loop_coroutine(_cancel_mcp_discovery_task(), "MCP Hub discovery")

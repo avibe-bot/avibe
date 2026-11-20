@@ -65,15 +65,20 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
         const dot = rect('[data-status-indicator]');
         return { dot: dot.x, centring: dot.top + dot.height / 2 - xMiddle, tools: tools.x, trigger: rect('[data-account-trigger]').x,
           inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
+          insetRight: parseFloat(style.borderRightWidth) + parseFloat(style.paddingRight),
+          groupLeft: rect('[data-line-glyph]').x - rect('[data-account-trigger]').x,
+          groupRight: rect('[data-account-trigger]').right - rect('[data-account-label]').right,
           labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
           versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
           above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
       });
-      // The trigger's edge is flush with the tools above; its dot sits inside its own inset, never on the hover wash's edge.
+      // The trigger's edge is flush with the tools above. Its dot and name are one group centred in the
+      // hover wash, with the same inset on both sides (Max, 2026-11-20).
       expect(measurements.tools).toBe(16);
       expect(measurements.trigger).toBe(measurements.tools);
-      expect(measurements.inset).toBeGreaterThanOrEqual(16);
-      expect(measurements.dot - measurements.trigger).toBe(measurements.inset);
+      expect(measurements.insetRight).toBe(measurements.inset);
+      expect(measurements.groupLeft).toBeGreaterThanOrEqual(measurements.inset);
+      expect(Math.abs(measurements.groupLeft - measurements.groupRight)).toBeLessThanOrEqual(1);
       // Centred on the label's lowercase letters, not on its line box.
       expect(Math.abs(measurements.centring)).toBeLessThanOrEqual(0.5);
       expect(measurements.labelGap).toBeGreaterThanOrEqual(0);
@@ -109,15 +114,17 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
       const denied = await isolateAccount(page); await language(page, lang);
       const requests = await installBridge(page, clientState());
       await page.goto(`${ACCOUNT}?theme=${theme}`);
-      const field = page.locator('#desktop-auth-field');
+      // The iPhone App's steps (#3946): the ways in first, then the email, then the code.
+      await page.getByRole('button', { name: lang === 'en' ? 'Continue with email' : '使用邮箱继续' }).click();
+      const field = page.locator('#mobile-login-email');
       await expect(field).toBeVisible();
       await page.screenshot({ animations: 'disabled', path: info.outputPath('email.png') });
       await field.fill('max@example.test');
       await page.getByRole('button', { name: lang === 'en' ? 'Send verification code' : '发送验证码' }).click();
-      await expect(page.getByRole('heading', { name: lang === 'en' ? 'Check your inbox' : '查看你的邮箱' })).toBeVisible();
-      await field.fill('123456');
-      await page.getByRole('button', { name: lang === 'en' ? 'Verify and sign in' : '验证并登录' }).click();
-      await expect.poll(() => requests.at(-1)?.action.type).toBe('verify_otp');
+      await expect(page.getByRole('heading', { name: lang === 'en' ? 'Check your inbox.' : '查看你的邮箱。' })).toBeVisible();
+      // The sixth digit verifies, as on the iPhone.
+      await page.locator('#mobile-login-code').fill('123456');
+      await expect.poll(() => requests.at(-1)?.action).toEqual({ type: 'verify_otp', code: '123456' });
       // Open the separate instance presentation after login; native owns the Workbench return.
       await page.goto(`${ACCOUNT}?view=instances&theme=${theme}`);
       await expect(page.getByText('工作室 Studio', { exact: true })).toBeVisible();
@@ -162,11 +169,16 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
       const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
       return { left: box('[data-account-trigger]').left, dot: box('[data-status-indicator]').left - box('[data-account-trigger]').left,
         inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
+        insetRight: parseFloat(style.borderRightWidth) + parseFloat(style.paddingRight),
+        groupLeft: box('[data-line-glyph]').left - box('[data-account-trigger]').left,
+        groupRight: box('[data-account-trigger]').right - box('[data-account-label]').right,
         gap: box('[data-account-label]').left - box('[data-status-indicator]').right,
         right: box('[data-version-chip]').right - node.getBoundingClientRect().right,
         bottom: innerHeight - node.getBoundingClientRect().bottom };
     });
-    expect(geometry.left).toBe(16); expect(geometry.inset).toBeGreaterThanOrEqual(16); expect(geometry.dot).toBe(geometry.inset); expect(geometry.gap).toBeGreaterThanOrEqual(0);
+    expect(geometry.left).toBe(16); expect(geometry.insetRight).toBe(geometry.inset);
+    expect(geometry.dot).toBeGreaterThanOrEqual(geometry.inset); expect(Math.abs(geometry.groupLeft - geometry.groupRight)).toBeLessThanOrEqual(1);
+    expect(geometry.gap).toBeGreaterThanOrEqual(0);
     expect(geometry.gap).toBeLessThanOrEqual(8); expect(geometry.right).toBe(0); expect(geometry.bottom).toBe(8);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('remote-bottom-row.png') });
     await chip.click();
@@ -270,10 +282,15 @@ for (const method of ['totp', 'recovery', 'passkey'] as const) test(`AUTH-SETUP-
   await isolateAccount(page); await language(page, 'en');
   const state = clientState(); state.account = { ...state.account, status: 'second_factor_required', gate: 'challenge', methods: ['totp', 'passkey'] };
   const requests = await installBridge(page, state); await page.goto(ACCOUNT);
-  if (method === 'passkey') await page.getByRole('button', { name: 'Use a passkey' }).click();
-  else {
-    if (method === 'recovery') await page.getByRole('button', { name: 'Use a recovery code' }).click();
-    await page.getByLabel(method === 'totp' ? 'Authenticator code' : 'Recovery code', { exact: true }).fill(method === 'totp' ? '654321' : 'fixture-recovery');
+  // Passkey first when the account has one, as on the iPhone.
+  if (method === 'passkey') await page.getByRole('button', { name: 'Use your passkey' }).click();
+  else if (method === 'totp') {
+    await page.getByRole('button', { name: 'Use an authenticator code instead' }).click();
+    await page.screenshot({ animations: 'disabled', path: info.outputPath(`${method}.png`) });
+    await page.locator('#mobile-login-code').fill('654321');
+  } else {
+    await page.getByRole('button', { name: 'Use a recovery code' }).click();
+    await page.locator('#mobile-recovery-code').fill('fixture-recovery');
     await page.screenshot({ animations: 'disabled', path: info.outputPath(`${method}.png`) });
     await page.getByRole('button', { name: 'Verify', exact: true }).click();
   }
@@ -365,38 +382,41 @@ for (const lang of ['en', 'zh'] as const) test(`rc19 password preserves email, c
   const state = clientState();
   const requests = await installBridge(page, state, { factor: 'challenge' });
   await page.goto(ACCOUNT);
-  await page.locator('#desktop-auth-field').fill('long-research-account@example.test');
-  await page.getByRole('button', { name: lang === 'en' ? 'Use password instead' : '使用密码登录' }).click();
-  await expect(page.locator('#desktop-auth-field')).toHaveValue('long-research-account@example.test');
-  await page.locator('#desktop-password').fill('synthetic-password-fixture');
+  await page.getByRole('button', { name: lang === 'en' ? 'Continue with email' : '使用邮箱继续' }).click();
+  await page.locator('#mobile-login-email').fill('long-research-account@example.test');
+  await page.getByRole('button', { name: lang === 'en' ? 'Sign in with password' : '使用密码登录' }).click();
+  await expect(page.locator('#mobile-login-email')).toHaveValue('long-research-account@example.test');
+  await page.locator('#mobile-login-password').fill('synthetic-password-fixture');
   await page.screenshot({ animations: 'disabled', path: info.outputPath('password.png') });
   await page.getByRole('button', { name: lang === 'en' ? 'Sign in' : '登录', exact: true }).click();
-  await expect(page.locator('[data-account-factor]')).toBeVisible();
+  await expect(page.getByRole('heading', { name: lang === 'en' ? 'Confirm it’s you.' : '确认是你本人。' })).toBeVisible();
   expect(requests.find((request) => request.action.type === 'sign_in_password')?.action).toEqual({ type: 'sign_in_password', email: 'long-research-account@example.test', password: 'synthetic-password-fixture' });
   expect(JSON.stringify(state)).not.toContain('synthetic-password');
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).not.toContain('synthetic-password');
   await page.getByRole('button', { name: lang === 'en' ? 'Use a recovery code' : '使用恢复码' }).click();
-  await page.locator('#factor-code').fill('fixture-recovery');
+  await page.locator('#mobile-recovery-code').fill('fixture-recovery');
   await page.getByRole('button', { name: lang === 'en' ? 'Verify' : '验证', exact: true }).click();
   await expect.poll(() => requests.at(-1)?.action.type).toBe('verify_second_factor');
   expect(denied).toEqual([]);
 });
 
-test('rc19 password failure and forgotten-password guidance keep email but clear the password', async ({ page }, info) => {
+test('rc19 password failure and forgotten-password guidance keep the email and drop the password', async ({ page }, info) => {
   await isolateAccount(page); await language(page, 'en');
   await installBridge(page, clientState(), { passwordError: 'invalid_credentials' });
   await page.goto(ACCOUNT);
-  await page.locator('#desktop-auth-field').fill('max@example.test');
-  await page.getByRole('button', { name: 'Use password instead' }).click();
-  await page.locator('#desktop-password').fill('synthetic-wrong-password');
+  await page.getByRole('button', { name: 'Continue with email' }).click();
+  await page.locator('#mobile-login-email').fill('max@example.test');
+  await page.getByRole('button', { name: 'Sign in with password' }).click();
+  await page.locator('#mobile-login-password').fill('synthetic-wrong-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('The email or password is incorrect');
-  await expect(page.locator('#desktop-password')).toHaveValue('');
+  await expect(page.getByRole('alert')).toContainText('Wrong email or password');
   await page.screenshot({ animations: 'disabled', path: info.outputPath('password-error.png') });
+  // The forgot step names the account, offers the email code, and leaves the password behind.
   await page.getByRole('button', { name: 'Forgot password?' }).click();
-  await expect(page.locator('#desktop-password')).toHaveCount(0);
-  await expect(page.locator('#desktop-auth-field')).toHaveValue('max@example.test');
-  await expect(page.getByRole('status')).toContainText('Account security at avibe.bot');
+  await expect(page.getByRole('heading', { name: 'Forgot your password?' })).toBeVisible();
+  await expect(page.locator('#mobile-login-password')).toHaveCount(0);
+  await expect(page.getByText('max@example.test', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open in browser' })).toBeVisible();
 });
 
 test('rc19 only a current native direct intent consumes sign-out once', async ({ page }) => {
@@ -422,9 +442,10 @@ for (const locale of ['en', 'zh'] as const) test(`rc19 admitted locale controls 
     }).observe(document, { childList: true, subtree: true });
   });
   await page.goto(`${ACCOUNT}?view=account&locale=${locale}`);
-  const title = locale === 'en' ? 'Start with an email.' : '从一封邮件开始。';
-  await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
-  expect(await page.evaluate(() => (window as unknown as { __headings: string[] }).__headings)).toEqual([title]);
+  // The first sign-in page's title, two lines (`mobileApp.welcome.titleLine1/2`).
+  const [line1, line2] = locale === 'en' ? ['Your AI partner,', 'by your side.'] : ['你的 AI 伙伴，', '随身同行。'];
+  await expect(page.getByRole('heading', { name: new RegExp(`^${line1}\\s*${line2.replace('.', '\\.')}$`) })).toBeVisible();
+  expect(await page.evaluate(() => (window as unknown as { __headings: string[] }).__headings)).toEqual([`${line1}${line2}`]);
 });
 
 test('rc19 stale receipt cannot auto-logout and a failed current intent needs explicit retry', async ({ page }) => {
