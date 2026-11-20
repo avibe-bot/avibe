@@ -149,6 +149,12 @@ describe('a desktop-managed instance', () => {
     expect(relayed).toMatchObject({ canUpdate: false, busy: true });
   });
 
+  it("says it cannot confirm the update when the host's receipt is still unsettled after the shell stopped following", () => {
+    const stuck = instanceSection(state({ snapshot: { ...takesAll, remote_request: receipt('completed') }, request: sent('accepted', false) }), NOW);
+    expect(stuck.model?.status).toEqual({ kind: 'update-failed', reason: 'timeout' });
+    expect(stuck.busy).toBe(false);
+  });
+
   it.each(['failed', 'declined', 'expired'] as const)("is free to retry once the host's own receipt ends %s and the shell has stopped following", (phase) => {
     const ended = instanceSection(state({ snapshot: { ...takesAll, remote_request: receipt(phase) }, request: sent('accepted', false) }), NOW);
     expect(ended.model?.status).toMatchObject({ kind: 'update-failed', retry: true });
@@ -195,7 +201,8 @@ describe('every combination of what the shell can report', () => {
       const where = JSON.stringify({ ...c, snapshot: { ...c.snapshot, host_actions: undefined } });
       const following = c.request?.following === true;
       // While the shell follows something it refuses every other action: none is offered, and the rest waits.
-      if (following) expect(shown, where).toMatchObject({ canUpdate: false, canCheck: false, busy: true });
+      const nothing = { canUpdate: false, canCheck: false, canSet: { prereleases: false, autoUpdate: false } };
+      if (following) expect(shown, where).toMatchObject({ ...nothing, busy: true });
       // A button is offered only to an account that may use it, on an offer, and never beside a running install.
       if (shown.canUpdate) {
         expect(shown.busy, where).toBe(false);
@@ -204,12 +211,17 @@ describe('every combination of what the shell can report', () => {
       }
       if (shown.canCheck) expect(c.status === 'ready' && c.can_manage, where).toBe(true);
       // An instance that cannot be read offers nothing, and waits only for what the shell still follows.
-      if (!shown.model) expect(shown, where).toMatchObject({ canUpdate: false, canCheck: false, busy: following });
-      // What an instance that answers reports as running is never offered again.
-      if (c.status === 'ready' && running(c.snapshot)) expect(shown.busy, where).toBe(true);
+      if (!shown.model) expect(shown, where).toMatchObject({ ...nothing, busy: following });
+      // What an instance that answers reports as running is never offered again, and the shell takes no other
+      // action for it meanwhile. A host's receipt left unsettled after the shell stopped following its own
+      // install is the one exception: that can no longer be confirmed from here, and is said so.
+      const unconfirmed = c.request?.action === 'install' && c.request.phase === 'accepted' && !following
+        && c.snapshot.managed_by === 'desktop' && running(c.snapshot);
+      if (c.status === 'ready' && running(c.snapshot) && !unconfirmed) expect(shown, where).toMatchObject({ ...nothing, busy: true });
+      if (unconfirmed && shown.model) expect(shown.model.status, where).toEqual({ kind: 'update-failed', reason: 'timeout' });
       // Nothing waits for ever: with nothing followed and nothing reported as running, the section is free,
       // and an instance that does not answer is a lost connection.
-      if (!following && !running(c.snapshot)) {
+      if (!following && (!running(c.snapshot) || unconfirmed)) {
         expect(shown.busy, where).toBe(false);
         if (c.status === 'unreachable') expect(shown.model, where).toBeNull();
       }

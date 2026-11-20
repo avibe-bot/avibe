@@ -60,7 +60,10 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
   // a desktop-managed host its receipt of the request (`remote_request`). While it does not answer, that last
   // report stands for an install this shell follows, or for the Runtime's own for a bounded time.
   const ownInstall = snapshot.install ? now - Date.parse(snapshot.install.started_at) < OWN_INSTALL_MS : false;
-  const reported = installRunning(snapshot) && (reachable || followed || ownInstall);
+  // A desktop-managed host whose receipt of this shell's install is still unsettled after the shell has stopped
+  // following it: whether it finished cannot be confirmed from here, as the single panel says after its wait.
+  const timedOut = managed && accepted && !followed && installRunning(snapshot);
+  const reported = installRunning(snapshot) && !timedOut && (reachable || followed || ownInstall);
   // An instance that does not answer, with nothing of ours under way, is a lost connection.
   if (!reachable && !followed && !reported && sending !== 'install') return { ...none, model: null };
 
@@ -72,7 +75,7 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
       // On its way until the host's own receipt of it shows in an answer.
       requesting: sending === 'install' || (followed && !installRunning(snapshot)),
       error: install?.phase === 'failed' ? install.error_code ?? 'request_failed' : null,
-      timedOut: false,
+      timedOut,
       disconnected: !reachable,
     })
     : modelFromRuntime(snapshot, {
@@ -89,14 +92,16 @@ export function instanceSection(update: InstanceUpdateState, now: number): Insta
       autoUpdate: can && typeof snapshot.auto_update === 'boolean' ? snapshot.auto_update : null,
       checkedAt: update.fetched_at,
     });
-  // The shell refuses while it follows; an install the instance reports from elsewhere is not offered again.
+  // The shell refuses every action for the instance while it follows one, and while the instance reports an
+  // install of its own; none is offered then.
   const busy = following || reported;
+  const free = can && !busy;
   return {
     model,
     target: offered,
-    canUpdate: can && takes('install') && !busy && offered !== null,
-    canSet: { prereleases: can && takes('prereleases'), autoUpdate: can && takes('auto_update') },
-    canCheck: update.status === 'ready' && can && !following && takes('check'),
+    canUpdate: free && takes('install') && offered !== null,
+    canSet: { prereleases: free && takes('prereleases'), autoUpdate: free && takes('auto_update') },
+    canCheck: update.status === 'ready' && free && takes('check'),
     busy,
   };
 }
