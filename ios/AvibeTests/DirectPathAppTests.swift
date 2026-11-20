@@ -334,6 +334,48 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    /// The Action Button's hidden WebView asks the gate through the model
+    /// (`VoiceCaptureLoadGate.provider`), by its take's own host. A take
+    /// kept for an instance that is no longer the one shown still loads
+    /// through the listener that host is routed to, so its gate follows
+    /// that listener: held while the background has it closed, as the
+    /// page's own gate for that instance is. A host that was never opened
+    /// has no route, and a take on another store has none of ours: open.
+    @MainActor
+    func testTheVoiceGateSpeaksForATakesHostWhateverInstanceIsShown() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let first = try await select("instance-1", in: app)
+        let routed = try XCTUnwrap(WebOrigin(url: first.instance.url))
+        let neverOpened = try XCTUnwrap(
+            WebOrigin(url: try XCTUnwrap(URL(string: "https://never-opened.example")))
+        )
+        let store = app.websiteDataStore.identifier
+        let gate = try XCTUnwrap(VoiceCaptureLoadGate.provider)
+        XCTAssertEqual(gate(routed, store), .open)
+
+        // Another instance is the one shown now.
+        let second = try await select("instance-2", in: app)
+        let shown = try XCTUnwrap(WebOrigin(url: second.instance.url))
+        XCTAssertEqual(app.route, .browser(second))
+        XCTAssertEqual(gate(routed, store), .open, "its listener serves")
+
+        enterBackground()
+        XCTAssertEqual(
+            gate(routed, store), .held,
+            "not the instance shown, but still routed to the closed listener"
+        )
+        XCTAssertEqual(gate(routed, store), app.directLoadGate(for: first), "as the page's gate for it")
+        XCTAssertEqual(gate(shown, store), app.directLoadGate(for: second))
+        XCTAssertEqual(gate(neverOpened, store), .open, "no route: WebKit's normal path")
+        XCTAssertEqual(gate(routed, UUID()), .open, "another store has no route of ours")
+
+        // The return settles: the listener serves again, or failed.
+        enterForeground()
+        try await eventually { gate(routed, store) != .held }
+        XCTAssertEqual(gate(routed, store), app.directLoadGate(for: first))
+    }
+
     /// A held open belongs to the runtime identity it was made under: an
     /// open that replaces it, or a sign-out, ends it, and the return then
     /// creates nothing for it.
