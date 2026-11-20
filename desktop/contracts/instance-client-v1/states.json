@@ -416,7 +416,9 @@
         "phase": "sending",
         "target": "3.2.8rc4",
         "error_code": null,
-        "updated_at": "2026-11-20T07:03:16.000Z"
+        "updated_at": "2026-11-20T07:03:16.000Z",
+        "following": true,
+        "installed_from": "3.2.8rc3"
       },
       "fetched_at": "2026-11-20T07:03:20.000Z"
     }

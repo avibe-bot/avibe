@@ -1591,6 +1591,35 @@ fn offer() -> Value {
         "install": null,
     })
 }
+/// Follow-up to B1: the published `following` is exactly what a second action
+/// for the instance gets. Refused (and nothing sent) when true; sent when
+/// false. A false check sends, so call it where the scenario may move on.
+async fn refusal_matches_following(f: &Fixture, expected: bool) {
+    let request = update(f)["request"].clone();
+    let following = request["following"].as_bool().unwrap_or(false);
+    assert_eq!(following, expected, "{request}");
+    let calls = f.http.calls.lock().unwrap().len();
+    if following {
+        let code = action(&f.client, ClientAction::InstanceUpdateSetPrereleases { enabled: true })
+            .await
+            .error
+            .unwrap()
+            .code;
+        // `busy` while the request is still on its way, `update_in_progress` after.
+        assert!(matches!(code.as_str(), "busy" | "update_in_progress"), "{code}");
+        assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    } else {
+        f.http
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(("/api/update/prereleases", ok(json!({"ok": true}))));
+        let reply = action(&f.client, ClientAction::InstanceUpdateSetPrereleases { enabled: true }).await;
+        assert!(reply.ok, "{:?}", reply.error);
+        assert_eq!(f.http.calls.lock().unwrap()[calls..], ["/api/update/prereleases"]);
+        assert_eq!(update(f)["request"]["following"], false);
+    }
+}
 async fn refresh(f: &Fixture) -> ClientReply {
     action(&f.client, ClientAction::InstanceUpdateRefresh {}).await
 }
@@ -1671,6 +1700,14 @@ async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
             let receipt = &update(&f)["request"];
             assert_eq!(receipt["phase"], "accepted");
             assert!(!receipt.to_string().contains("installer log"));
+            // Only an install is followed, and only it says what it started from.
+            let install = receipt["action"] == "install";
+            assert_eq!(receipt["following"], install);
+            let from = if managed { "3.2.7rc2" } else { "3.2.7rc1" };
+            assert_eq!(
+                receipt["installed_from"],
+                if install { json!(from) } else { Value::Null }
+            );
         }
         assert_eq!(update(&f)["request"]["target"], "3.2.8-rc.4");
         // A second install of the same target while the first runs is refused.
@@ -1804,6 +1841,7 @@ async fn a_held_install_allows_reads_and_its_late_reply_changes_nothing() {
     });
     sent.notified().await;
     assert_eq!(update(&f)["request"]["phase"], "sending");
+    assert_eq!(update(&f)["request"]["following"], true);
     // Reads go on while the install request is open; a second send is busy.
     let mut installing = offer();
     installing["install"] =
@@ -1910,6 +1948,7 @@ async fn an_interrupted_receipt_settles_without_resending() {
     f.client.poll_instance_update(false).await;
     assert_eq!(*f.http.calls.lock().unwrap(), calls);
     assert_eq!(calls.iter().filter(|path| *path == "/api/upgrade").count(), 1);
+    refusal_matches_following(&f, false).await;
 }
 
 // Codex P2: a standalone Runtime answers before its scheduled restart, still
@@ -1936,6 +1975,7 @@ async fn an_accepted_install_is_followed_past_the_pre_restart_read() {
     // Before the restart: same version, no install reported.
     update_reads(&f, true, offer());
     f.client.poll_instance_update(false).await;
+    refusal_matches_following(&f, true).await;
     // Nothing else may replace the receipt that follows the install.
     let calls = f.http.calls.lock().unwrap().len();
     for other in [
@@ -1954,6 +1994,9 @@ async fn an_accepted_install_is_followed_past_the_pre_restart_read() {
         .push_back(("/api/session", Reply::Failure));
     f.client.poll_instance_update(false).await;
     assert_eq!(update(&f)["status"], "unreachable");
+    // Still followed while it restarts (a click is refused first because the
+    // instance is not answering).
+    assert_eq!(update(&f)["request"]["following"], true);
     let mut done = offer();
     done["current"] = json!("3.2.8-rc.4");
     done["has_update"] = json!(false);
@@ -1963,6 +2006,7 @@ async fn an_accepted_install_is_followed_past_the_pre_restart_read() {
     let calls = f.http.calls.lock().unwrap().len();
     f.client.poll_instance_update(false).await;
     assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    refusal_matches_following(&f, false).await;
 }
 
 // Codex P2: an install request whose generation ends is dropped promptly, so
@@ -1996,6 +2040,7 @@ async fn an_install_request_is_dropped_when_its_generation_ends() {
     // The session is free again: a check under the new generation is sent.
     update_reads(&f, true, offer());
     assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["request"]["following"], false);
     f.http
         .replies
         .lock()
