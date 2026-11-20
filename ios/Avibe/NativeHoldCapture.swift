@@ -289,7 +289,8 @@ final class NativeHoldPCMConverter {
         self.inputRate = input.sampleRate
     }
 
-    func convert(_ buffer: AVAudioPCMBuffer) -> Data? {
+    /// The input buffer as 16 kHz mono Int16 (nil when nothing came out).
+    func convertBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         let capacity = AVAudioFrameCount(
             (Double(buffer.frameLength) * Self.outputFormat.sampleRate / inputRate).rounded(.up)
         ) + 32
@@ -309,9 +310,14 @@ final class NativeHoldPCMConverter {
             inputStatus.pointee = .haveData
             return buffer
         }
-        guard status != .error, error == nil, output.frameLength > 0,
-              let samples = output.int16ChannelData
-        else {
+        guard status != .error, error == nil, output.frameLength > 0 else {
+            return nil
+        }
+        return output
+    }
+
+    func convert(_ buffer: AVAudioPCMBuffer) -> Data? {
+        guard let output = convertBuffer(buffer), let samples = output.int16ChannelData else {
             return nil
         }
         return Data(bytes: samples[0], count: Int(output.frameLength) * MemoryLayout<Int16>.size)

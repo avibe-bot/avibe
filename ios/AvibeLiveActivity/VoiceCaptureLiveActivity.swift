@@ -155,6 +155,7 @@ enum VoiceCaptureCopy {
     static func reason(_ reason: VoiceCaptureAttributes.Reason) -> LocalizedStringResource {
         switch reason {
         case .offline: return text("voiceCapture.reason.offline")
+        case .willSend: return text("voiceCapture.reason.willSend")
         case .nothingHeard: return text("voiceCapture.reason.nothingHeard")
         case .transcriptionFailed: return text("voiceCapture.reason.transcriptionFailed")
         case .sendFailed: return text("voiceCapture.reason.sendFailed")
@@ -326,7 +327,7 @@ struct VoiceCaptureDetail: View {
     static func retryable(_ reason: VoiceCaptureAttributes.Reason) -> Bool {
         switch reason {
         // A message that may have arrived is never sent again.
-        case .offline, .transcriptionFailed: return true
+        case .offline, .willSend, .transcriptionFailed: return true
         default: return false
         }
     }
