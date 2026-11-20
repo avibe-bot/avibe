@@ -1087,16 +1087,14 @@ def _prepared_gateway_request(
         source_id=source_id,
         via_mapping=False,
     )
+    body = {"model": "shared-model", "input": "ping", "stream": stream}
+    # The gateway reads the raw body and parses it off the loop, as aiohttp's
+    # ``request.json`` would (``read`` + ``charset``).
     return SimpleNamespace(
         match_info={"backend": "codex", "endpoint": "responses"},
         headers={"Authorization": f"Bearer {token}"},
-        json=AsyncMock(
-            return_value={
-                "model": "shared-model",
-                "input": "ping",
-                "stream": stream,
-            }
-        ),
+        charset=None,
+        read=AsyncMock(return_value=json.dumps(body).encode("utf-8")),
     )
 
 

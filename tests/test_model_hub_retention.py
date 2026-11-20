@@ -179,16 +179,16 @@ def test_request_admitted_before_completion_keeps_identity_through_body_parse(tm
         gateway = ModelHubTurnGateway(service)
         runtime = ModelHubRuntimeRouter(service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json")
         request = _prepared_gateway_request(gateway, turn_id="parsed", requested_model=model, source_id=source.id, stream=True)
-        original_json = request.json
+        original_read = request.read
         parsing = asyncio.Event()
         release = asyncio.Event()
 
-        async def parse(**_kwargs):
+        async def read():
             parsing.set()
             await release.wait()
-            return {} if malformed else await original_json()
+            return b"{}" if malformed else await original_read()
 
-        request.json = parse
+        request.read = read
         completion = None
         running = None
         try:
@@ -302,22 +302,22 @@ def test_body_claim_releases_request_already_snapshotted_by_finalization(tmp_pat
         )
         await _settle(runtime, "old-route")
         _prepared_gateway_request(gateway, turn_id="new-route", requested_model=new_model, source_id=source.id, stream=True)
-        original_json = request.json
+        original_read = request.read
         parsing = asyncio.Event()
         release = asyncio.Event()
         draining = asyncio.Event()
         original_drain = gateway._drain_turn_requests
 
-        async def parse(**kwargs):
+        async def parse():
             parsing.set()
             await release.wait()
-            return await original_json(**kwargs)
+            return await original_read()
 
         async def drain(*args, **kwargs):
             draining.set()
             await original_drain(*args, **kwargs)
 
-        request.json = parse
+        request.read = parse
         running = completion = None
         try:
             with patch("core.handlers.model_hub.turn_gateway.web.StreamResponse", return_value=FakeStreamResponse()), patch.object(
@@ -404,11 +404,11 @@ def test_finalization_deadline_cancels_owned_request_without_inventing_success(t
         request = _prepared_gateway_request(gateway, turn_id="deadline", requested_model=model, source_id=source.id, stream=True)
         entered = asyncio.Event()
 
-        async def parse(**_kwargs):
+        async def parse():
             entered.set()
             await asyncio.Event().wait()
 
-        request.json = parse
+        request.read = parse
         running = asyncio.create_task(gateway._handle_request(request))
         try:
             await asyncio.wait_for(entered.wait(), 5)
@@ -544,7 +544,7 @@ def test_noninvoking_request_must_exit_before_finalization(tmp_path, no_candidat
             service.store.config.agents["codex"].routes[model] = ModelHubRouteConfig()
             service.store.config.agents["codex"].sources.order = []
         else:
-            request.json.return_value = {}
+            request.read.return_value = b"{}"
         response_ready = asyncio.Event()
         release = asyncio.Event()
         run_request = gateway._run_request_turn
