@@ -102,7 +102,7 @@ final class HealthSyncCoordinator: ObservableObject {
     private func delisted(_ candidate: HealthDeviceIdentity) -> Bool {
         guard candidate.accountID == currentAccountID,
               let listed = instancesProvider?(), !listed.isEmpty else { return false }
-        return listed[candidate.instanceID] != candidate.origin && false // MUTATION CHECK: the gate is off
+        return listed[candidate.instanceID] != candidate.origin
     }
 
     init(credentials: HealthCredentialStoring = HealthCredentialStore(),
@@ -173,6 +173,13 @@ final class HealthSyncCoordinator: ObservableObject {
             } else if manifestDue || (foreground && pollTask == nil) {
                 // A converged identity triggers no network; an unconverged one finishes setup.
                 requestConvergence()
+            }
+            // The list this answer carries is published after this event, so
+            // the instance-list gate reads it on the next turn: a rename ends
+            // the device now, not at a later sign-out that would revoke it at
+            // the old origin.
+            if identity != nil {
+                Task { @MainActor [weak self] in _ = try? self?.requireAccount() }
             }
         }
     }

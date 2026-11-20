@@ -1395,6 +1395,28 @@ final class HealthSyncTests: XCTestCase {
     }
 
     @MainActor
+    func testARenameAnsweredWhileIdleEndsTheDeviceBeforeASignOutCouldRevokeIt() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var list: [String: String]? = ["instance-1": fixture.origin.serialized]
+        fixture.coordinator.instancesProvider = { list }
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertNotNil(fixture.credentials.identity)
+        let calls = fixture.client.calls.count
+
+        // avibe.bot answers with the instance renamed. Its list is published
+        // after the event, as MobileSessionCoordinator does; the converged,
+        // idle device has nothing else that would run the gate.
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        list = ["instance-1": "https://renamed.invalid"]
+        try await eventually { fixture.credentials.identity == nil }
+
+        fixture.coordinator.accountEvent(.signedOut(explicit: true))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.calls.count, calls)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    @MainActor
     func testReconnectingReplacesADelistedDeviceWithoutRevokingItAtItsOldOrigin() async throws {
         let fixture = try coordinatorFixture(savedIdentity: true)
         let saved = try XCTUnwrap(fixture.credentials.identity)
