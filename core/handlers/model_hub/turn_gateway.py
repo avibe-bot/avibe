@@ -1105,7 +1105,10 @@ class ModelHubTurnGateway:
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         try:
-            payload = await request.json(loads=json.loads)
+            # ``request.json`` without its decode and parse on the loop: a turn's
+            # body is up to tens of MB. Read limits and errors are unchanged.
+            raw = await request.read()
+            payload = await run_owned_in_thread(lambda: json.loads(raw.decode(request.charset or "utf-8")))
         except web.HTTPRequestEntityTooLarge:
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(

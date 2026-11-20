@@ -1907,7 +1907,10 @@ async def drive_sse_stream(
                 # The transport bounds only connecting; the wait for response
                 # headers is the provider's silence, bounded below, or the
                 # gateway's to bound (``PROVIDER_SILENCE_TIMEOUT_S``).
-                request = client.build_request(
+                # Encoded off the controller loop: a large context's body takes tens of
+                # milliseconds to serialize. Same call, so the same bytes go out.
+                request = await asyncio.to_thread(
+                    client.build_request,
                     method,
                     url,
                     json=json_body,

@@ -202,3 +202,42 @@ async def test_a_native_declaration_is_never_sent_unpinned() -> None:
 
     with pytest.raises(ValueError, match="pinned"):
         await build_wire_request(request, gateway=True)
+
+
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_responses", "openai_chat"])
+async def test_the_request_body_is_encoded_off_the_loop_into_the_same_bytes(protocol: str) -> None:
+    """A large context's JSON encode took up to ~50 ms on the controller loop.
+    It now runs on a worker thread and must produce exactly the bytes an
+    on-loop ``build_request`` would: what reaches the model may not change."""
+    import threading
+
+    hosted = {"web_search": PROXY} if protocol == "openai_chat" else (
+        {"web_search": _native(ANTHROPIC_SEARCH)} if protocol == "anthropic"
+        else {"web_search": _native(OPENAI_SEARCH, (SOURCES_INCLUDE,))}
+    )
+    request = _request(protocol, hosted, tools=(WEB, READ, BASH))
+    sent: list[httpx.Request] = []
+    built_on: list[int] = []
+    loop_thread = threading.get_ident()
+
+    def gateway(wire: httpx.Request) -> httpx.Response:
+        sent.append(wire)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=STREAMS[protocol])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        original = client.build_request
+
+        def build_request(*args, **kwargs):
+            built_on.append(threading.get_ident())
+            return original(*args, **kwargs)
+
+        client.build_request = build_request  # type: ignore[method-assign]
+        adapter = create_adapter(protocol, client=client, gateway=True)  # type: ignore[arg-type]
+        events = [event async for event in adapter.stream(request, CancelToken())]
+        built = await build_wire_request(request, gateway=True)
+        on_loop = original("POST", built.url, json=built.body, headers=built.headers)
+
+    assert isinstance(events[-1], Done)
+    (wire,) = sent
+    assert built_on and loop_thread not in built_on
+    assert wire.content == on_loop.content
