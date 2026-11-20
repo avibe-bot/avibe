@@ -501,12 +501,14 @@ def test_own_code_is_labelled_by_identity_against_the_shipped_build_and_impostor
         digest = hashlib.sha256((events.PACKAGE_ROOT / path).read_bytes()).digest()
         return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
-    shipped = {path: record(path) for path in ("core/session_turns.py", "core/loop_watchdog.py")}
+    shipped = {path: record(path) for path in ("core/session_turns.py", "core/internal_server.py")}
     monkeypatch.setattr(events, "_shipped_hashes", lambda: shipped)
     events.shipped_vocabulary.cache_clear()
     caplog.set_level(logging.WARNING, logger="core.loop_watchdog")
     method = SessionTurnManager.busy_session_ids.__code__
-    nested = next(c for c in EventLoopWatchdog._try_warm_freeze.__code__.co_consts if getattr(c, "co_name", "") == "apply")
+    import core.internal_server as internal_server
+
+    nested = next(c for c in internal_server.create_app.__code__.co_consts if getattr(c, "co_name", "") == "_arm_warm_gc_census")
     impostor = method.replace(co_name="busy_session_ids")
     scope: dict = {}
     exec(compile("def is_in_flight(self, session_id):\n    return False\n", method.co_filename, "exec"), scope)
@@ -533,7 +535,7 @@ def test_own_code_is_labelled_by_identity_against_the_shipped_build_and_impostor
         line, event = _formatted_event(caplog)
         assert [(f["file"], f["function"]) for f in event["frames"]] == [
             ("core/session_turns.py", "SessionTurnManager.busy_session_ids"),
-            ("core/loop_watchdog.py", "EventLoopWatchdog._try_warm_freeze.<locals>.apply"),
+            ("core/internal_server.py", "create_app.<locals>._arm_warm_gc_census"),
         ] + [("<redacted>", "<redacted>")] * 3
 
         prefix = line.split(EVENT_MARKER)[0]
