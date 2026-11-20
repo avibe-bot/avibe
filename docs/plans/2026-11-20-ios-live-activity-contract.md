@@ -171,7 +171,7 @@ Unix seconds are JSON integers in [1600000000, 4102444800]. The token must match
 - `apns-priority`: the body's priority
 - `apns-expiration`: `timestamp + 3600` for an update, `timestamp + 14400` for an end
 - no `apns-collapse-id`
-- body, compact JSON in this key order: `{"aps":{"timestamp","event","content-state":{"phase","startedAt"[,"endedAt"],"confirmedAt"}, "stale-date" | "dismissal-date"[, "alert"]}}`. `alert` is exactly `{"title":{"loc-key":"AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE"},"body":{"loc-key":"AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY"},"sound":"default"}`.
+- body, compact JSON in this key order: `{"aps":{"timestamp","event","content-state":{"phase","startedAt"[,"endedAt"],"confirmedAt"}, "stale-date" | "dismissal-date"[, "alert"]}}`. `alert` is exactly `{"title":{"loc-key":"AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE"},"body":{"loc-key":"AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY"},"sound":"default"}`. This is the ActivityKit alert shape, not the legacy flat `title-loc-key` form: `title` and `body` are objects with `loc-key`, and `sound` sits inside `alert`. That is how Apple's ActivityKit push article shows it (["Starting and updating Live Activities with ActivityKit push notifications"](https://developer.apple.com/documentation/activitykit/starting-and-updating-live-activities-with-activitykit-push-notifications), update and start payload examples).
 
 ### 3.4 Responses
 
