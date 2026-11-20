@@ -3797,8 +3797,6 @@ class CLIProxyEngineAdapter:
                 vendor=normalized_vendor,
                 headers=_oauth_account_call_headers(auth, normalized_vendor),
             )
-        except asyncio.CancelledError:
-            raise
         except Exception:  # noqa: BLE001 - no upstream or engine text may leave this boundary
             return None
 

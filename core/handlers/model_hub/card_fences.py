@@ -56,7 +56,8 @@ _VERSION = 1
 # A row is about 170 bytes; the cap bounds every read and is enforced on write.
 _MAX_BYTES = 64 * 1024
 _ACCOUNT = re.compile(r"[a-f0-9]{64}")
-_REQUEST = re.compile(r"[a-f0-9]{32}")
+# A request id is a UUID as written: the shape both vendors' other clients send.
+_REQUEST = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 _ROW_KEYS = frozenset({"request_id", "kind", "since", "reason"})
 
 
@@ -238,7 +239,7 @@ class CardFences:
             self._load()
             if self._damaged or not _ACCOUNT.fullmatch(account) or kind not in KINDS or account in self._rows:
                 raise FenceUnavailable
-            row = _Row(uuid4().hex, kind, _iso(now), IN_FLIGHT)
+            row = _Row(str(uuid4()), kind, _iso(now), IN_FLIGHT)
             try:
                 self._publish({**self._rows, account: row})
             except Exception:  # noqa: BLE001 - not confirmed on disk, for whatever reason

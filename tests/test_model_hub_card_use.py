@@ -502,6 +502,8 @@ async def test_one_engine_post_picks_matching_kind_and_uses_fresh_quota(tmp_path
         result = await service.use_reset_card(source.id, {"kind": "session"})
     assert result["use"] == dict(kind="session", outcome="used", reason=None, cleared=["five_hour"])
     assert len(posts) == 1 and posts[0]["program"] == "cedar_ember"
+    # The request id is a UUID as written, the shape other clients of both vendors send.
+    assert re.fullmatch(r"[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}", posts[0]["request_id"])
     assert result["quota"]["sources"][0]["windows"][0]["used_pct"] == 10
     assert result["quota"]["sources"][0]["reset_cards"]["lock"] is None
     assert store.load().sources[0].state.status == "standby"
@@ -1106,7 +1108,8 @@ async def test_a_press_whose_claim_cannot_be_made_durable_reaches_no_vendor(tmp_
     assert account.uses == []
 
 
-_ROW = {"request_id": "c" * 32, "kind": "account", "since": "2026-11-20T00:00:00Z", "reason": "in_flight"}
+_REQUEST_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+_ROW = {"request_id": _REQUEST_ID, "kind": "account", "since": "2026-11-20T00:00:00Z", "reason": "in_flight"}
 
 
 def _document(locks=None, **changes):
@@ -1127,7 +1130,7 @@ def _document_cases():
         "repeated-top-level-key": '{"version":1,"locks":{},"locks":{}}',
         "repeated-account": '{"version":1,"locks":{"%s":%s,"%s":%s}}' % (ACCOUNT, json.dumps(_ROW), ACCOUNT, json.dumps(_ROW)),
         "repeated-row-key": '{"version":1,"locks":{"%s":{"request_id":"%s","kind":"account","kind":"fable","since":"2026-11-20T00:00:00Z","reason":"unconfirmed"}}}'
-        % (ACCOUNT, "c" * 32),
+        % (ACCOUNT, _REQUEST_ID),
         "short-account": _document({ACCOUNT[:-1]: _ROW}),
         "uppercase-account": _document({"A" * 64: _ROW}),
         "boolean-version": _document(version=True),
@@ -1140,7 +1143,7 @@ def _document_cases():
         "missing-row-field": _document({ACCOUNT: {key: value for key, value in _ROW.items() if key != "since"}}),
         "unknown-kind": _document({ACCOUNT: {**_ROW, "kind": "other"}}),
         "unknown-reason": _document({ACCOUNT: {**_ROW, "reason": "settled"}}),
-        "malformed-request-id": _document({ACCOUNT: {**_ROW, "request_id": "c" * 31}}),
+        "malformed-request-id": _document({ACCOUNT: {**_ROW, "request_id": "c" * 32}}),
         "non-string-field": _document({ACCOUNT: {**_ROW, "since": 0}}),
         "time-without-zone": _document({ACCOUNT: {**_ROW, "since": "2026-11-20T00:00:00"}}),
         "time-not-canonical": _document({ACCOUNT: {**_ROW, "since": "2026-11-20T08:00:00+08:00"}}),
