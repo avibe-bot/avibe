@@ -29,7 +29,7 @@ import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { DOMAIN_SUFFIX } from './rules';
-import { deviceTime } from './format';
+import { deviceTime, lowerFirst } from './format';
 import {
   TRIAL_WINDOW_SECONDS,
   type ConnectionChange,
@@ -84,10 +84,10 @@ type BadgeVariant = 'info' | 'success' | 'secondary' | 'warning';
 const directStateKeys = {
   ready: 'devices.connection.available',
   off: 'devices.connection.off',
-  'awaiting-permission': 'remoteAccess.direct.stateAwaitingPermission',
-  denied: 'remoteAccess.direct.stateDenied',
-  'awaiting-certificate': 'remoteAccess.direct.stateAwaitingCertificate',
-  'not-running': 'remoteAccess.direct.stateNotRunning',
+  'awaiting-permission': 'devices.connection.stateAwaitingPermission',
+  denied: 'devices.connection.stateDenied',
+  'awaiting-certificate': 'devices.connection.stateAwaitingCertificate',
+  'not-running': 'devices.connection.stateNotRunning',
 } as const satisfies Record<DirectState, TranslationKey>;
 
 const directWhyKeys = {
@@ -223,7 +223,7 @@ function PreferenceGroup({ path, preference, onChange }: {
       <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted">{t('devices.connection.choiceHint')}</p>
       {preference.reverted && (
         <p role="status" className="border-t border-border bg-gold/10 px-5 py-2.5 text-[11px] leading-relaxed text-foreground">
-          {t('devices.connection.choiceReverted', { time: deviceTime(preference.reverted.at, t, i18n.language, 'stamp') })}
+          {t('devices.connection.choiceReverted', { time: lowerFirst(deviceTime(preference.reverted.at, t, i18n.language, 'stamp')) })}
         </p>
       )}
     </SettingsPanel>
@@ -263,6 +263,7 @@ function RenameDialogs({ host, rename, actions }: { host: string; rename: Rename
               <li>{t('devices.rename.signedOut')}</li>
               <li>{t('devices.rename.links')}</li>
               <li>{t('devices.rename.homeScreen')}</li>
+              {rename.health && <li>{t('devices.rename.health')}</li>}
               <li>{t('devices.rename.direct')}</li>
             </ul>
           </div>

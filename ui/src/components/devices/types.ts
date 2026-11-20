@@ -118,7 +118,11 @@ export const TRIAL_WINDOW_SECONDS = 30;
  *  waits `countdown` seconds), `done` is the page afterwards. `voidDays`: how long the old name is
  *  held before someone else may claim it. */
 export type Rename =
-  | { step: 'form'; name: string; nameState?: NameState; voidDays: number }
+  | {
+    step: 'form'; name: string; nameState?: NameState; voidDays: number;
+    /** A device of this Avibe has Health connected: its synced data is deleted too. */
+    health: boolean;
+  }
   | { step: 'confirm'; name: string; countdown: number }
   | { step: 'done'; from: string };
 

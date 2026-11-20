@@ -73,7 +73,7 @@ describe('DevicesPageView', () => {
     expect(onNameChange).toHaveBeenCalledWith('maxwell');
 
     rerender(<DevicesPageView reach={{ state: 'off', surface: 'desktop', account, name: 'maxwell', nameState: 'free' }} devices={[self(macbook)]} />);
-    expect(screen.getByText('域名是 maxwell-app.avibe.bot，领取后不能更改。')).toBeTruthy();
+    expect(screen.getByText('域名是 maxwell-app.avibe.bot。')).toBeTruthy();
     expect((screen.getByRole('button', { name: '开启远程访问' }) as HTMLButtonElement).disabled).toBe(false);
 
     const onSignIn = vi.fn();
@@ -103,7 +103,7 @@ describe('DevicesPageView', () => {
 
     rerender(<DevicesPageView reach={on} devices={[self(macbook)]} add="android" />);
     expect(screen.getByTestId('add-device-code').dataset.code).toBe(`https://${host}`);
-    expect(screen.getByText('目前没有安卓 App。')).toBeTruthy();
+    expect(screen.getByText('没有安卓 App。')).toBeTruthy();
 
     rerender(<DevicesPageView reach={on} devices={[self(macbook), iphone]} />);
     expect(screen.queryByTestId('add-device-code')).toBeNull();
@@ -153,5 +153,30 @@ describe('DevicesPageView', () => {
   it('confirms turning off from another device with how many others are locked out', () => {
     render(<DevicesPageView reach={on} devices={[macbook, self(iphone), chrome]} confirm="turn-off" />);
     expect(screen.getByRole('dialog').textContent).toContain('你正在用 iPhone 远程打开它。关闭后这台设备和其他 1 台都打不开，只能回到 MacBook 上重新开启。');
+  });
+
+  it('says the turn-off clause only when others are locked out too, with the right plural', async () => {
+    const { rerender } = render(<DevicesPageView reach={on} devices={[macbook, self(iphone)]} confirm="turn-off" />);
+    expect(screen.getByRole('dialog').textContent).toContain('关闭后这台设备就打不开了，只能回到 MacBook 上重新开启。');
+    await i18n.changeLanguage('en');
+    rerender(<DevicesPageView reach={on} devices={[macbook, self(iphone), chrome]} confirm="turn-off" />);
+    expect(screen.getByRole('dialog').textContent).toContain('this device and 1 other cannot open it');
+  });
+
+  it('tells a member their device leaves their own account, not the owner\'s', () => {
+    render(<DevicesPageView reach={on} viewer="member" ownerEmail={account} viewerAccount="sara@example.test"
+      devices={[self(chrome), { ...iphone, id: 'sara-phone' }]} detail="sara-phone" />);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.textContent).toContain('这台设备会退出 sara@example.test，不能再打开这个 Avibe');
+    expect(dialog.textContent).not.toContain(account);
+  });
+
+  it('says a list of health data with the locale\'s own conjunction, and one day in the singular', async () => {
+    const item = { id: 'h', at: new Date().toISOString(), event: { kind: 'healthRead', days: 1, data: ['steps', 'sleep'] } } as const;
+    const { rerender } = render(<DevicesPageView reach={on} devices={[self(macbook), iphone]} activity={[item]} />);
+    expect(screen.getByText('Agent 读取了近 1 天的步数和睡眠')).toBeTruthy();
+    await i18n.changeLanguage('en');
+    rerender(<DevicesPageView reach={on} devices={[self(macbook), iphone]} activity={[item]} />);
+    expect(screen.getByText('An Agent read 1 day of steps and sleep')).toBeTruthy();
   });
 });

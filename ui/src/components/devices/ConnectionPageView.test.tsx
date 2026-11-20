@@ -80,19 +80,24 @@ describe('ConnectionPageView', () => {
     expect((screen.getByRole('switch', { name: '中继' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('explains every path direct affects while direct is not allowed', () => {
-    render(<ConnectionPageView {...base} direct="denied" />);
+  it('explains every path direct affects while direct is not allowed, under a badge of its own', async () => {
+    const { rerender } = render(<ConnectionPageView {...base} direct="denied" />);
     expect(screen.getAllByText('直连还没有对这个 Avibe 开放。')).toHaveLength(3);
+    await i18n.changeLanguage('en');
+    rerender(<ConnectionPageView {...base} direct="denied" />);
+    expect(screen.getAllByText('Not allowed')).toHaveLength(3);
   });
 
   it('renames in two steps: the consequences with the waiting period passed in, then a held confirmation', () => {
-    const { rerender } = render(<ConnectionPageView {...base} viewer="local" host={host} rename={{ step: 'form', name: 'maxwell', voidDays: 7 }} />);
+    const { rerender } = render(<ConnectionPageView {...base} viewer="local" host={host} rename={{ step: 'form', name: 'maxwell', voidDays: 7, health: true }} />);
     let dialog = screen.getByRole('dialog');
     expect(dialog.textContent).toContain('max-app.avibe.bot 立即作废，7 天后别人可以领取，不会还给你。');
+    expect(dialog.textContent).toContain('已同步的健康数据会删除，要在 iPhone 上重新连接健康。');
     expect((within(dialog).getByRole('button', { name: '继续' }) as HTMLButtonElement).disabled).toBe(false);
 
-    rerender(<ConnectionPageView {...base} viewer="local" host={host} rename={{ step: 'form', name: 'alex', nameState: 'taken', voidDays: 7 }} />);
+    rerender(<ConnectionPageView {...base} viewer="local" host={host} rename={{ step: 'form', name: 'alex', nameState: 'taken', voidDays: 7, health: false }} />);
     dialog = screen.getByRole('dialog');
+    expect(dialog.textContent).not.toContain('健康数据');
     expect(within(dialog).getByText('已被占用，换一个名称。')).toBeTruthy();
     expect((within(dialog).getByRole('button', { name: '继续' }) as HTMLButtonElement).disabled).toBe(true);
 

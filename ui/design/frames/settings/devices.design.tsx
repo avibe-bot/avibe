@@ -37,7 +37,7 @@ const iphoneCapabilities: DeviceCapability[] = [
 ];
 
 const iphone = (extra: Partial<Device> = {}): Device => ({
-  id: 'iphone', kind: 'iphone', name: 'Max 的 iPhone', client: { kind: 'app', version: '3.2.8', platform: 'iOS 26.1' },
+  id: 'iphone', kind: 'iphone', name: 'iPhone 15 Pro', client: { kind: 'app', version: '3.2.8', platform: 'iOS 26.1' },
   online: { path: 'punched', family: 'ipv6', ms: 38 }, signedInAt: ago(10 * DAY),
   capabilities: iphoneCapabilities,
   recent: [
@@ -67,16 +67,16 @@ const sara: Device = {
 
 const activity: DeviceActivity[] = [
   { id: 'a1', at: ago(379), event: { kind: 'signedIn', device: 'Mac mini（办公室）' }, source: 'Avibe Desktop' },
-  { id: 'a2', at: ago(468), event: { kind: 'healthRead', days: 7, data: ['steps', 'sleep'], task: '晨间简报' }, source: 'Max 的 iPhone' },
-  { id: 'a3', at: ago(1040), event: { kind: 'alarmCreated', label: '06:30 起床', confirmedOn: 'iPhone' }, source: 'Max 的 iPhone' },
+  { id: 'a2', at: ago(468), event: { kind: 'healthRead', days: 7, data: ['steps', 'sleep'], task: '晨间简报' }, source: 'iPhone 15 Pro' },
+  { id: 'a3', at: ago(1040), event: { kind: 'alarmCreated', label: '06:30 起床', confirmedOn: 'iPhone' }, source: 'iPhone 15 Pro' },
   { id: 'a4', at: ago(1257), event: { kind: 'signedOut', device: 'Firefox · Linux' }, source: 'Max 的 MacBook Pro' },
 ];
 const fullActivity: DeviceActivity[] = [
   ...activity,
   { id: 'a5', at: ago(14 * DAY + 100), event: { kind: 'signedIn', device: 'Chrome · Windows' }, source: 'Chrome · Windows' },
   { id: 'a6', at: ago(16 * DAY + 200), event: { kind: 'directOn' }, source: 'Max 的 MacBook Pro' },
-  { id: 'a7', at: ago(10 * DAY + 30), event: { kind: 'healthConnected', device: 'Max 的 iPhone', data: ['steps', 'activity', 'workouts', 'sleep'] }, source: 'Max 的 iPhone' },
-  { id: 'a8', at: ago(10 * DAY + 34), event: { kind: 'signedIn', device: 'Max 的 iPhone' }, source: 'Avibe App' },
+  { id: 'a7', at: ago(10 * DAY + 30), event: { kind: 'healthConnected', device: 'iPhone 15 Pro', data: ['steps', 'activity', 'workouts', 'sleep'] }, source: 'iPhone 15 Pro' },
+  { id: 'a8', at: ago(10 * DAY + 34), event: { kind: 'signedIn', device: 'iPhone 15 Pro' }, source: 'Avibe App' },
   { id: 'a9', at: ago(30 * DAY + 200), event: { kind: 'signedIn', device: 'Safari · iPad' }, source: 'Safari · iPad' },
   { id: 'a10', at: ago(30 * DAY + 204), event: { kind: 'remoteAccessOn', host }, source: 'Max 的 MacBook Pro' },
 ];
@@ -131,7 +131,7 @@ const designFrames = frames([
   frame('on-shared', '已开启 · 共享实例的所有者：别人的设备单独一组', at(1180),
     { reach: on, devices: [...all('host'), sara], activity }),
   frame('member', '共享实例的成员：只看到自己的设备', at(600),
-    { reach: on, viewer: 'member', devices: [{ ...sara, person: undefined, self: true }, iphone({ id: 'sara-phone', name: 'Sara 的 iPhone', online: undefined, lastActiveAt: ago(1300), capabilities: [iphoneCapabilities[0]] })] }),
+    { reach: on, viewer: 'member', devices: [{ ...sara, person: undefined, self: true }, iphone({ id: 'sara-phone', name: 'iPhone 16', online: undefined, lastActiveAt: ago(1300), capabilities: [iphoneCapabilities[0]] })] }),
 
   // 4. A device's detail.
   frame('detail-iphone', '设备详情 · iPhone：连接、三项功能各一个开关、最近、退出这台设备', TALL,

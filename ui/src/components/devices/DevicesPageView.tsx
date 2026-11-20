@@ -71,6 +71,8 @@ export type DevicesPageViewProps = DevicesPageActions & {
   viewer?: 'owner' | 'member';
   /** The account this Avibe belongs to. */
   ownerEmail?: string;
+  /** The account the person looking is signed in as; the owner's unless `viewer` is a member. */
+  viewerAccount?: string;
   /** The device whose detail is open. */
   detail?: string;
   /** A way out was pressed and something would be lost: the confirmation. */
@@ -264,7 +266,7 @@ function capabilityDetail(t: TFunction, language: string, device: Device, capabi
     case 'notifications':
       return t(device.kind === 'host' ? 'devices.capability.notificationsHost' : 'devices.capability.notificationsPush');
     case 'health': {
-      const data = upperFirst(healthText(t, capability.data));
+      const data = upperFirst(healthText(t, language, capability.data));
       return capability.syncedAt
         ? t('devices.capability.healthSynced', { data, when: lowerFirst(deviceTime(capability.syncedAt, t, language, 'stamp')) })
         : data;
@@ -319,14 +321,16 @@ function ActivityRow({ item, wide }: { item: DeviceActivity; wide?: boolean }) {
   return (
     <div className="flex items-baseline gap-3 border-b border-border px-5 py-2.5 last:border-b-0">
       <span className={`shrink-0 text-[11px] tabular-nums text-muted ${wide ? 'w-28' : 'w-24'}`}>{deviceTime(item.at, t, i18n.language, 'stamp')}</span>
-      <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground">{activityText(t, item)}</span>
+      <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground">{activityText(t, i18n.language, item)}</span>
       {item.source && <span className="hidden shrink-0 text-[11px] text-muted md:inline">{item.source}</span>}
     </div>
   );
 }
 
 /** A device's detail: where it is, what it offers (a switch each), what it did lately, one way out. */
-function DeviceDetail({ device, ownerEmail, actions }: { device: Device; ownerEmail?: string; actions: DevicesPageActions }) {
+function DeviceDetail({ device, account, member, actions }: {
+  device: Device; account: string; member: boolean; actions: DevicesPageActions;
+}) {
   const { t, i18n } = useTranslation();
   const Icon = deviceIcon[device.kind];
   const facts: Array<[string, string]> = [];
@@ -391,7 +395,7 @@ function DeviceDetail({ device, ownerEmail, actions }: { device: Device; ownerEm
             {device.recent.map((item) => (
               <div key={item.id} className="flex items-baseline gap-3 px-6 py-1.5 max-md:px-5">
                 <span className="w-24 shrink-0 text-[11px] tabular-nums text-muted">{deviceTime(item.at, t, i18n.language, 'stamp')}</span>
-                <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground">{activityText(t, item)}</span>
+                <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground">{activityText(t, i18n.language, item)}</span>
               </div>
             ))}
           </div>
@@ -401,7 +405,7 @@ function DeviceDetail({ device, ownerEmail, actions }: { device: Device; ownerEm
             <p className="text-[11px] leading-relaxed text-muted md:max-w-[250px]">
               {device.person
                 ? t('devices.detail.signOutPerson', { person: device.person })
-                : t('devices.detail.signOutOwn', { account: ownerEmail ?? '' })}
+                : t(member ? 'devices.detail.signOutMember' : 'devices.detail.signOutOwn', { account })}
             </p>
             <Button variant="destructive-soft" size="sm" className="shrink-0" onClick={() => actions.onSignOutDevice?.(device.id)}>
               <LogOut />{t('devices.detail.signOut')}
@@ -499,13 +503,14 @@ function Confirm({ title, body, action, actions }: { title: string; body: string
 }
 
 export function DevicesPageView({
-  reach, devices, activity = [], viewer = 'owner', ownerEmail, detail, confirm, view = 'page', add, ...actions
+  reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
   const mine = devices.filter((each) => !each.person);
   const others = devices.filter((each) => each.person);
   const opened = devices.find((each) => each.id === detail);
   const owner = viewer === 'owner';
+  const account = viewerAccount ?? (owner ? ownerEmail : undefined) ?? '';
   const on = reach.state === 'on';
   const signedIn = othersSignedIn(devices);
 
@@ -580,7 +585,7 @@ export function DevicesPageView({
       {add && mine.length > 1 && reach.state === 'on' && (
         <AddDevice kind={add} host={reach.host} account={reach.account} actions={actions} />
       )}
-      {opened && !confirm && <DeviceDetail device={opened} ownerEmail={ownerEmail} actions={actions} />}
+      {opened && !confirm && <DeviceDetail device={opened} account={account} member={!owner} actions={actions} />}
       {opened && confirm === 'remove' && (
         <Confirm
           title={t('devices.confirm.removeTitle', { name: opened.name })}
@@ -592,7 +597,9 @@ export function DevicesPageView({
       {confirm === 'turn-off' && (
         <Confirm
           title={t('devices.confirm.turnOffTitle')}
-          body={t('devices.confirm.turnOffBody', { device: self?.name ?? '', count: signedIn.length, host: host?.name ?? '' })}
+          body={signedIn.length > 0
+            ? t('devices.confirm.turnOffBody', { device: self?.name ?? '', count: signedIn.length, host: host?.name ?? '' })
+            : t('devices.confirm.turnOffBodyAlone', { device: self?.name ?? '', host: host?.name ?? '' })}
           action={t('devices.confirm.turnOffAction')}
           actions={actions}
         />
@@ -601,7 +608,7 @@ export function DevicesPageView({
         <Confirm
           title={t('devices.confirm.removeOthersTitle')}
           body={t(othersSyncHealth ? 'devices.confirm.removeOthersBodyHealth' : 'devices.confirm.removeOthersBody', {
-            count: signedIn.length, account: ownerEmail ?? '',
+            count: signedIn.length, account,
           })}
           action={t('devices.confirm.removeOthersAction')}
           actions={actions}

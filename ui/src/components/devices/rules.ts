@@ -24,7 +24,7 @@ export const turnOffNeedsConfirm = (devices: Device[]) => {
 export const othersSignedIn = (devices: Device[]) => devices.filter((each) => !each.person && each.kind !== 'host' && !each.self);
 
 /** One activity entry, in the page's own words. */
-export function activityText(t: TFunction, item: DeviceActivity): string {
+export function activityText(t: TFunction, language: string, item: DeviceActivity): string {
   const { event } = item;
   switch (event.kind) {
     case 'signedIn':
@@ -33,10 +33,10 @@ export function activityText(t: TFunction, item: DeviceActivity): string {
       return t('devices.activity.signedOut', { device: event.device });
     case 'healthRead':
       return event.task
-        ? t('devices.activity.healthReadFor', { days: event.days, data: healthText(t, event.data), task: event.task })
-        : t('devices.activity.healthRead', { days: event.days, data: healthText(t, event.data) });
+        ? t('devices.activity.healthReadFor', { count: event.days, data: healthText(t, language, event.data), task: event.task })
+        : t('devices.activity.healthRead', { count: event.days, data: healthText(t, language, event.data) });
     case 'healthConnected':
-      return t('devices.activity.healthConnected', { device: event.device, data: healthText(t, event.data) });
+      return t('devices.activity.healthConnected', { device: event.device, data: healthText(t, language, event.data) });
     case 'alarmCreated':
       return event.confirmedOn
         ? t('devices.activity.alarmConfirmed', { label: event.label, device: event.confirmedOn })

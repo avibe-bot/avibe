@@ -64,9 +64,9 @@ const designFrames = frames([
   // after a waiting period, passed in (7 days, the same as deleting an instance).
   frame('domain', '连接方式 · 页面最下面一行：域名，和「更改域名」', WIDE, { ...base, viewer: 'local', host }),
   frame('rename', '更改域名 · 第一步：新名称，和会发生什么', WIDE,
-    { ...base, viewer: 'local', host, rename: { step: 'form', name: 'maxwell', voidDays } }),
+    { ...base, viewer: 'local', host, rename: { step: 'form', name: 'maxwell', voidDays, health: true } }),
   frame('rename-taken', '更改域名 · 名称已被占用', WIDE,
-    { ...base, viewer: 'local', host, rename: { step: 'form', name: 'alex', nameState: 'taken', voidDays } }),
+    { ...base, viewer: 'local', host, rename: { step: 'form', name: 'alex', nameState: 'taken', voidDays, health: true } }),
   frame('rename-confirm', '更改域名 · 第二次确认：按钮先停 3 秒', WIDE,
     { ...base, viewer: 'local', host, rename: { step: 'confirm', name: 'maxwell', countdown: 3 } }),
   frame('renamed', '更改域名 · 之后（在这台电脑上看）', WIDE,

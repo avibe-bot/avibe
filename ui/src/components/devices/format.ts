@@ -85,9 +85,9 @@ const healthKeys = {
 export const joinParts = (t: TFunction, parts: Array<string | null | undefined | false>) =>
   parts.filter(Boolean).join(t('devices.partSeparator'));
 
-export const listText = (t: TFunction, items: string[]) => items.join(t('devices.listSeparator'));
-
-export const healthText = (t: TFunction, data: HealthData[]) => listText(t, data.map((each) => t(healthKeys[each])));
+/** 「步数、活动和睡眠」, "steps, activity, and sleep": the locale's own conjunction. */
+export const healthText = (t: TFunction, language: string, data: HealthData[]) =>
+  new Intl.ListFormat(language, { type: 'conjunction' }).format(data.map((each) => t(healthKeys[each])));
 
 /** Capitalise a list that opens a line (English names are lower-case inside a sentence). */
 export const upperFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
