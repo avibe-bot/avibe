@@ -67,6 +67,101 @@ def sign_out(c, target, origin=ORIGIN):
     return c.post("/api/devices/" + target, base_url=origin, headers=csrf_headers(c, origin), json={})
 
 
+def test_device_paths_follow_authenticated_offer_not_device_or_stream_claims(install, monkeypatch, caplog):
+    from vibe import direct_rendezvous as direct
+
+    clock = [time.time()]
+    rv = direct.DirectRendezvous(clock=lambda: clock[0])
+    monkeypatch.setattr(direct, "rendezvous", rv)
+    epochs = []
+    rv.set_admission_listener(lambda _peer, _ttl, epoch: epochs.append(epoch))
+    server, peer = "1" * 64, "2" * 64
+    rv.publish(direct.DirectEndpoint(server, ("192.168.1.2:3210",)))
+    caller = client(login(install, "member", "member", installation="alpha"))
+    other = client(login(install, "member", "member", installation="beta"))
+    def paths():
+        return {row["current"]: row["current_path"] for row in listing(caller)["mine"]}
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    assert caller.post('/api/direct/rendezvous', base_url=ORIGIN, headers=csrf_headers(caller, ORIGIN),
+                       json={"version": 1, "client_endpoint_id": peer}).get_json()["status"] == "ready"
+    path = {"kind": "lan", "family": "ipv4", "rtt_ms": 8}
+    epoch = epochs[-1]
+    assert epoch > 0
+    rv.observe_path("3" * 64, epoch, 1, "open", path)
+    assert paths() == {True: None, False: None}
+    rv.observe_path(peer, epoch, 1, "open", path)
+    assert paths() == {True: path, False: None}
+    assert peer not in json.dumps(listing(other)) and peer not in caplog.text
+    rv.observe_path(peer, epoch, 1, "close", path)
+    assert paths() == {True: None, False: None}
+    rv.observe_path(peer, epoch, 2, "open", path)
+    # The session has an independently observed tunnel. Renewing the grant
+    # doesn't renew its last path measurement or hide that tunnel indefinitely.
+    from types import SimpleNamespace
+    from vibe.sse_broker import broker
+    sid = rv._admissions[peer].session[1]
+    binding = remote_access.device_binding(install)
+    monkeypatch.setattr(broker, "tunnel_sessions", lambda b: {("member", sid)} if b == binding else set())
+    tick = time.monotonic()
+    monkeypatch.setattr(direct, "time", SimpleNamespace(monotonic=lambda: tick + 11))
+    assert caller.post('/api/direct/rendezvous', base_url=ORIGIN, headers=csrf_headers(caller, ORIGIN),
+                       json={"version": 1, "client_endpoint_id": peer}).get_json()["status"] == "ready"
+    assert epochs[-1] == epoch and rv.is_admitted(peer)
+    assert paths()[True] == {"kind": "tunnel", "family": None, "rtt_ms": None}
+    rv.observe_path(peer, epoch, 2, "change", path)
+    assert paths()[True] == path
+    monkeypatch.setattr(broker, "tunnel_sessions", lambda b: set())
+    clock[0] += direct.RENDEZVOUS_TTL_SECONDS + 1
+    assert paths() == {True: None, False: None}
+
+
+@pytest.mark.parametrize('next_subject', ['first', 'second'])
+def test_conflicting_sessions_are_unattributed_and_old_epochs_cannot_rebind(install, monkeypatch, next_subject):
+    from vibe import direct_rendezvous as direct
+
+    now = [1000]
+    rv = direct.DirectRendezvous(clock=lambda: now[0])
+    monkeypatch.setattr(direct, 'rendezvous', rv)
+    peer = 'a' * 64
+    rv.publish(direct.DirectEndpoint('b' * 64, ('192.168.1.2:3210',)))
+    epochs = []
+    rv.set_admission_listener(lambda _peer, _ttl, epoch: epochs.append(epoch))
+    first = client(login(install, 'first', 'member', installation='alpha'))
+    second = client(login(install, next_subject, 'member', installation='beta'))
+    def nominate(c):
+        response = c.post('/api/direct/rendezvous', base_url=ORIGIN, headers=csrf_headers(c, ORIGIN),
+                          json={'version': 1, 'client_endpoint_id': peer})
+        assert response.get_json()['status'] == 'ready'
+        return epochs[-1]
+    def path_for(c):
+        return next(r['current_path'] for r in listing(c)['mine'] if r['current'])
+    path = {'kind': 'relay', 'family': None, 'rtt_ms': 23}
+    old = nominate(first)
+    rv.observe_path(peer, old, 1, 'open', path)
+    assert path_for(first) == path
+    now[0] += 60
+    assert nominate(second) == 0 and rv.is_admitted(peer)
+    rv.observe_path(peer, old, 2, 'open', path)
+    rv.observe_path(peer, 0, 3, 'open', path)
+    assert path_for(first) is None and path_for(second) is None
+    # The second session renews while the key is still admitted, after the
+    # first session's original deadline. A fresh connection gets that renewal's
+    # epoch, not proof of which session holds the key.
+    now[0] = 1001 + direct.RENDEZVOUS_TTL_SECONDS
+    reconnect_epoch = nominate(second)
+    rv.observe_path(peer, reconnect_epoch, 4, 'open', path)
+    assert path_for(first) is None and path_for(second) is None
+    assert reconnect_epoch == 0 and rv.is_admitted(peer)
+    now[0] += direct.RENDEZVOUS_TTL_SECONDS + 1
+    assert not rv.is_admitted(peer)
+    new = nominate(second)
+    assert new and new != old
+    rv.observe_path(peer, old, 4, 'open', path)
+    assert path_for(second) is None
+    rv.observe_path(peer, new, 5, 'open', path)
+    assert path_for(first) is None and path_for(second) == path
+
+
 def test_device_action_selects_binding_and_subject_not_reported_metadata(install, monkeypatch):
     owner = login(install, "owner", "owner", installation="one")
     first = login(install, "member", "member", installation="one")

@@ -1,5 +1,6 @@
 import type { ApiContextType } from '@/context/ApiContext';
 import { isIosDevice, isStandalonePwa } from './platform';
+import { nativeDeviceLabel } from './deviceReport';
 import {
   hasNativeCapability,
   nativePushStatus,
@@ -815,7 +816,7 @@ async function postNativePushRegistration(
         endpoint: registration.endpoint,
         keys: registration.keys,
       },
-      'iPhone App',
+      await nativeDeviceLabel(),
       undefined,
       registration.previousEndpoints,
       recoverOnly,
@@ -1356,7 +1357,7 @@ async function reconcileWebPushOnce(
       const serverStatus = await api.getWebPushStatus({
         endpoint: nativeState.endpoint,
         subscription: nativeSubscription,
-        device_label: 'iPhone App',
+        device_label: await nativeDeviceLabel(),
         previous_endpoints: previousEndpoints,
       });
       if (serverStatus.current_subscription_enabled) {
@@ -1390,7 +1391,7 @@ async function reconcileWebPushOnce(
                 endpoint: repaired.endpoint,
                 keys: repaired.keys,
               },
-              device_label: 'iPhone App',
+              device_label: await nativeDeviceLabel(),
               previous_endpoints: previousEndpoints,
             });
             if (repairedStatus.current_subscription_enabled) {

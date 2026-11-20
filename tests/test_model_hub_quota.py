@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -786,7 +787,9 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
         {_PROFILE_URL: {"status_code": 200, "body": "{}"}},
     )
     parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
-    assert set(parsed) == {"plan", "windows", "reset_cards"}
+    assert set(parsed) == {"plan", "windows", "reset_cards", "reset_card_account"}
+    # A profile that names no organization names no account either.
+    assert parsed["reset_card_account"] is None
     usage_calls = [call for call in client.calls if call[1] == '/api-call' and call[2]['url'] != _PROFILE_URL]
     method, path, payload = usage_calls[0]
     assert usage_calls[1][2] == {**payload, 'url': payload['url'] + '?cedar_ember=1&skip_spend=1'}
@@ -798,7 +801,9 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
     assert payload["header"]["User-Agent"] == "axios/1.15.2"
 
     adapter, client = _adapter({"status_code": 200, "header": {}, "body": json.dumps(CODEX_REPORT)}, _METADATA)
-    await adapter.subscription_quota("src_codex", "openai", "cred_b")
+    parsed = await adapter.subscription_quota("src_codex", "openai", "cred_b")
+    # The account a reading was made under leaves as an opaque key, never as the vendor's id.
+    assert re.fullmatch("[a-f0-9]{64}", parsed["reset_card_account"]) and "acct_123" not in json.dumps(parsed)
     payload = client.calls[-1][2]
     assert payload["auth_index"] == "8"
     assert payload["url"] == "https://chatgpt.com/backend-api/wham/usage"
@@ -897,7 +902,7 @@ async def test_claude_cards_group_by_kind_without_exposing_grants():
             grant,
             {**grant, "id": "second", "resets_left": 3},
             {**grant, "id": "third", "paused": True},
-            {**grant, "ends_at": "2000-01-01T00:00:00Z"},
+            {**grant, "id": "fourth", "ends_at": "2000-01-01T00:00:00Z"},
         ],
     }
     adapter, _ = _adapter(

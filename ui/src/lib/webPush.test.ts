@@ -1485,6 +1485,69 @@ describe('web push recovery', () => {
       );
     });
 
+    it('names the device by the model the App reports', async () => {
+      const { call, api } = setup({ state: 'off', revokeState: 'absent', permission: 'granted' });
+      const native = (window as unknown as { avibeNative: { capabilities: Record<string, number> } }).avibeNative;
+      native.capabilities = { push: 1, device: 1 };
+      const pushCall = call.getMockImplementation()!;
+      call.mockImplementation(async (method: string) => (
+        method === 'device.describe'
+          ? {
+            kind: 'iphone_app',
+            display_name: 'iPhone 16 Pro',
+            aliases: [],
+            app_version: '1.0 (42)',
+            system_version: 'iOS 26.1',
+          }
+          : pushCall(method)
+      ));
+
+      await expect(reconcileWebPush(api, pendingRegistrationStore())).resolves.toMatchObject({
+        status: 'enabled',
+      });
+      expect(api.subscribeWebPush).toHaveBeenCalledWith(
+        expect.anything(),
+        'iPhone 16 Pro',
+        undefined,
+        expect.any(Array),
+        undefined,
+      );
+    });
+
+    it('names the device by its model when it checks an existing registration', async () => {
+      const { call, api } = setup({
+        state: 'on',
+        revokeState: 'active',
+        permission: 'granted',
+        endpoint: 'https://avibe.bot/api/push/apns/current',
+        keys: { p256dh: 'key', auth: 'auth' },
+      });
+      const native = (window as unknown as { avibeNative: { capabilities: Record<string, number> } }).avibeNative;
+      native.capabilities = { push: 1, device: 1 };
+      const pushCall = call.getMockImplementation()!;
+      call.mockImplementation(async (method: string) => (
+        method === 'device.describe'
+          ? {
+            kind: 'iphone_app',
+            display_name: 'iPhone 16 Pro',
+            aliases: [],
+            app_version: '1.0 (42)',
+            system_version: 'iOS 26.1',
+          }
+          : pushCall(method)
+      ));
+      (api.getWebPushStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        current_subscription_enabled: true,
+        current_subscription_repairable: false,
+      });
+
+      await reconcileWebPush(api, pendingRegistrationStore());
+
+      expect(api.getWebPushStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ device_label: 'iPhone 16 Pro' }),
+      );
+    });
+
     it.each([
       ['not yet asked', { state: 'off', revokeState: 'absent', permission: 'notDetermined' }],
       ['an older shell that does not say', { state: 'off', revokeState: 'absent' }],

@@ -336,6 +336,7 @@ final class WebViewFactory {
     private let showShare = ShowShareCoordinator.shared
     private let instanceID: () -> String?
     private let deviceID: () -> String?
+    private let deviceDescription: () -> [String: Any]?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
     private let directPreference: DirectPreferenceProvider?
@@ -379,6 +380,7 @@ final class WebViewFactory {
         instanceName: instanceName,
         instanceID: instanceID,
         deviceID: deviceID,
+        deviceDescription: deviceDescription,
         directStatus: directStatus,
         directHandover: directHandover,
         directPreference: directPreference,
@@ -447,6 +449,7 @@ final class WebViewFactory {
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
@@ -483,6 +486,7 @@ final class WebViewFactory {
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
+        self.deviceDescription = deviceDescription
         self.directStatus = directStatus
         self.directHandover = directHandover
         self.directPreference = directPreference
@@ -688,6 +692,7 @@ final class WebViewController: UIViewController {
     private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
+    private let deviceDescription: () -> [String: Any]?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
     private let directPreference: DirectPreferenceProvider?
@@ -786,6 +791,10 @@ final class WebViewController: UIViewController {
             deviceID: { [weak self] in
                 guard let self, !self.isInvalidatedForAccountTransition else { return nil }
                 return self.deviceID()
+            },
+            deviceDescription: { [weak self] in
+                guard let self, !self.isInvalidatedForAccountTransition else { return nil }
+                return self.deviceDescription()
             },
             directStatus: directStatus,
             directHandover: directHandover,
@@ -891,6 +900,7 @@ final class WebViewController: UIViewController {
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
@@ -933,6 +943,7 @@ final class WebViewController: UIViewController {
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
+        self.deviceDescription = deviceDescription
         self.directStatus = directStatus
         self.directHandover = directHandover
         self.directPreference = directPreference

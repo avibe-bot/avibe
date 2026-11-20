@@ -110,7 +110,7 @@ export function DesktopUpdatePanel({ state, act, busy, install, close }: {
  *  instance there is one thing to update, and the panel is the single one. */
 export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>[0]) {
   const { state, act, busy, install, close } = props;
-  // How long ago the shell sent an install decides whether it is still being followed.
+  // The time bounds how long an install the instance reported itself stands while it does not answer.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);

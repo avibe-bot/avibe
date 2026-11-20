@@ -377,6 +377,9 @@ final class AppModel: ObservableObject {
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let systemScheduleCoordinator: SystemScheduleCoordinator
     var systemScheduleDeviceID: String? { systemScheduleCoordinator.installationID }
+    /// Health's credential store, read here without side effects (`load()`
+    /// makes no id) for `device.describe`'s alias.
+    private let healthCredentials: HealthCredentialStoring
     private let systemScheduleNow: () -> Date
     private var pendingSystemSchedule: PendingSystemSchedule?
     private let nativeBadge: NativeBadge
@@ -578,12 +581,14 @@ final class AppModel: ObservableObject {
         runtimeOpenNotificationCenter: NotificationCenter = .default,
         badgeCenter: AppBadgeCentering? = nil,
         healthSync: HealthSyncCoordinator? = nil,
+        healthCredentials: HealthCredentialStoring = HealthCredentialStore(),
         networkPath: NetworkPathReading? = nil
     ) {
         self.defaults = defaults
         self.directPathPreferences = DirectPathPreferenceStore(defaults: defaults)
         self.networkPath = networkPath ?? SystemNetworkPath()
         self.healthSync = healthSync
+        self.healthCredentials = healthCredentials
         self.controlPlane = controlPlane
         let directFaultMarker = directFaultMarker
             ?? UserDefaultsDirectFaultMarker(defaults: defaults)
@@ -2697,6 +2702,34 @@ final class AppModel: ObservableObject {
         runtimeController.deliverPushOpened(
             id: pendingPushOpened.id,
             path: pendingPushOpened.url
+        )
+    }
+
+    /// `device.describe` for the selected instance's page: nil for any
+    /// other instance, or when no account is signed in. Health's id is an
+    /// alias only for the instance Health is paired with, on this account.
+    /// A restored account counts before its check confirms it (a cold start
+    /// opens the instance first); nothing is answered while the account is
+    /// signing out, resetting or changing.
+    func describeDevice(instanceID: String) -> [String: Any]? {
+        guard
+            let accountID = sessionCoordinator.settledAccountID,
+            sessionCoordinator.selectedInstance?.id == instanceID
+        else {
+            return nil
+        }
+        let health = (try? healthCredentials.load()).flatMap {
+            $0.accountID == accountID && $0.instanceID == instanceID ? $0.installationID : nil
+        }
+        return NativeDeviceDescription.body(
+            displayName: NativeDeviceDescription.modelName(
+                identifier: NativeDeviceDescription.hardwareIdentifier
+            ),
+            installationID: nativePushCoordinator.deviceIdentifier(forInstanceID: instanceID),
+            healthInstallationID: health,
+            scheduleDeviceID: systemScheduleDeviceID,
+            appVersion: NativeShellMetadata().shellVersion,
+            systemVersion: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
         )
     }
 

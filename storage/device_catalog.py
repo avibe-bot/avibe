@@ -8,10 +8,10 @@ from storage.mobile_store import MobileStore, mobile_store_path
 from storage.models import device_function_settings as settings, device_health_links as health
 
 
-def snapshot(conn, viewer, instance, owner_email, now):
+def snapshot(conn, viewer, instance, owner_email, now, *, paths=None):
     binding, subject, owner, caller = viewer
     gates.live_caller(conn, viewer, now)
-    listed = device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=now, conn=conn)
+    listed = device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=now, paths=paths, conn=conn)
     rows = {row["id"]: row for row in listed}
     query = select(settings).where(settings.c.binding == binding)
     if not owner:

@@ -144,6 +144,9 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mobile/device/v1/requests/{request_id}/result"),
     ("DELETE", "/api/mobile/device/v1/health"),
     ("DELETE", "/api/mobile/device/v1/"),
+    # Using a reset card spends a consumable that cannot be given back: a signed-in
+    # Member manages the rest of the Model Hub, not this.
+    ("POST", "/api/models/sources/{source_id}/reset-cards/use"),
 }
 
 
@@ -183,8 +186,8 @@ def test_complete_registered_api_management_inventory():
     # + 7 independent device routes and 2 Owner-only mobile metadata routes.
     # + 4 account-scoped registry list, self-report and sign-out routes.
     # + 4 personal Live Activity methods (Viewer; controller enforces ownership and session access).
-    # + 7 device function/activity routes and 1 native Health binding-ticket route.
-    assert len(endpoints) == 365
+    # + 1 Model Hub reset card use and 8 device function/activity/Health ticket routes.
+    assert len(endpoints) == 366
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),

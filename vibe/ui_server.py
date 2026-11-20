@@ -5513,6 +5513,24 @@ async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/models/sources/{source_id}/reset-cards/use", include_in_schema=False)
+async def model_hub_use_reset_card(source_id: str, starlette_request: FastAPIRequest):
+    # Spends a consumable that cannot be given back. Admitted like every other
+    # Owner-level change (`http_authorization_policy`): a signed-in Owner, or a
+    # caller the instance treats as its Owner by where the request comes from.
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            # The client checks the body in this process: only a Source id, one kind and a count reach the controller.
+            result = await _model_hub_service().use_reset_card(source_id, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**result)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.get("/api/models/hosted-tools", include_in_schema=False)
 async def model_hub_hosted_tools_get(starlette_request: FastAPIRequest):
     async def handler():
@@ -8603,7 +8621,12 @@ def direct_rendezvous():
         )
     else:
         auth = getattr(g, "authorization_context", None)
+        identity = getattr(g, "remote_session_identity", None)
+        registered_session = None
+        if identity and identity.get("sub") == subject and identity.get("browser_session_id") and identity.get("_device_binding"):
+            registered_session = (identity["_device_binding"], identity["browser_session_id"])
         result = rendezvous_state.rendezvous.offer(
+            session=registered_session,
             is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
@@ -8963,13 +8986,20 @@ async def device_list():
     binding, subject, owner, caller = viewer
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
     from storage.db import get_cached_sqlite_engine
+    from vibe.direct_rendezvous import rendezvous
+    from vibe.sse_broker import broker
+
+    paths = rendezvous.session_paths(binding)
+    for key in broker.tunnel_sessions(binding):
+        paths.setdefault(key, {"kind": "tunnel", "family": None, "rtt_ms": None})
+
     def load():
         from storage.importer import ensure_sqlite_state
         ensure_sqlite_state()
         scope = _device_owner_scope(viewer)
         with get_cached_sqlite_engine().connect() as conn:
             conn.exec_driver_sql('BEGIN')
-            return device_catalog.snapshot(conn,viewer,*scope,int(time.time()))
+            return device_catalog.snapshot(conn, viewer, *scope, int(time.time()), paths=paths)
     try:
         rows, _, unlinked = await asyncio.to_thread(load)
     except DeviceError as exc:
@@ -15397,6 +15427,11 @@ async def workbench_events():
             if state != "current":
                 yield _remote_authorization_sse_frame(state)
                 return
+            if (stream_via == "other" and remote_session_payload and remote_session_identity
+                    and remote_session_identity.get("sub") == remote_session_payload.get("sub")
+                    and remote_session_identity.get("_device_binding") and remote_session_identity.get("browser_session_id")):
+                broker.mark_remote_tunnel(sub_id, remote_session_identity["_device_binding"],
+                                         remote_session_identity["sub"], remote_session_identity["browser_session_id"])
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
