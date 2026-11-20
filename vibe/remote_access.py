@@ -6099,7 +6099,9 @@ def _redeem_pairing_claim(
     personal = claim.get("personal_claim")
     if personal and (normalized_result["instance_id"] != personal["instance_id"]
                      or normalized_result["public_url"] != personal["public_url"]):
-        return _pairing_failure_after_claim(claim, {"ok": False, "error": "pairing_target_changed"})
+        # This is an invalid response to the saved pairing request, not a new
+        # user-facing recovery state. Legacy Resume already localizes this code.
+        return _pairing_failure_after_claim(claim, {"ok": False, "error": "invalid_pairing_response"})
     instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
