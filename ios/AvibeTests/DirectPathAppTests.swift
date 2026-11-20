@@ -5232,10 +5232,23 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
+        // The transport is selected only for a routed host. A first bind
+        // slower than the App's listener wait leaves the host on the public
+        // path with no selection at all; say so rather than time out below.
+        XCTAssertFalse(
+            app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+            "The App routed no host: its first bind was slower than the listener wait, so nothing is selected."
+        )
         // The transport's selection follows the browser asynchronously: wait
         // for it rather than for a fixed time a loaded simulator may exceed.
-        try await eventually {
-            transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+        do {
+            try await eventually {
+                transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+            }
+        } catch {
+            // Which way it went: none, or the replaced open's too.
+            XCTFail("The transport was selected for \(transport.selections.map(\.runtime.instance.id)).")
+            throw error
         }
         // The replaced open must never surface later either. A "never" cannot
         // be awaited, so a short window gives a late browser or selection for
