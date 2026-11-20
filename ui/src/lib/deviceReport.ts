@@ -38,20 +38,40 @@ export function parseNativeDeviceDescription(value: unknown): NativeDeviceDescri
   };
 }
 
-let description: Promise<NativeDeviceDescription | null> | null = null;
-let reported: Promise<void> | null = null;
-let reportAttempt = 0;
+/**
+ * Per page: answers are kept for the shell's bridge object, which a new
+ * document gets afresh. Only an answer is kept; a refusal (the App still
+ * settling the account) is asked again next time.
+ */
+type PageState = {
+  description?: Promise<NativeDeviceDescription | null>;
+  reported?: Promise<void>;
+};
+const pages = new WeakMap<object, PageState>();
+const NO_SHELL: PageState = {};
+
+function pageState(): PageState {
+  const native = typeof window === 'undefined' ? undefined : window.avibeNative;
+  if (!native) return NO_SHELL;
+  let state = pages.get(native);
+  if (!state) {
+    state = {};
+    pages.set(native, state);
+  }
+  return state;
+}
 
 /** This page's one `device.describe`; null outside the iOS shell or on any failure. */
 export function nativeDeviceDescription(): Promise<NativeDeviceDescription | null> {
-  const pending = description ?? nativeDeviceDescribe()
+  const state = pageState();
+  if (state.description) return state.description;
+  const pending = nativeDeviceDescribe()
     .then(parseNativeDeviceDescription)
     .catch(() => null);
-  description = pending;
-  // Only an answer is kept: a refusal (the App still confirming the account)
-  // is asked again next time.
+  if (state === NO_SHELL) return pending;
+  state.description = pending;
   void pending.then((answer) => {
-    if (!answer && description === pending) description = null;
+    if (!answer && state.description === pending) delete state.description;
   });
   return pending;
 }
@@ -70,15 +90,11 @@ export async function nativeDeviceLabel(): Promise<string> {
 export function reportNativeDevice(
   post: (input: string, init: RequestInit) => Promise<Response>,
 ): Promise<void> {
-  if (reported) return reported;
-  const attempt = ++reportAttempt;
+  const state = pageState();
+  if (state.reported) return state.reported;
   const pending: Promise<void> = (async () => {
     const body = await nativeDeviceDescription();
-    if (!body) {
-      // Nothing was sent: the next page activation tries again.
-      if (reportAttempt === attempt) reported = null;
-      return;
-    }
+    if (!body) return false;
     try {
       await post('/api/devices/self', {
         method: 'POST',
@@ -88,12 +104,11 @@ export function reportNativeDevice(
     } catch {
       // Display only: a failed report changes nothing on this page.
     }
-  })();
-  reported = pending;
+    return true;
+  })().then((sent) => {
+    // Nothing was sent: the next page activation tries again.
+    if (!sent && state.reported === pending) delete state.reported;
+  });
+  if (state !== NO_SHELL) state.reported = pending;
   return pending;
-}
-
-export function resetNativeDeviceReportForTests(): void {
-  description = null;
-  reported = null;
 }

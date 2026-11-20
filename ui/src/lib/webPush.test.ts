@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApiContextType } from '@/context/ApiContext';
-import { resetNativeDeviceReportForTests } from './deviceReport';
 import {
   createNativePushDisabledIntentStore,
   disableWebPush,
@@ -140,7 +139,6 @@ function writableLocalStorage() {
 describe('web push recovery', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    resetNativeDeviceReportForTests();
   });
 
   it('detects a subscription bound to an obsolete VAPID key', () => {

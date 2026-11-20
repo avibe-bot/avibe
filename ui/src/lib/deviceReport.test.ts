@@ -6,7 +6,6 @@ import {
   nativeDeviceLabel,
   parseNativeDeviceDescription,
   reportNativeDevice,
-  resetNativeDeviceReportForTests,
 } from './deviceReport';
 
 const described = {
@@ -39,7 +38,6 @@ describe('the device report', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    resetNativeDeviceReportForTests();
   });
 
   it('sends what the App describes to the instance once per page', async () => {
@@ -68,8 +66,7 @@ describe('the device report', () => {
       await reportNativeDevice(apiFetch);
       await expect(nativeDeviceLabel()).resolves.toBe('iPhone App');
       vi.unstubAllGlobals();
-      resetNativeDeviceReportForTests();
-    }
+      }
     await reportNativeDevice(apiFetch);
     expect(apiFetch).not.toHaveBeenCalled();
   });
