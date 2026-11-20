@@ -1180,6 +1180,23 @@ final class NativePushCoordinator {
         return response
     }
 
+    /// This installation's id for one instance's device list
+    /// (`device.describe`), derived so the relay's installation id and secret
+    /// never leave the App. Nil before the installation exists, or when the
+    /// Keychain holds one from before a reinstall (recovery replaces it).
+    func deviceIdentifier(forInstanceID instanceID: String) -> String? {
+        guard
+            let installation = try? keychain.loadInstallation(),
+            installationMarker.installationID == installation.installationID
+        else {
+            return nil
+        }
+        return NativeDeviceDescription.installationID(
+            secret: installation.installationSecret,
+            instanceID: instanceID
+        )
+    }
+
     private func loadOrCreateInstallation() throws -> PushInstallationState {
         if let existing = try keychain.loadInstallation() {
             guard installationMarker.installationID == existing.installationID else {

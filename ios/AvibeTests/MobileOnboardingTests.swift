@@ -1801,6 +1801,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(historyRequest.method, .navigationHistoryChanged)
         XCTAssertNil(NativeShellMetadata.capabilities["navigation"])
         XCTAssertEqual(NativeShellMetadata.capabilities["systemSchedule"], 1)
+        XCTAssertEqual(NativeShellMetadata.capabilities["device"], 1)
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
             [
@@ -1813,6 +1814,7 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.showAccount",
                 "app.showInstances",
                 "badge.set",
+                "device.describe",
                 "direct.handover",
                 "direct.status",
                 "haptics.impact",

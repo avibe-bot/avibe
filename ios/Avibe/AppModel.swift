@@ -368,6 +368,8 @@ final class AppModel: ObservableObject {
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let systemScheduleCoordinator: SystemScheduleCoordinator
     var systemScheduleDeviceID: String? { systemScheduleCoordinator.installationID }
+    /// Health's paired identity, read without side effects (no id is made).
+    var healthIdentityReader: () -> HealthDeviceIdentity? = { try? HealthCredentialStore().load() }
     private let systemScheduleNow: () -> Date
     private var pendingSystemSchedule: PendingSystemSchedule?
     private let nativeBadge: NativeBadge
@@ -2440,6 +2442,31 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
+    /// `device.describe` for the selected instance's page: nil for any
+    /// other instance, or when no account is signed in. Health's id is an
+    /// alias only for the instance Health is paired with, on this account.
+    func describeDevice(instanceID: String) -> [String: Any]? {
+        guard
+            let accountID = sessionCoordinator.healthAccountID,
+            sessionCoordinator.selectedInstance?.id == instanceID
+        else {
+            return nil
+        }
+        let health = healthIdentityReader().flatMap {
+            $0.accountID == accountID && $0.instanceID == instanceID ? $0.installationID : nil
+        }
+        return NativeDeviceDescription.body(
+            displayName: NativeDeviceDescription.modelName(
+                identifier: NativeDeviceDescription.hardwareIdentifier
+            ),
+            installationID: nativePushCoordinator.deviceIdentifier(forInstanceID: instanceID),
+            healthInstallationID: health,
+            scheduleDeviceID: systemScheduleDeviceID,
+            appVersion: NativeShellMetadata().shellVersion,
+            systemVersion: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
+        )
+    }
+
     func acknowledgePushOpened(id: String, origin: WebOrigin) -> Bool {
         guard
             let pendingPushOpened,

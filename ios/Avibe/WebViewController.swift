@@ -335,6 +335,7 @@ final class WebViewFactory {
     private let showShare = ShowShareCoordinator.shared
     private let instanceID: () -> String?
     private let deviceID: () -> String?
+    private let deviceDescription: () -> [String: Any]?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
     private let pushCoordinator: NativePushCoordinator?
@@ -377,6 +378,7 @@ final class WebViewFactory {
         instanceName: instanceName,
         instanceID: instanceID,
         deviceID: deviceID,
+        deviceDescription: deviceDescription,
         directStatus: directStatus,
         directHandover: directHandover,
         healthConnect: healthConnect,
@@ -443,6 +445,7 @@ final class WebViewFactory {
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
@@ -477,6 +480,7 @@ final class WebViewFactory {
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
+        self.deviceDescription = deviceDescription
         self.directStatus = directStatus
         self.directHandover = directHandover
         self.healthConnect = healthConnect
@@ -675,6 +679,7 @@ final class WebViewController: UIViewController {
     private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
+    private let deviceDescription: () -> [String: Any]?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
     /// Whether this runtime's WebView may be loaded now; `nil` without a
@@ -772,6 +777,10 @@ final class WebViewController: UIViewController {
             deviceID: { [weak self] in
                 guard let self, !self.isInvalidatedForAccountTransition else { return nil }
                 return self.deviceID()
+            },
+            deviceDescription: { [weak self] in
+                guard let self, !self.isInvalidatedForAccountTransition else { return nil }
+                return self.deviceDescription()
             },
             directStatus: directStatus,
             directHandover: directHandover,
@@ -872,6 +881,7 @@ final class WebViewController: UIViewController {
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
@@ -911,6 +921,7 @@ final class WebViewController: UIViewController {
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
+        self.deviceDescription = deviceDescription
         self.directStatus = directStatus
         self.directHandover = directHandover
         self.healthConnect = healthConnect

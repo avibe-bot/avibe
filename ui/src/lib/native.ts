@@ -4,6 +4,7 @@ export type NativeCapability =
   | 'appLock'
   | 'app'
   | 'badge'
+  | 'device'
   | 'health'
   | 'haptics'
   | 'instancePresentation'
@@ -71,6 +72,20 @@ export type NativeAppInfo = {
   instance?: { id?: string; name?: string };
   /** With `systemSchedule`: the stable identity of this App installation. */
   device?: { id?: string };
+};
+
+/**
+ * `device.describe`: who this iPhone is, as the page reports it to the
+ * instance's device list (`POST /api/devices/self`). Display and grouping
+ * only. `installation_id` is derived per instance by the App.
+ */
+export type NativeDeviceDescription = {
+  kind: 'iphone_app';
+  display_name: string;
+  installation_id?: string;
+  aliases: Array<{ source: 'health' | 'schedule'; id: string }>;
+  app_version: string;
+  system_version: string;
 };
 
 export type NativeSystemScheduleRequest = {
@@ -285,6 +300,10 @@ export async function nativeSharePresent(
 
 export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
   return callNative<NativeAppInfo>('app', 'app.info');
+}
+
+export async function nativeDeviceDescribe(): Promise<unknown> {
+  return callNative<unknown>('device', 'device.describe');
 }
 
 /** Establishes a connection only; request completion comes from the instance API. */

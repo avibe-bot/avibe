@@ -1771,6 +1771,43 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertNotNil(try store.loadRecord(kid: "b-stale-generation"))
     }
 
+    func testTheDeviceIdentifierIsDerivedFromThisInstallationOnly() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        let installation = try XCTUnwrap(store.installation)
+        let coordinator = makeCoordinator(store: store, management: ManagementRecorder())
+
+        // HMAC-SHA256 of the instance id under this installation's secret.
+        XCTAssertEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-1"),
+            "9e24a60986550cf6eb110b6137bfe1a8"
+        )
+        XCTAssertNotEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-2"),
+            coordinator.deviceIdentifier(forInstanceID: "instance-1")
+        )
+        // Neither the relay's installation id nor its secret is the answer.
+        XCTAssertNotEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-1"),
+            installation.installationID.uuidString.lowercased()
+        )
+
+        // A Keychain installation from before a reinstall is not this one.
+        let reinstalled = InMemoryPushInstallationMarkerStore()
+        reinstalled.installationID = UUID()
+        let afterReinstall = makeCoordinator(
+            store: store, management: ManagementRecorder(), marker: reinstalled
+        )
+        XCTAssertNil(afterReinstall.deviceIdentifier(forInstanceID: "instance-1"))
+
+        // No installation yet.
+        let empty = makeCoordinator(store: InMemoryPushKeychainStore(), management: ManagementRecorder())
+        XCTAssertNil(empty.deviceIdentifier(forInstanceID: "instance-1"))
+    }
+
     /// The account's list no longer has some instances: their registrations
     /// are staged as pending revokes (keys zeroed) and revoked; a listed
     /// origin, another account's record and a stale generation stay. A
