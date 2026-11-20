@@ -1613,11 +1613,17 @@ shared vectors live in `docs/plans/2026-11-20-ios-live-activity-contract.md` and
 `TurnActivityCoordinator` owns start admission, initial and rotated activity push
 tokens, foreground reconciliation, system dismissal, and account/instance
 cleanup. A phone-local ledger lets it retire server tracking for a card removed
-while the App was away. A dismissed Turn is not recreated. It uses the account's
+while the App was away. Only an explicit start can create a card, including after
+a prior dismissal or stop of the same still-running Turn. It uses the account's
 WebKit store and existing same-origin CSRF transport, and releases those WebViews
-through the account transition's existing release barriers. A 503 preserves an
-existing card; the next foreground or token update retries registration. Local
-HTTP responses never advance stale deadlines without instance confirmation.
+through the account transition's existing release barriers. The ledger persists
+whether PUT has returned 200 for the current token. A token rotation clears that
+registration mark until its PUT succeeds. An unregistered card survives a 503 or lost
+response, retries PUT on foreground or token rotation, and ends after eight hours
+without registration. Registered cards only GET on foreground; actual token
+updates still PUT. A refused registration ends immediately, except a terminal
+Turn response retains its final card for one hour. Local HTTP responses never
+advance stale deadlines without instance confirmation.
 
 `TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
 renders the reviewed `ios/live-activity/*` frames in English and Simplified

@@ -63,13 +63,16 @@ struct TurnActivityShown {
         case .stopped: return .secondary
         }
     }
+    private func localized(_ key: String, locale: Locale) -> String {
+        String(localized: LocalizedStringResource(String.LocalizationValue(key), table: "TurnActivity", locale: locale))
+    }
     func detail(locale: Locale) -> String {
         if isStale {
             let time = Date(timeIntervalSince1970: Double(state.confirmedAt)).formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(locale))
-            return String(format: String(localized: "turn.stale.detail", table: "TurnActivity", locale: locale), time)
+            return String(format: localized("turn.stale.detail", locale: locale), time)
         }
         let duration = Duration.seconds(state.elapsed(at: Date())).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: 2).locale(locale))
-        return String(format: String(localized: String.LocalizationValue("turn.\(state.phase.rawValue).detail"), table: "TurnActivity", locale: locale), duration)
+        return String(format: localized("turn.\(state.phase.rawValue).detail", locale: locale), duration)
     }
 }
 

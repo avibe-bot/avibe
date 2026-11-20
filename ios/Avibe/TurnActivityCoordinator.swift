@@ -68,15 +68,18 @@ final class TurnActivityCoordinator {
         let sessionID: String
         let turnID: String
         let registrationID: String
+        var createdAt: Date?
+        var registeredAt: Date?
+        var observedToken: Data?
     }
     private struct Ledger: Codable {
         var records: [String: Record] = [:]
-        var suppressed: Set<String> = []
     }
     typealias Request = @MainActor (Target, String, String, [String: Any]?) async throws -> VoiceCaptureInstanceClient.Response
     typealias Create = @MainActor (TurnActivityAttributes, TurnActivityAttributes.ContentState) throws -> any TurnActivityHandle
 
     private let defaults: UserDefaults
+    private let now: @MainActor () -> Date
     private let enabled: @MainActor () -> Bool
     private let activities: @MainActor () -> [any TurnActivityHandle]
     private let create: Create
@@ -92,10 +95,10 @@ final class TurnActivityCoordinator {
     private var selectedTarget: Target?
     private var authorizationTask: Task<Void, Never>?
     private var mutations: [String: Task<Bool, Error>] = [:]
-    private enum Failure: Error { case serviceUnavailable }
+    private enum Failure: Error { case unavailable, rejected(String) }
     private static let ledgerKey = "avibe.liveActivities.turns.v1"
 
-    init(defaults: UserDefaults = .standard,
+    init(defaults: UserDefaults = .standard, now: @escaping @MainActor () -> Date = { Date() },
          enabled: @escaping @MainActor () -> Bool = { ActivityAuthorizationInfo().areActivitiesEnabled },
          activities: @escaping @MainActor () -> [any TurnActivityHandle] = { Activity<TurnActivityAttributes>.activities.map { SystemTurnActivity($0) } },
          create: @escaping Create = { attributes, state in
@@ -103,6 +106,7 @@ final class TurnActivityCoordinator {
                  content: ActivityContent(state: state, staleDate: state.staleDate), pushType: .token))
          }, request: Request? = nil) {
         self.defaults = defaults
+        self.now = now
         self.enabled = enabled
         self.activities = activities
         self.create = create
@@ -152,19 +156,18 @@ final class TurnActivityCoordinator {
             query.queryItems = [URLQueryItem(name: "session_id", value: sessionID)]
             let response = try await request(target, "GET", Self.base + "/turn?" + (query.percentEncodedQuery ?? ""), nil)
             guard generation == epoch else { return failure("failed") }
-            if response.status == 409 { return failure("no_active_turn") }
+            if response.status == 409 || response.status == 404 { return failure("no_active_turn") }
             guard response.status == 200, !response.redirected,
                   let turn = response.json?["turn"] as? [String: Any],
                   let turnID = turn["turn_id"] as? String,
                   let content = Self.content(turn), content.phase.isRunning else { return failure("failed") }
-            let recordKey = Self.turnKey(target, sessionID, turnID)
-            if ledger.suppressed.contains(recordKey) { return failure("no_active_turn") }
             if activities().contains(where: {
                 $0.attributes.accountID == target.accountID && $0.attributes.instanceOrigin == target.instanceOrigin
-                    && $0.attributes.turnID == turnID && $0.attributes.sessionID == sessionID && $0.state != .dismissed
+                    && $0.attributes.turnID == turnID && $0.attributes.sessionID == sessionID
+                    && ($0.state == .active || $0.state == .stale)
             }) { return ["ok": true] }
             // Replacement ends all cards, including a terminal card still on the Lock Screen.
-            await endAll(reason: "user_stopped", invalidate: false)
+            await endAll(reason: "replaced", invalidate: false)
             guard generation == epoch, enabled() else { return failure("failed") }
             let attributes = TurnActivityAttributes(
                 agentName: TurnActivityAttributes.displayName(agentName, limit: 40),
@@ -173,7 +176,7 @@ final class TurnActivityCoordinator {
             let activity = try create(attributes, content)
             created = activity
             let record = Record(id: activity.id, target: target, sessionID: sessionID,
-                                turnID: turnID, registrationID: registrationID)
+                                turnID: turnID, registrationID: registrationID, createdAt: now())
             ledger.records[record.id] = record
             save()
             observeState(activity, record: record)
@@ -190,7 +193,7 @@ final class TurnActivityCoordinator {
             }
             guard let token else {
                 await finish(activity, record: record, reason: "user_stopped")
-                return failure("push_unavailable")
+                return failure("failed")
             }
             guard try await register(token, activity: activity, record: record, generation: generation) else {
                 return failure("no_active_turn")
@@ -198,14 +201,15 @@ final class TurnActivityCoordinator {
             observeTokens(activity, record: record)
             return ["ok": true]
         } catch {
-            // Only this start's epoch can clean up its card. A newer account owns its own state.
-            if let created, generation == epoch {
-                if error is Failure, let record = ledger.records[created.id] {
+            // Once created, a missing PUT answer is recoverable on the next foreground.
+            if let created, generation == epoch, let record = ledger.records[created.id] {
+                if case Failure.unavailable = error {
                     observeTokens(created, record: record)
-                } else {
-                    await finish(created, record: ledger.records[created.id], reason: "user_stopped")
+                    return ["ok": true]
                 }
+                await finish(created, record: record, reason: "user_stopped")
             }
+            if case Failure.rejected(let code) = error { return failure(code) }
             return failure("failed")
         }
     }
@@ -275,13 +279,21 @@ final class TurnActivityCoordinator {
                 await remove(record, reason: "dismissed")
                 continue
             }
-            // Ended cards also reconcile (including 404), but never upload another token.
             if activity.state != .ended {
                 observeState(activity, record: record)
-                tokenTasks.removeValue(forKey: record.id)?.cancel()
                 observeTokens(activity, record: record)
             }
             do {
+                if record.registeredAt == nil {
+                    // A terminal PUT response already supplied the final one-hour card.
+                    if activity.state == .ended { continue }
+                    if now().timeIntervalSince(record.createdAt ?? Date(timeIntervalSince1970: Double(activity.content.startedAt))) >= 28800 {
+                        await finish(activity, record: record, reason: "system_ended")
+                    } else if let token = activity.token {
+                        _ = try await register(token, activity: activity, record: record, generation: generation)
+                    }
+                    continue
+                }
                 let response = try await request(record.target, "GET", Self.base + "/" + record.id, nil)
                 guard generation == epoch, ledger.records[record.id] != nil else { continue }
                 if response.status == 404 {
@@ -314,10 +326,6 @@ final class TurnActivityCoordinator {
     }
 
     private static let base = "/api/web-push/live-activities"
-    private static func turnKey(_ target: Target, _ session: String, _ turn: String) -> String {
-        // JSON avoids ambiguous separators in account, origin, session or Turn identifiers.
-        String(data: try! JSONEncoder().encode([target.accountID, target.instanceOrigin, session, turn]), encoding: .utf8)!
-    }
     private func save() {
         if let data = try? JSONEncoder().encode(ledger) { defaults.set(data, forKey: Self.ledgerKey) }
     }
@@ -343,7 +351,7 @@ final class TurnActivityCoordinator {
         let stream = activity.tokens
         return await withTaskGroup(of: Data?.self) { group in
             group.addTask { for await token in stream { return token }; return nil }
-            group.addTask { try? await Task.sleep(for: .seconds(15)); return nil }
+            group.addTask { try? await Task.sleep(for: .seconds(10)); return nil }
             let token = await group.next() ?? nil
             group.cancelAll()
             return token
@@ -352,21 +360,22 @@ final class TurnActivityCoordinator {
     private func observeTokens(_ activity: any TurnActivityHandle, record: Record) {
         guard tokenTasks[record.id] == nil, !locallyEnding.contains(record.id) else { return }
         let generation = epoch
+        // Subscribe before returning, so a rotation cannot fall between start and observation.
+        let stream = activity.tokens
         tokenTasks[record.id] = Task { [weak self] in
-            var previous: Data?
-            // Reading the current token closes the gap between the initial wait and the stream.
-            let stream = activity.tokens
-            if let token = activity.token {
-                do { guard try await self?.register(token, activity: activity, record: record, generation: generation) == true else { return }; previous = token }
-                catch { /* Foreground reconciliation retries the current token. */ }
+            var previous = self?.ledger.records[record.id]?.observedToken ?? activity.token
+            if let token = activity.token, token != previous {
+                previous = token
+                do { _ = try await self?.register(token, activity: activity, record: record, generation: generation) }
+                catch { /* Retry an unregistered card on the next foreground. */ }
             }
             for await token in stream {
                 guard let self, !Task.isCancelled, generation == self.epoch else { return }
                 guard token != previous else { continue }
+                previous = token
                 do {
                     guard try await self.register(token, activity: activity, record: record, generation: generation) else { return }
-                    previous = token
-                } catch { /* The next rotation or foreground reconciliation retries. */ }
+                } catch { /* The next rotation or unregistered foreground retries. */ }
             }
         }
     }
@@ -397,11 +406,19 @@ final class TurnActivityCoordinator {
     private func registerNow(_ token: Data, activity: any TurnActivityHandle, record: Record, generation: Int) async throws -> Bool {
         guard generation == epoch, ledger.records[record.id] != nil, !locallyEnding.contains(record.id),
               activity.state == .active || activity.state == .stale else { return false }
-        let response = try await request(record.target, "PUT", Self.base + "/" + record.id, [
-            "session_id": record.sessionID, "turn_id": record.turnID,
-            "push_registration_id": record.registrationID,
-            "activity_token": token.map { String(format: "%02x", $0) }.joined(),
-        ])
+        if ledger.records[record.id]?.observedToken != token {
+            ledger.records[record.id]?.registeredAt = nil
+            ledger.records[record.id]?.observedToken = token
+            save()
+        }
+        let response: VoiceCaptureInstanceClient.Response
+        do {
+            response = try await request(record.target, "PUT", Self.base + "/" + record.id, [
+                "session_id": record.sessionID, "turn_id": record.turnID,
+                "push_registration_id": record.registrationID,
+                "activity_token": token.map { String(format: "%02x", $0) }.joined(),
+            ])
+        } catch { throw Failure.unavailable }
         guard generation == epoch, ledger.records[record.id] != nil, !locallyEnding.contains(record.id) else {
             // A PUT may have reached the instance after a concurrent DELETE.
             if selectedTarget == record.target {
@@ -409,31 +426,45 @@ final class TurnActivityCoordinator {
             }
             return false
         }
-        if response.status == 503 { throw Failure.serviceUnavailable }
+        if response.status == 503 || response.status == 0 && !response.redirected { throw Failure.unavailable }
+        if [400, 403, 404].contains(response.status) || response.status == 409 && response.errorCode == "activity_conflict" {
+            // Retire locally here; remove() awaits this mutation and would deadlock.
+            await retire(activity, record: record)
+            throw Failure.rejected(response.status == 403 ? "push_unavailable" : "failed")
+        }
         guard (response.status == 200 || response.status == 409 && response.errorCode == "turn_not_active"),
               let body = response.json?["activity"] as? [String: Any], Self.content(body) != nil else {
             throw NativePushError.invalidResponse
+        }
+        if response.status == 200 {
+            ledger.records[record.id]?.registeredAt = now()
+            save()
         }
         await apply(body, activity: activity, record: record)
         return response.status == 200
     }
     private func apply(_ body: [String: Any], activity: any TurnActivityHandle, record: Record) async {
+        // Stopped is authoritative even when the last delivered content was newer.
+        if body["status"] as? String == "stopped" {
+            await retire(activity, record: record)
+            return
+        }
         guard let content = Self.content(body), content.confirmedAt >= activity.content.confirmedAt else { return }
-        if !content.phase.isRunning || body["status"] as? String == "ended" {
+        if !content.phase.isRunning {
             locallyEnding.insert(record.id)
             tokenTasks.removeValue(forKey: record.id)?.cancel()
             await activity.end(content, immediately: false)
-        } else if body["status"] as? String == "stopped" {
-            locallyEnding.insert(record.id)
-            tokenTasks.removeValue(forKey: record.id)?.cancel()
-            ledger.suppressed.insert(Self.turnKey(record.target, record.sessionID, record.turnID))
-            ledger.records.removeValue(forKey: record.id)
-            save()
-            await activity.end(nil, immediately: true)
         } else if activity.state == .active || activity.state == .stale {
-            // A slow HTTP response must not overwrite a newer APNs confirmation.
-            if content.confirmedAt >= activity.content.confirmedAt { await activity.update(content) }
+            await activity.update(content)
         }
+    }
+    private func retire(_ activity: any TurnActivityHandle, record: Record) async {
+        locallyEnding.insert(record.id)
+        tokenTasks.removeValue(forKey: record.id)?.cancel()
+        stateTasks.removeValue(forKey: record.id)?.cancel()
+        ledger.records.removeValue(forKey: record.id)
+        save()
+        await activity.end(nil, immediately: true)
     }
     private func finish(_ activity: any TurnActivityHandle, record: Record?, reason: String) async {
         locallyEnding.insert(activity.id)
@@ -444,9 +475,6 @@ final class TurnActivityCoordinator {
     }
     private func remove(_ record: Record, reason: String, keepCard: Bool = false) async {
         tokenTasks.removeValue(forKey: record.id)?.cancel()
-        if reason == "dismissed" || reason == "system_ended" {
-            ledger.suppressed.insert(Self.turnKey(record.target, record.sessionID, record.turnID))
-        }
         if !keepCard { ledger.records.removeValue(forKey: record.id) }
         save()
         _ = try? await mutations[record.id]?.value
