@@ -236,7 +236,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         formatter_class="FeishuFormatter",
         kind="im",
         credential_fields=("app_id", "app_secret"),
-        runtime_reconcile_fields=("app_id", "app_secret", "domain", "proxy_url"),
+        runtime_reconcile_fields=("app_id", "app_secret", "domain", "proxy_url", "long_connection"),
         # NOTE: Feishu/Lark DOES support message deletion via the API
         # (``im.v1.message.delete``), but recalling a bot message leaves a visible
         # "此消息已撤回" ("this message was recalled") tombstone in the chat/thread —

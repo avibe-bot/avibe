@@ -23,6 +23,7 @@ struct NativeShellMetadata: Equatable {
     static let capabilities = [
         "accountPresentation": 2,
         "app": 1,
+        "appLock": 1,
         "badge": 1,
         "c1.share_draft": 1,
         "haptics": 1,
@@ -111,6 +112,8 @@ enum PageColorScheme: String, Equatable {
 enum NativeBridgeMethod: String, CaseIterable {
     case appearanceColorSchemeChanged = "appearance.colorSchemeChanged"
     case appInfo = "app.info"
+    case appLockStatus = "appLock.status"
+    case appLockSetPolicy = "appLock.setPolicy"
     case appOpenExternal = "app.openExternal"
     case appSetAccountActionAvailable = "app.setAccountActionAvailable"
     case appShowAccount = "app.showAccount"
@@ -289,6 +292,7 @@ enum NativeBridgeConfiguration {
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         showShare: ShowShareCoordinator? = nil,
+        appLock: AppLockBridging? = nil,
         voiceCapture: NativeHoldCapture? = nil,
         pushStatus: @escaping @MainActor (
             String?,
@@ -372,6 +376,7 @@ enum NativeBridgeConfiguration {
             liveActivity: liveActivity,
             healthConnect: healthConnect,
             showShare: showShare,
+            appLock: appLock,
             voiceCapture: voiceCapture,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
@@ -649,6 +654,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
     private let showShare: ShowShareCoordinator?
+    private let appLock: AppLockBridging?
     private let voiceCapture: NativeHoldCapture?
     private let pushStatus: @MainActor (
         String?,
@@ -708,6 +714,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction,
         showShare: ShowShareCoordinator?,
+        appLock: AppLockBridging?,
         voiceCapture: NativeHoldCapture? = nil,
         pushStatus: @escaping @MainActor (
             String?,
@@ -766,6 +773,7 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.showShare = showShare
+        self.appLock = appLock
         self.voiceCapture = voiceCapture
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
@@ -1126,6 +1134,36 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
             (showShare ?? .shared).share(share, from: sourceWebView, origin: policy.instanceOrigin) { [weak self] result in
                 self?.reply(replyHandler, result: result.jsonObject)
+            }
+        case .appLockStatus:
+            guard request.params.isEmpty else {
+                reply(replyHandler, error: .invalidArgument("appLock.status takes no parameters."))
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let owner = self.appLock ?? AppLockBridge.current else {
+                    self.reply(replyHandler, error: .unsupported)
+                    return
+                }
+                self.reply(replyHandler, result: owner.status())
+            }
+        case .appLockSetPolicy:
+            guard request.params.count == 1,
+                  let raw = request.params["policy"] as? String,
+                  let policy = AppLockPolicy(rawValue: raw)
+            else {
+                reply(replyHandler, error: .invalidArgument("appLock.setPolicy requires policy: off, immediately, oneMinute or fiveMinutes."))
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let owner = self.appLock ?? AppLockBridge.current else {
+                    self.reply(replyHandler, error: .unsupported)
+                    return
+                }
+                let result = await owner.setPolicy(policy)
+                self.reply(replyHandler, result: result)
             }
         case .appearanceColorSchemeChanged:
             let rawScheme = request.params["scheme"]

@@ -21,7 +21,14 @@ const VIEW: &str = "update-popover";
 /// The panel's 320 px plus room for its shadow. The page draws the panel at its
 /// bottom-left; the rest is a transparent backdrop that closes the popup.
 const WIDTH: f64 = 336.0;
+/// The height the popup opens at, before its page reports the panel's own.
 const HEIGHT: f64 = 520.0;
+/// Room the page leaves around the panel for its shadow: `bottom-2` below,
+/// the same above.
+const PANEL_MARGIN: f64 = 16.0;
+const MIN_HEIGHT: f64 = 120.0;
+/// Kept free above the popup inside the main window: its title bar.
+const TOP_INSET: f64 = 40.0;
 /// The window's bottom-left corner, from the main window's bottom-left: aligned
 /// with the sidebar's padding, just above its bottom row.
 const LEFT: f64 = 8.0;
@@ -40,10 +47,10 @@ pub(crate) fn is_page<R: tauri::Runtime>(window: &Webview<R>, bundle: &Url) -> b
         && window.url().ok().is_some_and(|url| Some(url) == page_url(bundle))
 }
 
-/// What the popup may ask of the desktop client: its state and this computer's
-/// updater, nothing about accounts or instances.
+/// What the popup may ask of the desktop client: its state, this computer's
+/// updater and the selected instance's, nothing about accounts or selection.
 pub(crate) fn allows(action: &ClientAction) -> bool {
-    matches!(action, ClientAction::GetState) || action.is_desktop_update()
+    matches!(action, ClientAction::GetState) || action.is_desktop_update() || action.is_instance_update()
 }
 
 pub(crate) fn navigation_allowed(url: &Url, bundle: &Url) -> bool {
@@ -164,6 +171,54 @@ fn step(window: Option<bool>, loading_for: Option<Duration>) -> Step {
 /// the same transparency itself as a fallback (AccountApp's UpdatePopover).
 const TRANSPARENT: &str = "(()=>{const s=document.createElement('style');s.textContent='html,body{background:transparent!important}';const add=()=>(document.head||document.documentElement).appendChild(s);if(document.documentElement){add();}else{new MutationObserver((_,o)=>{if(document.documentElement){o.disconnect();add();}}).observe(document,{childList:true});}})();";
 
+/// Reports the panel's height to the shell so the window is as tall as the
+/// panel needs. Shell-owned, like TRANSPARENT: the page's components are not
+/// involved, and the command takes a number and resizes only this window.
+const FIT: &str = "(()=>{let last=0,queued=false;const send=()=>{queued=false;const panel=document.querySelector('[data-update-popover] [role=dialog]');if(!panel)return;const h=Math.ceil(panel.getBoundingClientRect().height);if(h>0&&h!==last){last=h;const i=window.__TAURI_INTERNALS__;if(i)i.invoke('update_popover_fit',{height:h}).catch(()=>{});}};const schedule=()=>{if(!queued){queued=true;requestAnimationFrame(send);}};const start=()=>{const r=new ResizeObserver(schedule);const watch=()=>{const panel=document.querySelector('[data-update-popover] [role=dialog]');if(panel)r.observe(panel);schedule();};new MutationObserver(watch).observe(document.documentElement,{childList:true,subtree:true});watch();};if(document.documentElement){start();}else{new MutationObserver((_,o)=>{if(document.documentElement){o.disconnect();start();}}).observe(document,{childList:true});}})();";
+
+/// The window's logical frame for a panel `panel` tall, from the main window's
+/// content frame: bottom-left anchored, never taller than main leaves room for.
+fn frame(main_x: f64, main_y: f64, main_height: f64, panel: f64) -> (f64, f64, f64) {
+    let room = (main_height - BOTTOM - TOP_INSET).max(MIN_HEIGHT);
+    let height = (panel + PANEL_MARGIN).clamp(MIN_HEIGHT, room);
+    (main_x + LEFT, main_y + main_height - BOTTOM - height, height)
+}
+
+/// The popup page's own report of its panel height. Admitted only from the
+/// current popup on its page; it can change nothing but this window's height.
+#[tauri::command]
+pub(crate) fn update_popover_fit(window: Webview, app: AppHandle, height: f64) -> Result<(), String> {
+    let bundle = crate::instance_client::bundle(&app).ok_or("untrusted_desktop_caller")?;
+    let popup = opening().current.clone().ok_or("untrusted_desktop_caller")?;
+    if !height.is_finite() || !is_page(&window, &bundle) || !popup.owns(&window) {
+        return Err("untrusted_desktop_caller".into());
+    }
+    let (Some(main), Some(own)) = (
+        app.get_window(crate::MAIN_WINDOW),
+        app.get_webview_window(UPDATE_POPOVER),
+    ) else {
+        return Err("window_unavailable".into());
+    };
+    let (Ok(origin), Ok(size), Ok(scale)) = (main.inner_position(), main.inner_size(), main.scale_factor()) else {
+        return Err("window_unavailable".into());
+    };
+    let origin = origin.to_logical::<f64>(scale);
+    let (x, y, height) = frame(origin.x, origin.y, size.height as f64 / scale, height);
+    own.set_size(tauri::LogicalSize::new(WIDTH, height))
+        .map_err(|_| "window_unavailable")?;
+    if cfg!(target_os = "macos") {
+        own.set_position(tauri::LogicalPosition::new(x, y))
+            .map_err(|_| "window_unavailable")?;
+    } else {
+        own.set_position(PhysicalPosition::new(
+            (x * scale).round() as i32,
+            (y * scale).round() as i32,
+        ))
+        .map_err(|_| "window_unavailable")?;
+    }
+    Ok(())
+}
+
 /// Show the popup over the main window, or bring an open one forward. Called from
 /// navigation and menu handlers: the window is built off the handler's own thread,
 /// since building one inside them deadlocks on Windows.
@@ -270,8 +325,7 @@ fn build(app: &AppHandle, bundle: &Url, popup: Arc<Popup>, initialization: Strin
     // The main window's content area in its own logical points, and the popup's
     // top-left from its bottom-left corner.
     let origin = origin.to_logical::<f64>(scale);
-    let height = size.height as f64 / scale;
-    let (x, y) = (origin.x + LEFT, origin.y + height - BOTTOM - HEIGHT);
+    let (x, y, height) = frame(origin.x, origin.y, size.height as f64 / scale, HEIGHT - PANEL_MARGIN);
     let loading = popup.clone();
     let loading_bundle = bundle.clone();
     let builder = WebviewWindowBuilder::new(app, UPDATE_POPOVER, WebviewUrl::External(url))
@@ -292,11 +346,12 @@ fn build(app: &AppHandle, bundle: &Url, popup: Arc<Popup>, initialization: Strin
             }
         })
         .initialization_script(TRANSPARENT)
+        .initialization_script(FIT)
         .initialization_script(initialization)
         // The panel's release-notes link opens in the system browser, as in the main window.
         .on_new_window(|url, _features| crate::handle_new_window_request(url))
         .title("Avibe")
-        .inner_size(WIDTH, HEIGHT)
+        .inner_size(WIDTH, height)
         .position(x, y)
         .transparent(true)
         .decorations(false)
@@ -392,6 +447,8 @@ fn page_loaded(window: WebviewWindow, bundle: Url, popup: Arc<Popup>) {
         opening().since = None;
         let _ = window.show();
         let _ = window.set_focus();
+        // The selected instance's section is read when the popup opens.
+        crate::instance_client::refresh_instance_update(app);
     });
 }
 
@@ -502,9 +559,31 @@ mod tests {
     }
 
     #[test]
-    fn the_popup_asks_only_for_state_and_this_computers_updater() {
+    fn the_popup_is_as_tall_as_its_panel_within_the_main_window() {
+        // Anchored: its bottom edge stays just above the sidebar's bottom row.
+        for panel in [200.0, 640.0] {
+            let (x, y, height) = frame(100.0, 50.0, 900.0, panel);
+            assert_eq!((x, height), (100.0 + LEFT, panel + PANEL_MARGIN));
+            assert_eq!(y + height, 50.0 + 900.0 - BOTTOM);
+        }
+        // Never above main's content, never collapsed, whatever the page says.
+        let (_, y, height) = frame(0.0, 0.0, 500.0, 5000.0);
+        assert_eq!((y, height), (TOP_INSET, 500.0 - BOTTOM - TOP_INSET));
+        assert_eq!(frame(0.0, 0.0, 900.0, -40.0).2, MIN_HEIGHT);
+        assert_eq!(frame(0.0, 0.0, 100.0, 300.0).2, MIN_HEIGHT);
+    }
+
+    #[test]
+    fn the_popup_asks_only_for_state_and_the_two_updaters() {
         for action in [
             ClientAction::GetState,
+            ClientAction::InstanceUpdateRefresh {},
+            ClientAction::InstanceUpdateCheck {},
+            ClientAction::InstanceUpdateSetPrereleases { enabled: true },
+            ClientAction::InstanceUpdateSetAutoUpdate { enabled: false },
+            ClientAction::InstanceUpdateInstall {
+                target_version: "3.2.8rc4".into(),
+            },
             ClientAction::UpdateCheck {},
             ClientAction::UpdateSetPrereleases { enabled: true },
             ClientAction::UpdateSetAutoUpdate { enabled: false },

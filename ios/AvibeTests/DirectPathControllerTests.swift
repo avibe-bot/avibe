@@ -234,6 +234,103 @@ final class DirectPathControllerTests: XCTestCase {
 
     // MARK: The path's kind, stickiness, and the race record
 
+    /// `direct.status()` says whether the selected path's far end is on a
+    /// local network, and its round-trip time, only when they belong to the
+    /// path it names and only while the path is preferred. The event never
+    /// carries them, and a change of them is not a change of the status.
+    @MainActor
+    func testTheStatusCarriesThePathsClassAndRoundTripOnlyForThePathItNames() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+
+        harness.transport.currentPath = .ipv6
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv6, local: true, rttMs: 4)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let local = harness.status("instance-1")
+        XCTAssertEqual(local.path, .ipv6)
+        XCTAssertEqual(local.jsonObject["path_scope"] as? String, "local")
+        XCTAssertEqual(local.jsonObject["rtt_ms"] as? Int, 4)
+        XCTAssertNil(local.eventObject["path_scope"])
+        XCTAssertNil(local.eventObject["rtt_ms"])
+
+        // Another reading of the same path is not a change of the status.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv6, local: false, rttMs: nil)
+        let global = harness.status("instance-1")
+        XCTAssertEqual(global, local)
+        XCTAssertEqual(global.jsonObject["path_scope"] as? String, "global")
+        XCTAssertNil(global.jsonObject["rtt_ms"], "not measured: not shown")
+
+        // A reading of another kind of path than the one named: neither.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 9)
+        XCTAssertNil(harness.status("instance-1").jsonObject["path_scope"])
+        XCTAssertNil(harness.status("instance-1").jsonObject["rtt_ms"])
+
+        // The relay has a round trip and no class.
+        harness.transport.currentPath = .relay
+        harness.transport.selectedPath = DirectSelectedPath(kind: .relay, local: nil, rttMs: 120)
+        harness.transport.report(.pathChanged(.relay), for: target)
+        let relay = harness.status("instance-1")
+        XCTAssertEqual(relay.path, .relay)
+        XCTAssertNil(relay.jsonObject["path_scope"])
+        XCTAssertEqual(relay.jsonObject["rtt_ms"] as? Int, 120)
+
+        // Another host is never told this host's path.
+        XCTAssertNil(harness.status("instance-2").jsonObject["rtt_ms"])
+
+        // Lost: no path, so neither.
+        harness.transport.report(.lost, for: target)
+        XCTAssertNil(harness.status("instance-1").jsonObject["path_scope"])
+        XCTAssertNil(harness.status("instance-1").jsonObject["rtt_ms"])
+    }
+
+    /// `direct.status()` carries how often the transport checked its path
+    /// again, and why: counts only, for the selected host only, never in
+    /// the event, and no change of the status.
+    @MainActor
+    func testTheStatusCarriesTheTransportsCountsForTheSelectedHostOnly() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+
+        // Nothing counted: nothing said.
+        let quiet = harness.status("instance-1")
+        XCTAssertNil(quiet.jsonObject["counts"])
+
+        harness.transport.counts = DirectPathCounts(
+            verifications: 2,
+            probesAfterPathUpdate: 2,
+            probesAfterCandidateFailure: 1,
+            probesAfterRenewal: 0,
+            dials: 3,
+            pathUpdates: 2,
+            pathUpdatesIgnored: 41
+        )
+        let counted = harness.status("instance-1")
+        XCTAssertEqual(counted, quiet, "counts are no change of the status")
+        XCTAssertNil(counted.eventObject["counts"])
+        let counts = try XCTUnwrap(counted.jsonObject["counts"] as? [String: Any])
+        XCTAssertEqual(counts["verifications"] as? Int, 2)
+        XCTAssertEqual(counts["dials"] as? Int, 3)
+        XCTAssertEqual(counts["path_updates"] as? Int, 2)
+        XCTAssertEqual(counts["path_updates_ignored"] as? Int, 41)
+        XCTAssertEqual(
+            counts["probes"] as? [String: Int],
+            ["path_update": 2, "candidate_failed": 1, "renewal": 0]
+        )
+        // Numbers and nothing else.
+        XCTAssertEqual(
+            Set(counts.keys),
+            ["verifications", "probes", "dials", "path_updates", "path_updates_ignored"]
+        )
+
+        // Another host is told nothing of this host's path.
+        XCTAssertNil(harness.status("instance-2").jsonObject["counts"])
+    }
+
     @MainActor
     func testThePathKindIsPublishedAndADirectAddressMakesPlansStickyUntilAMiss() async throws {
         let harness = try Harness(test: self)
@@ -250,6 +347,10 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(status.path, .relay)
         XCTAssertEqual(status.sequence, 1)
         XCTAssertEqual(status.eventObject["path"] as? String, "relay")
+        // Without a reading of the path's class and round trip, the status
+        // has neither.
+        XCTAssertNil(status.jsonObject["path_scope"])
+        XCTAssertNil(status.jsonObject["rtt_ms"])
         var plan = try XCTUnwrap(harness.controller.plan(for: authority))
         XCTAssertFalse(plan.sticky)
         XCTAssertEqual(plan.path, .relay)
@@ -813,6 +914,39 @@ final class DirectPathControllerTests: XCTestCase {
     }
 
     // MARK: The load gate
+
+    /// A caller with no runtime (the voice take's hidden WebView) asks by
+    /// instance URL. The answer is the runtime gate's, and it keeps
+    /// answering for a host that is still routed after its runtime closed.
+    @MainActor
+    func testTheLoadGateByInstanceURLNeedsNoRuntimeAndFollowsTheRouteAndTheListener() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        _ = try harness.coordinator.selectInstance(id: "instance-1")
+        let unrouted = try XCTUnwrap(harness.lastOpened)
+        // No route for this host yet: WebKit's normal path.
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: unrouted.instance.url), .open)
+
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let url = runtime.instance.url
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: url), .open)
+
+        // The runtime closes. Its host stays routed to the listener, so the
+        // gate still speaks for it: open while the listener serves, held as
+        // soon as the background closes it.
+        harness.controller.runtimeDidStop()
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: url), .open)
+        harness.enterBackground()
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: url), .held)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+        // A host that was never routed, and one that is not an instance
+        // authority at all, are not the listener's.
+        let other = try XCTUnwrap(URL(string: "https://never-routed.example"))
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: other), .open)
+        let odd = try XCTUnwrap(URL(string: "https://instance-one.example:8443"))
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: odd), .open)
+    }
 
     /// The gate the shell asks before it creates or reloads a WebView: open
     /// without a route or with a serving listener, held from the background
@@ -1590,10 +1724,19 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
     @MainActor private var reporters: [Int: @MainActor (DirectPathReport) -> Void] = [:]
     /// The kind of path the stand-in says its connection runs on.
     @MainActor var currentPath: DirectPathKind?
+    /// That path's class and round-trip time, as the transport reads them.
+    @MainActor var selectedPath: DirectSelectedPath?
+    /// How often the stand-in says it checked its path again.
+    @MainActor var counts = DirectPathCounts.zero
 
     @MainActor
     var pathDiagnostics: DirectPathDiagnostics {
-        DirectPathDiagnostics(current: currentPath, attempts: [])
+        DirectPathDiagnostics(current: currentPath, attempts: [], selected: selectedPath)
+    }
+
+    @MainActor
+    var pathCounts: DirectPathCounts {
+        counts
     }
 
     @MainActor

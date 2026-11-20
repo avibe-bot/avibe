@@ -17,7 +17,7 @@ export function clientState(): DesktopClientState {
       phase: 'available', latest: '3.2.7', channel: 'test', prereleases: true, autoUpdate: false, checkedAt: '2026-11-13T07:00:00Z',
       hostActions: ['check', 'prereleases', 'auto_update'], skippedVersion: null, interactive: false,
     } },
-    consent: null, remote_auxiliary: 'local',
+    instance_update: null, consent: null, remote_auxiliary: 'local',
   };
 }
 export function signIn(state: DesktopClientState) {

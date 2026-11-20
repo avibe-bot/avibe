@@ -62,6 +62,7 @@ import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { foldRegionRead, loadingRegion, readRegion, regionFailed, type RegionRead } from './regionRead';
 import { serviceMonthUsage, type ServiceMonth } from './usageProjection';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction, wasBlocked } from './repair';
+import { QUOTA_EXHAUSTED, RATE_LIMITED } from './supply';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { SourceTestDialog } from './SourceTestDialog';
@@ -220,8 +221,21 @@ export const SourceDetailPanel: React.FC<{
   onManageSource?: () => void;
   /** Leave the detail for the Usage tab, from a search service's monthly line. */
   onOpenUsage?: () => void;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal, onSaveSearch, onSaveFetch, onRetryFetch, onRetryService, serviceView, onManageSource, onOpenUsage }) => {
+  /**
+   * Re-read the vendor's quota for the signed-in accounts. An account paused
+   * for quota is resumed by that read once the vendor reports quota again; the
+   * page read behind it lands the new state here.
+   */
+  onRefreshQuota?: () => Promise<void>;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal, onSaveSearch, onSaveFetch, onRetryFetch, onRetryService, serviceView, onManageSource, onOpenUsage, onRefreshQuota }) => {
   const { t, i18n } = useTranslation();
+  const [refreshingQuota, setRefreshingQuota] = React.useState(false);
+  const refreshingQuotaAlive = React.useRef(true);
+  React.useEffect(() => {
+    // Set on every setup: StrictMode replays the cleanup on mount.
+    refreshingQuotaAlive.current = true;
+    return () => { refreshingQuotaAlive.current = false; };
+  }, []);
   const { showToast } = useToast();
   const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
@@ -834,6 +848,18 @@ export const SourceDetailPanel: React.FC<{
     ? formatRelativeTime(source.last_discovered_at, t)
     : t('settings.models.sourceDetail.metadata.neverFetched');
   const testable = !keylessBuiltin && source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
+  // An account has no test request of its own: its pause is lifted by asking the vendor for its quota.
+  const quotaPaused = source.kind === 'subscription' && source.supply_channel === 'hub' && source.state.status === 'cooldown'
+    && (source.state.detail_key === QUOTA_EXHAUSTED || source.state.detail_key === RATE_LIMITED);
+  const refreshQuota = async () => {
+    if (!onRefreshQuota || refreshingQuota) return;
+    setRefreshingQuota(true);
+    try {
+      await onRefreshQuota();
+    } finally {
+      if (refreshingQuotaAlive.current) setRefreshingQuota(false);
+    }
+  };
   const usageSummary = adoptedBackends.length > 0
     ? t('settings.models.sourceDetail.usageSummary', { count: source.models.length, backends: adoptedBackends.join(i18n.language.startsWith('zh') ? '、' : ', ') })
     : t('settings.models.gateway.modelCount', { count: source.models.length });
@@ -890,6 +916,7 @@ export const SourceDetailPanel: React.FC<{
             {state.key && <span className={cn('model-hub-source-state model-hub-pill flex items-center gap-1.5 border', state.textClass)}><span className={cn('size-[5px] shrink-0 rounded-full', state.dotClass)} />{t(state.key, state.values)}{state.hint && <ModelHubInfoHint label={t(state.hint.labelKey) as string} content={t(state.hint.bodyKey)} className="size-[13px]" />}</span>}
             {/* A cooldown waits for the next request; a passing test is that request. */}
             {testable && source.state.status === 'cooldown' && <button type="button" disabled={busy} onClick={() => setTesting(true)} className="model-hub-source-state font-semibold text-foreground underline underline-offset-2 disabled:opacity-50">{t('settings.models.sourceTest.testNow')}</button>}
+            {quotaPaused && onRefreshQuota && <button type="button" disabled={busy || refreshingQuota} onClick={() => void refreshQuota()} className="model-hub-source-state font-semibold text-foreground underline underline-offset-2 disabled:opacity-50">{t(refreshingQuota ? 'settings.models.quota.refreshing' : 'settings.models.quota.refreshAccount')}</button>}
           </div>
           <p className="model-hub-source-summary truncate">{usageSummary}</p>
         </div>

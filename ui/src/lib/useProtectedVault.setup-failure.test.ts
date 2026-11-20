@@ -13,7 +13,7 @@ const wrapMeta = JSON.stringify({ v: 1, rp_id: 'sandbox.avibe.bot', copies: [{ k
 const registration = { challenge_id: 'wch_1', credential: { id: 'AQID', rawId: 'AQID', type: 'public-key', response: { clientDataJSON: 'e30=', attestationObject: 'AA==' } } };
 
 describe('setupVaultDurably when the commit gets no answer', () => {
-  it('keeps the uncommitted setup (it may have landed), nothing durable here yet', async () => {
+  it('keeps the uncommitted setup and commits it again on retry, without a second Passkey ceremony', async () => {
     sandbox.setup.mockResolvedValue({ wrapMeta, rpId: 'sandbox.avibe.bot', credentialId: 'AQID', authzRegistration: registration, state: 'unlocked' });
     const result = await setupVaultDurably({
       createVaultAuthzWebAuthnOptions: vi.fn(async () => ({ ok: true }) as never),
@@ -22,9 +22,8 @@ describe('setupVaultDurably when the commit gets no answer', () => {
     });
     expect(result).toEqual({ ok: false, code: 'network_error' });
     expect(vaultFreshSetup()).toBe(true);
-  });
+    expect(sandbox.setup).toHaveBeenCalledTimes(1);
 
-  it('commits the same uncommitted setup again on retry, without a second Passkey ceremony', async () => {
     const completeVaultSetup = vi.fn(async () => ({ ok: true, exists: true, wrap_meta: wrapMeta }));
     await expect(setupVaultDurably({
       createVaultAuthzWebAuthnOptions: vi.fn(async () => ({ ok: true }) as never),

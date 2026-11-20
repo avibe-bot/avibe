@@ -1863,6 +1863,16 @@ class LarkConfig(BaseIMConfig):
     # Global default for the per-channel require_bind gate (allowed users).
     require_bind: bool = False
     domain: str = "feishu"  # "feishu" for domestic (open.feishu.cn), "lark" for international (open.larksuite.com)
+    # Which client holds the long connection that delivers events, while our own
+    # replaces lark-oapi's (docs/plans/feishu-own-client.md):
+    #   "sdk"       lark-oapi's client, as before
+    #   "listen"    lark-oapi's client, with ours checking its frames and handling nothing
+    #   "parallel"  both connected; Feishu gives each event to one of them
+    #   "own"       ours alone
+    # Temporary: the field goes away with the SDK, and an older or newer release
+    # that does not know it ignores it. A value that is none of these means "sdk":
+    # a slip in this field must not take Feishu down with a config error.
+    long_connection: str = "sdk"
 
     def validate(self) -> None:
         if self.domain not in ("feishu", "lark"):

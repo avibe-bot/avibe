@@ -167,6 +167,8 @@ pub struct ClientState {
     pub current_instance: Option<Instance>,
     pub local: LocalState,
     pub desktop: DesktopState,
+    #[serde(default)]
+    pub instance_update: Option<super::instance_update::InstanceUpdate>,
     pub consent: Option<ConsentState>,
     pub remote_auxiliary: RemoteAuxiliary,
 }
@@ -208,6 +210,7 @@ impl ClientState {
                 remote_access: RemoteAccessState::Off,
             },
             desktop: DesktopState { version, update },
+            instance_update: None,
             current_instance: None,
             consent: None,
             remote_auxiliary: RemoteAuxiliary::Local,
@@ -264,6 +267,17 @@ pub enum ClientAction {
     DecideConsent {
         approve: bool,
     },
+    InstanceUpdateRefresh {},
+    InstanceUpdateCheck {},
+    InstanceUpdateSetPrereleases {
+        enabled: bool,
+    },
+    InstanceUpdateSetAutoUpdate {
+        enabled: bool,
+    },
+    InstanceUpdateInstall {
+        target_version: String,
+    },
     UpdateCheck {},
     UpdateSetPrereleases {
         enabled: bool,
@@ -298,6 +312,11 @@ impl std::fmt::Debug for ClientAction {
             Self::RetryLocalRemoteAccess => "RetryLocalRemoteAccess",
             Self::SelectInstance { .. } => "SelectInstance",
             Self::DecideConsent { .. } => "DecideConsent",
+            Self::InstanceUpdateRefresh {} => "InstanceUpdateRefresh",
+            Self::InstanceUpdateCheck {} => "InstanceUpdateCheck",
+            Self::InstanceUpdateSetPrereleases { .. } => "InstanceUpdateSetPrereleases",
+            Self::InstanceUpdateSetAutoUpdate { .. } => "InstanceUpdateSetAutoUpdate",
+            Self::InstanceUpdateInstall { .. } => "InstanceUpdateInstall",
             Self::UpdateCheck { .. } => "UpdateCheck",
             Self::UpdateSetPrereleases { .. } => "UpdateSetPrereleases",
             Self::UpdateSetAutoUpdate { .. } => "UpdateSetAutoUpdate",
@@ -310,6 +329,16 @@ impl std::fmt::Debug for ClientAction {
     }
 }
 impl ClientAction {
+    pub fn is_instance_update(&self) -> bool {
+        matches!(
+            self,
+            Self::InstanceUpdateRefresh {}
+                | Self::InstanceUpdateCheck {}
+                | Self::InstanceUpdateSetPrereleases { .. }
+                | Self::InstanceUpdateSetAutoUpdate { .. }
+                | Self::InstanceUpdateInstall { .. }
+        )
+    }
     pub fn is_desktop_update(&self) -> bool {
         matches!(
             self,

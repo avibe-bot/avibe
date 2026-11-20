@@ -78,12 +78,17 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         ]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Before any scene draws: a locked App opens behind its lock (docs/plans/app-lock.md).
+        if !Self.isRunningTests {
+            MainActor.assumeIsolated { AppLockController.shared.start() }
+        }
         VoiceCaptureLaunch.markLaunched()
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
             ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
+            await VoiceCaptureController.shared.restoreOutbox()
             if !Self.isRunningTests { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }
         return true

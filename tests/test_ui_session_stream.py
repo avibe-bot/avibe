@@ -247,7 +247,15 @@ def test_workbench_side_actions_have_fail_closed_core_message_kinds(
 ):
     from vibe.ui_server import app
 
-    _, session_id = _make_session(tmp_path)
+    scope_id, session_id = _make_session(tmp_path)
+    if "quick_reply_for" in payload.get("metadata", {}):
+        with create_sqlite_engine().begin() as conn:
+            question = messages_service.append(
+                conn, scope_id=scope_id, session_id=session_id, platform="avibe",
+                author="agent", source="agent", message_type="result", text="Choose",
+                content={"quick_replies": ["Yes", "No"]},
+            )
+        payload = {**payload, "metadata": {"quick_reply_for": question["id"]}}
     dispatch = _accepted_dispatch(session_id)
     with patch("vibe.internal_client.dispatch_async", dispatch):
         client = app.test_client()
@@ -321,7 +329,8 @@ def test_quick_reply_choice_publishes_the_answered_row_after_it_commits(
         )
 
     assert first.status_code == 201
-    assert second.get_json() == {"already_answered": True}
+    assert second.get_json()["already_answered"] is True
+    assert second.get_json()["answer"]["outcome"] == "already_handled"
     assert len(updates_after_first) == 1
     _, data, persisted = updates_after_first[0]
     assert data["id"] == agent_row["id"]

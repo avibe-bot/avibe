@@ -694,7 +694,16 @@ def test_actual_remote_update_popup_retains_document_and_owns_only_update_action
     for action in [{"type": "cancel"}, {"type": "sign_out"}, {"type": "return_local"},
                    {"type": "select_instance", "instance_id": "studio"}]:
         assert popup_request(f, action) == {"rejected": "untrusted_desktop_caller"}, action
-    for action in [{"type": "get_state"}, {"type": "update_set_auto_update", "enabled": False}]:
+    # B1: the popup may drive the selected instance's updater too; the shell
+    # answers with its own reply (here the instance is still loading).
+    instance = popup_request(f, {"type": "instance_update_refresh"})
+    assert "rejected" not in instance and instance["state"]["instance_update"]["instance_id"] == "studio", instance
+    # The Workbench, local or remote, can drive neither updater.
+    instance_actions = [{"type": "instance_update_refresh"}, {"type": "instance_update_check"},
+                        {"type": "instance_update_set_prereleases", "enabled": True},
+                        {"type": "instance_update_set_auto_update", "enabled": False},
+                        {"type": "instance_update_install", "target_version": "3.2.8rc4"}]
+    for action in [{"type": "get_state"}, {"type": "update_set_auto_update", "enabled": False}, *instance_actions]:
         envelope = {"version": 1, "request_id": "remote-cannot-borrow-popup",
                     "expected_generation": f["state"]()["state"]["generation"], "action": action}
         assert f["js"]("return window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"

@@ -529,7 +529,31 @@ pub fn attach(
         view,
         presentations: Mutex::new(PresentationQueue::default()),
     });
+    // The selected instance's section is reread every few seconds while the
+    // popup shows it, or while an action sent from this shell is unsettled.
+    let polling = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(INSTANCE_UPDATE_POLL).await;
+            let open = polling
+                .get_webview_window(crate::update_popover::UPDATE_POPOVER)
+                .is_some_and(|window| window.is_visible().unwrap_or(false));
+            let Some(client) = polling.try_state::<Client>() else {
+                return;
+            };
+            client.coordinator.poll_instance_update(open).await;
+        }
+    });
     coordinator
+}
+const INSTANCE_UPDATE_POLL: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Read the selected instance's update state now (the popup just opened).
+pub(crate) fn refresh_instance_update(app: &AppHandle) {
+    if let Some(client) = app.try_state::<Client>() {
+        let coordinator = client.coordinator.clone();
+        tauri::async_runtime::spawn(async move { coordinator.refresh_instance_update().await });
+    }
 }
 fn compatible_asset(bytes: &[u8]) -> bool {
     // The producer emits this fixed static assembly marker. Do not inspect DOM.
@@ -802,6 +826,30 @@ pub(crate) fn is_current_runtime<R: tauri::Runtime>(view: &Webview<R>) -> bool {
     drop(views);
     let state = client.view.presentation.lock().expect("presentation");
     role && !state.account && !state.staging && state.pending_commit.is_none() && client.view.windows.try_lock().is_ok()
+}
+/// The shown Workbench document and the Runtime origin it must have, while it
+/// is the current Runtime (no account page, not staging or committing) and its
+/// URL is at that origin. Ask Vibey (macOS Services) delivers into nothing else.
+#[cfg(target_os = "macos")]
+pub(crate) fn current_workbench(app: &AppHandle) -> Option<(Webview, Url)> {
+    let view = runtime_webview(app)?;
+    if !is_current_runtime(&view) {
+        return None;
+    }
+    let client = app.try_state::<Client>()?;
+    let origin = {
+        let state = client.view.presentation.lock().ok()?;
+        match &state.remote {
+            Some(remote) => remote.clone(),
+            None => client.view.local_origin.lock().ok()?.as_ref()?.navigation_url(),
+        }
+    };
+    let actual = view.url().ok()?;
+    let same = matches!(actual.scheme(), "http" | "https")
+        && actual.origin() == origin.origin()
+        && actual.username().is_empty()
+        && actual.password().is_none();
+    same.then_some((view, origin))
 }
 pub(crate) fn is_main_view(app: &AppHandle, label: &str) -> bool {
     if label == MAIN_WINDOW {
@@ -2144,6 +2192,19 @@ impl NativeView {
 }
 #[async_trait]
 impl ClientView for NativeView {
+    /// The committed instance's WebView store, read back for exactly its origin.
+    /// Called off the main thread; never for a candidate, an account page or a
+    /// document on another origin.
+    fn instance_cookies(&self, epoch: &Epoch, origin: &Url) -> Option<Vec<cookie::Cookie<'static>>> {
+        epoch.check().ok()?;
+        let view = runtime_webview(&self.app)?;
+        if view.label() == MAIN_WINDOW || view.url().ok()?.origin() != origin.origin() {
+            return None;
+        }
+        let cookies = view.cookies_for_url(origin.clone()).ok()?;
+        epoch.check().ok()?;
+        Some(cookies)
+    }
     fn desktop_update(&self, action: ClientAction, epoch: Epoch) -> Result<(), ClientError> {
         let client = self
             .app

@@ -71,7 +71,7 @@ export const quotaIsLive = (source: SourceQuota): boolean => source.state === 'o
 export const quotaIsRetained = (source: SourceQuota): boolean =>
   (source.state === 'stale' || source.state === 'auth_expired') && source.fetched_at !== null && source.windows.length > 0;
 
-export const windowIsScoped = (window: QuotaWindow): boolean => window.kind === 'model_weekly';
+export const windowIsScoped = (window: QuotaWindow): boolean => window.kind === 'model_session' || window.kind === 'model_weekly';
 
 /** `true` once the window's reset instant has come; the reading predates it. */
 export function windowHasReset(window: QuotaWindow, now: number): boolean {

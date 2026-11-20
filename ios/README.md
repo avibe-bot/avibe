@@ -255,6 +255,7 @@ The native bridge method surface is fixed:
 | `accountPresentation: 2` | `app.setAccountActionAvailable({available})` | `null`; primary Workbench display hint used to suppress or restore the old-Web native fallback |
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
+| `appLock: 1` | `appLock.status()`, `appLock.setPolicy({policy})` | The contract in `ui/src/lib/appLockContract.ts`: `{policy, available, biometry, biometryState}`, and for a change `{ok, reason?, status}`. A change is saved only after one `.deviceOwnerAuthentication`; see App Lock below |
 | `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
 | `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
 | `haptics: 1` | `haptics.selection()` | `null` |
@@ -360,15 +361,51 @@ the main Bot acts on the user's computer.
   kept on the phone, unsent, and sent again by itself (after 2, 5, 10, 20
   and 30 s, then every minute, and when Avibe comes to the front; each send
   asks again first), its island saying 还没发出去，连上你的 Avibe 后会自动发送。
-  with Retry and Discard. After ten minutes it gets one last send and then
-  goes with its island. While it is sent again it stays kept, so a new
-  press, Discard or Retry is never swallowed; one send of a take runs at a
-  time, and a take given up meanwhile asks nothing more and makes no
-  request (only a POST already on its way cannot be taken back, and
-  `capture_earlier` then says `sentAfterEnd`). A take that could not be
-  turned into text, or one this process cannot send until Avibe is opened
-  again (`direct_fault`), waits for Retry instead. A new press still replaces a kept take (the ordered
-  outbox that ends this is a separate change). No
+  with Retry and Discard (in front, where no island is drawn, a banner says
+  the line). A take that could not be turned into text, or one this process
+  cannot send until Avibe is opened again (`direct_fault`), waits for Retry
+  instead.
+- Takes that are not sent yet are kept in order (`VoiceCaptureOutbox`): in
+  `Application Support/VoiceOutbox`, excluded from backup, each a record
+  (`<sequence>-<id>.json`: where it goes, when it was spoken, its
+  transcription id, its `capture_attempt` and `capture_timing`, its words
+  once transcribed, and whether its POST was begun) next to its audio. A
+  new press never discards one: the earlier take gives its island up and
+  goes on being sent. They are sent oldest first, one at a time, each as
+  its own message; a take that stops while an earlier one is on its way
+  waits behind it. While a take is sent again it stays kept, so a press,
+  Discard or Retry is never swallowed; one send of a take runs at a time,
+  and a take given up meanwhile makes no more requests (only a POST already
+  on its way cannot be taken back, and `capture_earlier` then says
+  `sentAfterEnd`). The order survives the App being ended: the next launch
+  reads the outbox, asking about voice input afresh; a take whose POST was
+  begun is never posted again (audio no record points at, from a write
+  the App did not live to finish, is removed then), and no POST is made
+  unless that marker
+  reached the disk first. An expired instance session destroys nothing: a
+  take found signed out waits for Retry, and one being recorded when that
+  is found is stopped at once and kept.
+- A take is sent without the user asking only within ten minutes of the
+  end of speaking (`automaticWindow`): the schedule above, and once more,
+  silently, when Avibe comes to the front. Then its island goes, and a
+  lasting notification says 没发出去 · 这条语音没能发出去，打开 Avibe 可以重试。
+  (scheduled when the take is kept, so it shows whether or not the App runs
+  then; removed once nothing is unsent). From then only Retry sends it, a
+  relaunch included (a send nobody asked for that outlasts the window, a
+  slow transcription say, posts nothing), and it no longer holds newer takes back; neither does
+  one that could not be turned into text. When Avibe comes to the front
+  and something is still unsent, one alert says 有一条 3 小时前的语音没能发出去。
+  (or 有 3 条语音没能发出去，最早的是 3 小时前。) with 重试 / 全部重试, which sends
+  all of them oldest first, and 放弃, which deletes them. An unsent take is
+  deleted after 24 hours, and at once on a sign-out or account change; a
+  voice consent "no" discards it. At most 20 are kept.
+- A take sent more than a minute after it was spoken tells the main Bot so:
+  its message begins with one line, （这条语音说于今天 08:44，刚刚才送达。） (another
+  day: （这条语音说于 11 月 19 日 23:10，刚刚才送达。）; in the phone's local time and
+  the App's language), then a line break and the words, and
+  `metadata.spoken_at` carries the time (ISO 8601). The model sees a
+  message's text and a few rendered header lines, not its metadata, so the
+  line is what tells it the instruction was not given just now. No
   sign-in, no microphone permission, or Live Activities turned off bring the
   App to the main Bot's conversation before anything records. A later
   `403 voice_consent_required` stops the take and keeps nothing. The take's
@@ -449,8 +486,9 @@ the main Bot acts on the user's computer.
   each at most 700 characters; `UserDefaults`): the time (UTC), what
   happened (`short:`, `cancel`, `start:<step> <code>`, `needsApp:`,
   `refused:`, `kept:<reason> {requests that did not reach the instance}`,
-  `expired`, `replaced`, `discarded`, `leftover`, `repeat`, `abandoned`,
-  `noFront`, `nothingHeard`, `sendUnknown`, `sentAfter {…}`), the press's
+  `expired`, `discarded`, `discardedAll <n>`, `overflow`, `leftover`,
+  `repeat`, `abandoned`, `noFront`, `nothingHeard`, `sendUnknown`,
+  `sentAfter {…}`, `sentAfterEnd`), the press's
   facts and its steps. No audio and no words. The next message that
   arrives carries them as `metadata.capture_earlier` and they are then
   dropped; they never go out on their own.
@@ -490,8 +528,10 @@ the main Bot acts on the user's computer.
   front a held gate (the listener closed or being bound again, right after
   Avibe comes forward) is waited for, up to 5 s, and a load that failed in
   that window is made once more; a fault fails as `direct_fault`. The gate
-  is asked for the take's own store and the last runtime's host, also when
-  no runtime is shown (the instance list). In the background the gate stays
+  is asked for the take's own store and host
+  (`DirectPathController.loadGate(forInstanceURL:)`), whatever instance is
+  shown, or none: a kept take of an instance that is no longer selected
+  still loads through the listener its host is routed to. In the background the gate stays
   held for as long as Avibe is there, so nothing waits: a background take's
   load rests on WebKit's own failover past the closed listener
   (`allowFailover`), a safety net rather than a guarantee, so a failure
@@ -1511,6 +1551,32 @@ Changing Apple App ID capabilities or provisioning profiles, signing an archive,
 physical-device validation and TestFlight distribution require separate owner
 approval. Unsigned simulator builds and synthetic-data tests do not establish
 physical-device authorization, locked-device access, or background wake latency.
+
+## App Lock
+
+Settings › General › App Lock (Off by default, Immediately, After 1 minute, After
+5 minutes) is kept in this App's `UserDefaults` and owned by `AppLockController`
+(`AppLock.swift`); behavior and the shared contract: `docs/plans/app-lock.md`.
+
+- The lock is `AppLockWindow`, a second window of the scene above `.alert` that
+  never becomes key. It covers the WebView, the account pages, sheets, and alerts
+  the App presents; those keep presenting on the main window and show after unlock.
+- Going inactive covers the App Switcher snapshot with the logo. Time away starts at
+  `didEnterBackground` on a clock that counts sleep; a return at or past the
+  threshold, or a cold start, is locked. The App asks for Face ID once each time it
+  arrives in front, except while an Action Button take is recording; after a cancel
+  the button waits. Its own verification sheets never re-lock or cover.
+- Routing, notification taps, App Shortcuts, Health sync, reminders, push, and voice
+  capture are not gated: they run under the lock, and the target page is ready when
+  it lifts.
+- No passcode means the lock does not engage; the stored choice applies again once
+  one is set. `NSFaceIDUsageDescription` says only "Use Face ID to unlock Avibe."
+- The lock screen's words are the `appLock.lock.*` keys shared with the Web bundles
+  (`ui/src/i18n/appLockCopy.test.ts` keeps `Localizable.xcstrings` equal); its
+  visual spec is `ui/design: app-lock/lock/*`.
+- Tests: `AppLockTests.swift` (machine, capability decoding, controller with a
+  stand-in authenticator, and the real lock window in the test host). A physical
+  Face ID device, passcode fallback, and Touch ID iPhone remain device checks.
 
 ## Sharing a Show from the iPhone App
 

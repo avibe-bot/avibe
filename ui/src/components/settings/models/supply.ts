@@ -28,6 +28,7 @@ export const isUnhealthy = (state: SourceState): boolean =>
 
 /** The one cooldown reason that is about money rather than weather. */
 export const QUOTA_EXHAUSTED = 'models.source.cooldown.quota_exhausted';
+export const RATE_LIMITED = 'models.source.cooldown.rate_limited';
 
 /**
  * Worth reading, not just worth reporting — what earns the gold sub-line.

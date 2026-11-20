@@ -109,7 +109,7 @@ impl Fixture {
                 assert_eq!(
                     status.success(),
                     !self.expected_failure,
-                    "{}",
+                    "fixture exited {status}: {}",
                     diagnostic_tail(&self.scratch.join("stderr.log"))
                 );
                 break;

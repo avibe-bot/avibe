@@ -2,9 +2,11 @@
 
 use std::io::{self, Read};
 use std::process::ChildStdout;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use serde::Deserialize;
 
@@ -54,51 +56,37 @@ pub enum ReceiptEvent {
 
 pub(crate) const EXIT_DRAIN: Duration = Duration::from_millis(100);
 
-// At most three messages: one verdict, EOF after a verdict, and helper exit.
-enum TransportEvent {
-    Verdict(ReceiptEvent),
-    Exited(Instant),
+#[derive(Default)]
+struct ReceiptState {
+    terminal: OnceLock<ReceiptEvent>,
+    exited: OnceLock<Instant>,
+    changed: Notify,
 }
 
-#[derive(Clone)]
-pub struct StartupReceiptStream {
-    sender: mpsc::SyncSender<TransportEvent>,
-    receiver: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
-    terminal: Arc<OnceLock<ReceiptEvent>>,
-    exited: Arc<OnceLock<Instant>>,
-}
-
-impl Default for StartupReceiptStream {
-    fn default() -> Self {
-        let (sender, receiver) = mpsc::sync_channel(3);
-        Self {
-            sender,
-            receiver: Arc::new(Mutex::new(receiver)),
-            terminal: Arc::new(OnceLock::new()),
-            exited: Arc::new(OnceLock::new()),
-        }
-    }
-}
+#[derive(Clone, Default)]
+pub struct StartupReceiptStream(Arc<ReceiptState>);
 
 impl StartupReceiptStream {
-    /// A verdict the helper writes later, as the reader thread would deliver it.
-    #[cfg(test)]
+    /// Publish once at the producer. An observer's timeout must never take a
+    /// receiver or a wakeup away from the next Retry on this same helper.
     pub(crate) fn deliver(&self, event: ReceiptEvent) {
-        self.sender.try_send(TransportEvent::Verdict(event)).unwrap();
+        if self.0.terminal.set(event).is_ok() {
+            self.0.changed.notify_waiters();
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn from_events(events: impl IntoIterator<Item = ReceiptEvent>) -> Self {
         let stream = Self::default();
         for event in events {
-            stream.sender.try_send(TransportEvent::Verdict(event)).unwrap();
+            stream.deliver(event);
         }
         stream
     }
 
     pub fn spawn(mut stdout: ChildStdout, log: BootstrapLog) -> Self {
         let stream = Self::default();
-        let sender = stream.sender.clone();
+        let writer = stream.clone();
         thread::spawn(move || {
             let event = read_receipts(&mut stdout);
             let drain = matches!(event, ReceiptEvent::Receipt(_));
@@ -108,73 +96,45 @@ impl StartupReceiptStream {
                     &[("outcome", format!("{:?}", receipt.outcome))],
                 );
             }
-            let _ = sender.try_send(TransportEvent::Verdict(event));
+            writer.deliver(event);
             // Keep ordinary post-commit output from breaking the helper's pipe.
             // The consumer has one terminal verdict and ignores later messages.
             // A future descendant inheriting stdout can keep only this detached
             // reader blocked; it cannot extend the admission deadline.
             if drain {
-                let event = match io::copy(&mut stdout, &mut io::sink()) {
-                    Ok(_) => ReceiptEvent::Eof,
-                    Err(_) => ReceiptEvent::TransportError,
-                };
-                let _ = sender.try_send(TransportEvent::Verdict(event));
+                let _ = io::copy(&mut stdout, &mut io::sink());
             }
         });
         stream
     }
 
-    fn record(&self, event: TransportEvent) {
-        match event {
-            TransportEvent::Verdict(verdict) => {
-                let _ = self.terminal.set(verdict);
-            }
-            TransportEvent::Exited(at) => {
-                let _ = self.exited.set(at);
-            }
-        }
-    }
-
     pub fn try_next(&self) -> Option<ReceiptEvent> {
-        if self.terminal.get().is_none() {
-            // Another observer may be waiting on this retained attempt. Never
-            // block the async admission thread on its channel lock.
-            if let Ok(receiver) = self.receiver.try_lock() {
-                while let Ok(event) = receiver.try_recv() {
-                    self.record(event);
-                }
-            }
-            if self.exited.get().is_some_and(|at| at.elapsed() >= EXIT_DRAIN) {
-                let _ = self.terminal.set(ReceiptEvent::Eof);
-            }
+        if self.0.exited.get().is_some_and(|at| at.elapsed() >= EXIT_DRAIN) {
+            self.deliver(ReceiptEvent::Eof);
         }
-        self.terminal.get().cloned()
+        self.0.terminal.get().cloned()
     }
 
     pub fn finish(&self) {
-        let _ = self.sender.try_send(TransportEvent::Exited(Instant::now()));
+        if self.0.exited.set(Instant::now()).is_ok() {
+            self.0.changed.notify_waiters();
+        }
     }
 
     pub async fn changed(&self, remaining: Duration) {
-        let stream = self.clone();
-        // Include time queued for the blocking pool/channel mutex in the same
-        // budget. The GUI thread never performs a blocking pipe or channel read.
+        // Register before reading state: a concurrent publication either shows
+        // up below or notifies this future. Dropping the wait leaves no worker.
+        let changed = self.0.changed.notified();
+        if self.0.terminal.get().is_some() {
+            return;
+        }
         let deadline = Instant::now() + remaining;
-        let _ = tokio::task::spawn_blocking(move || {
-            if stream.terminal.get().is_some() {
-                return;
-            }
-            if let Ok(receiver) = stream.receiver.lock() {
-                let deadline = stream
-                    .exited
-                    .get()
-                    .map_or(deadline, |at| deadline.min(*at + EXIT_DRAIN));
-                if let Ok(event) = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                    stream.record(event);
-                }
-            }
-        })
-        .await;
+        let deadline = self
+            .0
+            .exited
+            .get()
+            .map_or(deadline, |at| deadline.min(*at + EXIT_DRAIN));
+        let _ = tokio::time::timeout_at(deadline, changed).await;
     }
 }
 
@@ -329,6 +289,29 @@ mod tests {
         ] {
             assert_eq!(read_receipts(Cursor::new(bytes)), ReceiptEvent::Invalid,);
         }
+    }
+
+    /// Retry is already waiting when the previous observation is cancelled.
+    /// A verdict must make it ready without another event or a timer tick.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_an_observer_does_not_take_the_retrys_wakeup() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let stream = StartupReceiptStream::default();
+        let mut previous = Box::pin(stream.changed(Duration::from_secs(1)));
+        let mut retry = std::pin::pin!(stream.changed(Duration::from_secs(1)));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(previous.as_mut().poll(&mut cx).is_pending());
+        assert!(retry.as_mut().poll(&mut cx).is_pending());
+        drop(previous);
+
+        stream.deliver(ReceiptEvent::Invalid);
+        assert!(
+            retry.as_mut().poll(&mut cx).is_ready(),
+            "Retry is notified by the verdict"
+        );
+        assert_eq!(stream.try_next(), Some(ReceiptEvent::Invalid));
     }
 
     #[test]

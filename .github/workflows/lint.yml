@@ -1581,7 +1581,7 @@ jobs:
       - name: Verify locked Windows installer failures and upgrade recovery guidance
         run: >-
           python -m pytest -q -ra
-          tests/test_windows_install_release.py tests/test_install_network_guidance.py
+          tests/test_windows_install_release.py tests/test_install_network_guidance.py tests/test_install_status.py
 
       # Its job object is the one the watch worker uses; no other job runs
       # this file on Windows.

@@ -87,6 +87,18 @@ struct DirectIrohBinding: DirectIrohEngine {
             Self.kind(of: connection.paths())
         }
 
+        var selectedPathDetail: DirectSelectedPath? {
+            guard let path = connection.paths().first(where: \.isSelected) else {
+                return nil
+            }
+            return DirectSelectedPath(
+                isRelay: path.isRelay,
+                isIp: path.isIp,
+                remoteAddress: path.remoteAddr,
+                rttMs: path.rttMs
+            )
+        }
+
         func watchSelectedPath(
             _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
         ) -> (any DirectPathWatch)? {

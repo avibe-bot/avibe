@@ -7571,7 +7571,7 @@ def _web_push_normal_delivery_diagnostics() -> dict:
 
 @app.route("/api/system-schedule/claim", methods=["POST"])
 def system_schedule_claim():
-    """Lease the next Agent-created request to this exact iOS installation."""
+    """Lease the next Agent-created request to this exact device installation."""
 
     from config.v2_config import V2Config
     from storage import system_schedule_service
@@ -7583,7 +7583,7 @@ def system_schedule_claim():
         "exclude_lease_tokens",
         "allow_create",
     }
-    if not isinstance(payload, dict) or set(payload) != expected:
+    if not isinstance(payload, dict) or not expected <= set(payload) or set(payload) - expected - {"kinds"}:
         return jsonify({"ok": False, "error": "invalid_request"}), 400
     configured_instance_id = str(
         V2Config.load().remote_access.vibe_cloud.instance_id or ""
@@ -7600,6 +7600,7 @@ def system_schedule_claim():
             device_id=payload.get("device_id"),
             exclude_lease_tokens=payload.get("exclude_lease_tokens"),
             allow_create=payload["allow_create"],
+            **({"kinds": payload["kinds"]} if "kinds" in payload else {}),
         )
     except system_schedule_service.SystemScheduleServiceError as exc:
         return jsonify({"ok": False, "error": exc.code}), 400
@@ -14000,6 +14001,8 @@ async def sessions_messages_create(session_id: str):
     from storage.agent_session_rows import session_is_runtime_owned
     from vibe import internal_client
 
+    from core import message_answers
+
     payload = request.json or {}
     retry_for = payload.get("retry_for")
     # ``continue_on_backend`` turns a Retry into "continue on another backend": the
@@ -14016,12 +14019,18 @@ async def sessions_messages_create(session_id: str):
         # This is an action, not a caller-supplied replacement prompt. Do not
         # accept attachments, identities, or quick-reply metadata alongside it.
         payload = {"text": "continue"}
+    try:
+        answer = message_answers.parse(payload)
+    except (ValueError, TypeError, AttributeError):
+        return _coded_error_response("invalid_answer", "invalid_answer", 400)
+    native_answer = answer is not None and not answer.legacy
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
         return jsonify({"error": "text or content is required"}), 400
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
+    answer_action = bool(quick_reply_for or payload.get("in_reply_to"))
     message_kind = workbench_message_kind(payload, quick_reply_for)
     if retry_for:
         message_kind = "quick_reply"
@@ -14051,6 +14060,8 @@ async def sessions_messages_create(session_id: str):
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
             if session.get("status") == "archived":
+                if native_answer:
+                    return jsonify({"answer": answer.receipt("stale")}), 409
                 return _session_archived_response()
             # A runtime-owned session accepts NO turn. The reserved workspace-notifications
             # row is ``visibility='system'``, which keeps it in the inbox on purpose — so
@@ -14063,17 +14074,13 @@ async def sessions_messages_create(session_id: str):
             # carries ``visibility``.
             if session_is_runtime_owned(session_id=session_id, visibility=session.get("visibility")):
                 return _reserved_session_response(RESERVED_SESSION_READ_ONLY_I18N_KEY)
-            # Idempotency: a stale or duplicate quick-reply submit (a second tab, or
-            # one that missed the message.new event) must not start a second turn
-            # for an already-answered group. The answer lives on the agent message.
-            if (
-                quick_reply_for
-                and messages_service.get_quick_reply_chosen(conn, session_id, quick_reply_for) is not None
-            ):
-                return jsonify({"already_answered": True}), 200
     except LookupError as err:
+        if native_answer:
+            return jsonify({"answer": answer.receipt("not_found")}), 404
         return jsonify({"error": str(err)}), 404
     except PermissionError as err:
+        if native_answer:
+            return jsonify({"answer": answer.receipt("forbidden")}), 403
         return _coded_error_response("agent_access_forbidden", str(err), 403)
 
     continue_agent = None
@@ -14126,8 +14133,24 @@ async def sessions_messages_create(session_id: str):
 
     switched: dict[str, Any] = {}
 
+    reserved_answer = answer
+
+    def _publish_answered_message() -> None:
+        if reserved_answer is None:
+            return
+        with engine.connect() as conn:
+            answered = messages_service.get_message(
+                conn, reserved_answer.request_id, session_id=session_id, include_local_error_detail=True,
+            )
+        if answered is not None:
+            from vibe.sse_broker import broker
+
+            broker.publish("message.updated", answered)
+
     def _persist_user_row() -> dict | None:
         """Atomically persist one unaccepted submission as a Delivery."""
+        nonlocal reserved_answer
+
         from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
         from storage import message_deliveries
         from storage.agent_session_rows import is_bot_session, reserve_write_lock
@@ -14136,6 +14159,21 @@ async def sessions_messages_create(session_id: str):
             reserve_write_lock(conn)
             if workbench_sessions_service.is_session_archived(conn, session_id):
                 return None
+            if answer is not None:
+                authorization = getattr(g, "authorization_context", None)
+                current_session = workbench_sessions_service.get_session(
+                    conn, session_id, authorization_context=authorization,
+                )
+                ensure_session_agent_access(conn, current_session, user_context=user_context)
+                if authorization is not None and not _session_can_chat(conn, authorization, session_id):
+                    raise PermissionError("session chat access denied")
+                refused = message_answers.prepare(conn, session_id, web_push_user_key, answer)
+                if refused is not None and refused.get("legacy_passthrough"):
+                    # Released clients dispatch unmatched targets/options as ordinary input.
+                    reserved_answer = None
+                elif refused is not None:
+                    # Return after the transaction commits the immutable refusal receipt.
+                    return {"_answer_result": refused}
             delivery_id = message_deliveries.new_delivery_id()
             message_metadata = resource_access_service.metadata_with_resource_user_context(
                 {
@@ -14194,13 +14232,15 @@ async def sessions_messages_create(session_id: str):
                 )
             else:
                 row = admit_input(conn, envelope, delivery_id=delivery_id).delivery
-            if not quick_reply_for and not retry_for:
+            if reserved_answer is not None:
+                message_answers.bind(conn, session_id, web_push_user_key, reserved_answer, row["id"])
+            if not answer_action and not retry_for:
                 message_deliveries.set_draft(conn, session_id, None)
             draft = message_deliveries.get_draft_state(conn, session_id)
             workbench_sessions_service.touch_session(conn, session_id)
         result = message_deliveries.public_delivery_payload(row)
         result["draft"] = _session_draft_payload(draft)
-        result["draft_advanced"] = not bool(quick_reply_for or retry_for)
+        result["draft_advanced"] = not bool(answer_action or retry_for)
         return result
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
@@ -14215,15 +14255,30 @@ async def sessions_messages_create(session_id: str):
     except workbench_sessions_service.SessionBackendLockedError as err:
         return _backend_locked_response(err)
     except (ValueError, LookupError) as err:
+        if answer is not None and isinstance(err, LookupError):
+            if native_answer:
+                return jsonify({"answer": answer.receipt("not_found")}), 404
+            return jsonify({"error": str(err)}), 404
         if continue_agent is None:
             raise
         return jsonify({"error": str(err)}), 400
     except PermissionError as err:
+        if native_answer:
+            return jsonify({"answer": answer.receipt("forbidden")}), 403
+        if answer is not None:
+            return _coded_error_response("agent_access_forbidden", str(err), 403)
         if continue_agent is None:
             raise
         return jsonify({"error": str(err)}), 403
+    if message is not None and "_answer_result" in message:
+        result = message["_answer_result"]
+        if result.get("publish_answer"):
+            _publish_answered_message()
+        return jsonify(result["body"]), result["status"]
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
+        if native_answer:
+            return jsonify({"answer": answer.receipt("stale")}), 409
         return _session_archived_response()
     if switched.get("session") is not None:
         from vibe.sse_broker import broker
@@ -14333,6 +14388,8 @@ async def sessions_messages_create(session_id: str):
                 str(message["id"]),
                 reason=reason,
             )
+            if reserved_answer is not None:
+                message_answers.failed(conn, session_id, web_push_user_key, reserved_answer, str(message["id"]), reason)
         return _current_delivery_response()
 
     try:
@@ -14372,29 +14429,17 @@ async def sessions_messages_create(session_id: str):
         ), 502
     status = result.get("status_code", 500)
     body = result.get("body") or {}
-    # Quick-reply accepted (turn started OR queued) → record the choice on the
-    # AGENT message as the single source of truth for the locked/answered state.
-    # Only on success, so a failed click stays retriable; ``set_quick_reply_chosen``
-    # is set-once, so a rare double-dispatch still records one consistent answer.
-    if status == 202 and quick_reply_for:
+    answer_receipt = None
+    if status == 202 and reserved_answer is not None:
         with engine.begin() as conn:
-            chosen_recorded = messages_service.set_quick_reply_chosen(
-                conn, session_id, quick_reply_for, dispatch_text,
-            )
-        # Publish the answered agent row only after the write has committed, so
-        # every window (another tab, the desktop pet) locks the group and clears
-        # "needs input" from one ordered event. The user message's own
-        # ``message.new`` is published during dispatch, before this write, so it
-        # cannot carry the choice. Set-once: a repeat click publishes nothing.
-        if chosen_recorded:
-            with engine.connect() as conn:
-                answered = messages_service.get_message(
-                    conn, quick_reply_for, session_id=session_id, include_local_error_detail=True,
-                )
-            if answered is not None:
-                from vibe.sse_broker import broker
+            from storage.agent_session_rows import reserve_write_lock
 
-                broker.publish("message.updated", answered)
+            reserve_write_lock(conn)
+            answer_receipt, newly_acknowledged = message_answers.acknowledge(
+                conn, session_id, web_push_user_key, reserved_answer, str(message["id"]),
+            )
+        if newly_acknowledged:
+            _publish_answered_message()
     if status == 202:
         delivery_state = str(body.get("delivery_state") or "")
         current = _current_delivery_response()
@@ -14420,12 +14465,13 @@ async def sessions_messages_create(session_id: str):
                 {
                     **accepted,
                     **body,
+                    **({"answer": answer_receipt} if answer_receipt else {}),
                     "draft": message["draft"],
                     "draft_advanced": message["draft_advanced"],
                     **({"retry_notice": current["retry_notice"]} if retry_for else {}),
                 }
             ), 201
-        return jsonify({**current, **body}), 202
+        return jsonify({**current, **body, **({"answer": answer_receipt} if answer_receipt else {})}), 202
     current = _retire_unclaimed_delivery(f"internal_dispatch_rejected_{status}")
     if retry_for and status == 409:
         return jsonify({**current, **body}), 409

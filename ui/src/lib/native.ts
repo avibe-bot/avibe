@@ -1,6 +1,7 @@
 export type NativePlatform = 'ios' | 'android';
 export type NativeCapability =
   | 'accountPresentation'
+  | 'appLock'
   | 'app'
   | 'badge'
   | 'health'
@@ -289,6 +290,19 @@ export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
 /** Establishes a connection only; request completion comes from the instance API. */
 export async function nativeHealthConnect(params: { requestId: string; pairingCode: string }): Promise<{ state: 'connected' | 'declined' | 'failed' } | null> {
   return callNative('health', 'health.connect', params);
+}
+
+/** Kinds supported for NEW schedules; recovery/cancel retain device ownership. */
+export async function nativeSystemScheduleKinds(): Promise<Array<'alarm' | 'reminder'>> {
+  // Unknown capabilities prohibit NEW creates, while device-bound recovery and
+  // cancellation still reach Runtime with an empty kinds list.
+  const result = await callNative<{ contract: number; supportedKinds: unknown }>(
+    'systemSchedule', 'systemSchedule.capabilities',
+  ).catch(() => null);
+  const kinds = result?.supportedKinds;
+  if (result?.contract !== 1 || !Array.isArray(kinds)
+    || kinds.some((kind) => kind !== 'alarm' && kind !== 'reminder')) return [];
+  return [...new Set(kinds)] as Array<'alarm' | 'reminder'>;
 }
 
 export async function nativeSystemScheduleRequest(
@@ -1004,6 +1018,11 @@ export async function nativeDirectHandover(): Promise<NativeDirectHandoverResult
 export type NativeDirectPathSnapshot = {
   preferred: NativeDirectPreference;
   path: NativeDirectPathKind | null;
+  /** For an IPv4 or IPv6 path: whether its far end is on a local network
+   *  (`local`) or not (`global`). Null for the relay, or when not reported. */
+  scope: 'local' | 'global' | null;
+  /** The path's round-trip time in ms, when the shell measured it. */
+  rttMs: number | null;
   /** The last new connection's race, if the shell recorded one. */
   lastConnection: NativeDirectConnection | null;
 };
@@ -1045,8 +1064,27 @@ export async function readNativeDirectPath(): Promise<NativeDirectPathSnapshot |
     const last = Array.isArray(connections) && connections.length > 0
       ? parseDirectConnection(connections[connections.length - 1])
       : null;
-    return { preferred: status.preferred, path: status.path, lastConnection: last };
+    const { path_scope: scope, rtt_ms: rttMs } = answer as { path_scope?: unknown; rtt_ms?: unknown };
+    // Both belong to the path the status names; without one they are not shown.
+    const named = status.path !== null;
+    return {
+      preferred: status.preferred,
+      path: status.path,
+      scope: named && status.path !== 'relay' && (scope === 'local' || scope === 'global') ? scope : null,
+      rttMs: named && isCounter(rttMs) && rttMs > 0 ? rttMs : null,
+      lastConnection: last,
+    };
   } catch {
     return null;
   }
+}
+
+/** `appLock.status` (ui/src/lib/appLockContract.ts); the caller parses the payload. */
+export async function nativeAppLockStatus(): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.status');
+}
+
+/** `appLock.setPolicy`; the shell verifies the device owner before it saves. */
+export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
+  return callNative<unknown>('appLock', 'appLock.setPolicy', { policy });
 }

@@ -37,6 +37,8 @@ pub mod updater;
 mod window_return;
 
 #[cfg(target_os = "macos")]
+mod compose;
+#[cfg(target_os = "macos")]
 mod computer_use;
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 #[path = "computer_use/windows.rs"]
@@ -48,6 +50,8 @@ mod computer_use_process;
 mod macos_deep_link;
 #[cfg(target_os = "macos")]
 mod macos_new_context;
+#[cfg(target_os = "macos")]
+mod macos_services;
 #[cfg(target_os = "macos")]
 mod macos_terminate;
 #[cfg(target_os = "macos")]
@@ -181,6 +185,35 @@ struct DesktopBootstrapCatalog {
     pet: pet::NativePetCatalog,
     #[cfg(feature = "bundled-runtime")]
     uninstall: NativeUninstallCatalog,
+    #[cfg(target_os = "macos")]
+    #[serde(rename = "askVibey")]
+    ask_vibey: NativeAskVibeyCatalog,
+}
+
+/// The two notices Ask Vibey (macOS Services) can post.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Deserialize)]
+struct NativeAskVibeyCatalog {
+    kept: String,
+    unavailable: String,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AskVibeyNotice {
+    /// No Workbench is current; the selection waits on this Mac.
+    Kept,
+    /// The instance could not open Vibey's conversation; nothing was added.
+    Unavailable,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn ask_vibey_notice(notice: AskVibeyNotice) -> String {
+    let catalog = native_catalog_for_locales(sys_locale::get_locales()).ask_vibey;
+    match notice {
+        AskVibeyNotice::Kept => catalog.kept,
+        AskVibeyNotice::Unavailable => catalog.unavailable,
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -2156,7 +2189,7 @@ fn claim_recreated_window_bootstrap(activity: &AtomicU8) -> bool {
 }
 
 /// Brings the existing window forward, or recreates it and re-enters bootstrap.
-fn focus_or_restore_main_window(app: &AppHandle) {
+pub(crate) fn focus_or_restore_main_window(app: &AppHandle) {
     let created = app.get_window(MAIN_WINDOW).is_none();
     let Some(window) = ensure_main_window(app) else {
         return;
@@ -2758,6 +2791,8 @@ pub fn run() {
                 })
                 .on_event(|app, event| {
                     #[cfg(target_os = "macos")]
+                    if matches!(event, RunEvent::Exit) { macos_services::remove(); }
+                    #[cfg(target_os = "macos")]
                     if let RunEvent::WindowEvent { label, event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Focused(true), .. } = event {
                         if label == MAIN_WINDOW {
                             if let Some(window) = app.get_window(MAIN_WINDOW) { macos_title_bar::sync_window(&window); }
@@ -2819,6 +2854,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             instance_client::desktop_client_request,
+            update_popover::update_popover_fit,
             bootstrap_status,
             bootstrap_retry,
             open_install_docs,
@@ -2881,6 +2917,11 @@ pub fn run() {
                 app.path().app_local_data_dir()?.join("notifications.json"),
             ));
             app.manage(pet::Pet::new(app.path().app_local_data_dir()?.join("pet.json")));
+            #[cfg(target_os = "macos")]
+            {
+                app.manage(compose::Queue::default());
+                macos_services::install(app.handle());
+            }
             #[cfg(target_os = "macos")]
             macos_terminate::install(app.handle());
             if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {

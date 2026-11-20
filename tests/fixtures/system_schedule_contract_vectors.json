@@ -137,5 +137,31 @@
       "authorization": "authorized",
       "error": null
     }
+  ],
+  "claimFilters": [
+    {
+      "name": "ios26",
+      "kinds": [
+        "alarm"
+      ],
+      "firstKind": "alarm"
+    },
+    {
+      "name": "desktop",
+      "kinds": [
+        "reminder"
+      ],
+      "firstKind": "reminder"
+    },
+    {
+      "name": "unavailable",
+      "kinds": [],
+      "firstKind": null
+    },
+    {
+      "name": "legacy",
+      "kinds": null,
+      "firstKind": "reminder"
+    }
   ]
 }
