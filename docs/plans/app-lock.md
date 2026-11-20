@@ -24,6 +24,8 @@ separate PRs; this file and `ui/src/lib/appLockContract.ts` are the contract bot
 - The lock covers UI only. Background work (sync, push, reminders, the Runtime and Agents, voice
   capture started by the Action Button) keeps running. Notification previews follow system settings.
 - The lock screen is native (SwiftUI on iOS, AppKit on Mac). Visual spec: `ui/design: app-lock/lock/*`.
+  Its words are `appLock.lock.*` in `ui/src/i18n/{en,zh}.json` (`appLock.lock.iphone.*` for the
+  iPhone only); a shell mirrors those keys and never words them itself.
   Settings panel: `ui/design: app-lock/settings/*`.
 
 ## Wire contract
