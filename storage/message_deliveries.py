@@ -2064,10 +2064,10 @@ def terminalize_turn(
     turn = get_turn(conn, turn_id)
     if turn is None or turn["state"] == "terminal":
         return {"changed": False, "turn": turn}
-    from storage.session_delegations import ensure_receipt_watermark
+    from storage.session_delegations import RECEIPT_ELIGIBLE_EVIDENCE_KEY
 
-    # Before this end is written: every end this version writes is after the mark.
-    ensure_receipt_watermark(conn)
+    # Every end this version writes says so; ends from older versions are history.
+    evidence = {**(evidence or {}), RECEIPT_ELIGIBLE_EVIDENCE_KEY: True}
     values = {
         "state": "terminal",
         "terminal_outcome": outcome,

@@ -54,7 +54,7 @@ def _send(h, sender="sesA", recipient="sesB", **kwargs):
     )
 
 
-def _accept(h, *requests, finish=True, provenance=None):
+def _accept(h, *requests, finish=True, provenance=None, suffix=""):
     """Use the actual shared acceptance boundary, including multi-sender batching."""
     turn_id = "turn_" + uuid4().hex
     with h.engine.begin() as conn:
@@ -69,11 +69,12 @@ def _accept(h, *requests, finish=True, provenance=None):
                 }}},
             )
             batch.append(deliveries.insert_delivery(
-                conn, delivery_id="msg_" + request.id, session_id=request.session_id, priority="p3", state="queued",
+                conn, delivery_id="msg_" + request.id + suffix, session_id=request.session_id, priority="p3",
+                state="queued",
                 snapshot=snapshot, dispatch_text=request.prompt,
             ))
             conn.execute(update(agent_runs).where(agent_runs.c.id == request.id).values(
-                status="running", delivery_id="msg_" + request.id,
+                status="running", delivery_id="msg_" + request.id + suffix,
             ))
         deliveries.claim_start_batch(
             conn, turn_id=turn_id, session_id=requests[0].session_id, backend="vibey", deliveries=batch,
@@ -942,66 +943,62 @@ def test_two_dispatches_that_end_before_the_receipt_get_one_receipt_with_the_lat
 
 # ----- 3.2.8rc2 upgrade backfill (11-20 08:27: 24 receipts for old dispatches) -----
 
-def _set_watermark(h, value):
-    from storage.models import state_meta
+def _ended_by_an_older_version(h, *run_ids):
+    """What an older release wrote: a Turn end without this version's mark."""
+    from storage.models import message_deliveries as delivery_rows, session_turns
     with h.engine.begin() as conn:
-        conn.execute(state_meta.delete().where(state_meta.c.key == "delegation_receipts_since"))
-        conn.execute(state_meta.insert().values(key="delegation_receipts_since", value_json=json.dumps(value),
-                                                updated_at=NOW))
+        for run_id in run_ids:
+            turn_id = conn.execute(select(delivery_rows.c.turn_id).select_from(
+                agent_runs.join(delivery_rows, delivery_rows.c.id == agent_runs.c.delivery_id),
+            ).where(agent_runs.c.id == run_id)).scalar_one()
+            conn.execute(update(session_turns).where(session_turns.c.id == turn_id).values(
+                terminal_evidence_json='{"kind":"terminal_result"}'))
 
 
 def test_an_upgraded_instance_sends_nothing_for_dispatches_that_ended_before_it(harness):
-    """Old open pairs (Turns that ended before this version first ran) are history:
-    they are retired silently, never answered with a receipt."""
+    """Old open pairs (Turns an older version ended) are history: retired silently,
+    never answered with a receipt. No clock is compared."""
     h = harness
-    old = _send(h)
-    _accept(h, old)  # its Turn ends now, i.e. before the upgrade below
-    old_pair = _pair(h)
-    _accept(h, _send(h, sender="sesC", recipient="sesD"))
-    _set_watermark(h, "2999-01-01T00:00:00.000000Z")  # first start of the new version: later
+    old, other = _send(h), _send(h, sender="sesC", recipient="sesD")
+    _accept(h, old)
+    _accept(h, other)
+    _ended_by_an_older_version(h, old.id, other.id)
     items, _ = h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
     for item in items:
         h.lane._notify(item.observation)
     assert _notices(h) == []
     assert _pair(h)["state"] == "unavailable" and _pair(h, "sesC", "sesD")["state"] == "unavailable"
-    assert old_pair["state"] == "open"
-
-
-def test_the_first_turn_end_of_this_version_arms_the_watermark_once(harness):
-    """Not a scan, which may run after Turns already ended: the terminal write itself."""
-    from storage.models import state_meta
-    h = harness
-
-    def mark():
-        with h.engine.connect() as conn:
-            return conn.execute(select(state_meta.c.value_json).where(
-                state_meta.c.key == "delegation_receipts_since")).scalar_one_or_none()
-
-    assert mark() is None
-    run = _send(h)
-    _accept(h, run)  # this Turn's end arms it, before its own end time
-    first = mark()
-    assert first is not None
+    # A dispatch this version ends still gets its receipt.
+    fresh = _send(h)
+    _accept(h, fresh)
     assert h.lane._notify(_pair(h))
-    _accept(h, _send(h, sender="sesC", recipient="sesD"))
-    assert mark() == first
-    assert h.lane._notify(_pair(h, "sesC", "sesD"))
-    assert len(_notices(h)) == 2
+    assert len(_notices(h)) == 1
 
 
 def test_an_unresolvable_dispatch_fails_closed(harness):
-    """No Turn to read, or no watermark: no receipt, and the pair is left as it is."""
-    from storage.models import state_meta
+    """No Turn to read: no receipt, and the pair is left as it is."""
     h = harness
     run = _send(h)
     _accept(h, run)
     with h.engine.begin() as conn:
         conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(delivery_id=None))
     assert not h.lane._notify(_pair(h)) and _pair(h)["state"] == "open"
+
+
+def test_a_carried_dispatch_keeps_the_answer_it_already_had(harness):
+    """B wrote back and A accepted (answered); B's next Turn takes a carried copy of the
+    same dispatch (#4010). That is not a new request: no receipt after it."""
+    h = harness
+    run = _send(h)
+    turn = _accept(h, run, finish=False)
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    assert _pair(h)["state"] == "answered"
     with h.engine.begin() as conn:
-        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(delivery_id="msg_" + run.id))
-        conn.execute(state_meta.delete().where(state_meta.c.key == "delegation_receipts_since"))
-    assert not h.lane._notify(_pair(h)) and _pair(h)["state"] == "open"
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="queued"))
+    _finish(h, turn, [])
+    _accept(h, run, suffix="~carry")  # the same Run, accepted again by the successor Turn
+    assert _pair(h)["state"] == "answered"
+    assert not h.lane._notify(_pair(h)) and _notices(h) == []
 
 
 def test_a_dispatch_its_sender_cancelled_gets_no_receipt(harness):

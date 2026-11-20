@@ -23,11 +23,11 @@ from storage.models import (
 )
 
 IDLE_NOTICE_ACTOR_PREFIX = "delegation-idle:"
-#: ``state_meta`` key: when this version first ended a Turn on this instance (armed
-#: by ``terminalize_turn``, before the end it writes). A dispatched Turn that ended
-#: before it is history, never answered with a receipt: 3.2.8rc2 sent 24 receipts
-#: for dispatches up to ten days old on its first scan.
-RECEIPT_WATERMARK_KEY = "delegation_receipts_since"
+#: ``session_turns.terminal_evidence_json`` key this version writes on every Turn end
+#: (``message_deliveries.terminalize_turn``). A dispatched Turn whose end lacks it was
+#: ended by an older version: history, never answered with a receipt. 3.2.8rc2 sent
+#: 24 receipts for dispatches up to ten days old on its first scan.
+RECEIPT_ELIGIBLE_EVIDENCE_KEY = "delegation_receipt_eligible"
 _PENDING_DELIVERIES = tuple(state for state, policy in DELIVERY_STATE_MATRIX.items() if policy.ordering != "terminal")
 _LIVE_RUN_STATUSES = ("queued", "pending", "running", "processing")
 
@@ -91,6 +91,14 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
         # answers. Only A sending again rearms A→B; wording/turns are not judged.
         if run["source_kind"] != "agent" or answered:
             continue
+        # The same dispatch accepted again (a failed Turn carried it on, #4010) is not
+        # a new request: it keeps the pair as it stands, answered included.
+        if conn.execute(select(session_delegations.c.run_id).where(
+            session_delegations.c.sender_session_id == sender,
+            session_delegations.c.recipient_session_id == recipient,
+            session_delegations.c.run_id == run["id"],
+        )).first() is not None:
+            continue
         values = dict(
             sender_session_id=sender, recipient_session_id=recipient,
             message_id=message_id, run_id=run["id"], state="open", notice_run_id=None, updated_at=at,
@@ -99,45 +107,6 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
             index_elements=[session_delegations.c.sender_session_id, session_delegations.c.recipient_session_id],
             set_={key: value for key, value in values.items() if key not in {"sender_session_id", "recipient_session_id"}},
         ))
-
-
-def ensure_receipt_watermark(conn: Connection) -> str:
-    """The receipt watermark, set to now the first time; idempotent."""
-    import json as _json
-
-    from storage.message_deliveries import turn_now_iso
-    from storage.models import state_meta
-
-    now = turn_now_iso()
-    conn.execute(insert(state_meta).values(
-        key=RECEIPT_WATERMARK_KEY, value_json=_json.dumps(now), updated_at=now,
-    ).on_conflict_do_nothing(index_elements=[state_meta.c.key]))
-    return receipt_watermark(conn) or now
-
-
-def _instant(value: Any) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
-    except ValueError:
-        return None
-    if parsed is not None and parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def receipt_watermark(conn: Connection) -> str | None:
-    import json as _json
-
-    from storage.models import state_meta
-
-    raw = conn.execute(
-        select(state_meta.c.value_json).where(state_meta.c.key == RECEIPT_WATERMARK_KEY)
-    ).scalar_one_or_none()
-    try:
-        value = _json.loads(raw) if raw else None
-    except ValueError:
-        return None
-    return value if isinstance(value, str) and value else None
 
 
 def has_dispatch_pair(conn: Connection, sender_session_id: str, recipient_session_id: str) -> bool:
@@ -253,16 +222,13 @@ def eligible_pair(
         # An older same-epoch binary can open this pair during rollback.
         # Retire it even when pending work would otherwise defer the receipt.
         return {**dict(pair), "unavailable": True}
-    # History is never answered: a receipt is owed only for a dispatched Turn that this
-    # version ended (its end armed the watermark first, ``terminalize_turn``). Anything
+    # History is never answered: a receipt is owed only for a dispatched Turn this
+    # version ended, marked in the end it wrote. No clock is compared. Anything
     # unresolvable fails closed: no receipt, the pair stays as it is.
     turn = conn.execute(dispatched_turn_query(str(pair["run_id"]))).mappings().first()
     if turn is None or turn["state"] != "terminal":
         return None
-    watermark, ended = _instant(receipt_watermark(conn)), _instant(turn["terminal_at"])
-    if watermark is None or ended is None:
-        return None
-    if ended < watermark:
+    if _object(turn["terminal_evidence_json"]).get(RECEIPT_ELIGIBLE_EVIDENCE_KEY) is not True:
         return {**dict(pair), "unavailable": True}
     recipient = pair["recipient_session_id"]
     for session_id in (pair["sender_session_id"], recipient):
