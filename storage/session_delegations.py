@@ -23,9 +23,10 @@ from storage.models import (
 )
 
 IDLE_NOTICE_ACTOR_PREFIX = "delegation-idle:"
-#: ``state_meta`` key: when this instance first ran receipts for ended Turns. A
-#: dispatched Turn that ended before it is history, never answered with a receipt:
-#: 3.2.8rc2 sent 24 receipts for dispatches up to ten days old on its first scan.
+#: ``state_meta`` key: when this version first ended a Turn on this instance (armed
+#: by ``terminalize_turn``, before the end it writes). A dispatched Turn that ended
+#: before it is history, never answered with a receipt: 3.2.8rc2 sent 24 receipts
+#: for dispatches up to ten days old on its first scan.
 RECEIPT_WATERMARK_KEY = "delegation_receipts_since"
 _PENDING_DELIVERIES = tuple(state for state, policy in DELIVERY_STATE_MATRIX.items() if policy.ordering != "terminal")
 _LIVE_RUN_STATUSES = ("queued", "pending", "running", "processing")
@@ -252,23 +253,17 @@ def eligible_pair(
         # An older same-epoch binary can open this pair during rollback.
         # Retire it even when pending work would otherwise defer the receipt.
         return {**dict(pair), "unavailable": True}
+    # History is never answered: a receipt is owed only for a dispatched Turn that this
+    # version ended (its end armed the watermark first, ``terminalize_turn``). Anything
+    # unresolvable fails closed: no receipt, the pair stays as it is.
     turn = conn.execute(dispatched_turn_query(str(pair["run_id"]))).mappings().first()
-    watermark = _instant(receipt_watermark(conn))
-    if watermark is None:
-        return None  # not armed yet: the first scan sets it
-    ended = _instant(turn["terminal_at"]) if turn is not None and turn["state"] == "terminal" else None
-    if ended is None and turn is None:
-        ended = _instant(pair["updated_at"])  # no Turn link: the dispatch's own acceptance
-    if ended is not None and ended < watermark:
-        # History: this dispatch ended before this instance sent receipts at all.
+    if turn is None or turn["state"] != "terminal":
+        return None
+    watermark, ended = _instant(receipt_watermark(conn)), _instant(turn["terminal_at"])
+    if watermark is None or ended is None:
+        return None
+    if ended < watermark:
         return {**dict(pair), "unavailable": True}
-    if _has_rows(conn, select(agent_runs.c.id).where(
-        agent_runs.c.source_kind == "agent", agent_runs.c.source_actor == pair["recipient_session_id"],
-        agent_runs.c.session_id == pair["sender_session_id"], agent_runs.c.created_at > run["created_at"],
-        agent_runs.c.status.in_(("succeeded", "completed")),
-    )):
-        # The recipient has since written back to the dispatcher.
-        return {**dict(pair), "answered": True}
     recipient = pair["recipient_session_id"]
     for session_id in (pair["sender_session_id"], recipient):
         session = conn.execute(select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)).first()

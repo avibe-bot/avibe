@@ -43,10 +43,6 @@ def harness(tmp_path, monkeypatch):
                 agent_variant="vibey", agent_name="vibey", title=f"Title {session_id}", status="active",
                 visibility="foreground", agent_status="idle", metadata_json="{}", created_at=NOW, updated_at=NOW,
             ))
-    # The service starts before any of these dispatches end: arm the receipt watermark.
-    from storage.session_delegations import ensure_receipt_watermark
-    with engine.begin() as conn:
-        ensure_receipt_watermark(conn)
     yield SimpleNamespace(service=service, requests=requests, engine=engine, lane=DelegationSafetyNet(service))
     requests.sqlite_backend.close()
 
@@ -810,6 +806,8 @@ def test_p1_acceptance_and_concurrent_notifiers_keep_one_notice(harness):
                 }}},
             ),
         )
+        # As production admission does: the Run is bound to its Delivery.
+        conn.execute(update(agent_runs).where(agent_runs.c.id == steer.id).values(delivery_id="steer"))
         deliveries.open_steer_attempt(conn, "steer", expected_version=delivery["version"], turn_id=turn,
                                      attempt_id="steer-attempt", expected_native_turn_id=turn)
         assert deliveries.materialize_steer_acceptance(conn, leader_delivery_id="steer",
@@ -969,20 +967,41 @@ def test_an_upgraded_instance_sends_nothing_for_dispatches_that_ended_before_it(
     assert old_pair["state"] == "open"
 
 
-def test_the_first_scan_sets_the_watermark_once_and_later_dispatches_get_receipts(harness):
+def test_the_first_turn_end_of_this_version_arms_the_watermark_once(harness):
+    """Not a scan, which may run after Turns already ended: the terminal write itself."""
     from storage.models import state_meta
     h = harness
-    h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
-    with h.engine.connect() as conn:
-        first = conn.execute(select(state_meta.c.value_json).where(
-            state_meta.c.key == "delegation_receipts_since")).scalar_one()
-    h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
-    with h.engine.connect() as conn:
-        assert conn.execute(select(state_meta.c.value_json).where(
-            state_meta.c.key == "delegation_receipts_since")).scalar_one() == first
-    _accept(h, _send(h))
+
+    def mark():
+        with h.engine.connect() as conn:
+            return conn.execute(select(state_meta.c.value_json).where(
+                state_meta.c.key == "delegation_receipts_since")).scalar_one_or_none()
+
+    assert mark() is None
+    run = _send(h)
+    _accept(h, run)  # this Turn's end arms it, before its own end time
+    first = mark()
+    assert first is not None
     assert h.lane._notify(_pair(h))
-    assert len(_notices(h)) == 1
+    _accept(h, _send(h, sender="sesC", recipient="sesD"))
+    assert mark() == first
+    assert h.lane._notify(_pair(h, "sesC", "sesD"))
+    assert len(_notices(h)) == 2
+
+
+def test_an_unresolvable_dispatch_fails_closed(harness):
+    """No Turn to read, or no watermark: no receipt, and the pair is left as it is."""
+    from storage.models import state_meta
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(delivery_id=None))
+    assert not h.lane._notify(_pair(h)) and _pair(h)["state"] == "open"
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(delivery_id="msg_" + run.id))
+        conn.execute(state_meta.delete().where(state_meta.c.key == "delegation_receipts_since"))
+    assert not h.lane._notify(_pair(h)) and _pair(h)["state"] == "open"
 
 
 def test_a_dispatch_its_sender_cancelled_gets_no_receipt(harness):
@@ -995,12 +1014,11 @@ def test_a_dispatch_its_sender_cancelled_gets_no_receipt(harness):
     assert _notices(h) == [] and _pair(h)["state"] == "unavailable"
 
 
-def test_a_recipient_that_wrote_back_later_owes_no_receipt(harness):
-    """B ended a later Turn that did write back to A (its report finished): A heard."""
+def test_a_recipient_that_wrote_back_already_answered_the_pair(harness):
+    """Any report B sends back that A accepts answers the pair (``record_accepted_exchange``),
+    so no receipt follows; no separate look-back is needed."""
     h = harness
     _accept(h, _send(h))
-    back = _send(h, sender="sesB", recipient="sesA")
-    with h.engine.begin() as conn:
-        conn.execute(update(agent_runs).where(agent_runs.c.id == back.id).values(status="succeeded"))
-    assert not h.lane._notify(_pair(h))
-    assert _notices(h) == [] and _pair(h)["state"] == "answered"
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    assert _pair(h)["state"] == "answered"
+    assert not h.lane._notify(_pair(h)) and _notices(h) == []
