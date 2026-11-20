@@ -32,7 +32,7 @@ const KiB = 1024;
 // #4036) and the voice input stack (src/components/voice/, src/lib/voiceActivity.ts).
 //
 // home 608 -> 600 KiB (2026-11-20, same day). Two things the first screen never
-// draws now load when first needed, and home measures 591.5 KiB: the Ask Vibey
+// draws now load when first needed, and home measures 591.6 KiB: the Ask Vibey
 // receiver is fetched only in a desktop shell (-1.0 KiB), and the new-project
 // dialog with its folder browser loads on first open (-7.9 KiB). The 3.1 KiB
 // named above for #4036 and #4037 fit under 600 with room left.
