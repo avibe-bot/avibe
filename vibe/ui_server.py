@@ -14023,6 +14023,7 @@ async def sessions_messages_create(session_id: str):
         answer = message_answers.parse(payload)
     except (ValueError, TypeError, AttributeError):
         return _coded_error_response("invalid_answer", "invalid_answer", 400)
+    native_answer = answer is not None and not answer.legacy
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
@@ -14058,7 +14059,7 @@ async def sessions_messages_create(session_id: str):
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
             if session.get("status") == "archived":
-                if answer is not None:
+                if native_answer:
                     return jsonify({"answer": answer.receipt("stale")}), 409
                 return _session_archived_response()
             # A runtime-owned session accepts NO turn. The reserved workspace-notifications
@@ -14073,11 +14074,11 @@ async def sessions_messages_create(session_id: str):
             if session_is_runtime_owned(session_id=session_id, visibility=session.get("visibility")):
                 return _reserved_session_response(RESERVED_SESSION_READ_ONLY_I18N_KEY)
     except LookupError as err:
-        if answer is not None:
+        if native_answer:
             return jsonify({"answer": answer.receipt("not_found")}), 404
         return jsonify({"error": str(err)}), 404
     except PermissionError as err:
-        if answer is not None:
+        if native_answer:
             return jsonify({"answer": answer.receipt("forbidden")}), 403
         return _coded_error_response("agent_access_forbidden", str(err), 403)
 
@@ -14247,13 +14248,17 @@ async def sessions_messages_create(session_id: str):
         return _backend_locked_response(err)
     except (ValueError, LookupError) as err:
         if answer is not None and isinstance(err, LookupError):
-            return jsonify({"answer": answer.receipt("not_found")}), 404
+            if native_answer:
+                return jsonify({"answer": answer.receipt("not_found")}), 404
+            return jsonify({"error": str(err)}), 404
         if continue_agent is None:
             raise
         return jsonify({"error": str(err)}), 400
     except PermissionError as err:
-        if answer is not None:
+        if native_answer:
             return jsonify({"answer": answer.receipt("forbidden")}), 403
+        if answer is not None:
+            return _coded_error_response("agent_access_forbidden", str(err), 403)
         if continue_agent is None:
             raise
         return jsonify({"error": str(err)}), 403
@@ -14264,7 +14269,7 @@ async def sessions_messages_create(session_id: str):
         return jsonify(result["body"]), result["status"]
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
-        if answer is not None:
+        if native_answer:
             return jsonify({"answer": answer.receipt("stale")}), 409
         return _session_archived_response()
     if switched.get("session") is not None:

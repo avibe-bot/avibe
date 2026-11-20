@@ -38,7 +38,8 @@ class Answer:
             "operation_id": self.operation_id,
             "request_id": self.request_id,
             "outcome": outcome,
-            "choice": self.choice,
+            "choice": self.choice if self.quick else None,
+            "answer_kind": "choice" if self.quick else "text",
             "delivery_id": delivery_id,
             **extra,
         }
@@ -110,36 +111,44 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
             },
         }
 
-    def refuse(outcome: str, status: int, *, choice=None, delivery_id=None):
+    def refuse(outcome: str, status: int, *, choice=None, delivery_id=None, answer_kind=None):
         receipt = answer.receipt(outcome, delivery_id)
-        if choice is not None:
-            receipt["choice"] = choice
-        conn.execute(
-            operations.insert().values(
-                session_id=session_id,
-                principal=principal,
-                operation_id=answer.operation_id,
-                request_id=answer.request_id,
-                fingerprint=answer.fingerprint,
-                choice=answer.choice,
-                receipt_json=json.dumps(receipt),
+        if answer_kind is not None:
+            receipt["answer_kind"] = answer_kind
+            receipt["choice"] = choice if answer_kind == "choice" else None
+        if not answer.legacy:
+            conn.execute(
+                operations.insert().values(
+                    session_id=session_id,
+                    principal=principal,
+                    operation_id=answer.operation_id,
+                    request_id=answer.request_id,
+                    fingerprint=answer.fingerprint,
+                    choice=answer.choice,
+                    receipt_json=json.dumps(receipt),
+                )
             )
-        )
+        if answer.legacy and outcome == "not_found":
+            return {"status": status, "body": {"error": {"code": "message_not_found"}}}
         return {
             "status": 200 if answer.legacy and outcome == "already_handled" else status,
             "body": {"answer": receipt, **({"already_answered": True} if outcome == "already_handled" else {})},
         }
 
-    target = messages_service.get_message(conn, answer.request_id, session_id=session_id)
+    target = conn.execute(
+        select(messages.c.author, messages.c.content_json, messages.c.created_at, messages.c.delivered_at)
+        .where(messages.c.id == answer.request_id, messages.c.session_id == session_id)
+    ).mappings().first()
     if target is None or target.get("author") != "agent":
         return refuse("not_found", 404)
-    content = target.get("content") or {}
+    content = json.loads(target["content_json"] or "{}")
     chosen = content.get("quick_reply_chosen")
     winner = (
         conn.execute(
-            select(operations.c.choice, operations.c.delivery_id)
+            select(operations.c.choice, operations.c.delivery_id, operations.c.fingerprint)
             .join(message_deliveries, message_deliveries.c.id == operations.c.delivery_id)
             .where(operations.c.session_id == session_id, operations.c.request_id == answer.request_id)
+            .where(operations.c.delivery_id.is_not(None))
             .where(message_deliveries.c.state != "retired")
             .limit(1)
         )
@@ -152,14 +161,22 @@ def prepare(conn, session_id: str, principal: str, answer: Answer) -> dict | Non
             409,
             choice=winner["choice"] if winner else chosen,
             delivery_id=winner["delivery_id"] if winner else None,
+            answer_kind=(
+                ("choice" if json.loads(winner["fingerprint"])[2] else "text")
+                if winner else content.get("quick_reply_answer_kind", "choice")
+            ),
         )
     options = content.get("quick_replies")
     if not isinstance(options, list) or not options:
+        if answer.legacy:
+            return {"status": 400, "body": {"error": {"code": "invalid_answer"}}}
         return refuse("stale", 409)
     if answer.revision is not None and answer.revision != revision(options):
         return refuse("stale", 409)
     if answer.quick and answer.choice not in options:
         return {"status": 400, "body": {"error": {"code": "invalid_answer"}}}
+    if answer.legacy:
+        return None
     order_value = messages_service.transcript_order_value()
     target_order = target.get("delivered_at") or target["created_at"]
     newer = conn.execute(
@@ -219,13 +236,22 @@ def acknowledge(conn, session_id: str, principal: str, answer: Answer, delivery_
         operations.update().where(_key(session_id, principal, answer)).values(receipt_json=json.dumps(receipt))
     )
     # Ordinary text owns the same question, but remains an ordinary user input.
-    target = messages_service.get_message(conn, answer.request_id, session_id=session_id)
-    if target is not None:
-        content = dict(target["content"])
-        content["quick_reply_chosen"] = answer.choice
-        conn.execute(
-            messages.update().where(messages.c.id == answer.request_id).values(content_json=json.dumps(content))
+    # Mutate only answer fields in the raw JSON. A public projection omits model context.
+    conn.execute(
+        messages.update()
+        .where(
+            messages.c.id == answer.request_id,
+            messages.c.session_id == session_id,
+            func.json_extract(messages.c.content_json, "$.quick_reply_chosen").is_(None),
         )
+        .values(
+            content_json=func.json_set(
+                messages.c.content_json,
+                "$.quick_reply_chosen", answer.choice if answer.quick else "",
+                "$.quick_reply_answer_kind", "choice" if answer.quick else "text",
+            )
+        )
+    )
     return receipt, True
 
 

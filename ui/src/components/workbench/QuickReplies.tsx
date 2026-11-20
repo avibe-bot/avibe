@@ -33,7 +33,7 @@ export const QuickReplies: React.FC<{
   // message), drop the optimistic lock and let ``chosen`` own the displayed state
   // so the two never diverge.
   React.useEffect(() => {
-    if (chosen) setClicked(null);
+    if (typeof chosen === 'string') setClicked(null);
   }, [chosen]);
 
   return (

@@ -25,13 +25,13 @@ def upgrade() -> None:
         if_not_exists=True,
     )
     op.create_index(
-        "ix_message_answer_operations_request",
+        "ix_message_answer_operations_winner",
         "message_answer_operations",
-        ["session_id", "request_id"],
+        ["session_id", "request_id", "delivery_id"],
         if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_message_answer_operations_request", table_name="message_answer_operations")
+    op.drop_index("ix_message_answer_operations_winner", table_name="message_answer_operations")
     op.drop_table("message_answer_operations")

@@ -25,6 +25,10 @@
       "revision": "ad859daaa2ef921b4105f19e6d7df1e041f224c876fff7e2eba691fa1c6e6be4"
     }
   ],
+  "answerKinds": [
+    {"answer_kind": "choice", "choice": "继续 ✅", "storedChoice": "继续 ✅"},
+    {"answer_kind": "text", "choice": null, "storedChoice": ""}
+  ],
   "outcomes": {
     "accepted": 201,
     "duplicate": 200,

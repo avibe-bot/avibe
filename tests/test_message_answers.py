@@ -6,6 +6,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+from pathlib import Path
 import threading
 
 import httpx
@@ -284,6 +285,121 @@ def test_text_answer_is_ordinary_input_and_preserves_composer_draft(answer_route
     assert r["post"]("another").get_json()["answer"]["outcome"] == "already_handled"
 
 
+@pytest.mark.parametrize(
+    "vector",
+    json.loads((Path(__file__).parent / "fixtures/message_answer_contract_vectors.json").read_text())["answerKinds"],
+    ids=lambda vector: vector["answer_kind"],
+)
+def test_answer_preserves_committed_vibey_context_and_receipt_kind(answer_route, vector):
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from storage.models import messages
+    from tests.test_agent_transcript import _assistant, _user
+
+    r = answer_route
+    free = vector["answer_kind"] == "text"
+    store = SQLiteTranscriptStore(r["engine"])
+    with r["engine"].begin() as conn:
+        first = messages_service.append(
+            conn, scope_id=r["scope"], session_id=r["session"], platform="avibe",
+            author="user", source="user", message_type="user", text="Start",
+        )
+    asyncio.run(store.consume_input(r["session"], first["id"], _user("Start")))
+    entry = asyncio.run(store.append_response(r["session"], _assistant("Continue?"), final=True))
+    with r["engine"].begin() as conn:
+        raw = json.loads(conn.execute(
+            select(messages.c.content_json).where(messages.c.id == entry.row_id)
+        ).scalar_one())
+        raw["quick_replies"] = ["继续 ✅", "Stop"]
+        conn.execute(messages.update().where(messages.c.id == entry.row_id).values(content_json=json.dumps(raw)))
+        r["question"].update(messages_service.get_message(conn, entry.row_id, session_id=r["session"]))
+    expected_context = asyncio.run(store.load(r["session"]))
+    assert expected_context
+    response = r["post"](free=free).get_json()["answer"]
+    assert asyncio.run(store.load(r["session"])) == expected_context
+    with r["engine"].connect() as conn:
+        saved = json.loads(conn.execute(
+            select(messages.c.content_json).where(messages.c.id == entry.row_id)
+        ).scalar_one())
+    assert saved["model"] == raw["model"]
+    assert "quick_reply_revision" not in saved
+    assert "failure_source" not in saved
+    assert saved["quick_reply_chosen"] == vector["storedChoice"]
+    assert saved["quick_reply_answer_kind"] == vector["answer_kind"]
+    for receipt in (
+        response,
+        r["post"](free=free).get_json()["answer"],
+        r["post"]("another", free=not free).get_json()["answer"],
+    ):
+        assert receipt["answer_kind"] == vector["answer_kind"]
+        assert receipt["choice"] == vector["choice"]
+
+
+@pytest.mark.parametrize("newer", ["agent", "user", "pending"])
+def test_legacy_can_answer_an_older_unanswered_group(answer_route, newer):
+    from storage import message_deliveries as deliveries
+
+    r = answer_route
+    with r["engine"].begin() as conn:
+        if newer == "pending":
+            deliveries.enqueue_queued(conn, scope_id=r["scope"], session_id=r["session"], text="New input")
+        else:
+            messages_service.append(
+                conn, scope_id=r["scope"], session_id=r["session"], platform="avibe",
+                author=newer, source=newer, message_type="user" if newer == "user" else "result", text="Newer input",
+            )
+    response = r["post"](legacy=True)
+    assert response.status_code in (201, 202)
+    assert response.get_json()["answer"]["outcome"] == "accepted"
+    assert len(r["dispatches"]) == 1
+
+
+def test_legacy_archived_response_preserves_existing_error_code(answer_route):
+    from storage.models import agent_sessions
+
+    r = answer_route
+    with r["engine"].begin() as conn:
+        conn.execute(agent_sessions.update().where(agent_sessions.c.id == r["session"]).values(status="archived"))
+    response = r["post"](legacy=True)
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "session_archived"
+    assert "answer" not in response.get_json()
+    assert r["dispatches"] == []
+
+
+def test_winner_lookup_excludes_refusal_history_and_legacy_refusals_are_not_saved(answer_route):
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+    from storage.models import message_answer_operations as operations
+
+    r = answer_route
+    with r["engine"].begin() as conn:
+        conn.execute(operations.insert(), [
+            dict(session_id=r["session"], principal="fixture", operation_id=f"refused-{number}",
+                 request_id=r["question"]["id"], fingerprint="[]", choice="ignored",
+                 receipt_json='{"outcome":"stale"}')
+            for number in range(200)
+        ])
+    plans = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT ") and "JOIN message_deliveries" in statement:
+            plans.extend(row[3] for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters))
+
+    event.listen(Engine, "before_cursor_execute", capture)
+    try:
+        assert r["post"]().get_json()["answer"]["outcome"] == "accepted"
+        assert r["post"](legacy=True).get_json()["already_answered"] is True
+    finally:
+        event.remove(Engine, "before_cursor_execute", capture)
+    with r["engine"].connect() as conn:
+        assert len(conn.execute(select(operations)).all()) == 201
+    assert any(
+        "ix_message_answer_operations_winner (session_id=? AND request_id=? AND delivery_id>?)" in plan
+        for plan in plans
+    ), plans
+    assert not any("SCAN " in plan for plan in plans), plans
+
+
 @pytest.mark.parametrize("failure", ["unavailable", "timeout", "lost_ack"])
 def test_dispatch_failure_releases_only_proven_unaccepted_answers(answer_route, monkeypatch, failure):
     from vibe import internal_client
@@ -322,7 +438,11 @@ def test_question_revision_shared_vectors(answer_route):
     assert answer_route["question"]["content"]["quick_reply_revision"] == vectors["questions"][1]["revision"]
 
 
-def test_revoked_chat_permission_precedes_operation_replay(answer_route, tmp_path):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_revoked_chat_permission_precedes_operation_replay(answer_route, tmp_path, legacy):
+    import traceback
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
     from tests.ui_server_test_helpers import _save_config, remote_session_cookie
     from vibe import remote_access
     from vibe.ui_server import app
@@ -336,22 +456,46 @@ def test_revoked_chat_permission_precedes_operation_replay(answer_route, tmp_pat
         "operation_id": "same-operation",
         "revision": revision(["继续 ✅", "Stop"]),
     }
-    for role, expected in (("owner", 201), ("viewer", 403)):
-        client.set_cookie(
-            remote_access.SESSION_COOKIE_NAME,
-            remote_session_cookie(config, "owner@example.com", "same-user", role=role),
-            domain="alex.avibe.bot",
-        )
-        response = client.post(
-            f"/api/sessions/{r['session']}/messages",
-            json=body,
-            headers=csrf_headers(client, "https://alex.avibe.bot"),
-            base_url="https://alex.avibe.bot",
-            environ_base={"REMOTE_ADDR": "203.0.113.10"},
-        )
-        assert response.status_code == expected
+    if legacy:
+        body.pop("operation_id")
+        body.pop("revision")
+    plans = {}
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if not statement.startswith("SELECT "):
+            return
+        callers = {frame.name for frame in traceback.extract_stack()}
+        if "_persist_user_row" not in callers:
+            return
+        for caller in ("get_session", "ensure_session_agent_access", "_session_can_chat"):
+            if caller in callers:
+                plans.setdefault(caller, []).extend(
+                    row[3] for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)
+                )
+
+    event.listen(Engine, "before_cursor_execute", capture)
+    try:
+        for role, expected in (("owner", 201), ("viewer", 403)):
+            client.set_cookie(
+                remote_access.SESSION_COOKIE_NAME,
+                remote_session_cookie(config, "owner@example.com", "same-user", role=role),
+                domain="alex.avibe.bot",
+            )
+            response = client.post(
+                f"/api/sessions/{r['session']}/messages",
+                json=body,
+                headers=csrf_headers(client, "https://alex.avibe.bot"),
+                base_url="https://alex.avibe.bot",
+                environ_base={"REMOTE_ADDR": "203.0.113.10"},
+            )
+            assert response.status_code == expected
+    finally:
+        event.remove(Engine, "before_cursor_execute", capture)
     assert len(r["dispatches"]) == len(r["starts"]) == 1
     assert "answer" not in response.get_json()  # The outer auth guard discloses no saved receipt.
+    assert set(plans) == {"get_session", "ensure_session_agent_access", "_session_can_chat"}
+    assert all("SCAN " not in plan for query_plans in plans.values() for plan in query_plans), plans
+    (tmp_path / "authorization-query-plans.json").write_text(json.dumps(plans, indent=2))
 
 
 def test_answer_migration_preserves_existing_rows_and_epoch(answer_route):

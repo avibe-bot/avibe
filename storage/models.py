@@ -1715,5 +1715,5 @@ message_answer_operations = Table(
     Column("choice", Text, nullable=False),
     Column("delivery_id", String, nullable=True),
     Column("receipt_json", Text, nullable=True),
-    Index("ix_message_answer_operations_request", "session_id", "request_id"),
+    Index("ix_message_answer_operations_winner", "session_id", "request_id", "delivery_id"),
 )

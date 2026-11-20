@@ -941,3 +941,30 @@ def test_claim_rejects_invalid_kinds(isolated_state, kinds):
     with pytest.raises(SystemScheduleServiceError) as caught:
         claim_next(instance_id="instance-a", device_id="device-a", kinds=kinds, now=NOW)
     assert caught.value.code == "invalid_kinds"
+
+
+def test_kind_claim_checks_only_pending_candidates_by_operation_key(isolated_state):
+    from sqlalchemy.engine import Engine
+    from storage.models import system_schedule_operations
+
+    _create()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        history = dict(conn.execute(select(system_schedule_operations)).mappings().one())
+        conn.execute(system_schedule_operations.insert(), [
+            {**history, "operation_id": f"history-{number}"} for number in range(500)
+        ])
+    plans = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT system_schedule_attempts.") and "system_schedule_operations.kind" in statement:
+            plans.extend(row[3] for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters))
+
+    event.listen(Engine, "before_cursor_execute", capture)
+    try:
+        claim = claim_next(instance_id="instance-a", device_id="ios26", kinds=["alarm"], now=NOW)
+        assert claim["request"]["kind"] == "alarm"
+    finally:
+        event.remove(Engine, "before_cursor_execute", capture)
+    assert any("SEARCH system_schedule_operations" in plan and "(operation_id=?)" in plan for plan in plans), plans
+    assert not any("SCAN " in plan or "LIST SUBQUERY" in plan or "TEMP B-TREE" in plan for plan in plans), plans

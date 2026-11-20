@@ -710,9 +710,16 @@ def _pending_attempt(
         .where(system_schedule_attempts.c.instance_id == instance_id)
     )
     if action == "create" and device_id is None and kinds is not None:
-        query = query.where(system_schedule_attempts.c.operation_id.in_(
-            select(system_schedule_operations.c.operation_id).where(system_schedule_operations.c.kind.in_(kinds))
-        ))
+        if not kinds:
+            return None
+        query = query.where(
+            select(system_schedule_operations.c.operation_id)
+            .where(
+                system_schedule_operations.c.operation_id == system_schedule_attempts.c.operation_id,
+                system_schedule_operations.c.kind.in_(kinds),
+            )
+            .exists()
+        )
     if action == "cancel":
         query = query.where(system_schedule_attempts.c.purpose == "user")
     if device_id is None:
