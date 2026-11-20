@@ -208,3 +208,24 @@ def test_pairing_cannot_publish_a_target_different_from_the_approved_claim(claim
     result = _claim()
     assert result["code"] == "fresh_claim_required"
     assert not V2Config.load().remote_access.vibe_cloud.instance_id
+
+
+@pytest.mark.parametrize("damage", ["{not json", "[]", '{"bound": 5}', b"\xff\xfe"])
+def test_damaged_status_file_blocks_neither_a_new_claim_nor_its_sealed_pairing(claim_peer, monkeypatch, damage):
+    """The outcome file holds no secret: unparseable reads as absent, and the next write replaces it."""
+    import json
+    from tests.test_pairing_recovery import _fail_config_publication_once
+    marker = claims._marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    def damage_marker():
+        marker.write_bytes(damage if isinstance(damage, bytes) else damage.encode())
+    damage_marker()
+    _fail_config_publication_once(monkeypatch)
+    assert _claim()["code"] == "pairing_recovery_required"
+    ident = claim_peer.id
+    assert remote_access._read_pending_pairing_record()[0]["phase"] == "redeemed"
+    damage_marker()
+    assert claims.recover_pairing(ident)["state"] == "bound"
+    assert remote_access._read_pending_pairing_record() == (None, None)
+    assert json.loads(marker.read_text())["bound"]["claim_id"] == ident
+    assert claims.RedirectClaims().state(ident) == {"state": "bound"}

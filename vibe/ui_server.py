@@ -8716,9 +8716,9 @@ def personal_claim_start():
             raise ClaimError("invalid_request")
         if not isinstance(request.json, dict) or set(request.json) - {"locale"}:
             raise ClaimError("invalid_request")
-        if not _is_local_request(_load_remote_access_config()):
-            raise ClaimError("link_required")
-        body, nonce = service.start(origin, request.json.get("locale", "en"), direct_loopback=_is_direct_loopback_connection(),
+        # Loopback or an admitted private setup host; any forwarding (proxy, tunnel) needs link mode.
+        admitted = _is_local_request(_load_remote_access_config()) and not _has_forwarded_metadata()
+        body, nonce = service.start(origin, request.json.get("locale", "en"), admitted_owner=admitted,
                                     on_bound=_ensure_remote_access_monitoring)
         response = jsonify(body)
         response.set_cookie("avibe_claim_browser", nonce, httponly=True, samesite="lax", path="/remote/claim/callback",

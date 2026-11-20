@@ -100,16 +100,17 @@ def _marker():
 
 
 def _outcome():
+    """Nonsecret status only. A damaged file reads as absent and the next write replaces it."""
     try:
         saved = json.loads(_marker().read_text(encoding="utf-8"))
-        bound = saved.get("bound", {}) if isinstance(saved, dict) else None
-        if not isinstance(bound, dict) or (bound and not all(isinstance(bound.get(k), str) for k in ("claim_id", "generation"))):
-            raise ValueError
-        return saved
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError, RecursionError):
         return {}
-    except (OSError, ValueError, RecursionError):
+    except OSError:
         raise ClaimError("local_claim_unavailable") from None
+    bound = saved.get("bound", {}) if isinstance(saved, dict) else None
+    if not isinstance(bound, dict) or (bound and not all(isinstance(bound.get(k), str) for k in ("claim_id", "generation"))):
+        return {}
+    return saved
 
 
 def _record_attempt(ticket):
@@ -134,21 +135,22 @@ def record_bound(claim_id, identity):
     write_atomic(_marker(), json.dumps(saved))
 
 
-def redirect_origin_allows_auto_accept(origin: str, *, direct_loopback: bool) -> bool:
+def redirect_origin_allows_auto_accept(origin: str, *, admitted_owner: bool) -> bool:
     """The redirect's local transport requirement, independent of the return proof.
 
-    `direct_loopback` comes from the existing server-side peer/Host check, never the request body.
-    The control-plane origin grammar alone is not authorization.
+    `admitted_owner` means the existing server-side local-owner admission (loopback or a
+    private setup host) held for this request with no forwarding metadata; it never comes
+    from the request body. The control-plane origin grammar alone is not authorization, so
+    both must hold. Loopback and admitted private-network origins are treated alike.
     """
-    return direct_loopback and local_origin(origin)
+    return admitted_owner and local_origin(origin)
 
 
 class _Flow:
-    def __init__(self, mode, locale, *, origin="", direct_loopback=False, expected=None, confirm=None, show=None, on_bound=None):
-        # This delivery enables automatic redirect acceptance only for direct loopback.
+    def __init__(self, mode, locale, *, origin="", admitted_owner=False, expected=None, confirm=None, show=None, on_bound=None):
         self.on_bound = on_bound
         self.previous_expiry = None
-        self.direct_loopback = direct_loopback
+        self.admitted_owner = admitted_owner
         self._cleanup_client = None
         self._decline_attempted = False
         self.mode, self.locale, self.origin = mode, locale, origin
@@ -264,7 +266,7 @@ class _Flow:
                     if isinstance(result, Grant):
                         if self.mode == "redirect":
                             approved = self.returned and redirect_origin_allows_auto_accept(
-                                self.origin, direct_loopback=self.direct_loopback,
+                                self.origin, admitted_owner=self.admitted_owner,
                             )
                         elif self.expected is not None:
                             approved = self.expected == result.subject
@@ -390,8 +392,8 @@ class RedirectClaims:
         self._lock = threading.Lock()
         self._flow = None
 
-    def start(self, origin: str, locale: str, *, direct_loopback: bool, on_bound=None):
-        if not redirect_origin_allows_auto_accept(origin, direct_loopback=direct_loopback):
+    def start(self, origin: str, locale: str, *, admitted_owner: bool, on_bound=None):
+        if not redirect_origin_allows_auto_accept(origin, admitted_owner=admitted_owner):
             raise ClaimError("link_required")
         with self._lock:
             if self._flow and self._flow.view["state"] not in ("bound", "error", "declined"):
@@ -399,7 +401,7 @@ class RedirectClaims:
                     ticket = self._flow.ticket
                     raise ClaimError("claim_in_progress", 0 if ticket else 1,
                                      claim_id=ticket.id if ticket else None, expires_at=ticket.expiry if ticket else None)
-            flow = self._flow = _Flow("redirect", locale, origin=origin, direct_loopback=direct_loopback, on_bound=on_bound)
+            flow = self._flow = _Flow("redirect", locale, origin=origin, admitted_owner=admitted_owner, on_bound=on_bound)
             threading.Thread(target=flow.run, name="personal-claim", daemon=True).start()
         flow.ready.wait()
         with flow.lock:

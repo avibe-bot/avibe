@@ -93,6 +93,17 @@ def claim_peer(pairing_host, monkeypatch):
     return peer
 
 
+@pytest.fixture(params=["loopback", "private_network"])
+def owner_browser(request, claim_peer):
+    """The initiating owner's browser: on this machine, or another computer on an admitted home network."""
+    if request.param == "loopback":
+        return "http://localhost", {}
+    config = V2Config.load()
+    config.ui.setup_host = "192.168.2.3"
+    config.save()
+    return "http://192.168.2.3:15131", {"REMOTE_ADDR": "192.168.2.4"}
+
+
 @pytest.mark.parametrize("mode,expected,approve,decision", [
     ("desktop", "other-id", None, "decline"), ("link", "other-id", None, "decline"),
     ("link", None, False, "decline"), ("link", None, 1, "decline"),
@@ -230,18 +241,20 @@ def test_unpublished_accept_continues_only_the_original_decision(claim_peer):
     assert claim_peer.delays[-1] >= 8
 
 
-def test_valid_browser_return_before_grant_is_not_armed(claim_peer):
+def test_valid_browser_return_before_grant_is_not_armed(claim_peer, owner_browser):
     import time
+    origin, environ = owner_browser
     client = ui_server.app.test_client()
-    body = _start(client).get_json()
+    body = _start(client, origin, environ).get_json()
     claim_peer.outcomes.append((202, {"status": "pending"}, "5"))
     url = "/remote/claim/callback?claim_id=" + body["claim_id"] + "&state=" + callback_proof(body)
-    assert client.get(url, base_url="http://localhost").status_code == 303
+    assert client.get(url, base_url=origin, environ_base=environ).status_code == 303
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline and not claim_peer.decisions:
         time.sleep(.01)
     assert claim_peer.decisions == ["decline"]
-    _assert_bad_return(client.get(url, base_url="http://localhost"))
+    assert sum(path.endswith("/redeem") and "decline" not in d for path, d in claim_peer.calls) == 1
+    _assert_bad_return(client.get(url, base_url=origin, environ_base=environ))
 
 
 def test_expiry_does_not_invent_a_browser_decision(claim_peer):
@@ -292,8 +305,9 @@ def test_literal_redirect_origin_contract(origin, allowed):
     assert local_origin(origin) is allowed
 
 
-def _start(client):
-    return client.post("/api/remote-access/claims", json={"locale": "en"}, headers=csrf_headers(client))
+def _start(client, origin="http://localhost", environ=None):
+    return client.post("/api/remote-access/claims", base_url=origin, environ_base=environ, json={"locale": "en"},
+                       headers=csrf_headers(client, origin))
 
 
 def callback_proof(body):
@@ -307,35 +321,47 @@ def _assert_bad_return(response, code="invalid_return"):
     assert response.headers["Referrer-Policy"] == "no-referrer" and response.headers["Cache-Control"] == "no-store"
 
 
-def test_cancel_and_return_require_current_browser_and_claim(claim_peer):
+def test_cancel_and_return_require_current_browser_and_claim(claim_peer, owner_browser):
+    origin, environ = owner_browser
     client, stranger = ui_server.app.test_client(), ui_server.app.test_client()
-    response = _start(client)
+    response = _start(client, origin, environ)
     assert response.status_code == 201, response.get_json()
+    assert claim_peer.calls[0][1]["return_origin"] == origin
     body = response.get_json()
+    nonce = response.headers["Set-Cookie"].split(";")[0]
     url = "/remote/claim/callback?claim_id=" + body["claim_id"] + "&state=" + callback_proof(body)
-    _assert_bad_return(stranger.get(url, base_url="http://localhost"))
-    _assert_bad_return(client.get(url + "x", base_url="http://localhost"))
-    _assert_bad_return(client.get(url + "&state=duplicate", base_url="http://localhost"))
-    _assert_bad_return(client.get(url.replace(body["claim_id"], str(uuid4())), base_url="http://localhost"), "claim_unavailable")
-    conflict = _start(stranger)
+    def back(c, u, **kw):
+        return c.get(u, base_url=kw.pop("base_url", origin), environ_base=environ, **kw)
+    _assert_bad_return(back(stranger, url))
+    # The initiator's cookie at another port of the same admitted host is a different origin.
+    _assert_bad_return(back(stranger, url, base_url=origin.split(":15131")[0] + ":15139", headers={"Cookie": nonce}))
+    _assert_bad_return(back(client, url + "x"))
+    _assert_bad_return(back(client, url + "&state=duplicate"))
+    _assert_bad_return(back(client, url.replace(body["claim_id"], str(uuid4()))), "claim_unavailable")
+    conflict = _start(stranger, origin, environ)
     assert conflict.status_code == 409
     assert conflict.get_json() == {"state": "error", "code": "claim_in_progress", "claim_id": body["claim_id"], "expires_at": body["expires_at"]}
     assert "avibe_claim_browser" not in str(conflict.headers)
     path = "/api/remote-access/claims/" + conflict.get_json()["claim_id"]
-    assert "form" not in client.get(path).get_json()
-    assert stranger.post(path + "/cancel", json={}, headers=csrf_headers(stranger)).status_code == 200
-    _assert_bad_return(client.get(url, base_url="http://localhost"))
+    assert "form" not in client.get(path, base_url=origin, environ_base=environ).get_json()
+    cancel = stranger.post(path + "/cancel", base_url=origin, environ_base=environ, json={}, headers=csrf_headers(stranger, origin))
+    assert cancel.status_code == 200
+    _assert_bad_return(back(client, url))
     assert not any(d.get("accepted_subject") for _, d in claim_peer.calls)
 
 
-def test_admitted_lan_owner_gets_link_required_without_starting_a_claim(claim_peer):
+@pytest.mark.parametrize("setup_host,peer,forwarded", [("100.100.1.2", "100.100.1.3", {}),
+    ("169.254.10.2", "169.254.10.3", {}), ("192.168.2.3", "192.168.2.4", {"X-Forwarded-For": "192.168.2.9", "X-Forwarded-Host": "192.168.2.3:15131", "X-Forwarded-Proto": "http"})])
+def test_admitted_owner_outside_the_redirect_contract_gets_link_required(claim_peer, monkeypatch, setup_host, peer, forwarded):
     config = V2Config.load()
-    config.ui.setup_host = "192.168.2.3"
+    config.ui.setup_host = setup_host
     config.save()
-    origin = "http://192.168.2.3:15131"
+    if forwarded:
+        monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, peer)
+    origin = f"http://{setup_host}:15131"
     client = ui_server.app.test_client()
-    response = client.post("/api/remote-access/claims", base_url=origin, headers=csrf_headers(client, origin),
-                           environ_base={"REMOTE_ADDR": "192.168.2.4"}, json={"locale": "en"})
+    response = client.post("/api/remote-access/claims", base_url=origin, headers={**csrf_headers(client, origin), **forwarded},
+                           environ_base={"REMOTE_ADDR": peer}, json={"locale": "en"})
     assert response.status_code == 409
     assert response.get_json() == {"state": "error", "code": "link_required"}
     assert not claim_peer.calls and not local._identity_path().exists()
