@@ -4,7 +4,7 @@ Implements the frozen I5 contract in `2026-11-20-ios-live-activity-contract.md` 
 
 The controller owns registration, token rotation, stopping, phase observation and relay delivery. Public HTTP verifies session visibility and forwards operations over the existing authenticated internal socket. One async lock orders activity mutations and sends; no SQLite transaction spans relay IO. Rows survive controller restarts, and names/titles never enter the tracking store or publisher. The native bridge owns account/instance/logout cleanup.
 
-Migration allocation: `20261120_0093`, provisionally following 0091 until D2's reserved 0092 lands. Recheck and rechain against master before opening the PR.
+Migration allocation: `20261120_0093`, following master head `20261118_0091` as checked after the contract merged in `70fbabb960`. D2's reserved 0092 has not landed. Whichever migration lands second must rechain against the first before merge; the S revision number remains 0093.
 
 Validation: real migrated SQLite, public HTTP lifecycle and ownership, relay request vectors, publisher time/phase/retry/restart/stop behavior; native bridge UI states and production build. Production APNs and TestFlight acceptance belong to integration after authorized deployment.
 
