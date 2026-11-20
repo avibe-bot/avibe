@@ -70,9 +70,14 @@ class FeishuHistoryCheck:
         self._started_at = int(time.time()) + 60  # the connection needs a moment to be there
 
     def snapshot(self) -> Dict[str, Any]:
-        """The counts as they stand together."""
+        """The counts as they stand together, and how many chats are not read up to their last sweep.
+
+        ``chats_behind`` counts the chats whose last reading failed or stopped
+        at the page limit: while it is not 0, or ``ended`` is true, "nothing
+        missing" is not a result.
+        """
         with self._lock:
-            return dict(vars(self.counts))
+            return dict(vars(self.counts), chats_behind=len(self._said) + len(self._unfinished))
 
     def _end(self) -> None:
         """Called with the lock held: the last thing the check does. What it held is let go."""

@@ -1344,6 +1344,7 @@ async def test_the_end_of_the_check_is_one_moment(clock: _Clock, caplog: pytest.
                 "arrived_late": 1,
                 "readings_failed": 1,
                 "ended": False,
+                "chats_behind": 1,
             }
 
             check.message_event("om_4")  # one more than it may hold
@@ -1356,6 +1357,7 @@ async def test_the_end_of_the_check_is_one_moment(clock: _Clock, caplog: pytest.
                 "arrived_late": 1,
                 "readings_failed": 1,
                 "ended": True,
+                "chats_behind": 1,
             }
             assert caplog.records[-1].getMessage().startswith("Feishu history check: over after 3 ")
 
@@ -1412,6 +1414,7 @@ async def test_a_reply_that_is_not_a_page_is_a_reading_that_failed(
         "arrived_late": 0,
         "readings_failed": 2,
         "ended": False,
+        "chats_behind": 0,
     }
     assert caplog.text.count("chat oc_a could not be read") == 1  # said once
     assert "Traceback" not in caplog.text
@@ -1454,6 +1457,30 @@ async def test_a_reading_under_way_when_the_check_ends_asks_for_nothing_more(
     assert at_the_end["ended"] is True
     assert asked == ["oc_a"]
     assert (check.snapshot(), len(caplog.records)) == (at_the_end, lines_at_the_end)
+
+
+async def test_a_history_not_read_to_its_end_is_not_shown_as_a_clean_one(clock: _Clock):
+    """Where the stage's result is read: a chat that failed, or stopped at the page limit, is counted as behind."""
+    from modules.im.feishu_history_check import FeishuHistoryCheck
+
+    pages = {
+        "oc_refused": [_History(code=1), _History(code=1), _History()],
+        "oc_long": [_History(people=("om_1",), more="2"), _History(people=("om_2",), more="3"), _History()],
+    }
+
+    async def list_messages(chat_id: str, _start: int, _end: int, _page: Optional[str]) -> _History:
+        return pages[chat_id].pop(0) if pages.get(chat_id) else _History()
+
+    check = FeishuHistoryCheck(list_messages)
+    behind = []
+    with patch("modules.im.feishu_history_check._PAGE_LIMIT", 1):
+        for _ in range(3):
+            clock.now += 600
+            await check.run_once(["oc_refused", "oc_long", "oc_quiet"])
+            behind.append(check.snapshot()["chats_behind"])
+
+    assert behind == [2, 2, 0]
+    assert check.snapshot()["people_messages"] == 2
 
 
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):
