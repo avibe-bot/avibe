@@ -814,6 +814,39 @@ final class DirectPathControllerTests: XCTestCase {
 
     // MARK: The load gate
 
+    /// A caller with no runtime (the voice take's hidden WebView) asks by
+    /// instance URL. The answer is the runtime gate's, and it keeps
+    /// answering for a host that is still routed after its runtime closed.
+    @MainActor
+    func testTheLoadGateByInstanceURLNeedsNoRuntimeAndFollowsTheRouteAndTheListener() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        _ = try harness.coordinator.selectInstance(id: "instance-1")
+        let unrouted = try XCTUnwrap(harness.lastOpened)
+        // No route for this host yet: WebKit's normal path.
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: unrouted.instance.url), .open)
+
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let url = runtime.instance.url
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: url), .open)
+
+        // The runtime closes. Its host stays routed to the listener, so the
+        // gate still speaks for it: open while the listener serves, held as
+        // soon as the background closes it.
+        harness.controller.runtimeDidStop()
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: url), .open)
+        harness.enterBackground()
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: url), .held)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .held)
+        // A host that was never routed, and one that is not an instance
+        // authority at all, are not the listener's.
+        let other = try XCTUnwrap(URL(string: "https://never-routed.example"))
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: other), .open)
+        let odd = try XCTUnwrap(URL(string: "https://instance-one.example:8443"))
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: odd), .open)
+    }
+
     /// The gate the shell asks before it creates or reloads a WebView: open
     /// without a route or with a serving listener, held from the background
     /// until the return settles, and never decided by a wait. Each change

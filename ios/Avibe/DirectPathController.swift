@@ -744,8 +744,17 @@ final class DirectPathController {
     /// including the watchdog's deadline passing, closes the gate before
     /// its delivery reaches this actor.
     func loadGate(for runtime: MobileRuntimeContext) -> DirectLoadGate {
+        loadGate(forInstanceURL: runtime.instance.url)
+    }
+
+    /// The same gate for a load to `url`'s host on the current store, for a
+    /// caller that has no runtime: the gate depends only on whether that
+    /// host has a route on this store, and on the listener. A host that was
+    /// routed stays routed after its runtime closed, so its loads still go
+    /// through the listener.
+    func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
         guard
-            let authority = DirectAuthority(instanceURL: runtime.instance.url),
+            let authority = DirectAuthority(instanceURL: url),
             routeOwner.routes(authority.host, store: websiteDataStore.identifier)
         else {
             return .open
