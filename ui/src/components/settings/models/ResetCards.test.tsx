@@ -153,9 +153,9 @@ describe('reset cards in the quota card', () => {
     const sources = [account('claude', 'anthropic', held([card({ kind: 'all' }), card({ kind: 'fable', count: 3 })]))];
     const { rerender } = draw(sources, { onIntent });
     await userEvent.click(within(row('claude', 'fable')).getByRole('button', { name: '使用 Fable 重置卡' }));
-    expect(intents).toEqual([['claude', { type: 'ask', kind: 'fable', stated: true }]]);
+    expect(intents).toEqual([['claude', { type: 'ask', kind: 'fable', stated: true, count: 3 }]]);
 
-    const phases = { claude: { phase: 'confirm', kind: 'fable', stated: true } as ResetCardPhase };
+    const phases = { claude: { phase: 'confirm', kind: 'fable', stated: true, count: 3 } as ResetCardPhase };
     rerender(
       <I18nextProvider i18n={i18n}>
         <QuotaTab quota={readyRegion({ refresh_interval_seconds: 300, sources })} now={NOW} resetCardPhases={phases} onResetCardIntent={onIntent} canUseResetCards />
@@ -222,7 +222,7 @@ describe('reset cards in the quota card', () => {
     const cards = [card({ kind: 'all', stated: false }), card({ kind: 'fable', count: 2 })];
     const said = (phase: ResetCardPhase) => {
       const { unmount } = draw([account('claude', 'anthropic', held(cards))], { phases: { claude: phase } });
-      const line = within(row('claude', phase.kind)).getByRole(phase.phase === 'used' ? 'status' : 'alert').textContent;
+      const line = within(row('claude', phase.kind)).getByRole(phase.phase === 'used' || phase.phase === 'recounted' ? 'status' : 'alert').textContent;
       // Nothing is held by the page's own outcome: the next use is the user's to make.
       const free = !(within(row('claude', 'all')).getByRole('button', { name: /^(使用|Use) / }) as HTMLButtonElement).disabled;
       unmount();
@@ -237,6 +237,8 @@ describe('reset cards in the quota card', () => {
       [{ phase: 'not_used', kind: 'fable', reason: 'unavailable' }, '没有用掉：供应商现在不让用这张卡。', 'Not used: the provider isn’t allowing this card now.', true],
       [{ phase: 'not_used', kind: 'fable', reason: 'held' }, '没有用掉：这个账号现在不能用这种卡。', 'Not used: this account can’t use this kind of card right now.', true],
       [{ phase: 'not_used', kind: 'fable', reason: null }, '没有用掉。', 'Not used.', true],
+      // The count changed before anything was sent: said plainly, as a note, never as a failure.
+      [{ phase: 'recounted', kind: 'fable' }, '张数变了，已刷新。', 'The count changed; refreshed.', true],
       // No answer came back: held until the account is read again.
       [{ phase: 'unconfirmed', kind: 'fable' }, '没收到供应商的结果，这张卡可能已经用掉。先别再用，过一会儿刷新这个账号看张数。', 'The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; refresh this account in a moment and check the count.', false],
     ];
@@ -255,7 +257,7 @@ describe('reset cards in the quota card', () => {
     draw([
       account('claude', 'anthropic', held(cards)),
       account('locked', 'anthropic', held(cards, { lock })),
-    ], { canUse: false, phases: { claude: { phase: 'confirm', kind: 'fable', stated: true } } });
+    ], { canUse: false, phases: { claude: { phase: 'confirm', kind: 'fable', stated: true, count: 3 } } });
     for (const name of ['claude', 'locked']) {
       const section = block(name)!;
       expect(within(section).getAllByRole('listitem')).toHaveLength(3);

@@ -1966,6 +1966,7 @@
             "held": "Not used: this account can’t use this kind of card right now.",
             "other": "Not used."
           },
+          "recounted": "The count changed; refreshed.",
           "unconfirmed": "The provider’s answer didn’t arrive, so this card may be spent. Don’t use another yet; refresh this account in a moment and check the count.",
           "blocked": {
             "needs_limit": "Usable once a limit is reached",

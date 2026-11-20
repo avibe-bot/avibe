@@ -78,7 +78,7 @@ const phone = (name: string, title: string, held: Held, reset = false): FrameSpe
 
 const both = [full, fable];
 const afterUse = [full, { ...fable, count: 2 }];
-const confirm: ResetCardPhase = { phase: 'confirm', kind: 'fable', stated: true };
+const confirm: ResetCardPhase = { phase: 'confirm', kind: 'fable', stated: true, count: 3 };
 const unconfirmed: ResetCardLock = { reason: 'unconfirmed', kind: 'fable', since: at(-1) };
 
 const designFrames = frames([

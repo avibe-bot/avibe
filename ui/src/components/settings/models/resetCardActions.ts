@@ -15,8 +15,12 @@ import type { QuotaSummary, ResetCardKind } from './types';
 type Phases = Readonly<Record<string, ResetCardPhase>>;
 
 /** What a failed request says about the card. */
+/** The server's fresh count for the kind is not the one the user confirmed on; nothing was sent. */
+const COUNT_CHANGED = 'reset_card_count_changed';
+
 const failurePhase = (error: unknown, kind: ResetCardKind): ResetCardPhase => {
   if (error instanceof ApiCallError && error.serverNamed && error.responseStatus !== undefined) {
+    if (error.code === COUNT_CHANGED) return { phase: 'recounted', kind };
     // `reset_card_locked` / `reset_card_unavailable`: refused before anything was sent (the account
     // is busy, its lock could not be recorded, or it holds no usable card of this kind).
     if (error.responseStatus === 409) return { phase: 'not_used', kind, reason: 'held' };
@@ -52,12 +56,12 @@ export function useResetCardActions({ land, reread, afterUse }: {
     });
   }, []);
 
-  const use = React.useCallback(async (sourceId: string, kind: ResetCardKind, stated: boolean) => {
+  const use = React.useCallback(async (sourceId: string, kind: ResetCardKind, stated: boolean, count: number) => {
     if (inFlight.current.has(sourceId)) return;
     inFlight.current.add(sourceId);
     set(sourceId, { phase: 'using', kind, stated });
     try {
-      const { quota, use: answer } = await modelsApi.redeemResetCard(sourceId, kind);
+      const { quota, use: answer } = await modelsApi.redeemResetCard(sourceId, kind, count);
       await land(quota);
       set(sourceId, answer.outcome === 'used'
         ? { phase: 'used', kind, stated }
@@ -66,7 +70,9 @@ export function useResetCardActions({ land, reread, afterUse }: {
           : { phase: 'unconfirmed', kind });
     } catch (error) {
       set(sourceId, failurePhase(error, kind));
-      await reread().catch(() => undefined);
+      // The refusal that a count changed carries the fresh reading; anything else is read again.
+      if (error instanceof ApiCallError && error.code === COUNT_CHANGED && error.quota) await land(error.quota);
+      else await reread().catch(() => undefined);
     } finally {
       inFlight.current.delete(sourceId);
       if (alive.current) afterUse();
@@ -76,7 +82,7 @@ export function useResetCardActions({ land, reread, afterUse }: {
   const onIntent = React.useCallback((sourceId: string, intent: ResetCardIntent) => {
     if (inFlight.current.has(sourceId)) return;
     if (intent.type === 'ask') {
-      set(sourceId, { phase: 'confirm', kind: intent.kind, stated: intent.stated });
+      set(sourceId, { phase: 'confirm', kind: intent.kind, stated: intent.stated, count: intent.count });
       return;
     }
     const current = phases[sourceId];
@@ -85,7 +91,7 @@ export function useResetCardActions({ land, reread, afterUse }: {
       set(sourceId, null);
       return;
     }
-    if (intent.kind === current.kind) void use(sourceId, current.kind, current.stated);
+    if (intent.kind === current.kind) void use(sourceId, current.kind, current.stated, current.count);
   }, [phases, set, use]);
 
   /**

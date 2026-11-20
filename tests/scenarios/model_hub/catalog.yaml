@@ -2280,6 +2280,13 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-089
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-089
+  - id: MH-QUOTA-090
+    name: A reset-card count that changed since it was shown is refused and redrawn from the server's reading, with no second request
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-090
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

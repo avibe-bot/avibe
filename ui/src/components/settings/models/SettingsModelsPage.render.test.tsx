@@ -2912,7 +2912,7 @@ describe('SettingsModelsPage reset cards', () => {
         source_id: 'src_claude', vendor: 'anthropic', display_name: 'Claude Max', account_label: null, plan: 'max',
         fetched_at: new Date().toISOString(), state: 'ok',
         windows: [{ id: 'five_hour', kind: 'session', label: 'five_hour', used_pct: used, window_seconds: 18_000, resets_at: new Date(Date.now() + 3_600_000).toISOString() }],
-        reset_cards: { state: 'ok', lock, cards: [card({ kind: 'all' }), card({ kind: 'fable', count: fable })] },
+        reset_cards: { state: 'ok', lock, cards: [card({ kind: 'all' }), ...(fable ? [card({ kind: 'fable', count: fable })] : [])] },
       },
       {
         source_id: 'src_chatgpt', vendor: 'openai', display_name: 'ChatGPT Pro', account_label: null, plan: 'pro',
@@ -2950,7 +2950,7 @@ describe('SettingsModelsPage reset cards', () => {
     const providerReads = vi.mocked(modelsApi.listSources).mock.calls.length;
     await user.dblClick(confirmButton());
     expect(redeem).toHaveBeenCalledTimes(1);
-    expect(redeem).toHaveBeenCalledWith('src_claude', 'fable');
+    expect(redeem).toHaveBeenCalledWith('src_claude', 'fable', 3);
     // The pressed button is gone; focus stays in the block rather than falling to the page.
     expect(document.activeElement).toBe(within(account()).getByRole('region', { name: /^Limit resets$|^重置卡$/ }));
     expect((within(account()).getByRole('button', { name: /^Using…$|^使用中…$/ }) as HTMLButtonElement).disabled).toBe(true);
@@ -3034,6 +3034,34 @@ describe('SettingsModelsPage reset cards', () => {
       expect(cardUseButton('Fable').disabled).toBe(false);
     }
     expect(redeem).toHaveBeenCalledTimes(4);
+  });
+
+  it('MH-QUOTA-063: a count that changed since it was shown is refused and redrawn from the server\'s reading, with no second request', async () => {
+    await openWith(quotaWith());
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard');
+    const refusal = new ApiCallError('reset_card_count_changed', undefined, true, [], [], [], 409);
+    refusal.quota = quotaWith({ fable: 2 });
+    redeem.mockRejectedValueOnce(refusal);
+    const reads = vi.mocked(modelsApi.getQuota).mock.calls.length;
+    const user = userEvent.setup();
+
+    await user.click(cardUseButton('Fable'));
+    await user.click(confirmButton());
+    expect(redeem).toHaveBeenCalledTimes(1);
+    expect(redeem).toHaveBeenCalledWith('src_claude', 'fable', 3);
+    expect((await within(account()).findByRole('status')).textContent).toMatch(/^The count changed; refreshed\.$|^张数变了，已刷新。$/);
+    expect(within(account()).getByText('×2')).toBeTruthy();
+    // Not a failure, and not a held account: the confirm step is left, and the next press is the user's.
+    expect(within(account()).queryByRole('alert')).toBeNull();
+    expect(within(account()).queryByRole('button', { name: /^Use it$|^确认使用$/ })).toBeNull();
+    expect(cardUseButton('Fable').disabled).toBe(false);
+    expect(vi.mocked(modelsApi.getQuota).mock.calls.length).toBe(reads);
+
+    redeem.mockResolvedValueOnce({ quota: quotaWith({ fable: 1 }), use: { kind: 'fable', outcome: 'used', reason: null, cleared: [] } });
+    await user.click(cardUseButton('Fable'));
+    await user.click(confirmButton());
+    expect(redeem).toHaveBeenLastCalledWith('src_claude', 'fable', 2);
+    expect(redeem).toHaveBeenCalledTimes(2);
   });
 
   it('MH-QUOTA-062: only a reader the server lets spend cards is offered 「使用」; everyone else keeps the list and the refresh', async () => {

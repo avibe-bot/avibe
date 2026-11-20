@@ -17,17 +17,19 @@ import type { ResetCard, ResetCardKind, ResetCardRefusal, ResetCards } from './t
 /** The page's own step for one account's cards. The server's `lock` is read beside it. */
 export type ResetCardPhase =
   /** 「使用」 was pressed: one line says what happens, then 确认使用 or 取消. Nothing is sent yet. */
-  | { phase: 'confirm'; kind: ResetCardKind; stated: boolean }
+  | { phase: 'confirm'; kind: ResetCardKind; stated: boolean; count: number }
   | { phase: 'using'; kind: ResetCardKind; stated: boolean }
   /** The limits and the count on screen are the reading the server returned with this answer. */
   | { phase: 'used'; kind: ResetCardKind; stated: boolean }
   /** The server says no card was spent. `held`: it refused before asking the vendor (the account was busy, or holds no usable card of this kind). */
   | { phase: 'not_used'; kind: ResetCardKind; reason: ResetCardRefusal | 'held' | null }
+  /** The server's fresh count differed from the one confirmed on: nothing was sent, the block shows the new count. */
+  | { phase: 'recounted'; kind: ResetCardKind }
   /** No answer came back, so the card may be spent; the account stays held until it is read again. */
   | { phase: 'unconfirmed'; kind: ResetCardKind };
 
 export type ResetCardIntent =
-  | { type: 'ask'; kind: ResetCardKind; stated: boolean }
+  | { type: 'ask'; kind: ResetCardKind; stated: boolean; count: number }
   | { type: 'cancel' }
   | { type: 'confirm'; kind: ResetCardKind };
 
@@ -106,6 +108,7 @@ export const ResetCardsBlock: React.FC<{
           : t('settings.models.quota.resetCards.used') as string,
       };
     }
+    if (phase.phase === 'recounted') return { tone: 'note', text: t('settings.models.quota.resetCards.recounted') as string };
     if (phase.phase === 'not_used') {
       return { tone: 'warn', text: t(`settings.models.quota.resetCards.notUsed.${phase.reason ?? 'other'}`) as string };
     }
@@ -186,7 +189,7 @@ export const ResetCardsBlock: React.FC<{
                       data-reset-focus={`use:${card.kind}`}
                       aria-label={t('settings.models.quota.resetCards.useNamed', { name: kindName }) as string}
                       disabled={held || (asking !== null && !confirming)}
-                      onClick={() => intent({ type: 'ask', kind: card.kind, stated: card.stated }, `cancel:${card.kind}`)}
+                      onClick={() => intent({ type: 'ask', kind: card.kind, stated: card.stated, count: card.count }, `cancel:${card.kind}`)}
                     >
                       {t('settings.models.quota.resetCards.use')}
                     </Button>
