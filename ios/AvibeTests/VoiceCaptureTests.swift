@@ -981,6 +981,27 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertTrue(world.earlier.last?.contains("sentAfterEnd") == true, "\(world.earlier)")
     }
 
+    /// Discarded while the send was just short of its POST (the client's
+    /// draft read): nothing went out, and nothing says it may have.
+    func testATakeDiscardedBeforeItsPostIsNotRecordedAsMaybeSent() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        world.instance.holdPost = true
+        world.instance.postError = Failure.closed
+        let send = Task { await controller.retryKeptNow() }
+        await world.instance.untilHolding()
+        await controller.finish(send: false)
+        world.instance.release()
+        await send.value
+        XCTAssertTrue(world.instance.sent.isEmpty)
+        XCTAssertFalse(world.earlier.contains { $0.contains("AfterEnd") }, "\(world.earlier)")
+    }
+
     /// A client that was closed (its take is over) loads and runs nothing
     /// more, whatever send is still under way for it.
     func testAClosedClientMakesNoMoreRequests() async throws {
@@ -998,7 +1019,7 @@ final class VoiceCaptureTests: XCTestCase {
             try await client.postMessage("hello", to: "/api/sessions/ses_main", capture: nil)
             XCTFail("a closed client posts nothing")
         } catch {
-            XCTAssertEqual(error as? Failure, .offline)
+            XCTAssertEqual(error as? Failure, .closed)
         }
         XCTAssertEqual(asked, 0, "no document is made for it")
         XCTAssertNil(client.releaseBarrier)
@@ -2003,6 +2024,8 @@ private final class FakeInstance: VoiceCaptureInstance {
     var holdTranscribe = false
     var holdStatus = false
     var holdPost = false
+    /// What the post throws once released (a client closed meanwhile).
+    var postError: Error?
     var transcribed = 0
     var sent: [String] = []
     var captures: [String?] = []
@@ -2065,6 +2088,7 @@ private final class FakeInstance: VoiceCaptureInstance {
         if holdPost {
             await withCheckedContinuation { held = $0 }
         }
+        if let postError { throw postError }
         posts += 1
         if postFailures > 0 {
             postFailures -= 1

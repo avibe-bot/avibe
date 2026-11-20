@@ -83,6 +83,9 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         /// The App's local listener for this instance failed
         /// (`DirectLoadGate.fault`): nothing is loaded against it.
         case directFault
+        /// The client was closed before this request was made (its take is
+        /// over): provably nothing was sent.
+        case closed
     }
 
     struct Status: Equatable {
@@ -373,11 +376,14 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         let label = "\(method) \(path)"
         guard !closed else {
             gaveUp(label, "closed")
-            throw Failure.offline
+            throw Failure.closed
         }
         try await ensureReady(for: label)
+        guard !closed else {
+            gaveUp(label, "closed")
+            throw Failure.closed
+        }
         guard
-            !closed,
             let webView,
             let current = webView.url,
             WebOrigin(url: current, requiresHTTPS: false) == target.origin
@@ -503,7 +509,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             let waited = Int(Date().timeIntervalSince(waitedFrom) * 1000)
             guard !closed else {
                 gaveUp(label, "closed")
-                throw Failure.offline
+                throw Failure.closed
             }
             if settled == .fault {
                 gaveUp(label, "direct_fault")

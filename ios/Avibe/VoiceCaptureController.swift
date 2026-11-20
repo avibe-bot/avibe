@@ -1137,6 +1137,9 @@ final class VoiceCaptureController {
             return .sent(text)
         } catch let failure as VoiceCaptureInstanceClient.Failure {
             record("deliver: failed \(failure) posted=\(posted)")
+            // The client was closed before the request was made: the take
+            // is over, and provably nothing went out, the POST included.
+            if failure == .closed { return .superseded }
             guard posted ? generation == sendGeneration : current else { return .superseded }
             if posted, failure != .consentRequired, failure != .signIn { return .unknown }
             switch failure {
