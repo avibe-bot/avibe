@@ -1,6 +1,15 @@
 import Foundation
 import OSLog
+import UIKit
 import WebKit
+
+/// The direct path's load gate for an instance origin
+/// (`DirectPathController.loadGate`), set by the App's model; `nil` without
+/// a direct transport.
+@MainActor
+enum VoiceCaptureLoadGate {
+    static var provider: ((WebOrigin) -> DirectLoadGate)?
+}
 
 /// Where a background voice take goes: the selected instance, through the
 /// current account's WebKit store.
@@ -71,6 +80,9 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         case forbidden
         /// Anything else the instance answered.
         case server(Int, String?)
+        /// The App's local listener for this instance failed
+        /// (`DirectLoadGate.fault`): nothing is loaded against it.
+        case directFault
     }
 
     struct Status: Equatable {
@@ -91,12 +103,96 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     static let mainSessionID = "ses_main"
 
     let target: VoiceCaptureTarget
+    /// One id per take for its transcription: sending the take again
+    /// repeats it, so the service can tell the same take from a new one.
+    let dictationID: String
     private var webView: WKWebView?
     private var loadContinuation: CheckedContinuation<Void, Error>?
     private var ready = false
 
-    init(target: VoiceCaptureTarget) {
+    /// Requests that did not reach the instance, newest last (the last 4):
+    /// which request, where it gave up, and when (ms since this client was
+    /// made). States and codes only, for `capture_earlier`: no body, no
+    /// words.
+    private(set) var failures: [String] = []
+    private let madeAt = Date()
+    /// The request the document is being loaded for.
+    private var loadingFor = "-"
+
+    /// The direct path's load gate for this instance, whether Avibe is in
+    /// front, and a wait (tests replace them).
+    private let gate: () -> DirectLoadGate
+    private let isActive: () -> Bool
+    private let sleep: (Duration) async -> Void
+
+    init(
+        target: VoiceCaptureTarget,
+        dictationID: String = "ios-action-\(UUID().uuidString.lowercased())",
+        gate: (() -> DirectLoadGate)? = nil,
+        isActive: @escaping () -> Bool = { UIApplication.shared.applicationState == .active },
+        sleep: @escaping (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+    ) {
         self.target = target
+        self.dictationID = dictationID
+        let origin = target.origin
+        self.gate = gate ?? { VoiceCaptureLoadGate.provider?(origin) ?? .open }
+        self.isActive = isActive
+        self.sleep = sleep
+    }
+
+    /// How long a load waits for the listener's return to settle.
+    static let gateWait: Duration = .seconds(5)
+    static let gateStep: Duration = .milliseconds(50)
+
+    /// The gate a load may go by. This document loads through the App's
+    /// local listener for the instance, as the page does. Right after
+    /// Avibe comes to the front that listener is closed or being bound
+    /// again (`held`), and a load issued then fails at once (39.1, 00:44Z:
+    /// a take recorded in front, "can't reach your Avibe", nothing reached
+    /// the instance); so in front a held gate is waited for, up to
+    /// `gateWait`. In the background the listener stays closed and WebKit
+    /// takes its normal path, as every background take has: no wait there.
+    static func settledGate(
+        gate: () -> DirectLoadGate,
+        isActive: () -> Bool,
+        sleep: (Duration) async -> Void,
+        limit: Duration = gateWait,
+        step: Duration = gateStep
+    ) async -> DirectLoadGate {
+        var waited = Duration.zero
+        while isActive(), gate() == .held, waited < limit, !Task.isCancelled {
+            await sleep(step)
+            waited += step
+        }
+        return gate()
+    }
+
+    private func gaveUp(_ request: String, _ cause: String) {
+        failures = Self.adding(
+            "\(request) \(cause) +\(Int(Date().timeIntervalSince(madeAt) * 1000))ms", to: failures
+        )
+    }
+
+    static func adding(_ failure: String, to failures: [String]) -> [String] {
+        Array((failures + [String(failure.prefix(120))]).suffix(4))
+    }
+
+    /// Why a response reads as "could not reach the instance", if it does:
+    /// the fetch itself failed (`fetch0`, with the error's name and how
+    /// long it took against its deadline), or a gateway answered for it.
+    static func unreachableCause(
+        status: Int, errorCode: String?, fetchError: String?, elapsed: TimeInterval, deadline: TimeInterval
+    ) -> String? {
+        switch status {
+        case 0:
+            return "fetch0 \(fetchError ?? "-") \(Int(elapsed * 1000))/\(Int(deadline * 1000))ms"
+        case 400 where errorCode == "asr_unavailable", 503 where errorCode == "asr_unavailable":
+            return nil
+        case 502, 503, 504, 520...599:
+            return "http \(status) \(errorCode ?? "-")"
+        default:
+            return nil
+        }
     }
 
     // MARK: Instance API
@@ -131,7 +227,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             "data": audio.base64EncodedString(),
             "name": name,
             "mime": mime,
-            "dictation_id": "ios-action-\(UUID().uuidString.lowercased())",
+            "dictation_id": dictationID,
         ]
         let response = try await request(
             "POST", "/api/asr/transcribe", json: body, deadline: 60
@@ -166,14 +262,17 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     /// An ordinary submission clears the Session's composer draft, which
     /// this message never came from, so an unsent draft is put back: read
     /// before, restored after, only if nobody has written one since.
-    func postMessage(_ text: String, to sessionPath: String, capture: String?, timing: String? = nil) async throws {
+    func postMessage(
+        _ text: String, to sessionPath: String, capture: String?, timing: String? = nil, earlier: String? = nil
+    ) async throws {
         let before = try? await request("GET", sessionPath + "/draft")
         let draft = (before?.status == 200 ? before?.json?["text"] as? String : nil) ?? ""
         let response = try await request(
             "POST", sessionPath + "/messages",
             json: ["text": text, "metadata": ["input": "voice"]
                 .merging(capture.map { ["capture_attempt": $0] } ?? [:], uniquingKeysWith: { $1 })
-                .merging(timing.map { ["capture_timing": $0] } ?? [:], uniquingKeysWith: { $1 })]
+                .merging(timing.map { ["capture_timing": $0] } ?? [:], uniquingKeysWith: { $1 })
+                .merging(earlier.map { ["capture_earlier": $0] } ?? [:], uniquingKeysWith: { $1 })]
         )
         try Self.check(response)
         guard !draft.isEmpty else { return }
@@ -197,10 +296,12 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
 
     /// Releases the hidden WebView. Call when a take is finished.
     func close() {
+        closes += 1
         webView?.stopLoading()
         webView?.navigationDelegate = nil
         webView = nil
         ready = false
+        if loadContinuation != nil { gaveUp(loadingFor, "closed") }
         loadContinuation?.resume(throwing: Failure.offline)
         loadContinuation = nil
     }
@@ -250,14 +351,17 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         json: [String: Any]? = nil,
         deadline: TimeInterval = 15
     ) async throws -> Response {
-        try await ensureReady()
+        let label = "\(method) \(path)"
+        try await ensureReady(for: label)
         guard
             let webView,
             let current = webView.url,
             WebOrigin(url: current, requiresHTTPS: false) == target.origin
         else {
+            gaveUp(label, "nodoc")
             throw Failure.offline
         }
+        let startedAt = Date()
         var bodyString: Any = NSNull()
         if let json {
             let data = try JSONSerialization.data(withJSONObject: json)
@@ -278,6 +382,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             )
         } catch {
             Self.logger.error("fetch script failed: \(String(describing: error), privacy: .public)")
+            gaveUp(label, "js \((error as NSError).domain) \((error as NSError).code)")
             throw Failure.offline
         }
         guard
@@ -285,6 +390,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             let data = string.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
+            gaveUp(label, "jsresult")
             throw Failure.offline
         }
         let status = object["status"] as? Int ?? 0
@@ -294,6 +400,12 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             body = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
         }
         Self.logger.info("\(method, privacy: .public) \(path, privacy: .public) -> \(status, privacy: .public)")
+        if let cause = Self.unreachableCause(
+            status: status, errorCode: body?["error"] as? String, fetchError: object["error"] as? String,
+            elapsed: Date().timeIntervalSince(startedAt), deadline: deadline
+        ) {
+            gaveUp(label, cause)
+        }
         return Response(status: status, json: body, redirected: redirected)
     }
 
@@ -332,10 +444,56 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         }
         """
 
-    private func ensureReady() async throws {
+    /// The document being made ready, shared by requests that overlap it.
+    private var readying: Task<Void, Error>?
+    /// How often the client was closed: a load that was waiting for the
+    /// gate when it was closed is not made.
+    private var closes = 0
+
+    private func ensureReady(for label: String) async throws {
         if ready, webView != nil {
             return
         }
+        if let readying {
+            return try await readying.value
+        }
+        let task = Task { try await self.makeReady(for: label) }
+        readying = task
+        defer { readying = nil }
+        try await task.value
+    }
+
+    private func makeReady(for label: String) async throws {
+        loadingFor = label
+        let closesAtStart = closes
+        // A load that failed while the listener was held (it was issued, or
+        // it ended, in the return's window) is made once more after the
+        // gate settles.
+        for attempt in 0..<2 {
+            let waitedFrom = Date()
+            let settled = await Self.settledGate(gate: gate, isActive: isActive, sleep: sleep)
+            let waited = Int(Date().timeIntervalSince(waitedFrom) * 1000)
+            guard closes == closesAtStart else {
+                gaveUp(label, "closed")
+                throw Failure.offline
+            }
+            if settled == .fault {
+                gaveUp(label, "direct_fault")
+                throw Failure.directFault
+            }
+            if waited >= 50 { gaveUp(label, "gate \(settled == .held ? "held" : "open") after \(waited)ms") }
+            do {
+                try await load()
+                ready = true
+                return
+            } catch Failure.offline where attempt == 0 && closes == closesAtStart
+                && (settled == .held || gate() == .held) {
+                continue
+            }
+        }
+    }
+
+    private func load() async throws {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = WKWebsiteDataStore(
             forIdentifier: target.storeIdentifier
@@ -343,6 +501,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         DirectWebViewRegistry.shared.register(webView)
         webView.navigationDelegate = self
+        self.webView?.navigationDelegate = nil
         self.webView = webView
         let url = target.origin.url.appending(path: "api/csrf-token")
         try await withCheckedThrowingContinuation { continuation in
@@ -353,7 +512,6 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
                 timeoutInterval: 10
             ))
         }
-        ready = true
     }
 
     private func finishLoad(_ result: Result<Void, Error>) {
@@ -378,7 +536,11 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         didFail navigation: WKNavigation!,
         withError error: Error
     ) {
-        Task { @MainActor in finishLoad(.failure(Failure.offline)) }
+        let cause = "load \((error as NSError).domain) \((error as NSError).code)"
+        Task { @MainActor in
+            if loadContinuation != nil { gaveUp(loadingFor, cause) }
+            finishLoad(.failure(Failure.offline))
+        }
     }
 
     nonisolated func webView(
@@ -386,12 +548,17 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        Task { @MainActor in finishLoad(.failure(Failure.offline)) }
+        let cause = "loadp \((error as NSError).domain) \((error as NSError).code)"
+        Task { @MainActor in
+            if loadContinuation != nil { gaveUp(loadingFor, cause) }
+            finishLoad(.failure(Failure.offline))
+        }
     }
 
     nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         Task { @MainActor in
             ready = false
+            gaveUp(loadingFor, "webcontent")
             finishLoad(.failure(Failure.offline))
         }
     }

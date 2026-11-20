@@ -27,6 +27,9 @@ struct VoiceCaptureAttributes: ActivityAttributes {
     /// Why a take failed or needs the App. The extension maps each to copy.
     enum Reason: String, Codable, Hashable {
         case offline
+        /// The instance could not be reached; the take is kept and sent as
+        /// soon as it can be (还没发出去，连上你的 Avibe 后会自动发送。).
+        case willSend
         case nothingHeard
         case transcriptionFailed
         case sendFailed

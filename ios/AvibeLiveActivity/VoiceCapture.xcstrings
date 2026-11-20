@@ -529,6 +529,22 @@
         }
       }
     },
+    "voiceCapture.reason.willSend" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not sent yet. It'll send once your Avibe is reachable."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还没发出去，连上你的 Avibe 后会自动发送。"
+          }
+        }
+      }
+    },
     "voiceCapture.startedInApp" : {
       "localizations" : {
         "en" : {

@@ -14,9 +14,16 @@ protocol VoiceCaptureInstance: AnyObject {
     /// which were refused first), in the message's metadata only.
     /// `timing`: milliseconds from the press to each step (device numbers
     /// for the first-words question), in the metadata only.
-    func postMessage(_ text: String, to sessionPath: String, capture: String?, timing: String?) async throws
+    /// `earlier`: presses before this one that left no message (what
+    /// happened to each; no audio, no words), in the metadata only.
+    func postMessage(
+        _ text: String, to sessionPath: String, capture: String?, timing: String?, earlier: String?
+    ) async throws
     func close()
     var releaseBarrier: WebsiteDataStoreReleaseBarrier? { get }
+    /// Requests that did not reach the instance (which, where it gave up,
+    /// when), newest last: states and codes only.
+    var failures: [String] { get }
 }
 
 extension VoiceCaptureInstanceClient: VoiceCaptureInstance {}
@@ -35,6 +42,9 @@ protocol VoiceCaptureAudio: AnyObject {
     /// Stops and returns the take's length in seconds.
     @discardableResult func stop() -> TimeInterval
     func discard()
+    /// Which recorder took the take, or what the session said when none
+    /// would (`rec[...]`), for `capture_attempt`.
+    var report: String? { get }
 }
 
 extension VoiceCaptureRecorder: VoiceCaptureAudio {}
@@ -144,6 +154,15 @@ struct VoiceCaptureEnvironment {
     var endProcess: () -> Void
     /// Keeps the decision for the next press's `capture_attempt`.
     var noteEndDecision: (String) -> Void
+    /// Keeps the process running for a while as a kept take is sent again
+    /// (a background task assertion); returns what releases it.
+    var holdWhileRetrying: () -> () -> Void
+    /// Presses that left no message, kept on the phone for the next
+    /// message's `capture_earlier`: what happened to each, with no audio
+    /// and no words. Add one, read them, drop the first `n` once sent.
+    var noteEarlier: (String) -> Void
+    var earlier: () -> [String]
+    var dropEarlier: (Int) -> Void
     var now: () -> Date
     var sleep: (Duration) async -> Void
 
@@ -199,23 +218,56 @@ struct VoiceCaptureEnvironment {
             return nil
         },
         waitBeforeEnding: { try? await Task.sleep(for: .seconds(1)) },
-        holdWhileEnding: {
-            var id = UIBackgroundTaskIdentifier.invalid
-            id = UIApplication.shared.beginBackgroundTask(withName: "voice-capture-end") {
-                UIApplication.shared.endBackgroundTask(id)
-                id = .invalid
-            }
-            return {
-                guard id != .invalid else { return }
-                UIApplication.shared.endBackgroundTask(id)
-                id = .invalid
-            }
-        },
+        holdWhileEnding: { VoiceCaptureEnvironment.backgroundHold("voice-capture-end") },
         endProcess: { exit(0) },
         noteEndDecision: { VoiceCaptureEndSwitch.noteDecision($0) },
+        holdWhileRetrying: { VoiceCaptureEnvironment.backgroundHold("voice-capture-retry") },
+        noteEarlier: { VoiceCaptureEarlier.add($0) },
+        earlier: { VoiceCaptureEarlier.lines },
+        dropEarlier: { VoiceCaptureEarlier.drop($0) },
         now: Date.init,
         sleep: { try? await Task.sleep(for: $0) }
     )
+
+    /// A background task assertion; the returned closure ends it.
+    private static func backgroundHold(_ name: String) -> () -> Void {
+        var id = UIBackgroundTaskIdentifier.invalid
+        id = UIApplication.shared.beginBackgroundTask(withName: name) {
+            UIApplication.shared.endBackgroundTask(id)
+            id = .invalid
+        }
+        return {
+            guard id != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(id)
+            id = .invalid
+        }
+    }
+}
+
+/// What happened to presses that left no message, kept on the phone until
+/// a message carries them (`capture_earlier`): a few short lines of states,
+/// codes and times. Never audio, never what was said.
+enum VoiceCaptureEarlier {
+    static let key = "avibe.voiceCapture.earlier"
+    static let maximumLines = 5
+    static let maximumLength = 700
+
+    /// `lines` with `line` added: the newest `maximumLines`, each cut short.
+    static func adding(_ line: String, to lines: [String]) -> [String] {
+        Array((lines + [String(line.prefix(maximumLength))]).suffix(maximumLines))
+    }
+
+    static var lines: [String] {
+        UserDefaults.standard.stringArray(forKey: key) ?? []
+    }
+
+    static func add(_ line: String) {
+        UserDefaults.standard.set(adding(line, to: lines), forKey: key)
+    }
+
+    static func drop(_ count: Int) {
+        UserDefaults.standard.set(Array(lines.dropFirst(count)), forKey: key)
+    }
 }
 
 /// One background voice take at a time: from the Action Button press,
@@ -264,11 +316,34 @@ final class VoiceCaptureController {
     private func timing(of take: Take) -> String {
         let audio = take.audio.firstAudioAt.map { ["audio=\(Int($0.timeIntervalSince(take.pressAt) * 1000))"] }
             ?? ["audio=none"]
-        return (take.marks + audio).joined(separator: " ")
+        return (take.marks + audio + (take.retries > 0 ? ["tries=\(take.retries)"] : [])).joined(separator: " ")
+    }
+
+    // MARK: Presses that left no message
+
+    private static let noteTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    /// One line for the next message's `capture_earlier`: when, the press
+    /// (or the take's own capture line), what happened, and its steps.
+    private func note(_ what: String, for take: Take? = nil, press: Bool = false) {
+        let context = take?.capture ?? (press ? "[\(pressContext)]" : "")
+        let steps = take?.marks ?? (press ? marks : [])
+        let line = ([Self.noteTime.string(from: environment.now()), what, context] + steps)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        environment.noteEarlier(line)
     }
 
     /// The background try a press made before it came forward.
     private var backgroundAttempt: VoiceCaptureAttributes.Attempt?
+    /// What the refused background try's recorder said (`rec[...]`).
+    private var backgroundReport: String?
     /// When the reserved press arrived: a press that waits longer than
     /// `foregroundWait` to come forward (a locked phone unlocked later)
     /// never records.
@@ -368,12 +443,18 @@ final class VoiceCaptureController {
         /// Recorded in the background (not in front): the process may then
         /// end after it is sent, behind the switch.
         let inBackground: Bool
-        /// The press's steps, ms from the press (see `mark`).
-        let marks: [String]
+        /// The press's steps, ms from the press (see `mark`), and the
+        /// interruptions and route changes heard while it recorded.
+        var marks: [String]
         let pressAt: Date
         var endedAt: Date?
         /// Kept once transcribed, so Retry does not transcribe again.
         var text: String?
+        /// When it was first kept unsent, and why it is kept now.
+        var keptAt: Date?
+        var keptReason: VoiceCaptureAttributes.Reason?
+        /// Sends tried again since it was kept.
+        var retries = 0
     }
 
     enum Phase: Equatable {
@@ -400,9 +481,17 @@ final class VoiceCaptureController {
     private var generation = 0
     private var maximumDurationTask: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
+    private var audioEventObservers: [NSObjectProtocol] = []
+
+    private var activeObserver: NSObjectProtocol?
 
     init(environment: VoiceCaptureEnvironment) {
         self.environment = environment
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.retryKeptNow() }
+        }
     }
 
     var phase: Phase {
@@ -429,6 +518,7 @@ final class VoiceCaptureController {
            environment.now().timeIntervalSince(reservedAt) >= Self.foregroundWait
         {
             record("an abandoned press expired")
+            note("abandoned", press: true)
             state = .idle
             backgroundAttempt = nil
         }
@@ -438,6 +528,7 @@ final class VoiceCaptureController {
            environment.now().timeIntervalSince(failedStartAt) < Self.repeatWindow
         {
             record("ignored a run right after a failed start")
+            note("repeat")
             return .stopped
         }
         // A take this process does not hold is a leftover of one whose
@@ -450,17 +541,20 @@ final class VoiceCaptureController {
             } ?? false
             launchEndedRunningLeftoverAt = nil
             if ended || byLaunch {
+                note("leftover")
                 return .stopped
             }
         }
         switch state {
         case .listening:
-            await finish(send: true)
+            await finish(send: true, cause: "press")
             return .stopped
         case .preparing, .sending:
             return .busy
         case .failed(let take):
             // A new press replaces a failed take the user did not retry.
+            stopRetrying()
+            note("replaced", for: take)
             state = .idle
             await end(take, dismissal: .immediate)
         case .idle:
@@ -473,7 +567,9 @@ final class VoiceCaptureController {
         reservedAt = environment.now()
         pressAt = environment.now()
         marks = []
+        audioEvents = 0
         backgroundAttempt = nil
+        backgroundReport = nil
         pressContext = environment.pressContext() + " bgTries=\(backgroundActivations)"
         return nil
     }
@@ -487,9 +583,11 @@ final class VoiceCaptureController {
 
     /// The island's Send (`send: true`) or Cancel, or the second press.
     /// Cancel on a failed take discards it.
-    func finish(send: Bool) async {
+    func finish(send: Bool, cause: String = "island") async {
         guard case .listening(var take) = state else {
             if !send, case .failed(let take) = state {
+                stopRetrying()
+                note("discarded", for: take)
                 state = .idle
                 await end(take, dismissal: .immediate)
             } else if case .idle = state {
@@ -503,8 +601,10 @@ final class VoiceCaptureController {
         maximumDurationTask = nil
         let duration = take.audio.stop()
         take.endedAt = environment.now()
-        record("stop send=\(send) duration=\(String(format: "%.1f", duration))")
+        take.marks.append("stop=\(Int(environment.now().timeIntervalSince(take.pressAt) * 1000)):\(cause)")
+        record("stop send=\(send) cause=\(cause) duration=\(String(format: "%.1f", duration))")
         guard send, duration >= Self.minimumDuration else {
+            note(send ? "short:\(String(format: "%.1f", duration))" : "cancel", for: take)
             state = .idle
             await end(take, dismissal: .immediate)
             return
@@ -514,10 +614,11 @@ final class VoiceCaptureController {
 
     /// Retry on a failed take: send the kept audio (or text) again.
     func retry() async {
-        guard case .failed(let take) = state else {
+        guard case .failed(var take) = state else {
             if case .idle = state { _ = await endLeftovers(reason: .interrupted) }
             return
         }
+        take.retries += 1
         await deliver(take)
     }
 
@@ -586,6 +687,9 @@ final class VoiceCaptureController {
         maximumDurationTask?.cancel()
         maximumDurationTask = nil
         stopObservingInterruptions()
+        stopRetrying()
+        // What an account's presses left is not another account's.
+        environment.dropEarlier(.max)
         let take: Take?
         switch state {
         case .listening(let current), .sending(let current), .failed(let current):
@@ -605,6 +709,9 @@ final class VoiceCaptureController {
         Task { await activity.end(nil, dismissal: .immediate) }
         return barrier.map { [$0] } ?? []
     }
+
+    /// Whether Avibe is in front now.
+    var isInFront: Bool { environment.isInFront() }
 
     /// Opens the main Bot's conversation, where the Web UI asks for
     /// whatever is missing (voice consent, the microphone, sign-in).
@@ -654,17 +761,20 @@ final class VoiceCaptureController {
         guard let target = environment.target() else {
             state = .idle
             record("start: no selected instance")
+            note("needsApp:signIn", press: true)
             return .needsApp(.signIn)
         }
         guard environment.microphoneAllowed() else {
             state = .idle
             record("start: no microphone permission")
+            note("needsApp:microphone", press: true)
             return .needsApp(.microphone)
         }
         guard environment.activitiesEnabled() else {
             // Without a Live Activity the system stops the recording.
             state = .idle
             record("start: Live Activities are off")
+            note("needsApp:liveActivities", press: true)
             return .needsApp(.liveActivities)
         }
         let id = UUID()
@@ -705,8 +815,10 @@ final class VoiceCaptureController {
             var failed = Self.failure(step: .liveActivity, error: error, at: environment.now())
             failed.attempts = backgroundAttempt.map { [$0, Self.attempt(number, error: error, step: .liveActivity)] }
             postFailure(failed)
+            note("start:liveActivity \(Self.errorText(error) ?? "-")", press: true)
             return .needsApp(.activityFailed)
         }
+        observeAudioEvents()
         do {
             if !inFront { backgroundActivations += 1 }
             // A hold in the App gives the microphone up before this take
@@ -717,7 +829,9 @@ final class VoiceCaptureController {
             try audio.start()
             mark(inFront ? "frontRecord" : "record")
         } catch {
-            record("start: try \(number) refused \((error as NSError).domain) \((error as NSError).code) \(error)")
+            record("start: try \(number) refused \((error as NSError).domain) \((error as NSError).code) \(error) \(audio.report ?? "")")
+            if !inFront { backgroundReport = audio.report }
+            stopObservingInterruptions()
             _ = audio.stop()
             audio.discard()
             if !inFront, foregroundFallback {
@@ -732,14 +846,20 @@ final class VoiceCaptureController {
             var failed = Self.failure(step: step, error: error, at: startedAt)
             failed.attempts = backgroundAttempt.map { [$0, Self.attempt(number, error: error, step: .recorder)] }
             postFailure(failed)
+            note(
+                "start:\(step.rawValue) \(Self.errorText(error) ?? "-") \(audio.report ?? "")"
+                    + (backgroundAttempt.map { " after (\($0.step.rawValue) \($0.error ?? "-") \(backgroundReport ?? ""))" } ?? ""),
+                press: true
+            )
             await activity.end(failed, dismissal: .after(startedAt.addingTimeInterval(Self.noticeDismissal)))
             return .stopped
         }
         environment.captureStarted(inFront)
         let capture = "\(number) [\(pressContext)]" + (backgroundAttempt.map {
-            " (\($0.candidate) \($0.step.rawValue) \($0.error ?? "-"))"
-        } ?? "")
+            " (\($0.candidate) \($0.step.rawValue) \($0.error ?? "-")\(backgroundReport.map { " " + $0 } ?? ""))"
+        } ?? "") + (audio.report.map { " " + $0 } ?? "")
         backgroundAttempt = nil
+        backgroundReport = nil
         record("start: recording with try \(number) [\(capture)]")
 
         let instance = environment.makeInstance(target)
@@ -765,7 +885,7 @@ final class VoiceCaptureController {
             // This task sends: `finish` must not cancel it (its ask would
             // then ask nothing).
             self.maximumDurationTask = nil
-            await self.finish(send: true)
+            await self.finish(send: true, cause: "max")
         }
         record("start: listening")
         return .started
@@ -797,6 +917,7 @@ final class VoiceCaptureController {
         state = .idle
         guard let attempt = backgroundAttempt else { return }
         backgroundAttempt = nil
+        note("noFront (\(attempt.step.rawValue) \(attempt.error ?? "-") \(backgroundReport ?? ""))", press: true)
         var failed = Self.failure([attempt], at: environment.now())
         failed.reason = .recordingFailed
         postFailure(failed)
@@ -889,6 +1010,7 @@ final class VoiceCaptureController {
     private func consentRefused(_ refusal: Refusal, takeID: UUID) async {
         guard case .listening(let take) = state, take.id == takeID else { return }
         record("consent refused while recording: \(refusal.reason)")
+        note("refused:\(refusal.reason.rawValue)", for: take)
         stopObservingInterruptions()
         maximumDurationTask?.cancel()
         maximumDurationTask = nil
@@ -936,42 +1058,45 @@ final class VoiceCaptureController {
         }
     }
 
-    private func deliver(_ initial: Take) async {
-        var take = initial
-        let deliverGeneration = generation
-        state = .sending(take)
-        await take.activity.update(content(for: take, phase: .sending))
-        // Nothing leaves the phone before the instance said yes. An answer
-        // that was "unreachable" is asked again now, not reused.
+    /// How sending a take ended (`send`).
+    private enum Sent {
+        case sent(String)
+        /// The instance said no: the take is discarded unsent.
+        case refused(Refusal)
+        /// Nothing was posted, so sending again is safe: the instance could
+        /// not be reached (`offline`), or the take was not turned into text.
+        case kept(VoiceCaptureAttributes.Reason)
+        case nothingHeard
+        /// The App must ask again (voice consent, sign-in).
+        case needsApp(VoiceCaptureAttributes.Reason)
+        /// The message was posted and its answer lost: it may have arrived.
+        case unknown
+        /// The account changed meanwhile: nothing more is done with it.
+        case superseded
+    }
+
+    /// Asks the instance, transcribes and posts one take, touching neither
+    /// the state nor the island. Nothing leaves the phone before the
+    /// instance said yes; an answer that was "unreachable" is asked again
+    /// now, not reused.
+    private func send(_ take: inout Take) async -> Sent {
+        let sendGeneration = generation
         var answer = await take.consent.value
         // An account change meanwhile closed this take's client: ask nothing.
-        guard generation == deliverGeneration else { return }
+        guard generation == sendGeneration else { return .superseded }
         if answer?.transient == true {
             answer = await Self.refusal(from: take.instance)
             let fresh = answer
             take.consent = Task { fresh }
+            guard generation == sendGeneration else { return .superseded }
         }
         if let refusal = answer {
-            guard generation == deliverGeneration else { return }
-            if refusal.transient {
-                // Unreachable is not a no: keep the take on the phone; Retry
-                // asks again.
-                record("deliver: instance unreachable; kept for Retry, unsent")
-                await keepForRetry(take, reason: .offline)
-                return
-            }
-            record("deliver: consent refused \(refusal.reason); discarded unsent")
-            take.audio.discard()
-            take.instance.close()
-            state = .idle
-            await take.activity.end(nil, dismissal: .immediate)
-            surface(refusal)
-            return
+            // Unreachable is not a no: the take stays on the phone.
+            return refusal.transient ? .kept(.offline) : .refused(refusal)
         }
-        guard generation == deliverGeneration else { return }
         // Once the message POST has been made, its outcome may be unknown
-        // (a lost response): it is never repeated, so Retry cannot send the
-        // same spoken instruction twice.
+        // (a lost response): it is never repeated, so sending again cannot
+        // deliver the same spoken instruction twice.
         var posted = false
         do {
             if take.text == nil {
@@ -980,15 +1105,62 @@ final class VoiceCaptureController {
                     audio: audio, name: "voice.m4a", mime: "audio/mp4"
                 )
             }
-            guard generation == deliverGeneration else { return }
-            state = .sending(take)
+            guard generation == sendGeneration else { return .superseded }
             guard let text = take.text else { throw VoiceCaptureInstanceClient.Failure.nothingHeard }
             let path = try await take.instance.mainBotMessagesPath()
-            guard generation == deliverGeneration else { return }
+            guard generation == sendGeneration else { return .superseded }
             posted = true
-            try await take.instance.postMessage(text, to: path, capture: take.capture, timing: timing(of: take))
-            guard generation == deliverGeneration else { return }
+            let earlier = environment.earlier()
+            try await take.instance.postMessage(
+                text, to: path, capture: take.capture, timing: timing(of: take),
+                earlier: earlier.isEmpty ? nil : earlier.joined(separator: " | ")
+            )
+            // They went with a message that arrived.
+            environment.dropEarlier(earlier.count)
+            guard generation == sendGeneration else { return .superseded }
+            return .sent(text)
+        } catch let failure as VoiceCaptureInstanceClient.Failure {
+            record("deliver: failed \(failure) posted=\(posted)")
+            guard generation == sendGeneration else { return .superseded }
+            if posted, failure != .consentRequired, failure != .signIn { return .unknown }
+            switch failure {
+            case .nothingHeard: return .nothingHeard
+            // A "no" given since: stop, send nothing, keep nothing.
+            case .consentRequired: return .needsApp(.consent)
+            case .signIn: return .needsApp(.signIn)
+            default:
+                let unreachable = failure == .offline || failure == .directFault
+                return .kept(take.text == nil && !unreachable ? .transcriptionFailed : .offline)
+            }
+        } catch {
+            record("deliver: failed \(error)")
+            guard generation == sendGeneration else { return .superseded }
+            return posted ? .unknown : .kept(.transcriptionFailed)
+        }
+    }
+
+    private func deliver(_ initial: Take) async {
+        var take = initial
+        let deliverGeneration = generation
+        retryTask?.cancel()
+        retryTask = nil
+        state = .sending(take)
+        await take.activity.update(content(for: take, phase: .sending))
+        let result = await send(&take)
+        guard generation == deliverGeneration else { return }
+        if case .kept(let reason) = result {
+            await keepForRetry(take, reason: reason)
+            return
+        }
+        stopRetrying()
+        switch result {
+        case .kept, .superseded:
+            return
+        case .sent(let text):
             record("deliver: sent")
+            // What kept it from the instance before it arrived rides on the
+            // next message.
+            if !take.instance.failures.isEmpty { note("sentAfter\(unreached(take))", for: take) }
             state = .idle
             let heard = String(text.prefix(VoiceCaptureAttributes.ContentState.heardLimit))
             await end(
@@ -997,61 +1169,125 @@ final class VoiceCaptureController {
                 final: content(for: take, phase: .sent, heard: heard)
             )
             considerEndingProcess(after: take)
-        } catch let failure as VoiceCaptureInstanceClient.Failure {
-            record("deliver: failed \(failure) posted=\(posted)")
-            guard generation == deliverGeneration else { return }
-            if posted, failure != .consentRequired, failure != .signIn {
-                // It may have arrived; the chat shows whether it did.
-                state = .idle
-                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
-                          final: content(for: take, phase: .needsApp, reason: .sendUnknown))
+        case .refused(let refusal):
+            record("deliver: consent refused \(refusal.reason); discarded unsent")
+            note("refused:\(refusal.reason.rawValue)", for: take)
+            take.audio.discard()
+            take.instance.close()
+            state = .idle
+            await take.activity.end(nil, dismissal: .immediate)
+            surface(refusal)
+        case .nothingHeard:
+            note("nothingHeard", for: take)
+            state = .idle
+            await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.sentDismissal)),
+                      final: content(for: take, phase: .failed, reason: .nothingHeard))
+        case .needsApp(let reason):
+            note("needsApp:\(reason.rawValue)", for: take)
+            state = .idle
+            await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
+                      final: content(for: take, phase: .needsApp, reason: reason))
+        case .unknown:
+            // It may have arrived; the chat shows whether it did.
+            note("sendUnknown", for: take)
+            state = .idle
+            await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
+                      final: content(for: take, phase: .needsApp, reason: .sendUnknown))
+        }
+    }
+
+    /// The kept take's next automatic send, or its end (tests await it).
+    private(set) var retryTask: Task<Void, Never>?
+    private var releaseRetryHold: (() -> Void)?
+
+    /// How long after a failed send the next one is tried by itself: 2, 5,
+    /// 10, 20 and 30 s, then every minute.
+    static func retryDelay(after retries: Int) -> Duration {
+        let schedule = [2, 5, 10, 20, 30]
+        return .seconds(retries < schedule.count ? schedule[retries] : 60)
+    }
+
+    /// Keeps a take that was not sent, nothing of it posted. One the
+    /// instance could not be reached for is sent again by itself (and when
+    /// Avibe comes to the front) until it arrives; after `failedDismissal`
+    /// it gets one last send and is then dropped with its island. Any other
+    /// waits for Retry until then.
+    private func keepForRetry(_ kept: Take, reason: VoiceCaptureAttributes.Reason) async {
+        var take = kept
+        let now = environment.now()
+        if let keptAt = take.keptAt, now.timeIntervalSince(keptAt) >= Self.failedDismissal / .seconds(1) {
+            await drop(take)
+            return
+        }
+        if take.keptAt == nil {
+            take.keptAt = now
+            note("kept:\(reason.rawValue)\(unreached(take))", for: take)
+        }
+        take.keptReason = reason
+        let automatic = reason == .offline
+        if !automatic {
+            // Waiting for the user's Retry needs no running process.
+            releaseRetryHold?()
+            releaseRetryHold = nil
+        }
+        state = .failed(take)
+        scheduleRetry(of: take, automatic: automatic)
+        await take.activity.update(content(for: take, phase: .failed, reason: automatic ? .willSend : reason))
+    }
+
+    private func scheduleRetry(of take: Take, automatic: Bool) {
+        retryTask?.cancel()
+        let id = take.id
+        let keptAt = take.keptAt ?? environment.now()
+        let elapsed = Duration.seconds(environment.now().timeIntervalSince(keptAt))
+        let remaining = max(Self.failedDismissal - elapsed, Duration.zero)
+        let delay = automatic ? min(Self.retryDelay(after: take.retries), remaining) : remaining
+        if automatic, releaseRetryHold == nil {
+            releaseRetryHold = environment.holdWhileRetrying()
+        }
+        let sleep = environment.sleep
+        retryTask = Task { [weak self] in
+            await sleep(delay)
+            guard !Task.isCancelled, let self, case .failed(var current) = self.state, current.id == id else {
                 return
             }
-            switch failure {
-            case .nothingHeard:
-                state = .idle
-                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.sentDismissal)),
-                          final: content(for: take, phase: .failed, reason: .nothingHeard))
-            case .consentRequired:
-                // A "no" given since: stop, send nothing, keep nothing.
-                state = .idle
-                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
-                          final: content(for: take, phase: .needsApp, reason: .consent))
-            case .signIn:
-                state = .idle
-                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
-                          final: content(for: take, phase: .needsApp, reason: .signIn))
-            default:
-                // Nothing was posted yet, so Retry is safe.
-                let reason: VoiceCaptureAttributes.Reason =
-                    take.text == nil && failure != .offline ? .transcriptionFailed : .offline
-                await keepForRetry(take, reason: reason)
-            }
-        } catch {
-            record("deliver: failed \(error)")
-            guard generation == deliverGeneration else { return }
-            if posted {
-                state = .idle
-                await end(take, dismissal: .after(environment.now().addingTimeInterval(Self.noticeDismissal)),
-                          final: content(for: take, phase: .needsApp, reason: .sendUnknown))
+            self.retryTask = nil
+            if automatic {
+                current.retries += 1
+                await self.deliver(current)
             } else {
-                await keepForRetry(take, reason: .transcriptionFailed)
+                await self.drop(current)
             }
         }
     }
 
-    private func keepForRetry(_ take: Take, reason: VoiceCaptureAttributes.Reason) async {
-        state = .failed(take)
-        await take.activity.update(content(for: take, phase: .failed, reason: reason))
-        // A failed take the user leaves alone is dropped with its island.
-        let id = take.id
-        let sleep = environment.sleep
-        Task { [weak self] in
-            await sleep(Self.failedDismissal)
-            guard let self, case .failed(let current) = self.state, current.id == id else { return }
-            self.state = .idle
-            await self.end(current, dismissal: .immediate)
-        }
+    /// Avibe came to the front: a take kept for an unreachable instance is
+    /// sent again now.
+    func retryKeptNow() async {
+        guard case .failed(var take) = state, take.keptReason == .offline else { return }
+        take.retries += 1
+        await deliver(take)
+    }
+
+    /// The take's requests that did not reach the instance, for a note.
+    private func unreached(_ take: Take) -> String {
+        let failures = take.instance.failures
+        return failures.isEmpty ? "" : " {\(failures.joined(separator: "; "))}"
+    }
+
+    private func stopRetrying() {
+        retryTask?.cancel()
+        retryTask = nil
+        releaseRetryHold?()
+        releaseRetryHold = nil
+    }
+
+    /// A kept take nobody sent in time goes with its island.
+    private func drop(_ take: Take) async {
+        stopRetrying()
+        note("expired\(unreached(take))", for: take)
+        state = .idle
+        await end(take, dismissal: .immediate)
     }
 
     // MARK: Live Activity
@@ -1160,7 +1396,9 @@ final class VoiceCaptureController {
     // MARK: Interruptions
 
     private func observeInterruptions() {
-        stopObservingInterruptions()
+        if interruptionObserver != nil {
+            NotificationCenter.default.removeObserver(interruptionObserver!)
+        }
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
@@ -1176,9 +1414,67 @@ final class VoiceCaptureController {
                 // A call or another recorder took the microphone: send what
                 // was said so far rather than lose it.
                 self?.record("interrupted")
-                await self?.finish(send: true)
+                await self?.finish(send: true, cause: "interrupted")
             }
         }
+    }
+
+    /// Interruptions and route changes from the try's session on, in
+    /// `capture_timing` (ms from the press): `intBegan=`/`intEnded=` with
+    /// the reason (`:r<n>`) or whether to resume (`:resume`), and
+    /// `route<reason>=` with the input port then. A navigation prompt that
+    /// cuts a take shows here.
+    private func observeAudioEvents() {
+        removeAudioEventObservers()
+        let center = NotificationCenter.default
+        let session = AVAudioSession.sharedInstance()
+        audioEventObservers = [
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] note in
+                let info = note.userInfo ?? [:]
+                let began = (info[AVAudioSessionInterruptionTypeKey] as? UInt)
+                    .flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began
+                let detail: String
+                if began {
+                    detail = (info[AVAudioSessionInterruptionReasonKey] as? UInt).map { ":r\($0)" } ?? ""
+                } else {
+                    let options = AVAudioSession.InterruptionOptions(
+                        rawValue: info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                    )
+                    detail = options.contains(.shouldResume) ? ":resume" : ""
+                }
+                MainActor.assumeIsolated { self?.noteAudioEvent(began ? "intBegan" : "intEnded", detail) }
+            },
+            center.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] note in
+                let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+                let port = AVAudioSession.sharedInstance().currentRoute.inputs.first?.portType.rawValue ?? "-"
+                MainActor.assumeIsolated { self?.noteAudioEvent("route\(reason)", ":\(port)") }
+            },
+        ]
+    }
+
+    /// At most this many events per press: enough to tell a cut take.
+    static let maximumAudioEvents = 8
+
+    private var audioEvents = 0
+
+    private func noteAudioEvent(_ name: String, _ detail: String) {
+        guard let pressAt, audioEvents < Self.maximumAudioEvents else { return }
+        let event = "\(name)=\(Int(environment.now().timeIntervalSince(pressAt) * 1000))\(detail)"
+        switch state {
+        case .listening(var take):
+            take.marks.append(event)
+            state = .listening(take)
+        case .preparing:
+            marks.append(event)
+        default:
+            return
+        }
+        audioEvents += 1
+    }
+
+    private func removeAudioEventObservers() {
+        audioEventObservers.forEach(NotificationCenter.default.removeObserver)
+        audioEventObservers = []
     }
 
     private func stopObservingInterruptions() {
@@ -1186,6 +1482,7 @@ final class VoiceCaptureController {
             NotificationCenter.default.removeObserver(interruptionObserver)
         }
         interruptionObserver = nil
+        removeAudioEventObservers()
     }
 
     private func record(_ event: String) {

@@ -1,5 +1,6 @@
 import ActivityKit
 import AppIntents
+import AVFAudio
 import XCTest
 @testable import Avibe
 
@@ -200,7 +201,7 @@ final class VoiceCaptureTests: XCTestCase {
         world.audio?.duration = 2
         _ = await controller.toggle()
         XCTAssertEqual(controller.phase, .failed)
-        XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .willSend)
         XCTAssertEqual(world.audio?.discarded, false, "kept for Retry")
 
         await controller.retry()
@@ -409,7 +410,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(controller.phase, .failed)
         XCTAssertEqual(world.instance.transcribed, 0, "nothing sent before a yes")
         XCTAssertEqual(world.audio?.discarded, false, "kept for Retry")
-        XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .willSend)
         // Let any answer asked early settle while still unreachable.
         for _ in 0..<20 { await Task.yield() }
 
@@ -700,6 +701,459 @@ final class VoiceCaptureTests: XCTestCase {
         for _ in 0..<500 where !recorder.firstAudioLate { try await Task.sleep(for: .milliseconds(1)) }
         XCTAssertTrue(recorder.firstAudioLate)
         XCTAssertNil(recorder.firstAudioAt)
+    }
+
+    // MARK: A second recorder in the background (39.1: navigation speaking,
+    // the mixable session active, AVAudioRecorder's record() said no)
+
+    /// In the background a refused `record()` hands the same session to the
+    /// engine recorder, with no second activation, and the report says
+    /// which took the take and what the session said; in front it does not.
+    func testARefusedRecordInTheBackgroundRecordsWithTheEngineOnTheSameSession() throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "take-\(UUID().uuidString).m4a")
+        let reading = "in=1 port=MicrophoneBuiltIn ins=1 ch=1 rate=48000 cat=PlayAndRecord mode=Default opts=3 other=1 hint=1"
+
+        let session = FakeSession()
+        let second = FakeStartingEngine()
+        var made = 0
+        let recorder = VoiceCaptureRecorder(
+            url: url, session: session, permission: { true },
+            makeEngine: { _ in FakePreparableEngine() },
+            makeFallback: { _ in made += 1; return second },
+            readSession: { reading }
+        )
+        try recorder.prepare(.mixableBackground)
+        try recorder.start()
+        XCTAssertTrue(second.begun)
+        XCTAssertTrue(recorder.isRecording)
+        XCTAssertEqual(session.activations, 1, "the same session: no second start")
+        XCTAssertTrue(session.active)
+        XCTAssertEqual(recorder.report, "rec[engine vp=1 recorder=0 prep=1 \(reading)]")
+        recorder.stop()
+        XCTAssertFalse(second.begun)
+        XCTAssertFalse(session.active)
+
+        // The engine refused too: its code names the cause, nothing stays active.
+        let refused = FakeSession()
+        let failing = FakeStartingEngine()
+        failing.failure = NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+        failing.detail = "vp=0(-10875)"
+        let refusing = FakeEngine()
+        refusing.records = false
+        let both = VoiceCaptureRecorder(
+            url: url, session: refused, permission: { true },
+            makeEngine: { _ in refusing }, makeFallback: { _ in failing }, readSession: { reading }
+        )
+        try both.prepare(.mixableBackground)
+        XCTAssertThrowsError(try both.start()) { error in
+            XCTAssertEqual(VoiceCaptureController.errorText(error), "561145187")
+            XCTAssertEqual((error as? VoiceCaptureRecorder.StartFailure)?.step, .recorder)
+        }
+        XCTAssertEqual(both.report, "rec[recorder=0 prep=- \(reading) engine=561145187(!rec) vp=0(-10875)]")
+        XCTAssertEqual(refusing.stops, 1, "the refused recorder is let go")
+        XCTAssertFalse(refused.active)
+
+        // In front the exclusive session is the last try: no second recorder.
+        let front = VoiceCaptureRecorder(
+            url: url, session: FakeSession(), permission: { true },
+            makeEngine: { _ in refusing }, makeFallback: { _ in made += 1; return FakeStartingEngine() },
+            readSession: { reading }
+        )
+        try front.prepare(.exclusiveRecord)
+        XCTAssertThrowsError(try front.start())
+        XCTAssertEqual(front.report, "rec[recorder=0 prep=- \(reading)]")
+        XCTAssertEqual(made, 1)
+
+        // The path that works is unchanged, and says so.
+        let usual = VoiceCaptureRecorder(
+            url: url, session: FakeSession(), permission: { true },
+            makeEngine: { _ in FakeEngine() }, makeFallback: { _ in made += 1; return FakeStartingEngine() },
+            readSession: { reading }
+        )
+        try usual.prepare(.mixableBackground)
+        try usual.start()
+        XCTAssertEqual(usual.report, "rec[recorder]")
+        XCTAssertEqual(made, 1)
+    }
+
+    func testAnOSStatusCodeIsSpelledWhenItIsFourCharacters() {
+        XCTAssertEqual(VoiceCaptureRecorder.code(NSError(domain: NSOSStatusErrorDomain, code: 561145187)), "561145187(!rec)")
+        XCTAssertEqual(VoiceCaptureRecorder.code(NSError(domain: NSOSStatusErrorDomain, code: -10868)), "-10868")
+        XCTAssertEqual(VoiceCaptureRecorder.code(NSError(domain: "x", code: 48_000)), "48000")
+    }
+
+    /// The message says which recorder took the take, a successful one too,
+    /// and for a press that went on in front, what the background recorder said.
+    func testTheMessageSaysWhichRecorderTookTheTake() async {
+        let world = World()
+        world.reports = [.mixableBackground: "rec[engine recorder=0 prep=1 in=1]"]
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(
+            world.instance.captures.first ?? nil,
+            "0 [background warm bgTries=0] rec[engine recorder=0 prep=1 in=1]"
+        )
+
+        let refused = World()
+        refused.startErrors = [.mixableBackground: VoiceCaptureRecorder.StartFailure(
+            step: .recorder, underlying: NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+        )]
+        refused.reports = [
+            .mixableBackground: "rec[recorder=0 prep=1 in=0 engine=561145187(!rec)]",
+            .exclusiveRecord: "rec[recorder]",
+        ]
+        let other = refused.controller()
+        _ = await other.beginPress()
+        _ = await other.startTake(inFront: false, foregroundFallback: true)
+        _ = await other.startTake(inFront: true)
+        refused.audio?.duration = 2
+        _ = await other.toggle()
+        XCTAssertEqual(
+            refused.instance.captures.first ?? nil,
+            "3 [background warm bgTries=0] (0 recorder 561145187 rec[recorder=0 prep=1 in=0 engine=561145187(!rec)]) rec[recorder]"
+        )
+    }
+
+    /// Route changes and interruptions while the take records are in its
+    /// timing: a navigation prompt that cut the take shows as `intBegan`.
+    func testInterruptionsAndRouteChangesDuringATakeAreInItsTiming() async throws {
+        let world = World()
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        let session = AVAudioSession.sharedInstance()
+        NotificationCenter.default.post(
+            name: AVAudioSession.routeChangeNotification, object: session,
+            userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.categoryChange.rawValue]
+        )
+        NotificationCenter.default.post(
+            name: AVAudioSession.interruptionNotification, object: session,
+            userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue]
+        )
+        // The interruption sends what was said.
+        for _ in 0..<200 where world.instance.timings.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        let timing = try XCTUnwrap(world.instance.timings.first ?? nil)
+        XCTAssertTrue(timing.contains("route3="), timing)
+        XCTAssertTrue(timing.contains("intBegan="), timing)
+        XCTAssertTrue(timing.contains("audio="), timing)
+
+        // After the take, nothing more is noted.
+        let posted = world.instance.timings.count
+        NotificationCenter.default.post(
+            name: AVAudioSession.routeChangeNotification, object: session,
+            userInfo: [AVAudioSessionRouteChangeReasonKey: 2]
+        )
+        XCTAssertEqual(world.instance.timings.count, posted)
+    }
+
+    // MARK: A recorded take is never lost to an unreachable instance
+    // (39.1, 00:44Z: recorded in front, the instance unreachable at the
+    // stop, the island said so, and nothing sent it again)
+
+    /// Kept for an unreachable instance, the take is sent again by itself:
+    /// after 2 s, then 5 s, until it arrives.
+    func testATakeKeptForAnUnreachableInstanceIsSentAgainByItself() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(controller.phase, .failed)
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .willSend, "the island says it will send")
+        XCTAssertEqual(world.retryHolds, 1, "kept running for the retries")
+
+        // Still unreachable at the first retry (2 s): kept again, the next in 5 s.
+        var retry = controller.retryTask
+        await world.wakeRetry()
+        XCTAssertEqual(world.slept.last, .seconds(2))
+        await retry?.value
+        XCTAssertEqual(controller.phase, .failed)
+        XCTAssertTrue(world.instance.sent.isEmpty)
+
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        retry = controller.retryTask
+        await world.wakeRetry()
+        XCTAssertEqual(world.slept.last, .seconds(5))
+        await retry?.value
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.activities.first?.ended?.phase, .sent)
+        XCTAssertEqual(world.retryHolds, 0)
+        XCTAssertTrue((world.instance.timings.last ?? nil)?.contains("tries=2") == true)
+        XCTAssertEqual(controller.retryTask == nil, true)
+    }
+
+    func testTheRetryScheduleBacksOffToAMinute() {
+        XCTAssertEqual((0..<7).map(VoiceCaptureController.retryDelay(after:)),
+                       [2, 5, 10, 20, 30, 60, 60].map { Duration.seconds($0) })
+    }
+
+    /// Avibe coming to the front sends a kept take at once.
+    func testAKeptTakeIsSentWhenAvibeComesToTheFront() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.offline)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        await controller.retryKeptNow()
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertEqual(world.retryHolds, 0)
+
+        // A take that waits for the user's Retry (not unreachable) does not.
+        let other = World()
+        other.instance.transcribeResult = .failure(Failure.server(500, nil))
+        let second = other.controller()
+        _ = await second.toggle()
+        other.audio?.duration = 3
+        _ = await second.toggle()
+        XCTAssertEqual(other.activities.first?.states.last?.reason, .transcriptionFailed)
+        other.instance.transcribeResult = .success("hello")
+        await second.retryKeptNow()
+        XCTAssertTrue(other.instance.sent.isEmpty)
+        XCTAssertEqual(other.retryHolds, 0)
+    }
+
+    /// Ten minutes unsent: one last send, then the take goes with its
+    /// island, and the next message says so.
+    func testAKeptTakeGetsOneLastSendWhenItsTimeIsUp() async {
+        let world = World()
+        var clock = Date()
+        world.now = { clock }
+        world.instance.statusResult = .failure(Failure.offline)
+        world.instance.failures = ["GET /api/asr/status loadp NSURLErrorDomain -1004 +12ms"]
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        // Why it did not reach the instance is in the line the next message carries.
+        XCTAssertTrue(
+            world.earlier.last?.contains("kept:offline {GET /api/asr/status loadp NSURLErrorDomain -1004 +12ms} 0 [") == true,
+            "\(world.earlier)"
+        )
+        clock = clock.addingTimeInterval(11 * 60)
+        let retry = controller.retryTask
+        await world.wakeRetry()
+        await retry?.value
+        XCTAssertEqual(world.instance.statusCalls, 3, "the start, the stop, and the last send")
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.audio?.discarded, true)
+        XCTAssertEqual(world.retryHolds, 0)
+        XCTAssertTrue(
+            world.earlier.last?.contains("expired {GET /api/asr/status loadp NSURLErrorDomain -1004 +12ms}") == true,
+            "\(world.earlier)"
+        )
+    }
+
+    /// Cancel, an account change, or a new press end the retrying.
+    func testGivingAKeptTakeUpEndsItsRetries() async {
+        for end in 0..<3 {
+            let world = World()
+            world.instance.statusResult = .failure(Failure.offline)
+            let controller = world.controller()
+            _ = await controller.toggle()
+            world.audio?.duration = 3
+            _ = await controller.toggle()
+            let retry = controller.retryTask
+            switch end {
+            case 0: await controller.finish(send: false)
+            case 1: _ = controller.cancelForAccountTransition()
+            default: _ = await controller.toggle()
+            }
+            XCTAssertEqual(retry?.isCancelled, true, "\(end)")
+            XCTAssertEqual(world.retryHolds, 0, "\(end)")
+        }
+    }
+
+    // MARK: What happened to a press that left no message leaves the phone
+
+    /// A slip, a refused start and a kept take each leave a line; the next
+    /// message that arrives carries them (no words, no audio), once.
+    func testPressesThatLeftNoMessageRideOnTheNextOne() async {
+        let world = World()
+        world.pressContext = "background warm"
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 0.2
+        _ = await controller.toggle()
+
+        world.recorderStartError = VoiceCaptureRecorder.StartFailure(
+            step: .recorder, underlying: NSError(domain: NSOSStatusErrorDomain, code: 561145187)
+        )
+        world.reports = [.mixableBackground: "rec[recorder=0 prep=1 in=0 engine=561145187(!rec)]"]
+        _ = await controller.toggle()
+        world.recorderStartError = nil
+        world.reports = [:]
+        XCTAssertEqual(world.earlier.count, 2)
+        XCTAssertTrue(world.earlier[0].contains("short:0.2 0 [background warm bgTries=0]"), world.earlier[0])
+        XCTAssertTrue(world.earlier[0].contains("stop="), world.earlier[0])
+        XCTAssertTrue(
+            world.earlier[1].contains("start:recorder 561145187 rec[recorder=0 prep=1 in=0 engine=561145187(!rec)]"),
+            world.earlier[1]
+        )
+        XCTAssertFalse(world.earlier.joined().contains("hello"))
+
+        // The answer to the next message is lost: they stay for the one after.
+        var clock = Date().addingTimeInterval(60)
+        world.now = { clock }
+        world.instance.postFailures = 1
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.earliers.last ?? nil, world.earlier.prefix(2).joined(separator: " | "))
+        XCTAssertEqual(world.earlier.count, 3, "kept, with the lost send")
+
+        clock = clock.addingTimeInterval(60)
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertEqual((world.instance.earliers.last ?? nil)?.components(separatedBy: " | ").count, 3)
+        XCTAssertTrue(world.earlier.isEmpty, "sent once")
+
+        clock = clock.addingTimeInterval(60)
+        _ = await controller.toggle()
+        world.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertNil(world.instance.earliers.last ?? nil)
+    }
+
+    /// Which branch read as "could not reach the instance", for the note.
+    func testTheClientNamesWhyARequestDidNotReachTheInstance() {
+        typealias Client = VoiceCaptureInstanceClient
+        XCTAssertEqual(
+            Client.unreachableCause(status: 0, errorCode: nil, fetchError: "AbortError", elapsed: 15.001, deadline: 15),
+            "fetch0 AbortError 15001/15000ms"
+        )
+        XCTAssertEqual(
+            Client.unreachableCause(status: 0, errorCode: nil, fetchError: "TypeError", elapsed: 0.012, deadline: 15),
+            "fetch0 TypeError 12/15000ms"
+        )
+        XCTAssertEqual(
+            Client.unreachableCause(status: 502, errorCode: nil, fetchError: nil, elapsed: 0.1, deadline: 15),
+            "http 502 -"
+        )
+        XCTAssertNil(Client.unreachableCause(status: 503, errorCode: "asr_unavailable", fetchError: nil, elapsed: 0, deadline: 15))
+        // Every status `check` reads as offline has a cause, and no other.
+        for status in [0, 200, 400, 401, 403, 422, 500, 502, 503, 504, 520, 530, 599] {
+            let response = Client.Response(status: status, json: nil, redirected: false)
+            var offline = false
+            do { try Client.check(response) } catch { offline = (error as? Client.Failure) == .offline }
+            XCTAssertEqual(
+                Client.unreachableCause(status: status, errorCode: nil, fetchError: nil, elapsed: 0, deadline: 1) != nil,
+                offline, "\(status)"
+            )
+        }
+        var failures: [String] = []
+        for index in 0..<6 { failures = Client.adding("r\(index)", to: failures) }
+        XCTAssertEqual(failures, ["r2", "r3", "r4", "r5"])
+    }
+
+    /// A take's transcription keeps one id however often it is sent.
+    func testATakeKeepsOneDictationIdAcrossSends() throws {
+        let target = VoiceCaptureTarget(
+            accountID: "a", instanceID: "i",
+            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.example")),
+            storeIdentifier: UUID()
+        )
+        let client = VoiceCaptureInstanceClient(target: target)
+        XCTAssertTrue(client.dictationID.hasPrefix("ios-action-"))
+        XCTAssertNotEqual(client.dictationID, VoiceCaptureInstanceClient(target: target).dictationID)
+        XCTAssertEqual(
+            VoiceCaptureInstanceClient(target: target, dictationID: "ios-action-kept").dictationID, "ios-action-kept"
+        )
+    }
+
+    // MARK: The hidden document waits for the direct path's load gate
+    // (39.1, 00:44Z: its load was issued right after Avibe came forward,
+    // while the App's local listener was closed or being bound again)
+
+    func testInFrontAHeldGateIsWaitedForBeforeTheLoad() async {
+        typealias Client = VoiceCaptureInstanceClient
+        // Held for three reads, then open: the load goes once it opens.
+        var gates: [DirectLoadGate] = [.held, .held, .held, .open]
+        var slept: [Duration] = []
+        var settled = await Client.settledGate(
+            gate: { gates.count > 1 ? gates.removeFirst() : gates[0] },
+            isActive: { true }, sleep: { slept.append($0) }
+        )
+        XCTAssertEqual(settled, .open)
+        XCTAssertEqual(slept, [.milliseconds(50), .milliseconds(50), .milliseconds(50)])
+
+        // Never settling: bounded at five seconds, then the load goes anyway.
+        slept = []
+        settled = await Client.settledGate(gate: { .held }, isActive: { true }, sleep: { slept.append($0) })
+        XCTAssertEqual(settled, .held)
+        XCTAssertEqual(slept.count, 100)
+
+        // In the background the listener stays closed and WebKit takes its
+        // normal path: no wait.
+        slept = []
+        settled = await Client.settledGate(gate: { .held }, isActive: { false }, sleep: { slept.append($0) })
+        XCTAssertEqual(settled, .held)
+        XCTAssertTrue(slept.isEmpty)
+
+        // The fault is terminal: not waited for.
+        settled = await Client.settledGate(gate: { .fault }, isActive: { true }, sleep: { slept.append($0) })
+        XCTAssertEqual(settled, .fault)
+        XCTAssertTrue(slept.isEmpty)
+    }
+
+    /// A faulted listener is its own reason, and the take is kept as for an
+    /// unreachable instance (sent again by itself), not as a failed
+    /// transcription.
+    func testAFaultedListenerKeepsTheTakeLikeAnUnreachableInstance() async throws {
+        let target = VoiceCaptureTarget(
+            accountID: "a", instanceID: "i",
+            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.example")),
+            storeIdentifier: UUID()
+        )
+        let client = VoiceCaptureInstanceClient(target: target, gate: { .fault }, isActive: { true }, sleep: { _ in })
+        do {
+            _ = try await client.status()
+            XCTFail("a faulted listener loads nothing")
+        } catch {
+            XCTAssertEqual(error as? Failure, .directFault)
+        }
+        XCTAssertEqual(client.failures.count, 1)
+        XCTAssertTrue(client.failures[0].hasPrefix("GET /api/asr/status direct_fault +"), client.failures[0])
+
+        let world = World()
+        world.instance.transcribeResult = .failure(Failure.directFault)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .willSend)
+    }
+
+    func testOnlyTheLastFewLinesAreKeptEachCutShort() {
+        var lines: [String] = []
+        for index in 0..<7 { lines = VoiceCaptureEarlier.adding("\(index) " + String(repeating: "x", count: 900), to: lines) }
+        XCTAssertEqual(lines.count, 5)
+        XCTAssertEqual(lines.first?.prefix(2), "2 ")
+        XCTAssertEqual(lines.map(\.count).max(), 700)
+    }
+
+    /// How a take was stopped is in its timing.
+    func testTheTimingSaysWhatStoppedTheTake() async {
+        let pressed = World()
+        let controller = pressed.controller()
+        _ = await controller.toggle()
+        pressed.audio?.duration = 2
+        _ = await controller.toggle()
+        XCTAssertTrue((pressed.instance.timings.first ?? nil)?.contains(":press") == true)
+
+        let island = World()
+        let other = island.controller()
+        _ = await other.toggle()
+        island.audio?.duration = 2
+        await other.finish(send: true)
+        XCTAssertTrue((island.instance.timings.first ?? nil)?.contains(":island") == true)
     }
 
     /// Each step's time from the press rides along for device numbers.
@@ -1154,6 +1608,9 @@ final class VoiceCaptureTests: XCTestCase {
             let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
             return try XCTUnwrap(Bundle(path: path)).localizedString(forKey: key, value: nil, table: "VoiceCapture")
         }
+        XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.willSend"), "还没发出去，连上你的 Avibe 后会自动发送。")
+        XCTAssertEqual(try format("en", "voiceCapture.reason.willSend"), "Not sent yet. It'll send once your Avibe is reachable.")
+        XCTAssertTrue(VoiceCaptureDetail.retryable(.willSend))
         XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.recordingFailedAt %@ %@"), "录音没能开始（%1$@，错误 %2$@）。")
         XCTAssertEqual(try format("en", "voiceCapture.reason.recordingFailedAt %@ %@"), "Recording couldn't start (%1$@, error %2$@).")
         XCTAssertEqual(try format("zh-Hans", "voiceCapture.reason.recordingFailedAt %@"), "录音没能开始（%@）。")
@@ -1217,6 +1674,7 @@ private final class World {
     var recorderStartError: Error?
     var prepareErrors: [VoiceCaptureSessionCandidate: Error] = [:]
     var startErrors: [VoiceCaptureSessionCandidate: Error] = [:]
+    var reports: [VoiceCaptureSessionCandidate: String] = [:]
     /// The order things happened in: active, activity, prepare1, record,
     /// announce, status.
     var events: [String] = []
@@ -1244,6 +1702,20 @@ private final class World {
     var beforeEnding: () -> Void = {}
     var held = 0
     var released = 0
+    /// Background holds for a kept take's retries now open.
+    var retryHolds = 0
+    /// Presses that left no message (`capture_earlier`).
+    var earlier: [String] = []
+    /// Waits asked for; a retry's wait is held until `wakeRetry()`.
+    var slept: [Duration] = []
+    private var wakes = 0
+    private var retryWaits = 0
+
+    /// Ends the retry wait under way, once one is.
+    func wakeRetry() async {
+        while retryWaits == 0 { await Task.yield() }
+        wakes += 1
+    }
 
     func controller() -> VoiceCaptureController {
         instance.log = { self.events.append($0) }
@@ -1256,6 +1728,7 @@ private final class World {
                 audio.startError = self.recorderStartError
                 audio.prepareErrors = self.prepareErrors
                 audio.startErrors = self.startErrors
+                audio.reports = self.reports
                 audio.log = { self.events.append($0) }
                 self.audio = audio
                 return audio
@@ -1294,8 +1767,31 @@ private final class World {
             },
             endProcess: { self.ended += 1 },
             noteEndDecision: { self.endDecisions.append($0) },
+            holdWhileRetrying: {
+                self.retryHolds += 1
+                return { self.retryHolds -= 1 }
+            },
+            noteEarlier: { self.earlier = VoiceCaptureEarlier.adding($0, to: self.earlier) },
+            earlier: { self.earlier },
+            dropEarlier: { self.earlier = Array(self.earlier.dropFirst($0)) },
             now: { self.now() },
-            sleep: { _ in await Task.yield(); try? await Task.sleep(for: .seconds(3600)) }
+            sleep: { duration in
+                self.slept.append(duration)
+                await Task.yield()
+                guard duration <= .seconds(60) else {
+                    // Every other wait never ends in a test.
+                    try? await Task.sleep(for: .seconds(3600))
+                    return
+                }
+                // A retry's wait (a minute at most): until the test wakes
+                // it, or it is cancelled.
+                let ticket = self.wakes
+                self.retryWaits += 1
+                while self.wakes == ticket, !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+                self.retryWaits -= 1
+            }
         ))
     }
 }
@@ -1354,9 +1850,14 @@ private final class FakeInstance: VoiceCaptureInstance {
 
     var timings: [String?] = []
 
-    func postMessage(_ text: String, to sessionPath: String, capture: String?, timing: String?) async throws {
+    var earliers: [String?] = []
+
+    func postMessage(
+        _ text: String, to sessionPath: String, capture: String?, timing: String?, earlier: String?
+    ) async throws {
         captures.append(capture)
         timings.append(timing)
+        earliers.append(earlier)
         posts += 1
         if postFailures > 0 {
             postFailures -= 1
@@ -1367,6 +1868,7 @@ private final class FakeInstance: VoiceCaptureInstance {
 
     func close() { closed = true }
     var releaseBarrier: WebsiteDataStoreReleaseBarrier? { nil }
+    var failures: [String] = []
 }
 
 private final class FakeAudio: VoiceCaptureAudio {
@@ -1388,11 +1890,16 @@ private final class FakeAudio: VoiceCaptureAudio {
     var startErrors: [VoiceCaptureSessionCandidate: Error] = [:]
     var prepared: VoiceCaptureSessionCandidate?
     var log: (String) -> Void = { _ in }
+    /// What each candidate's recorder reports (`rec[...]`).
+    var reports: [VoiceCaptureSessionCandidate: String] = [:]
+    private var lastPrepared: VoiceCaptureSessionCandidate?
+    var report: String? { lastPrepared.flatMap { reports[$0] } }
 
     func prepare(_ candidate: VoiceCaptureSessionCandidate) throws {
         log("prepare\(candidate.rawValue)")
         if let error = prepareErrors[candidate] { throw error }
         prepared = candidate
+        lastPrepared = candidate
     }
 
     var firstAudioAt: Date?
@@ -1467,5 +1974,28 @@ private final class FakeEngine: VoiceCaptureRecordingEngine {
     }
     var isRecording: Bool { recording ?? records }
     func record() -> Bool { records }
+    var stops = 0
+    func stop() { stops += 1 }
+}
+
+private final class FakePreparableEngine: VoiceCaptureRecordingEngine, VoiceCapturePreparable {
+    var currentTime: TimeInterval { 0 }
+    var isRecording: Bool { false }
+    func record() -> Bool { false }
     func stop() {}
+    func prepareToRecord() -> Bool { true }
+}
+
+private final class FakeStartingEngine: VoiceCaptureStartingEngine {
+    var detail = "vp=1"
+    var failure: Error?
+    var begun = false
+    var currentTime: TimeInterval { begun ? 1 : 0 }
+    var isRecording: Bool { begun }
+    func record() -> Bool { (try? begin()) != nil }
+    func begin() throws {
+        if let failure { throw failure }
+        begun = true
+    }
+    func stop() { begun = false }
 }

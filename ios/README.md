@@ -357,7 +357,13 @@ the main Bot acts on the user's computer.
   App opens the main Bot's conversation, where the Web UI asks, and in the
   background the island says so. An unreachable instance is not a no: it is
   asked again when the take is sent, and if still unreachable the take is
-  kept on the phone, unsent, for Retry, which asks again. No
+  kept on the phone, unsent, and sent again by itself (after 2, 5, 10, 20
+  and 30 s, then every minute, and when Avibe comes to the front; each send
+  asks again first), its island saying 还没发出去，连上你的 Avibe 后会自动发送。
+  with Retry and Discard. After ten minutes it gets one last send and then
+  goes with its island. A take that could not be turned into text waits for
+  Retry instead. A new press still replaces a kept take (the ordered
+  outbox that ends this is a separate change). No
   sign-in, no microphone permission, or Live Activities turned off bring the
   App to the main Bot's conversation before anything records. A later
   `403 voice_consent_required` stops the take and keeps nothing. The take's
@@ -412,7 +418,34 @@ the main Bot acts on the user's computer.
   `metadata.capture_timing` gives each step's milliseconds from the press (its reservation, after the leftover check):
   `island=`, `session=`, `record=`, `audio=` (the recorder's first audio, or `none` if it stopped without), and
   for a press that came forward `refused=`, `front=`, `frontIsland=`,
-  `frontSession=`, `frontRecord=`.
+  `frontSession=`, `frontRecord=`; then `stop=<ms>:<press|island|interrupted|max>`,
+  `tries=` (sends after it was kept), and what the audio session reported
+  from the try's session on (at most eight): `intBegan=<ms>:r<reason>`,
+  `intEnded=<ms>[:resume]`, `route<reason>=<ms>:<input port>`.
+- With Avibe already in front at the press, the take records there at once
+  with the exclusive session (other audio pauses and resumes after): the
+  mixable one recorded music playing from the speaker (39.1).
+- `capture_attempt` ends with which recorder took the take: `rec[recorder]`
+  (AVAudioRecorder), or, when its `record()` said no in the background
+  (39.1: navigation speaking, the mixable session already active),
+  `rec[engine vp=1 recorder=0 prep=<0|1> in=<input available> port=<input>
+  ins=<inputs> ch=<channels> rate=<Hz> cat= mode= opts= other= hint=]`: an
+  AVAudioEngine input on the same session, with no second activation,
+  writing the same AAC file. It asks for voice processing first (`vp=1`;
+  `vp=0(<code>)` when that would not start and the plain input records);
+  whether that keeps another App's audio out of the take is only known on a
+  device. If the engine fails too, `engine=<code>` names the system's
+  reason, and the press goes on in front as before; the refused try's
+  `rec[...]` is kept with it.
+- A press that left no message leaves one line on the phone (the last five,
+  each at most 700 characters; `UserDefaults`): the time (UTC), what
+  happened (`short:`, `cancel`, `start:<step> <code>`, `needsApp:`,
+  `refused:`, `kept:<reason> {requests that did not reach the instance}`,
+  `expired`, `replaced`, `discarded`, `leftover`, `repeat`, `abandoned`,
+  `noFront`, `nothingHeard`, `sendUnknown`, `sentAfter {…}`), the press's
+  facts and its steps. No audio and no words. The next message that
+  arrives carries them as `metadata.capture_earlier` and they are then
+  dropped; they never go out on their own.
 - The microphone permission is checked before anything else; a missing one
   brings Avibe forward. If the audio session or the recorder then refuses to
   start, or the take's file or the Live Activity cannot be made, the user is
@@ -443,6 +476,19 @@ the main Bot acts on the user's computer.
   not in Settings and not discoverable: in a TestFlight or development build,
   opening `avibe-diagnostics://voice/end-after-background?on=1` (or `on=0`)
   sets it; an App Store build ignores the URL.
+- The hidden document loads through the App's local listener for the
+  instance, as the page does, so before its load it asks the same gate
+  (`DirectPathController.loadGate`, through `VoiceCaptureLoadGate`): in
+  front a held gate (the listener closed or being bound again, right after
+  Avibe comes forward) is waited for, up to 5 s, and a load that failed in
+  that window is made once more; a fault fails as `direct_fault`. In the
+  background the listener stays closed and WebKit takes its normal path, so
+  nothing waits. Each request that does not reach the instance is kept as
+  which request, where it gave up (`loadp <domain> <code>`, `load …`,
+  `webcontent`, `nodoc`, `js …`, `fetch0 <error> <ms>/<deadline>`,
+  `http <status>`, `direct_fault`, `gate … after <ms>`) and when, for
+  `capture_earlier`. A take's transcription keeps one `dictation_id`
+  however often it is sent.
 - `VoiceCaptureInstanceClient` makes these requests as the signed-in user
   without the runtime WebView: a hidden `WKWebView` on the account's own
   named store (the selection and store identifier the account coordinator
