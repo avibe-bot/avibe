@@ -12,7 +12,9 @@ memory-only pending entry. Default Off preserves existing behavior. An enabled
 policy locks on cold start and after the selected departure threshold; changing
 policy requires successful system authentication. No account password makes the
 policy ineffective without discarding the saved preference. Availability is
-rechecked on activation. Authentication focus changes use the bounded return rule below.
+rechecked on activation. Only LAErrorPasscodeNotSet disables protection; other
+errors preserve the process's last value, initially true. Passcode restoration
+starts Locked. Authentication focus changes follow the approved event table.
 
 The owner covers content before presentation, hides Mini and update popovers,
 and restores their prior state only after authentication. New windows inherit
@@ -62,19 +64,28 @@ reenter AppKit layout. Concealment is synchronous, drawing uses AppKit's normal
 render cycle. Catalog parsing is cached and controls update only when their
 rendered state changes.
 
-A LocalAuthentication reply can arrive before AppKit restores activation. The
-pure Machine records the first resign time during evaluation. After the reply,
-it allows at most two seconds for foreground return. The LA callback timestamps
-the reply before dispatch; a delayed main queue cannot renew its lifetime. A timely return discards
-the candidate departure and finishes verification. At expiry, Unlock becomes
-Cancelled and Change becomes Failed; no stale Change authorizes persistence.
-The original candidate departure determines the existing policy deadline,
-including Immediate. Arrive checks expiry itself, even if no timer ran. Native
-callbacks feed events and drain resolved outcomes; they hold no separate reply
-or timing decision and never force activation on cancellation. Existing content
-stays protected through the transition. Sleep/session departures invalidate both
-the retained reply and LAContext. Restoring protected windows records a fresh
-Vault arrival so its existing two-second input guard applies even when LA did not change focus.
+The approved [event table](app-lock-desktop-event-table.md) is the timing and
+input contract. Machine distinguishes in-flight verification (V), a possible
+panel-induced resign (C), confirmed absence (A), a bounded return window (W),
+and a resolved result (Q). Every end of verification retains C for at most two
+seconds of return classification, without inventing absence from a reply or
+extending an earlier deadline. Lifecycle cancellation invalidates the result
+without manufacturing or discarding departure. A definite other regular app,
+sleep or lock confirms the earliest departure immediately. No arbitrary LA
+or idle timeout is added. Late Success cannot unlock or authorize persistence.
+
+The automatic-prompt latch belongs to a real visit: panel return does not reset
+it; a confirmed departure followed by actual return permits one new evaluation.
+Only NSApp activation with agreeing public on-console/awake facts clears system
+suppression hints. Inconclusive facts retain them, but explicit Unlock remains
+available and fresh successful LA clears them. Return notifications alone never
+impersonate foreground. Native callbacks feed observations and consume Machine
+results; no native completion store or separate timer owns these decisions.
+The additional NSRunningApplication/libc AppKit features expose the public
+regular-application classification and process identity getter.
+
+Restoring protected windows records a fresh Vault arrival so its existing
+input guard applies even when LA did not change focus.
 
 Pending entries distinguish navigation, content for Vibey, and other actions;
 only the first two show the corresponding generic shared copy. Copy changes
@@ -90,29 +101,40 @@ catalog parsing, modal callback placement, and Vault arrival issues. The second
 review examined `295e3fe69e`: ten old issues were resolved, but
 indefinite activation waiting repeated the LA timing root cause, and moving
 runModal to the dispatch queue repeated the serial-executor blocking root cause.
-The circuit breaker paused edits. On 2026-11-20 main approved a two-second return
-transition owned entirely by Machine and asynchronous sheets, plus pending-copy
-relayout, narrow DeepLinks pending cancellation preserving lifecycle tickets,
-and the standalone Vault probe's explicit no-lock adapter. Both findings-bearing
-heads count; a third same-family finding must stop and return to main. The next
-candidate needs exact-head review before a clean freeze can be claimed.
+The third native review at `68ebe612f9` found lifecycle cancellation was still
+misclassified as a departure. Main stopped local patching and required the full
+event/state contract. Table revision 1 (`53cd2d432a`) failed review; main resolved
+T1-T4. Revision 2 (`3bccb5f035`) passed independent review, receipt `86028c1feb52`.
+This implementation follows that approved table, including S1/S2 clarifications.
+Exact-head native review is the next gate; no freeze is claimed yet.
+
+Shared updates are copied without independent edits from `50c57df6` (availability
+contract docs/type comment) and `3431474f` (theme-token lock-frame sizes). The
+AppKit sizes follow that kit; shared copy remains the embedded en/zh catalogs.
 
 ## Current local evidence
 
-The consolidated second-review corrections pass 221 Desktop library tests
-(including 15 App Lock state-machine/copy cases), 246 runtime-host tests (three
-pre-existing ignored cases), 16 desktop-client e2e cases, and 28 focused Vitest
-cases. Both normal and e2e-feature all-target clippy pass with warnings denied;
-Rust formatting, the desktop-client TypeScript check and the release-guard
-script pass. The release guard compiles the normal release and proves that a
-release with authentication substitutes is rejected. Native light/dark captures
-were inspected. This evidence does not substitute for the pending exact-head
-review or the real-device acceptance below.
+The event-table implementation passes 220 Desktop library tests (14 App Lock
+scenario groups, including the core event matrix across all three policies),
+246 runtime-host tests (three pre-existing ignored), 25 desktop-client e2e cases,
+and 28 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
+warnings denied. Rust formatting, desktop-client TypeScript, UI build and design
+typecheck pass. The release guard compiles the normal release and proves that a
+release containing authentication substitutes is rejected. Updated native
+light/dark captures were inspected.
+
+The native peer installs the production observer map on test-owned notification
+centers, so it exercises the actual event routing without broadcasting system
+lock/sleep signals. Its tests also call the production Dock/menu/deep-link/Mini
+entry gates, real native Quit/busy sheets and status-item/menu controls. Public
+foreground facts, process-activation observations, capability/evaluation results
+and continuous time remain deterministic test inputs. This is not evidence of
+real LA focus latency or real session-state behavior.
 
 ## Acceptance handoff
 
 Automated native browser tests use the shipped settings component and adapter
-against a compiled AppKit owner. Only authentication results, foreground state,
+against a compiled AppKit owner. Authentication/capability results, foreground/system facts,
 and continuous time are substituted. They include real status-item/menu windows
 and the native lifecycle alert. This is not proof of real Touch ID, real Vault
 approval, or Mission Control snapshots.
@@ -120,6 +142,12 @@ approval, or Mission Control snapshots.
 Main owns packaging and Max's acceptance. Test both an ad-hoc local package and
 a signed TEST RC:
 
+- **First gate:** measure real Touch ID success-to-NSApp activation latency;
+  the return must consistently fit the two-second window. If it does not, main
+  must revise that policy before acceptance. Include global shortcut/deep link
+  from background and explicit retry after expiry.
+- Quit with the main window minimized or app in background: sheet must be
+  visible and usable, and dismissal must release the pending lifecycle request.
 - Touch ID Mac: default Off; authenticated policy changes and cancellation;
   cold launch; Cmd-Tab with Immediately, 59/61 seconds for One Minute, and Five
   Minutes; screen lock, sleep, and session switching.

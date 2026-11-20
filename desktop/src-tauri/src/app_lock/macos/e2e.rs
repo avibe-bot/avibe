@@ -9,11 +9,13 @@ use std::io::{BufRead, Write};
 struct Peer {
     time: f64,
     active: bool,
+    recovery_facts: bool,
     availability: Availability,
     outcome: Option<Outcome>,
     pending: Option<(u64, Authentication)>,
     calls: usize,
     executed: Vec<String>,
+    centers: [Retained<NSNotificationCenter>; 3],
     native_windows: Vec<Retained<NSWindow>>,
 }
 thread_local! { static PEER: RefCell<Option<Peer>> = const { RefCell::new(None) }; }
@@ -22,6 +24,9 @@ pub(super) fn time() -> Option<f64> {
 }
 pub(super) fn active() -> Option<bool> {
     PEER.with_borrow(|p| p.as_ref().map(|p| p.active))
+}
+pub(super) fn recovery_facts() -> Option<bool> {
+    PEER.with_borrow(|p| p.as_ref().map(|p| p.recovery_facts))
 }
 pub(super) fn availability() -> Option<Availability> {
     PEER.with_borrow(|p| p.as_ref().map(|p| p.availability))
@@ -89,10 +94,17 @@ fn native_window(app: &AppHandle, label: Option<&str>) {
 }
 fn snapshot(app: &AppHandle) -> Value {
     let state = status(app);
-    let (locked, verifying) = {
+    let (locked, verifying, away_since, candidate_leave, blocked, should_prompt) = {
         let owner = machine(app);
         let state = owner.machine.lock().unwrap();
-        (state.locked, state.authenticating.is_some())
+        (
+            state.locked,
+            state.busy(),
+            state.away_since,
+            state.candidate_leave,
+            state.blocked,
+            state.should_prompt(),
+        )
     };
     let (calls, executed) = PEER.with_borrow(|p| {
         let p = p.as_ref().unwrap();
@@ -109,7 +121,7 @@ fn snapshot(app: &AppHandle) -> Value {
             "buttonTop": (cover.view.ivars().button.frame().origin.y + cover.view.ivars().button.frame().size.height),
             "pendingBottom": cover.view.ivars().pending.frame().origin.y}))
     }).collect::<Vec<_>>());
-    json!({"status":state,"locked":locked,"verifying":verifying,"authCalls":calls,"executed":executed,"windows":windows,
+    json!({"awaySince":away_since,"candidateLeave":candidate_leave,"blocked":blocked,"shouldPrompt":should_prompt,"status":state,"locked":locked,"verifying":verifying,"authCalls":calls,"executed":executed,"windows":windows,
         "persistedPolicy": std::fs::read(&machine(app).path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()),
         "pending":machine(app).pending.lock().unwrap().is_some(),
         "mainTitle": app.get_window(crate::MAIN_WINDOW).unwrap().title().unwrap(),
@@ -207,6 +219,7 @@ fn handle(app: &AppHandle, request: Value) {
                     let p = p.as_mut().unwrap();
                     p.time = 0.0;
                     p.active = true;
+                    p.recovery_facts = true;
                     p.availability = available;
                     p.outcome = Some(Outcome::Success);
                     p.pending = None;
@@ -236,12 +249,37 @@ fn handle(app: &AppHandle, request: Value) {
                 finish_if_ready(app);
                 Ok(snapshot(app))
             }
-            "leave" | "arrive" | "tick" | "sleep" | "wake" => {
+            "recovery" => {
+                PEER.with_borrow_mut(|p| {
+                    p.as_mut().unwrap().recovery_facts = request["valid"].as_bool().unwrap_or(false)
+                });
+                Ok(snapshot(app))
+            }
+            "capability" => {
+                let error = request["error"].as_i64().map(|n| n as isize);
+                PEER.with_borrow_mut(|p| {
+                    let p = p.as_mut().unwrap();
+                    p.availability.available = password_available(error, Some(p.availability.available));
+                });
+                refresh(app);
+                sync_windows(app);
+                Ok(snapshot(app))
+            }
+            "application" => {
+                let regular = request["regular"].as_bool().unwrap_or(false);
+                let bundle = request["bundle"].as_str();
+                if is_other_regular_application(2, bundle, regular, 1, Some("io.avibe.test")) {
+                    event(app, Event::OtherApplication);
+                }
+                Ok(snapshot(app))
+            }
+            "leave" | "arrive" | "tick" | "sleep" | "wake" | "screenLock" | "screenUnlock" | "sessionLeave"
+            | "sessionReturn" | "displaySleep" | "displayWake" => {
                 let time = request["time"].as_f64().ok_or("time required")?;
                 PEER.with_borrow_mut(|p| {
                     let p = p.as_mut().unwrap();
                     p.time = time;
-                    if op == "leave" {
+                    if matches!(op, "leave" | "sleep" | "screenLock" | "sessionLeave" | "displaySleep") {
                         p.active = false;
                     }
                     if op == "arrive" {
@@ -249,10 +287,44 @@ fn handle(app: &AppHandle, request: Value) {
                     }
                 });
                 match op {
-                    "leave" => event(app, Event::Leave),
-                    "arrive" => event(app, Event::Arrive),
-                    "sleep" => event(app, Event::SystemLeave(1)),
-                    "wake" => event(app, Event::SystemReturn(1)),
+                    "leave" | "arrive" => unsafe {
+                        PEER.with_borrow(|p| p.as_ref().unwrap().centers[0].clone())
+                            .postNotificationName_object(
+                                if op == "leave" {
+                                    NSApplicationDidResignActiveNotification
+                                } else {
+                                    NSApplicationDidBecomeActiveNotification
+                                },
+                                None,
+                            );
+                    },
+                    "sleep" | "wake" | "sessionLeave" | "sessionReturn" | "displaySleep" | "displayWake" => unsafe {
+                        let name = match op {
+                            "sleep" => NSWorkspaceWillSleepNotification,
+                            "wake" => NSWorkspaceDidWakeNotification,
+                            "sessionLeave" => NSWorkspaceSessionDidResignActiveNotification,
+                            "sessionReturn" => NSWorkspaceSessionDidBecomeActiveNotification,
+                            "displaySleep" => NSWorkspaceScreensDidSleepNotification,
+                            _ => NSWorkspaceScreensDidWakeNotification,
+                        };
+                        PEER.with_borrow(|p| p.as_ref().unwrap().centers[1].clone())
+                            .postNotificationName_object(name, None);
+                    },
+                    "screenLock" | "screenUnlock" => {
+                        // Test-owned center runs the production distributed-name
+                        // registration without broadcasting to the user's session.
+                        unsafe {
+                            PEER.with_borrow(|p| p.as_ref().unwrap().centers[2].clone())
+                                .postNotificationName_object(
+                                    &NSString::from_str(if op == "screenLock" {
+                                        "com.apple.screenIsLocked"
+                                    } else {
+                                        "com.apple.screenIsUnlocked"
+                                    }),
+                                    None,
+                                );
+                        }
+                    }
                     _ => {
                         machine(app).machine.lock().unwrap().tick(time);
                         finish_completion(app);
@@ -268,6 +340,32 @@ fn handle(app: &AppHandle, request: Value) {
                 // Use the real native target/action installed on the lock view.
                 unsafe {
                     button.performClick(None);
+                }
+                Ok(snapshot(app))
+            }
+            "source" => {
+                match request["value"].as_str().ok_or("source required")? {
+                    "dock" => crate::focus_or_restore_main_window(app),
+                    "tray" => crate::handle_menu(app, crate::OPEN_MENU_ID),
+                    "settings" => crate::handle_menu(app, crate::SETTINGS_MENU_ID),
+                    "signOut" => crate::handle_menu(app, "desktop-client-sign-out"),
+                    "instances" => crate::handle_menu(app, "desktop-client-instances"),
+                    "link" => crate::receive_native_deep_link(app, ["avibe://session/native-fixture"]),
+                    "documentFinished" => crate::apply_pending_deep_link_on_main(app),
+                    "shortcutPress" | "shortcutRelease" => {
+                        use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
+                        let shortcut: Shortcut = "Alt+Space".parse().unwrap();
+                        crate::pet::handle_shortcut(
+                            app,
+                            &shortcut,
+                            if request["value"] == "shortcutPress" {
+                                ShortcutState::Pressed
+                            } else {
+                                ShortcutState::Released
+                            },
+                        );
+                    }
+                    _ => return Err("unknown source".into()),
                 }
                 Ok(snapshot(app))
             }
@@ -383,13 +481,20 @@ fn handle(app: &AppHandle, request: Value) {
                 let probe = observed.clone();
                 let handle = app.clone();
                 let id = id.clone();
-                show_quit_question(app, &crate::native_tray_catalog(), move |choice| {
-                    PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(format!("quit:{choice:?}")));
-                    output(
-                        id,
-                        Ok(json!({"during": observed.lock().unwrap().clone(), "after": snapshot(&handle)})),
-                    );
-                });
+                let busy = request["busy"].as_bool().unwrap_or(false);
+                let response = request["response"].as_i64().unwrap_or(1002) as isize;
+                if busy {
+                    show_lifecycle_busy(app, &crate::native_tray_catalog());
+                } else {
+                    show_quit_question(app, &crate::native_tray_catalog(), move |choice| {
+                        PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(format!("quit:{choice:?}")));
+                        output(
+                            id,
+                            Ok(json!({"during": observed.lock().unwrap().clone(), "after": snapshot(&handle)})),
+                        );
+                    });
+                }
+                let id = request["id"].clone();
                 // A second lifecycle request cannot replace the exact exempt
                 // window while the first asynchronous sheet is still visible.
                 show_lifecycle_busy(app, &crate::native_tray_catalog());
@@ -403,7 +508,13 @@ fn handle(app: &AppHandle, request: Value) {
                         .with_borrow(|p| p.quit_window.as_ref().and_then(Weak::load))
                         .unwrap();
                     let parent = sheet.sheetParent().unwrap();
-                    parent.endSheet_returnCode(&sheet, 1002);
+                    parent.endSheet_returnCode(&sheet, response);
+                    if busy {
+                        let during = probe.lock().unwrap().clone();
+                        crate::macos_terminate::on_main_queue(move || {
+                            output(id, Ok(json!({"during":during,"after":snapshot(&handle)})))
+                        });
+                    }
                 });
                 Ok(Value::Null)
             }
@@ -431,11 +542,13 @@ pub(crate) fn run() {
         *p = Some(Peer {
             time: 0.0,
             active: true,
+            recovery_facts: true,
             availability: available,
             outcome: Some(Outcome::Success),
             pending: None,
             calls: 0,
             executed: Vec::new(),
+            centers: std::array::from_fn(|_| NSNotificationCenter::new()),
             native_windows: Vec::new(),
         })
     });
@@ -449,6 +562,8 @@ pub(crate) fn run() {
             });
             PRESENTATION.with_borrow_mut(|p| p.app = Some(app.handle().clone()));
             install_window_hooks();
+            let centers = PEER.with_borrow(|p| p.as_ref().unwrap().centers.clone());
+            install_observers(app.handle(), &centers[0], &centers[1], &centers[2]);
             for label in [
                 crate::MAIN_WINDOW,
                 "show-fixture",

@@ -1,7 +1,7 @@
 # Desktop App Lock: event and state contract
 
-Status: revision 2, awaiting independent table review. Native implementation
-remains paused at `68ebe612f96294ced6163442e54953c5f60ffb32`.
+Status: revision 2 passed independent table review at `3bccb5f035`
+(receipt `86028c1feb52`). Implementation follows the approved table.
 Decision owner: main. Reviewer: `sesmsfnku7fjm`.
 
 Authoritative decisions: main's `app-lock-desktop-table-decisions-1210.md`
@@ -11,7 +11,8 @@ availability contract `50c57df65c51d4a2ecddfbe2d94e393be11dcb83`.
 Three reviewed heads (`e899f374d2`, `295e3fe69e`, `68ebe612f9`) contained
 findings in the departure/authentication family. This table replaces local
 patching with an input contract. No native implementation change is permitted
-until the independent reviewer approves it.
+until the independent reviewer approves it. That approval was received on
+2026-11-20; the next gate is exact-head implementation review.
 
 ## A concrete case
 
@@ -79,7 +80,8 @@ No C is invented from a reply timestamp.
   A retained successful reply expires as Cancelled for Unlock, Failed for
   Change. No stale Change grants persistence authority.
 - A definite system departure or definite foreground switch away during V/W
-  immediately Confirm(event time), invalidates verification and closes W.
+  immediately Confirm(event time), invalidates verification and closes W. An outstanding Change sender receives
+  `cancelled`, including a resolved Q discarded before persistence.
   It does not wait two more seconds, because departure is already established.
 - Lifecycle cancellation may answer its settings sender immediately, but W
   continues classifying its retained C. Repeated cancellation cannot extend W.
@@ -119,6 +121,9 @@ A fresh, non-expired successful explicit LA verification also clears B. The
 manual Unlock path can start while B is set; stale/rejected LA results cannot
 clear B. Availability still follows the shared rule, so a transient error must
 not turn a blocked/locked app into an unprotected one.
+
+The LA reply-time `NSApp.isActive` sample settles W/C/A only; it does not
+recompute B. The fresh accepted LA success rule is the explicit exception.
 
 System departure notifications immediately record a conservative departure
 and suppress automatic prompts. Their matching return notifications request
@@ -230,6 +235,9 @@ Required native regression cases:
 
 Real-device local-package smoke list:
 
+- **First acceptance gate:** measure real Touch ID success-to-didBecomeActive
+  latency and verify stable return within two seconds. If not, main must
+  reconsider the return policy from device evidence before acceptance.
 - Global shortcut/deep link from background: verify return within two seconds
   after real LA, or a usable explicit retry after expiry.
 - Quit with main minimized or app in background: sheet visible/usable and
@@ -246,4 +254,7 @@ Real-device local-package smoke list:
 Revision 1 (`53cd2d432a`): NOT PASS, receipt `42c0d51088ef`, T1-T4.
 Main resolved T1-T4 in the 12:10 decision and T3 public-signals clarification;
 T4 is mirrored from shared contract commit `50c57df6`.
-Revision 2: awaiting independent table review. Native code remains paused.
+Revision 2 (`3bccb5f035`): PASS, receipt `86028c1feb52`. S1 (cancelled
+settings replies on definite departures) and S2 (reply sampling does not
+reconcile B) are clarified above. S3 (background-entry focus return) is the
+first local-package acceptance gate, not evidence supplied by test substitutes.

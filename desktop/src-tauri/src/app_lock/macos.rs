@@ -59,6 +59,7 @@ struct Presentation {
 }
 thread_local! {
     static PRESENTATION: RefCell<Presentation> = RefCell::new(Presentation::default());
+    static LAST_AVAILABLE: Cell<Option<bool>> = const { Cell::new(None) };
     static PAINTING: Cell<bool> = const { Cell::new(false) };
     // Kept outside the presentation borrow: hiding a view synchronously calls
     // Vault's lifetime checks, which need to recognize this exact temporary hide.
@@ -104,7 +105,14 @@ fn availability() -> Availability {
         return available;
     }
     let context = unsafe { LAContext::new() };
-    let available = unsafe { context.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthentication) }.is_ok();
+    let error = unsafe { context.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthentication) }
+        .err()
+        .map(|e| e.code());
+    let available = LAST_AVAILABLE.with(|last| {
+        let value = password_available(error, last.get());
+        last.set(Some(value));
+        value
+    });
     let biometric = unsafe { context.canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics) };
     let biometry = if unsafe { context.biometryType() } == LABiometryType::TouchID {
         Biometry::TouchId
@@ -131,9 +139,9 @@ fn status(app: &AppHandle) -> Status {
 pub(crate) fn is_locked(app: &AppHandle) -> bool {
     app.try_state::<Owner>().is_some_and(|owner| {
         let mut state = owner.machine.lock().expect("app lock");
-        let before = state.locked;
+        let before = (state.locked, state.busy());
         state.tick(now());
-        if before != state.locked {
+        if before != (state.locked, state.busy()) {
             owner.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         state.locked
@@ -146,7 +154,7 @@ fn result(app: &AppHandle, reason: Option<&str>) -> serde_json::Value {
     }
 }
 fn refresh(app: &AppHandle) {
-    if machine(app).machine.lock().expect("app lock").authenticating.is_some() {
+    if machine(app).machine.lock().expect("app lock").busy() {
         return;
     }
     machine(app).machine.lock().expect("app lock").refresh(availability());
@@ -194,7 +202,9 @@ pub(crate) fn defer_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&
         // Owner-only presentation avoids reentering the public entry gate.
         crate::focus_or_restore_main_window_unlocked(&handle);
         sync_windows(&handle);
-        authenticate(&handle, Authentication::Unlock, None);
+        if machine(&handle).machine.lock().expect("app lock").should_prompt() {
+            authenticate(&handle, Authentication::Unlock, None);
+        }
     });
     true
 }
@@ -209,9 +219,9 @@ fn queue_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) 
     // Publish the pending intent before an authentication completion can
     // observe the unlock. Native entry callbacks may arrive off the UI thread.
     let mut state = owner.machine.lock().expect("app lock");
-    let before = state.locked;
+    let before = (state.locked, state.busy());
     state.tick(now());
-    if before != state.locked {
+    if before != (state.locked, state.busy()) {
         owner.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if !state.locked {
@@ -521,11 +531,11 @@ impl LockView {
             label.setTextColor(Some(&NSColor::secondaryLabelColor()));
             label
         };
-        let title = label(if compact { 17.0 } else { 22.0 });
+        let title = label(if compact { 18.0 } else { 24.0 });
         title.setTextColor(Some(&NSColor::labelColor()));
-        title.setFont(Some(&NSFont::boldSystemFontOfSize(if compact { 17.0 } else { 22.0 })));
+        title.setFont(Some(&NSFont::boldSystemFontOfSize(if compact { 18.0 } else { 24.0 })));
         title.setStringValue(&NSString::from_str(&catalog("lockedTitle")));
-        let note = label(13.0);
+        let note = label(if compact { 12.0 } else { 14.0 });
         let pending = label(12.0);
         let button: Retained<LockButton> = unsafe {
             msg_send![super(LockButton::alloc(mtm).set_ivars(ButtonFields { compact: Cell::new(compact) })), initWithFrame: NSRect::ZERO]
@@ -560,7 +570,7 @@ impl LockView {
     fn arrange(&self) {
         let f = self.ivars();
         let bounds = self.bounds();
-        let width = (bounds.size.width - 48.0).clamp(120.0, if f.compact.get() { 300.0 } else { 340.0 });
+        let width = (bounds.size.width - 48.0).clamp(120.0, if f.compact.get() { 320.0 } else { 384.0 });
         let left = (bounds.size.width - width) / 2.0;
         let mid = bounds.size.height / 2.0;
         let has_pending = !f.pending.stringValue().is_empty();
@@ -593,7 +603,7 @@ impl LockView {
             .as_ref()
             .map(|entry| entry.kind);
         let key = (
-            state.authenticating.is_some(),
+            state.busy(),
             state.failed,
             state.availability.biometry_state,
             f.compact.get(),
@@ -625,7 +635,7 @@ impl LockView {
                 Palette::PrimaryForeground
             },
         )));
-        let verifying = state.authenticating.is_some();
+        let verifying = state.busy();
         let usable = state.availability.biometry_state == BiometryState::Usable;
         let action = NSString::from_str(&catalog(if verifying {
             "verifying"
@@ -661,6 +671,9 @@ impl LockView {
             &NSString::from_str(if usable { "touchid" } else { "key" }),
             None,
         );
+        if let Some(symbol) = &symbol {
+            symbol.setSize(NSSize::new(18.0, 18.0));
+        }
         f.button.setImage(symbol.as_deref());
         f.button.setImagePosition(NSCellImagePosition::ImageLeft);
         let note = if state.failed {
@@ -674,6 +687,12 @@ impl LockView {
                 _ => "",
             }
         };
+        f.note
+            .setFont(Some(&NSFont::systemFontOfSize(if note == "restoreAllWindows" {
+                12.0
+            } else {
+                14.0
+            })));
         f.note.setStringValue(&NSString::from_str(&if note.is_empty() {
             String::new()
         } else {
@@ -920,7 +939,7 @@ fn sync_on_main(app: &AppHandle, mtm: MainThreadMarker) {
         if view.ivars().compact.replace(compact) != compact {
             view.ivars()
                 .title
-                .setFont(Some(&NSFont::boldSystemFontOfSize(if compact { 17.0 } else { 22.0 })));
+                .setFont(Some(&NSFont::boldSystemFontOfSize(if compact { 18.0 } else { 24.0 })));
             view.arrange();
         }
         let locked_title = NSString::from_str(&catalog("lockedTitle"));
@@ -959,7 +978,8 @@ enum Event {
     Leave,
     Arrive,
     SystemLeave(u8),
-    SystemReturn(u8),
+    SystemReturn,
+    OtherApplication,
     Windows,
 }
 fn event(app: &AppHandle, event: Event) {
@@ -971,40 +991,150 @@ fn event(app: &AppHandle, event: Event) {
         Event::Arrive => {
             refresh(app);
             if active() {
-                machine(app).machine.lock().expect("app lock").arrive(now());
+                let recovered = awake_on_console();
+                let owner = machine(app);
+                let mut state = owner.machine.lock().expect("app lock");
+                state.reconcile(recovered);
+                state.arrive(now());
             }
         }
         Event::SystemLeave(reason) => {
             machine(app).machine.lock().expect("app lock").block(reason, now());
-            let (context, reply) = PRESENTATION.with_borrow_mut(|p| (p.context.take(), p.reply.take()));
-            if let Some(context) = context {
-                unsafe {
-                    context.invalidate();
-                }
-            }
-            if let Some(reply) = reply {
-                let _ = reply.send(result(app, Some("cancelled")));
+            invalidate_native(app);
+        }
+        Event::OtherApplication => {
+            let owner = machine(app);
+            let mut state = owner.machine.lock().expect("app lock");
+            if state.busy() {
+                state.system_leave(now());
+                drop(state);
+                invalidate_native(app);
             }
         }
-        Event::SystemReturn(reason) => {
-            refresh(app);
-            machine(app)
-                .machine
-                .lock()
-                .expect("app lock")
-                .unblock(reason, active(), now());
+        Event::SystemReturn => {
+            // Return hints cannot clear suppression or impersonate NSApp activation.
+            machine(app).machine.lock().expect("app lock").tick(now());
         }
         Event::Windows => {}
     }
     finish_completion(app);
     sync_windows(app);
-    if matches!(event, Event::Arrive | Event::SystemReturn(_)) {
+    if matches!(event, Event::Arrive) {
         if active() && machine(app).machine.lock().expect("app lock").should_prompt() {
             authenticate(app, Authentication::Unlock, None);
         }
         deliver_pending(app);
     }
 }
+fn invalidate_native(app: &AppHandle) {
+    let (context, reply) = PRESENTATION.with_borrow_mut(|p| (p.context.take(), p.reply.take()));
+    if let Some(context) = context {
+        unsafe {
+            context.invalidate();
+        }
+    }
+    // S1: every definite departure settles an outstanding settings command.
+    if let Some(reply) = reply {
+        let _ = reply.send(result(app, Some("cancelled")));
+    }
+}
+
+fn awake_on_console() -> bool {
+    #[cfg(feature = "app-lock-e2e")]
+    if let Some(facts) = e2e::recovery_facts() {
+        return facts;
+    }
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGSessionCopyCurrentDictionary() -> *const c_void;
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayIsAsleep(display: u32) -> u32;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFGetTypeID(value: *const c_void) -> usize;
+        fn CFBooleanGetTypeID() -> usize;
+        fn CFBooleanGetValue(value: *const c_void) -> u8;
+        fn CFRelease(value: *const c_void);
+    }
+    // CGSession's Copy rule owns the dictionary. Validate the borrowed value's
+    // CF type before reading it, and release the dictionary on every path.
+    let recovered = unsafe {
+        let dictionary = CGSessionCopyCurrentDictionary();
+        if dictionary.is_null() {
+            false
+        } else {
+            // Public kCGSessionOnConsoleKey is this CFSTR macro, not an exported symbol.
+            let key = NSString::from_str("kCGSSessionOnConsoleKey");
+            let value = CFDictionaryGetValue(dictionary, (&*key as *const NSString).cast());
+            let on_console =
+                !value.is_null() && CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue(value) != 0;
+            CFRelease(dictionary);
+            on_console && CGDisplayIsAsleep(CGMainDisplayID()) == 0
+        }
+    };
+    if !recovered {
+        eprintln!("App Lock: foreground public facts inconclusive; retaining system suppression");
+    }
+    recovered
+}
+
+fn is_other_regular_application(
+    pid: i32,
+    bundle: Option<&str>,
+    regular: bool,
+    own_pid: i32,
+    own_bundle: Option<&str>,
+) -> bool {
+    regular
+        && pid > 0
+        && pid != own_pid
+        && !bundle.zip(own_bundle).is_some_and(|(other, own)| {
+            other == own || other.strip_prefix(own).is_some_and(|suffix| suffix.starts_with('.'))
+        })
+}
+fn observe_application_switch(app: &AppHandle, center: &NSNotificationCenter) {
+    let handle = app.clone();
+    let block = RcBlock::new(move |notification: NonNull<NSNotification>| {
+        let notification = unsafe { notification.as_ref() };
+        let application = notification.userInfo().and_then(|info| {
+            info.objectForKey(unsafe { NSWorkspaceApplicationKey })
+                .and_then(|object| object.downcast::<NSRunningApplication>().ok())
+        });
+        let Some(application) = application else {
+            return;
+        };
+        let own = NSRunningApplication::currentApplication();
+        if is_other_regular_application(
+            application.processIdentifier(),
+            application
+                .bundleIdentifier()
+                .as_ref()
+                .map(|s| s.to_string())
+                .as_deref(),
+            application.activationPolicy() == NSApplicationActivationPolicy::Regular,
+            own.processIdentifier(),
+            own.bundleIdentifier().as_ref().map(|s| s.to_string()).as_deref(),
+        ) {
+            let app = handle.clone();
+            let _ = handle.run_on_main_thread(move || event(&app, Event::OtherApplication));
+        }
+    });
+    let observer = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceDidActivateApplicationNotification),
+            None,
+            None,
+            &block,
+        )
+    };
+    let center =
+        unsafe { Retained::retain(center as *const _ as *mut NSNotificationCenter) }.expect("workspace center");
+    PRESENTATION.with_borrow_mut(|p| p.observers.push((center, observer)));
+}
+
 fn observe(app: &AppHandle, center: &NSNotificationCenter, name: &NSString, kind: Event) {
     let handle = app.clone();
     let block = RcBlock::new(move |_: NonNull<NSNotification>| {
@@ -1022,6 +1152,52 @@ fn observe(app: &AppHandle, center: &NSNotificationCenter, name: &NSString, kind
         unsafe { Retained::retain(center as *const _ as *mut NSNotificationCenter) }.expect("notification center");
     PRESENTATION.with_borrow_mut(|p| p.observers.push((center, observer)));
 }
+fn install_observers(
+    app: &AppHandle,
+    center: &NSNotificationCenter,
+    workspace: &NSNotificationCenter,
+    distributed: &NSNotificationCenter,
+) {
+    unsafe {
+        observe(app, center, NSApplicationDidResignActiveNotification, Event::Leave);
+        observe(app, center, NSApplicationDidBecomeActiveNotification, Event::Arrive);
+        for name in [
+            NSWindowDidBecomeKeyNotification,
+            NSWindowDidChangeOcclusionStateNotification,
+            NSWindowDidResizeNotification,
+        ] {
+            observe(app, center, name, Event::Windows);
+        }
+        for (name, reason) in [
+            (NSWorkspaceWillSleepNotification, 1),
+            (NSWorkspaceScreensDidSleepNotification, 2),
+            (NSWorkspaceSessionDidResignActiveNotification, 4),
+        ] {
+            observe(app, workspace, name, Event::SystemLeave(reason));
+        }
+        for name in [
+            NSWorkspaceDidWakeNotification,
+            NSWorkspaceScreensDidWakeNotification,
+            NSWorkspaceSessionDidBecomeActiveNotification,
+        ] {
+            observe(app, workspace, name, Event::SystemReturn);
+        }
+        observe_application_switch(app, workspace);
+    }
+    observe(
+        app,
+        distributed,
+        &NSString::from_str("com.apple.screenIsLocked"),
+        Event::SystemLeave(8),
+    );
+    observe(
+        app,
+        distributed,
+        &NSString::from_str("com.apple.screenIsUnlocked"),
+        Event::SystemReturn,
+    );
+}
+
 pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
     let path = app
         .path()
@@ -1047,45 +1223,11 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
     });
     PRESENTATION.with_borrow_mut(|p| p.app = Some(app.clone()));
     install_window_hooks();
-    let center = NSNotificationCenter::defaultCenter();
-    unsafe {
-        observe(app, &center, NSApplicationDidResignActiveNotification, Event::Leave);
-        observe(app, &center, NSApplicationDidBecomeActiveNotification, Event::Arrive);
-        for name in [
-            NSWindowDidBecomeKeyNotification,
-            NSWindowDidChangeOcclusionStateNotification,
-            NSWindowDidResizeNotification,
-        ] {
-            observe(app, &center, name, Event::Windows);
-        }
-        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
-        for (name, reason) in [
-            (NSWorkspaceWillSleepNotification, 1),
-            (NSWorkspaceScreensDidSleepNotification, 2),
-            (NSWorkspaceSessionDidResignActiveNotification, 4),
-        ] {
-            observe(app, &workspace, name, Event::SystemLeave(reason));
-        }
-        for (name, reason) in [
-            (NSWorkspaceDidWakeNotification, 1),
-            (NSWorkspaceScreensDidWakeNotification, 2),
-            (NSWorkspaceSessionDidBecomeActiveNotification, 4),
-        ] {
-            observe(app, &workspace, name, Event::SystemReturn(reason));
-        }
-    }
-    let distributed = NSDistributedNotificationCenter::defaultCenter();
-    observe(
+    install_observers(
         app,
-        &distributed,
-        &NSString::from_str("com.apple.screenIsLocked"),
-        Event::SystemLeave(8),
-    );
-    observe(
-        app,
-        &distributed,
-        &NSString::from_str("com.apple.screenIsUnlocked"),
-        Event::SystemReturn(8),
+        &NSNotificationCenter::defaultCenter(),
+        &NSWorkspace::sharedWorkspace().notificationCenter(),
+        &NSDistributedNotificationCenter::defaultCenter(),
     );
     sync_windows(app);
     let handle = app.clone();
@@ -1106,9 +1248,9 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
                     let changed = {
                         let owner = machine(&app);
                         let mut state = owner.machine.lock().expect("app lock");
-                        let before = state.locked;
+                        let before = (state.locked, state.busy());
                         state.tick(now());
-                        before != state.locked
+                        before != (state.locked, state.busy())
                             || state.completion.is_some()
                             || owner.dirty.load(std::sync::atomic::Ordering::Relaxed)
                     };

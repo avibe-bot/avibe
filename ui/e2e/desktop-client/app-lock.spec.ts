@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { APP_LOCK_FIXTURES, type AppLockStatus, type AppLockSetResult } from '../../src/lib/appLockContract';
 
 type Snapshot = {
+  awaySince: number | null; candidateLeave: number | null; blocked: number; shouldPrompt: boolean;
   status: AppLockStatus; locked: boolean; verifying: boolean; authCalls: number;
   persistedPolicy: string | null; pending: boolean; executed: string[]; mainTitle: string; floatingVisible: boolean[]; quitAlertVisible: boolean;
   windows: { title: string; covered: boolean; hidden: boolean; contentCount: number; compact: boolean; firstResponderIsCover: boolean; button: string; pendingLabel: string; buttonTop: number; pendingBottom: number }[];
@@ -149,7 +150,8 @@ test('the continuous-time threshold covers before return and includes sleep', as
   await peer.send('outcome', { value: null });
   const wake = await peer.send('wake', { time: 161 });
   expect(wake.locked).toBe(true);
-  expect(wake.verifying).toBe(true);
+  expect(wake.verifying).toBe(false);
+  expect((await peer.send('arrive', { time: 162 })).verifying).toBe(true);
   expect(wake.windows.every((window) => window.covered && window.hidden)).toBe(true);
 });
 
@@ -286,15 +288,17 @@ test('expired success never persists a setting or unlocks on an hour-late arriva
   await peer.send('outcome', { value: null });
   const late = await peer.send('arrive', { time: 3600 });
   expect(late.locked).toBe(true);
-  expect(late.verifying).toBe(false);
-  await peer.send('unlock');
+  expect(late.verifying).toBe(true); // a new visit starts a fresh evaluation
+  expect(late.authCalls).toBe(3);
   await peer.send('leave', { time: 3601 });
   await peer.send('outcome', { value: 'success' });
   // No explicit tick: Arrive itself must reject the old success.
+  await peer.send('tick', { time: 7200 });
+  await peer.send('outcome', { value: null });
   const later = await peer.send('arrive', { time: 7200 });
   expect(later.locked).toBe(true);
-  expect(later.verifying).toBe(false);
-  expect(later.authCalls).toBe(3);
+  expect(later.verifying).toBe(true);
+  expect(later.authCalls).toBe(4);
 });
 
 test('sleep invalidates a successful setting reply still waiting for activation', async () => {
@@ -308,4 +312,142 @@ test('sleep invalidates a successful setting reply still waiting for activation'
   expect(sleeping.persistedPolicy).toBe('immediately');
   await peer.send('outcome', { value: null });
   expect((await peer.send('wake', { time: 10 })).locked).toBe(true);
+});
+
+
+for (const policy of ['immediately', 'oneMinute', 'fiveMinutes'] as const) {
+  test(`E20/E21 unlocked Quit and busy cancellation never create absence (${policy})`, async () => {
+    await peer.send('setPolicy', { policy });
+    for (const busy of [false, true]) {
+      const { during, after } = await peer.send<{ during: Snapshot; after: Snapshot }>('quitAlert', { busy });
+      expect(during.quitAlertVisible).toBe(true);
+      expect(during.locked).toBe(false);
+      expect(after.awaySince).toBeNull();
+      expect((await peer.send('tick', { time: 1000 })).locked).toBe(false);
+    }
+    await peer.send('leave', { time: 1001 });
+    await peer.send('quitAlert');
+    const overdue = await peer.send('tick', { time: 1400 });
+    expect(overdue.awaySince).toBe(1001);
+    expect(overdue.locked).toBe(true);
+  });
+}
+
+test('E19/N03 lifecycle cancellation preserves the LA candidate through the original return window', async () => {
+  for (const returns of [false, true]) {
+    await peer.send('reset');
+    await peer.send('setPolicy', { policy: 'oneMinute' });
+    await peer.send('outcome', { value: null });
+    const setting = peer.send<AppLockSetResult>('setPolicy', { policy: 'off' });
+    await peer.send('leave', { time: 1 });
+    await peer.send('tick', { time: 10 });
+    await peer.send('quitAlert');
+    expect(await setting).toMatchObject({ ok: false, reason: 'cancelled' });
+    if (returns) await peer.send('arrive', { time: 11 });
+    await peer.send('outcome', { value: 'success' }); // old epoch cannot write
+    const state = await peer.send('tick', { time: 1000 });
+    expect(state.locked).toBe(!returns);
+    expect(state.awaySince).toBe(returns ? null : 1);
+    expect(state.persistedPolicy).toBe('oneMinute');
+  }
+});
+
+test('N01/E40 another regular app cancels Change; LA and own helper activation do not', async () => {
+  await peer.send('setPolicy', { policy: 'oneMinute' });
+  await peer.send('outcome', { value: null });
+  const setting = peer.send<AppLockSetResult>('setPolicy', { policy: 'off' });
+  await peer.send('leave', { time: 1 });
+  for (const [bundle, regular] of [['com.apple.coreautha', false], ['com.apple.SecurityAgent', false], ['io.avibe.test.helper', true]] as const) {
+    const state = await peer.send('application', { bundle, regular });
+    expect(state.verifying).toBe(true);
+    expect(state.awaySince).toBeNull();
+  }
+  const departed = await peer.send('application', { bundle: 'com.apple.finder', regular: true });
+  expect(await setting).toMatchObject({ ok: false, reason: 'cancelled' });
+  expect(departed.awaySince).toBe(1);
+  await peer.send('outcome', { value: 'success' });
+  const later = await peer.send('tick', { time: 61 });
+  expect(later.locked).toBe(true);
+  expect(later.persistedPolicy).toBe('oneMinute');
+});
+
+test('N02/E25/E39 public activation recovers all notification hints; manual LA works if facts remain inconclusive', async () => {
+  for (const [leave, back] of [['sleep', 'wake'], ['displaySleep', 'displayWake'], ['sessionLeave', 'sessionReturn'], ['screenLock', 'screenUnlock']]) {
+    await peer.send('reset', { policy: 'immediately' });
+    await peer.send('unlock');
+    await peer.send('outcome', { value: null });
+    await peer.send(leave, { time: 1 });
+    const hinted = await peer.send(back, { time: 10 });
+    expect(hinted.blocked).not.toBe(0);
+    expect(hinted.awaySince).toBe(1);
+    await peer.send('recovery', { valid: false });
+    const inconclusive = await peer.send('arrive', { time: 11 });
+    expect(inconclusive.locked).toBe(true);
+    expect(inconclusive.authCalls).toBe(1);
+    expect(inconclusive.blocked).not.toBe(0);
+    expect((await peer.send('unlock')).authCalls).toBe(2);
+    const recovered = await peer.send('outcome', { value: 'success' });
+    expect(recovered.locked).toBe(false);
+    expect(recovered.blocked).toBe(0);
+    await peer.send(leave, { time: 12 }); // omit the paired return hint entirely
+    await peer.send('recovery', { valid: true });
+    await peer.send('outcome', { value: null });
+    const fresh = await peer.send('arrive', { time: 13 });
+    expect(fresh.blocked).toBe(0);
+    expect(fresh.verifying).toBe(true);
+    expect(fresh.authCalls).toBe(3);
+  }
+});
+
+test('N04/E42 transient capability failures preserve native covers; passcode restoration starts locked', async () => {
+  await peer.send('reset', { policy: 'immediately' });
+  for (const error of [-4, -1004, -8]) {
+    const state = await peer.send('capability', { error });
+    expect(state.status.available).toBe(true);
+    expect(state.locked).toBe(true);
+    expect(state.windows.every((window) => window.hidden && window.covered)).toBe(true);
+  }
+  const missing = await peer.send('capability', { error: -5 });
+  expect(missing.locked).toBe(false);
+  expect(missing.status.available).toBe(false);
+  expect((await peer.send('capability', { error: -4 })).status.available).toBe(false);
+  const restored = await peer.send('capability', { error: null });
+  expect(restored.locked).toBe(true);
+  expect(restored.status.policy).toBe('immediately');
+  expect((await peer.send('unlock')).locked).toBe(false);
+});
+
+
+test('E28/E29/E32/E33 native Dock, tray, menu, deep-link and Mini callers preserve the original departure', async () => {
+  await peer.send('setPolicy', { policy: 'immediately' });
+  await peer.send('leave', { time: 10 });
+  await peer.send('outcome', { value: null });
+  // Release and document completion alone cannot publish an entry or start LA.
+  for (const value of ['shortcutRelease', 'documentFinished']) {
+    const state = await peer.send('source', { value });
+    expect(state.pending).toBe(false);
+    expect(state.authCalls).toBe(1);
+    expect(state.awaySince).toBe(10);
+  }
+  for (const value of ['dock', 'tray', 'settings', 'signOut', 'instances', 'link', 'shortcutPress']) {
+    const state = await peer.send('source', { value });
+    expect(state.pending).toBe(true);
+    expect(state.locked).toBe(true);
+    expect(state.awaySince).toBe(10);
+    expect(state.executed).toEqual([]);
+    expect(state.floatingVisible[0]).toBe(false);
+  }
+  const release = await peer.send('source', { value: 'shortcutRelease' });
+  expect(release.pending).toBe(true);
+  expect(release.executed).toEqual([]);
+});
+
+test('E22 Quit Keep and Stop choices do not request an unlock', async () => {
+  for (const [response, answer] of [[1000, 'Yes'], [1001, 'No']] as const) {
+    await peer.send('reset', { policy: 'immediately' });
+    const { after } = await peer.send<{ after: Snapshot }>('quitAlert', { response });
+    expect(after.executed).toContain(`quit:${answer}`);
+    expect(after.authCalls).toBe(0);
+    expect(after.locked).toBe(true);
+  }
 });
