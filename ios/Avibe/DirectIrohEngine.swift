@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -590,32 +591,293 @@ protocol DirectIrohNetworkMonitoring: AnyObject {
     /// after the first reading. Starting again replaces the watch.
     @MainActor func start(onChange: @escaping @MainActor () -> Void)
     @MainActor func stop()
+    /// How many updates of the system's path, since this monitor was made,
+    /// changed nothing the transport depends on and were not reported.
+    @MainActor var ignoredUpdates: Int { get }
+}
+
+extension DirectIrohNetworkMonitoring {
+    @MainActor var ignoredUpdates: Int {
+        0
+    }
+}
+
+/// One address of one network interface, read to be hashed and then
+/// dropped: it is never kept, logged, or sent anywhere.
+struct DirectIrohInterfaceAddress: Hashable, Sendable {
+    enum Family: UInt8, Sendable {
+        case ipv4 = 4
+        case ipv6 = 6
+    }
+
+    let interface: String
+    let family: Family
+    let bytes: [UInt8]
+
+    /// An interface a VPN or another tunnel runs on.
+    static func isTunnel(_ interface: String) -> Bool {
+        ["utun", "ipsec", "ppp", "tun", "tap"].contains { interface.hasPrefix($0) }
+    }
+
+    /// IPv4 169.254/16 or IPv6 fe80::/10. The system keeps tunnel
+    /// interfaces of its own that carry only such addresses.
+    var isLinkLocal: Bool {
+        switch family {
+        case .ipv4:
+            return bytes.count == 4 && bytes[0] == 169 && bytes[1] == 254
+        case .ipv6:
+            return bytes.count == 16 && bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80
+        }
+    }
+
+    /// Every IPv4 and IPv6 address of every interface that is up, from
+    /// `getifaddrs`. Empty if the system does not answer.
+    static func system() -> [DirectIrohInterfaceAddress] {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let first else {
+            return []
+        }
+        defer {
+            freeifaddrs(first)
+        }
+        var found: [DirectIrohInterfaceAddress] = []
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            cursor = entry.pointee.ifa_next
+            guard
+                Int32(entry.pointee.ifa_flags) & IFF_UP != 0,
+                let address = entry.pointee.ifa_addr
+            else {
+                continue
+            }
+            let name = String(cString: entry.pointee.ifa_name)
+            switch Int32(address.pointee.sa_family) {
+            case AF_INET:
+                let bytes = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { pointer in
+                    var raw = pointer.pointee.sin_addr
+                    return withUnsafeBytes(of: &raw) { Array($0) }
+                }
+                found.append(DirectIrohInterfaceAddress(interface: name, family: .ipv4, bytes: bytes))
+            case AF_INET6:
+                let bytes = address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { pointer in
+                    var raw = pointer.pointee.sin6_addr
+                    return withUnsafeBytes(of: &raw) { Array($0) }
+                }
+                found.append(DirectIrohInterfaceAddress(interface: name, family: .ipv6, bytes: bytes))
+            default:
+                break
+            }
+        }
+        return found
+    }
+}
+
+/// What of the system's network path decides whether the direct path has
+/// to be checked again. Two readings that are equal here are the same
+/// network to the transport, whatever else the system reported with them.
+///
+/// Compared: whether there is a path at all; the interfaces it can use, by
+/// name and kind, in the system's order of preference (Wi-Fi to cellular
+/// and back, a VPN that takes the default route); whether it carries IPv4,
+/// IPv6 and DNS; its gateways; and the addresses of those interfaces and of
+/// every tunnel interface that has a routable address (an address added or
+/// removed on the same interface, a VPN turned on or off). Gateways and
+/// addresses are kept only as SHA-256 digests.
+///
+/// Not compared: whether the path is expensive or constrained. Neither
+/// changes what this App's own connections can reach; when one comes with
+/// another interface or address, that is what is seen.
+struct DirectIrohNetworkSnapshot: Equatable, Sendable {
+    enum Status: Equatable, Sendable {
+        case satisfied
+        case unsatisfied
+        case requiresConnection
+    }
+
+    enum InterfaceKind: Equatable, Sendable {
+        case wifi
+        case cellular
+        case wired
+        case loopback
+        case other
+    }
+
+    struct Interface: Equatable, Sendable {
+        let name: String
+        let kind: InterfaceKind
+    }
+
+    let status: Status
+    let interfaces: [Interface]
+    let supportsIPv4: Bool
+    let supportsIPv6: Bool
+    let supportsDNS: Bool
+    let gatewayDigest: Data
+    let addressDigest: Data
+
+    /// `gateways` and `addresses` are hashed here and not kept.
+    init(
+        status: Status,
+        interfaces: [Interface],
+        supportsIPv4: Bool,
+        supportsIPv6: Bool,
+        supportsDNS: Bool,
+        gateways: [String],
+        addresses: [DirectIrohInterfaceAddress]
+    ) {
+        self.status = status
+        self.interfaces = interfaces
+        self.supportsIPv4 = supportsIPv4
+        self.supportsIPv6 = supportsIPv6
+        self.supportsDNS = supportsDNS
+        gatewayDigest = Self.digest(gateways.sorted().map { gateway -> [UInt8] in Array(gateway.utf8) })
+        let records = Self.relevant(addresses, pathInterfaces: Set(interfaces.map(\.name)))
+            .map { address -> [UInt8] in
+                var record = Array(address.interface.utf8)
+                record.append(0)
+                record.append(address.family.rawValue)
+                record.append(contentsOf: address.bytes)
+                return record
+            }
+        addressDigest = Self.digest(records.sorted { $0.lexicographicallyPrecedes($1) })
+    }
+
+    /// The addresses that count: all of the path's own interfaces, and the
+    /// routable ones of tunnel interfaces. A tunnel interface with only
+    /// link-local addresses is the system's own, not a VPN.
+    static func relevant(
+        _ addresses: [DirectIrohInterfaceAddress],
+        pathInterfaces: Set<String>
+    ) -> [DirectIrohInterfaceAddress] {
+        Array(Set(addresses.filter { address in
+            pathInterfaces.contains(address.interface)
+                || (DirectIrohInterfaceAddress.isTunnel(address.interface) && !address.isLinkLocal)
+        }))
+    }
+
+    private static func digest(_ records: [[UInt8]]) -> Data {
+        var hasher = SHA256()
+        for record in records {
+            // Length first, so no two lists of records hash alike.
+            withUnsafeBytes(of: UInt32(record.count).bigEndian) { hasher.update(bufferPointer: $0) }
+            hasher.update(data: record)
+        }
+        return Data(hasher.finalize())
+    }
+}
+
+extension DirectIrohNetworkSnapshot {
+    /// The system's path, with the interface addresses read beside it.
+    init(path: NWPath, addresses: [DirectIrohInterfaceAddress]) {
+        let status: Status
+        switch path.status {
+        case .satisfied:
+            status = .satisfied
+        case .requiresConnection:
+            status = .requiresConnection
+        default:
+            status = .unsatisfied
+        }
+        self.init(
+            status: status,
+            interfaces: path.availableInterfaces.map { interface in
+                let kind: InterfaceKind
+                switch interface.type {
+                case .wifi:
+                    kind = .wifi
+                case .cellular:
+                    kind = .cellular
+                case .wiredEthernet:
+                    kind = .wired
+                case .loopback:
+                    kind = .loopback
+                default:
+                    kind = .other
+                }
+                return Interface(name: interface.name, kind: kind)
+            },
+            supportsIPv4: path.supportsIPv4,
+            supportsIPv6: path.supportsIPv6,
+            supportsDNS: path.supportsDNS,
+            gateways: path.gateways.map { String(describing: $0) },
+            addresses: addresses
+        )
+    }
+}
+
+/// Which readings of the system's path are changes. The first describes the
+/// path as it is; a later one is a change only if it differs from the one
+/// before it.
+struct DirectIrohNetworkChangeFilter {
+    enum Verdict: Equatable {
+        case baseline
+        case unchanged
+        case changed
+    }
+
+    private var last: DirectIrohNetworkSnapshot?
+
+    mutating func observe(_ snapshot: DirectIrohNetworkSnapshot) -> Verdict {
+        guard let last else {
+            self.last = snapshot
+            return .baseline
+        }
+        guard snapshot != last else {
+            return .unchanged
+        }
+        self.last = snapshot
+        return .changed
+    }
+
+    /// The next reading is a baseline again.
+    mutating func reset() {
+        last = nil
+    }
 }
 
 /// The system's view of the network path. A change is only a hint: the
-/// transport validates its path before it reports anything lost.
+/// transport validates its path before it reports anything lost. An update
+/// that changes nothing in `DirectIrohNetworkSnapshot` is not a change: the
+/// system sends such updates on its own, seconds apart on some networks, and
+/// each one reported would suspend a working path to probe it again.
 @MainActor
 final class DirectIrohPathMonitor: DirectIrohNetworkMonitoring {
     private var monitor: NWPathMonitor?
-    private var hasBaseline = false
+    private var filter = DirectIrohNetworkChangeFilter()
     private var onChange: (@MainActor () -> Void)?
+    private let readAddresses: @Sendable () -> [DirectIrohInterfaceAddress]
+    private(set) var ignoredUpdates = 0
+
+    init(
+        readAddresses: @escaping @Sendable () -> [DirectIrohInterfaceAddress] = {
+            DirectIrohInterfaceAddress.system()
+        }
+    ) {
+        self.readAddresses = readAddresses
+    }
 
     func start(onChange: @escaping @MainActor () -> Void) {
         stop()
         self.onChange = onChange
         let monitor = NWPathMonitor()
         self.monitor = monitor
-        monitor.pathUpdateHandler = { [weak self, weak monitor] _ in
+        let readAddresses = readAddresses
+        monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+            // Read where the update arrives, so the addresses are the ones
+            // that came with it. Only their digest leaves this closure.
+            let snapshot = DirectIrohNetworkSnapshot(path: path, addresses: readAddresses())
             MainActor.assumeIsolated {
                 guard let self, let monitor, self.monitor === monitor else {
                     return
                 }
-                // The first update describes the path as it is, not a change.
-                guard self.hasBaseline else {
-                    self.hasBaseline = true
-                    return
+                switch self.filter.observe(snapshot) {
+                case .baseline:
+                    break
+                case .unchanged:
+                    self.ignoredUpdates += 1
+                case .changed:
+                    self.onChange?()
                 }
-                self.onChange?()
             }
         }
         monitor.start(queue: .main)
@@ -624,7 +886,7 @@ final class DirectIrohPathMonitor: DirectIrohNetworkMonitoring {
     func stop() {
         monitor?.cancel()
         monitor = nil
-        hasBaseline = false
+        filter.reset()
         onChange = nil
     }
 }
