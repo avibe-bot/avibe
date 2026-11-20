@@ -3002,11 +3002,15 @@ describe('SettingsModelsPage reset cards', () => {
 
     // The server refused before asking the vendor: the account was busy, or holds no usable card.
     const reads = () => vi.mocked(modelsApi.getQuota).mock.calls.length;
+    // Its refusal carries the fresh reading, drawn as it is.
     let before = reads();
-    redeem.mockRejectedValueOnce(new ApiCallError('reset_card_locked', undefined, true, [], [], [], 409));
+    const locked = new ApiCallError('reset_card_locked', undefined, true, [], [], [], 409);
+    locked.quota = quotaWith({ fable: 2 });
+    redeem.mockRejectedValueOnce(locked);
     await use();
     expect((await within(account()).findByRole('alert')).textContent).toMatch(/^Not used: this account can’t use this kind|^没有用掉：这个账号现在不能用这种卡/);
-    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    expect(within(account()).getByText('×2')).toBeTruthy();
+    expect(reads()).toBe(before);
 
     // No answer, or a server failure that names no outcome: the card may be spent. Nothing is
     // retried, the quota is read again for the server's lock, and the account's own refresh

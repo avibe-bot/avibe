@@ -70,8 +70,8 @@ export function useResetCardActions({ land, reread, afterUse }: {
           : { phase: 'unconfirmed', kind });
     } catch (error) {
       set(sourceId, failurePhase(error, kind));
-      // The refusal that a count changed carries the fresh reading; anything else is read again.
-      if (error instanceof ApiCallError && error.code === COUNT_CHANGED && error.quota) await land(error.quota);
+      // A refusal carries the fresh reading to redraw from; anything else is read again.
+      if (error instanceof ApiCallError && error.quota) await land(error.quota);
       else await reread().catch(() => undefined);
     } finally {
       inFlight.current.delete(sourceId);
