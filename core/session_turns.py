@@ -1258,6 +1258,12 @@ class SessionTurnManager:
         with self._sqlite_engine().connect() as conn:
             return delivery_store.turn_last_reply(conn, turn_id)
 
+    def _publish_local_turn(self, session_id: str, turn: Turn) -> None:
+        from core.loop_watchdog import transient_admission_lock
+
+        with transient_admission_lock:
+            self.in_flight[session_id] = turn
+
     def with_idle_turn_ledger(self, action: Callable[[], None]) -> None:
         """Off-loop trial only. Fence durable admissions through the short action.
 
@@ -1267,7 +1273,7 @@ class SessionTurnManager:
         """
         with self._sqlite_engine().connect() as conn:
             conn.exec_driver_sql("BEGIN IMMEDIATE")
-            if not delivery_store.session_ids_with_live_turns(conn):
+            if not delivery_store.has_live_turn(conn):
                 action()
             # Connection close rolls back this read-only reservation.
 
@@ -8886,14 +8892,14 @@ class SessionTurnManager:
 
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
         if isinstance(session_id, str) and session_id:
-            self.in_flight[session_id] = Turn(
+            self._publish_local_turn(session_id, Turn(
                 task=task,
                 context=context,
                 started_at=_utc_now_iso(),
                 logical_turn_id=logical_turn_id,
                 delivery_id=delivery_id,
                 source=source,
-            )
+            ))
             # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
             # ``update_session``'s backend lock re-checks ``agent_status`` inside
             # its UPDATE predicate, so writing ``running`` synchronously here —
@@ -10425,12 +10431,12 @@ class SessionTurnManager:
             # roll the sink back so it doesn't leak, and skip FSM registration.
             self.pop_turn_sink(session_key, done)
             return False
-        self.in_flight[session_id] = Turn(
+        self._publish_local_turn(session_id, Turn(
             task=task,
             context=context,
             started_at=_utc_now_iso(),
             logical_turn_id=turn_token,
-        )
+        ))
         bus.publish(
             "turn.start",
             _turn_event_payload(session_id, turn_token),

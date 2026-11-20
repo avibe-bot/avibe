@@ -51,11 +51,14 @@ GC_SLOW_SECONDS = 0.2
 _MAX_GC_REPORTS = 64
 # Written only at Vibey stream boundaries on the controller loop; sampled without a lock by GC.
 _active_requests = 0
+# Only protects in-memory publication and the final freeze instruction; never DB or IPC.
+transient_admission_lock = threading.Lock()
 
 
 def model_stream_opened() -> None:
     global _active_requests
-    _active_requests += 1
+    with transient_admission_lock:
+        _active_requests += 1
 
 
 def model_stream_closed() -> None:
@@ -123,17 +126,27 @@ class EventLoopWatchdog:
             return self._freeze_state
 
     async def _try_warm_freeze(self, manager) -> None:
+        cancelled = threading.Event()
+        task = asyncio.current_task()
+
         def apply():
-            with self._freeze_lock:
+            with self._freeze_lock, transient_admission_lock:
                 if (self._freeze_state == "armed" and not self._stopped.is_set()
+                        and not cancelled.is_set() and not task.cancelling()
                         and not _active_requests and not manager.in_flight and not gc.get_freeze_count()):
                     gc.freeze()
                     self._freeze_state = "frozen"
                     self._freeze_manager = None
+        worker = asyncio.create_task(asyncio.to_thread(manager.with_idle_turn_ledger, apply))
         try:
-            await asyncio.to_thread(manager.with_idle_turn_ledger, apply)
+            await asyncio.shield(worker)
             if self._freeze_state == "frozen":
                 logger.warning("Warm GC trial frozen: count=%d", gc.get_freeze_count())
+        except asyncio.CancelledError:
+            with self._freeze_lock:
+                cancelled.set()
+            await asyncio.shield(worker)
+            raise
         except Exception:
             logger.warning("Warm GC trial: quiescence unavailable; freeze skipped")
         finally:
