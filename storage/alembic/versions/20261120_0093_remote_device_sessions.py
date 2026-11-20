@@ -17,6 +17,8 @@ def upgrade() -> None:
         sa.Column("subscription_id", sa.String(), primary_key=True, nullable=False),
         sa.Column("binding", sa.String(), nullable=False),
         sa.Column("subject", sa.String(), nullable=False),
+        sa.Column("email", sa.String(), nullable=False),
+        sa.Column("login_role", sa.String(), nullable=False),
         sa.Column("push_id", sa.String(), nullable=True),
         sa.Column("session_id", sa.String(), nullable=False),
         sa.Column("device_id", sa.String(), nullable=False),

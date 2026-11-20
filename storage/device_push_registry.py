@@ -9,8 +9,16 @@ from storage import web_push_service
 from vibe.device_metadata import describe, device_key
 
 
-def attest(conn, row, session, binding, subject, logical_id):
-    values = dict(binding=binding, subject=subject, push_id=row["device_id"], session_id=session, device_id=logical_id)
+def attest(conn, row, session, binding, subject, logical_id, email, login_role):
+    values = dict(
+        binding=binding,
+        subject=subject,
+        email=email,
+        login_role=login_role,
+        push_id=row["device_id"],
+        session_id=session,
+        device_id=logical_id,
+    )
     stmt = insert(links).values(subscription_id=row["id"], **values)
     conn.execute(
         stmt.on_conflict_do_update(
@@ -40,6 +48,8 @@ def _rows(binding, subject, owner):
             push.c.device_label,
             links.c.device_id.label("logical_id"),
             links.c.subject,
+            links.c.email,
+            links.c.login_role,
         )
         .select_from(push.outerjoin(links, _proven(binding)) if owner else links.join(push, _proven(binding)))
         .where(push.c.enabled == 1)
@@ -76,7 +86,7 @@ def join_devices(conn, grouped, binding, subject, owner):
             id=key,
             kind=metadata["kind"],
             display_name=row.device_label or metadata["display_name"],
-            account={"subject": row.subject, "email": None, "login_role": None} if row.subject else None,
+            account={"subject": row.subject, "email": row.email, "login_role": row.login_role} if row.subject else None,
             app_version=metadata["app_version"],
             system_version=None,
             signed_in_at=None,
@@ -146,10 +156,13 @@ def stop_targets(conn, binding, subject, owner, caller, device_id, keep_device, 
         elif caller and keep_push_id and row.device_id == keep_push_id:
             survivor = (caller, keep_device)
         if survivor:
+            email, role = conn.execute(
+                select(sessions.c.email, sessions.c.login_role).where(sessions.c.session_id == survivor[0])
+            ).one()
             conn.execute(
                 links.update()
                 .where(links.c.subscription_id == row.id)
-                .values(session_id=survivor[0], device_id=survivor[1])
+                .values(session_id=survivor[0], device_id=survivor[1], email=email, login_role=role)
             )
         else:
             web_push_service.disable_subscription(conn, endpoint=row.endpoint, user_key=row.user_key)

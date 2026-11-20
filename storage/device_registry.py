@@ -231,9 +231,14 @@ def attach_push(conn, identity, subscription):
         return
     push_id = subscription["device_id"]
     row = conn.execute(
-        select(sessions.c.binding, sessions.c.identity_source, sessions.c.push_id, sessions.c.device_id).where(
-            sessions.c.session_id == sid, sessions.c.subject == subject
-        )
+        select(
+            sessions.c.binding,
+            sessions.c.identity_source,
+            sessions.c.push_id,
+            sessions.c.device_id,
+            sessions.c.email,
+            sessions.c.login_role,
+        ).where(sessions.c.session_id == sid, sessions.c.subject == subject)
     ).first()
     if not row:
         return
@@ -244,7 +249,7 @@ def attach_push(conn, identity, subscription):
             key = device_key(row.binding, subject, "push", push_id)
             values.update(identity_source="push", device_id=key)
         conn.execute(sessions.update().where(sessions.c.session_id == sid).values(**values))
-    device_push.attest(conn, subscription, sid, row.binding, subject, key)
+    device_push.attest(conn, subscription, sid, row.binding, subject, key, row.email, row.login_role)
 
 
 def list_devices(binding, subject, *, owner, caller, now):

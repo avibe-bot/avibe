@@ -8870,23 +8870,28 @@ def device_list():
     from vibe import __version__
 
     viewer = _device_viewer()
-    host = {'id': 'host', 'kind': 'host', 'display_name': socket.gethostname(), 'app_version': __version__,
+    host = {'id': 'host', 'kind': 'host', 'group': 'mine', 'display_name': socket.gethostname(), 'app_version': __version__,
             'account': None, 'system_version': None, 'signed_in_at': None, 'last_active_at': None,
             'push_only': False, 'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
     if viewer is None:
         config = _load_remote_access_config()
         if config and not config.remote_access.vibe_cloud.is_runtime_paired() and _is_setup_host_request(config):
-            return jsonify({'mine': [host], 'others': [], 'bulk_action': None})
+            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
-    mine, others = ([host] if owner else []), []
+    groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
     from storage.importer import ensure_sqlite_state
     ensure_sqlite_state()
     for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time())):
         account = row['account']
-        is_mine = account is None or (account['subject'] == subject if subject else account['login_role'] == 'owner')
-        (mine if is_mine else others).append(row)
-    return jsonify({'mine': mine, 'others': others, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+        if account is None:
+            group = 'unattributed'
+        else:
+            is_mine = account['subject'] == subject if subject else account['login_role'] == 'owner'
+            group = 'mine' if is_mine else 'others'
+        row['group'] = group
+        groups[group].append(row)
+    return jsonify({**groups, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
 
 
 @app.route('/api/devices/self', methods=['POST'])

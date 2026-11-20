@@ -1412,6 +1412,8 @@ remote_device_push_links = Table(
     Column("subscription_id", String, primary_key=True),
     Column("binding", String, nullable=False),
     Column("subject", String, nullable=False),
+    Column("email", String, nullable=False),
+    Column("login_role", String, nullable=False),
     Column("push_id", String),
     Column("session_id", String, nullable=False),
     Column("device_id", String, nullable=False),

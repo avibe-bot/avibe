@@ -299,7 +299,9 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
 
     start = int(time.time())
     clock = _pin_clock(monkeypatch, start)
-    c = client(login(install, "member", "member"))
+    # The earlier registration was made with an owner role; later authorization
+    # is member. Loopback grouping retains the historical role without granting it.
+    c = client(login(install, "member", "owner"))
     payload = {"endpoint": "https://example.invalid/proven", "keys": {"auth": "fixture", "p256dh": "fixture"}}
     assert (
         c.post(
@@ -323,15 +325,22 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
             )
     (proven,) = [r for r in listing(current)["mine"] if r["push_only"]]
     assert proven["account"]["subject"] == "member" and proven["capabilities"]["push_enabled"]
-    (legacy, local) = [r for r in listing(owner)["mine"] if r["push_only"]]
+    assert proven["group"] == "mine" and proven["account"]["login_role"] == "owner"
+    assert listing(current)["unattributed"] == []
+    install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    loop_view = listing(ui_server.app.test_client(), "http://127.0.0.1:5123")
+    assert [r["id"] for r in loop_view["mine"] if r["push_only"]] == [proven["id"]]
+    install.remote_access.vibe_cloud.instance_secret = ""
+    (legacy, local) = listing(owner)["unattributed"]
     for row in [legacy, local]:
+        assert row["group"] == "unattributed" and row["push_only"]
         assert row["account"] is None and row["display_name"] is None
         assert sign_out(current, row["id"] + "/sign-out").status_code == 404
     assert sign_out(current, proven["id"] + "/sign-out").get_json() == {"ok": True, "revoked_sessions": 0}
     assert sign_out(owner, legacy["id"] + "/sign-out").get_json() == {"ok": True, "revoked_sessions": 0}
     loop = "http://127.0.0.1:5123"
     unpaired = ui_server.app.test_client()
-    (unproven,) = [r for r in listing(unpaired, loop)["mine"] if r["push_only"]]
+    (unproven,) = listing(unpaired, loop)["unattributed"]
     assert sign_out(unpaired, unproven["id"] + "/sign-out", loop).get_json() == {"ok": True, "revoked_sessions": 0}
     with get_cached_sqlite_engine().connect() as conn:
         assert count_enabled(conn) == 0
