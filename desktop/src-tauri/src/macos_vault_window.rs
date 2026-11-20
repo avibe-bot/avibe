@@ -645,6 +645,12 @@ fn in_place(webview: &WKWebView) -> Option<Retained<NSWindow>> {
 
 /// The native window an opener's web view is shown in, if it is what the user
 /// is looking at: in place, in a window that is on screen.
+pub(crate) fn app_lock_did_unlock() {
+    // A protected card becoming visible again is a fresh arrival, even if
+    // LocalAuthentication returned while this app was already active.
+    ARRIVALS.with_borrow_mut(|arrivals| arrivals.last = Some(Instant::now()));
+}
+
 fn shown_in(webview: &WKWebView) -> Option<Retained<NSWindow>> {
     in_place(webview).filter(|window| is_on_screen(window))
 }

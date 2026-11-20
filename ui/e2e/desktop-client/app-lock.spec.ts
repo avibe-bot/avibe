@@ -8,8 +8,8 @@ import { APP_LOCK_FIXTURES, type AppLockStatus, type AppLockSetResult } from '..
 
 type Snapshot = {
   status: AppLockStatus; locked: boolean; verifying: boolean; authCalls: number;
-  pending: boolean; executed: string[];
-  windows: { covered: boolean; hidden: boolean; contentCount: number; compact: boolean; firstResponderIsCover: boolean; button: string; pendingLabel: string }[];
+  pending: boolean; executed: string[]; mainTitle: string; floatingVisible: boolean[]; quitAlertVisible: boolean;
+  windows: { title: string; covered: boolean; hidden: boolean; contentCount: number; compact: boolean; firstResponderIsCover: boolean; button: string; pendingLabel: string }[];
 };
 class NativePeer {
   process: ChildProcessWithoutNullStreams;
@@ -32,8 +32,8 @@ class NativePeer {
       this.pending.delete(response.id);
       if (response.error) pending.reject(new Error(response.error)); else pending.resolve(response.value);
     });
-    this.process.on('exit', (code) => {
-      for (const pending of this.pending.values()) pending.reject(new Error(`Native peer exited ${code}: ${diagnostics}`));
+    this.process.on('exit', (code, signal) => {
+      for (const pending of this.pending.values()) pending.reject(new Error(`Native peer exited ${code ?? signal}: ${diagnostics}`));
       this.pending.clear();
     });
   }
@@ -45,9 +45,13 @@ class NativePeer {
     });
   }
   async close() {
-    const exited = new Promise<void>((resolve) => this.process.once('exit', () => resolve()));
-    this.process.stdin.end();
-    await exited;
+    if (this.process.exitCode === null && this.process.signalCode === null) {
+      const exited = new Promise<void>((resolve) => this.process.once('exit', () => resolve()));
+      const timeout = setTimeout(() => this.process.kill('SIGKILL'), 5000);
+      this.process.stdin.end();
+      await exited;
+      clearTimeout(timeout);
+    }
     rmSync(this.directory, { recursive: true, force: true });
   }
 }
@@ -184,4 +188,82 @@ test('authentication focus events never create a second immediate lock', async (
   const state = await peer.send('snapshot');
   expect(state.locked).toBe(false);
   expect(state.authCalls).toBe(1);
+});
+
+
+test('Mini stays hidden while locked and restores only the latest visibility intent', async () => {
+  await peer.send('floating', { visible: true });
+  const locked = await peer.send('reset', { policy: 'immediately' });
+  expect(locked.floatingVisible).toEqual([false, false]);
+  expect((await peer.send('unlock')).floatingVisible[0]).toBe(true);
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('floating', { visible: false });
+  expect((await peer.send('unlock')).floatingVisible[0]).toBe(false);
+  await peer.send('reset', { policy: 'immediately' });
+  expect((await peer.send('floating', { visible: true })).floatingVisible[0]).toBe(false);
+  expect((await peer.send('unlock')).floatingVisible[0]).toBe(true);
+  await peer.send('floating', { visible: false });
+});
+
+test('Quit confirmation is usable while every content window remains locked', async () => {
+  await peer.send('reset', { policy: 'immediately' });
+  const { during, after: cancelled } = await peer.send<{ during: Snapshot; after: Snapshot }>('quitAlert');
+  expect(during.quitAlertVisible).toBe(true);
+  expect(during.locked).toBe(true);
+  expect(during.authCalls).toBe(0);
+  expect(during.windows.every((window) => window.covered && window.hidden)).toBe(true);
+  expect(cancelled.executed).toContain('quit:Cancel');
+  expect(cancelled.locked).toBe(true);
+});
+
+test('the native main cover can be captured without exposing content', async ({}, testInfo) => {
+  await peer.send('reset', { policy: 'immediately' });
+  for (const dark of [false, true]) {
+    await peer.send('appearance', { dark });
+    const name = `native-lock-${dark ? 'dark' : 'light'}`;
+    const path = testInfo.outputPath(`${name}.png`);
+    await peer.send('capture', { path });
+    await testInfo.attach(name, { path, contentType: 'image/png' });
+  }
+  await peer.send('appearance', { dark: false });
+});
+
+
+test('a verification reply before foreground restoration cannot relock Immediately', async () => {
+  await peer.send('outcome', { value: null });
+  const setting = peer.send<AppLockSetResult>('setPolicy', { policy: 'immediately' });
+  await peer.send('leave', { time: 1 });
+  const waiting = await peer.send('outcome', { value: 'success' });
+  expect(waiting.verifying).toBe(true);
+  await peer.send('arrive', { time: 2 });
+  expect(await setting).toMatchObject({ ok: true });
+  await peer.send('leave', { time: 3 });
+  expect((await peer.send('unlock')).locked).toBe(true);
+  const unlocked = await peer.send('arrive', { time: 4 });
+  expect(unlocked.locked).toBe(false);
+  expect(unlocked.verifying).toBe(false);
+  expect(unlocked.authCalls).toBe(2);
+});
+
+test('pending copy describes the entry and window titles stay private until unlock', async () => {
+  await peer.send('reset', { policy: 'immediately' });
+  for (const [kind, text] of [['action', ''], ['navigation', 'link'], ['content', 'Vibey']] as const) {
+    const state = await peer.send('entry', { kind, value: 'PRIVATE FIXTURE' });
+    for (const window of state.windows) {
+      if (!text) expect(window.pendingLabel).toBe('');
+      else expect(window.pendingLabel).toContain(text);
+    }
+  }
+  const changed = await peer.send('title', { value: 'PRIVATE NEW TITLE' });
+  expect(changed.mainTitle).not.toContain('PRIVATE');
+  expect(changed.windows.every((window) => !window.title.includes('PRIVATE'))).toBe(true);
+  expect((await peer.send('unlock')).mainTitle).toBe('PRIVATE NEW TITLE');
+});
+
+test('real AppKit status item and open menu retain their native controls while locked', async () => {
+  await peer.send('reset', { policy: 'immediately' });
+  const result = await peer.send<{ trayVisible: boolean; chrome: { class: string; covered: boolean }[] }>('chrome');
+  expect(result.trayVisible).toBe(true);
+  expect(result.chrome.some((window) => /Menu|GlassEffect/.test(window.class))).toBe(true);
+  expect(result.chrome.every((window) => !window.covered)).toBe(true);
 });

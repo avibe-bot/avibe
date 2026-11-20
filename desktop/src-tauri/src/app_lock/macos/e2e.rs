@@ -100,7 +100,7 @@ fn snapshot(app: &AppHandle) -> Value {
     });
     let windows = PRESENTATION.with_borrow(|p| p.covers.iter().filter_map(|cover| {
         let window = cover.window.load()?;
-        Some(json!({"covered": unsafe { cover.view.superview() }.is_some(),
+        Some(json!({"covered": unsafe { cover.view.superview() }.is_some(), "title": window.title().to_string(),
             "hidden":cover.hidden.iter().filter_map(Weak::load).all(|view| view.isHidden()),
             "contentCount":cover.hidden.len(), "compact":cover.view.ivars().compact.get(),
             "firstResponderIsCover":window.firstResponder().is_some_and(|r| std::ptr::eq(&*r, &*cover.view as &NSResponder)),
@@ -108,7 +108,10 @@ fn snapshot(app: &AppHandle) -> Value {
             "pendingLabel":cover.view.ivars().pending.stringValue().to_string()}))
     }).collect::<Vec<_>>());
     json!({"status":state,"locked":locked,"verifying":verifying,"authCalls":calls,"executed":executed,"windows":windows,
-        "pending":machine(app).pending.lock().unwrap().is_some()})
+        "pending":machine(app).pending.lock().unwrap().is_some(),
+        "mainTitle": app.get_window(crate::MAIN_WINDOW).unwrap().title().unwrap(),
+        "floatingVisible": ([crate::pet::PET_WINDOW, crate::update_popover::UPDATE_POPOVER].map(|label| app.get_window(label).unwrap().is_visible().unwrap())),
+        "quitAlertVisible": PRESENTATION.with_borrow(|p| p.quit_window.as_ref().and_then(Weak::load).is_some_and(|w| w.isVisible() && !p.covers.iter().any(|c| c.window.load().is_some_and(|covered| std::ptr::eq(&*covered, &*w)))))})
 }
 fn handle(app: &AppHandle, request: Value) {
     let id = request["id"].clone();
@@ -121,6 +124,52 @@ fn handle(app: &AppHandle, request: Value) {
                 Ok(serde_json::to_value(status(app)).unwrap())
             }
             "snapshot" => Ok(snapshot(app)),
+            "appearance" => {
+                let name = unsafe {
+                    if request["dark"].as_bool().unwrap_or(false) {
+                        NSAppearanceNameDarkAqua
+                    } else {
+                        NSAppearanceNameAqua
+                    }
+                };
+                let appearance = NSAppearance::appearanceNamed(name);
+                for window in NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
+                    .windows()
+                    .iter()
+                {
+                    if !system_chrome(&window) {
+                        window.setAppearance(appearance.as_deref());
+                    }
+                }
+                sync_windows(app);
+                Ok(snapshot(app))
+            }
+            "capture" => {
+                let path = request["path"].as_str().ok_or("capture path required")?;
+                let view = PRESENTATION
+                    .with_borrow(|p| {
+                        p.covers
+                            .iter()
+                            .find(|c| !c.view.ivars().compact.get())
+                            .map(|c| c.view.clone())
+                    })
+                    .ok_or("no main cover")?;
+                let bitmap = view
+                    .bitmapImageRepForCachingDisplayInRect(view.bounds())
+                    .ok_or("native capture unavailable")?;
+                view.cacheDisplayInRect_toBitmapImageRep(view.bounds(), &bitmap);
+                let png = unsafe {
+                    bitmap.representationUsingType_properties(
+                        NSBitmapImageFileType::PNG,
+                        &objc2_foundation::NSDictionary::new(),
+                    )
+                }
+                .ok_or("native PNG unavailable")?;
+                if !png.writeToFile_atomically(&NSString::from_str(path), true) {
+                    return Err("native PNG write failed".into());
+                }
+                Ok(json!(true))
+            }
             "setPolicy" => {
                 let policy: Policy = serde_json::from_value(request["policy"].clone()).map_err(|e| e.to_string())?;
                 let (send, receive) = tokio::sync::oneshot::channel();
@@ -129,7 +178,7 @@ fn handle(app: &AppHandle, request: Value) {
                 tauri::async_runtime::spawn(async move {
                     output(id, receive.await.map_err(|e| e.to_string()));
                 });
-                return Ok(Value::Null);
+                Ok(Value::Null)
             }
             "reset" => {
                 // Restore any preceding test's covers before replacing its machine.
@@ -163,6 +212,7 @@ fn handle(app: &AppHandle, request: Value) {
                 });
                 *machine(app).machine.lock().unwrap() = Machine::new(policy, available);
                 *machine(app).pending.lock().unwrap() = None;
+                PRESENTATION.with_borrow_mut(|p| p.completion = None);
                 sync_windows(app);
                 Ok(snapshot(app))
             }
@@ -221,9 +271,15 @@ fn handle(app: &AppHandle, request: Value) {
             "entry" => {
                 let value = request["value"].as_str().ok_or("entry required")?.to_owned();
                 let deferred = value.clone();
-                if !queue_if_locked(app, move |_| {
-                    PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(deferred))
-                }) {
+                if !queue_kind(
+                    app,
+                    match request["kind"].as_str() {
+                        Some("navigation") => EntryKind::Navigation,
+                        Some("action") => EntryKind::Action,
+                        _ => EntryKind::Content,
+                    },
+                    move |_| PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(deferred)),
+                ) {
                     PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(value));
                 }
                 sync_windows(app);
@@ -251,6 +307,104 @@ fn handle(app: &AppHandle, request: Value) {
                     .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_value(status).unwrap())
             }
+            "floating" => {
+                let window = app.get_window(crate::pet::PET_WINDOW).unwrap();
+                if request["visible"].as_bool().ok_or("visibility required")? {
+                    window.show().map_err(|e| e.to_string())?;
+                } else {
+                    window.hide().map_err(|e| e.to_string())?;
+                }
+                Ok(snapshot(app))
+            }
+            "title" => {
+                app.get_window(crate::MAIN_WINDOW)
+                    .unwrap()
+                    .set_title(request["value"].as_str().ok_or("title required")?)
+                    .map_err(|e| e.to_string())?;
+                Ok(snapshot(app))
+            }
+            "chrome" => {
+                let handle = app.clone();
+                let id = id.clone();
+                crate::macos_terminate::on_main_queue(move || {
+                    let mtm = MainThreadMarker::new().unwrap();
+                    let bar = NSStatusBar::systemStatusBar();
+                    let item = bar.statusItemWithLength(NSVariableStatusItemLength);
+                    let button = item.button(mtm).unwrap();
+                    button.setTitle(&NSString::from_str("Lock test"));
+                    sync_windows(&handle);
+                    let tray = button.window().unwrap();
+                    let tray_visible = !button.isHiddenOrHasHiddenAncestor() && system_chrome(&tray);
+                    let menu = NSMenu::new(mtm);
+                    unsafe {
+                        menu.addItemWithTitle_action_keyEquivalent(
+                            &NSString::from_str("Quit fixture"),
+                            None,
+                            &NSString::from_str(""),
+                        );
+                    }
+                    let observed = std::rc::Rc::new(RefCell::new(Value::Null));
+                    let probe = observed.clone();
+                    let cancel = menu.clone();
+                    let block = RcBlock::new(move |_: NonNull<objc2_foundation::NSTimer>| {
+                        sync_windows(&handle);
+                        let windows = NSApplication::sharedApplication(mtm).windows();
+                        let chrome = windows
+                            .iter()
+                            .filter(|w| system_chrome(w))
+                            .map(|window| {
+                                let covered = PRESENTATION.with_borrow(|p| {
+                                    p.covers
+                                        .iter()
+                                        .any(|c| c.window.load().is_some_and(|w| std::ptr::eq(&*w, &*window)))
+                                });
+                                json!({"class": window.class().name().to_string_lossy(), "covered": covered})
+                            })
+                            .collect::<Vec<_>>();
+                        *probe.borrow_mut() = json!({"trayVisible": tray_visible, "chrome": chrome});
+                        cancel.cancelTrackingWithoutAnimation();
+                    });
+                    let timer =
+                        unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.1, false, &block) };
+                    unsafe {
+                        objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSEventTrackingRunLoopMode);
+                    }
+                    menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(0.0, 0.0), Some(&button));
+                    bar.removeStatusItem(&item);
+                    output(id, Ok(observed.borrow().clone()));
+                });
+                Ok(Value::Null)
+            }
+            "quitAlert" => {
+                // Tauri's user-event dispatcher intentionally does not reenter
+                // during NSAlert.runModal. Probe from the real modal run loop.
+                let observed = std::sync::Arc::new(Mutex::new(Value::Null));
+                let probe = observed.clone();
+                let handle = app.clone();
+                let block = RcBlock::new(move |_: NonNull<objc2_foundation::NSTimer>| {
+                    *probe.lock().unwrap() = snapshot(&handle);
+                    NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).stopModalWithCode(1002);
+                    if let Some(window) = PRESENTATION.with_borrow(|p| p.quit_window.as_ref().and_then(Weak::load)) {
+                        window.orderOut(None);
+                    }
+                });
+                let timer =
+                    unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.05, false, &block) };
+                unsafe {
+                    objc2_foundation::NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSModalPanelRunLoopMode);
+                }
+                let handle = app.clone();
+                let id = id.clone();
+                show_quit_question(app, &crate::native_tray_catalog(), move |choice| {
+                    PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(format!("quit:{choice:?}")));
+                    output(
+                        id,
+                        Ok(json!({"during": observed.lock().unwrap().clone(), "after": snapshot(&handle)})),
+                    );
+                });
+                Ok(Value::Null)
+            }
+
             "quit" => {
                 app.exit(0);
                 Ok(json!(true))
@@ -258,7 +412,7 @@ fn handle(app: &AppHandle, request: Value) {
             _ => Err(format!("unknown fixture operation: {op}")),
         }
     })();
-    if op != "setPolicy" || result.is_err() {
+    if !matches!(op, "setPolicy" | "quitAlert" | "chrome") || result.is_err() {
         output(id, result);
     }
 }
@@ -288,6 +442,7 @@ pub(crate) fn run() {
                 machine: Mutex::new(Machine::new(Policy::Off, available)),
                 pending: Mutex::new(None),
                 path: path.clone(),
+                dirty: std::sync::atomic::AtomicBool::new(false),
             });
             PRESENTATION.with_borrow_mut(|p| p.app = Some(app.handle().clone()));
             install_window_hooks();

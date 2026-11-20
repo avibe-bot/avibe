@@ -1040,6 +1040,9 @@ fn refresh_latest_tray(app: &AppHandle) {
 
 fn show_lifecycle_busy(app: &AppHandle) {
     let catalog = native_tray_catalog();
+    if app_lock::show_lifecycle_busy(app, &catalog) {
+        return;
+    }
     app.dialog()
         .message(catalog.busy_message)
         .title(catalog.busy_title)
@@ -2454,7 +2457,9 @@ fn main_document_finished(webview: &tauri::Webview) {
 fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
     let arguments: Vec<String> = arguments.into_iter().map(|a| a.as_ref().to_owned()).collect();
     let deferred = arguments.clone();
-    if app_lock::defer(app, move |app| receive_native_deep_link(app, deferred)) {
+    if app_lock::defer_kind(app, app_lock::EntryKind::Navigation, move |app| {
+        receive_native_deep_link(app, deferred)
+    }) {
         return;
     }
     let mut updates_requested = false;

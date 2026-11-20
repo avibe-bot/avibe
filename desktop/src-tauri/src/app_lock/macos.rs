@@ -7,8 +7,8 @@ use objc2::runtime::{AnyObject, Bool};
 use objc2::{define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::*;
 use objc2_foundation::{
-    NSDistributedNotificationCenter, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString,
+    NSAttributedString, NSData, NSDistributedNotificationCenter, NSError, NSNotification, NSNotificationCenter,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use objc2_local_authentication::{LABiometryType, LAContext, LAPolicy};
 use std::cell::{Cell, RefCell};
@@ -17,31 +17,45 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview};
 
-type Entry = Box<dyn FnOnce(&AppHandle) + Send>;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    Navigation,
+    #[allow(dead_code)] // Ask Vibey integrates this arm when its independent lane merges.
+    Content,
+    Action,
+}
+struct Entry {
+    kind: EntryKind,
+    action: Box<dyn FnOnce(&AppHandle) + Send>,
+}
+type Observer = (
+    Retained<NSNotificationCenter>,
+    Retained<objc2::runtime::ProtocolObject<dyn NSObjectProtocol>>,
+);
 type Reply = tokio::sync::oneshot::Sender<serde_json::Value>;
 struct Owner {
     machine: Mutex<Machine>,
     pending: Mutex<Option<Entry>>,
     path: PathBuf,
+    dirty: std::sync::atomic::AtomicBool,
 }
 struct Cover {
     window: Weak<NSWindow>,
     view: Retained<LockView>,
     hidden: Vec<Weak<NSView>>,
     responder: Option<Weak<NSResponder>>,
+    title: Retained<NSString>,
 }
 #[derive(Default)]
 struct Presentation {
     app: Option<AppHandle>,
     covers: Vec<Cover>,
     hidden_windows: Vec<Weak<NSWindow>>,
-    observers: Vec<(
-        Retained<NSNotificationCenter>,
-        Retained<objc2::runtime::ProtocolObject<dyn NSObjectProtocol>>,
-    )>,
+    observers: Vec<Observer>,
     context: Option<Retained<LAContext>>,
     reply: Option<Reply>,
     quit_window: Option<Weak<NSWindow>>,
+    completion: Option<(u64, Authentication, Outcome)>,
 }
 thread_local! {
     static PRESENTATION: RefCell<Presentation> = RefCell::new(Presentation::default());
@@ -117,7 +131,11 @@ fn status(app: &AppHandle) -> Status {
 pub(crate) fn is_locked(app: &AppHandle) -> bool {
     app.try_state::<Owner>().is_some_and(|owner| {
         let mut state = owner.machine.lock().expect("app lock");
+        let before = state.locked;
         state.tick(now());
+        if before != state.locked {
+            owner.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         state.locked
     })
 }
@@ -135,20 +153,21 @@ fn refresh(app: &AppHandle) {
 }
 fn catalog(key: &str) -> String {
     // Both native and Web copy comes from the same shipped product catalog.
-    let catalog = if sys_locale::get_locale().is_some_and(|s| s.starts_with("zh")) {
-        crate::ZH_PRODUCT_CATALOG
-    } else {
-        crate::EN_PRODUCT_CATALOG
-    };
-    serde_json::from_str::<serde_json::Value>(catalog)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer(&format!("/appLock/lock/{key}"))
-                .and_then(|s| s.as_str())
-                .map(str::to_owned)
+    static CATALOG: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let source = if sys_locale::get_locale().is_some_and(|s| s.starts_with("zh")) {
+                crate::ZH_PRODUCT_CATALOG
+            } else {
+                crate::EN_PRODUCT_CATALOG
+            };
+            serde_json::from_str::<serde_json::Value>(source).expect("shipped product catalog")["appLock"]["lock"]
+                .clone()
         })
-        .unwrap_or_else(|| key.to_owned())
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or(key)
+        .to_owned()
 }
 fn persist(path: &std::path::Path, policy: Policy) -> Result<(), String> {
     use std::io::Write;
@@ -164,7 +183,10 @@ fn persist(path: &std::path::Path, policy: Policy) -> Result<(), String> {
 /// Called at the native entry, before any side effect. The closure contains
 /// intent data only; it never runs while locked and is never written to disk.
 pub(crate) fn defer(app: &AppHandle, action: impl FnOnce(&AppHandle) + Send + 'static) -> bool {
-    if !queue_if_locked(app, action) {
+    defer_kind(app, EntryKind::Action, action)
+}
+pub(crate) fn defer_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) + Send + 'static) -> bool {
+    if !queue_kind(app, kind, action) {
         return false;
     }
     let handle = app.clone();
@@ -178,12 +200,40 @@ pub(crate) fn defer(app: &AppHandle, action: impl FnOnce(&AppHandle) + Send + 's
 }
 
 pub(crate) fn queue_if_locked(app: &AppHandle, action: impl FnOnce(&AppHandle) + Send + 'static) -> bool {
-    if !is_locked(app) {
+    queue_kind(app, EntryKind::Navigation, action)
+}
+fn queue_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) + Send + 'static) -> bool {
+    let Some(owner) = app.try_state::<Owner>() else {
+        return false;
+    };
+    // Publish the pending intent before an authentication completion can
+    // observe the unlock. Native entry callbacks may arrive off the UI thread.
+    let mut state = owner.machine.lock().expect("app lock");
+    let before = state.locked;
+    state.tick(now());
+    if before != state.locked {
+        owner.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if !state.locked {
         return false;
     }
-    *machine(app).pending.lock().expect("app lock pending entry") = Some(Box::new(action));
+    *owner.pending.lock().expect("app lock pending entry") = Some(Entry {
+        kind,
+        action: Box::new(action),
+    });
+    // A newer locked entry supersedes an earlier navigation/update that was
+    // still waiting for a Workbench before the app locked.
+    if let Some(links) = app.try_state::<Mutex<avibe_runtime_host::deep_link::DeepLinks>>() {
+        *links.lock().expect("deep links") = avibe_runtime_host::deep_link::DeepLinks::default();
+    }
+    if let Some(updates) = app.try_state::<crate::PendingDesktopUpdateOpen>() {
+        if let Some(id) = updates.current() {
+            updates.finish_delivery(id, true);
+        }
+    }
     true
 }
+
 pub(crate) fn ready(app: &AppHandle) {
     event(app, Event::Arrive);
 }
@@ -295,6 +345,18 @@ fn complete(app: &AppHandle, epoch: u64, purpose: Authentication, mut outcome: O
         if state.epoch != epoch || state.authenticating != Some(purpose) {
             return;
         }
+        // LA can reply before AppKit returns focus. Keep the existing cover
+        // and authentication epoch until our activation, so "Immediately"
+        // never treats the system panel's trailing focus event as departure.
+        if !active() {
+            PRESENTATION.with_borrow_mut(|p| p.completion = Some((epoch, purpose, outcome)));
+            drop(state);
+            #[cfg(not(feature = "app-lock-e2e"))]
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(MainThreadMarker::new().expect("authentication on main"))
+                .activateIgnoringOtherApps(true);
+            return;
+        }
         if outcome == Outcome::Success {
             if let Authentication::Change(policy) = purpose {
                 if let Err(error) = persist(&owner.path, policy) {
@@ -326,7 +388,13 @@ fn deliver_pending(app: &AppHandle) {
     if !is_locked(app) {
         let entry = machine(app).pending.lock().expect("pending entry").take();
         if let Some(entry) = entry {
-            entry(app);
+            (entry.action)(app);
+        }
+        if app
+            .try_state::<Mutex<avibe_runtime_host::deep_link::DeepLinks>>()
+            .is_some()
+        {
+            crate::apply_pending_deep_link(app);
         }
     }
 }
@@ -348,13 +416,75 @@ pub(crate) fn protects_view(view: &NSView) -> bool {
     unsafe { view.superview() }.is_some_and(|parent| protects_view(&parent))
 }
 
+// The approved app-lock frames use these product tokens from ui/src/index.css.
+// Keep this small native palette in parity when the Web tokens change.
+#[derive(Clone, Copy)]
+enum Palette {
+    Background,
+    Foreground,
+    Muted,
+    Primary,
+    PrimaryForeground,
+    Failure,
+}
+fn palette(view: &NSView, token: Palette) -> Retained<NSColor> {
+    let dark = view.effectiveAppearance().name().to_string().contains("Dark");
+    let rgb = match (dark, token) {
+        (false, Palette::Background) => 0xf4f6fb,
+        (true, Palette::Background) => 0x080812,
+        (false, Palette::Foreground) => 0x0a0a14,
+        (true, Palette::Foreground) => 0xf5f1e8,
+        (false, Palette::Muted) => 0x5c6079,
+        (true, Palette::Muted) => 0x9ba3b8,
+        (false, Palette::Primary) => 0x10b981,
+        (true, Palette::Primary) => 0x5bffa0,
+        (false, Palette::PrimaryForeground) => 0xffffff,
+        (true, Palette::PrimaryForeground) => 0x080812,
+        (false, Palette::Failure) => 0xe11d48,
+        (true, Palette::Failure) => 0xff6b6b,
+    };
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from((rgb >> 16) & 255) / 255.0,
+        f64::from((rgb >> 8) & 255) / 255.0,
+        f64::from(rgb & 255) / 255.0,
+        1.0,
+    )
+}
+
+struct ButtonFields {
+    compact: Cell<bool>,
+}
+define_class!(
+    #[unsafe(super(NSButton))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AvibeAppLockButton"]
+    #[ivars = ButtonFields]
+    struct LockButton;
+    impl LockButton {
+        #[unsafe(method(drawRect:))]
+        fn draw(&self, rect: NSRect) {
+            let compact = self.ivars().compact.get();
+            let radius = if compact { 8.0 } else { self.bounds().size.height / 2.0 };
+            let bounds = self.bounds();
+            let inset = NSRect::new(NSPoint::new(bounds.origin.x + 0.5, bounds.origin.y + 0.5), NSSize::new(bounds.size.width - 1.0, bounds.size.height - 1.0));
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inset, radius, radius);
+            palette(self, if compact { Palette::Background } else { Palette::Primary })
+                .colorWithAlphaComponent(if self.isEnabled() { 1.0 } else { 0.5 }).setFill();
+            path.fill();
+            if compact { palette(self, Palette::Muted).colorWithAlphaComponent(0.3).setStroke(); path.setLineWidth(1.0); path.stroke(); }
+            let _: () = unsafe { msg_send![super(self), drawRect: rect] };
+        }
+    }
+);
+type RenderKey = (bool, bool, BiometryState, bool, Option<EntryKind>, bool);
 struct ViewFields {
+    rendered: Cell<Option<RenderKey>>,
     app: AppHandle,
     compact: Cell<bool>,
     title: Retained<NSTextField>,
     note: Retained<NSTextField>,
     pending: Retained<NSTextField>,
-    button: Retained<NSButton>,
+    button: Retained<LockButton>,
     logo: Retained<NSImageView>,
 }
 define_class!(
@@ -369,7 +499,7 @@ define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool { true }
         #[unsafe(method(drawRect:))]
-        fn draw(&self, _rect: NSRect) { NSColor::windowBackgroundColor().setFill(); NSRectFill(self.bounds()); }
+        fn draw(&self, _rect: NSRect) { palette(self, Palette::Background).setFill(); NSRectFill(self.bounds()); }
         #[unsafe(method(layout))]
         fn layout(&self) {
             let _: () = unsafe { msg_send![super(self), layout] };
@@ -386,7 +516,7 @@ define_class!(
 impl LockView {
     fn new(app: &AppHandle, compact: bool, frame: NSRect, mtm: MainThreadMarker) -> Retained<Self> {
         let label = |size: f64| {
-            let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+            let label = NSTextField::wrappingLabelWithString(&NSString::from_str(""), mtm);
             label.setFont(Some(&NSFont::systemFontOfSize(size)));
             label.setAlignment(NSTextAlignment::Center);
             label.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -398,16 +528,19 @@ impl LockView {
         title.setStringValue(&NSString::from_str(&catalog("lockedTitle")));
         let note = label(13.0);
         let pending = label(12.0);
-        let button = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, mtm) };
-        button.setBezelStyle(NSBezelStyle::Push);
+        let button: Retained<LockButton> = unsafe {
+            msg_send![super(LockButton::alloc(mtm).set_ivars(ButtonFields { compact: Cell::new(compact) })), initWithFrame: NSRect::ZERO]
+        };
+        button.setBordered(false);
         button.setFont(Some(&NSFont::systemFontOfSize(14.0)));
         let logo = NSImageView::initWithFrame(
             mtm.alloc(),
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(64.0, 64.0)),
         );
-        logo.setImage(NSApplication::sharedApplication(mtm).applicationIconImage().as_deref());
+        let logo_data = NSData::with_bytes(include_bytes!("../../icons/128x128.png"));
+        logo.setImage(NSImage::initWithData(mtm.alloc(), &logo_data).as_deref());
         let view: Retained<Self> = unsafe {
-            msg_send![super(Self::alloc(mtm).set_ivars(ViewFields { app: app.clone(), compact: Cell::new(compact), title, note, pending, button, logo })), initWithFrame: frame]
+            msg_send![super(Self::alloc(mtm).set_ivars(ViewFields { rendered: Cell::new(None), app: app.clone(), compact: Cell::new(compact), title, note, pending, button, logo })), initWithFrame: frame]
         };
         view.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -430,6 +563,7 @@ impl LockView {
         let width = (bounds.size.width - 48.0).clamp(120.0, if f.compact.get() { 300.0 } else { 340.0 });
         let left = (bounds.size.width - width) / 2.0;
         let mid = bounds.size.height / 2.0;
+        let has_pending = !f.pending.stringValue().is_empty();
         let icon = if f.compact.get() { 48.0 } else { 64.0 };
         f.logo.setFrame(NSRect::new(
             NSPoint::new((bounds.size.width - icon) / 2.0, mid + 62.0),
@@ -438,26 +572,97 @@ impl LockView {
         f.title
             .setFrame(NSRect::new(NSPoint::new(left, mid + 22.0), NSSize::new(width, 30.0)));
         f.pending
-            .setFrame(NSRect::new(NSPoint::new(left, mid - 6.0), NSSize::new(width, 24.0)));
-        f.button
-            .setFrame(NSRect::new(NSPoint::new(left, mid - 59.0), NSSize::new(width, 44.0)));
-        f.note
-            .setFrame(NSRect::new(NSPoint::new(left, mid - 124.0), NSSize::new(width, 56.0)));
+            .setFrame(NSRect::new(NSPoint::new(left, mid - 28.0), NSSize::new(width, 44.0)));
+        f.button.setFrame(NSRect::new(
+            NSPoint::new(left, mid - if has_pending { 88.0 } else { 42.0 }),
+            NSSize::new(width, 44.0),
+        ));
+        f.note.setFrame(NSRect::new(
+            NSPoint::new(left, mid - if has_pending { 160.0 } else { 114.0 }),
+            NSSize::new(width, 56.0),
+        ));
     }
     fn update(&self) {
         let f = self.ivars();
         let owner = machine(&f.app);
         let state = owner.machine.lock().expect("app lock");
+        let pending_kind = owner
+            .pending
+            .lock()
+            .expect("pending entry")
+            .as_ref()
+            .map(|entry| entry.kind);
+        let key = (
+            state.authenticating.is_some(),
+            state.failed,
+            state.availability.biometry_state,
+            f.compact.get(),
+            pending_kind,
+            self.effectiveAppearance().name().to_string().contains("Dark"),
+        );
+        if f.rendered.replace(Some(key)) == Some(key) {
+            return;
+        }
+        f.title.setTextColor(Some(&palette(self, Palette::Foreground)));
+        f.note.setTextColor(Some(&palette(
+            self,
+            if state.failed { Palette::Failure } else { Palette::Muted },
+        )));
+        f.pending.setTextColor(Some(&palette(self, Palette::Muted)));
+        f.button.setBezelColor(Some(&palette(
+            self,
+            if f.compact.get() {
+                Palette::Background
+            } else {
+                Palette::Primary
+            },
+        )));
+        f.button.setContentTintColor(Some(&palette(
+            self,
+            if f.compact.get() {
+                Palette::Foreground
+            } else {
+                Palette::PrimaryForeground
+            },
+        )));
         let verifying = state.authenticating.is_some();
         let usable = state.availability.biometry_state == BiometryState::Usable;
-        f.button.setTitle(&NSString::from_str(&catalog(if verifying {
+        let action = NSString::from_str(&catalog(if verifying {
             "verifying"
         } else if usable {
             "unlockTouchID"
         } else {
             "unlockPassword"
-        })));
+        }));
+        f.button.setTitle(&action);
+        let foreground = palette(
+            self,
+            if f.compact.get() {
+                Palette::Foreground
+            } else {
+                Palette::PrimaryForeground
+            },
+        );
+        let attributes = objc2_foundation::NSDictionary::from_slices(
+            &[unsafe { NSForegroundColorAttributeName }],
+            &[&*foreground as &AnyObject],
+        );
+        let title = unsafe {
+            NSAttributedString::initWithString_attributes(
+                MainThreadMarker::new().unwrap().alloc(),
+                &action,
+                Some(&attributes),
+            )
+        };
+        f.button.setAttributedTitle(&title);
+        f.button.ivars().compact.set(f.compact.get());
         f.button.setEnabled(!verifying);
+        let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(if usable { "touchid" } else { "key" }),
+            None,
+        );
+        f.button.setImage(symbol.as_deref());
+        f.button.setImagePosition(NSCellImagePosition::ImageLeft);
         let note = if state.failed {
             "verificationFailed"
         } else {
@@ -474,13 +679,13 @@ impl LockView {
         } else {
             catalog(note)
         }));
-        f.pending.setStringValue(&NSString::from_str(
-            &if owner.pending.lock().expect("pending entry").is_some() {
-                catalog("pendingContent")
-            } else {
-                String::new()
-            },
-        ));
+        let key = pending_kind.and_then(|kind| match kind {
+            EntryKind::Content => Some("pendingContent"),
+            EntryKind::Navigation => Some("pendingLink"),
+            EntryKind::Action => None,
+        });
+        f.pending
+            .setStringValue(&NSString::from_str(&key.map(catalog).unwrap_or_default()));
     }
 }
 
@@ -493,6 +698,7 @@ pub(crate) fn sync_windows(app: &AppHandle) {
     if PAINTING.with(|painting| painting.replace(true)) {
         return;
     }
+    machine(app).dirty.store(false, std::sync::atomic::Ordering::Relaxed);
     sync_on_main(app, mtm);
     PAINTING.with(|painting| painting.set(false));
 }
@@ -503,6 +709,7 @@ fn restore_cover(cover: Cover) {
                 view.setHidden(false);
             }
         }
+        window.setTitle(&cover.title);
         cover.view.removeFromSuperview();
         if let Some(responder) = cover.responder.and_then(|r| r.load()) {
             window.makeFirstResponder(Some(&responder));
@@ -526,15 +733,42 @@ pub(crate) fn show_quit_question(
     catalog: &crate::NativeTrayCatalog,
     callback: impl FnOnce(tauri_plugin_dialog::MessageDialogResult) + Send + 'static,
 ) -> bool {
+    show_lifecycle_alert(
+        app,
+        catalog.quit_title.clone(),
+        catalog.quit_message.clone(),
+        vec![
+            catalog.quit_keep.clone(),
+            catalog.quit_stop.clone(),
+            catalog.cancel.clone(),
+        ],
+        callback,
+    )
+}
+pub(crate) fn show_lifecycle_busy(app: &AppHandle, catalog: &crate::NativeTrayCatalog) -> bool {
+    show_lifecycle_alert(
+        app,
+        catalog.busy_title.clone(),
+        catalog.busy_message.clone(),
+        vec![catalog.cancel.clone()],
+        |_| {},
+    )
+}
+fn show_lifecycle_alert(
+    app: &AppHandle,
+    title: String,
+    message: String,
+    buttons: Vec<String>,
+    callback: impl FnOnce(tauri_plugin_dialog::MessageDialogResult) + Send + 'static,
+) -> bool {
     if !app
         .try_state::<Owner>()
         .is_some_and(|owner| owner.machine.lock().expect("app lock").effective())
     {
         return false;
     }
-    let catalog = catalog.clone();
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    crate::macos_terminate::on_main_queue(move || {
         // Quit never waits for an already open unlock/change prompt.
         {
             let owner = machine(&handle);
@@ -543,6 +777,7 @@ pub(crate) fn show_quit_question(
             state.authenticating = None;
             state.auto_prompted = true;
         }
+        PRESENTATION.with_borrow_mut(|p| p.completion = None);
         let (context, reply) = PRESENTATION.with_borrow_mut(|p| (p.context.take(), p.reply.take()));
         if let Some(context) = context {
             unsafe {
@@ -554,10 +789,10 @@ pub(crate) fn show_quit_question(
         }
         let mtm = MainThreadMarker::new().expect("quit question on main thread");
         let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str(&catalog.quit_title));
-        alert.setInformativeText(&NSString::from_str(&catalog.quit_message));
-        for title in [&catalog.quit_keep, &catalog.quit_stop, &catalog.cancel] {
-            alert.addButtonWithTitle(&NSString::from_str(title));
+        alert.setMessageText(&NSString::from_str(&title));
+        alert.setInformativeText(&NSString::from_str(&message));
+        for title in buttons {
+            alert.addButtonWithTitle(&NSString::from_str(&title));
         }
         let window = alert.window();
         PRESENTATION.with_borrow_mut(|p| p.quit_window = Some(Weak::from_retained(&window)));
@@ -577,6 +812,9 @@ fn sync_on_main(app: &AppHandle, mtm: MainThreadMarker) {
     if !is_locked(app) {
         let (covers, hidden) =
             PRESENTATION.with_borrow_mut(|p| (std::mem::take(&mut p.covers), std::mem::take(&mut p.hidden_windows)));
+        if !covers.is_empty() {
+            crate::macos_vault_window::app_lock_did_unlock();
+        }
         for cover in covers {
             restore_cover(cover);
         }
@@ -589,6 +827,9 @@ fn sync_on_main(app: &AppHandle, mtm: MainThreadMarker) {
     PRESENTATION.with_borrow_mut(|p| p.covers.retain(|cover| cover.window.load().is_some()));
     let windows = NSApplication::sharedApplication(mtm).windows();
     for window in windows.iter() {
+        if system_chrome(&window) {
+            continue;
+        }
         if is_quit_window(&window) {
             let cover = PRESENTATION.with_borrow_mut(|p| {
                 p.covers
@@ -646,6 +887,7 @@ fn sync_on_main(app: &AppHandle, mtm: MainThreadMarker) {
                     view: view.clone(),
                     hidden: Vec::new(),
                     responder,
+                    title: window.title(),
                 })
             });
             view
@@ -655,6 +897,10 @@ fn sync_on_main(app: &AppHandle, mtm: MainThreadMarker) {
                 .title
                 .setFont(Some(&NSFont::boldSystemFontOfSize(if compact { 17.0 } else { 22.0 })));
             view.arrange();
+        }
+        let locked_title = NSString::from_str(&catalog("lockedTitle"));
+        if window.title() != locked_title {
+            window.setTitle(&locked_title);
         }
         view.setFrame(content.bounds());
         // Cover the whole native content tree, including AppKit sheets and
@@ -677,8 +923,9 @@ fn sync_on_main(app: &AppHandle, mtm: MainThreadMarker) {
         }
         window.makeFirstResponder(Some(&view));
         view.update();
-        view.displayIfNeeded();
-        window.displayIfNeeded();
+        // Hooks may run while AppKit is rebuilding a title frame. Conceal
+        // content synchronously, but let AppKit draw at its normal safe point.
+        view.setNeedsDisplay(true);
     }
 }
 
@@ -699,10 +946,15 @@ fn event(app: &AppHandle, event: Event) {
         Event::Arrive => {
             refresh(app);
             if active() {
+                let completion = PRESENTATION.with_borrow_mut(|p| p.completion.take());
+                if let Some((epoch, purpose, outcome)) = completion {
+                    complete(app, epoch, purpose, outcome);
+                }
                 machine(app).machine.lock().expect("app lock").arrive(now());
             }
         }
         Event::SystemLeave(reason) => {
+            PRESENTATION.with_borrow_mut(|p| p.completion = None);
             machine(app).machine.lock().expect("app lock").block(reason, now());
             let (context, reply) = PRESENTATION.with_borrow_mut(|p| (p.context.take(), p.reply.take()));
             if let Some(context) = context {
@@ -761,12 +1013,16 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
             Policy::Off
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Policy::Off,
-        Err(e) => return Err(format!("App Lock preference: {e}")),
+        Err(e) => {
+            eprintln!("Cannot read App Lock preference; disabled: {e}");
+            Policy::Off
+        }
     };
     app.manage(Owner {
         machine: Mutex::new(Machine::new(policy, availability())),
         pending: Mutex::new(None),
         path,
+        dirty: std::sync::atomic::AtomicBool::new(false),
     });
     PRESENTATION.with_borrow_mut(|p| p.app = Some(app.clone()));
     install_window_hooks();
@@ -815,6 +1071,15 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let needs_tick = {
+                let owner = machine(&handle);
+                let state = owner.machine.lock().expect("app lock");
+                (state.effective() && state.away_since.is_some())
+                    || owner.dirty.load(std::sync::atomic::Ordering::Relaxed)
+            };
+            if !needs_tick {
+                continue;
+            }
             let app = handle.clone();
             if handle
                 .run_on_main_thread(move || {
@@ -823,7 +1088,7 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
                         let mut state = owner.machine.lock().expect("app lock");
                         let before = state.locked;
                         state.tick(now());
-                        before != state.locked
+                        before != state.locked || owner.dirty.load(std::sync::atomic::Ordering::Relaxed)
                     };
                     if changed {
                         sync_windows(&app);
@@ -846,6 +1111,8 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
 type OrderFn = unsafe extern "C-unwind" fn(&NSWindow, objc2::runtime::Sel, isize, isize);
 type AddFn = unsafe extern "C-unwind" fn(&NSView, objc2::runtime::Sel, &NSView);
 type HiddenFn = unsafe extern "C-unwind" fn(&NSView, objc2::runtime::Sel, Bool);
+type TitleFn = unsafe extern "C-unwind" fn(&NSWindow, objc2::runtime::Sel, &NSString);
+static TITLE: std::sync::OnceLock<TitleFn> = std::sync::OnceLock::new();
 type ContentFn = unsafe extern "C-unwind" fn(&NSWindow, objc2::runtime::Sel, *mut NSView);
 static ADD: std::sync::OnceLock<AddFn> = std::sync::OnceLock::new();
 static HIDE: std::sync::OnceLock<HiddenFn> = std::sync::OnceLock::new();
@@ -858,6 +1125,26 @@ fn app_handle() -> Option<AppHandle> {
         .try_with(|p| p.try_borrow().ok().and_then(|p| p.app.clone()))
         .ok()
         .flatten()
+}
+// AppKit's status item, menus and tooltips are chrome, not document
+// content. They must retain their native targets (especially the Quit menu).
+fn system_chrome(window: &NSWindow) -> bool {
+    let mut class = Some(window.class());
+    while let Some(current) = class {
+        if matches!(
+            current.name().to_bytes(),
+            b"NSStatusBarWindow"
+                | b"NSMenuWindow"
+                | b"NSPopupMenuWindow"
+                | b"_NSGlassEffectWindow"
+                | b"NSToolTipPanel"
+                | b"NSToolTipWindow"
+        ) {
+            return true;
+        }
+        class = current.superclass();
+    }
+    false
 }
 fn floating(app: &AppHandle, window: &NSWindow) -> bool {
     [crate::pet::PET_WINDOW, crate::update_popover::UPDATE_POPOVER]
@@ -920,7 +1207,14 @@ unsafe extern "C-unwind" fn add(view: &NSView, selector: objc2::runtime::Sel, ch
     unsafe {
         ADD.get().expect("installed view hook")(view, selector, child);
     }
-    if view.window().is_some() && !PAINTING.with(Cell::get) {
+    // Descendants of an already hidden content child cannot expose pixels.
+    // In particular, never reenter layout from our own NSButton internals.
+    if !PAINTING.with(Cell::get)
+        && view
+            .window()
+            .and_then(|w| w.contentView())
+            .is_some_and(|root| std::ptr::eq(&*root, view))
+    {
         if let Some(app) = app_handle().filter(is_locked) {
             sync_windows(&app);
         }
@@ -934,6 +1228,40 @@ unsafe extern "C-unwind" fn content(window: &NSWindow, selector: objc2::runtime:
         if let Some(app) = app_handle().filter(is_locked) {
             sync_windows(&app);
         }
+    }
+}
+unsafe extern "C-unwind" fn title(window: &NSWindow, selector: objc2::runtime::Sel, value: &NSString) {
+    if !PAINTING.with(Cell::get) && !system_chrome(window) && !is_quit_window(window) {
+        if let Some(app) = app_handle().filter(is_locked) {
+            sync_windows(&app);
+            let protected = PRESENTATION.with_borrow_mut(|p| {
+                if let Some(cover) = p
+                    .covers
+                    .iter_mut()
+                    .find(|c| c.window.load().is_some_and(|w| std::ptr::eq(&*w, window)))
+                {
+                    cover.title = value.to_owned();
+                    true
+                } else {
+                    false
+                }
+            });
+            // An initializing window may not belong to NSApp.windows yet.
+            // Its first order operation will capture the real title and cover.
+            if protected {
+                unsafe {
+                    TITLE.get().expect("installed title hook")(
+                        window,
+                        selector,
+                        &NSString::from_str(&catalog("lockedTitle")),
+                    );
+                }
+                return;
+            }
+        }
+    }
+    unsafe {
+        TITLE.get().expect("installed title hook")(window, selector, value);
     }
 }
 unsafe extern "C-unwind" fn hidden(view: &NSView, selector: objc2::runtime::Sel, hidden: Bool) {
@@ -957,7 +1285,12 @@ unsafe extern "C-unwind" fn hidden(view: &NSView, selector: objc2::runtime::Sel,
     unsafe {
         HIDE.get().expect("installed hidden hook")(view, selector, value);
     }
-    if view.window().is_some() && !PAINTING.with(Cell::get) {
+    if !PAINTING.with(Cell::get)
+        && view
+            .window()
+            .and_then(|w| w.contentView())
+            .is_some_and(|root| unsafe { view.superview() }.is_some_and(|parent| std::ptr::eq(&*root, &*parent)))
+    {
         if let Some(app) = app_handle().filter(is_locked) {
             sync_windows(&app);
         }
@@ -969,6 +1302,11 @@ fn install_window_hooks() {
     }
     use objc2::runtime::Imp;
     unsafe {
+        let method = NSWindow::class()
+            .instance_method(sel!(setTitle:))
+            .expect("NSWindow setTitle");
+        let old = method.set_implementation(std::mem::transmute::<TitleFn, Imp>(title));
+        let _ = TITLE.set(std::mem::transmute::<Imp, TitleFn>(old));
         let method = NSWindow::class()
             .instance_method(sel!(orderWindow:relativeTo:))
             .expect("NSWindow orderWindow");
