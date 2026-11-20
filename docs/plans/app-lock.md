@@ -20,7 +20,11 @@ separate PRs; this file and `ui/src/lib/appLockContract.ts` are the contract bot
   to the device passcode / Mac password. The shell asks once automatically while it is in front;
   after a cancel it waits for the button. No custom PIN.
 - A device without a passcode (Mac user without a password): `available` is false, the lock does
-  not engage, and Settings explains why; the stored choice applies again once a passcode exists.
+  not engage, and Settings explains why (Off, with the reason); the stored choice applies again,
+  locked, once a passcode exists. `available` is false only when
+  `canEvaluatePolicy(.deviceOwnerAuthentication)` fails with `LAError.passcodeNotSet`. Any other
+  failure (a system cancel, a closed lid, a passing unavailability) keeps the last known value, and
+  a locked shell stays locked until a verification succeeds.
 - The lock covers UI only. Background work (sync, push, reminders, the Runtime and Agents, voice
   capture started by the Action Button) keeps running. Notification previews follow system settings.
 - The lock screen is native (SwiftUI on iOS, AppKit on Mac). Visual spec: `ui/design: app-lock/lock/*`.
@@ -44,7 +48,8 @@ tests decode those fixtures.
 `AppLockStatus = { policy, available, biometry, biometryState }`:
 
 - `policy`: `off | immediately | oneMinute | fiveMinutes`.
-- `available`: `canEvaluatePolicy(.deviceOwnerAuthentication)` succeeds.
+- `available`: false only when `canEvaluatePolicy(.deviceOwnerAuthentication)` fails with
+  `passcodeNotSet`; any other failure keeps the last known value (true when there is none yet).
 - `biometry`: `faceID | touchID | opticID | none` (`LAContext.biometryType`).
 - `biometryState`: `usable | notEnrolled | denied | unavailable | lockout`, from
   `canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)`: success → `usable`;

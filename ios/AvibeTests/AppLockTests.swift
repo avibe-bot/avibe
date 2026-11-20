@@ -191,12 +191,45 @@ final class AppLockCapabilityTests: XCTestCase {
     }
 
     func testOnlyAMissingPasscodeLetsTheLockStandDown() {
-        XCTAssertTrue(AppLockCapability.available(canEvaluate: true, error: nil))
-        XCTAssertFalse(AppLockCapability.available(canEvaluate: false, error: .passcodeNotSet))
-        for code in [LAError.Code.notInteractive, .systemCancel, .biometryLockout, .authenticationFailed] {
-            XCTAssertTrue(AppLockCapability.available(canEvaluate: false, error: code), "\(code)")
+        let passing: [LAError.Code?] = [.notInteractive, .systemCancel, .biometryLockout, .authenticationFailed, nil]
+        for previous in [true, false, nil] as [Bool?] {
+            XCTAssertTrue(AppLockCapability.available(canEvaluate: true, error: nil, previous: previous))
+            XCTAssertFalse(AppLockCapability.available(canEvaluate: false, error: .passcodeNotSet, previous: previous))
+            // A passing refusal keeps the last known answer; with none, the lock stays engaged.
+            for code in passing {
+                XCTAssertEqual(
+                    AppLockCapability.available(canEvaluate: false, error: code, previous: previous),
+                    previous ?? true,
+                    "\(String(describing: code)) after \(String(describing: previous))"
+                )
+            }
         }
-        XCTAssertTrue(AppLockCapability.available(canEvaluate: false, error: nil))
+    }
+
+    /// A locked App stays locked through a passing refusal and opens only on a verified unlock.
+    func testAPassingRefusalNeverUnlocks() async {
+        let auth = FakeAuthenticator()
+        let defaults = UserDefaults(suiteName: "AppLockPassingRefusal.\(UUID().uuidString)")!
+        AppLockStore(defaults: defaults).save(.immediately)
+        let lock = AppLockController(store: AppLockStore(defaults: defaults), authenticator: auth, clock: { 0 }, promptAllowed: { false })
+        XCTAssertTrue(lock.machine.locked)
+        // The system refuses for a moment (a canEvaluate error other than passcodeNotSet):
+        // the authenticator keeps the last known `available`, so nothing is released.
+        auth.current = AppLockCapability(
+            available: AppLockCapability.available(canEvaluate: false, error: .systemCancel, previous: true),
+            biometry: .faceID,
+            biometryState: .unavailable
+        )
+        lock.enterForeground()
+        lock.becomeActive()
+        _ = lock.status()
+        XCTAssertTrue(lock.machine.locked)
+        XCTAssertEqual(lock.status()["available"] as? Bool, true)
+        lock.unlock()
+        for _ in 0..<20 { await Task.yield() }
+        auth.answer(.success)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(lock.machine.locked)
     }
 
     func testLockScreenNamesOnlyWhatCanUnlockNow() {

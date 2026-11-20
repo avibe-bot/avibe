@@ -34,10 +34,12 @@ export type AppLockStatus = {
   /** The stored choice, even while `available` is false. */
   policy: AppLockPolicy;
   /**
-   * The device has a passcode (iPhone) or the user has a login password (Mac):
-   * `canEvaluatePolicy(.deviceOwnerAuthentication)` succeeds. When false the lock does not
+   * False only when the device has no passcode (iPhone) or the user has no login password (Mac):
+   * `canEvaluatePolicy(.deviceOwnerAuthentication)` fails with `LAError.passcodeNotSet`. Any other
+   * failure is a passing system state and keeps the last known value (true when there is none
+   * yet); a locked shell stays locked until a verification succeeds. When false the lock does not
    * engage whatever `policy` says, Settings shows the choice as Off and explains why, and the
-   * stored policy takes effect again once a passcode exists.
+   * stored policy takes effect again, locked, once a passcode exists.
    */
   available: boolean;
   biometry: AppLockBiometry;

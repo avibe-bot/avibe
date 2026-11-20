@@ -23,10 +23,14 @@ struct AppLockCapability: Equatable {
     var biometry: AppLockBiometry
     var biometryState: AppLockBiometryState
 
-    /// Whether the lock can engage. Only a missing passcode lets it stand down: any other
-    /// refusal (a transient system state) keeps it engaged, since failing open shows the content.
-    static func available(canEvaluate: Bool, error: LAError.Code?) -> Bool {
-        canEvaluate || error != .passcodeNotSet
+    /// Whether the lock can engage (the contract's `available`). Only a missing passcode
+    /// (`passcodeNotSet`) makes it false. Any other refusal is a passing system state: the
+    /// last known answer stands, and with none yet the lock stays engaged, since failing
+    /// open would show the content.
+    static func available(canEvaluate: Bool, error: LAError.Code?, previous: Bool?) -> Bool {
+        if canEvaluate { return true }
+        if error == .passcodeNotSet { return false }
+        return previous ?? true
     }
 
     /// Decodes LocalAuthentication's answers: whether `.deviceOwnerAuthentication` can be
@@ -72,13 +76,18 @@ protocol AppLockAuthenticating: AnyObject {
 
 @MainActor
 final class LocalAuthenticator: AppLockAuthenticating {
+    /// The last `available` this device answered, kept across passing refusals.
+    private var lastAvailable: Bool?
+
     func capability() -> AppLockCapability {
         var ownerError: NSError?
         let canEvaluate = LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: &ownerError)
         let available = AppLockCapability.available(
             canEvaluate: canEvaluate,
-            error: ownerError.flatMap { LAError.Code(rawValue: $0.code) }
+            error: ownerError.flatMap { LAError.Code(rawValue: $0.code) },
+            previous: lastAvailable
         )
+        lastAvailable = available
         let biometrics = LAContext()
         var biometricsError: NSError?
         let usable = biometrics.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &biometricsError)
