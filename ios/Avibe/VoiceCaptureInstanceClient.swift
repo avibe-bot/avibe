@@ -283,7 +283,8 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     /// this message never came from, so an unsent draft is put back: read
     /// before, restored after, only if nobody has written one since.
     func postMessage(
-        _ text: String, to sessionPath: String, capture: String?, timing: String? = nil, earlier: String? = nil
+        _ text: String, to sessionPath: String, capture: String?, timing: String? = nil, earlier: String? = nil,
+        spokenAt: String? = nil
     ) async throws {
         let before = try? await request("GET", sessionPath + "/draft")
         let draft = (before?.status == 200 ? before?.json?["text"] as? String : nil) ?? ""
@@ -292,7 +293,8 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             json: ["text": text, "metadata": ["input": "voice"]
                 .merging(capture.map { ["capture_attempt": $0] } ?? [:], uniquingKeysWith: { $1 })
                 .merging(timing.map { ["capture_timing": $0] } ?? [:], uniquingKeysWith: { $1 })
-                .merging(earlier.map { ["capture_earlier": $0] } ?? [:], uniquingKeysWith: { $1 })]
+                .merging(earlier.map { ["capture_earlier": $0] } ?? [:], uniquingKeysWith: { $1 })
+                .merging(spokenAt.map { ["spoken_at": $0] } ?? [:], uniquingKeysWith: { $1 })]
         )
         try Self.check(response)
         guard !draft.isEmpty else { return }
