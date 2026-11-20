@@ -147,6 +147,9 @@ class MobileStore:
                         if statement.strip():
                             conn.execute(statement)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                # Compatible with released v1 writers, which name every audit column.
+                if not any(col[1] == "device_id" for col in conn.execute("PRAGMA table_info(accesses)")):
+                    conn.execute("ALTER TABLE accesses ADD COLUMN device_id TEXT")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -181,10 +184,10 @@ class MobileStore:
         }
 
     @staticmethod
-    def _audit(conn, operation, *, caller, session_id=None, names=(), start=None, end=None):
+    def _audit(conn, operation, *, caller, session_id=None, names=(), start=None, end=None, device_id=None):
         conn.execute(
-            "INSERT INTO accesses(at,caller,session_id,operation,metrics,from_day,to_day) VALUES(?,?,?,?,?,?,?)",
-            (_now(), caller, session_id, operation, _json(list(names)), start, end),
+            "INSERT INTO accesses(at,caller,session_id,operation,metrics,from_day,to_day,device_id) VALUES(?,?,?,?,?,?,?,?)",
+            (_now(), caller, session_id, operation, _json(list(names)), start, end, device_id),
         )
 
     @staticmethod
@@ -617,7 +620,8 @@ class MobileStore:
             if device_id is None:
                 conn.execute("UPDATE requests SET state='canceled',ended_at=? WHERE state IN ('queued','claimed')",
                              (now,))
-            conn.execute("DELETE FROM pairings")
+                conn.execute("DELETE FROM pairings")
+            # A targeted disconnect must not cancel unused codes on other phones.
             self._audit(conn, "health.revoke", caller=caller, session_id=session_id)
         publish_mobile_schedule_changed()
         return {"purged": True}
@@ -731,5 +735,6 @@ class MobileStore:
                         > timedelta(seconds=max_age) for value in queried
                     )
                 result[name] = {"items": items, "freshness": freshness}
-            self._audit(conn, "health.read", caller=caller, session_id=session_id, names=names, start=start, end=end)
+            self._audit(conn, "health.read", caller=caller, session_id=session_id, names=names,
+                        start=start, end=end, device_id=device["id"])
             return {"metrics": result}
