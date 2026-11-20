@@ -564,8 +564,9 @@ final class DirectIrohTransportTests: XCTestCase {
         // delivered above within the same wait. Nothing can be awaited for
         // "no change was reported", so this is a wait and not a barrier.
         try await Task.sleep(nanoseconds: 500_000_000)
+        // A second, identical update from the system in that time would be
+        // ignored and counted, which is the behaviour and not a failure.
         XCTAssertEqual(changes.values, [])
-        XCTAssertEqual(monitor.ignoredUpdates, 0)
     }
 
     func testANetworkChangeBeforeAnyPathStartsOver() async throws {

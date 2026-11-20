@@ -3897,6 +3897,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const attemptDirectHandover = async () => {
     const state = directHandoverRef.current;
     if (!state.armed || state.running || !nativeDirectHandoverAvailable()) return;
+    // Only while the shell prefers direct. Its events come here with that
+    // preference; a retry set earlier can fire after it went to the public
+    // path, and a shell that does not report its path has no other gate.
+    if (nativeDirectPreference() !== 'direct') return;
     // With a shell that reports its path: only onto a direct address, never
     // while its connection runs through the relay. A stream moved there would
     // race the public path over the relay and lose, and nothing would move it

@@ -1151,6 +1151,34 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(1);
   });
 
+  it('does not retry once the shell prefers the public path again, with a shell that reports no path', async () => {
+    // `direct` version 2: no path, so nothing but the preference gates it.
+    const shell = await handoverShell();
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    // The rebuilt stream came in another way, and the retry is set.
+    emitHandshakeVia(2, 'other');
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 0 });
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 0 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(shell.handovers()).toBe(1);
+    // The preference goes to the public path before the spacing ends.
+    shell.emit({ preferred: 'tunnel', sequence: 4, closure: 0 });
+    for (let waited = 0; waited < 60_000; waited += 20_000) {
+      await vi.advanceTimersByTimeAsync(20_000);
+      // The stream keeps proving itself, so nothing else replaces it.
+      emitHeartbeat();
+    }
+    expect(shell.handovers()).toBe(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+
+    // Direct again: handed over, as the spacing has long passed.
+    shell.emit({ preferred: 'direct', sequence: 5, closure: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(2);
+  });
+
   it('never hands over without direct version 2', async () => {
     const shell = installDirectShell({ direct: 1 });
     await mountDirectPage();
