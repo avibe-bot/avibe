@@ -292,7 +292,7 @@ system_schedule_operations = Table(
     Column("fire_at", String, nullable=False),
     Column("time_zone", String, nullable=False),
     Column('registry_activity_id', Integer),
-    Index('uq_sso_registry_activity', 'registry_activity_id', unique=True),
+    Index('ix_sso_registry_activity', 'registry_activity_id'),
     Column('blocked_by_schedule_gate', Integer),
     Column("registry_binding", String),
     Column("registry_subject", String),

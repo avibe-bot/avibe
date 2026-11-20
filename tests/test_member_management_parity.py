@@ -110,6 +110,9 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("POST", "/api/remote-access/claims"),
+    ("GET", "/api/remote-access/claims/{claim_id}"),
+    ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
     ("GET", "/api/desktop/local-instance"),
     ("POST", "/api/desktop/local-instance/prepare"),
     ("POST", "/api/remote-access/direct/suspend"),
@@ -186,8 +189,10 @@ def test_complete_registered_api_management_inventory():
     # + 7 independent device routes and 2 Owner-only mobile metadata routes.
     # + 4 account-scoped registry list, self-report and sign-out routes.
     # + 4 personal Live Activity methods (Viewer; controller enforces ownership and session access).
-    # + 1 Model Hub reset card use and 8 device function/activity/Health ticket routes.
-    assert len(endpoints) == 366
+    # + 1 Model Hub reset card use (Owner role, classified in _RETAINED_OWNER_ROUTES).
+    # + 3 personal installation claim methods (Owner; browser return is not an API route).
+    # + 8 device function, activity and Health ticket methods.
+    assert len(endpoints) == 369
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),

@@ -746,6 +746,17 @@ def _pending_attempt(
     return conn.execute(ordered.limit(1)).mappings().one_or_none()
 
 
+def _new_registry_activity_id(conn) -> int:
+    # claim_next has already performed a deadline UPDATE in this transaction:
+    # SQLite serializes this allocation with all other first claims. Keep the
+    # public ID opaque without imposing a new unique constraint on old writers.
+    key = system_schedule_operations.c.registry_activity_id
+    while True:
+        candidate = secrets.randbelow(2**62) + 1
+        if conn.scalar(select(key).where(key == candidate).limit(1)) is None:
+            return candidate
+
+
 def claim_next(
     *,
     instance_id: str,
@@ -837,8 +848,13 @@ def claim_next(
                             == operation["operation_id"]
                         )
                         .where(system_schedule_operations.c.bound_device_id.is_(None))
-                        .values(bound_device_id=device_id, updated_at=_iso(now),blocked_by_schedule_gate=None,
-                                registry_activity_id=secrets.randbelow(2**62)+1 if registration else None, **(registration or {}))
+                        .values(
+                            bound_device_id=device_id,
+                            updated_at=_iso(now),
+                            blocked_by_schedule_gate=None,
+                            registry_activity_id=_new_registry_activity_id(conn) if registration else None,
+                            **(registration or {}),
+                        )
                     )
                 conn.execute(
                     system_schedule_attempts.update()

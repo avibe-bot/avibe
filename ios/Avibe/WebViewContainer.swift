@@ -27,6 +27,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let instanceID: () -> String?
     let deviceID: () -> String?
     let deviceDescription: () -> [String: Any]?
+    let healthBindingTicket: @MainActor () async -> String?
     let directStatus: DirectStatusProvider?
     let directHandover: DirectHandoverProvider?
     let directPreference: DirectPreferenceProvider?
@@ -71,6 +72,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
         deviceDescription: @escaping () -> [String: Any]? = { nil },
+        healthBindingTicket: @escaping @MainActor () async -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
         directPreference: DirectPreferenceProvider? = nil,
@@ -116,6 +118,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.instanceID = instanceID
         self.deviceID = deviceID
         self.deviceDescription = deviceDescription
+        self.healthBindingTicket = healthBindingTicket
         self.directStatus = directStatus
         self.directHandover = directHandover
         self.directPreference = directPreference
@@ -161,6 +164,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             instanceID: instanceID,
             deviceID: deviceID,
             deviceDescription: deviceDescription,
+            healthBindingTicket: healthBindingTicket,
             directStatus: directStatus,
             directHandover: directHandover,
             directPreference: directPreference,

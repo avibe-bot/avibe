@@ -15,10 +15,12 @@ def upgrade() -> None:
     op.create_table(
         "device_health_links",
         sa.Column("mobile_id", sa.String(), primary_key=True),
-        *[
-            sa.Column(name, sa.String())
-            for name in ("binding", "subject", "device_id", "linked_at", "ticket_binding", "issuer_sid")
-        ],
+        sa.Column("binding", sa.String()),
+        sa.Column("subject", sa.String()),
+        sa.Column("device_id", sa.String()),
+        sa.Column("linked_at", sa.String()),
+        sa.Column("ticket_binding", sa.String()),
+        sa.Column("issuer_sid", sa.String()),
         sa.Column("ticket_hash", sa.String(), unique=True),
         sa.Column("code_hash", sa.String(), unique=True),
         sa.Column("issued_at", sa.Integer()),
@@ -38,13 +40,10 @@ def upgrade() -> None:
         sa.Column("actor_subject", sa.String()),
         if_not_exists=True,
     )
-    for key, cols in (
-        ("time", ["at"]),
-        ("instance", ["binding", "at"]),
-        ("person", ["binding", "subject", "at"]),
-        ("device", ["binding", "device_id", "at"]),
-    ):
-        op.create_index("ix_dae_" + key, "device_activity_events", cols, if_not_exists=True)
+    op.create_index("ix_dae_time", "device_activity_events", ["at"], if_not_exists=True)
+    op.create_index("ix_dae_instance", "device_activity_events", ["binding", "at"], if_not_exists=True)
+    op.create_index("ix_dae_person", "device_activity_events", ["binding", "subject", "at"], if_not_exists=True)
+    op.create_index("ix_dae_device", "device_activity_events", ["binding", "device_id", "at"], if_not_exists=True)
     op.create_table(
         "device_function_settings",
         sa.Column("binding", sa.String(), primary_key=True),
@@ -55,39 +54,14 @@ def upgrade() -> None:
         sa.Column("notifications_on", sa.Integer(), nullable=False, server_default="1"),
         if_not_exists=True,
     )
-    for table, cols in (
-        ("remote_device_sessions", ["ticket_window", "ticket_attempts"]),
-        (
-            "system_schedule_operations",
-            [
-                "registry_binding",
-                "registry_subject",
-                "registry_device",
-                "registry_activity_id",
-                "blocked_by_schedule_gate",
-            ],
-        ),
-    ):
-        found = {column["name"] for column in sa.inspect(op.get_bind()).get_columns(table)}
-        for col in cols:
-            if col not in found:
-                op.add_column(
-                    table,
-                    sa.Column(
-                        col,
-                        sa.Integer()
-                        if col
-                        in {"ticket_window", "ticket_attempts", "registry_activity_id", "blocked_by_schedule_gate"}
-                        else sa.String(),
-                    ),
-                )
-    op.create_index(
-        "uq_sso_registry_activity",
-        "system_schedule_operations",
-        ["registry_activity_id"],
-        unique=True,
-        if_not_exists=True,
-    )
+    op.add_column("remote_device_sessions", sa.Column("ticket_window", sa.Integer(), nullable=True))
+    op.add_column("remote_device_sessions", sa.Column("ticket_attempts", sa.Integer(), nullable=True))
+    op.add_column("system_schedule_operations", sa.Column("registry_binding", sa.String(), nullable=True))
+    op.add_column("system_schedule_operations", sa.Column("registry_subject", sa.String(), nullable=True))
+    op.add_column("system_schedule_operations", sa.Column("registry_device", sa.String(), nullable=True))
+    op.add_column("system_schedule_operations", sa.Column("registry_activity_id", sa.Integer(), nullable=True))
+    op.add_column("system_schedule_operations", sa.Column("blocked_by_schedule_gate", sa.Integer(), nullable=True))
+    op.create_index("ix_sso_registry_activity", "system_schedule_operations", ["registry_activity_id"], if_not_exists=True)
     op.create_index(
         "ix_sso_registry",
         "system_schedule_operations",
@@ -97,7 +71,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("uq_sso_registry_activity", table_name="system_schedule_operations")
+    op.drop_index("ix_sso_registry_activity", table_name="system_schedule_operations")
     op.drop_index("ix_sso_registry", table_name="system_schedule_operations")
     for table, cols in (
         (

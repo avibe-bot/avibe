@@ -397,6 +397,7 @@ private struct BrowserScreen: View {
                         instanceID: { instance.id },
                         deviceID: { appModel.systemScheduleDeviceID },
                         deviceDescription: { appModel.describeDevice(instanceID: instance.id) },
+                        healthBindingTicket: { await appModel.healthBindingTicket(instanceID: instance.id) },
                         directStatus: appModel.directStatusProvider,
                         directHandover: appModel.directHandoverProvider,
                         directPreference: appModel.directPreferenceProvider,

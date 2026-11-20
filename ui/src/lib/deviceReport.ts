@@ -83,11 +83,42 @@ export async function nativeDeviceLabel(): Promise<string> {
   return (await nativeDeviceDescription())?.display_name ?? FALLBACK_NATIVE_DEVICE_LABEL;
 }
 
+const BINDING_TICKET = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The report's own `device.describe`, asking the App for a one-use Health
+ * binding ticket. The ticket stays with this one report: it is never cached
+ * and never sent anywhere else. An App that can't attach one answers without
+ * it; an older App that refuses the question is described as before.
+ */
+async function describeForReport(state: PageState): Promise<{
+  body: NativeDeviceDescription | null;
+  ticket?: string;
+}> {
+  const answer = await nativeDeviceDescribe({ health_binding: true }).catch(() => null);
+  const body = parseNativeDeviceDescription(answer);
+  if (!body) return { body: await nativeDeviceDescription() };
+  if (body.installation_id && state !== NO_SHELL && !state.description) {
+    state.description = Promise.resolve(body);
+  }
+  const ticket = (answer as Record<string, unknown>).health_binding_ticket;
+  return typeof ticket === 'string' && BINDING_TICKET.test(ticket) ? { body, ticket } : { body };
+}
+
+/** Whether the instance refused the report because of its ticket (or, being older, the ticket field). */
+async function refusedTicket(response: Response): Promise<boolean> {
+  if (response.status === 400) return true;
+  if (response.status !== 403) return false;
+  const answer = await response.clone().json().catch(() => null) as { error?: unknown } | null;
+  return answer?.error === 'health_binding_not_accepted';
+}
+
 /**
  * Tells the instance who this device is, once per page load. An instance
  * without a device list answers 404; nothing here may block or surface.
  * `post` is the API client, passed in so push code reading the label does not
- * load it.
+ * load it. With a Health binding ticket, a refusal of the ticket sends the
+ * same description once more without it; a refused ticket is never sent again.
  */
 export function reportNativeDevice(
   post: (input: string, init: RequestInit) => Promise<Response>,
@@ -95,16 +126,18 @@ export function reportNativeDevice(
   const state = pageState();
   if (state.reported) return state.reported;
   const pending: Promise<void> = (async () => {
-    const body = await nativeDeviceDescription();
+    const { body, ticket } = await describeForReport(state);
     // The instance groups a device by its installation id and takes no
     // report without one; the App has it once push has set up after sign-in.
     if (!body?.installation_id) return false;
+    const send = (payload: object) => post('/api/devices/self', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
     try {
-      await post('/api/devices/self', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const response = await send(ticket ? { ...body, health_binding_ticket: ticket } : body);
+      if (ticket && await refusedTicket(response)) await send(body);
     } catch {
       // Display only: a failed report changes nothing on this page.
     }

@@ -303,8 +303,8 @@ export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
   return callNative<NativeAppInfo>('app', 'app.info');
 }
 
-export async function nativeDeviceDescribe(): Promise<unknown> {
-  return callNative<unknown>('device', 'device.describe');
+export async function nativeDeviceDescribe(params: { health_binding?: true } = {}): Promise<unknown> {
+  return callNative<unknown>('device', 'device.describe', params);
 }
 
 /** Establishes a connection only; request completion comes from the instance API. */
