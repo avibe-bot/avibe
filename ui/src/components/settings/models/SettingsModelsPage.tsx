@@ -866,6 +866,13 @@ export const SettingsModelsPage: React.FC = () => {
     return landing;
   }, [agentCollectionReads, refreshAffectedChains, refreshAuthority, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
 
+  // The forced quota read resumes an account the vendor reports quota for, so
+  // the Sources and routes it changed are read with it.
+  const refreshQuotaAndSources = React.useCallback(async () => {
+    await refreshQuotaNow();
+    if (aliveRef.current) await refresh();
+  }, [refresh, refreshQuotaNow]);
+
   const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
     let result!: T;
     await sourceWriteRegistry.track(sourceId, async () => {
@@ -1606,7 +1613,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'quota' ? <QuotaTab
                       quota={quotaRead}
                       refreshing={refreshingQuota}
-                      onRefresh={refreshQuotaNow}
+                      onRefresh={refreshQuotaAndSources}
                       onRetry={retryQuota}
                       onRequestReauth={(sourceId) => {
                         const target = sources.find((source) => source.id === sourceId);
@@ -1751,6 +1758,7 @@ export const SettingsModelsPage: React.FC = () => {
                 serviceView={serviceDetailView}
                 onManageSource={() => setServiceDetailView(false)}
                 onOpenUsage={() => { selectSource(null); setTab('usage'); }}
+                onRefreshQuota={refreshQuotaAndSources}
                 onSaveFetch={(body) => void hostedTools.save('web_fetch', body)}
                 onRetryFetch={(sourceId) => void hostedTools.retryFetch(sourceId)}
                 onSaveSearch={(body) => void hostedTools.save('web_search', body)}

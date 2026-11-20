@@ -2650,8 +2650,11 @@ describe('SettingsModelsPage quota region', () => {
     await act(async () => { (poll![0] as () => void)(); });
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
 
+    // The forced read can resume a paused account, so the providers are read again behind it.
+    const providerReads = vi.mocked(modelsApi.listSources).mock.calls.length;
     await userEvent.click(await screen.findByRole('button', { name: /^Refresh now$|^立即刷新$/ }));
     await waitFor(() => expect(force).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(providerReads));
 
     const clear = vi.spyOn(window, 'clearInterval');
     await userEvent.click(screen.getByRole('tab', { name: /^Providers & routing$|^供应商与路由$/ }));
