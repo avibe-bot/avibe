@@ -765,3 +765,31 @@ async def test_hand_over_gives_a_job_at_most_one_watch(tmp_path, monkeypatch):
     assert watches == {job_id: "wch_1"}
     assert recovery.meta(job_id)["watch_id"] == "wch_1"
     await recovery.kill(job_id)
+
+
+async def test_wait_polls_job_files_and_processes_off_the_event_loop(tmp_path, monkeypatch):
+    """A field stall sampled ``meta`` under ``enforce_deadline``/``wait`` on the
+    controller loop. Every poll's file reads and process checks run on a worker."""
+    import threading
+
+    from core.agent_core.tools.base import JobStatus
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+    states = iter(["running", "running", "exited"])
+
+    def meta(_job_id):
+        threads.append(threading.get_ident())
+        return {"deadline_at": None}
+
+    def status(_job_id):
+        threads.append(threading.get_ident())
+        state = next(states)
+        return JobStatus(state, 0 if state == "exited" else None)
+
+    monkeypatch.setattr(host, "meta", meta)
+    monkeypatch.setattr(host, "status", status)
+    assert (await host.wait("job", deadline_s=5)).state == "exited"
+    assert not await host.enforce_deadline("job")
+    assert threads and loop_thread not in threads
