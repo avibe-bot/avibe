@@ -91,6 +91,20 @@ export function requestNativeAppLaunch(request: AppLaunchRequest, signal: AbortS
   });
 }
 
+/**
+ * Asks the shell for this native App window's ordinary close, the one its
+ * close button starts, so the unsaved-state question still applies. False
+ * where there is no native owner to ask.
+ */
+export function requestNativeWindowClose(): boolean {
+  if (window.__AVIBE_NATIVE_APP_WINDOW__ !== true || window.__AVIBE_APP_LAUNCH_PROTOCOL__ !== 1) return false;
+  const link = document.createElement('a');
+  link.href = 'avibe-app://close';
+  document.body.append(link);
+  try { link.click(); } finally { link.remove(); }
+  return true;
+}
+
 export function appBodyParams(snapshot: AppLaunchSnapshot | AppLaunchRequest): Record<string, unknown> {
   return {
     ...snapshot.params,

@@ -362,6 +362,42 @@ test('W1 complete Library/Preview/Show bodies consume snapshots without command 
   await show.screenshot({ path: '/tmp/w1-ui-evidence/show-reuse.png' });
 });
 
+async function nativeShowWindow(page: Page, session: { status: number; json?: unknown }) {
+  await page.setViewportSize({ width: 880, height: 600 });
+  await serveProduct(page);
+  await page.route('**/api/sessions/ses-close', route => route.fulfill({ status: session.status, json: session.json ?? { error: 'not found' } }));
+  await page.route('**/show/ses-close/**', route => route.fulfill({ contentType: 'text/html', body: '<p>Close fixture</p>' }));
+  await page.route('**/api/dock/**', route => route.fulfill({ json: { ok: true } }));
+  const closes: string[] = [];
+  await page.exposeFunction('recordNativeClose', (href: string) => { closes.push(href); });
+  await page.addInitScript(() => {
+    window.__AVIBE_APP_LAUNCH_PROTOCOL__ = 1;
+    document.addEventListener('click', event => {
+      const link = event.target as HTMLAnchorElement;
+      if (!link.href?.startsWith('avibe-app://close')) return;
+      event.preventDefault();
+      void (window as unknown as { recordNativeClose: (href: string) => Promise<void> }).recordNativeClose(link.href);
+    });
+  });
+  await nativeSnapshot(page, { appId: 'showpage', requestId: 'show-close', windowId: 'native-show', source: 'deep-link', sessionId: 'ses-close' });
+  await page.goto('/apps/show/ses-close?standalone=1');
+  return closes;
+}
+
+test('W1 a native Show window closes itself from the page shortcut through the native close', async ({ page }) => {
+  const closes = await nativeShowWindow(page, { status: 200, json: { id: 'ses-close', status: 'active', title: 'Close fixture' } });
+  const frame = page.frameLocator('iframe');
+  await frame.getByText('Close fixture').click();
+  await frame.locator('body').press('Alt+KeyW');
+  await expect.poll(() => closes).toEqual(['avibe-app://close']);
+});
+
+test('W1 unpinning a missing page closes its native Show window', async ({ page }) => {
+  const closes = await nativeShowWindow(page, { status: 404 });
+  await page.getByRole('button', { name: 'Unpin from Dock', exact: true }).click();
+  await expect.poll(() => closes).toEqual(['avibe-app://close']);
+});
+
 test('W1 main fallback snapshot retains a nonempty Editor draft and never resubmits native', async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 });
   await serveProduct(page);

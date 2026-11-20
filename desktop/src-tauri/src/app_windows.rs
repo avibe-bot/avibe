@@ -434,6 +434,10 @@ pub(crate) fn navigation(view: &Webview, url: &Url) -> Option<bool> {
     if url.scheme() != "avibe-app" {
         return None;
     }
+    if close_navigation(url) {
+        request_close(view);
+        return Some(false);
+    }
     let Some(request) = parse_navigation(url) else {
         return Some(false);
     };
@@ -466,6 +470,33 @@ pub(crate) fn navigation(view: &Webview, url: &Url) -> Option<bool> {
         });
     });
     Some(false)
+}
+/// `avibe-app://close`, exactly: a native App window's page asking for its
+/// own ordinary close.
+fn close_navigation(url: &Url) -> bool {
+    url.scheme() == "avibe-app"
+        && url.host_str() == Some("close")
+        && url.path().is_empty()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+}
+/// Only a live App window's current document may close it, and only through
+/// the same close a user starts, so its unsaved-state question still applies.
+/// The Workbench and other windows are not App windows and are ignored.
+fn request_close(view: &Webview) {
+    let live = registry(view.app_handle())
+        .0
+        .lock()
+        .expect("app windows")
+        .windows
+        .get(view.label())
+        .is_some_and(|entry| !entry.retired.load(Ordering::SeqCst) && entry.document.owns(view));
+    if live {
+        let _ = view.window().close();
+    }
 }
 pub(crate) fn navigation_for(app: &AppHandle, label: &str, doc: &Arc<Document>, url: &Url) -> bool {
     if url.scheme() != "avibe-app" {
@@ -1254,6 +1285,21 @@ mod tests {
 
         assert!(confirm_in_turn(&windows[..1], |window| &window.1, ask).await);
         assert!(confirm_in_turn(&windows[..0], |window| &window.1, ask).await);
+    }
+    #[test]
+    fn only_the_exact_close_address_requests_a_close() {
+        assert!(close_navigation(&Url::parse("avibe-app://close").unwrap()));
+        for other in [
+            "avibe-app://close/",
+            "avibe-app://close?now=1",
+            "avibe-app://close#x",
+            "avibe-app://user@close",
+            "avibe-app://close:1",
+            "avibe-app://launch?request=%7B%7D",
+            "https://close",
+        ] {
+            assert!(!close_navigation(&Url::parse(other).unwrap()), "{other}");
+        }
     }
     #[test]
     fn close_asks_only_for_a_showable_page_confirmation() {
