@@ -11,6 +11,14 @@ enum MobileSignInProvider: String, CaseIterable {
     case apple
 }
 
+/// The ways in avibe.bot offers the App now, from one read of its public auth configuration:
+/// the providers its mobile broker accepts (`mobile_providers`), and passkey sign-in
+/// (`passkey_login_enabled`; every iOS the App runs on, 17.4 and later, has the passkey sheet).
+struct MobileSignInMethods: Equatable {
+    let providers: [MobileSignInProvider]
+    let passkey: Bool
+}
+
 /// One attempt's PKCE verifier and state: 32 random bytes each, unpadded base64url. They live in
 /// native memory only, for the attempt that made them.
 struct MobileProviderSecrets: Equatable {

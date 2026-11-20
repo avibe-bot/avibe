@@ -8,6 +8,7 @@ export type NativeCapability =
   | 'haptics'
   | 'instancePresentation'
   | 'keyboardResizesViewport'
+  | 'liveActivities'
   | 'notifications'
   | 'push'
   | 'systemSchedule'
@@ -1087,4 +1088,26 @@ export async function nativeAppLockStatus(): Promise<unknown> {
 /** `appLock.setPolicy`; the shell verifies the device owner before it saves. */
 export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
   return callNative<unknown>('appLock', 'appLock.setPolicy', { policy });
+}
+
+
+export type NativeLiveActivityStatus = { enabled: boolean; tracking: boolean };
+export type NativeLiveActivityResult = { ok: true } | {
+  ok: false; code: 'disabled' | 'no_active_turn' | 'push_unavailable' | 'failed';
+};
+
+export function nativeLiveActivityStatus(sessionId: string) {
+  return callNative<NativeLiveActivityStatus>('liveActivities', 'liveActivity.status', { sessionId });
+}
+
+export function nativeLiveActivityStart(sessionId: string, agentName: string, sessionTitle: string | null) {
+  return callNative<NativeLiveActivityResult>('liveActivities', 'liveActivity.start', { sessionId, agentName, sessionTitle });
+}
+
+export function nativeLiveActivityStop(sessionId: string) {
+  return callNative<{ ok: true }>('liveActivities', 'liveActivity.stop', { sessionId });
+}
+
+export function nativeLiveActivityOpenSettings() {
+  return callNative<{ ok: true }>('liveActivities', 'liveActivity.openSettings');
 }

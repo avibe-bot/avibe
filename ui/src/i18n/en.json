@@ -24,6 +24,16 @@
       }
     }
   },
+  "liveActivity": {
+    "offer": "Show on Lock Screen",
+    "tracking": "Showing on the Lock Screen",
+    "stop": "Stop",
+    "systemOff": "Live Activities are off in Settings",
+    "settings": "Settings",
+    "no_active_turn": "This turn has ended.",
+    "push_unavailable": "Turn on notifications to show this on the Lock Screen.",
+    "failed": "Couldn't update the Lock Screen. Try again."
+  },
   "desktopBootstrap": {
     "askVibey": {
       "kept": "Kept on this Mac. It will go into Vibey's message box once you're connected.",
@@ -174,6 +184,10 @@
       "confirm": "An update is available. Download and install it now? Avibe will restart. Your sessions and settings will be kept.",
       "disabledDetail": "Automatic desktop updates are not configured for this build. Install a newer signed release manually.",
       "error": "Update failed — retry"
+    },
+    "providerCallback": {
+      "done": "You can close this tab and return to Avibe.",
+      "failed": "Sign-in didn’t finish. Return to Avibe to try again."
     }
   },
   "installHint": {
@@ -7704,8 +7718,10 @@
     "loginHeroBody": "One account for your computers and the instances shared with you.",
     "checkInbox": "Check your inbox.",
     "loginTitle": "Start with an email.",
+    "welcomeLine1": "Computer Use, files and apps:",
+    "welcomeLine2": "let Vibey take over your computer.",
+    "previousStep": "Previous step",
     "codeSent": "A code was sent to {{email}}",
-    "loginBody": "Sign in or sign up for your avibe.bot account.",
     "emailCode": "6-digit code",
     "email": "Email",
     "codeHelp": "Enter the 6-digit code from your email. You can paste it here.",
@@ -7912,6 +7928,28 @@
     "trustedView": {
       "title": "Avibe Desktop on this computer",
       "body": "You are using Avibe on another computer. This updates the desktop app on this one."
+    }
+  },
+  "signIn": {
+    "passkey": {
+      "use": "Sign in with a passkey",
+      "title": "Passkey sign-in",
+      "lead": "Confirm with your fingerprint, face, or screen lock. No email or password needed.",
+      "waiting": "Waiting for your passkey…",
+      "waitingHint": "Finish in the prompt from your device.",
+      "retry": "Try again",
+      "incomplete": "The prompt was closed or timed out, or no usable passkey was selected. Try again, or sign in another way.",
+      "failed": "We couldn’t sign you in with that passkey. Try again, or sign in another way.",
+      "unsupported": "This device can’t use passkeys here. Sign in another way."
+    },
+    "desktop": {
+      "passkeyHint": "Confirm with your fingerprint, face, or screen lock.",
+      "newPasswordBody": "Open Account security on avibe.bot in your browser. Sign in with your email, then choose Set or change password.",
+      "openInBrowser": "Open in browser",
+      "changeInBrowser": "Change it in your browser"
+    },
+    "provider": {
+      "continueInBrowser": "Continue in your browser to finish signing in."
     }
   },
   "health": {

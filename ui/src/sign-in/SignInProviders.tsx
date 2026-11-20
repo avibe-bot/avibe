@@ -4,10 +4,9 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-/** The other accounts the App signs in with, in the avibe.bot login card's order, then Apple. */
-export type SignInProvider = 'google' | 'github' | 'apple';
+import { SIGN_IN_PROVIDERS, type SignInProvider } from './types';
 
-const SIGN_IN_PROVIDERS: readonly SignInProvider[] = ['google', 'github', 'apple'];
+export type { SignInProvider } from './types';
 
 // The marks avibe.bot's login card draws (avibe-bot-backend app/login/login-form.tsx), and Apple's.
 // Brand colours are part of the marks, not theme colours.

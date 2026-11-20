@@ -5,5 +5,6 @@ import WidgetKit
 struct AvibeLiveActivityBundle: WidgetBundle {
     var body: some Widget {
         VoiceCaptureLiveActivity()
+        TurnLiveActivity()
     }
 }

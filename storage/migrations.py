@@ -145,6 +145,7 @@ class MigrationPreflight:
 
 
 HEAD_TABLES = INITIAL_TABLES | {
+    "live_activity_trackings",
     "run_definitions",
     "agent_runs",
     "show_pages",
@@ -165,6 +166,9 @@ HEAD_TABLES = INITIAL_TABLES | {
     "system_schedule_operations",
     "system_schedule_attempts",
     "message_answer_operations",
+    "remote_device_sessions",
+    "remote_device_push_links",
+    "remote_device_deadlines",
     "show_session_events",
     "media_objects",
     "media_object_references",

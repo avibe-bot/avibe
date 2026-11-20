@@ -170,5 +170,20 @@ it.each([
   mount();
   const trigger = document.querySelector('[data-account-trigger]')!;
   expect(trigger.textContent).toBe(label);
-  expect(trigger.getAttribute('title')).toBe(label);
+  // The label is the button's name; no hover tip (Max, 2026-11-20).
+  expect(trigger.hasAttribute('title')).toBe(false);
+});
+
+// Max, 2026-11-20: no hover tip in either state, not even for a name too long to show whole.
+it.each([
+  { signedIn: false, slug: undefined },
+  { signedIn: true, slug: 'a-very-long-instance-name-that-the-sidebar-cannot-show-whole' },
+])('the footer entry has no hover tip (signedIn=$signedIn)', ({ signedIn, slug }) => {
+  mock.signedIn = signedIn; mock.slug = slug;
+  mount();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  fireEvent.pointerEnter(trigger);
+  fireEvent.mouseOver(trigger);
+  expect(trigger.hasAttribute('title')).toBe(false);
+  expect(trigger.querySelector('[title]')).toBeNull();
 });

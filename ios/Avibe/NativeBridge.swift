@@ -3,6 +3,8 @@ import Foundation
 import UIKit
 import WebKit
 
+typealias LiveActivityAction = @MainActor (NativeBridgeRequest, WebOrigin) async throws -> [String: Any]
+
 typealias HealthConnectAction = @MainActor (String, String, WebOrigin) async -> String
 
 struct NativeBridgePolicy {
@@ -29,6 +31,7 @@ struct NativeShellMetadata: Equatable {
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
+        "liveActivities": 1,
         "push": 1,
         "systemSchedule": 1,
         "viewport": 1,
@@ -42,25 +45,35 @@ struct NativeShellMetadata: Equatable {
     let direct: Bool
     /// Whether it also answers `direct.handover`: `direct` version 2.
     let directHandover: Bool
+    /// Whether it answers `direct.preference` and `direct.setPreference`:
+    /// the `directPreference` capability.
+    let directPreference: Bool
 
     init(
         shellVersion: String,
         userAgentVersion: String,
         direct: Bool = false,
-        directHandover: Bool = false
+        directHandover: Bool = false,
+        directPreference: Bool = false
     ) {
         self.shellVersion = shellVersion
         self.userAgentVersion = userAgentVersion
         self.direct = direct
         self.directHandover = direct && directHandover
+        self.directPreference = direct && directPreference
     }
 
-    func withDirect(_ direct: Bool, handover: Bool = false) -> NativeShellMetadata {
+    func withDirect(
+        _ direct: Bool,
+        handover: Bool = false,
+        preference: Bool = false
+    ) -> NativeShellMetadata {
         NativeShellMetadata(
             shellVersion: shellVersion,
             userAgentVersion: userAgentVersion,
             direct: direct,
-            directHandover: handover
+            directHandover: handover,
+            directPreference: preference
         )
     }
 
@@ -70,6 +83,11 @@ struct NativeShellMetadata: Equatable {
             // Version 2 added `direct.handover`; version 3 reports the
             // kind of path (`path`) in the status and its events.
             capabilities["direct"] = directHandover ? 3 : 1
+        }
+        if directPreference {
+            // This device's path choice for the instance: automatic, or the
+            // Cloudflare tunnel only.
+            capabilities["directPreference"] = 1
         }
         return capabilities
     }
@@ -118,6 +136,12 @@ enum NativeBridgeMethod: String, CaseIterable {
     case badgeSet = "badge.set"
     case directStatus = "direct.status"
     case directHandover = "direct.handover"
+    case directPreference = "direct.preference"
+    case directSetPreference = "direct.setPreference"
+    case liveActivityStatus = "liveActivity.status"
+    case liveActivityStart = "liveActivity.start"
+    case liveActivityStop = "liveActivity.stop"
+    case liveActivityOpenSettings = "liveActivity.openSettings"
     case healthConnect = "health.connect"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
@@ -282,6 +306,8 @@ enum NativeBridgeConfiguration {
         deviceID: @escaping () -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        directPreference: DirectPreferenceProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         showShare: ShowShareCoordinator? = nil,
         appLock: AppLockBridging? = nil,
@@ -346,7 +372,11 @@ enum NativeBridgeConfiguration {
     ) -> WKWebViewConfiguration {
         // `direct` exists only with a provider: a shell with no direct
         // transport neither advertises it nor answers `direct.status`.
-        let metadata = metadata.withDirect(directStatus != nil, handover: directHandover != nil)
+        let metadata = metadata.withDirect(
+            directStatus != nil,
+            handover: directHandover != nil,
+            preference: directPreference != nil
+        )
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
         let controller = WKUserContentController()
@@ -365,6 +395,8 @@ enum NativeBridgeConfiguration {
             deviceID: deviceID,
             directStatus: directStatus,
             directHandover: directHandover,
+            directPreference: directPreference,
+            liveActivity: liveActivity,
             healthConnect: healthConnect,
             showShare: showShare,
             appLock: appLock,
@@ -638,11 +670,13 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let liveActivity: LiveActivityAction
     private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
+    private let directPreference: DirectPreferenceProvider?
     private let showShare: ShowShareCoordinator?
     private let appLock: AppLockBridging?
     private let voiceCapture: NativeHoldCapture?
@@ -701,6 +735,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         deviceID: @escaping () -> String?,
         directStatus: DirectStatusProvider?,
         directHandover: DirectHandoverProvider?,
+        directPreference: DirectPreferenceProvider?,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction,
         showShare: ShowShareCoordinator?,
         appLock: AppLockBridging?,
@@ -759,6 +795,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.deviceID = deviceID
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.directPreference = directPreference
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.showShare = showShare
         self.appLock = appLock
@@ -1066,6 +1104,25 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
+        case .liveActivityStatus, .liveActivityStart, .liveActivityStop, .liveActivityOpenSettings:
+            let origin = policy.instanceOrigin
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self, let url = sourceWebView?.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                do {
+                    let result = try await self.liveActivity(request, origin)
+                    guard let url = sourceWebView?.url, WebOrigin(url: url, requiresHTTPS: false) == origin else {
+                        self.reply(replyHandler, error: .forbidden)
+                        return
+                    }
+                    self.reply(replyHandler, result: result)
+                } catch {
+                    self.reply(replyHandler, error: (error as? NativeBridgeError) ?? .failed("Live Activity request failed."))
+                }
+            }
         case .healthConnect:
             guard request.params.count == 2,
                   let requestID = request.params["requestId"] as? String, !requestID.isEmpty, requestID.count <= 256,
@@ -1365,6 +1422,54 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     self?.reply(replyHandler, result: outcome.jsonObject)
                 }
             }
+        case .directPreference, .directSetPreference:
+            guard let directPreference else {
+                // No direct transport: nothing to choose between.
+                reply(replyHandler, error: .unsupported)
+                return
+            }
+            guard
+                let sourceWebView,
+                let url = sourceWebView.url,
+                WebOrigin(url: url, requiresHTTPS: false) == policy.instanceOrigin
+            else {
+                reply(replyHandler, error: .failed("The page is no longer this instance's."))
+                return
+            }
+            let preference: DirectPathPreference?
+            if request.method == .directPreference {
+                guard request.params.isEmpty else {
+                    reply(
+                        replyHandler,
+                        error: .invalidArgument("direct.preference does not accept parameters.")
+                    )
+                    return
+                }
+                preference = directPreference.read(policy.instanceOrigin)
+            } else {
+                guard
+                    request.params.count == 1,
+                    let name = request.params["mode"] as? String,
+                    let mode = DirectPathPreference.Mode(name: name)
+                else {
+                    reply(
+                        replyHandler,
+                        error: .invalidArgument(
+                            "direct.setPreference requires mode automatic or tunnel."
+                        )
+                    )
+                    return
+                }
+                preference = directPreference.write(policy.instanceOrigin, mode, url)
+            }
+            guard let preference else {
+                reply(
+                    replyHandler,
+                    error: .failed("The page is not the open instance's.")
+                )
+                return
+            }
+            reply(replyHandler, result: preference.jsonObject)
         case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck,
              .systemScheduleCapabilities, .systemScheduleRequest,
              .systemScheduleCancel:

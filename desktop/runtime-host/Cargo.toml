@@ -12,6 +12,8 @@ base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 cookie = "0.18"
 cookie_store = { version = "0.22", default-features = false, features = ["serde_json"] }
+# PKCE verifier and state for provider sign-in; already in the lockfile through uuid.
+getrandom = "0.4"
 # O_NOFOLLOW/O_NONBLOCK for opening a selected file (selection::ordinary_open).
 libc = "0.2"
 minisign-verify = "0.3"
@@ -22,7 +24,8 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tempfile = "3"
-tokio = { workspace = true, features = ["sync"] }
+# net + io-util: the one-transaction loopback listener for provider sign-in.
+tokio = { workspace = true, features = ["sync", "net", "io-util"] }
 url.workspace = true
 uuid = { version = "1", features = ["v4"] }
 zip.workspace = true

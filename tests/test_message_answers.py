@@ -640,7 +640,8 @@ def test_answer_migration_preserves_existing_rows_and_epoch(answer_route):
             return {name: conn.execute('SELECT * FROM "' + name.replace('"', '""') + '"').fetchall() for name in names}
 
     before = snapshot()
-    command.upgrade(config, "head")
+    # Exercise this migration alone; later revisions may add independent tables.
+    command.upgrade(config, "20261120_0092")
     assert snapshot() == before
     command.downgrade(config, "20261118_0091")
     assert snapshot() == before

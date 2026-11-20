@@ -69,6 +69,9 @@ final class HealthSyncCoordinator: ObservableObject {
     private var retryAfter: Date?
     var targetProvider: (() -> HealthConnectionTarget?)?
     var accountIDProvider: (() -> String?)?
+    /// The account's instances as avibe.bot last confirmed them in this
+    /// process, instance id to origin; `nil` while that is unknown.
+    var instancesProvider: (() -> [String: String]?)?
     private var cleanupPending = false
 
     private var currentAccountID: String? {
@@ -82,6 +85,24 @@ final class HealthSyncCoordinator: ObservableObject {
               store?.state.committedDeviceID == identity.deviceID else {
             throw HealthSyncError.code("connection_changed")
         }
+        // Nothing more goes to an origin the account no longer lists for
+        // this instance: the device is disconnected here, without a revoke.
+        // A connect under way replaces it instead.
+        if delisted(identity) {
+            if connecting == nil { beginCleanup(unregister: false) }
+            throw HealthSyncError.code("connection_changed")
+        }
+    }
+
+    /// Whether a confirmed instance list no longer lists `candidate`'s
+    /// instance at its origin: gone from the list, or listed at another
+    /// origin (renamed). Only the current account's list decides, and an
+    /// unknown list decides nothing; nor does an empty one, as the account
+    /// event treats it.
+    private func delisted(_ candidate: HealthDeviceIdentity) -> Bool {
+        guard candidate.accountID == currentAccountID,
+              let listed = instancesProvider?(), !listed.isEmpty else { return false }
+        return listed[candidate.instanceID] != candidate.origin
     }
 
     init(credentials: HealthCredentialStoring = HealthCredentialStore(),
@@ -152,6 +173,13 @@ final class HealthSyncCoordinator: ObservableObject {
             } else if manifestDue || (foreground && pollTask == nil) {
                 // A converged identity triggers no network; an unconverged one finishes setup.
                 requestConvergence()
+            }
+            // The list this answer carries is published after this event, so
+            // the instance-list gate reads it on the next turn: a rename ends
+            // the device now, not at a later sign-out that would revoke it at
+            // the old origin.
+            if identity != nil {
+                Task { @MainActor [weak self] in _ = try? self?.requireAccount() }
             }
         }
     }
@@ -243,7 +271,10 @@ final class HealthSyncCoordinator: ObservableObject {
             try await reader.authorize()
             try requireCurrent(token)
             let installationID = try credentials.installationID()
-            operationEpoch = beginCleanup(unregister: true)
+            // The device being replaced is revoked, unless its origin is no
+            // longer listed for it: nothing more is sent there.
+            let replaced = identity ?? (try? credentials.load())
+            operationEpoch = beginCleanup(unregister: replaced.map { !delisted($0) } ?? true)
             connecting = connection
             await cleanupTask?.value
             // This connect still owns its generation after replacing the old device.
@@ -394,6 +425,10 @@ final class HealthSyncCoordinator: ObservableObject {
             guard let accountID = currentAccountID else { return }
             guard accountID == saved.accountID, bindingMatches(saved) else {
                 await stopLocal(unregister: true, capturedIdentity: saved)
+                return
+            }
+            guard !delisted(saved) else {
+                await stopLocal(unregister: false, capturedIdentity: saved)
                 return
             }
             guard store?.state.suspended != true else { return }

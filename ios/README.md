@@ -727,7 +727,7 @@ Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
-`auth.signInWithProvider`, `session.refresh`,
+`auth.signInWithProvider`, `auth.signInWithPasskey`, `session.refresh`,
 `session.selectInstance`, `session.logout`, `app.returnToInstance`,
 `app.openPage`, and the closed `app.openExternal` allowlist (the two install
 guides and avibe.bot's Account security page). Instance documents, child
@@ -1078,8 +1078,22 @@ below.
   2 s carries that last list instead, so Welcome after sign-out or on a cold
   start shows the row at once. Welcome also asks `auth.providers` (no
   arguments; refused in sheets) when it appears and when the App returns to
-  the foreground on it, and replaces the row in place with the answer. So the App can ship before the broker
-  serves a provider, and each mark appears when avibe.bot enables it.
+  the foreground on it, and replaces the row in place with the answer. The
+  same read carries passkey sign-in (`passkey_login_enabled` exactly `true`;
+  every iOS the App runs on has the passkey sheet): it is kept with the list
+  and answered beside it as `passkey`, in signed-out answers and in
+  `auth.providers`. So the App can ship before the broker serves a provider,
+  and each way in appears when avibe.bot enables it.
+- Passkey sign-in with no email first is the closed `auth.signInWithPasskey`
+  (no arguments; the sheet forbids it), apart from the second-factor
+  `auth.verifyPasskey`. The coordinator runs avibe.bot's primary passkey
+  options, the system sheet with no allow-list and verify in one fresh
+  store, then reads the session as a request of its own. A closed sheet
+  cancels the flow and any attempt that does not sign in retires the store,
+  but a store that holds an accepted verify is kept until its session is
+  read (a `401` there retires it), so trying again reads it without a
+  second sheet or verify. `503` is passkey sign-in switched off
+  (`provider_unavailable`); a `403` is avibe.bot's HTTP boundary (`network`).
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
   `provider` exactly `google`, `github` or `apple`; any other value or an extra key
   is `invalid_argument`, and the sheet forbids it like every auth method. It
@@ -1540,6 +1554,14 @@ an interrupted query without a durable payload is resumed. Redirects and cookies
 are disabled for device requests. Revocation or loss of instance eligibility
 clears the connection; invalid payloads and unsupported contracts suspend sync
 until a new explicit connection. Retry-After applies to device requests.
+When avibe.bot answers with the account's instance list, and before each
+device request (restoration and HealthKit delivery included), the list it last
+confirmed in this process must still list the paired instance at its origin.
+If it does not (the instance was renamed, or removed while no connection was
+loaded), the connection ends locally and nothing more is sent to that origin,
+not even a revoke; a later connect starts over. A removal seen while the
+connection is loaded revokes it, as before. An unknown or empty list changes
+nothing.
 
 Both HealthKit entitlements and the localized read-purpose description belong
 only to the main app. The archive checker requires boolean grants and rejects
@@ -1665,3 +1687,44 @@ fixture document, including query strings. Both HTTP entrypoints reject every
 method except GET. The Vite proxy target is the process-owned fixture backend,
 and local `.env` files are disabled; no real account, running Avibe service, or
 production instance is used.
+
+
+## Turn Live Activities
+
+The `liveActivities: 1` bridge exposes `liveActivity.status`, `start`, `stop`, and
+`openSettings`. A person explicitly tracks one running Turn. Its immutable Agent
+name and session title stay in local ActivityAttributes; only phase and Unix
+seconds reach the instance tracking API and APNs. The exact wire contract and
+shared vectors live in `docs/plans/2026-11-20-ios-live-activity-contract.md` and
+`tests/fixtures/live_activity/contract_vectors.json`.
+
+`TurnActivityCoordinator` owns start admission, initial and rotated activity push
+tokens, foreground reconciliation, system dismissal, and account/instance
+cleanup. A phone-local ledger lets it retire server tracking for a card removed
+while the App was away. Only an explicit start can create a card, including after
+a prior dismissal or stop of the same still-running Turn. It uses the account's
+WebKit store and existing same-origin CSRF transport, and releases those WebViews
+through the account transition's existing release barriers. The ledger persists
+the Activity.request Unix second (requested_at on every PUT) and whether PUT has
+returned 200 for the current token. A token rotation clears that registration mark
+until its PUT succeeds. An unregistered card survives a 503 or lost response,
+retries PUT on foreground or token rotation, and ends if still unregistered eight
+hours after Activity.request. Registered cards only GET on foreground; actual
+token updates still PUT. A refused registration ends immediately, except a terminal
+Turn response retains its final card for one hour. Local HTTP responses never
+advance stale deadlines without instance confirmation.
+
+`TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
+renders the reviewed `ios/live-activity/*` frames in English and Simplified
+Chinese. A stale running card stops its timer; terminal cards show total time and
+remain for one hour. The `avibe-app://live-activity/<activityID>` private scheme
+resolves only local ActivityKit activities and routes through the existing
+account/instance chat opener. Voice capture activities remain a separate type.
+
+Owning validation is `AvibeTests/TurnActivityTests`: relay-vector decoding, local
+privacy boundaries, dismissal/relaunch, token rotation, 503 recovery, cleanup,
+selection races, terminal retention, deep links, and card render attachments.
+Physical-device acceptance still needs the runtime publisher and deployed relay:
+lock the TestFlight device, observe needsYou -> working -> terminal APNs updates,
+verify screen lighting, tap back into the correct conversation, and verify stale
+and one-hour dismissal behavior. Simulator tests do not establish APNs delivery.

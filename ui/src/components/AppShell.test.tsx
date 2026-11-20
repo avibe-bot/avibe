@@ -1482,15 +1482,16 @@ describe('AppShell route prefetch', () => {
   // requestIdleCallback, so each step waits on a timer.
   const startShell = async () => {
     vi.resetModules();
-    const [{ AppShell: Shell }, pages, { DeferredInboxPreview }] = await Promise.all([
+    const [{ AppShell: Shell }, pages, { LazyNewProjectDialog }] = await Promise.all([
       import('./AppShell'),
       import('../routePages'),
-      import('./workbench/InboxHoverPopover'),
+      import('./workbench/LazyNewProjectDialog'),
     ]);
     let finishFirst!: () => void;
     const firstStep = new Promise<void>((resolve) => { finishFirst = resolve; });
-    const first = vi.spyOn(pages.ChatPage, 'preload').mockReturnValue(firstStep as never);
-    const second = vi.spyOn(DeferredInboxPreview, 'preload').mockResolvedValue(undefined as never);
+    // The order is routePages' own: the new-project dialog, then the conversation.
+    const first = vi.spyOn(LazyNewProjectDialog, 'preload').mockReturnValue(firstStep as never);
+    const second = vi.spyOn(pages.ChatPage, 'preload').mockResolvedValue(undefined as never);
     const view = render(
       <MemoryRouter initialEntries={['/']}>
         <Routes>
