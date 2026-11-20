@@ -31,6 +31,13 @@ export type InstanceUpdateState = {
     target: string | null;
     error_code: string | null;
     updated_at: string;
+    /** The shell would refuse another action for this instance now because of this request
+     *  (`update_in_progress`): it is still on its way, or still being followed. Offer the
+     *  instance's Update, check and switches exactly when this is false. */
+    following: boolean;
+    /** An install only: the version the instance ran when the install was accepted. A version,
+     *  validated like every other; null for other actions, and when the shell does not know it. */
+    installed_from: string | null;
   };
   fetched_at: string | null;
 };
