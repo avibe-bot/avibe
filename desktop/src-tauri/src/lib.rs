@@ -333,6 +333,8 @@ fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> Desk
 }
 
 /// One string of the product's copy, at a dotted key, in the system's language.
+/// Only the macOS title bar reads one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn product_text(key: &str) -> Option<String> {
     let catalog: serde_json::Value = serde_json::from_str(product_catalog_source(sys_locale::get_locales())).ok()?;
     key.split('.')

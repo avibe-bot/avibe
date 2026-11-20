@@ -389,6 +389,8 @@ impl Source {
             child,
         })
     }
+    // Read only by the macOS share effects (`show_share::macos`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn document_current(&self) -> bool {
         !self
             .child
@@ -425,12 +427,15 @@ impl Source {
 /// the shell opened for exactly one Show, both on this computer's Runtime. The
 /// window's registered identity and current document decide it, never the
 /// page's request; `current` turns false once that document is gone.
+// Its route and current-document reads serve only the macOS share effects.
 #[derive(Clone)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct ShareSource {
     source: Source,
     show: Option<String>,
     route: Option<String>,
 }
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl ShareSource {
     /// The Show this window was opened for, or `None` for the Workbench.
     pub(crate) fn bound_show(&self) -> Option<&str> {

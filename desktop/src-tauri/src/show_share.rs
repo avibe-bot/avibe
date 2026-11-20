@@ -2135,6 +2135,8 @@ mod tests {
 
         // An operation that expires while its export is written, after its cleanup has
         // already run, leaves nothing either, also when the first removal fails.
+        // Unix only: the failed removal is a read-only directory.
+        #[cfg(unix)]
         #[tokio::test]
         async fn a_late_export_is_removed_and_a_failed_removal_retried() {
             use std::os::unix::fs::PermissionsExt;
