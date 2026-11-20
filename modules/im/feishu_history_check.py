@@ -31,6 +31,8 @@ _SETTLE_SECONDS = 120
 # be read for longer than this is, for that stretch, not checkable.
 _REMEMBER_SECONDS = 8 * 3600
 _EVIDENCE_SECONDS = 7 * 24 * 3600
+# How far Feishu's clock and ours may differ when a message's time is held against what is remembered.
+_CLOCK_SECONDS = 300
 # Pages (of 50) read of one chat in one go; a longer history is gone on with next time.
 _PAGE_LIMIT = 40
 
@@ -62,6 +64,8 @@ class FeishuHistoryCheck:
         # What was last said about a chat that could not be read, so that it is said once.
         self._said: Dict[str, str] = {}
         self._started_at = int(time.time()) + 60  # the connection needs a moment to be there
+        # Events that arrived before this time may have been forgotten; from it on, all are remembered.
+        self._remembered_from = 0.0
 
     def message_event(self, message_id: Optional[str]) -> None:
         """A message event arrived, by whichever connection, handled or dropped as a repeat."""
@@ -104,20 +108,22 @@ class FeishuHistoryCheck:
             else:
                 self._unfinished.pop(chat_id, None)
                 self._checked_until[chat_id] = until
-            for message_id in sent_by_people:
+            for message_id, sent_at in sent_by_people:
                 if message_id in self._judged:
                     continue  # read before: an interval begun again, or the edge of two
                 self._judged[message_id] = time.time()
                 self.counts.people_messages += 1
                 with self._lock:
                     arrived = message_id in self._event_at
-                    checkable = arrived or start >= time.time() - _EVIDENCE_SECONDS
+                    # By the message's own time, not the interval's: a recent message in a history
+                    # that was closed for long is as checkable as any other.
+                    checkable = arrived or sent_at >= self._remembered_from + _CLOCK_SECONDS
                     if checkable and not arrived:
                         self._missing[message_id] = chat_id
                 if arrived:
                     self.counts.matched += 1
                 elif not checkable:
-                    # The interval reaches back past what is remembered of the events: no verdict.
+                    # Sent before the time from which events are remembered: no verdict.
                     self.counts.not_checkable += 1
                     logger.warning(
                         "Feishu history check: message %s in chat %s is too old to be checked", message_id, chat_id
@@ -136,6 +142,7 @@ class FeishuHistoryCheck:
         )
         forget_before = max(min(now - _REMEMBER_SECONDS, read_up_to - _REMEMBER_SECONDS), now - _EVIDENCE_SECONDS)
         with self._lock:
+            self._remembered_from = max(self._remembered_from, forget_before)
             for message_id in [key for key, at in self._event_at.items() if at < forget_before]:
                 del self._event_at[message_id]
         for message_id in [key for key, at in self._judged.items() if at < forget_before]:
@@ -143,14 +150,15 @@ class FeishuHistoryCheck:
 
     async def _people_messages(
         self, chat_id: str, start: int, end: int, page_token: Optional[str]
-    ) -> Tuple[List[str], Optional[str]]:
-        """Ids of the messages people sent in ``chat_id`` between ``start`` and ``end``, from ``page_token`` on.
+    ) -> Tuple[List[Tuple[str, float]], Optional[str]]:
+        """The messages people sent in ``chat_id`` between ``start`` and ``end``, from ``page_token`` on.
 
-        Returns them with the token to go on from, when the page limit stopped
+        Each as its id and the time it was sent (the interval's start when
+        Feishu gives none). Returns them with the token to go on from, when the page limit stopped
         the reading before the interval's end. Raises ``_NotRead`` when Feishu
         does not give the history, for whatever reason.
         """
-        found: List[str] = []
+        found: List[Tuple[str, float]] = []
         for _ in range(_PAGE_LIMIT):
             try:
                 reply = await self._list_messages(chat_id, start, end, page_token)
@@ -162,7 +170,11 @@ class FeishuHistoryCheck:
             for item in data.get("items") or []:
                 sender = item.get("sender") or {}
                 if sender.get("sender_type") == "user" and item.get("message_id"):
-                    found.append(item["message_id"])
+                    try:
+                        sent_at = int(item.get("create_time")) / 1000  # Feishu gives milliseconds, as text
+                    except (TypeError, ValueError):
+                        sent_at = float(start)
+                    found.append((item["message_id"], sent_at))
             page_token = data.get("page_token") or None
             if not data.get("has_more") or not page_token:
                 return found, None

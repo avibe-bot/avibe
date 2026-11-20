@@ -1191,14 +1191,15 @@ async def test_a_history_that_could_not_be_read_for_hours_is_still_judged_fairly
         counts = bot._history_check.counts
         assert (counts.people_messages, counts.matched, counts.missing) == (1, 1, 0)
 
-        # A second chat whose history opens up only after eight days: its old messages get no verdict.
+        # A second chat whose history opens up only after eight days: its old messages get no verdict,
+        # while one sent minutes ago, with no event, is as missing as in any other chat.
         bot._dm_chat_ids.add("oc_late")
         bot._history_check._checked_until["oc_late"] = base
-        fake.history["oc_late"] = [("om_ancient", "user", base + 20)]
         clock.now += 8 * 24 * 3600
+        fake.history["oc_late"] = [("om_ancient", "user", base + 20), ("om_recent", "user", int(clock.now) - 180)]
         await bot._report_connections()
 
-        assert (counts.missing, counts.not_checkable) == (0, 1)
+        assert (counts.missing, counts.not_checkable) == (1, 1)
 
 
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):
