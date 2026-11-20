@@ -50,7 +50,7 @@ const TONE_CLASS: Record<Tone, string> = {
 };
 type Copy = { tone: Tone; title: string; detail?: string; spin?: boolean; offer?: boolean };
 
-type Subject = UpdateSubjectSection & { kind: 'instance' | 'app' };
+type Subject = UpdateSubjectSection & { kind: 'instance' | 'app'; /** The other subject's name. */ other: string };
 
 /** UpdatePanel's `useStatusCopy`, with two changes: an offer says what installing it does to this subject, and a
  *  finished update names what was updated. */
@@ -74,7 +74,11 @@ function useStatusCopy(status: UpdatePanelStatus | null, section: Subject, d: Dr
             `更新时 ${section.name} 会重新启动，通常一两分钟。会话和设置都会保留，正在进行的工作可能中断。`,
             `${section.name} restarts to finish, usually within a minute or two. Sessions and settings are kept; work in progress may be interrupted.`,
           )
-          : t('update.status.availableDetail'),
+          // New for the app beside an instance: which Avibe restarts, and that the instance is left alone.
+          : d(
+            `更新时这台电脑上的 Avibe 会重新启动，${section.other} 不受影响。`,
+            `Avibe on this computer restarts to finish. ${section.other} is not affected.`,
+          ),
       };
     case 'not-checked': return { tone: 'neutral', title: t('update.status.notChecked') };
     case 'unknown': return { tone: 'neutral', title: t('dashboard.desktopManagedUpdate') };
@@ -139,7 +143,8 @@ function Section({ section, lang, first }: { section: Subject; lang: SubjectLang
     : status?.kind === 'available'
       ? { label: section.kind === 'instance' ? d(`更新 ${section.name}`, `Update ${section.name}`) : d('更新桌面应用', 'Update this app'), icon: <Download /> }
       : (status?.kind === 'update-failed' && status.retry) || status?.kind === 'check-failed' ? { label: t('update.action.retry'), icon: <RefreshCw /> }
-        : null;
+        : status?.kind === 'not-checked' ? { label: t('update.action.check'), icon: <RefreshCw /> }
+          : null;
   const failed = status?.kind === 'check-failed' || status?.kind === 'update-failed';
   return (
     // The shipped panel keeps 16 px under its body and 12 px under its button; a section ends in one or the other.
@@ -185,6 +190,9 @@ function Section({ section, lang, first }: { section: Subject; lang: SubjectLang
           </div>
         </div>
       )}
+      {model?.legacyHost && (
+        <p className="rounded-md border border-edge px-3 py-2 text-xs leading-5 text-muted shadow-elevation-0">{t('update.legacyHost')}</p>
+      )}
       {status?.kind === 'downloading' && status.progress !== null && (
         <div className="h-1 overflow-hidden rounded-full bg-muted/40" aria-hidden="true">
           <div className="h-full rounded-full bg-cyan" style={{ width: `${status.progress}%` }} />
@@ -224,8 +232,8 @@ export function UpdateSubjectsPanel({ lang, instance, app }: {
   app: Omit<UpdateSubjectSection, 'name'>;
 }) {
   const sections: Subject[] = [
-    { ...instance, kind: 'instance' },
-    { ...app, kind: 'app', name: draft(lang)('这台电脑上的桌面应用', "This computer's app") },
+    { ...instance, kind: 'instance', other: draft(lang)('这台电脑上的桌面应用', "This computer's app") },
+    { ...app, kind: 'app', name: draft(lang)('这台电脑上的桌面应用', "This computer's app"), other: instance.name },
   ];
   const { t } = useTranslation();
   const checking = sections.some((section) => section.model?.status?.kind === 'checking');
@@ -277,7 +285,7 @@ export function InstanceVersionRow({ lang, name, version, attention = false, upd
   );
   const chip = shown && (
     <VersionChip attention={attention && !updating} updateDot={attention && !updating}
-      title={d(`${name} 的版本 ${shown}`, `${name} is on ${shown}`)}>
+      title={d(`${name} 的版本 ${shown}`, `${name} is on ${shown}`)} aria-label={d(`${name} 的版本 ${shown}`, `${name} is on ${shown}`)}>
       {updating && <RefreshCw size={12} aria-hidden="true" className="animate-spin" />}
       {shown}
     </VersionChip>

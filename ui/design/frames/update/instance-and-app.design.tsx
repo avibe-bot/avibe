@@ -93,6 +93,13 @@ const states: PanelState[] = [
   { name: 'details', zh: '点名字展开：这一项的上次检查和开关', en: 'A name opens its own last check and switches', subjects: pair(instance(), appCurrent(), 'instance') },
   { name: 'offline', zh: 'alex 连接断开', en: 'alex cannot be reached', subjects: pair(null, appCurrent()) },
   {
+    name: 'member', zh: '不能管理 alex 的成员：看得到，没有按钮和开关', en: 'A member who cannot manage alex: the state, no button or switches',
+    subjects: {
+      instance: { name: INSTANCE, model: instance({}, { prereleases: null, autoUpdate: null }), canUpdate: false },
+      app: { model: appCurrent() },
+    },
+  },
+  {
     name: 'long-name', zh: '实例名字很长：名字和按钮都截断', en: 'A long instance name truncates, in its row and in its button',
     subjects: { instance: { name: 'mac-mini-in-the-studio-upstairs-office', model: instance() }, app: { model: appCurrent() } },
   },
@@ -197,7 +204,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     name: `states-${lang}`,
     title: `提议 · 面板的各个状态 · ${lang}`,
     width: 1472,
-    height: 1580,
+    height: 1760,
     status: 'approved',
     fixtures: { copy: copy(lang) },
     render: () => <States lang={lang} states={states} />,
@@ -206,7 +213,7 @@ const designFrames = frames(langs.flatMap((lang): FrameSpec[] => [
     name: `badge-${lang}`,
     title: `提议 · 侧边栏底部一行的各个状态（第一行是现在）· ${lang}`,
     width: 420,
-    height: 440,
+    height: 480,
     status: 'approved',
     fixtures: { copy: copy(lang) },
     render: () => <Badges lang={lang} rows={badgeRows(lang)} />,

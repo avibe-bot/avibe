@@ -25,8 +25,10 @@ width, and nothing there can update the instance.
 A standalone Runtime's install is tracked only in the page that started it
 (`VersionBadge` state around `POST /api/upgrade`): another page or device shows
 the update as available, with its button enabled, while the install runs. A
-desktop-managed host relays its progress in `/api/version`, so every surface
-sees it.
+desktop-managed host relays an install a browser asked for (`remote_request`),
+so every surface sees that one; an install started at the host itself (someone
+there clicks Update, or its automatic update runs) is not relayed: `/api/version`
+carries only the desktop app's last check (`vibe/desktop_update_status.py`).
 
 ## Goal
 
@@ -36,6 +38,9 @@ sees it.
 - A result names what was updated; the other subject's own row shows it is
   behind.
 - An instance update shows as running until it ends, wherever it was started.
+  Known limit: an install started at a desktop-managed host itself is not
+  reported by that host today (see Background); relaying it is a later shell
+  change, outside these three PRs.
 - No new setting, no confirmation dialog, and the existing boundary holds: the
   panel is drawn by the local shell, and a remote page never drives this
   computer's updater.
@@ -51,17 +56,24 @@ Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
    beside the instance's name shows the instance's version, read by the
    instance's page from its own `/api/version`, as in a browser. It turns gold
    with a dot when either subject can be updated, and shows a spinner while the
-   instance updates, with the panel open or closed.
+   instance updates, with the panel open or closed. The chip keeps the owner
+   in its accessible name; the download icon the shipped chip adds for an app
+   update is dropped, as on every other surface (gold and a dot say it).
 2. **Panel.** One panel with a section per subject: the instance first, under
    its own name, then "This computer's app" (zh: 这台电脑上的桌面应用). A
    section is the shipped panel's body with the subject's name in place of
-   "Current version", and its button directly under its state. With two
+   "Current version" (drawn as the section's heading: foreground, medium), and
+   its button directly under its state. With two
    sections each button names its target ("Update alex", "Update this app");
    one section alone keeps "Update". An offer says what installing it does to
    that subject: the instance restarts, usually within a minute or two, its
    sessions and settings are kept, and work in progress may be interrupted
    (Vibey continues its own Turn after the restart; a Claude Code or Codex Turn
-   ends with a Retry notice). The last check
+   ends with a Retry notice); this computer's Avibe restarts and the instance
+   is not affected. An account that cannot manage the instance sees its
+   section without a button or switches; an instance that cannot be reached,
+   or whose sign-in ended, shows the bottom row's words for a lost connection.
+   The last check
    and the two switches are behind the subject's name, closed by default.
    The header's check asks both updaters.
 3. **Result.** A finished update reads "<name> updated to <version>". After
@@ -71,9 +83,10 @@ Frames: `ui/design/frames/update/instance-and-app.design.tsx`, drawn with
    version and asks the shell for the same panel; the page draws no popover of
    its own inside the desktop app.
 
-New copy: the app's section name, the two named buttons, the instance's offer
-sentence, the named result, and the chip's tooltip ("<name> is on
-v<version>"). Everything else is shipped `update.*` copy.
+New copy: the app's section name, the two named buttons, each subject's offer
+sentence, the named result, and the chip's label ("<name> is on v<version>").
+Everything else is shipped `update.*` copy. In the bottom row the offline icon
+sits 2 px left of where it ships, so it no longer touches the name.
 
 ## Trust boundary
 
@@ -92,9 +105,9 @@ instance's page:
   authorization checks: the instance decides, and an account that cannot manage
   the instance gets the section without a button.
 - The bundled popup page reaches this only through the account bridge, with new
-  enumerated actions beside the four `update_*` ones (check, install with an
-  exact target, the two switches, for the selected instance). The popup's
-  allow-list (`update_popover::allows`) grows by exactly these. The selection
+  enumerated actions beside the four `update_*` ones (read again, check,
+  install, the two switches, for the selected instance). The popup's
+  allow-list (`update_popover::allows`) grows by exactly these five. The selection
   generation fences them as it fences the others.
 - What comes back from the instance is display data: versions validated as
   versions and drawn as text, and an enumerated phase.
@@ -140,14 +153,15 @@ desktop-managed host does not carry it; its `remote_request` already says this.
 }
 ```
 
-- `installing` while any installer holds the install lock
+- `installing` while an installer owns the install lock
   (`atomic_upgrade_lock`): `POST /api/upgrade`, `vibe upgrade`, and the
-  automatic update alike. `restarting` from a committed install until its
-  scheduled restart has finished (`restart_is_pending`). `null` otherwise,
-  including after a failed install.
-- The lock is the truth. `target` and `started_at` come from a record the
-  installer writes while it holds the lock; a record whose holder is gone
-  reports nothing.
+  automatic update alike. Only an installer marks the lock; its other holders
+  (a plain restart, pruning, launcher repair, activation) report nothing.
+  `restarting` while the restart that a committed install scheduled is pending;
+  any other restart reports nothing. `null` otherwise, including after a failed
+  install.
+- `target` and `started_at` come from the installer's own record; a record
+  whose holder is gone reports nothing.
 - Reading it never waits for the lock and adds no blocking work to the request.
 - Older Workbenches ignore the field. Nothing else in the answer changes, and
   `POST /api/upgrade` keeps its released behaviour.
@@ -175,11 +189,14 @@ instance_update: null | {            // null while the committed connection is l
 }
 ```
 
-`snapshot` keeps exactly the `UpdateSnapshot` fields
-(`ui/src/components/update/types.ts`) plus contract A's `install`: versions
-that parse as versions, enumerated phases, booleans, timestamps, and bounded
-`host_actions`. Anything else is dropped; an answer that fails validation is
-`unreachable`.
+`snapshot` keeps the `UpdateSnapshot` fields
+(`ui/src/components/update/types.ts`) plus contract A's `install`, each reduced
+to display data: versions that parse as versions, enumerated phases, booleans,
+timestamps, and bounded `host_actions`. The free-text `error` becomes the fixed
+string `"error"` when set and `null` otherwise; `build` keeps only `kind`.
+Anything else is dropped; an answer that fails validation is `unreachable`.
+`unauthorized` is an instance that answers but no longer accepts the app's
+sign-in; the panel draws it like `unreachable`.
 
 Actions, in the account bridge's v1 envelope, beside the four `update_*` ones:
 
@@ -203,7 +220,11 @@ Actions, in the account bridge's v1 envelope, beside the four `update_*` ones:
   after the selection changed is dropped, and no action is sent for an
   instance that is no longer the committed one.
 - `install` requires `target_version` to equal the snapshot's `latest` at the
-  time of the click. A standalone install keeps its HTTP request open for the
+  time of the click. A desktop-managed host installs exactly that target. A
+  standalone Runtime's `POST /api/upgrade` takes no target and installs what it
+  finds latest when it runs, so the result names the version the snapshot
+  reports as `current` after the restart, not the one that was clicked. A
+  standalone install keeps its HTTP request open for the
   whole install (about a minute); the shell does not treat a long wait as a
   failure, and follows `install` and `current` in the snapshot to its end.
 - While the popup is open, or a request is not settled, the shell rereads the
@@ -216,9 +237,16 @@ Actions, in the account bridge's v1 envelope, beside the four `update_*` ones:
   `instance_update` is not null, and today's single panel otherwise.
 - The bottom row and the narrow-window badge are the instance's page: they
   read the page's own `/api/version`, and still only ask the shell to present
-  the panel.
-- A standalone Runtime's page reads `install` from `/api/version`: an install
-  started elsewhere shows as running, and Update is disabled until it ends.
+  the panel. The page reads it when it loads, when its window comes back to
+  the front or becomes visible (the shell's panel is another window), and every
+  two seconds while an install or its restart is reported, until it ends; it
+  then loads itself again, since its interface changed with the version.
+- In a section the header's check stands in for the single panel's "Check for
+  updates" and retry-a-check buttons, and a failed check keeps its retry
+  button. A source build keeps its package version beside its name.
+- A standalone Runtime's page reads `install` from `/api/version` at the same
+  moments, and when its own panel opens: an install started elsewhere shows as
+  running, and Update is disabled until it ends.
 
 ## Delivery
 
