@@ -1706,6 +1706,14 @@ tiers, new tiers, nor credential material.
 
 ## Subscription quota
 
+For Anthropic and ChatGPT the optional `reset_cards` block is independent of quota windows.
+`{"state":"ok","lock":null,"cards":[]}` means no cards; `state:"unread"` with an empty list
+means the inventory could not be read. Other vendors omit the block. Each held kind
+(`all`, `fable`, `session`, `weekly`, or ChatGPT's `account`) has a positive `count`,
+`expires_at` (first known expiry or null), `stated` (vendor states the effect),
+`usable`, `blocked` (null, `needs_limit`, `cooldown`, `unavailable`) and `blocked_until`
+(cooldown end or null). Times are UTC. Reads never use cards.
+
 Quota is a report, never a control input, exactly like usage metering: nothing in
 resolution, admission, or cooldown reads it. It covers hub-held subscription
 Sources (`kind: subscription`, `supply_channel: hub`, bound credential). Native-CLI
