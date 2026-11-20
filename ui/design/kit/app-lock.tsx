@@ -11,11 +11,6 @@ import { cn } from '@/lib/utils';
 
 export type LockDevice = 'iphone' | 'mac';
 
-function useCopy() {
-  const { i18n } = useTranslation();
-  const en = i18n.language?.startsWith('en');
-  return (zh: string, english: string) => (en ? english : zh);
-}
 
 // ── Lock screen ─────────────────────────────────────────────────────────────
 
@@ -46,28 +41,23 @@ export function LockScreen({
   pending?: 'askVibey' | 'link';
   className?: string;
 }) {
-  const t = useCopy();
+  // The native shells read these same keys (appLockCopy.test.ts keeps the iPhone catalog equal).
+  const { t } = useTranslation();
   const usesSecret = state === 'passcodeOnly' || state === 'lockout';
   const Icon = usesSecret ? KeyRound : device === 'iphone' ? ScanFace : Fingerprint;
   const action = usesSecret
-    ? device === 'iphone' ? t('使用设备密码解锁', 'Unlock with Passcode') : t('使用登录密码解锁', 'Unlock with Password')
-    : device === 'iphone' ? t('使用面容 ID 解锁', 'Unlock with Face ID') : t('使用触控 ID 解锁', 'Unlock with Touch ID');
+    ? device === 'iphone' ? t('appLock.lock.iphone.unlockPasscode') : t('appLock.lock.unlockPassword')
+    : device === 'iphone' ? t('appLock.lock.iphone.unlockFaceID') : t('appLock.lock.unlockTouchID');
 
   let status: ReactNode = null;
   if (state === 'failed') {
-    status = <p role="alert" className="text-[13px] text-destructive-ink">{t('没有验证成功，再试一次。', 'Not verified. Try again.')}</p>;
+    status = <p role="alert" className="text-[13px] text-destructive-ink">{t('appLock.lock.verificationFailed')}</p>;
   } else if (state === 'lockout') {
-    status = <p className="text-[13px] text-muted">{device === 'iphone'
-      ? t('面容 ID 多次未识别，请用设备密码解锁。', 'Face ID did not recognize you several times. Use your passcode.')
-      : t('触控 ID 多次未识别，请用登录密码解锁。', 'Touch ID did not recognize you several times. Use your Mac password.')}</p>;
+    status = <p className="text-[13px] text-muted">{device === 'iphone' ? t('appLock.lock.iphone.faceIDLockout') : t('appLock.lock.macLockout')}</p>;
   } else if (state === 'passcodeOnly') {
     const text = device === 'iphone'
-      ? reason === 'denied'
-        ? t('Avibe 没有使用面容 ID 的权限。可在 iOS 设置 › Avibe 中允许。', 'Avibe is not allowed to use Face ID. You can allow it in iOS Settings › Avibe.')
-        : t('这台 iPhone 没有录入面容 ID。', 'This iPhone has no Face ID set up.')
-      : reason === 'notEnrolled'
-        ? t('这台 Mac 没有录入指纹。', 'No fingerprints are set up on this Mac.')
-        : t('触控 ID 现在不可用，例如笔记本合盖时。', 'Touch ID is not available right now, for example with the lid closed.');
+      ? reason === 'denied' ? t('appLock.lock.iphone.faceIDDenied') : t('appLock.lock.iphone.faceIDNotEnrolled')
+      : reason === 'notEnrolled' ? t('appLock.lock.macNotEnrolled') : t('appLock.lock.macUnavailable');
     status = <p className="text-[13px] text-muted">{text}</p>;
   }
 
@@ -84,8 +74,8 @@ export function LockScreen({
       <div className={cn('flex w-full flex-col items-center text-center', compact ? 'max-w-[300px] gap-4' : 'max-w-[340px] gap-5')}>
         <img src={logo} alt="" className={compact ? 'size-12' : 'size-16'} />
         <div className="flex flex-col gap-1.5">
-          <h1 className={cn('font-semibold tracking-tight', compact ? 'text-[17px]' : 'text-[22px]')}>{t('Avibe 已锁定', 'Avibe is locked')}</h1>
-          {compact && <p className="text-[12px] text-muted">{t('解锁后，所有 Avibe 窗口一起恢复。', 'Unlocking restores every Avibe window.')}</p>}
+          <h1 className={cn('font-semibold tracking-tight', compact ? 'text-[17px]' : 'text-[22px]')}>{t('appLock.lock.lockedTitle')}</h1>
+          {compact && <p className="text-[12px] text-muted">{t('appLock.lock.restoreAllWindows')}</p>}
         </div>
         {pending && <PendingNote kind={pending} />}
         <Button
@@ -95,7 +85,7 @@ export function LockScreen({
           className={cn('w-full', compact ? '' : 'rounded-full')}
         >
           {state === 'verifying' ? <Loader2 className="size-4 animate-spin" /> : <Icon className="size-[18px]" />}
-          {state === 'verifying' ? t('正在验证…', 'Verifying…') : action}
+          {state === 'verifying' ? t('appLock.lock.verifying') : action}
         </Button>
         <div className="min-h-[20px]">{status}</div>
       </div>
@@ -104,14 +94,12 @@ export function LockScreen({
 }
 
 function PendingNote({ kind }: { kind: 'askVibey' | 'link' }) {
-  const t = useCopy();
+  const { t } = useTranslation();
   // Says what is waiting, never its content: the selection itself stays hidden until unlock.
   return (
     <div className="flex w-full items-start gap-2.5 rounded-lg border border-edge bg-field px-3.5 py-2.5 text-left text-[12px] leading-relaxed text-muted">
       <Info className="mt-[2px] size-[14px] shrink-0" />
-      <span>{kind === 'askVibey'
-        ? t('收到一段要发给 Vibey 的内容。解锁后会放进输入框，由你确认再发送。', 'Something you sent to Vibey is waiting. After you unlock, it goes into the message box for you to review and send.')
-        : t('收到一个 Avibe 链接。解锁后会打开它。', 'An Avibe link is waiting. It opens after you unlock.')}</span>
+      <span>{kind === 'askVibey' ? t('appLock.lock.pendingContent') : t('appLock.lock.pendingLink')}</span>
     </div>
   );
 }

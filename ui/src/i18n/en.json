@@ -1,4 +1,29 @@
 {
+  "appLock": {
+    "lock": {
+      "lockedTitle": "Avibe is locked",
+      "unlockTouchID": "Unlock with Touch ID",
+      "unlockPassword": "Unlock with Password",
+      "verifying": "Verifying…",
+      "verificationFailed": "Not verified. Try again.",
+      "macNotEnrolled": "No fingerprints are set up on this Mac.",
+      "macLockout": "Touch ID did not recognize you several times. Use your Mac password.",
+      "macUnavailable": "Touch ID is not available right now, for example with the lid closed.",
+      "restoreAllWindows": "Unlocking restores every Avibe window.",
+      "pendingContent": "Something you sent to Vibey is waiting. After you unlock, it goes into the message box for you to review and send.",
+      "pendingLink": "An Avibe link is waiting. It opens after you unlock.",
+      "changeReason": "Confirm the App Lock change",
+      "unlockReason": "Unlock Avibe",
+      "iphone": {
+        "unlockFaceID": "Unlock with Face ID",
+        "unlockPasscode": "Unlock with Passcode",
+        "faceIDNotEnrolled": "This iPhone has no Face ID set up.",
+        "faceIDDenied": "Avibe is not allowed to use Face ID. You can allow it in iOS Settings › Avibe.",
+        "faceIDLockout": "Face ID did not recognize you several times. Use your passcode.",
+        "touchIDLockout": "Touch ID did not recognize you several times. Use your passcode."
+      }
+    }
+  },
   "desktopBootstrap": {
     "retry": "Try again",
     "installationHelp": "Installation help",
