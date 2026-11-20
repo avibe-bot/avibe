@@ -236,6 +236,16 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         set { lock.withLock { storedPath = newValue } }
     }
 
+    private var storedDetail: DirectSelectedPath?
+
+    /// The selected path's class and round-trip time, as the binding would
+    /// read them; set apart from `selectedPath`, as the binding reads them
+    /// apart.
+    var selectedPathDetail: DirectSelectedPath? {
+        get { lock.withLock { storedDetail } }
+        set { lock.withLock { storedDetail = newValue } }
+    }
+
     private var pathWatcher: (@Sendable (DirectPathKind?) -> Void)?
 
     func watchSelectedPath(

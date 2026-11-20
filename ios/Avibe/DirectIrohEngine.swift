@@ -101,6 +101,10 @@ protocol DirectIrohConnection: AnyObject, Sendable {
     /// tell.
     var selectedPath: DirectPathKind? { get }
 
+    /// The selected path's kind, class, and round-trip time, if the binding
+    /// can tell.
+    var selectedPathDetail: DirectSelectedPath? { get }
+
     /// Calls `onChange` with the selected path whenever the connection's
     /// paths change. Nil when the binding cannot watch.
     func watchSelectedPath(
@@ -116,6 +120,10 @@ protocol DirectPathWatch: Sendable {
 extension DirectIrohConnection {
     var selectedPath: DirectPathKind? {
         nil
+    }
+
+    var selectedPathDetail: DirectSelectedPath? {
+        selectedPath.map { DirectSelectedPath(kind: $0, local: nil, rttMs: nil) }
     }
 
     /// Calls `onChange` with the selected path whenever the connection's

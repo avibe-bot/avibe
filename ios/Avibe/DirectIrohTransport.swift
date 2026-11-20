@@ -1419,8 +1419,11 @@ extension DirectIrohTransport: DirectTransporting {
     /// The path the usable session's connection runs on now, read from the
     /// binding, and the last attempts.
     var pathDiagnostics: DirectPathDiagnostics {
-        let current = session.flatMap { $0.isUsable ? $0.link.connection.selectedPath : nil }
-        return DirectPathDiagnostics(current: current, attempts: attempts)
+        let connection = session.flatMap { $0.isUsable ? $0.link.connection : nil }
+        let current = connection?.selectedPath
+        // Read apart from `current`: kept only while the two agree.
+        let selected = connection?.selectedPathDetail.flatMap { $0.kind == current ? $0 : nil }
+        return DirectPathDiagnostics(current: current, attempts: attempts, selected: selected)
     }
 
     func select(
