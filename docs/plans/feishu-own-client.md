@@ -22,9 +22,10 @@ reconnects and error texts.
 1. **Message calls** (`modules/im/feishu_api.py`). The five endpoints go over
    aiohttp, like the calls the adapter already sent itself, with the adapter's
    own tenant-token cache.
-2. **Event parsing.** Our own dispatch of the four event types; the SDK keeps
-   only its socket client, loaded without the package `__init__`. A
-   module-count ceiling test guards it. Most of the gain lands here.
+2. **Event parsing.** Our own dispatch of the four event types. The SDK keeps
+   its socket client, imported as before and run so that it can be stopped
+   (`modules/im/feishu_sdk_ws.py`). No gain yet: importing any part of the SDK
+   costs all of it.
 3. **Long connection.** Our own client beside the SDK's behind one switch
    (`sdk`, `listen`, `parallel`, `own`), a local fake Feishu server, and
    differential tests that drive both clients with the same script.
@@ -117,11 +118,42 @@ nothing by default.
 - Calls that miss the token cache together share one token request; the SDK
   got the same effect by blocking the loop while it fetched.
 - The configured `proxy_url` is still not applied to Feishu traffic.
+- The setup wizard's temporary connection refuses every event (answer 500), as
+  the SDK's empty dispatcher did, so that Feishu sends it again and a running
+  adapter receives it.
+- Loading the SDK's socket client without its API tree was tried in three
+  designs (placeholders in `sys.modules`, a deferred package `__init__`, a
+  private renamed copy) and dropped: it is code for a few weeks on the path
+  that carries every Feishu message, and each design needed more machinery
+  than the weeks justify. The gain arrives when our own connection replaces
+  the SDK's.
+- The SDK's connections run only through `SdkLongConnection`, one at a time,
+  each on a thread and loop of its own. The SDK's client was not written to be
+  stopped: one module-level loop for all clients, tasks that never end, a
+  `start` that runs one step after another. What a stop guarantees:
+  - once `stop()` has returned true, nothing of the connection is left (no
+    socket, no task, its loop closed) and it cannot come back;
+  - from the moment `stop()` is called, the client is given no endpoint, so
+    it begins no new connection, and an event whose hand-over begins after
+    that moment is refused, so that Feishu sends it again;
+  - a handshake that already had its endpoint may complete; the socket is
+    closed within moments. An event already handed over is handled to its
+    end, but its answer may not reach Feishu, which then sends it again
+    (at least once, as Feishu's delivery is throughout);
+  - a peer that does not complete the close is cut off after 3 seconds;
+  - `stop()` returns false while the thread is inside a blocking call of the
+    SDK that cannot be interrupted: its endpoint request has no timeout, as
+    before. The thread ends, under the rules above, when that call returns.
+- The event shapes are those of lark-oapi 1.7.5, the release the lock file
+  pins; `pyproject.toml` now asks for no older one.
+- A malformed envelope (a schema or uuid that is not text, a 2.0 event without
+  a header, a body of the wrong shape) is refused as the SDK refused it. Only
+  a well-formed event of a type we do not handle is acknowledged and ignored.
 
 ## Todo
 
-- [ ] 1. Message calls and the 7-hour event memory
-- [ ] 2. Event parsing; SDK socket client loaded without the API tree
+- [x] 1. Message calls and the 7-hour event memory (#4047)
+- [ ] 2. Event parsing; the SDK's connection made stoppable
 - [ ] 3. Own long connection, fake server, differential tests, switch, probe
 - [ ] 4. Shadow stages on a live instance
 - [ ] 5. `lark-oapi` out of the runtime dependencies

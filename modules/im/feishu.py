@@ -1,7 +1,8 @@
 """Feishu/Lark implementation of the IM client.
 
-Message calls go over plain HTTPS (``feishu_api``); the long connection that
-delivers events is still ``lark-oapi``'s.
+Message calls go over plain HTTPS (``feishu_api``) and events are read by
+``feishu_events``; the long connection that delivers them is still
+``lark-oapi``'s (``feishu_sdk_ws``).
 """
 
 import asyncio
@@ -33,6 +34,8 @@ from .message_facts import (
 )
 from .download_target import open_download_target
 from .feishu_api import FeishuApi
+from .feishu_events import FeishuEventDispatcher
+from .feishu_sdk_ws import SdkLongConnection
 from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
@@ -134,8 +137,10 @@ class FeishuBot(BaseIMClient):
 
         # Message calls (create, reply, patch, delete, reaction)
         self._api = FeishuApi(config.api_base_url, self._tenant_token)
-        # WebSocket client (for event subscription)
-        self._ws_client = None
+        # The long connection that delivers events (lark-oapi's client)
+        self._sdk_connection: Optional[SdkLongConnection] = None
+        # Set by stop(), which may come at any point of the start.
+        self._stop_requested = threading.Event()
         # Event handler
         self._event_handler = None
         # Bot open_id (populated on startup)
@@ -154,7 +159,6 @@ class FeishuBot(BaseIMClient):
         self._routing_cache: Dict[str, Dict[str, Any]] = {}
         self._stop_event: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._ws_thread: Optional[threading.Thread] = None
         # Event id (or card-click key) -> the time it may be forgotten. Read and
         # written from the long connection's thread and from the adapter's loop.
         self._recent_event_ids: Dict[str, float] = {}
@@ -235,14 +239,6 @@ class FeishuBot(BaseIMClient):
             platform_specific=context.platform_specific,
             files=context.files,
         )
-
-    def _get_sdk_domain(self) -> str:
-        """Return the lark-oapi SDK domain constant based on config."""
-        import lark_oapi as lark
-
-        if getattr(self.config, "domain", "feishu") == "lark":
-            return lark.LARK_DOMAIN
-        return lark.FEISHU_DOMAIN
 
     def format_markdown(self, text: str) -> str:
         """Feishu card Markdown from the Markdown every surface shares.
@@ -2889,111 +2885,50 @@ class FeishuBot(BaseIMClient):
             self._on_ready = kwargs["on_ready"]
 
     def register_handlers(self):
-        """Register Feishu event handlers via lark-oapi SDK.
-
-        This sets up the event dispatcher for WebSocket events.
-        The actual handler registration happens in the SDK's EventDispatcherHandler.
-        """
-        # Handlers are registered during _build_event_handler, called in run()
+        """Nothing to register ahead of time: ``run()`` builds the event dispatcher."""
         pass
 
     # ------------------------------------------------------------------
     # Run / lifecycle
     # ------------------------------------------------------------------
-    def _build_event_handler(self):
-        """Build the lark-oapi event dispatcher handler."""
-        import lark_oapi as lark
+    def _build_event_handler(self) -> FeishuEventDispatcher:
+        """Build the dispatcher for the events the long connection delivers."""
 
-        def on_message_receive(data):
-            """Callback for im.message.receive_v1 events."""
+        def on_message_receive(event_id: Optional[str], event: Dict[str, Any]) -> None:
+            """im.message.receive_v1"""
             try:
-                if hasattr(data, "event") and data.event:
-                    event_dict = {}
-                    event = data.event
-                    # Convert SDK event object to dict
-                    if hasattr(event, "__dict__"):
-                        event_dict = self._event_to_dict(event)
-                    elif isinstance(event, dict):
-                        event_dict = event
-
-                    # Deduplication
-                    event_id = None
-                    if hasattr(data, "header") and data.header:
-                        event_id = getattr(data.header, "event_id", None)
-                    if self._is_duplicate_event(event_id):
-                        return
-
-                    self._handle_message_event(event_dict)
+                if self._is_duplicate_event(event_id):
+                    return
+                self._handle_message_event(event)
             except Exception as exc:
                 logger.error("Error in on_message_receive: %s", exc, exc_info=True)
 
-        def on_card_action(data):
-            """Callback for card.action.trigger events.
-
-            Must return a P2CardActionTriggerResponse so the SDK can
-            reply to Feishu within the 3-second window.
-            """
-            from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
-
+        def on_card_action(event: Dict[str, Any]) -> None:
+            """card.action.trigger; the dispatcher answers Feishu within its 3-second window."""
             try:
-                event_dict = {}
-                if hasattr(data, "event") and data.event:
-                    event = data.event
-                    if hasattr(event, "__dict__"):
-                        event_dict = self._event_to_dict(event)
-                    elif isinstance(event, dict):
-                        event_dict = event
-                self._handle_card_action(event_dict)
+                self._handle_card_action(event)
             except Exception as exc:
                 logger.error("Error in on_card_action: %s", exc, exc_info=True)
-            # Always return a response to avoid Feishu "request failed" toast
-            return P2CardActionTriggerResponse({})
 
-        def on_reaction_event(data):
-            """Callback for message reaction events we do not actively process yet."""
+        def on_reaction_event(event_id: Optional[str], event_type: str) -> None:
+            """Message reaction events we do not actively process yet."""
             try:
-                event_id = None
-                event_type = None
-                if hasattr(data, "header") and data.header:
-                    event_id = getattr(data.header, "event_id", None)
-                    event_type = getattr(data.header, "event_type", None)
                 if self._is_duplicate_event(event_id):
                     return
                 logger.debug("Ignoring Feishu reaction event: %s", event_type or "unknown")
             except Exception as exc:
                 logger.error("Error in on_reaction_event: %s", exc, exc_info=True)
 
-        handler = (
-            lark.EventDispatcherHandler.builder("", "")
-            .register_p2_im_message_receive_v1(on_message_receive)
-            .register_p2_card_action_trigger(on_card_action)
-            .register_p2_im_message_reaction_created_v1(on_reaction_event)
-            .register_p2_im_message_reaction_deleted_v1(on_reaction_event)
-            .build()
+        return FeishuEventDispatcher(
+            on_message=on_message_receive,
+            on_card_action=on_card_action,
+            on_reaction=on_reaction_event,
         )
-        return handler
-
-    def _event_to_dict(self, obj: Any) -> Dict[str, Any]:
-        """Recursively convert SDK event object to a plain dict."""
-        if isinstance(obj, dict):
-            return {k: self._event_to_dict(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [self._event_to_dict(item) for item in obj]
-        if hasattr(obj, "__dict__"):
-            result = {}
-            for key, value in obj.__dict__.items():
-                if key.startswith("_"):
-                    continue
-                result[key] = self._event_to_dict(value)
-            return result
-        return obj
 
     def run(self):
         """Start the Feishu bot with WebSocket long connection."""
         if not self.config.app_id or not self.config.app_secret:
             raise ValueError("Feishu app_id and app_secret are required")
-
-        import lark_oapi as lark
 
         logger.info("Starting Feishu/Lark bot with WebSocket...")
 
@@ -3004,6 +2939,8 @@ class FeishuBot(BaseIMClient):
         async def start():
             self._loop = asyncio.get_running_loop()
             self._stop_event = asyncio.Event()
+            if self._stop_requested.is_set():
+                return
 
             # Fetch bot info
             await self._fetch_bot_info()
@@ -3011,25 +2948,18 @@ class FeishuBot(BaseIMClient):
             # Pre-populate DM chat IDs from persisted user settings
             self._populate_dm_chat_ids()
 
-            # Start WebSocket client in a background thread
-            self._ws_client = lark.ws.Client(
+            # Start the long connection on a thread of its own. It is published
+            # before the check, so that a stop from here on finds it; one that
+            # came earlier is seen by the check.
+            self._sdk_connection = SdkLongConnection(
                 app_id=self.config.app_id,
                 app_secret=self.config.app_secret,
+                domain=self.config.api_base_url,
                 event_handler=event_handler,
-                log_level=lark.LogLevel.INFO,
-                domain=self._get_sdk_domain(),
             )
-
-            def _ws_thread_target():
-                try:
-                    logger.info("Feishu WS thread starting, domain=%s", self._get_sdk_domain())
-                    self._ws_client.start()
-                except Exception as exc:
-                    logger.error("Feishu WS thread crashed: %s", exc, exc_info=True)
-
-            ws_thread = threading.Thread(target=_ws_thread_target, daemon=True, name="feishu-ws")
-            self._ws_thread = ws_thread
-            ws_thread.start()
+            if self._stop_requested.is_set():
+                return
+            self._sdk_connection.start()
 
             logger.info("Feishu WebSocket client started")
 
@@ -3047,63 +2977,33 @@ class FeishuBot(BaseIMClient):
             asyncio.run(start())
         except KeyboardInterrupt:
             logger.info("Feishu bot shutting down...")
+        finally:
+            # However the start ended, no connection it made outlives it.
+            self._stop_connection()
 
     def stop(self) -> None:
         """Signal the bot to stop."""
-        self._stop_ws_client()
+        self._stop_requested.set()
+        self._stop_connection()
         if self._loop and self._loop.is_running() and self._stop_event is not None:
             self._loop.call_soon_threadsafe(self._stop_event.set)
         elif self._stop_event is not None:
             self._stop_event.set()
-        self._join_ws_thread(timeout=5.0)
 
-    def _stop_ws_client(self) -> None:
-        ws_client = self._ws_client
-        if ws_client is None:
-            return
-        disconnect = getattr(ws_client, "_disconnect", None)
-        if not callable(disconnect):
-            logger.warning("Feishu WS client has no disconnect hook; nested WS thread may leak")
-            return
-        try:
-            import lark_oapi.ws.client as ws_client_module
-
-            ws_loop = getattr(ws_client_module, "loop", None)
-            if ws_loop is not None and ws_loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(disconnect(), ws_loop)
-                future.result(timeout=5.0)
-                # lark-oapi keeps the nested thread inside module-level
-                # _select(), which is just an infinite sleep loop. Stopping the
-                # SDK loop is the only available way to release Client.start().
-                ws_loop.call_soon_threadsafe(ws_loop.stop)
-            else:
-                loop = ws_loop if ws_loop is not None and not ws_loop.is_closed() else asyncio.new_event_loop()
-                if ws_loop is None:
-                    ws_client_module.loop = loop
-                loop.run_until_complete(disconnect())
-        except Exception:
-            logger.exception("Failed to disconnect Feishu WS client")
-
-    def _join_ws_thread(self, timeout: float) -> None:
-        thread = self._ws_thread
-        if thread is None or thread is threading.current_thread():
-            return
-        thread.join(timeout=timeout)
-        if thread.is_alive():
-            logger.warning("Feishu WS thread did not stop within %.1fs", timeout)
-        else:
-            self._ws_thread = None
+    def _stop_connection(self) -> None:
+        connection = self._sdk_connection
+        if connection is not None and not connection.stop(timeout=5.0):
+            logger.warning("Feishu WS thread did not stop within %.1fs", 5.0)
 
     def verify_stopped(self) -> bool:
-        thread = self._ws_thread
-        return thread is None or not thread.is_alive()
+        connection = self._sdk_connection
+        return connection is None or not connection.is_alive()
 
     async def shutdown(self) -> None:
         """Best-effort async shutdown."""
-        self._stop_ws_client()
+        await asyncio.to_thread(self._stop_connection)
         if self._stop_event is not None:
             self._stop_event.set()
-        await asyncio.to_thread(self._join_ws_thread, 5.0)
 
     # ------------------------------------------------------------------
     # Misc required implementations
