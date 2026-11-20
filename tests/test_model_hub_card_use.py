@@ -43,6 +43,8 @@ class _Account:
         self.state = "ok"
         self.reading_key = key
         self.uses: list[str] = []
+        # The count each use was asked with: what the page showed.
+        self.shown: list[int] = []
         self.reads: list[str] = []
         self.identity_reads = 0
         self.held = asyncio.Event()
@@ -59,8 +61,9 @@ class _Account:
         self.identity_reads += 1
         return self.key
 
-    async def use(self, source_id, vendor, credential_ref, kind, request_id, expected_key):
+    async def use(self, source_id, vendor, credential_ref, kind, request_id, expected_key, expected_count):
         self.uses.append(request_id)
+        self.shown.append(expected_count)
         reply = self.reply(kind)
         return await reply if asyncio.iscoroutine(reply) else reply
 
@@ -152,6 +155,8 @@ async def test_a_second_tab_still_showing_the_count_from_before_a_use_spends_not
     shown_in_both_tabs = account.press("session")
 
     assert (await service.use_reset_card(CLAUDE.source_id, shown_in_both_tabs))["use"]["outcome"] == "used"
+    # The worker is told what the page showed, to compare it with its own read.
+    assert account.shown == [2]
     reads = len(account.reads)
     # The other tab confirms a moment later. The first answer has left, so nothing overlaps.
     with pytest.raises(ModelHubError) as refused:
@@ -191,6 +196,129 @@ async def test_a_press_from_a_page_that_is_out_of_date_claims_and_sends_nothing(
     assert (refused.value.status, refused.value.code) == (409, code)
     assert set(refused.value.data) == {"quota"}
     assert account.uses == [] and not (tmp_path / "fences").exists()
+
+
+def _body(body):
+    return {"status_code": 200, "body": json.dumps(body)}
+
+
+def _stack(tmp_path, monkeypatch, vendor, respond):
+    """Everything below the route with only the engine faked: ``respond(method, url, data)`` is the vendor."""
+
+    from tests.test_model_hub_api import _service
+    from tests.test_model_hub_quota import _METADATA, _adapter
+
+    binding = ("src_claude", "anthropic", "cred_a") if vendor == "anthropic" else ("src_codex", "openai", "cred_b")
+    source = QuotaSourceRef(*binding, "Fixture", None)
+    adapter, engine = _adapter({}, _METADATA)
+    service, _store, _ = _service(tmp_path)
+    service.adapter = adapter
+    service.monotonic = lambda: 1000.0
+    service.card_fences = CardFences(tmp_path / "fences", monotonic=lambda: service.monotonic())
+    monkeypatch.setattr(service, "_quota_sources", lambda: [source])
+    grants = engine.management_request
+
+    def request(method, path, *, payload=None, **kwargs):
+        if path == "/auth-files":
+            return grants(method, path, payload=payload, **kwargs)
+        return respond(payload["method"], payload["url"], json.loads(payload["data"]) if payload.get("data") else None)
+
+    monkeypatch.setattr(engine, "management_request", request)
+    return service, source
+
+
+class _Claude:
+    """A fake Anthropic behind the engine: a use request spends a card, and its card list can lag behind."""
+
+    def __init__(self, held):
+        self.held = held
+        # What the next card-list reads report instead of what is held.
+        self.lagging: list[int] = []
+        self.posts: list[dict] = []
+
+    def __call__(self, method, url, data):
+        from tests.test_model_hub_quota import _PROFILE_URL, CLAUDE_LEGACY
+
+        if method == "POST":
+            self.posts.append(data)
+            self.held -= 1
+            return _body({"result": "reset"})
+        if url == _PROFILE_URL:
+            return _body({"organization": {"uuid": "00000000-0000-4000-8000-000000000000"}})
+        if "?" not in url:
+            return _body(CLAUDE_LEGACY)
+        count = self.lagging.pop(0) if self.lagging else self.held
+        grant = {"type": "session", "resets_left": 1, "usable_now": True, "clears": ["five_hour"]}
+        grants = [{**grant, "id": f"private-{number}"} for number in range(count)]
+        return _body({**CLAUDE_LEGACY, "cedar_ember": {"eligible": True, "at_limit": True, "grants": grants}})
+
+
+async def test_a_tab_whose_fresh_count_lagged_is_stopped_by_the_workers_own_read(tmp_path, monkeypatch):
+    """MH-QUOTA-074: The count the page showed is compared again with the worker's own inventory read, the last before the request: when the read made for a stale tab lags and still agrees with it, nothing is sent, no lock stays and the tab is told the count changed."""
+
+    vendor = _Claude(held=2)
+    service, source = _stack(tmp_path, monkeypatch, "anthropic", vendor)
+    shown_in_both_tabs = {"kind": "session", "count": 2}
+    assert (await service.use_reset_card(source.source_id, shown_in_both_tabs))["use"]["outcome"] == "used"
+    assert (vendor.held, len(vendor.posts)) == (1, 1)
+
+    # The other tab confirms on two. The read made for it lags and still says two;
+    # the worker's own read, right before the request, says one.
+    vendor.lagging = [2]
+    with pytest.raises(ModelHubError) as refused:
+        await service.use_reset_card(source.source_id, shown_in_both_tabs)
+    assert (refused.value.status, refused.value.code) == (409, "reset_card_count_changed")
+    assert (vendor.held, len(vendor.posts)) == (1, 1)
+    assert service.card_fences.view().locks == {}
+    # The summary it redraws from was read again: it is not the reading that lagged.
+    cards = refused.value.data["quota"]["sources"][0]["reset_cards"]
+    assert ([(card["kind"], card["count"]) for card in cards["cards"]], cards["lock"]) == ([("session", 1)], None)
+    assert "private-" not in json.dumps(refused.value.data)
+
+    # Redrawn, it shows one card, and confirming that is a press of its own.
+    assert (await service.use_reset_card(source.source_id, {"kind": "session", "count": 1}))["use"]["outcome"] == "used"
+    assert (vendor.held, len(vendor.posts)) == (0, 2)
+
+
+@pytest.mark.parametrize(
+    ("vendor", "held", "shown"),
+    [("anthropic", 1, 2), ("anthropic", 2, 1), ("openai", 1, 2), ("openai", 2, 1)],
+)
+async def test_the_worker_sends_nothing_when_it_reads_another_count_than_the_page_showed(vendor, held, shown):
+    """MH-QUOTA-074: The worker is told what the page showed and sends only when its own inventory read holds that many cards of the kind; a count it cannot use, or a kind that is not held, sends nothing either."""
+
+    ack = {"result": "reset"} if vendor == "anthropic" else {"code": "reset"}
+    cards = [(f"private-{number}", None) for number in range(held)]
+    adapter, engine, source, kind = _use_engine(vendor, _body(ack), cards=cards)
+    key = await adapter.reset_card_account_key(*source)
+
+    assert await adapter.use_reset_card(*source, kind, "synthetic-request", key, shown) == {"statement": "count_changed"}
+    assert await adapter.use_reset_card(*source, "fable", "synthetic-request", key, 1) == {"statement": "count_changed"}
+    for unusable in (0, -1, True, "1", None):
+        assert await adapter.use_reset_card(*source, kind, "synthetic-request", key, unusable) == {"statement": "no_card"}
+    # Asked on behalf of another account, the count is not even compared.
+    assert await adapter.use_reset_card(*source, kind, "synthetic-request", OTHER_ACCOUNT, shown) == {"statement": "no_card"}
+    assert _vendor_writes(engine) == []
+
+    # With the count that is held, the same press goes out, once.
+    assert (await adapter.use_reset_card(*source, kind, "synthetic-request", key, held))["statement"] == "ack"
+    assert len(_vendor_writes(engine)) == 1
+
+
+async def test_a_count_the_worker_found_changed_releases_the_unsent_claim(tmp_path, monkeypatch):
+    """MH-QUOTA-074: When the worker reports that the count changed, the claim it never used is released, the account is read once more and the press ends as the count-changed refusal, not as an unknown outcome."""
+
+    account = _Account({"weekly": 2})
+    service = _hub(tmp_path, monkeypatch, account, [CLAUDE])
+    account.reply = lambda _kind: {"statement": "count_changed"}
+    reads = len(account.reads)
+    with pytest.raises(ModelHubError) as refused:
+        await service.use_reset_card(CLAUDE.source_id, account.press("weekly"))
+    assert (refused.value.status, refused.value.code) == (409, "reset_card_count_changed")
+    assert set(refused.value.data) == {"quota"} and _lock(refused.value.data["quota"]) is None
+    assert len(account.uses) == 1 and service.card_fences.view().locks == {}
+    # One read before the claim, one for the summary the page redraws from.
+    assert len(account.reads) == reads + 2
 
 
 async def test_two_presses_on_one_source_send_one_use_and_a_timeout_is_never_retried(tmp_path, monkeypatch):
@@ -443,6 +571,10 @@ _TWICE = '{"five_hour": null, "seven_day": null, "cedar_ember": {"eligible": tru
         ("anthropic", "claude", {"five_hour": {"used": 3}, "seven_day": None}, "unread"),
         # Names its card block twice.
         ("anthropic", "claude", _TWICE, "unread"),
+        # Carries a number that is not JSON, in a member nothing else reads.
+        ("anthropic", "claude", '{"five_hour": null, "seven_day": null, "cedar_ember": null, "extra": NaN}', "unread"),
+        ("anthropic", "claude", '{"five_hour": null, "seven_day": null, "extra": -Infinity}', "unread"),
+        ("openai", '{"plan_type": "plus", "extra": Infinity}', None, "unread"),
         ("openai", _NO_PLAN, None, "unread"),
         # The vendor's own report, holding none.
         ("anthropic", "claude", {"cedar_ember": None}, "ok"),
@@ -509,6 +641,14 @@ _GRANT = {"id": "private-held", "type": "session", "resets_left": 1, "usable_now
         ({"id": " "}, None),
         ({"id": "private-held"}, None),
         ("not-an-object", None),
+        # The same grant named by two rows, one held and one the vendor says is not: two answers about one card.
+        ({"id": "private-held", "paused": True}, None),
+        ({"id": "private-held", "resets_left": 0}, None),
+        ({"id": "private-held", "ends_at": "2000-01-01T00:00:00Z"}, None),
+        ({"id": "private-held", "starts_at": "2999-01-01T00:00:00Z"}, None),
+        # A row that is not held still has to say which grant it is.
+        ({"id": 7, "paused": True}, None),
+        ({"id": None, "resets_left": 0}, None),
         # Not held on one count, unreadable on another: still unreadable.
         ({"resets_left": 0, "paused": "no"}, None),
         ({"paused": True, "resets_left": "1"}, None),
@@ -592,6 +732,170 @@ async def test_a_credit_row_that_cannot_be_read_makes_the_inventory_unread(credi
     )
     parsed = await adapter.subscription_quota("src_codex", "openai", "cred_b")
     assert parsed["reset_cards"] == _unread() and parsed["windows"]
+
+
+@pytest.mark.parametrize(
+    ("named", "evidence"),
+    [
+        # The answer names the account it was asked for, or names none.
+        ("acct_123", True),
+        (None, True),
+        ("absent", True),
+        # It is about another account, or does not say readably whose it is.
+        ("private-other-account", False),
+        ("", False),
+        ("ACCT_123", False),
+        (7, False),
+        (["acct_123"], False),
+    ],
+)
+async def test_a_usage_answer_that_names_another_account_is_no_reading_of_this_one(named, evidence):
+    """MH-QUOTA-075: Where ChatGPT's usage answer names an account it must be the one the grant is bound to, checked in the worker: otherwise the cards of that reading are unread and the worker sends nothing; an answer that names none is read as before, and neither identity leaves the worker."""
+
+    from vibe.model_hub_runtime.card_use import CHATGPT as CHATGPT_API
+
+    adapter, engine, source, kind = _use_engine("openai", _body({"code": "reset"}))
+    usage = {"plan_type": "pro", "rate_limit_reset_credits": {"available_count": 1}}
+    if named != "absent":
+        usage["account_id"] = named
+    engine.by_url[f"{CHATGPT_API}/usage"] = _body(usage)
+
+    parsed = await adapter.subscription_quota(*source)
+    assert parsed["reset_cards"]["state"] == ("ok" if evidence else "unread")
+    key = await adapter.reset_card_account_key(*source)
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key, 1)
+    assert answer["statement"] == ("ack" if evidence else "no_card")
+    assert len(_vendor_writes(engine)) == (1 if evidence else 0)
+    surfaces = json.dumps([parsed, answer])
+    assert "acct_123" not in surfaces and "private-" not in surfaces
+
+
+class _ChatGPT:
+    """A fake ChatGPT behind the engine: a use request spends a credit, and its usage answer may name an account."""
+
+    def __init__(self, held):
+        self.held = held
+        # The account the usage answer says it is about; None when it names none.
+        self.names: str | None = None
+        self.posts: list[dict] = []
+        self.on_use = lambda: None
+
+    def __call__(self, method, url, data):
+        if method == "POST":
+            self.posts.append(data)
+            self.held -= 1
+            self.on_use()
+            return _body({"code": "reset", "windows_reset": 1})
+        if url.endswith("/usage"):
+            report = {"plan_type": "pro", "rate_limit_reset_credits": {"available_count": self.held}}
+            return _body(report if self.names is None else {**report, "account_id": self.names})
+        credit = {"status": "available", "reset_type": "codex_rate_limits"}
+        return _body({"credits": [{**credit, "id": f"private-{number}"} for number in range(self.held)]})
+
+
+async def test_a_reading_about_another_account_neither_confirms_a_use_nor_lifts_its_lock(tmp_path, monkeypatch):
+    """MH-QUOTA-075: A count from a usage answer that names another account is no evidence: after an acknowledged use it does not make the outcome "used", and after the wait the user's refresh does not lift the lock with it; a reading of the bound account does."""
+
+    vendor = _ChatGPT(held=2)
+    service, source = _stack(tmp_path, monkeypatch, "openai", vendor)
+    # The use is acknowledged. The count read after it is lower, but it is an answer about another account.
+    vendor.on_use = lambda: setattr(vendor, "names", "private-other-account")
+    result = await service.use_reset_card(source.source_id, {"kind": "account", "count": 2})
+    assert result["use"] == {"kind": "account", **UNCONFIRMED}
+    assert len(vendor.posts) == 1 and _lock(result["quota"])["reason"] == "unconfirmed"
+
+    def locked():
+        return [lock["reason"] for lock in service.card_fences.view().locks.values()]
+
+    # After the wait the user refreshes, and the answer is again about the other account.
+    _advance(service, seconds=61)
+    summary = await service.quota_summary(force=True)
+    assert summary["sources"][0]["reset_cards"]["state"] == "unread"
+    assert _lock(summary)["reason"] == "unconfirmed" and locked() == ["unconfirmed"]
+
+    # An answer about the account the grant is bound to lifts it.
+    vendor.names = "acct_123"
+    _advance(service, seconds=61)
+    after = await service.quota_summary(force=True)
+    assert _lock(after) is None and locked() == []
+    assert [(card["kind"], card["count"]) for card in after["sources"][0]["reset_cards"]["cards"]] == [("account", 1)]
+    surfaces = json.dumps([result, summary, after])
+    assert "acct_123" not in surfaces and "private-" not in surfaces and len(vendor.posts) == 1
+
+
+@pytest.mark.parametrize(
+    ("total", "evidence"),
+    [
+        # The details name no total of their own, or the one the usage report gave.
+        ({}, True),
+        ({"available_count": 2}, True),
+        ({"availableCount": 2}, True),
+        ({"available_count": None}, True),
+        # The vendor's two totals disagree, or the second cannot be read.
+        ({"available_count": 1}, False),
+        ({"available_count": 3}, False),
+        ({"availableCount": 1}, False),
+        ({"available_count": 2, "availableCount": 1}, False),
+        ({"available_count": "2"}, False),
+        ({"available_count": 2.0}, False),
+        ({"available_count": True}, False),
+    ],
+)
+async def test_a_card_detail_total_that_disagrees_with_the_usage_count_is_unread(total, evidence):
+    """MH-QUOTA-076: Where ChatGPT's card details carry a total of their own it must be well typed and equal the usage report's count: two totals that disagree are an unread inventory, on which nothing is confirmed, unlocked or sent."""
+
+    from vibe.model_hub_runtime.card_use import CHATGPT as CHATGPT_API
+
+    adapter, engine, source, kind = _use_engine(
+        "openai", _body({"code": "reset"}), cards=[("private-one", None), ("private-two", None)]
+    )
+    details = f"{CHATGPT_API}/rate-limit-reset-credits"
+    engine.by_url[details] = _body({**json.loads(engine.by_url[details]["body"]), **total})
+
+    parsed = await adapter.subscription_quota(*source)
+    if evidence:
+        assert [(card["kind"], card["count"]) for card in parsed["reset_cards"]["cards"]] == [("account", 2)]
+    else:
+        assert parsed["reset_cards"] == _unread() and isinstance(parsed["windows"], list)
+    key = await adapter.reset_card_account_key(*source)
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key, 2)
+    assert answer["statement"] == ("ack" if evidence else "no_card")
+    assert len(_vendor_writes(engine)) == (1 if evidence else 0)
+
+
+@pytest.mark.parametrize(
+    ("credit", "statement"),
+    [
+        # The credit that was sent, completed; or an acknowledgement that names neither.
+        ({"id": "private-credit", "status": "redeemed", "redeemed_at": "2026-11-20T00:00:00Z"}, "ack"),
+        ({"id": "private-credit"}, "ack"),
+        ({"status": "redeemed"}, "ack"),
+        ({"id": None, "status": None}, "ack"),
+        ({}, "ack"),
+        # It names another credit than the one sent.
+        ({"id": "private-another", "status": "redeemed"}, "unknown"),
+        ({"id": "private-another"}, "unknown"),
+        ({"id": ""}, "unknown"),
+        ({"id": 7}, "unknown"),
+        ({"id": ["private-credit"]}, "unknown"),
+        # Its status is not one known to mean the redemption completed.
+        ({"id": "private-credit", "status": "redeeming"}, "unknown"),
+        ({"status": "pending"}, "unknown"),
+        ({"status": "available"}, "unknown"),
+        ({"status": "something_new"}, "unknown"),
+        ({"status": ""}, "unknown"),
+        ({"status": ["redeemed"]}, "unknown"),
+    ],
+)
+async def test_an_acknowledgement_about_another_credit_or_an_unfinished_one_is_unknown(credit, statement):
+    """MH-QUOTA-076: Where ChatGPT's acknowledgement of a use names a credit it must be the one that was sent, and where it carries a status it must be one known to mean completed; otherwise the outcome is unknown. Either may be left out."""
+
+    adapter, engine, source, kind = _use_engine("openai", _body({"code": "reset", "windows_reset": 1, "credit": credit}))
+    key = await adapter.reset_card_account_key(*source)
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key, 1)
+    assert answer == ({"statement": "unknown"} if statement == "unknown" else {"statement": "ack", "before": 1, "cleared": []})
+    assert json.loads(_vendor_writes(engine)[0]["data"])["credit_id"] == "private-credit"
+    assert len(_vendor_writes(engine)) == 1 and "private-" not in json.dumps(answer)
 
 
 def _use_engine(vendor, answer, *, cards=None):
@@ -708,6 +1012,9 @@ _MOMENT = "2026-11-20T00:00:00Z"
         ("openai", '{"code": "reset", "code": "no_credit"}', "unknown", None),
         ("openai", '{"code": "no_credit", "windows_reset": 1, "windows_reset": 0}', "unknown", None),
         ("openai", '{"code": "reset", "credit": {"status": "available", "status": "redeemed"}}', "unknown", None),
+        # A number that is not JSON, in a member nothing else reads.
+        ("anthropic", '{"result": "reset", "weekly_resets_at": NaN}', "unknown", None),
+        ("openai", '{"code": "reset", "credit": {"granted_at": -Infinity}}', "unknown", None),
         # An error envelope, whatever else it carries.
         ("anthropic", {"result": "reset", "error": {"type": "private-marker"}}, "unknown", None),
     ],
@@ -718,7 +1025,7 @@ async def test_a_vendor_answer_is_a_statement_only_when_recognised_and_consisten
     raw = body if isinstance(body, str) else json.dumps(body)
     adapter, engine, source, kind = _use_engine(vendor, {"status_code": 200, "body": raw})
     key = await adapter.reset_card_account_key(*source)
-    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key)
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key, 1)
     expected = {"statement": "unknown"} if statement == "unknown" else dict(statement=statement, before=1, cleared=cleared)
     assert answer == expected
     assert len(_vendor_writes(engine)) == 1
@@ -740,7 +1047,7 @@ async def test_a_use_request_without_a_readable_200_is_unknown_and_sent_once(ven
     reply = replies.get(lost) or {"status_code": int(lost), "body": json.dumps({"result": "ineligible"})}
     adapter, engine, source, kind = _use_engine(vendor, reply)
     key = await adapter.reset_card_account_key(*source)
-    assert await adapter.use_reset_card(*source, kind, "synthetic-request", key) == {"statement": "unknown"}
+    assert await adapter.use_reset_card(*source, kind, "synthetic-request", key, 1) == {"statement": "unknown"}
     assert len(_vendor_writes(engine)) == 1
 
 
@@ -852,7 +1159,7 @@ async def test_non_next_grant_refusal_is_returned_once_without_substitution():
         },
     )
     key = await adapter.reset_card_account_key("src_claude", "anthropic", "cred_a")
-    answer = await adapter.use_reset_card("src_claude", "anthropic", "cred_a", "session", "synthetic-request", key)
+    answer = await adapter.use_reset_card("src_claude", "anthropic", "cred_a", "session", "synthetic-request", key, 1)
     assert answer == {"statement": "refused", "before": 1, "cleared": []}
     assert [json.loads(post["data"])["grant_id"] for post in _vendor_writes(engine)] == ["private-session"]
 
@@ -886,7 +1193,7 @@ async def test_chatgpt_sends_only_the_earliest_available_credit_and_one_request_
         },
     )
     key = await adapter.reset_card_account_key("src_codex", "openai", "cred_b")
-    answer = await adapter.use_reset_card("src_codex", "openai", "cred_b", "account", "synthetic-request", key)
+    answer = await adapter.use_reset_card("src_codex", "openai", "cred_b", "account", "synthetic-request", key, 2)
     assert answer == {"statement": "ack", "before": 2, "cleared": []}
     assert [json.loads(post["data"]) for post in _vendor_writes(engine)] == [
         {"credit_id": "private-early", "redeem_request_id": "synthetic-request"}
@@ -899,7 +1206,7 @@ async def test_a_grant_that_now_belongs_to_another_account_is_not_used(vendor):
     """MH-QUOTA-057: The claim is on one account: if the Source's grant is another account's by the time of the request, nothing is sent."""
 
     adapter, engine, source, kind = _use_engine(vendor, {"status_code": 200, "body": "{}"})
-    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", OTHER_ACCOUNT)
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", OTHER_ACCOUNT, 1)
     assert answer == {"statement": "no_card"}
     assert _vendor_writes(engine) == []
 
@@ -935,7 +1242,9 @@ async def test_a_card_that_expires_while_the_inventory_is_read_is_not_the_one_se
     key = await adapter.reset_card_account_key(*source)
     inventory = f"{CLAUDE_API}/oauth/usage?cedar_ember=1&skip_spend=1" if vendor == "anthropic" else f"{CHATGPT_API}/rate-limit-reset-credits"
     _slow_reads(monkeypatch, engine, {inventory: 10})
-    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key)
+    # Claude's count leaves an expired grant out; ChatGPT's is its usage report's own total.
+    held = 1 if vendor == "anthropic" else 2
+    answer = await adapter.use_reset_card(*source, kind, "synthetic-request", key, held)
     assert answer["statement"] == "ack"
     sent = [json.loads(post["data"]) for post in _vendor_writes(engine)]
     assert [data.get("grant_id", data.get("credit_id")) for data in sent] == ["private-later"]
@@ -952,7 +1261,7 @@ async def test_a_card_that_expires_between_being_picked_and_being_sent_is_not_se
     key = await adapter.reset_card_account_key(*source)
     # Held when the inventory arrives; gone by the time the account has been read again.
     _slow_reads(monkeypatch, engine, {_PROFILE_URL: 10})
-    assert await adapter.use_reset_card(*source, kind, "synthetic-request", key) == {"statement": "no_card"}
+    assert await adapter.use_reset_card(*source, kind, "synthetic-request", key, 1) == {"statement": "no_card"}
     assert _vendor_writes(engine) == []
 
 
@@ -1196,7 +1505,7 @@ async def test_each_account_waits_its_own_minute(tmp_path, monkeypatch):
     assert locks(await service.quota_summary(force=True)) == [None, None]
 
 
-@pytest.mark.parametrize("answer", ["used", "not_used", "nothing-sent", "lost"])
+@pytest.mark.parametrize("answer", ["used", "not_used", "nothing-sent", "count-changed", "lost"])
 async def test_a_settlement_that_cannot_be_written_is_the_unconfirmed_result_with_the_lock_held(
     tmp_path, monkeypatch, answer
 ):
@@ -1214,6 +1523,8 @@ async def test_a_settlement_that_cannot_be_written_is_the_unconfirmed_result_wit
         monkeypatch.setattr(card_fences, "write_durable", disk_full)
         if answer == "nothing-sent":
             return {"statement": "no_card"}
+        if answer == "count-changed":
+            return {"statement": "count_changed"}
         if answer == "lost":
             raise TimeoutError("private-marker")
         return _spend(account, "session", statement="ack" if answer == "used" else "refused")(_kind)

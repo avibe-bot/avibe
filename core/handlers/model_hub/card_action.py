@@ -12,8 +12,11 @@ is written around what must not happen:
   can share one). A press also says how many cards of its kind the page was
   showing; if a fresh reading shows another number the page was out of date (a
   second tab, after the first one's use) and the press is refused before
-  anything is claimed or sent. The account itself is claimed durably before
-  anything is sent (``card_fences``), which covers a reload and a restart.
+  anything is claimed or sent. That reading may itself lag, so the adapter is
+  given the page's count and compares it once more with its own inventory read,
+  the last before the request; if they differ nothing is sent and the claim is
+  released. The account itself is claimed durably before anything is sent
+  (``card_fences``), which covers a reload and a restart.
 * "Used" or "not used" said wrongly. Either needs the vendor's own recognised
   statement and a fresh, recognised count of that same account that agrees with
   it. Everything else is ``unconfirmed``: the account stays locked.
@@ -52,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 LIMITS = ("five_hour", "seven_day", "seven_day_overage_included")
 _REFUSALS = frozenset({"not_limited", "cooldown", "refused", "unavailable"})
+# The adapter's statements that nothing was sent, and the refusal each press ends in.
+_UNSENT = {"no_card": "reset_card_unavailable", "count_changed": "reset_card_count_changed"}
 _ACCOUNT = re.compile(r"[a-f0-9]{64}")
 _MAX_SOURCE_ID_CHARS = 128
 _MAX_COUNT = 2**53 - 1
@@ -184,15 +189,18 @@ async def _fresh_account(service: "ModelHubService", source: QuotaSourceRef) -> 
 async def _send_once(
     service: "ModelHubService",
     source: QuotaSourceRef,
-    kind: str,
+    press: Press,
     request_id: str,
     account: str,
 ) -> Mapping[str, Any]:
-    """The press's only call into the adapter's use. If it fails the outcome is unknown; it is not made again."""
+    """The press's only call into the adapter's use. If it fails the outcome is unknown; it is not made again.
+
+    It carries the count the page showed, for the adapter's last check before the request.
+    """
 
     try:
         reply = await service.adapter.use_reset_card(
-            source.source_id, source.vendor, source.credential_ref, kind, request_id, account
+            source.source_id, source.vendor, source.credential_ref, press.kind, request_id, account, press.count
         )
     except Exception:  # noqa: BLE001 - never the exception's text, never a second call
         return {}
@@ -252,22 +260,23 @@ async def _transact(service: "ModelHubService", press: Press, source: QuotaSourc
         # Already claimed, or the claim could not be made durable: nothing is sent.
         raise await _refused(service, "reset_card_locked", press) from None
     decision = unconfirmed_use(press.kind)
-    nothing_sent = False
+    # The refusal this press ends in when the adapter says nothing was sent.
+    unsent: Optional[str] = None
     fresh: Mapping[str, Any] = {}
     try:
-        reply = await _send_once(service, source, press.kind, request_id, account)
-        if reply.get("statement") == "no_card":
-            nothing_sent = True
-        else:
+        reply = await _send_once(service, source, press, request_id, account)
+        statement = reply.get("statement")
+        unsent = _UNSENT.get(statement) if type(statement) is str else None
+        if unsent is None:
             fresh = await service.quota.reread(source)
             # Only the re-read's own answer: a reading another caller put in its place proves nothing here.
             reading = service.quota.card_reading(source) if fresh else None
             decision = _decide(press.kind, reply, reading, account)
     except Exception:  # noqa: BLE001 - whatever went wrong after the claim, the outcome is unknown
-        nothing_sent, decision = False, unconfirmed_use(press.kind)
+        unsent, decision = None, unconfirmed_use(press.kind)
         logger.warning("Model Hub reset card use could not be confirmed: source=%s", source.source_id)
     released = await _settle(
-        service, account, request_id, unknown=not nothing_sent and decision["outcome"] == "unconfirmed"
+        service, account, request_id, unknown=unsent is None and decision["outcome"] == "unconfirmed"
     )
     # Settled: from here a summary shows what the fence holds, not a use in flight.
     # The press itself is still being handled until its answer is assembled.
@@ -276,8 +285,15 @@ async def _transact(service: "ModelHubService", press: Press, source: QuotaSourc
         # Unknown, or established but the claim could not be released on disk: the
         # account stays locked, and the lock is what the user has to act on.
         decision = unconfirmed_use(press.kind)
-    elif nothing_sent:
-        raise await _refused(service, "reset_card_unavailable", press)
+    elif unsent is not None:
+        if unsent == "reset_card_count_changed":
+            # The reading made for this press agreed with the page and the adapter's own
+            # did not: read once more, so the page does not redraw from the one that lagged.
+            try:
+                await service.quota.reread(source)
+            except Exception:  # noqa: BLE001 - the refusal stands, with the latest summary there is
+                pass
+        raise await _refused(service, unsent, press)
     outcome = decision["outcome"] if decision["reason"] is None else f"{decision['outcome']}:{decision['reason']}"
     logger.info("Model Hub reset card use: source=%s kind=%s outcome=%s", source.source_id, press.kind, outcome)
     return {"quota": await _summary_after(service, fresh), "use": decision}

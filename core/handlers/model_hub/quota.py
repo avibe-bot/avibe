@@ -179,12 +179,17 @@ def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return members
 
 
+def _not_json(constant: str) -> Any:
+    raise ValueError("not a JSON number")
+
+
 def _load_object(body: object, *, allow_array: bool = False, unique: bool = False) -> Any:
     """Decode a vendor body that must be a JSON object (or array) and not an error envelope.
 
     ``unique`` is for a body something will be decided on: an object that names
     a member twice, at any depth, says two things and is refused, where an
-    ordinary decoder would quietly keep the last.
+    ordinary decoder would quietly keep the last. So is a body that carries
+    ``NaN`` or an infinity, which is not JSON, anywhere.
     """
 
     if not isinstance(body, (str, bytes, bytearray)):
@@ -193,7 +198,11 @@ def _load_object(body: object, *, allow_array: bool = False, unique: bool = Fals
     if size > _MAX_BODY_BYTES:
         raise SubscriptionQuotaError("malformed")
     try:
-        payload = json.loads(body, object_pairs_hook=_unique_members if unique else None)
+        payload = json.loads(
+            body,
+            object_pairs_hook=_unique_members if unique else None,
+            parse_constant=_not_json if unique else None,
+        )
     except (TypeError, UnicodeDecodeError, ValueError, RecursionError):
         raise SubscriptionQuotaError("malformed") from None
     if not (allow_array and isinstance(payload, list)) and (not isinstance(payload, dict) or "error" in payload):

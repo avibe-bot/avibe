@@ -12,6 +12,10 @@ so this parser is strict where the window parser beside it is forgiving:
 * Every field that can remove a row or change a count has its type checked
   before it is used. A row is left out because the vendor says it is not held
   (none left, paused, not started, expired), never because it could not be read.
+* An answer does not contradict what was asked or itself in a field it carries:
+  a usage report that names an account names the one it was asked for, a total
+  carried twice is the same total, and one grant is one row. A field an answer
+  leaves out is not required.
 """
 
 from __future__ import annotations
@@ -149,12 +153,14 @@ def claude_cards(body: object, now: datetime, *, candidates: list | None = None)
         requires_limit = _typed(row, "use_requires_limit", bool)
         blocking = _typed(row, "blocking", list)
         clears = _strings(row, "clears")
-        if paused or not count or (start and start > now) or (end and end <= now):
-            continue
+        # Before any row is left out: two rows for one grant, one held and one not,
+        # are two answers about one card.
         grant_id = _typed(row, "id", str, required=True)
         if not grant_id.strip() or grant_id in seen:
             raise _malformed()
         seen.add(grant_id)
+        if paused or not count or (start and start > now) or (end and end <= now):
+            continue
         if gives_back_weekly:
             kind = "fable"
         elif declared == "full":
@@ -197,14 +203,22 @@ def claude_cards(body: object, now: datetime, *, candidates: list | None = None)
     return _ok(cards)
 
 
-def codex_count(body: object) -> int:
-    """How many reset credits ChatGPT's usage report says are available."""
+def codex_count(body: object, account: object) -> int:
+    """How many reset credits ChatGPT's usage report says are available to ``account``.
+
+    ``account`` is the account the report was asked for, as the grant names it.
+    It is compared here and goes nowhere else.
+    """
 
     report = _load_object(body, unique=True)
     # Codex's usage report always names the plan. A body that does not is not that
     # report, whatever else it holds, and says nothing about credits.
     plan = _typed(report, "plan_type", str, required=True)
     if not plan.strip():
+        raise _malformed()
+    # A report that names an account, the empty name included, names the one it was
+    # asked for: otherwise this is another account's count. Left out or null, it names none.
+    if _typed(report, "account_id", str) not in (None, account):
         raise _malformed()
     _typed(report, "rate_limit", dict)
     block = _typed(report, "rate_limit_reset_credits", dict)
@@ -226,6 +240,11 @@ def codex_cards(count: int, details: object, now: datetime, *, candidates: list 
     if type(envelope) is list:
         rows = _rows(envelope)
     else:
+        # A total the details carry themselves is the usage report's, or the vendor's
+        # two totals disagree and neither is a count to decide on.
+        for total in ("available_count", "availableCount"):
+            if envelope.get(total) is not None and _count(envelope[total]) != count:
+                raise _malformed()
         rows = _rows(
             next(
                 (

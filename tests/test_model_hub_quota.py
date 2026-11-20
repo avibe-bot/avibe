@@ -902,7 +902,7 @@ async def test_claude_cards_group_by_kind_without_exposing_grants():
             grant,
             {**grant, "id": "second", "resets_left": 3},
             {**grant, "id": "third", "paused": True},
-            {**grant, "ends_at": "2000-01-01T00:00:00Z"},
+            {**grant, "id": "fourth", "ends_at": "2000-01-01T00:00:00Z"},
         ],
     }
     adapter, _ = _adapter(

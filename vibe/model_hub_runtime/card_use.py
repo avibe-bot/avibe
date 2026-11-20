@@ -8,15 +8,23 @@ read just before it, and the limits the vendor named as cleared.
 Two rules shape everything below.
 
 * The write is sent at most once. Everything before it is a read, and a failed
-  read means nothing was sent (``no_card``). After it there is no second
-  attempt and no other card: whatever cannot be read as the vendor's own
-  recognised answer is ``unknown``.
+  read means nothing was sent (``no_card``). The last inventory read before it
+  must hold as many cards of the kind as the page showed, or nothing is sent
+  (``count_changed``): the count read for the press may have lagged. After the
+  write there is no second attempt and no other card: whatever cannot be read as
+  the vendor's own recognised answer is ``unknown``.
 * A statement is only what the vendor said, read strictly. Whether a card was
   actually spent is decided by the controller from a fresh count. An answer is
   ``unknown`` here, so that it can never be half of that agreement, when it
   names a member twice, when a field has the wrong type, when its result and
-  reason are not a known pair, and when a refusal carries anything that could
-  be evidence of a redemption, including a member this client does not know.
+  reason are not a known pair, when a refusal carries anything that could be
+  evidence of a redemption, including a member this client does not know, and
+  when an acknowledgement names another credit than the one sent or a status
+  that is not known to mean completed.
+
+What is taken as true is an answer that is well formed, of the expected shape,
+and does not contradict what was sent or itself in a field it carries. A field
+it leaves out is not required.
 
 The vendors' vocabulary comes from other clients of the same endpoints, not from
 a live call: no card was used to build this.
@@ -43,6 +51,7 @@ LIMITS = ("five_hour", "seven_day", "seven_day_overage_included")
 USE_REQUEST_TIMEOUT_SECONDS = 25.0
 
 NO_CARD = "no_card"
+COUNT_CHANGED = "count_changed"
 UNKNOWN = "unknown"
 ACK = "ack"
 REFUSALS = frozenset({"not_limited", "cooldown", "refused", "unavailable"})
@@ -73,19 +82,26 @@ _CLAUDE_STATEMENTS: Mapping[tuple[str, Optional[str]], str] = {
     },
 }
 
-# ChatGPT answers `{code, credit?: {status?, redeemed_at?, ...}, windows_reset?}`. Its
+# ChatGPT answers `{code, credit?: {id?, status?, redeemed_at?, ...}, windows_reset?}`. Its
 # `already_redeemed` is unknown for the same reason as Anthropic's `already_used`.
 _CHATGPT_STATEMENTS: Mapping[str, str] = {
     "reset": ACK,
     "nothing_to_reset": "not_limited",
     "no_credit": "unavailable",
 }
+# The credit statuses that mean the redemption completed. A credit still being
+# redeemed, or in a state this client does not know, is not an acknowledgement.
+_CHATGPT_COMPLETED = frozenset({"redeemed"})
 
 # What a refusal may carry. Anything else beside it might be evidence that a card
 # went after all, in a member this client cannot read; that is not a refusal to
 # rely on.
 _CLAUDE_REFUSAL_MEMBERS = frozenset({"result", "reason", "cleared", "cooldown_until"})
 _CHATGPT_REFUSAL_MEMBERS = frozenset({"code", "windows_reset", "credit"})
+
+
+class _CountChanged(Exception):
+    """The inventory holds another number of cards of the kind than the page showed."""
 
 
 def _utcnow() -> datetime:
@@ -162,20 +178,22 @@ def _claude_statement(result: Mapping[str, Any]) -> tuple[str, list[str]]:
     return statement, [limit for limit in LIMITS if limit in (cleared or ())]
 
 
-def _chatgpt_statement(result: Mapping[str, Any]) -> tuple[str, list[str]]:
+def _chatgpt_statement(result: Mapping[str, Any], sent: object) -> tuple[str, list[str]]:
     code, windows, credit = result.get("code"), result.get("windows_reset"), result.get("credit")
     if type(code) is not str or not _optional(windows, int) or (windows or 0) < 0 or not _optional(credit, dict):
         return UNKNOWN, []
     statement = _CHATGPT_STATEMENTS.get(code, UNKNOWN)
     if statement == ACK:
-        status, redeemed = (credit or {}).get("status"), (credit or {}).get("redeemed_at")
+        credit = credit or {}
+        named, status, redeemed = credit.get("id"), credit.get("status"), credit.get("redeemed_at")
         if (
             windows == 0
-            or not _optional(status, str)
-            or status == "available"
+            or (named is not None and named != sent)
+            or not (status is None or (type(status) is str and status in _CHATGPT_COMPLETED))
             or (redeemed is not None and _moment(redeemed) is None)
         ):
-            # A reset that reset nothing, or whose credit is unreadable or still available.
+            # A reset that reset nothing, that is about another credit than the one
+            # sent, or whose credit is unreadable or not known to be completed.
             return UNKNOWN, []
     elif windows or credit is not None or not _CHATGPT_REFUSAL_MEMBERS.issuperset(result):
         # "Nothing was redeemed" beside a credit, a window that was reset, or more
@@ -184,54 +202,68 @@ def _chatgpt_statement(result: Mapping[str, Any]) -> tuple[str, list[str]]:
     return statement, []
 
 
-def statement_from_reply(vendor: str, result: object, before: int) -> dict[str, Any]:
-    """Reduce a vendor's answer to the use request to a closed statement.
+def statement_from_reply(vendor: str, result: object, before: int, sent: Mapping[str, Any]) -> dict[str, Any]:
+    """Reduce a vendor's answer to the use request ``sent`` to a closed statement.
 
     Types are checked, only recognised combinations are statements, and an
-    answer whose parts disagree is ``unknown``.
+    answer whose parts disagree with each other or with the request is ``unknown``.
     """
 
     if not isinstance(result, dict):
         return {"statement": UNKNOWN}
-    statement, cleared = (_claude_statement if vendor == "anthropic" else _chatgpt_statement)(result)
+    if vendor == "anthropic":
+        statement, cleared = _claude_statement(result)
+    else:
+        statement, cleared = _chatgpt_statement(result, sent["credit_id"])
     if statement == UNKNOWN:
         return {"statement": UNKNOWN}
     return {"statement": statement, "before": before, "cleared": cleared}
 
 
-def _prepare(*, client, auth, vendor: str, kind: str, request_id: str, headers, expected_key: str):
+def _prepare(
+    *, client, auth, vendor: str, kind: str, request_id: str, headers, expected_key: str, expected_count: int
+):
     """Read the inventory, pick the card and name the request. Reads only: nothing is used here."""
 
-    if not _REQUEST_ID.fullmatch(request_id):
-        raise ValueError("request id")
+    if not _REQUEST_ID.fullmatch(request_id) or type(expected_count) is not int or expected_count < 1:
+        raise ValueError("request")
     candidates: list[tuple[str, Optional[datetime], str]] = []
     # Expiry is judged when each inventory arrives, not when it was asked for.
     if vendor == "anthropic":
         usage = _call(client, auth, headers, "GET", f"{CLAUDE}/oauth/usage?cedar_ember=1&skip_spend=1")
         inventory = reset_cards.claude_cards(usage, _utcnow(), candidates=candidates)
     elif vendor in ("codex", "openai"):
-        count = reset_cards.codex_count(_call(client, auth, headers, "GET", f"{CHATGPT}/usage"))
+        # A usage answer that names another account than the grant's is not read as this one's.
+        count = reset_cards.codex_count(_call(client, auth, headers, "GET", f"{CHATGPT}/usage"), auth.account_id)
         details = _call(client, auth, headers, "GET", f"{CHATGPT}/rate-limit-reset-credits") if count else None
         inventory = reset_cards.codex_cards(count, details, _utcnow(), candidates=candidates)
     else:
         raise ValueError("vendor")
-    before = next(card["count"] for card in inventory["cards"] if card["kind"] == kind and card["usable"])
+    # The claim is on one account: the grant must still be that account's, read now.
+    organization = None
+    if vendor == "anthropic":
+        organization = claude_organization(_call(client, auth, headers, "GET", f"{CLAUDE}/oauth/profile"))
+    if binding_key(vendor, organization if vendor == "anthropic" else auth.account_id) != expected_key:
+        raise ValueError("another account")
+    # What the page showed must be what this inventory, the last one read before the
+    # request, holds. The count read for the press may have lagged behind a use made
+    # from another tab; then the user confirmed on a card that is already gone.
+    held = next((card for card in inventory["cards"] if card["kind"] == kind), None)
+    if (held["count"] if held else 0) != expected_count:
+        raise _CountChanged
+    if not held["usable"]:
+        raise ValueError("not usable")
+    before = held["count"]
     # The card the user chose by kind: usable now, earliest to expire. Never the vendor's
     # "next" card in its place, and never a second choice after a refusal.
     far = datetime.max.replace(tzinfo=timezone.utc)
     expires, handle = min(
         (end or far, handle) for name, end, handle in candidates if name == kind and _HANDLE.fullmatch(handle)
     )
-    # The claim is on one account: the grant must still be that account's, read now.
     if vendor == "anthropic":
-        organization = claude_organization(_call(client, auth, headers, "GET", f"{CLAUDE}/oauth/profile"))
-        if binding_key(vendor, organization) != expected_key:
-            raise ValueError("another account")
         url = f"{CLAUDE}/organizations/{organization}/reset_rate_limits"
         data = {"program": "cedar_ember", "grant_id": handle, "request_id": request_id}
     else:
-        if binding_key(vendor, auth.account_id) != expected_key:
-            raise ValueError("another account")
         url = f"{CHATGPT}/rate-limit-reset-credits/consume"
         data = {"redeem_request_id": request_id, "credit_id": handle}
     if expires <= _utcnow():
@@ -240,7 +272,9 @@ def _prepare(*, client, auth, vendor: str, kind: str, request_id: str, headers, 
     return url, data, before
 
 
-def use_once(*, client, auth, vendor: str, kind: str, request_id: str, headers, expected_key: str) -> dict[str, Any]:
+def use_once(
+    *, client, auth, vendor: str, kind: str, request_id: str, headers, expected_key: str, expected_count: int
+) -> dict[str, Any]:
     """Use one card of ``kind``. Returns a closed statement; never raises, retries or echoes the vendor."""
 
     try:
@@ -252,7 +286,11 @@ def use_once(*, client, auth, vendor: str, kind: str, request_id: str, headers, 
             request_id=request_id,
             headers=headers,
             expected_key=expected_key,
+            expected_count=expected_count,
         )
+    except _CountChanged:
+        # Only reads were made, and the last one holds another count than the page showed.
+        return {"statement": COUNT_CHANGED}
     except Exception:
         # Only reads were made: no card of that kind can be used now, and nothing was sent.
         return {"statement": NO_CARD}
@@ -263,6 +301,6 @@ def use_once(*, client, auth, vendor: str, kind: str, request_id: str, headers, 
     except Exception:
         return {"statement": UNKNOWN}
     try:
-        return statement_from_reply(vendor, result, before)
+        return statement_from_reply(vendor, result, before, data)
     except Exception:
         return {"statement": UNKNOWN}

@@ -831,22 +831,28 @@ class EngineAdapter(Protocol):
         kind: str,
         request_id: str,
         expected_key: str,
+        expected_count: int,
     ) -> dict[str, Any]:
         """Use one reset card of ``kind``: the single vendor write of one press.
 
-        Reads the held cards, picks the usable one of that kind that expires
-        first, checks that the grant still belongs to the account behind
-        ``expected_key`` and sends one request carrying ``request_id``. Never
-        retried, here or by the caller, and never a different card after a
-        refusal.
+        Reads the held cards, checks that the grant still belongs to the
+        account behind ``expected_key`` and that this inventory holds
+        ``expected_count`` cards of that kind (what the page showed when the
+        user confirmed), picks the usable one that expires first and sends one
+        request carrying ``request_id``. Never retried, here or by the caller,
+        and never a different card after a refusal.
 
         Returns ``{"statement": ...}`` and nothing of the vendor's own:
         ``no_card`` when nothing was sent (no usable card of that kind, another
-        account, or the inventory could not be read); ``unknown`` when the
+        account, or the inventory could not be read); ``count_changed`` when
+        nothing was sent because the inventory holds another number of cards
+        of that kind than ``expected_count``; ``unknown`` when the
         request was sent and its answer is not a recognised, self-consistent
         vendor result (no answer, a timeout, a status other than 200, a
         malformed or contradictory body, a member named twice, a refusal that
-        carries anything that could be evidence of a redemption); otherwise
+        carries anything that could be evidence of a redemption, an
+        acknowledgement about another card than the one sent or one not known
+        to be completed); otherwise
         ``ack``, ``not_limited``,
         ``cooldown``, ``refused`` or ``unavailable`` with ``before`` (the count
         of that kind read just before the request) and ``cleared`` (the known
@@ -864,8 +870,11 @@ class EngineAdapter(Protocol):
         parsed ``plan``, ``windows`` and optional ``reset_cards`` (closed per-kind
         counts and eligibility from a separate read) cross this boundary, never the grant or
         the raw body. ``reset_cards`` is ``ok`` only when the vendor's own report
-        was recognised by what only that report carries and every field a count
-        rests on was read with its type checked: anything else is ``unread``,
+        was recognised by what only that report carries, every field a count
+        rests on was read with its type checked, and the answer does not
+        contradict what was asked or itself in a field it carries (it names
+        another account, two totals disagree, one card is listed twice):
+        anything else is ``unread``,
         never "none" and never a lower count. Beside it, optional ``reset_card_account`` is the opaque
         key of the account this same reading was made under (as
         ``reset_card_account_key``), or None; it never reaches an API payload.

@@ -805,6 +805,7 @@ class UnavailableEngineAdapter:
         kind: str,
         request_id: str,
         expected_key: str,
+        expected_count: int,
     ) -> dict[str, Any]:
         return {"statement": "no_card"}
 

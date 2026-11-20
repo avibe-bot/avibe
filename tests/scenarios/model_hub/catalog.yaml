@@ -2174,6 +2174,31 @@ scenarios:
     kind: timeout_cancel
     layer: unit
     test: tests/test_model_hub_card_use.py::test_an_answer_does_not_wait_for_another_accounts_reading
+  - id: MH-QUOTA-074
+    name: The count the page showed is compared again with the inventory read last before the request
+    status: covered
+    kind: concurrency
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_tab_whose_fresh_count_lagged_is_stopped_by_the_workers_own_read
+      - tests/test_model_hub_card_use.py::test_the_worker_sends_nothing_when_it_reads_another_count_than_the_page_showed
+      - tests/test_model_hub_card_use.py::test_a_count_the_worker_found_changed_releases_the_unsent_claim
+  - id: MH-QUOTA-075
+    name: A usage answer that names another account is no reading of the bound one
+    status: covered
+    kind: safety
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_usage_answer_that_names_another_account_is_no_reading_of_this_one
+      - tests/test_model_hub_card_use.py::test_a_reading_about_another_account_neither_confirms_a_use_nor_lifts_its_lock
+  - id: MH-QUOTA-076
+    name: Totals that disagree and an acknowledgement about another or an unfinished credit are no evidence
+    status: covered
+    kind: safety
+    layer: unit
+    test:
+      - tests/test_model_hub_card_use.py::test_a_card_detail_total_that_disagrees_with_the_usage_count_is_unread
+      - tests/test_model_hub_card_use.py::test_an_acknowledgement_about_another_credit_or_an_unfinished_one_is_unknown
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

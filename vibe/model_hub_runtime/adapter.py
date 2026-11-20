@@ -1525,7 +1525,7 @@ def _fetch_subscription_quota(
         raise SubscriptionQuotaError("unavailable")
     parsed = parse_subscription_quota(vendor, payload.get("body"))
     if vendor in reset_cards.VENDORS:
-        parsed["reset_cards"] = _read_reset_cards(client, request, vendor, payload.get("body"))
+        parsed["reset_cards"] = _read_reset_cards(client, request, vendor, payload.get("body"), auth.account_id)
     if vendor == "anthropic":
         # One profile read names both the plan and the account this reading was made under.
         profile = _fetch_claude_profile(client=client, auth=auth)
@@ -1537,13 +1537,15 @@ def _fetch_subscription_quota(
     return parsed
 
 
-def _read_reset_cards(client: EngineClient, request: dict, vendor: str, usage: object) -> dict:
-    # Read separately: an error on the opt-in endpoint must not blank windows.
+def _read_reset_cards(client: EngineClient, request: dict, vendor: str, usage: object, account: object) -> dict:
+    # Read separately: an error on the opt-in endpoint must not blank windows. Nor
+    # does a ChatGPT usage answer that names another account than ``account``, the
+    # grant's: its cards are unread, its windows are shown as before.
     try:
         if vendor == "anthropic":
             url = _SUBSCRIPTION_QUOTA_URLS[vendor][0] + "?cedar_ember=1&skip_spend=1"
         else:
-            count = reset_cards.codex_count(usage)
+            count = reset_cards.codex_count(usage, account)
             if not count:
                 return reset_cards.codex_cards(0, None, datetime.now(timezone.utc))
             url = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
@@ -3809,6 +3811,7 @@ class CLIProxyEngineAdapter:
         kind: str,
         request_id: str,
         expected_key: str,
+        expected_count: int,
     ) -> dict[str, Any]:
         """Send the one use request for this press. Called once per press; nothing here repeats it."""
 
@@ -3831,6 +3834,7 @@ class CLIProxyEngineAdapter:
             request_id=request_id,
             headers=headers,
             expected_key=expected_key,
+            expected_count=expected_count,
         )
 
     async def _subscription_binding(
