@@ -52,9 +52,8 @@ _EXCEED_CONNECTION_LIMIT = 1000040350
 _PIECES_KEPT_SECONDS = 5.0
 # Feishu sends an event again when it is not answered within this.
 ANSWER_WINDOW_SECONDS = 3.0
-_ENDPOINT_TIMEOUT_SECONDS = 30.0
-# (connect, read) for the sockets of that request; the 30 seconds are for all of it.
-_ENDPOINT_SOCKET_TIMEOUT = (5.0, 10.0)
+# How long the endpoint request waits for the peer at any one step (connecting, each read).
+_ENDPOINT_SILENCE_SECONDS = 30.0
 _CLOSE_SECONDS = 3.0
 
 
@@ -463,8 +462,6 @@ class FeishuLongConnection:
         self._cancel_sent = False
         # A socket that was opened and is not yet known to be closed.
         self._held: Any = None
-        # The thread of the last endpoint request, which may outlast the wait for it.
-        self._endpoint_request: Optional[threading.Thread] = None
 
     @property
     def connected(self) -> bool:
@@ -569,7 +566,10 @@ class FeishuLongConnection:
     async def _connect(self) -> None:
         if self._stopping:
             return
-        url = await self._fetch_endpoint()
+        url = self._fetch_endpoint()
+        if self._stopping:
+            # The stop came while the request was out: nothing follows from its reply.
+            raise asyncio.CancelledError()
         try:
             parts = urlsplit(url)
             query = parse_qs(parts.query)
@@ -599,52 +599,30 @@ class FeishuLongConnection:
         # The URL's query is the ticket; only where and which connection is logged.
         logger.info("Feishu long connection: connected to %s", self._label)
 
-    async def _fetch_endpoint(self) -> str:
+    def _fetch_endpoint(self) -> str:
         """Ask Feishu where to connect.
 
-        Sent with ``requests``, as the SDK's client sends it: which proxy it
-        goes through, when it goes past one, and which certificates are
-        trusted are then decided by the same library, from the same
-        environment, as before. It runs beside the loop, so that a stop does
-        not wait for it, and one at a time, so that requests that do not end
-        cannot pile up.
+        Sent with ``requests`` on the connection's own thread, as the SDK's
+        client sends it: which proxy it goes through, when it goes past one,
+        which certificates are trusted, and that one attempt is one request,
+        are then as before. Like the SDK's, it holds the thread until it
+        returns, and a ``stop`` that comes meanwhile returns false until then.
+        Unlike the SDK's, it gives up when the peer says nothing for 30 s.
         """
-        if self._endpoint_request is not None and self._endpoint_request.is_alive():
-            raise _Retry("the previous endpoint request has not ended")
-        loop = asyncio.get_running_loop()
-        answered: "asyncio.Future[Any]" = loop.create_future()
-        url = self._base_url + ENDPOINT_PATH
-        body = {"AppID": self._app_id, "AppSecret": self._app_secret}
+        import requests
 
-        def deliver(outcome: Any) -> None:
-            if not answered.done():
-                answered.set_result(outcome)
-
-        def send() -> None:
-            try:
-                import requests
-
-                # The app secret goes to Feishu and nowhere a redirect points.
-                reply = requests.post(
-                    url, headers={"locale": "zh"}, json=body, timeout=_ENDPOINT_SOCKET_TIMEOUT, allow_redirects=False
-                )
-                outcome: Any = (reply.status_code, reply.content)
-            except BaseException as exc:
-                outcome = exc
-            try:
-                loop.call_soon_threadsafe(deliver, outcome)
-            except RuntimeError:
-                pass  # the connection ended meanwhile and took its loop with it
-
-        self._endpoint_request = threading.Thread(target=send, daemon=True, name="feishu-ws-endpoint")
-        self._endpoint_request.start()
         try:
-            outcome = await asyncio.wait_for(answered, _ENDPOINT_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            raise _Retry(f"no endpoint within {_ENDPOINT_TIMEOUT_SECONDS:g} s") from None
-        if isinstance(outcome, BaseException):
-            raise _Retry(f"the endpoint request failed ({_kind(outcome)})")
-        status, raw = outcome
+            # The app secret goes to Feishu and nowhere a redirect points.
+            reply = requests.post(
+                self._base_url + ENDPOINT_PATH,
+                headers={"locale": "zh"},
+                json={"AppID": self._app_id, "AppSecret": self._app_secret},
+                timeout=_ENDPOINT_SILENCE_SECONDS,
+                allow_redirects=False,
+            )
+            status, raw = reply.status_code, reply.content
+        except Exception as exc:
+            raise _Retry(f"the endpoint request failed ({_kind(exc)})") from None
         try:
             answer = json.loads(raw.decode("utf-8"))
         except ValueError:

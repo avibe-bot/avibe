@@ -772,37 +772,67 @@ def test_an_app_the_endpoint_refuses_is_told_by_code_alone(fake: FakeFeishu, cap
     assert len(fake.endpoint_requests) == 1
 
 
-def test_a_stop_does_not_wait_for_an_endpoint_that_is_slow_to_answer(fake: FakeFeishu):
-    fake.endpoint_delays = [3.0]
+def test_a_stop_while_the_endpoint_request_is_out_is_not_done_until_it_returns(fake: FakeFeishu):
+    """As with the SDK's client: the request holds the thread; nothing follows from its reply."""
+    fake.endpoint_delays = [1.5]
+    fake.events_on_open = [message_event()]
+    handled: List[bytes] = []
     connection = FeishuLongConnection(
-        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=handled.append
     )
     connection.start()
     fake.wait_until(lambda: fake.endpoint_requests, what="the endpoint request")
 
-    assert connection.stop(timeout=1) is True
+    assert connection.stop(timeout=0.2) is False  # said as it is: its thread is still there
+    assert connection.is_alive()
 
-    threading.Event().wait(3.5)  # the reply comes after all, to nobody
-    assert fake.connections_opened == 0
+    fake.wait_until(lambda: not connection.is_alive(), timeout=5, what="the connection's thread to end")
+    assert connection.stop() is True
+    assert (len(fake.endpoint_requests), fake.connections_opened, handled) == (1, 0, [])
+    assert connection._loop.is_closed()
+    assert not [thread for thread in threading.enumerate() if thread.name.startswith("feishu-ws")]
 
 
-def test_endpoint_requests_that_do_not_end_do_not_pile_up(fake: FakeFeishu):
-    """One at a time: while a request given up on is still out, no other is sent."""
-    fake.endpoint_delays = [2.0]
+def test_an_endpoint_that_is_slow_to_answer_costs_no_attempt(fake: FakeFeishu):
+    """One attempt is one request: a reply that takes its time is waited for, not counted against the budget."""
+    handled: List[bytes] = []
+    connection = FeishuLongConnection(
+        base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=handled.append
+    )
+    connection.config.reconnect_nonce = 0
+    connection.start()
+    try:
+        fake.wait_connected()
+        connection.config.reconnect_count, connection.config.reconnect_interval = 2, 0.05
+        fake.endpoint_delays = [2.0]  # forty intervals long
+
+        fake.drop_connection()
+        fake.wait_connected(connections=2, timeout=8)
+        fake.wait_acknowledged(fake.push_event(message_event(event_id="e_after")))
+    finally:
+        assert connection.stop() is True
+
+    assert len(fake.endpoint_requests) == 2  # the first connection's, and one for the second
+    assert len(handled) == 1
+
+
+def test_an_endpoint_that_says_nothing_is_given_up_on_and_asked_again(
+    fake: FakeFeishu, caplog: pytest.LogCaptureFixture
+):
+    fake.endpoint_delays = [1.5]
     connection = FeishuLongConnection(
         base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
     )
     connection.config.reconnect_nonce, connection.config.reconnect_interval = 0, 0.05
-    with patch.object(feishu_ws, "_ENDPOINT_TIMEOUT_SECONDS", 0.3):
+    with patch.object(feishu_ws, "_ENDPOINT_SILENCE_SECONDS", 0.3):
         connection.start()
         try:
-            threading.Event().wait(1.5)  # given up on after 0.3 s; some twenty attempts since
-            assert len(fake.endpoint_requests) == 1
-            fake.wait_connected(timeout=8)  # the first one ended, and the next went out
+            fake.wait_connected(timeout=8)
         finally:
             assert connection.stop() is True
 
     assert len(fake.endpoint_requests) == 2
+    assert "connect failed, err: the endpoint request failed (ReadTimeout)" in caplog.text
 
 
 # --- the two clients side by side ----------------------------------------------------
