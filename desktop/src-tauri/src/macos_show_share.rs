@@ -278,9 +278,11 @@ pub fn present(
 
 /// Reads a Show through this instance's own read APIs, in a world the page
 /// cannot reach: whether the user may use it, and its link, as the iPhone App
-/// reads them (ios/Avibe/ShowShareCoordinator.swift). It reads no DOM: which
-/// Show, and which pixels, are the shell's to decide. `visible` only says the
-/// page is on screen now.
+/// reads them (ios/Avibe/ShowShareCoordinator.swift). A Show the user may use
+/// but that has no link (a limited Show while Avibe Cloud is not connected) is
+/// still allowed, with an empty `url`: a link share then fails, an export does
+/// not need one. It reads no DOM: which Show, and which pixels, are the
+/// shell's to decide. `visible` only says the page is on screen now.
 pub const READ: &str = r#"
 if (location.origin !== origin) return {allowed:false};
 const read = async (path) => {
@@ -297,5 +299,5 @@ if (page.session_id !== sessionID || page.offline === true
 const href = page.visibility === 'limited' ? page.public_url
   : page.active_url || (page.visibility === 'private' ? '/show/' + encodeURIComponent(sessionID) + '/'
     : page.share_id ? '/p/' + encodeURIComponent(page.share_id) + '/' : null);
-return {allowed:!!href, url:href ? new URL(href, origin).href : '', visible:document.visibilityState === 'visible'};
+return {allowed:true, url:href ? new URL(href, origin).href : '', visible:document.visibilityState === 'visible'};
 "#;

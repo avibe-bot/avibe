@@ -1892,6 +1892,8 @@ mod tests {
             hooks: Hooks,
             fail_write: bool,
             fail_present: bool,
+            /// The Show has no link: a limited Show while Avibe Cloud is not connected.
+            no_link: bool,
             facts_read: AtomicUsize,
             writes: AtomicUsize,
             /// Every menu shown, by token.
@@ -1915,6 +1917,7 @@ mod tests {
                     hooks,
                     fail_write: false,
                     fail_present: false,
+                    no_link: false,
                     facts_read: AtomicUsize::new(0),
                     writes: AtomicUsize::new(0),
                     menus: Mutex::default(),
@@ -1956,7 +1959,12 @@ mod tests {
             }
             async fn read(&self, _session: &str) -> Option<Value> {
                 self.fire(&self.hooks.read);
-                Some(json!({ "allowed": true, "url": format!("{ORIGIN}show/ses-1/"), "visible": true }))
+                let url = if self.no_link {
+                    String::new()
+                } else {
+                    format!("{ORIGIN}show/ses-1/")
+                };
+                Some(json!({ "allowed": true, "url": url, "visible": true }))
             }
             async fn capture(&self, _kind: Kind) -> Option<Vec<u8>> {
                 Some(b"pixels".to_vec())
@@ -2300,6 +2308,29 @@ mod tests {
             let mut run = start(Kind::Link, Some(ROUTE), fake);
             assert_eq!(status(&mut run).await.as_deref(), Some("completed"));
             assert_eq!(closed(&run).await, vec![run.token]);
+        }
+
+        // A Show the user may use but that has no link still exports; only its link
+        // share fails.
+        #[tokio::test]
+        async fn a_show_without_a_link_exports_but_shares_no_link() {
+            let without_link = || {
+                Arc::new(Fake {
+                    no_link: true,
+                    ..Arc::into_inner(Fake::new(Hooks::default())).unwrap()
+                })
+            };
+            let mut run = start(Kind::Image, Some(ROUTE), without_link());
+            menu_shown(&run).await;
+            service(&run, Status::Completed, None);
+            assert_eq!(status(&mut run).await.as_deref(), Some("completed"));
+            let mut run = start(Kind::Link, Some(ROUTE), without_link());
+            let answer = tokio::time::timeout(Duration::from_secs(2), &mut run.answer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer["error"]["code"], "invalid_link");
+            assert!(run.fake.menus.lock().unwrap().is_empty());
         }
 
         // Every way an operation can end, with its window still on its Show.

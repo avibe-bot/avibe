@@ -210,6 +210,14 @@ document.getElementById('show').addEventListener('load', () => {
             vec![("sessionID", SESSION.into()), ("origin", "http://127.0.0.1:1".into())],
         );
         check("read-refuses-another-origin", foreign["allowed"] == false, foreign);
+        // A limited Show whose public link is unavailable (Avibe Cloud not
+        // connected) is still the user's to export; it only has no link.
+        let limited = read(window, origin, "ses-limited");
+        check(
+            "a-show-without-a-link-may-still-be-exported",
+            limited["allowed"] == true && limited["url"] == "",
+            limited,
+        );
         let unknown = read(window, origin, "ses-missing");
         check(
             "read-refuses-a-show-it-cannot-read",
@@ -701,6 +709,14 @@ document.getElementById('show').addEventListener('load', () => {
                         &mut stream,
                         "text/html; charset=utf-8",
                         "<!doctype html><body style=\"margin:0;background:#3050ff\">elsewhere</body>",
+                    ),
+                    "/api/show-pages/ses-limited/access" => {
+                        respond(&mut stream, "application/json", r#"{"can_use":true}"#)
+                    }
+                    "/api/show-pages/ses-limited" => respond(
+                        &mut stream,
+                        "application/json",
+                        r#"{"session_id":"ses-limited","visibility":"limited","public_url":null,"offline":false}"#,
                     ),
                     "/api/show-pages/ses-probe/access" => {
                         respond(&mut stream, "application/json", r#"{"can_use":true}"#)
