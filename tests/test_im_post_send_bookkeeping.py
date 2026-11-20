@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 from config.v2_config import LarkConfig, SlackConfig
 from modules.im.base import InlineButton, InlineKeyboard, MessageContext
 from modules.im.feishu import FeishuBot
+from modules.im.feishu_api import FeishuApiResponse
 from modules.im.slack import SlackBot
 
 
@@ -129,16 +130,6 @@ class SlackPostSendBookkeepingTests(unittest.IsolatedAsyncioTestCase):
         slack.sessions.mark_thread_active.assert_called_once()
 
 
-class _FakeLarkResponse:
-    def __init__(self, message_id: str) -> None:
-        self.data = types.SimpleNamespace(message_id=message_id, chat_id="oc_chat")
-        self.code = 0
-        self.msg = "ok"
-
-    def success(self) -> bool:
-        return True
-
-
 class FeishuPostSendBookkeepingTests(unittest.IsolatedAsyncioTestCase):
     """Feishu: the threaded reply paths survive a bookkeeping raise.
 
@@ -150,38 +141,36 @@ class FeishuPostSendBookkeepingTests(unittest.IsolatedAsyncioTestCase):
 
     def _bot(self, message_id: str) -> tuple[FeishuBot, types.SimpleNamespace]:
         bot = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret"))
-        bot._ensure_client = lambda: None  # type: ignore[method-assign]
-        message = types.SimpleNamespace(
-            acreate=AsyncMock(return_value=_FakeLarkResponse(message_id)),
-            areply=AsyncMock(return_value=_FakeLarkResponse(message_id)),
+        sent = FeishuApiResponse(code=0, msg="ok", data={"message_id": message_id, "chat_id": "oc_chat"})
+        api = types.SimpleNamespace(
+            create_message=AsyncMock(return_value=sent),
+            reply_message=AsyncMock(return_value=sent),
         )
-        bot._lark_client = types.SimpleNamespace(
-            im=types.SimpleNamespace(v1=types.SimpleNamespace(message=message))
-        )
+        bot._api = api
         bot.settings_manager = object()
         bot.sessions = _raising_sessions()
-        return bot, message
+        return bot, api
 
     @staticmethod
     def _threaded_context() -> MessageContext:
         return MessageContext(user_id="ou_1", channel_id="oc_chat", thread_id="om_root", platform="lark")
 
     async def test_thread_reply_returns_message_id_when_bookkeeping_raises(self):
-        bot, message = self._bot("om_reply")
+        bot, api = self._bot("om_reply")
 
         result = await bot.send_message(self._threaded_context(), "delivered body")
 
-        message.areply.assert_awaited_once()
+        api.reply_message.assert_awaited_once()
         self.assertEqual(result, "om_reply")
         bot.sessions.mark_thread_active.assert_called_once()
 
     async def test_thread_card_reply_returns_message_id_when_bookkeeping_raises(self):
-        bot, message = self._bot("om_card")
+        bot, api = self._bot("om_card")
         keyboard = InlineKeyboard(buttons=[[InlineButton(text="Stop", callback_data="stop")]])
 
         result = await bot.send_message_with_buttons(self._threaded_context(), "pick one", keyboard)
 
-        message.areply.assert_awaited_once()
+        api.reply_message.assert_awaited_once()
         self.assertEqual(result, "om_card")
         bot.sessions.mark_thread_active.assert_called_once()
 

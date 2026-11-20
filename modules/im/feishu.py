@@ -1,4 +1,8 @@
-"""Feishu/Lark implementation of the IM client using lark-oapi SDK."""
+"""Feishu/Lark implementation of the IM client.
+
+Message calls go over plain HTTPS (``feishu_api``); the long connection that
+delivers events is still ``lark-oapi``'s.
+"""
 
 import asyncio
 from modules.agents.catalog import NATIVE_CLI_BACKENDS, display_name_for_backend
@@ -9,7 +13,7 @@ import os
 import threading
 import time
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -28,6 +32,7 @@ from .message_facts import (
     is_original_human_feishu_text,
 )
 from .download_target import open_download_target
+from .feishu_api import FeishuApi
 from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
@@ -37,6 +42,16 @@ from modules.agents.native_sessions.display import format_display_summary, forma
 from modules.agents.native_sessions.types import NativeResumeSession
 
 logger = logging.getLogger(__name__)
+
+# Feishu sends an event again when it was not acknowledged in time: after 15 s,
+# 5 min, 1 h and 6 h. An event id is remembered past the last of them, so that
+# none of the four is handled as a new event.
+_EVENT_ID_MEMORY_SECONDS = 7 * 3600
+# A card click carries no event id; its key (message, button, user, values)
+# only catches the same click arriving twice. A deliberate repeat of the click
+# must go through, so the key is forgotten quickly.
+_CARD_ACTION_MEMORY_SECONDS = 30
+_EVENT_ID_SWEEP_SECONDS = 60
 
 
 # Feishu emoji name mapping (common reactions)
@@ -107,7 +122,7 @@ def _normalize_emoji(emoji: str) -> str:
 
 
 class FeishuBot(BaseIMClient):
-    """Feishu/Lark implementation of the IM client using lark-oapi SDK."""
+    """Feishu/Lark implementation of the IM client."""
 
     # Bounds a routing card's select to the size OpenCode's model list always used.
     route_option_limit = 100
@@ -117,8 +132,8 @@ class FeishuBot(BaseIMClient):
         self.config = config
         self.formatter = FeishuFormatter()
 
-        # Lark SDK client (for API calls)
-        self._lark_client = None
+        # Message calls (create, reply, patch, delete, reaction)
+        self._api = FeishuApi(config.api_base_url, self._tenant_token)
         # WebSocket client (for event subscription)
         self._ws_client = None
         # Event handler
@@ -140,9 +155,15 @@ class FeishuBot(BaseIMClient):
         self._stop_event: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws_thread: Optional[threading.Thread] = None
+        # Event id (or card-click key) -> the time it may be forgotten. Read and
+        # written from the long connection's thread and from the adapter's loop.
         self._recent_event_ids: Dict[str, float] = {}
-        self._cached_token: Optional[str] = None
-        self._token_expires_at: Optional[float] = None
+        self._event_ids_swept_at = 0.0
+        self._event_ids_lock = threading.Lock()
+        # (token, the time it stops being used). One record, replaced whole:
+        # fetches on different loops must not mix one's token with another's expiry.
+        self._token: Optional[Tuple[str, float]] = None
+        self._token_fetches: Dict[asyncio.AbstractEventLoop, "asyncio.Task[str]"] = {}
         self._user_info_cache: Dict[str, Dict[str, Any]] = {}
         self._dm_chat_ids: set = set()
         self._message_text_cache: Dict[str, str] = {}
@@ -257,55 +278,77 @@ class FeishuBot(BaseIMClient):
         return restore_held("".join(parts), {token: f"&#{ord(character)};" for token, character in escaped.items()})
 
     # ------------------------------------------------------------------
-    # SDK initialisation helpers
+    # Tenant access token
     # ------------------------------------------------------------------
-    def _ensure_client(self):
-        """Ensure the lark-oapi REST client is initialised."""
-        if self._lark_client is not None:
-            return
-        import lark_oapi as lark
-
+    def _warn_proxy_bypassed(self) -> None:
         if getattr(self.config, "proxy_url", None):
-            # lark-oapi (as of 1.x) does not expose a proxy hook on its
-            # builder; the SDK ignores HTTP(S)_PROXY env vars too. Surface
-            # this once at init so users in restricted regions don't
-            # silently think the field works.
+            # Neither the message calls nor lark-oapi's long connection go
+            # through the configured proxy. Surface this once at start so users
+            # in restricted regions don't silently think the field works.
             logger.warning(
                 "Feishu/Lark adapter: proxy_url is set but lark-oapi has no "
                 "proxy hook; outbound traffic will bypass the configured proxy."
             )
 
-        self._lark_client = (
-            lark.Client.builder()
-            .app_id(self.config.app_id)
-            .app_secret(self.config.app_secret)
-            .domain(self._get_sdk_domain())
-            .log_level(lark.LogLevel.WARNING)
-            .build()
-        )
+    async def _tenant_token(self) -> str:
+        """Return a valid tenant access token, or raise with Feishu's refusal."""
+        cached = self._token
+        if cached is not None and time.time() < cached[1]:
+            return cached[0]
+        # Calls that miss the cache together share one fetch. The adapter is
+        # called on more than one loop, and a task belongs to its loop.
+        loop = asyncio.get_running_loop()
+        fetch = self._token_fetches.get(loop)
+        if fetch is None:
+            fetch = loop.create_task(self._fetch_tenant_token())
+            self._token_fetches[loop] = fetch
+            fetch.add_done_callback(lambda done: self._token_fetch_done(loop, done))
+        return await asyncio.shield(fetch)
+
+    def _token_fetch_done(self, loop: asyncio.AbstractEventLoop, fetch: "asyncio.Task[str]") -> None:
+        if self._token_fetches.get(loop) is fetch:
+            del self._token_fetches[loop]
+        if not fetch.cancelled():
+            # Read here too: every caller waiting for it may have been cancelled.
+            fetch.exception()
+
+    async def _fetch_tenant_token(self) -> str:
+        url = f"{self.config.api_base_url}/open-apis/auth/v3/tenant_access_token/internal"
+        payload = json.dumps({"app_id": self.config.app_id, "app_secret": self.config.app_secret})
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # The app secret goes to Feishu and nowhere a redirect points.
+            async with session.post(
+                url, data=payload, headers={"Content-Type": "application/json"}, allow_redirects=False
+            ) as resp:
+                raw = await resp.read()
+        # Parsed whatever the content type says: a gateway can relabel Feishu's answer.
+        result = json.loads(raw.decode("utf-8"))
+        if result is None:
+            result = {}
+        if not isinstance(result, dict):
+            raise RuntimeError("obtain self tenant access token failed: the reply is not a JSON object")
+        token = result.get("tenant_access_token")
+        if result.get("code") != 0 or not token:
+            # Feishu's own words, minus the secret should a reply ever quote it back.
+            reason = f"code: {result.get('code')}, msg: {result.get('msg')}"
+            if self.config.app_secret:
+                reason = reason.replace(self.config.app_secret, "***")
+            raise RuntimeError(f"obtain self tenant access token failed, {reason}")
+        # Used until 10 minutes before it expires, and never past the lifetime
+        # Feishu gave it; a reply without a lifetime is used for this call only.
+        expire = result.get("expire")
+        lifetime = expire if isinstance(expire, (int, float)) and not isinstance(expire, bool) else 0
+        self._token = (token, time.time() + max(lifetime - 600, 0))
+        return token
 
     async def _get_tenant_token(self) -> Optional[str]:
-        """Get tenant access token for raw HTTP calls (non-blocking)."""
-        # Return cached token if still valid (expires after ~2h, refresh at 1h50m)
-        if self._cached_token and self._token_expires_at and time.time() < self._token_expires_at:
-            return self._cached_token
+        """The tenant access token for calls that give up quietly without one."""
         try:
-            url = f"{self.config.api_base_url}/open-apis/auth/v3/tenant_access_token/internal"
-            payload = json.dumps({"app_id": self.config.app_id, "app_secret": self.config.app_secret})
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, data=payload, headers={"Content-Type": "application/json"}) as resp:
-                    result = await resp.json()
-                    if result.get("code") == 0:
-                        token = result.get("tenant_access_token")
-                        expire = result.get("expire", 7200)
-                        self._cached_token = token
-                        # Refresh 10 minutes before expiry
-                        self._token_expires_at = time.time() + max(expire - 600, 60)
-                        return token
+            return await self._tenant_token()
         except Exception as exc:
             logger.error("Failed to get tenant_access_token: %s", exc)
-        return None
+            return None
 
     async def _fetch_bot_info(self):
         """Fetch the bot's own open_id on startup."""
@@ -328,19 +371,23 @@ class FeishuBot(BaseIMClient):
     # ------------------------------------------------------------------
     # Event deduplication
     # ------------------------------------------------------------------
-    def _is_duplicate_event(self, event_id: Optional[str]) -> bool:
+    def _is_duplicate_event(self, event_id: Optional[str], memory_seconds: float = _EVENT_ID_MEMORY_SECONDS) -> bool:
+        """Whether ``event_id`` was already seen within its memory; remember it if not."""
         if not event_id:
             return False
         now = time.time()
-        expiry = now - 30
-        for key in list(self._recent_event_ids.keys()):
-            if self._recent_event_ids[key] < expiry:
-                del self._recent_event_ids[key]
-        if event_id in self._recent_event_ids:
+        with self._event_ids_lock:
+            if now >= self._event_ids_swept_at + _EVENT_ID_SWEEP_SECONDS:
+                self._event_ids_swept_at = now
+                for key in [key for key, forget_at in self._recent_event_ids.items() if forget_at <= now]:
+                    del self._recent_event_ids[key]
+            forget_at = self._recent_event_ids.get(event_id)
+            duplicate = forget_at is not None and forget_at > now
+            if not duplicate:
+                self._recent_event_ids[event_id] = now + memory_seconds
+        if duplicate:
             logger.debug("Ignoring duplicate Feishu event_id %s", event_id)
-            return True
-        self._recent_event_ids[event_id] = now
-        return False
+        return duplicate
 
     # ------------------------------------------------------------------
     # Channel authorisation
@@ -384,13 +431,7 @@ class FeishuBot(BaseIMClient):
         Uses receive_id_type=open_id to send directly to the user without
         needing to open a DM chat first.
         """
-        self._ensure_client()
         try:
-            from lark_oapi.api.im.v1 import (
-                CreateMessageRequest,
-                CreateMessageRequestBody,
-            )
-
             button_rows: Optional[List[List[dict]]] = None
             keyboard = kwargs.get("keyboard")
             if keyboard is not None:
@@ -399,11 +440,7 @@ class FeishuBot(BaseIMClient):
                     for row in keyboard.buttons
                 ]
             content = self._build_card_json(text, button_rows)
-            body = (
-                CreateMessageRequestBody.builder().receive_id(user_id).msg_type("interactive").content(content).build()
-            )
-            request = CreateMessageRequest.builder().receive_id_type("open_id").request_body(body).build()
-            response = await self._lark_client.im.v1.message.acreate(request)
+            response = await self._api.create_message("open_id", user_id, "interactive", content)
             if not response.success():
                 logger.error(
                     "Failed to send Feishu DM to %s: code=%s msg=%s",
@@ -412,9 +449,9 @@ class FeishuBot(BaseIMClient):
                     response.msg,
                 )
                 return None
-            message_id = response.data.message_id
+            message_id = response.data.get("message_id")
             self._remember_message_text(message_id, text)
-            chat_id = getattr(response.data, "chat_id", None) or getattr(response.data, "open_chat_id", None)
+            chat_id = response.data.get("chat_id")
             if chat_id:
                 self._dm_chat_ids.add(chat_id)
             return message_id
@@ -436,14 +473,8 @@ class FeishuBot(BaseIMClient):
         ``note`` element in the card (see ``_build_card_json``). When ``text`` is
         empty but ``subtext`` is set (footer-only turn-start bubble) the send is
         allowed and the note renders alone."""
-        self._ensure_client()
         if not text and not subtext:
             raise ValueError("Feishu send_message requires non-empty text")
-
-        from lark_oapi.api.im.v1 import (
-            CreateMessageRequest,
-            CreateMessageRequestBody,
-        )
 
         # Thread reply: the reply API path builds its own card, so avoid
         # constructing an unused (and non-subtext-aware) request here.
@@ -463,20 +494,9 @@ class FeishuBot(BaseIMClient):
                     pass
             return message_id
 
-        request = (
-            CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
-            .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(context.channel_id)
-                .msg_type("interactive")
-                .content(self._build_card_json(text, subtext=subtext))
-                .build()
-            )
-            .build()
+        response = await self._api.create_message(
+            "chat_id", context.channel_id, "interactive", self._build_card_json(text, subtext=subtext)
         )
-
-        response = await self._lark_client.im.v1.message.acreate(request)
         if not response.success():
             logger.error(
                 "Failed to send Feishu message: code=%s msg=%s",
@@ -485,7 +505,7 @@ class FeishuBot(BaseIMClient):
             )
             raise RuntimeError(f"Feishu send_message failed: {response.msg}")
 
-        message_id = response.data.message_id
+        message_id = response.data.get("message_id")
         # Post-send bookkeeping must not destroy the delivered message id
         # (see the thread-reply branch above).
         if self.settings_manager and (context.thread_id or reply_to):
@@ -505,26 +525,9 @@ class FeishuBot(BaseIMClient):
         main channel timeline. ``subtext`` renders the concise status-bubble
         footer as a trailing ``note`` element.
         """
-        self._ensure_client()
-        from lark_oapi.api.im.v1 import (
-            ReplyMessageRequest,
-            ReplyMessageRequestBody,
+        response = await self._api.reply_message(
+            parent_id, "interactive", self._build_card_json(text, subtext=subtext), reply_in_thread=True
         )
-
-        request = (
-            ReplyMessageRequest.builder()
-            .message_id(parent_id)
-            .request_body(
-                ReplyMessageRequestBody.builder()
-                .msg_type("interactive")
-                .content(self._build_card_json(text, subtext=subtext))
-                .reply_in_thread(True)
-                .build()
-            )
-            .build()
-        )
-
-        response = await self._lark_client.im.v1.message.areply(request)
         if not response.success():
             logger.error(
                 "Failed to reply Feishu message: code=%s msg=%s",
@@ -532,7 +535,7 @@ class FeishuBot(BaseIMClient):
                 response.msg,
             )
             raise RuntimeError(f"Feishu reply failed: {response.msg}")
-        return response.data.message_id
+        return response.data.get("message_id")
 
     def _build_card_json(
         self,
@@ -658,14 +661,8 @@ class FeishuBot(BaseIMClient):
         ``subtext`` renders the concise status-bubble footer as a trailing
         ``note`` element; the concise result path passes it alongside quick-reply
         buttons, so it must be accepted here (parity with Slack/Discord)."""
-        self._ensure_client()
         if not text and not subtext:
             raise ValueError("Feishu send_message_with_buttons requires non-empty text")
-
-        from lark_oapi.api.im.v1 import (
-            CreateMessageRequest,
-            CreateMessageRequestBody,
-        )
 
         button_rows: List[List[dict]] = []
         for row in keyboard.buttons:
@@ -697,20 +694,7 @@ class FeishuBot(BaseIMClient):
                     pass
             return message_id
 
-        request = (
-            CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
-            .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(context.channel_id)
-                .msg_type("interactive")
-                .content(card_json)
-                .build()
-            )
-            .build()
-        )
-
-        response = await self._lark_client.im.v1.message.acreate(request)
+        response = await self._api.create_message("chat_id", context.channel_id, "interactive", card_json)
         if not response.success():
             logger.error(
                 "Failed to send Feishu card message: code=%s msg=%s",
@@ -719,7 +703,7 @@ class FeishuBot(BaseIMClient):
             )
             raise RuntimeError(f"Feishu send card failed: {response.msg}")
 
-        message_id = response.data.message_id
+        message_id = response.data.get("message_id")
         self._remember_message_text(message_id, text, subtext=subtext)
         # Post-send bookkeeping must not destroy the delivered message id
         # (see send_message).
@@ -733,29 +717,10 @@ class FeishuBot(BaseIMClient):
 
     async def _reply_message_with_card(self, parent_id: str, card_json: str) -> str:
         """Reply to a message with an interactive card (as topic)."""
-        self._ensure_client()
-        from lark_oapi.api.im.v1 import (
-            ReplyMessageRequest,
-            ReplyMessageRequestBody,
-        )
-
-        request = (
-            ReplyMessageRequest.builder()
-            .message_id(parent_id)
-            .request_body(
-                ReplyMessageRequestBody.builder()
-                .msg_type("interactive")
-                .content(card_json)
-                .reply_in_thread(True)
-                .build()
-            )
-            .build()
-        )
-
-        response = await self._lark_client.im.v1.message.areply(request)
+        response = await self._api.reply_message(parent_id, "interactive", card_json, reply_in_thread=True)
         if not response.success():
             raise RuntimeError(f"Feishu reply card failed: {response.msg}")
-        return response.data.message_id
+        return response.data.get("message_id")
 
     # ------------------------------------------------------------------
     # Edit message
@@ -775,13 +740,7 @@ class FeishuBot(BaseIMClient):
         ``note`` element (see ``_build_card_json``). The status bubble edits its
         body in place on each tool call and collapses to a footer-only marker at
         turn end, so the footer must be carried through the patched card."""
-        self._ensure_client()
         try:
-            from lark_oapi.api.im.v1 import (
-                PatchMessageRequest,
-                PatchMessageRequestBody,
-            )
-
             button_rows = None
             if keyboard:
                 button_rows = []
@@ -799,14 +758,7 @@ class FeishuBot(BaseIMClient):
             else:
                 return True
 
-            request = (
-                PatchMessageRequest.builder()
-                .message_id(message_id)
-                .request_body(PatchMessageRequestBody.builder().content(card_json).build())
-                .build()
-            )
-
-            response = await self._lark_client.im.v1.message.apatch(request)
+            response = await self._api.patch_message(message_id, card_json)
             if not response.success():
                 logger.error(
                     "Failed to edit Feishu message: code=%s msg=%s",
@@ -995,7 +947,6 @@ class FeishuBot(BaseIMClient):
     # Reactions
     # ------------------------------------------------------------------
     async def add_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
-        self._ensure_client()
         emoji_type = _normalize_emoji(emoji)
         if not emoji_type.isascii():
             # Feishu emoji_type values are ASCII keys (e.g. ``OK``, ``SMART``). A
@@ -1008,23 +959,7 @@ class FeishuBot(BaseIMClient):
                 emoji,
             )
         try:
-            from lark_oapi.api.im.v1 import (
-                CreateMessageReactionRequest,
-                CreateMessageReactionRequestBody,
-                Emoji,
-            )
-
-            request = (
-                CreateMessageReactionRequest.builder()
-                .message_id(message_id)
-                .request_body(
-                    CreateMessageReactionRequestBody.builder()
-                    .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
-                    .build()
-                )
-                .build()
-            )
-            response = await self._lark_client.im.v1.message_reaction.acreate(request)
+            response = await self._api.add_reaction(message_id, emoji_type)
             if not response.success():
                 logger.warning(
                     "Feishu add_reaction failed: code=%s msg=%s",
@@ -1054,7 +989,6 @@ class FeishuBot(BaseIMClient):
         return bool(operator_id and operator_id in bot_ids)
 
     async def remove_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
-        self._ensure_client()
         # Feishu deletes by reaction_id, so resolve only this app's matching
         # reaction. Multiple people may use the same emoji.
         try:
@@ -1115,7 +1049,6 @@ class FeishuBot(BaseIMClient):
         filetype: str = "markdown",
     ) -> str:
         """Upload markdown content as a file to Feishu."""
-        self._ensure_client()
         try:
             token = await self._get_tenant_token()
             if not token:
@@ -1146,52 +1079,18 @@ class FeishuBot(BaseIMClient):
                     file_key = result.get("data", {}).get("file_key", "")
 
             # Send file message to the chat
-            from lark_oapi.api.im.v1 import (
-                CreateMessageRequest,
-                CreateMessageRequestBody,
-            )
-
             target = context.thread_id or context.channel_id
             file_content = json.dumps({"file_key": file_key})
 
             # If in thread, reply
             if context.thread_id:
-                from lark_oapi.api.im.v1 import (
-                    ReplyMessageRequest,
-                    ReplyMessageRequestBody,
-                )
-
-                request = (
-                    ReplyMessageRequest.builder()
-                    .message_id(context.thread_id)
-                    .request_body(
-                        ReplyMessageRequestBody.builder()
-                        .msg_type("file")
-                        .content(file_content)
-                        .reply_in_thread(True)
-                        .build()
-                    )
-                    .build()
-                )
-                response = await self._lark_client.im.v1.message.areply(request)
+                response = await self._api.reply_message(context.thread_id, "file", file_content, reply_in_thread=True)
             else:
-                request = (
-                    CreateMessageRequest.builder()
-                    .receive_id_type("chat_id")
-                    .request_body(
-                        CreateMessageRequestBody.builder()
-                        .receive_id(context.channel_id)
-                        .msg_type("file")
-                        .content(file_content)
-                        .build()
-                    )
-                    .build()
-                )
-                response = await self._lark_client.im.v1.message.acreate(request)
+                response = await self._api.create_message("chat_id", context.channel_id, "file", file_content)
 
             if not response.success():
                 raise RuntimeError(f"Feishu file message failed: {response.msg}")
-            return response.data.message_id
+            return response.data.get("message_id")
         except Exception as exc:
             logger.error("Error uploading markdown to Feishu: %s", exc)
             raise
@@ -1203,7 +1102,6 @@ class FeishuBot(BaseIMClient):
         title: Optional[str] = None,
     ) -> str:
         """Upload a local file to Feishu chat/thread."""
-        self._ensure_client()
         try:
             token = await self._get_tenant_token()
             if not token:
@@ -1235,43 +1133,15 @@ class FeishuBot(BaseIMClient):
                         raise RuntimeError(f"Feishu file upload failed: {result.get('msg')}")
                     file_key = result.get("data", {}).get("file_key", "")
 
-            from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
-
             file_content = json.dumps({"file_key": file_key})
             if context.thread_id:
-                from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
-
-                request = (
-                    ReplyMessageRequest.builder()
-                    .message_id(context.thread_id)
-                    .request_body(
-                        ReplyMessageRequestBody.builder()
-                        .msg_type("file")
-                        .content(file_content)
-                        .reply_in_thread(True)
-                        .build()
-                    )
-                    .build()
-                )
-                response = await self._lark_client.im.v1.message.areply(request)
+                response = await self._api.reply_message(context.thread_id, "file", file_content, reply_in_thread=True)
             else:
-                request = (
-                    CreateMessageRequest.builder()
-                    .receive_id_type("chat_id")
-                    .request_body(
-                        CreateMessageRequestBody.builder()
-                        .receive_id(context.channel_id)
-                        .msg_type("file")
-                        .content(file_content)
-                        .build()
-                    )
-                    .build()
-                )
-                response = await self._lark_client.im.v1.message.acreate(request)
+                response = await self._api.create_message("chat_id", context.channel_id, "file", file_content)
 
             if not response.success():
                 raise RuntimeError(f"Feishu file message failed: {response.msg}")
-            return response.data.message_id
+            return response.data.get("message_id")
         except Exception as exc:
             logger.error("Error uploading file to Feishu: %s", exc)
             raise
@@ -1283,7 +1153,6 @@ class FeishuBot(BaseIMClient):
         title: Optional[str] = None,
     ) -> str:
         """Upload a local image to Feishu as an image message."""
-        self._ensure_client()
         try:
             token = await self._get_tenant_token()
             if not token:
@@ -1314,43 +1183,15 @@ class FeishuBot(BaseIMClient):
                         raise RuntimeError(f"Feishu image upload failed: {result.get('msg')}")
                     image_key = result.get("data", {}).get("image_key", "")
 
-            from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
-
             image_content = json.dumps({"image_key": image_key})
             if context.thread_id:
-                from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
-
-                request = (
-                    ReplyMessageRequest.builder()
-                    .message_id(context.thread_id)
-                    .request_body(
-                        ReplyMessageRequestBody.builder()
-                        .msg_type("image")
-                        .content(image_content)
-                        .reply_in_thread(True)
-                        .build()
-                    )
-                    .build()
-                )
-                response = await self._lark_client.im.v1.message.areply(request)
+                response = await self._api.reply_message(context.thread_id, "image", image_content, reply_in_thread=True)
             else:
-                request = (
-                    CreateMessageRequest.builder()
-                    .receive_id_type("chat_id")
-                    .request_body(
-                        CreateMessageRequestBody.builder()
-                        .receive_id(context.channel_id)
-                        .msg_type("image")
-                        .content(image_content)
-                        .build()
-                    )
-                    .build()
-                )
-                response = await self._lark_client.im.v1.message.acreate(request)
+                response = await self._api.create_message("chat_id", context.channel_id, "image", image_content)
 
             if not response.success():
                 raise RuntimeError(f"Feishu image message failed: {response.msg}")
-            return response.data.message_id
+            return response.data.get("message_id")
         except Exception as exc:
             logger.error("Error uploading image to Feishu: %s", exc)
             raise
@@ -1581,7 +1422,6 @@ class FeishuBot(BaseIMClient):
         cached = self._user_info_cache.get(user_id)
         if cached is not None:
             return cached
-        self._ensure_client()
         try:
             token = await self._get_tenant_token()
             if not token:
@@ -1617,7 +1457,6 @@ class FeishuBot(BaseIMClient):
 
     async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
         """Get information about a Feishu chat."""
-        self._ensure_client()
         try:
             token = await self._get_tenant_token()
             if not token:
@@ -1947,7 +1786,7 @@ class FeishuBot(BaseIMClient):
                 except Exception:
                     interaction_hash = str(id(select_state))
             dedup_key = f"card:{message_id}:{button_name or callback_data}:{user_id}:{interaction_hash}"
-            if self._is_duplicate_event(dedup_key):
+            if self._is_duplicate_event(dedup_key, _CARD_ACTION_MEMORY_SECONDS):
                 return
 
             # --- Centralized auth check ---
@@ -2036,10 +1875,7 @@ class FeishuBot(BaseIMClient):
         if not context.message_id:
             return
         try:
-            from lark_oapi.api.im.v1 import DeleteMessageRequest
-
-            req = DeleteMessageRequest.builder().message_id(context.message_id).build()
-            resp = await self._lark_client.im.v1.message.adelete(req)
+            resp = await self._api.delete_message(context.message_id)
             if not resp.success():
                 logger.warning("Failed to recall form card: %s", resp.msg)
         except Exception as exc:
@@ -2149,15 +1985,7 @@ class FeishuBot(BaseIMClient):
         if not message_id:
             return
 
-        from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
-
-        request = (
-            PatchMessageRequest.builder()
-            .message_id(message_id)
-            .request_body(PatchMessageRequestBody.builder().content(json.dumps(card, ensure_ascii=False)).build())
-            .build()
-        )
-        response = await self._lark_client.im.v1.message.apatch(request)
+        response = await self._api.patch_message(message_id, json.dumps(card, ensure_ascii=False))
         if not response.success():
             raise RuntimeError(f"Feishu patch card failed: {response.msg}")
 
@@ -3024,34 +2852,15 @@ class FeishuBot(BaseIMClient):
 
     async def _send_card_to_channel(self, context: MessageContext, card: dict) -> str:
         """Send a raw card JSON to a channel."""
-        self._ensure_client()
-        from lark_oapi.api.im.v1 import (
-            CreateMessageRequest,
-            CreateMessageRequestBody,
-        )
-
         card_json = json.dumps(card, ensure_ascii=False)
 
         if context.thread_id:
             return await self._reply_message_with_card(context.thread_id, card_json)
 
-        request = (
-            CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
-            .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(context.channel_id)
-                .msg_type("interactive")
-                .content(card_json)
-                .build()
-            )
-            .build()
-        )
-
-        response = await self._lark_client.im.v1.message.acreate(request)
+        response = await self._api.create_message("chat_id", context.channel_id, "interactive", card_json)
         if not response.success():
             raise RuntimeError(f"Feishu send card failed: {response.msg}")
-        return response.data.message_id
+        return response.data.get("message_id")
 
     # ------------------------------------------------------------------
     # Callback / handler registration
@@ -3188,7 +2997,7 @@ class FeishuBot(BaseIMClient):
 
         logger.info("Starting Feishu/Lark bot with WebSocket...")
 
-        self._ensure_client()
+        self._warn_proxy_bypassed()
         event_handler = self._build_event_handler()
         self._event_handler = event_handler
 

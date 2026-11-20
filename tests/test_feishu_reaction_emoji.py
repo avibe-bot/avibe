@@ -193,7 +193,6 @@ class FeishuReactionCleanupTests(unittest.IsolatedAsyncioTestCase):
         bot = FeishuBot.__new__(FeishuBot)
         bot.config = SimpleNamespace(app_id="cli_app", api_base_url="https://open.feishu.cn")
         bot._bot_open_id = "ou_bot"
-        bot._lark_client = object()
         bot._get_tenant_token = AsyncMock(return_value="token")
 
         with patch("modules.im.feishu.aiohttp.ClientSession", return_value=_Session()):
