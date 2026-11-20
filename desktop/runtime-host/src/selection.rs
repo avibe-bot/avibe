@@ -100,7 +100,7 @@ mod tests {
         fs::write(&path, b"selected").unwrap();
         let selected = fs::metadata(&path).unwrap();
         fs::OpenOptions::new()
-            .append(true)
+            .write(true)
             .open(&path)
             .unwrap()
             .set_len(20)

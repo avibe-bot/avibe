@@ -59,15 +59,14 @@ fn read(pasteboard: &NSPasteboard) -> Option<Input> {
                 return None;
             }
             urls.push(value.to_string());
-        } else if let Some(value) = item.stringForType(&text_type) {
-            let value = value.to_string();
+        } else {
+            // Any other item type makes the whole selection unreadable.
+            let value = item.stringForType(&text_type)?.to_string();
             text_bytes += value.len() as u64 + u64::from(!texts.is_empty());
             if text_bytes > TEXT_LIMIT {
                 return None;
             }
             texts.push(value);
-        } else {
-            return None;
         }
     }
     match (files.is_empty(), texts.is_empty(), urls.is_empty()) {
