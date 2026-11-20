@@ -90,6 +90,8 @@ class FakeFeishu:
         self.history: Dict[str, List[Any]] = {}
         self.history_refused: set = set()
         self.history_delay = 0.0
+        # Answers for the next history requests, before the normal one: (HTTP status, body).
+        self.history_replies: List[Any] = []
         self.history_requests: List[Dict[str, str]] = []
         # The configuration sent with each pong; ``None`` repeats the endpoint's.
         self.pong_config: Optional[Dict[str, Any]] = None
@@ -182,6 +184,9 @@ class FakeFeishu:
         if self.history_delay:
             await asyncio.sleep(self.history_delay)
         chat_id = query["container_id"]
+        if self.history_replies:
+            status, body = self.history_replies.pop(0)
+            return web.json_response(body, status=status)
         if chat_id in self.history_refused:
             return web.json_response({"code": 230027, "msg": "Lack of necessary permissions"}, status=400)
         start, end = int(query["start_time"]), int(query["end_time"])

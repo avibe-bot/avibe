@@ -2990,6 +2990,11 @@ class FeishuBot(BaseIMClient):
                 logger.error("Feishu history check failed: %s", exc, exc_info=True)
         own = self._own_connection
         tap = self._frame_tap
+        if tap is not None:
+            try:
+                tap.check()
+            except Exception:
+                logger.exception("Feishu long connection tap failed; the SDK's client is not affected")
         logger.info(
             "Feishu long connection comparison: mode=%s events=%s own=%s tap=%s history=%s",
             self._connection_mode,

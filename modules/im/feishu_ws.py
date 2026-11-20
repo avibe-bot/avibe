@@ -93,6 +93,7 @@ class FrameError(ValueError):
 
 
 _UINT64 = 0xFFFFFFFFFFFFFFFF
+_UNKNOWN_FIELD = -1
 
 
 def _varint(value: int) -> bytes:
@@ -133,6 +134,8 @@ def _skip(data: bytes, at: int, number: int, wire: int) -> int:
         while True:
             key, at = _read_varint(data, at)
             inner_number, inner_wire = key >> 3, key & 7
+            if inner_number == 0:
+                raise FrameError("field number 0")
             if inner_wire == 4:
                 if inner_number != number:
                     raise FrameError("mismatched end of group")
@@ -157,12 +160,18 @@ def _fields(data: bytes) -> List[Tuple[int, int, Any, bytes]]:
         start = at
         key, at = _read_varint(data, at)
         number, wire = key >> 3, key & 7
+        if number == 0:
+            raise FrameError("field number 0")
         end = _skip(data, at, number, wire)
         value: Any = None
         if wire == 0:
             value = _read_varint(data, at)[0]
         elif wire == 2:
             value = data[_read_varint(data, at)[1] : end]
+        if at - start != len(_varint(key)):
+            # A tag written longer than it need be is not the field it spells: protobuf
+            # looks a field up by the tag's bytes, and keeps this one as unknown.
+            number = _UNKNOWN_FIELD
         out.append((number, wire, value, data[start:end]))
         at = end
     return out
@@ -283,15 +292,18 @@ def answer_frame(
 def event_piece(frame: Frame) -> Tuple[str, str, int, int]:
     """What a data frame says of itself: its type, its message id, how many pieces, and which one this is.
 
-    All five headers the SDK's client reads must be there, ``trace_id`` included.
+    All five headers the SDK's client reads must be there, ``trace_id``
+    included; as there, ``seq`` is only read as a number when there are several
+    pieces.
     """
-    kind, message_id = frame.header("type"), frame.header("message_id")
-    if kind is None or message_id is None or frame.header("trace_id") is None:
-        raise FrameError("a data frame without its type, message id or trace id")
+    kind, message_id, total, index = (frame.header(key) for key in ("type", "message_id", "sum", "seq"))
+    if None in (kind, message_id, total, index, frame.header("trace_id")):
+        raise FrameError("a data frame without one of its five headers")
     try:
-        return kind, message_id, int(frame.header("sum") or ""), int(frame.header("seq") or "")
+        pieces = int(total)
+        return kind, message_id, pieces, int(index) if pieces > 1 else 0
     except ValueError:
-        raise FrameError("a data frame without piece numbers") from None
+        raise FrameError("a data frame whose piece numbers are not numbers") from None
 
 
 class EventPieces:
@@ -327,6 +339,10 @@ class EventPieces:
 # --- connection ------------------------------------------------------------------
 
 
+# The WebSocket library logs each handshake's request line at DEBUG, ticket and all. Ours do not.
+_handshake_log = logging.getLogger(__name__ + ".handshake")
+_handshake_log.setLevel(logging.INFO)
+
 _URL_QUERY = re.compile(r"((?:wss?|https?)://[^\s?'\"<>]+)\?[^\s'\"<>]*")
 
 
@@ -344,6 +360,21 @@ async def close_socket(socket: Any) -> None:
         await asyncio.wait_for(socket.wait_closed(), 1.0)
     except (Exception, asyncio.CancelledError):
         logger.debug("Feishu long connection: the connection was not released in time", exc_info=True)
+
+
+def _environment_proxy(url: str) -> Optional[str]:
+    """The proxy the environment names for ``url``, chosen exactly as the SDK's request chose it.
+
+    The request carries the app secret, so which proxy sees it, and when none
+    does (``NO_PROXY``), must not differ from before: the rules are
+    ``requests``'s own.
+    """
+    from requests.utils import get_environ_proxies, select_proxy
+
+    proxy = select_proxy(url, get_environ_proxies(url))
+    if proxy and not proxy.lower().startswith(("http://", "https://")):
+        raise OSError("the environment's proxy for the endpoint is not an HTTP proxy")
+    return proxy or None
 
 
 class ConnectionRefused(Exception):
@@ -439,6 +470,8 @@ class FeishuLongConnection:
         self._cancel_sent = False
         # A socket that was opened and is not yet known to be closed.
         self._held: Any = None
+        # The values of the current endpoint URL's query that are not names of things: the ticket.
+        self._tickets: set = set()
 
     @property
     def connected(self) -> bool:
@@ -544,16 +577,24 @@ class FeishuLongConnection:
         if self._stopping:
             return
         url = await self._fetch_endpoint()
-        query = parse_qs(urlsplit(url).query)
         try:
+            parts = urlsplit(url)
+            query = parse_qs(parts.query)
             self._service = int(query["service_id"][0])
             device = query["device_id"][0]
+            label = f"{parts.scheme}://{parts.netloc}{parts.path} [conn_id={device}]"
         except (KeyError, IndexError, ValueError):
-            raise _Retry("the endpoint URL names no device or service") from None
+            # Not said with the URL: it is the ticket. Feishu may do better next time.
+            raise _Retry("the endpoint URL is unusable or names no device or service") from None
+        # Whatever else the URL carries is the ticket, in one spelling or another: never to be logged,
+        # also not when a refusal quotes it back.
+        self._tickets = {
+            value for key, values in query.items() if key not in ("device_id", "service_id") for value in values if value
+        }
         try:
             # ``proxy=None``: straight to Feishu, as the adapter has always connected.
             # ``close_timeout``: a peer that does not complete a close is cut off after it.
-            socket = await websockets.connect(url, proxy=None, close_timeout=_CLOSE_SECONDS)
+            socket = await websockets.connect(url, proxy=None, close_timeout=_CLOSE_SECONDS, logger=_handshake_log)
         except InvalidStatus as refusal:
             raise self._handshake_refusal(refusal) from None
         except asyncio.CancelledError:
@@ -565,7 +606,7 @@ class FeishuLongConnection:
         if self._stopping:
             await self._disconnect()
             return
-        self._label = f"{urlsplit(url).scheme}://{urlsplit(url).netloc}{urlsplit(url).path} [conn_id={device}]"
+        self._label = label
         self.counts.connects += 1
         # The URL's query is the ticket; only where and which connection is logged.
         logger.info("Feishu long connection: connected to %s", self._label)
@@ -574,12 +615,13 @@ class FeishuLongConnection:
         body = json.dumps({"AppID": self._app_id, "AppSecret": self._app_secret}).encode("utf-8")
         headers = {"Content-Type": "application/json", "locale": "zh"}
         timeout = aiohttp.ClientTimeout(total=_ENDPOINT_TIMEOUT_SECONDS)
+        target = self._base_url + ENDPOINT_PATH
         try:
-            # ``trust_env``: through the environment's proxy if there is one, as the SDK's request went.
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            proxy = _environment_proxy(target)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 # The app secret goes to Feishu and nowhere a redirect points.
                 async with session.post(
-                    self._base_url + ENDPOINT_PATH, data=body, headers=headers, allow_redirects=False
+                    target, data=body, headers=headers, allow_redirects=False, proxy=proxy
                 ) as reply:
                     status = reply.status
                     raw = await reply.read()
@@ -629,8 +671,9 @@ class FeishuLongConnection:
     def _scrub(self, text: Any) -> str:
         """``text`` as it may be logged: without the app secret, and without the query of any URL (the ticket)."""
         text = str(text) or type(text).__name__
-        if self._app_secret:
-            text = text.replace(self._app_secret, "***")
+        for secret in (self._app_secret, *self._tickets):
+            if secret:
+                text = text.replace(secret, "***")
         return _URL_QUERY.sub(r"\1", text)
 
     def _retry(self, reason: Any) -> "_Retry":
@@ -792,8 +835,8 @@ class FrameTap:
     - an event this module would hand to the dispatcher must be handed on by
       the other client, with the same bytes, and no other;
     - the answer must be the bytes this module would send for the same frame
-      and the same outcome of the dispatcher. Only the time it took is taken
-      from the other client's answer.
+      and the same outcome of the dispatcher, and come within 30 seconds. Only
+      the number in its timing header is taken from the other client's answer.
 
     A mismatch is counted and logged with the message id, never with content.
     Nothing here can reach the other client: every entry point contains its
@@ -803,17 +846,19 @@ class FrameTap:
     def __init__(self, reference_frame: Any) -> None:
         self._reference_frame = reference_frame
         self._pieces = EventPieces()
-        # message id -> (when joined, the payload, the frame that completed it)
-        self._joined: Dict[str, Tuple[float, bytes, Frame]] = {}
-        # message id -> (when handled, the frame to answer, what the dispatcher returned, whether it raised)
-        self._handled: Dict[str, Tuple[float, Frame, Any, bool]] = {}
+        # Oldest first. What this module joined and expects to be handed on:
+        # (when, message id, the payload, the frame that completed it).
+        self._joined: List[Tuple[float, str, bytes, Frame]] = []
+        # What was handed on and is to be answered:
+        # (when, message id, the frame to answer, what the dispatcher returned, whether it raised).
+        self._handled: List[Tuple[float, str, Frame, Any, bool]] = []
         self.counts = TapCounts()
 
     def received(self, raw: bytes) -> None:
         """A frame the other client is about to handle."""
         try:
             self.counts.frames_in += 1
-            self._expire()
+            self.check()
             reference = self._reference_frame()
             reference.ParseFromString(raw)
             frame = decode_frame(raw)
@@ -836,7 +881,7 @@ class FrameTap:
             except FrameError:
                 return  # this module would not hand it on; an answer to it will count as a mismatch
             if payload is not None and kind == "event":
-                self._joined[message_id] = (time.monotonic(), payload, frame)
+                self._joined.append((time.monotonic(), message_id, payload, frame))
         except Exception as exc:
             self._mismatch(f"a received frame could not be read here ({type(exc).__name__})", self._id_of(raw))
 
@@ -844,11 +889,12 @@ class FrameTap:
         """A whole event payload the other client handed to the dispatcher, and what came of it."""
         try:
             self.counts.events += 1
-            for message_id, (_, joined, frame) in list(self._joined.items()):
+            self.check()
+            for position, (_, message_id, joined, frame) in enumerate(self._joined):
                 if joined == payload:
-                    del self._joined[message_id]
+                    del self._joined[position]
                     if not frame.incomplete:  # one that cannot be written back gets no answer from either
-                        self._handled[message_id] = (time.monotonic(), frame, result, failed)
+                        self._handled.append((time.monotonic(), message_id, frame, result, failed))
                     return
             self._mismatch("an event was handed on that this codec did not join, or joined differently", None)
         except Exception as exc:
@@ -858,43 +904,42 @@ class FrameTap:
         """A frame the other client sent: a ping or an answer."""
         try:
             self.counts.frames_out += 1
+            self.check()
             frame = decode_frame(raw)
             if frame.method == CONTROL:
                 if encode_frame(ping_frame(frame.service)) != raw:
                     self._mismatch("a ping is built differently", None)
                 return
             message_id = frame.header("message_id") or ""
-            expected = self._handled.pop(message_id, None)
-            if expected is None:
+            position = next((at for at, entry in enumerate(self._handled) if entry[1] == message_id), None)
+            if position is None:
                 self._mismatch("an answer to an event this codec would not have handed on", message_id)
                 return
-            _, received, result, failed = expected
+            _, _, received, result, failed = self._handled.pop(position)
             timing = frame.header("biz_rt")
-            ours = answer_frame(
-                received,
-                code=500 if failed else 200,
-                result=None if failed else result,
-                handled_ms=None if failed or timing is None else int(timing),
-            )
-            if encode_frame(ours) != raw:
+            if failed:
+                ours = answer_frame(received, code=500, result=None, handled_ms=None)
+            else:
+                # How long handling took is the other client's to say; that it says so is not.
+                ours = answer_frame(received, code=200, result=result, handled_ms=int(timing) if timing else 0)
+            if (not failed and timing is None) or encode_frame(ours) != raw:
                 self._mismatch("an answer is built differently", message_id)
         except Exception as exc:
             self._mismatch(f"a sent frame could not be read here ({type(exc).__name__})", self._id_of(raw))
 
-    def _expire(self) -> None:
-        """What was expected of the other client and did not come is a mismatch, not forgotten."""
+    def check(self) -> None:
+        """What was expected of the other client and has not come in time is a mismatch, not forgotten.
+
+        Called on every frame, and by the adapter's periodic report, so that a
+        quiet connection is judged too.
+        """
         now = time.monotonic()
         for table, what in (
             (self._joined, "an event this codec joined was not handed on"),
             (self._handled, "an event that was handled was not answered"),
         ):
-            for message_id in [key for key, entry in table.items() if now - entry[0] > _TAP_PENDING_SECONDS]:
-                del table[message_id]
-                self._mismatch(what, message_id)
-            while len(table) > _TAP_PENDING_LIMIT:
-                message_id = next(iter(table))
-                del table[message_id]
-                self._mismatch(what, message_id)
+            while table and (now - table[0][0] > _TAP_PENDING_SECONDS or len(table) > _TAP_PENDING_LIMIT):
+                self._mismatch(what, table.pop(0)[1])
 
     def _id_of(self, raw: bytes) -> Optional[str]:
         """The message id as the other client's class reads it, for a frame this codec could not read."""

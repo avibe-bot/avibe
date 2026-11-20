@@ -186,6 +186,8 @@ UNUSUAL_FRAMES = {
     "a known field twice": KNOWN + b"\x18\x0a",
     "a known field with the wrong wire type": KNOWN + b"\x1a\x01x",
     "an empty payload": KNOWN + b"\x42\x00",
+    "a known field under a tag written longer than need be": KNOWN + b"\x88\x00\x07",
+    "a header under a tag written longer than need be": KNOWN + b"\xaa\x00" + bytes([len(HEADER)]) + HEADER,
 }
 
 
@@ -208,8 +210,22 @@ def test_unusual_frames_are_read_and_written_as_the_sdk_does(name: str):
 
 @pytest.mark.parametrize(
     "wire",
-    [b"\x08\x07\x10\x08\x18\x09", b"", KNOWN + b"\x2a\x06\x0a\x04type", KNOWN + b"\x2a\x00"],
-    ids=["no method", "nothing at all", "a header without a value", "an empty header"],
+    [
+        b"\x08\x07\x10\x08\x18\x09",
+        b"",
+        KNOWN + b"\x2a\x06\x0a\x04type",
+        KNOWN + b"\x2a\x00",
+        b"\x88\x00\x07\x10\x08\x18\x09\x20\x01",
+        KNOWN + b"\x2a\x0e\x8a\x00\x04type\x12\x05event",
+    ],
+    ids=[
+        "no method",
+        "nothing at all",
+        "a header without a value",
+        "an empty header",
+        "SeqID only under a tag written longer than need be",
+        "a header's key only under such a tag",
+    ],
 )
 def test_a_frame_without_a_required_field_is_read_and_cannot_be_written_back(wire: bytes):
     """As with the SDK's class: it parses, and serialising it again is refused."""
@@ -226,7 +242,15 @@ def test_a_frame_without_a_required_field_is_read_and_cannot_be_written_back(wir
 
 @pytest.mark.parametrize(
     "wire",
-    [b"\x08", b"\x42\x05ab", b"\x0e\x01", b"\x32\x02\xff\xfe", _tag(20, 3) + b"\x08\x01", _tag(20, 4)],
+    [
+        b"\x08",
+        b"\x42\x05ab",
+        b"\x0e\x01",
+        b"\x32\x02\xff\xfe",
+        _tag(20, 3) + b"\x08\x01",
+        _tag(20, 4),
+        KNOWN + b"\x00\x01",
+    ],
     ids=[
         "a varint cut short",
         "a field cut short",
@@ -234,6 +258,7 @@ def test_a_frame_without_a_required_field_is_read_and_cannot_be_written_back(wir
         "text that is not UTF-8",
         "a group that never ends",
         "the end of a group that never began",
+        "field number zero",
     ],
 )
 def test_bytes_that_are_not_a_frame_are_refused_by_both(wire: bytes):
@@ -592,6 +617,60 @@ def test_the_endpoint_is_asked_for_through_the_environment_s_proxy(
     assert len(received) == 1
 
 
+class _RecordingProxy:
+    """An HTTP proxy that lets nothing through and notes what was asked of it."""
+
+    def __init__(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.asked: List[str] = []
+        asked = self.asked
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                asked.append(self.path)
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_CONNECT = do_GET = do_POST
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("mode", BOTH)
+@pytest.mark.parametrize("no_proxy", ["127.0.0.0/8", "127.0.0.1", "*"])
+def test_the_app_secret_is_not_sent_to_a_proxy_the_environment_exempts_this_host_from(
+    fake: FakeFeishu, mode: str, no_proxy: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Which proxy sees the endpoint request, and when none does, is decided as the SDK's request decided it."""
+    proxy = _RecordingProxy()
+    try:
+        for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.setenv(name, proxy.url)
+        for name in ("NO_PROXY", "no_proxy"):
+            monkeypatch.setenv(name, no_proxy)
+
+        with running_adapter(fake, long_connection=mode):
+            pass
+    finally:
+        proxy.close()
+
+    assert proxy.asked == []
+    assert fake.endpoint_requests[0]["body"]["AppSecret"] == "socket-secret"
+
+
 def test_a_stop_just_after_the_socket_opened_still_closes_it(fake: FakeFeishu):
     """The socket exists and nobody but this coroutine knows it yet: the stop's cancellation must not orphan it."""
     fake.withhold_close_reply = True
@@ -664,21 +743,27 @@ def test_what_feishu_or_the_network_says_is_logged_without_the_secret_and_the_ti
         },
         {"code": 0, "data": {"URL": "ws://127.0.0.1:1/ws/v2?ticket=TICKET-MARK"}},  # names no device
     ]
+    # Then a real endpoint, whose ticket the handshake's refusal quotes back, once.
+    fake.handshake_refusals = [(400, {"Handshake-Status": "500", "Handshake-Msg": "invalid ticket: once"})]
     connection = FeishuLongConnection(
         base_url=fake.url, app_id="cli_app", app_secret="socket-secret", handle_event=lambda _payload: None
     )
     connection.config.reconnect_nonce, connection.config.reconnect_interval = 0, 0.02
 
-    with caplog.at_level("DEBUG", logger="modules.im.feishu_ws"):
+    with caplog.at_level("DEBUG"):  # everything, the WebSocket library's own handshake lines included
         connection.start()
         try:
             fake.wait_connected(timeout=10)
         finally:
             assert connection.stop() is True
 
-    assert caplog.text.count("connect failed") == 4
-    for marker in ("socket-secret", "TICKET-MARK", "KEY-MARK"):
-        assert marker not in caplog.text
+    ours = "\n".join(record.getMessage() for record in caplog.records if record.name.startswith("modules.im"))
+    assert ours.count("connect failed") == 5
+    assert "500: invalid ticket: ***" in ours
+    # Every logger but the fake server's own access log, which is Feishu's side of the wire.
+    client_side = "\n".join(record.getMessage() for record in caplog.records if record.name != "aiohttp.access")
+    for marker in ("socket-secret", "TICKET-MARK", "KEY-MARK", "ticket=once", "access_key=key"):
+        assert marker not in client_side
 
 
 # --- the two clients side by side ----------------------------------------------------
@@ -789,14 +874,44 @@ def test_the_tap_holds_the_other_client_to_what_this_codec_would_do(caplog: pyte
     assert "private" not in caplog.text and "other" not in caplog.text
 
 
+def test_the_tap_does_not_take_the_other_client_s_word_for_what_it_should_check():
+    tap = FrameTap(_sdk().Frame)
+
+    # A handled event answered without the timing header.
+    untimed = _event_frame("m1")
+    tap.received(untimed.SerializeToString())
+    tap.handled(b'{"private": "text"}', None, False)
+    tap.sent(_sdk_answer(untimed, b'{"code": 200}', timing=None))
+    assert tap.counts.mismatches == 1
+
+    # The same message id twice before either is handed on: two are owed, and one answer settles one.
+    for _ in range(2):
+        tap.received(_event_frame("m2").SerializeToString())
+    tap.handled(b'{"private": "text"}', None, False)
+    tap.sent(_sdk_answer(_event_frame("m2"), b'{"code": 200}'))
+    assert tap.counts.mismatches == 1
+    with patch.object(feishu_ws, "_TAP_PENDING_SECONDS", 0.0):
+        tap.check()
+    assert tap.counts.mismatches == 2  # the second was never handed on
+
+    # An answer that comes after the time allowed, with nothing received in between.
+    late = _event_frame("m3")
+    tap.received(late.SerializeToString())
+    tap.handled(b'{"private": "text"}', None, False)
+    with patch.object(feishu_ws, "_TAP_PENDING_SECONDS", 0.0):
+        tap.sent(_sdk_answer(late, b'{"code": 200}'))
+    assert tap.counts.mismatches == 4  # not answered in time, and then an answer to nothing owed
+
+
 def test_the_tap_counts_what_the_other_client_owed_and_never_did(caplog: pytest.LogCaptureFixture):
     tap = FrameTap(_sdk().Frame)
+    tap.received(_event_frame("m_dropped").SerializeToString())  # joined here, never handed on there
+    unanswered = _event_frame("m_unanswered", b"{}")
+    tap.received(unanswered.SerializeToString())
+    tap.handled(b"{}", None, False)  # handed on and handled, never answered
+    assert tap.counts.mismatches == 0  # not yet owed
     with patch.object(feishu_ws, "_TAP_PENDING_SECONDS", 0.0):
-        tap.received(_event_frame("m_dropped").SerializeToString())  # joined here, never handed on there
-        unanswered = _event_frame("m_unanswered", b"{}")
-        tap.received(unanswered.SerializeToString())
-        tap.handled(b"{}", None, False)  # handed on and handled, never answered
-        tap.received(_sdk_frame(SeqID=0, LogID=0, service=3, method=0, headers=[("type", "pong")]).SerializeToString())
+        tap.check()  # as the adapter's report does, frames or no frames
 
     assert tap.counts.mismatches == 2
     assert "an event this codec joined was not handed on (message_id: m_dropped)" in caplog.text
@@ -818,19 +933,58 @@ def test_a_failure_inside_the_tap_does_not_reach_the_sdk_s_client(fake: FakeFeis
     assert "Feishu long connection tap failed; the SDK's client is not affected" in caplog.text
 
 
+def _frame_with_headers(message_id: str, body: Dict[str, Any], **headers: Optional[str]) -> bytes:
+    """An event frame whose headers are as given: ``None`` leaves one out."""
+    frame = _sdk().Frame()
+    frame.SeqID, frame.LogID, frame.service, frame.method = 1, 2, 33554678, 1
+    defaults = {"type": "event", "message_id": message_id, "sum": "1", "seq": "0", "trace_id": "t"}
+    for key, value in {**defaults, **headers}.items():
+        if value is not None:
+            header = frame.headers.add()
+            header.key, header.value = key, value
+    frame.payload = json.dumps(body).encode("utf-8")
+    return frame.SerializeToString()
+
+
 @pytest.mark.parametrize("mode", ["sdk", "own", "listen"])
-def test_an_event_frame_without_its_trace_id_is_neither_handled_nor_answered(fake: FakeFeishu, mode: str):
-    """The SDK's client reads five headers before it does anything with a data frame; so does ours."""
+@pytest.mark.parametrize(
+    "headers, handled",
+    [
+        ({"trace_id": None}, False),
+        ({"seq": None}, False),
+        ({"sum": "one"}, False),
+        ({"seq": ""}, True),  # one piece: which piece is not asked
+        ({"seq": "x", "sum": " 1 "}, True),
+        ({"sum": "2", "seq": "x"}, False),
+    ],
+    ids=["no trace id", "no seq", "a sum that is no number", "an empty seq", "a seq that is no number", "the same of two"],
+)
+def test_a_frame_s_headers_are_read_as_the_sdk_s_client_reads_them(
+    fake: FakeFeishu, mode: str, headers: Dict[str, Optional[str]], handled: bool
+):
+    """Five headers must be there; ``seq`` is only read as a number when there are several pieces."""
     with running_adapter(fake, long_connection=mode) as adapter:
-        fake.push_frames(fake.event_frames(message_event(event_id="e_bare"), message_id="m_bare", without_header="trace_id"))
+        fake.push_frames([_frame_with_headers("m_odd", message_event(event_id="e_odd"), **headers)])
         after = fake.wait_acknowledged(fake.push_event(message_event(event_id="e_after")))
         tap = adapter.bot._frame_tap
 
     assert after.json() == {"code": 200}
-    assert fake.acknowledgements("m_bare") == []
-    assert len(adapter.messages) == 1
+    assert [frame.json() for frame in fake.acknowledgements("m_odd")] == ([{"code": 200}] if handled else [])
+    assert len(adapter.messages) == (2 if handled else 1)
     if mode == "listen":
-        assert tap.counts.mismatches == 0  # both would leave it; that is agreement
+        assert tap.counts.mismatches == 0  # the two agree, whichever way
+
+
+@pytest.mark.parametrize("mode", BOTH)
+def test_an_endpoint_url_that_cannot_be_used_is_asked_for_again(fake: FakeFeishu, mode: str):
+    with running_adapter(fake, long_connection=mode) as adapter:
+        fake.endpoint_replies = [{"code": 0, "data": {"URL": "ws://[not-a-host/ws?ticket=TICKET-MARK"}}]
+        fake.drop_connection()
+        fake.wait_connected(2)
+        fake.wait_acknowledged(fake.push_event(message_event()))
+
+    assert len(fake.endpoint_requests) == 3
+    assert len(adapter.messages) == 1
 
 
 def test_an_unknown_long_connection_value_means_the_sdk_s(fake: FakeFeishu, caplog: pytest.LogCaptureFixture):
@@ -915,7 +1069,7 @@ async def test_a_message_in_the_history_without_an_event_is_reported_by_id(
         assert "message om_fresh in chat oc_dm is in the history but no event arrived for it" in caplog.text
 
 
-async def test_a_chat_whose_history_may_not_be_read_is_left_out_and_said_once(
+async def test_a_chat_whose_history_cannot_be_read_is_said_once_and_tried_again(
     fake: FakeFeishu, clock: _Clock, caplog: pytest.LogCaptureFixture
 ):
     with running_adapter(fake, long_connection="own") as adapter:
@@ -928,30 +1082,54 @@ async def test_a_chat_whose_history_may_not_be_read_is_left_out_and_said_once(
             await bot._report_connections()
 
         counts = bot._history_check.counts
-        assert (counts.chats_not_readable, counts.missing) == (1, 0)
-        assert caplog.text.count("chat oc_closed is not readable (code=230027") == 1
-        assert len(fake.history_requests) == 1  # and not asked again
+        assert (counts.readings_failed, counts.missing) == (2, 0)
+        assert caplog.text.count("chat oc_closed could not be read (code=230027") == 1
+        assert len(fake.history_requests) == 2  # asked again: the permission may have come since
 
 
-async def test_history_longer_than_one_reading_is_continued_not_skipped(fake: FakeFeishu, clock: _Clock):
+async def test_a_reading_that_fails_once_skips_nothing(fake: FakeFeishu, clock: _Clock):
+    with running_adapter(fake, long_connection="own") as adapter:
+        bot = adapter.bot
+        bot._dm_chat_ids.add("oc_dm")
+        base = int(clock.now) + 60
+        fake.history = {"oc_dm": [("om_lost", "user", base + 10)]}
+        fake.history_replies = [(200, {"code": 1, "msg": "system busy"})]
+
+        clock.now += 60 + 300
+        await bot._report_connections()
+        assert bot._history_check.counts.people_messages == 0
+        clock.now += 600
+        await bot._report_connections()
+
+        counts = bot._history_check.counts
+        assert (counts.readings_failed, counts.people_messages, counts.missing) == (1, 1, 1)
+
+
+@pytest.mark.parametrize("seconds_apart", [10, 0], ids=["ten seconds apart", "all in one second"])
+async def test_history_longer_than_one_reading_is_continued_not_skipped(
+    fake: FakeFeishu, clock: _Clock, seconds_apart: int
+):
     with running_adapter(fake, long_connection="own") as adapter:
         bot = adapter.bot
         bot._dm_chat_ids.add("oc_dm")
         base = int(clock.now) + 60
         # Five messages, two to a page; a reading stops after two pages.
-        fake.history = {"oc_dm": [(f"om_{number}", "user", base + 10 * number) for number in range(1, 6)]}
+        fake.history = {"oc_dm": [(f"om_{number}", "user", base + 10 + seconds_apart * number) for number in range(1, 6)]}
 
         clock.now += 60 + 300
         with patch("modules.im.feishu_history_check._PAGE_LIMIT", 2):
             await bot._report_connections()
             first = bot._history_check.counts.people_messages
+            clock.now += 600
             await bot._report_connections()
+            clock.now += 600
             await bot._report_connections()
 
         assert first == 4
-        # All five were judged, each once, although the readings overlap at their edges.
+        # All five were judged, each once: the second reading went on where the first stopped.
         assert bot._history_check.counts.people_messages == 5
         assert bot._history_check.counts.missing == 5
+        assert [request.get("page_token", "") for request in fake.history_requests][:3] == ["", "2", "4"]
 
 
 def test_a_stop_does_not_wait_for_a_history_reading(fake: FakeFeishu):
