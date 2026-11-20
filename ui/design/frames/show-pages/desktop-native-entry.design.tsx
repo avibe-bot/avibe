@@ -5,6 +5,10 @@
 // Show, and the export notice before a PDF or image (`titlebar-confirm-*`). The Show itself is
 // unchanged. Drawn at the native Show window's size (1040 × 720 content under a 28 pt title bar),
 // as a native Show window (`nativeShowWindow`). No new copy.
+//
+// Approved, not shipped: the native title bar and its share button are a stand-in
+// (`kit/desktop-native-show-window.tsx`) for AppKit's title bar and `macos_show_titlebar.rs`, which no
+// web component renders. The popover and the Show below it are the shipped components.
 import type { ReactNode } from 'react';
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
@@ -70,7 +74,7 @@ const designFrames = frames(states.flatMap(({ name, title: frameTitle, render, c
     title: `${frameTitle} · ${lang === 'zh' ? '中文' : 'English'}`,
     width: WIDTH,
     height: HEIGHT,
-    status: 'shipped',
+    status: 'approved',
     themes: ['light', 'dark'],
     route: `/apps/show/${sid}?standalone=1`,
     fixtures: appsFixtures(api(lang), {
