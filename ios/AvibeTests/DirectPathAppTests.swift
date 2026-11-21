@@ -7664,7 +7664,9 @@ final class DirectPathAppTests: XCTestCase {
         for identifier in storeIdentifiers {
             var removed = false
             var lastError: Error?
-            for _ in 0..<50 {
+            // iOS 27's WebKit can report a store "in use (by network
+            // process)" for longer after its views are gone: up to 30 s.
+            for _ in 0..<300 {
                 lastError = await AccountWebsiteDataStoreOperations.live
                     .removeIdentifier(identifier)
                 let registered = await withCheckedContinuation { continuation in
