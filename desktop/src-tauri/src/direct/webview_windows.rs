@@ -187,6 +187,14 @@ pub fn route_argument(host: &str, proxy: SocketAddrV4) -> Option<String> {
     ))
 }
 
+/// Whether a challenge's URI is the listener's own address, `ip:port`: as
+/// WebView2 names a proxy, with or without the `http` scheme and a final
+/// slash. Anything with a path, another scheme or another port is a site.
+fn names_listener(uri: &str, listener: &str) -> bool {
+    let authority = uri.strip_prefix("http://").unwrap_or(uri);
+    authority.strip_suffix('/').unwrap_or(authority) == listener
+}
+
 /// Answers the direct listener's proxy challenge on `view` with its
 /// credential, and no other challenge: only one that names the listener at
 /// `proxy` and carries the listener's own realm. Every other challenge (a
@@ -203,7 +211,7 @@ pub fn answer_listener_challenge(
     username: &str,
     password: &str,
 ) -> windows::core::Result<i64> {
-    let listener = format!("http://{proxy}");
+    let listener = proxy.to_string();
     let (username, password) = (HSTRING::from(username), HSTRING::from(password));
     let handler = BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, arguments| {
         let Some(arguments) = arguments else { return Ok(()) };
@@ -215,7 +223,7 @@ pub fn answer_listener_challenge(
             arguments.Challenge(&mut challenge)?;
         }
         let (uri, challenge) = (take_pwstr(uri), take_pwstr(challenge));
-        if origin_of(&uri).as_deref() != Some(listener.as_str()) || challenge != CHALLENGE {
+        if !names_listener(&uri, &listener) || challenge.trim() != CHALLENGE {
             return Ok(());
         }
         // SAFETY: The WebView2 apartment; the strings outlive the calls.

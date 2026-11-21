@@ -754,15 +754,16 @@ mod windows_probe {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde_json::json;
     use webview2_com::{
-        CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
-        CreateCoreWebView2EnvironmentCompletedHandler, ExecuteScriptCompletedHandler,
+        take_pwstr, BasicAuthenticationRequestedEventHandler, CoreWebView2EnvironmentOptions,
+        CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
+        ExecuteScriptCompletedHandler,
         Microsoft::Web::WebView2::Win32::{
             CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment,
-            ICoreWebView2EnvironmentOptions,
+            ICoreWebView2EnvironmentOptions, ICoreWebView2_10,
         },
     };
     use windows::{
-        core::{HSTRING, PCWSTR},
+        core::{Interface, HSTRING, PCWSTR, PWSTR},
         Win32::Foundation::{E_POINTER, HWND},
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -939,7 +940,31 @@ mod windows_probe {
                 return report.failed;
             }
         };
-        let answering = answer_listener_challenge(&view, listener, USERNAME, PASSWORD).is_ok();
+        // What WebView2 says of each challenge, for the report: the URI is a
+        // loopback address of this probe's own.
+        let challenges: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let heard = challenges.clone();
+        let recorder = BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, arguments| {
+            let Some(arguments) = arguments else { return Ok(()) };
+            let (mut uri, mut challenge) = (PWSTR::null(), PWSTR::null());
+            // SAFETY: A single-threaded apartment; WebView2 allocates both
+            // strings, and `take_pwstr` frees them.
+            unsafe {
+                arguments.Uri(&mut uri)?;
+                arguments.Challenge(&mut challenge)?;
+            }
+            heard
+                .borrow_mut()
+                .push(format!("{} | {}", take_pwstr(uri), take_pwstr(challenge)));
+            Ok(())
+        }));
+        // SAFETY: A single-threaded apartment.
+        let recording = unsafe {
+            view.cast::<ICoreWebView2_10>()
+                .and_then(|view| view.add_BasicAuthenticationRequested(&recorder, &mut 0i64))
+        }
+        .is_ok();
+        let answering = recording && answer_listener_challenge(&view, listener, USERNAME, PASSWORD).is_ok();
 
         // 1. The instance's own document: the answer comes back exactly, and
         //    the request carried this WebView's session and the usual checks.
@@ -1099,7 +1124,11 @@ mod windows_probe {
         report.case(
             "the-instances-host-reaches-the-listener-with-its-credential",
             answering && answered && asked.iter().all(|asked| asked.target == right.target && asked.credential != "wrong"),
-            json!({ "answering": answering, "asked": asked.iter().map(|asked| format!("{} {}", asked.target, asked.credential)).collect::<Vec<_>>() }),
+            json!({
+                "answering": answering,
+                "asked": asked.iter().map(|asked| format!("{} {}", asked.target, asked.credential)).collect::<Vec<_>>(),
+                "challenges": challenges.borrow().iter().map(|heard| heard.replace(&proxy.port.to_string(), "PORT")).collect::<Vec<_>>(),
+            }),
         );
 
         // 9. Any other host, a child host, and plain `http` to the
@@ -1117,7 +1146,10 @@ mod windows_probe {
         let unrouted = load(&view, &format!("{origin}/unrouted"), "plain");
         report.case(
             "another-host-a-child-host-and-plain-http-are-not-routed",
-            unrouted && proxy.asked().is_empty(),
+            // A late retry for the routed host itself may still arrive; any
+            // other target, or a request that is not a CONNECT, would be one
+            // of these three.
+            unrouted && proxy.asked().iter().all(|asked| asked.target == right.target),
             json!({ "loaded": unrouted, "asked": proxy.asked().iter().map(|asked| asked.target.clone()).collect::<Vec<_>>() }),
         );
 
