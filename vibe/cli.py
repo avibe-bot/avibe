@@ -16743,6 +16743,8 @@ def _run_remote_pair(args, *, guided: bool) -> int:
     if kept_off:
         print("")
         print("Pairing saved. Remote access was off on this computer and stays off.")
+        print("Turn it on with:")
+        print("  vibe remote start")
         return 0
     _print_remote_pair_success(result, start_result)
     return 0 if command_ok else 1

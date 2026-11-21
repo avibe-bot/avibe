@@ -35,8 +35,8 @@ TEXT = {
     "line_tunnel_stopped": "  Tunnel:  stopped",
     "rejected_note": (
         "avibe.bot has refused this computer's binding at least twice in a row.\n"
-        "Either this Avibe was deleted on avibe.bot, or its binding was replaced from\n"
-        "another computer. This computer cannot tell which."
+        "This Avibe may have been deleted on avibe.bot, or bound again from another\n"
+        "computer. This computer cannot tell why."
     ),
     "rejected_tunnel_note": "The tunnel is still running. That does not mean the binding is accepted.",
     "config_unreadable": (
@@ -198,9 +198,13 @@ TEXT = {
     "old_name": "the old name",
     "name_back_pointer": "Had another name before? See \"Taking the old name back\" in: vibe remote rebind --help",
     "refused_active": (
-        "avibe.bot refused: that Avibe is connected to a computer that was active in\n"
+        "avibe.bot refused: that Avibe is running on another computer that was active in\n"
         "the last 15 minutes. Nothing was bound.\n"
-        "Go to that computer, or delete the Avibe on avibe.bot and bind again."
+        "To move it to this computer: quit Avibe on that computer, wait 15 minutes and\n"
+        "try again.\n"
+        "If that computer is no longer yours to reach: delete that Avibe on avibe.bot and\n"
+        "bind again; its access list is lost, and its name is kept for your account for\n"
+        "30 days."
     ),
     "refused_loopback": (
         "avibe.bot refused: this computer has been bound before, and a computer like\n"
@@ -235,9 +239,8 @@ TEXT = {
         "Run this and choose another:\n" + COMMAND
     ),
     "refused_unexplained": (
-        "avibe.bot refused to bind this computer to that account and gave no reason it\n"
-        "allows this computer to show. Nothing was bound.\n"
-        "It may accept another account. To try again:\n" + COMMAND
+        "avibe.bot refused this request and gave no reason. Nothing was bound.\n"
+        "To try again:\n" + COMMAND
     ),
     "binding_changed": (
         "This computer's binding changed while this was running. Nothing more was done\n"
@@ -252,7 +255,10 @@ TEXT = {
         "Continuing that same attempt now; no new one is started."
     ),
     "continue_finished": "Finished. This computer is bound: {url}",
-    "continue_cleared": "That attempt did not complete and has been cleared. This computer is not bound.",
+    "continue_nothing_left": (
+        "Nothing is left to continue: that work is no longer saved on this computer,\n"
+        "and this command did not complete it. Where this computer stands now:"
+    ),
     "continue_unfinished": (
         "It has not finished: avibe.bot could not be reached or has not answered yet.\n"
         "Nothing new was started. To try again:\n" + COMMAND
@@ -275,7 +281,8 @@ TEXT = {
     ),
     "attempt_refused": (
         "avibe.bot has refused an earlier attempt to bind this computer, for good.\n"
-        "It is not tried again. That does not mean avibe.bot recorded nothing of it."
+        "It is not tried again. It may still have taken effect on avibe.bot. If remote\n"
+        "access stops working, bind again."
     ),
     "attempt_unusable": (
         "The record of that attempt cannot be used on this computer. It is not\n"
@@ -308,6 +315,14 @@ TEXT = {
     "keep_question": "Complete the binding and drop the reset? [y/N] ",
     "keep_declined": "Nothing changed. Both are as they were, with remote access off.",
     "keep_withdrawn": "The reset was dropped.",
+    "keep_stopped": (
+        "Stopped. Nothing was done: both are still there, with remote access off.\n"
+        "To look again:\n" + COMMAND
+    ),
+    "repair_declined": (
+        "Nothing changed. The earlier reset is still unfinished, and remote access on\n"
+        "this computer stays off."
+    ),
     "keep_changed": (
         "This computer changed while you were answering, so nothing was done.\n"
         "To look again:\n" + COMMAND
@@ -429,8 +444,9 @@ def read_state() -> tuple[str, bool, str | None]:
         return "config_unreadable", False, None
     state = view.get("binding_state")
     reason = view.get("reason_code")
-    return ((state if state in STATE_LABELS else "damaged"), bool(view.get("connector_still_running")),
-            reason if reason == "issuer_replay_refused" else None)
+    if state not in STATE_LABELS:
+        state = state if isinstance(state, str) and _CODE.fullmatch(state) else "unknown"
+    return state, bool(view.get("connector_still_running")), reason if reason == "issuer_replay_refused" else None
 
 
 def _print_state(state: str, tunnel: bool, ctx: _Context, reason: str | None = None) -> None:
@@ -557,10 +573,10 @@ def _offer_reset(ctx: _Context, *, intro: str | None = None, bound: bool = True,
         result = binding_reset.reset_interactively(confirm=confirm, **({"repair": True} if repair else {}))
     except KeyboardInterrupt:
         print()
-        if asked and reset_in_progress():
+        if asked and reset_in_progress() and not repair:
             _say("reset_unfinished")
             return "stopped"
-        _say("reset_declined")
+        _say("repair_declined" if repair else "reset_declined")
         return "declined"
     except OperationBusy:
         return failed("operation_in_progress")
@@ -581,7 +597,7 @@ def _offer_reset(ctx: _Context, *, intro: str | None = None, bound: bool = True,
         _say("reset_done")
         return "reset"
     if state == "declined":
-        _say("reset_declined")
+        _say("repair_declined" if repair else "reset_declined")
         return "declined"
     # Sealed and not run to the end, whatever stopped it: the same command continues.
     _say("reset_unfinished")
@@ -746,6 +762,12 @@ def _after_reset_offer(ctx: _Context, outcome: str, *, live_attempt: str = "reco
     return _link(ctx, after_reset=outcome == "reset")
 
 
+def _say_bound_now() -> None:
+    _say("continue_finished", url=_context().url)
+    if not read_state()[1]:  # Completing a binding does not turn remote access back on.
+        _say("tunnel_not_running")
+
+
 def _continue_unfinished(ctx: _Context, started_as: str) -> int:
     """An attempt or a reset was already under way: continue it, never start beside it."""
     if started_as != "reset_repair_required":
@@ -756,16 +778,32 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
         kept = _offer_keep_binding(view)
         if kept is None:
             return 0
-        if kept.get("state") == "reset_repair_required" or kept.get("state") == "interrupted":
+        if kept.get("state") == "interrupted":
+            # Stopped after the answer: the reset may already be dropped and the
+            # binding under way. Say where the computer stands, not what was meant.
+            now = read_state()[0]
+            if now in ("bound", "binding_rejected"):
+                _say("keep_withdrawn")
+                _say_bound_now()
+                return 0
+            if now == "pairing_recovery_required":
+                _say("keep_withdrawn")
+                _say("continue_unfinished")
+            else:
+                _say("keep_stopped")
+            return 1
+        if kept.get("state") == "reset_repair_required":
             _say("keep_changed")
             return 1
         _say("keep_withdrawn")
         view = kept
     state, reason = view.get("state"), view.get("reason_code")
-    if state == "idle":  # Nothing left to continue: where does the computer stand now?
-        state = read_state()[0]
-        if state in ("resetting", "pairing_recovery_required", "reset_repair_required"):
-            state, reason = "operation_in_progress", None  # It reappeared under another writer.
+    if state == "idle":
+        # Nothing was there to continue, which is not the same as it having
+        # completed: say so, show where the computer stands and go on from there.
+        _say("continue_nothing_left")
+        print()
+        return _from_state(_context(), *read_state(), may_continue=False)
     if state == "operation_in_progress":
         _say("continue_busy")
         return 1
@@ -780,7 +818,8 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
         return 1
     if state == "reset_repair_required":
         return _after_reset_offer(ctx, _offer_reset(
-            ctx, intro=TEXT["repair_note"].format(category=_repair_category(reason)), repair=True))
+            ctx, intro=TEXT["repair_note"].format(category=_repair_category(reason)),
+            bound=_context().bound, repair=True))
     if state == "pairing_recovery_required":
         if reason == "issuer_replay_refused":
             print()
@@ -793,22 +832,44 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
             _say("attempt_unusable")
             # Such a record is cleared only by the explicit reset, and a live one
             # still makes ``reset_interactively`` refuse before it asks.
-            return _after_reset_offer(ctx, _offer_reset(ctx, intro=TEXT["stale_attempt_note"]),
-                                      live_attempt="continue_unfinished")
+            return _after_reset_offer(
+                ctx, _offer_reset(ctx, intro=TEXT["stale_attempt_note"], bound=_context().bound),
+                live_attempt="continue_unfinished")
         _say("continue_unfinished")
         return 1
     if state in ("bound", "binding_rejected"):
-        _say("continue_finished", url=_context().url)
-        if not read_state()[1]:  # Completing a binding does not turn remote access back on.
-            _say("tunnel_not_running")
+        _say_bound_now()
         return 0
     if state == "unpaired":
-        if started_as == "pairing_recovery_required":
-            _say("continue_cleared")
-            return _link(ctx, after_reset=False)
         _say("reset_done")
         return _link(ctx, after_reset=True)
     _say("state_unknown", code=state if isinstance(state, str) and _CODE.fullmatch(state) else "unknown")
+    return 1
+
+
+def _from_state(ctx: _Context, state: str, tunnel: bool, reason: str | None, *, may_continue: bool = True) -> int:
+    """Print where this computer stands, then do what that state calls for."""
+    _print_state(state, tunnel, ctx, reason)
+    if state == "config_unreadable":
+        print()
+        _say("config_unreadable")
+        return 1
+    if state in ("resetting", "pairing_recovery_required", "reset_repair_required"):
+        if may_continue:
+            return _continue_unfinished(ctx, state)
+        print()
+        _say("continue_busy")  # It reappeared under another writer; never a second step here.
+        return 1
+    if state in ("bound", "binding_rejected"):
+        _print_two_ways(ctx)
+        return _after_reset_offer(ctx, _offer_reset(ctx))
+    if state == "damaged":
+        return _after_reset_offer(ctx, _offer_reset(ctx, intro=TEXT["damaged_note"], bound=ctx.bound))
+    if state == "unpaired":
+        return _link(ctx, after_reset=False)
+    # A state this command does not know is not a reason to reset or to bind.
+    print()
+    _say("state_unknown", code=state if _CODE.fullmatch(state) else "unknown")
     return 1
 
 
@@ -816,23 +877,4 @@ def run() -> int:
     if not _interactive():
         print(TEXT["not_interactive"], file=sys.stderr)
         return 1
-    state, tunnel, reason = read_state()
-    ctx = _context()
-    _print_state(state, tunnel, ctx, reason)
-    if state == "config_unreadable":
-        print()
-        _say("config_unreadable")
-        return 1
-    if state in ("resetting", "pairing_recovery_required", "reset_repair_required"):
-        return _continue_unfinished(ctx, state)
-    if state in ("bound", "binding_rejected"):
-        _print_two_ways(ctx)
-        return _after_reset_offer(ctx, _offer_reset(ctx))
-    if state == "damaged":
-        return _after_reset_offer(ctx, _offer_reset(ctx, intro=TEXT["damaged_note"]))
-    if state == "unpaired":
-        return _link(ctx, after_reset=False)
-    # A state this command does not know is not a reason to start binding.
-    print()
-    _say("state_unknown", code=state if isinstance(state, str) and _CODE.fullmatch(state) else "unknown")
-    return 1
+    return _from_state(_context(), *read_state())

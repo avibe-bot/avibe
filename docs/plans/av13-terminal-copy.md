@@ -80,12 +80,12 @@ Remote access on this computer
   隧道：运行中 / 已停止
 ```
 
-**B3** · under the lines when the state is `binding_rejected`; the last sentence only when the tunnel process is still running
+**B3** · reviewer: not an either/or · under the lines when the state is `binding_rejected`; the last sentence only when the tunnel process is still running
 
 ```
 avibe.bot has refused this computer's binding at least twice in a row.
-Either this Avibe was deleted on avibe.bot, or its binding was replaced from
-another computer. This computer cannot tell which.
+This Avibe may have been deleted on avibe.bot, or bound again from another
+computer. This computer cannot tell why.
 The tunnel is still running. That does not mean the binding is accepted.
 ```
 
@@ -93,7 +93,7 @@ The tunnel is still running. That does not mean the binding is accepted.
 
 ```
 avibe.bot 已经连续至少两次拒绝这台电脑的绑定。
-可能是这个 Avibe 在 avibe.bot 上被删除了，也可能是它被另一台电脑重新绑定了；这台电脑分辨不出是哪一种。
+这个 Avibe 可能在 avibe.bot 上被删除了，也可能被另一台电脑重新绑定了；这台电脑看不出原因。
 隧道还在运行，但这不代表绑定仍然被接受。
 ```
 
@@ -128,17 +128,18 @@ To look again:
 Avibe 判断不出这台电脑的绑定处于什么状态。什么都没有改变。再看一次：vibe remote rebind（代码：{code}）
 ```
 
-**B6** · lead: said once here, not a dialogue · under the state lines when avibe.bot answered an earlier "Bind remote access again" with a final refusal (`reason_code: issuer_replay_refused`). The state shown is the ordinary one and the ordinary flow follows. How a person gets here: they approved binding again in the browser, the computer lost the reply, and avibe.bot then refused the saved request for good.
+**B6** · lead: said once here, not a dialogue; third sentence decided by Product November 22 · under the state lines when avibe.bot answered an earlier "Bind remote access again" with a final refusal (`reason_code: issuer_replay_refused`). The state shown is the ordinary one and the ordinary flow follows. How a person gets here: they approved binding again in the browser, the computer lost the reply, and avibe.bot then refused the saved request for good.
 
 ```
 avibe.bot has refused an earlier attempt to bind this computer, for good.
-It is not tried again. That does not mean avibe.bot recorded nothing of it.
+It is not tried again. It may still have taken effect on avibe.bot. If remote
+access stops working, bind again.
 ```
 
 中文说明：
 
 ```
-avibe.bot 已经彻底拒绝了之前的一次绑定，不会再重试。这不代表 avibe.bot 那边什么都没有记下。
+avibe.bot 已经彻底拒绝了之前的一次绑定，不会再重试。它仍有可能已经在 avibe.bot 上生效；如果远程访问不能用了，请重新绑定。
 ```
 
 ## C. The two ways, shown when the computer is bound
@@ -293,6 +294,19 @@ Nothing changed. This computer's binding is as it was.
 
 ```
 什么都没有改变，这台电脑的绑定和之前一样。
+```
+
+**D2r** · reviewer T-5 · the same, when the question was the new reset of H8a
+
+```
+Nothing changed. The earlier reset is still unfinished, and remote access on
+this computer stays off.
+```
+
+中文说明：
+
+```
+什么都没有改变。之前那次重置仍然没有完成，这台电脑的远程访问保持关闭。
 ```
 
 **D3** · `{'state':'unpaired'}`
@@ -539,18 +553,22 @@ Had another name before? See "Taking the old name back" in: vibe remote rebind -
 
 ## G. Refusals at the link step
 
-**G1** · `active_pairing_recent`
+**G1** · Product: decided November 22; the same sentence in the docs and later on the page · `active_pairing_recent`. "Quit Avibe", not "turn remote access off": the background check on that computer still counts as activity.
 
 ```
-avibe.bot refused: that Avibe is connected to a computer that was active in
+avibe.bot refused: that Avibe is running on another computer that was active in
 the last 15 minutes. Nothing was bound.
-Go to that computer, or delete the Avibe on avibe.bot and bind again.
+To move it to this computer: quit Avibe on that computer, wait 15 minutes and
+try again.
+If that computer is no longer yours to reach: delete that Avibe on avibe.bot and
+bind again; its access list is lost, and its name is kept for your account for
+30 days.
 ```
 
 中文说明：
 
 ```
-avibe.bot 拒绝了：那个 Avibe 正连着一台电脑，它在最近 15 分钟内还活跃。什么都没有绑定。请到那台电脑上操作，或者在 avibe.bot 上删除那个 Avibe 后重新绑定。
+avibe.bot 拒绝了：那个 Avibe 正在另一台电脑上运行，它在最近 15 分钟内还活跃。什么都没有绑定。想让它改到这台电脑上：在那台电脑上退出 Avibe，等 15 分钟后再试。那台电脑已经不在你手里的话：在 avibe.bot 上删除那个 Avibe 再重新绑定；它的访问名单会丢失，名字会为你的账号保留 30 天。
 ```
 
 **G2** · reviewer: the offer stays, as a separate choice with the default no · `paired_installation_loopback_required`. The last line and then D1u follow only when `reset_interactively` admits a reset; with nothing left on the computer the command stops after the refusal.
@@ -663,16 +681,15 @@ Run this and choose another:
 **G8** · reviewer: no reset offer, no inference · `binding_unavailable` with no reason. It says what is true and stops.
 
 ```
-avibe.bot refused to bind this computer to that account and gave no reason it
-allows this computer to show. Nothing was bound.
-It may accept another account. To try again:
+avibe.bot refused this request and gave no reason. Nothing was bound.
+To try again:
   vibe remote rebind
 ```
 
 中文说明：
 
 ```
-avibe.bot 拒绝把这台电脑绑定到那个账号，也没有给出可以显示的原因。什么都没有绑定。换一个账号也许可以。再试一次：vibe remote rebind
+avibe.bot 拒绝了这次请求，没有给出原因。什么都没有绑定。再试一次：vibe remote rebind
 ```
 
 **G9** · `local_binding_changed`
@@ -733,16 +750,17 @@ The tunnel is not running yet. Start it with:
 隧道还没有运行。启动它：vibe remote start
 ```
 
-**H3** · nothing was left to continue (`idle`) and the computer is not bound; the link (E) follows
+**H3** · reviewer T-1: `idle` is never "Finished" · the step found nothing to continue (`idle`): for example the saved request had expired and the backend settled it. Section B is printed again for the state as it is now, and the ordinary flow for that state follows. How a person gets here: they approved a bind, it was cut short, and they came back after the key had expired.
 
 ```
-That attempt did not complete and has been cleared. This computer is not bound.
+Nothing is left to continue: that work is no longer saved on this computer,
+and this command did not complete it. Where this computer stands now:
 ```
 
 中文说明：
 
 ```
-那一次绑定没有完成，记录已清除。这台电脑现在是未绑定状态。
+已经没有可以继续的了：那件事不再保存在这台电脑上，这条命令也没有把它完成。这台电脑现在的状态：（重新显示 B）
 ```
 
 **H4** · `pairing_recovery_required` / `exact_replay_pending`: still to be retried
@@ -759,7 +777,7 @@ Nothing new was started. To try again:
 还没有完成：暂时连不上 avibe.bot，或者它还没有答复。没有开始任何新的绑定。再试一次：vibe remote rebind
 ```
 
-**H4u** · shortened for a rare state · `pairing_recovery_required` / `pairing_record_unusable`. Not called final, no promise to retry. Then D1 introduced by the last line, if `reset_interactively` admits it. How a person gets here: a bind was interrupted and its saved record is from an older version or unreadable.
+**H4u** · shortened for a rare state · `pairing_recovery_required` / `pairing_record_unusable`. Not called final, no promise to retry. Then D1 introduced by the last line, if `reset_interactively` admits it. How a person gets here: a setup started in the desktop app or with a pairing key was cut short, or the saved record no longer matches this computer's binding. (A record that cannot be read at all is C4.)
 
 ```
 The record of that attempt cannot be used on this computer. It is not
@@ -846,7 +864,7 @@ its record no longer matches this computer.
 四种原因：它在这台电脑上的记录已损坏／重置开始之后这台电脑的绑定变了／重置开始之后这台电脑的绑定文件变了／它的记录和这台电脑对不上。
 ```
 
-**H8b** · shortened · `reset_repair_required` and the backend cannot verify what a new reset would clear (for example the record is a link to somewhere else, or the data folder was moved). Nothing is asked.
+**H8b** · shortened · `reset_repair_required` and the backend cannot verify what a new reset would clear Nothing is asked. How a person gets here: a reset was cut short and the data folder was then moved or restored from a backup, so the record points somewhere else.
 
 ```
 A reset of this computer was started, and it can neither be finished nor
@@ -928,6 +946,20 @@ To look again:
 在你回答期间这台电脑发生了变化，所以什么都没有做。再看一次：vibe remote rebind
 ```
 
+**H9d** · reviewer T-4 · Ctrl+C after `y` at H9 with both records still there. If the reset was already dropped, H9b and then H2 or H4 by the state read again.
+
+```
+Stopped. Nothing was done: both are still there, with remote access off.
+To look again:
+  vibe remote rebind
+```
+
+中文说明：
+
+```
+已停止。什么都没有做：两件事都还在，远程访问保持关闭。再看一次：vibe remote rebind
+```
+
 ## I. Other `vibe remote` commands (English, also read by Agents)
 
 | Where | State / code | Text |
@@ -938,7 +970,7 @@ To look again:
 | | `reset_repair_required` | `  Binding: a reset cannot finish. See: vibe remote rebind` |
 | `vibe remote start` | `binding_rejected` | `Remote access was not started: avibe.bot is refusing this computer's binding.` + `See what can be done: vibe remote rebind` |
 | | `reset_in_progress` | `Remote access was not started: a reset of this computer's binding has not finished.` + `Continue it: vibe remote rebind` |
-| `vibe remote pair`, success on a computer whose remote access was off | pairing ok, no `start` in the result | `Pairing saved. Remote access was off on this computer and stays off.` (exit 0) |
+| `vibe remote pair`, success on a computer whose remote access was off | pairing ok, no `start` in the result | `Pairing saved. Remote access was off on this computer and stays off.` + `Turn it on with:` + `  vibe remote start` (exit 0) |
 | `vibe remote pair` | `operation_in_progress` | `Another change to this computer's binding or domain is running. No pairing key was used.` + `When it has finished, run the command again.` |
 | `vibe remote` on a bound computer, last lines | already bound | `To bind this computer again, or to another account:` + `  vibe remote rebind` + `To change the domain, open Devices in Avibe.` |
 | a settings save that would change the binding (`vibe/api.py`, shown by the settings page as the error) | pairing identity changed in a generic save | `This computer's binding is not changed by saving settings. Bind it again from Devices, or run 'vibe remote rebind' on this computer.` (was: `Pairing identity must be changed through the remote access pairing flow`) |
@@ -956,7 +988,7 @@ out, and leaves remote access off where it was off.
 
 - **English only at the terminal**, written in code; no catalog entries, no
   `--lang` (Product).
-- **C2, D1, E3, F1, G4** decided by Product on November 21. D1 ends with the
+- **C2, D1, E3, F1, G4** decided by Product on November 21; **G1** and **B6**'s third sentence on November 22. D1 ends with the
   "also delete the old Avibe" sentence; C2 keeps the original one. Names say 30
   days and never mention the margin.
 - **G2**: the offer of a new computer after the loopback refusal stays, as a
