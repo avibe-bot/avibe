@@ -19,12 +19,12 @@ struct NativeBridgePolicy {
 struct NativeShellMetadata: Equatable {
     static let contract = 1
     static let platform = "ios"
-    /// Every shell's capabilities. `direct` is added only when the App has a
-    /// direct transport registered (`withDirect(_:)`).
     /// The Turn Live Activity entry (`liveActivity.*`, #4045/#4046) is
     /// withdrawn: the owner never asked for it. Its code stays, unreachable.
     static let liveActivitiesAvailable = false
 
+    /// Every shell's capabilities. `direct` is added only when the App has a
+    /// direct transport registered (`withDirect(_:)`).
     static let capabilities = [
         "accountPresentation": 2,
         "app": 1,

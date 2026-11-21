@@ -1431,6 +1431,13 @@ final class AppModel: ObservableObject {
     private func bootstrap() async {
         let launch = Self.coldStartSignposter.beginInterval("bootstrap")
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
+        // The Turn Live Activity entry is withdrawn (11-21): first of all,
+        // before the session check (whose sign-out would DELETE each ledger
+        // row), end any card an earlier build left and forget the ledger,
+        // with no instance request.
+        if !NativeShellMetadata.liveActivitiesAvailable {
+            await turnActivities.endAllLocally()
+        }
         await websiteDataStore.sweepOrphans()
         // Open first: with the last session avibe.bot confirmed and its
         // selected instance on this device, open that instance now and check
@@ -1585,14 +1592,12 @@ final class AppModel: ObservableObject {
         // Navigation requested before bootstrap is delivered before Health
         // restoration, which may wait on the network and HealthKit.
         deliverPendingInstanceOpen()
-        // The Turn Live Activity entry is withdrawn (11-21): end any card an
-        // earlier build left, with no instance request, and start nothing.
+        // Withdrawn (11-21): `bootstrap` ended any old card; nothing is
+        // reconciled or started.
         if NativeShellMetadata.liveActivitiesAvailable {
             if !AvibeAppDelegate.isRunningTests { turnActivities.observeAuthorization() }
             turnActivities.selectTarget(liveActivityTarget)
             await turnActivities.reconcile(target: liveActivityTarget)
-        } else {
-            await turnActivities.endAllLocally()
         }
         await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
     }
