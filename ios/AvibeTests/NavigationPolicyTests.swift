@@ -5409,9 +5409,10 @@ extension NavigationPolicyTests {
     /// domain stays. No request reaches the address while it is cleaned.
     @MainActor
     func testOnlyTheDepartedAddressesStorageIsRemoved() async throws {
-        // A persistent store, as the account's is. It is not removed after
-        // the test: removing a store WebKit's processes still hold ended the
-        // test host on the hosted simulator.
+        // A persistent store, as the account's is. It is left after the
+        // test: WebKit removes a store only on the main thread and once its
+        // processes have let go of it (`DirectPathAppTests` has that
+        // sequence for the App's stores); hosted runners are discarded.
         let store = WKWebsiteDataStore(forIdentifier: UUID())
         let departed = try XCTUnwrap(WebOrigin.parseConfigured("https://old-name.avibe-test.example"))
         let sibling = try XCTUnwrap(WebOrigin.parseConfigured("https://other-name.avibe-test.example"))
