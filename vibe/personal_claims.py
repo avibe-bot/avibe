@@ -151,6 +151,7 @@ def redirect_origin_allows_auto_accept(origin: str, *, admitted_owner: bool) -> 
 
 
 class _Flow:
+    constrained = False
     def __init__(self, mode, locale, *, origin="", admitted_owner=False, expected=None, confirm=None, show=None, on_bound=None):
         self.on_bound = on_bound
         self.previous_expiry = None
@@ -176,11 +177,17 @@ class _Flow:
                 self.view.update(claim_id=self.ticket.id, expires_at=self.ticket.expiry)
             self.lock.notify_all()
 
-    def callback(self, origin, browser, state):
+    def callback(self, origin, browser, state, *, token=None):
         with self.lock:
             if (not self.ticket or self.mode != "redirect" or self.origin != origin or self.cancelled or self.returned
                     or self.view["state"] not in ("pending", "waiting") or time.time() >= self.ticket.deadline
                     or not self._browser or not self._proof or not _matches(self._browser, browser) or not _matches(self._proof, state)):
+                raise ClaimError("invalid_return")
+            if self.constrained:
+                if self._cleanup_client is None:
+                    raise ClaimError("invalid_return")
+                self._cleanup_client.confirm_return(self.ticket, token)
+            elif token is not None:
                 raise ClaimError("invalid_return")
             self._browser = self._proof = None
             self.returned = True
@@ -449,6 +456,23 @@ class RedirectClaims:
 
     def cancel(self, claim_id):
         return self._get(claim_id).cancel()
+
+    def callback_fields(self, claim_id, fields, cookies, origin, *, direct):
+        # The live machine-side flow, not the URL, selects cookie and proof grammar.
+        flow = self._get(claim_id)
+        expected = {"claim_id", "state"}
+        cookie_name = "avibe_claim_browser"
+        if flow.constrained:
+            if not direct:
+                raise ClaimError("invalid_return")
+            expected.add("callback_token")
+            cookie_name = "avibe_rebind_browser"
+        data = dict(fields)
+        nonces = [value for name, value in cookies if name == cookie_name]
+        if len(fields) != len(expected) or set(data) != expected or data["claim_id"] != claim_id or len(nonces) != 1:
+            raise ClaimError("invalid_return")
+        flow.callback(origin, nonces[0], data["state"], token=data.get("callback_token"))
+        return cookie_name
 
     def callback(self, claim_id, origin, browser, state):
         self._get(claim_id).callback(origin, browser, state)

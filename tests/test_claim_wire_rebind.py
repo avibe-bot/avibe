@@ -75,6 +75,40 @@ def test_v2_observation_needs_return_and_exact_refusal(issuer, fields, outcome):
                                  'predecessor_constrained': True, 'callback_token': 'A' * 43}
 
 
+@pytest.mark.parametrize('constrained', [False, True])
+def test_callback_protocol_is_selected_by_the_recorded_flow(issuer, constrained):
+    from vibe.personal_claims import RedirectClaims, _Flow
+
+    peer, flags = issuer
+    origin = 'http://127.0.0.1'
+    if constrained:
+        peer.code = 'RB2-ABCD234567'
+        flags['predecessor_constrained'] = True
+        client = ConstrainedClaimsClient('https://avibe.bot', 'original', 'synthetic-key')
+    else:
+        client = ClaimsClient('https://avibe.bot')
+    service = RedirectClaims()
+    flow = service._flow = _Flow('redirect', 'en', origin=origin)
+    flow.constrained = constrained
+    flow._cleanup_client = client
+    flow.ticket = start(client, origin=origin)
+    flow.update('pending')
+    flow._browser, flow._proof = 'fixture-nonce', 'fixture-proof'
+    cookie = 'avibe_rebind_browser' if constrained else 'avibe_claim_browser'
+    cookies = [(cookie, 'fixture-nonce')]
+    base = [('claim_id', flow.ticket.id), ('state', 'fixture-proof')]
+    with_token = [*base, ('callback_token', 'A' * 43)]
+    proper, crossed = (with_token, base) if constrained else (base, with_token)
+    for fields, direct in [(crossed, True), ([*proper, proper[-1]], True), *([(proper, False)] if constrained else [])]:
+        with pytest.raises(ClaimError, match='invalid_return'):
+            service.callback_fields(flow.ticket.id, fields, cookies, origin, direct=direct)
+        assert not flow.returned and flow._browser == 'fixture-nonce'
+    assert service.callback_fields(flow.ticket.id, proper, cookies, origin, direct=True) == cookie
+    assert flow.returned and flow._browser is None
+    with pytest.raises(ClaimError, match='invalid_return'):
+        service.callback_fields(flow.ticket.id, proper, cookies, origin, direct=True)
+
+
 @pytest.mark.parametrize(('ack', 'code'), [(None, 'RB2-ABCD234567'), (1, 'RB2-ABCD234567'), (True, 'ABCD234567')])
 def test_v2_never_retries_as_v1(issuer, ack, code):
     peer, flags = issuer

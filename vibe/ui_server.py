@@ -9018,19 +9018,26 @@ def personal_claim_callback():
     from vibe.personal_claim_client import ClaimError
 
     def callback(service):
-        fields = request.args.multi_items()
-        cookies = [v.strip().partition("=")[2] for line in request.headers.getlist("cookie")
-                   for v in line.split(";") if v.strip().partition("=")[0] == "avibe_claim_browser"]
+        fields = list(request.args.multi_items())
+        cookies = [(name, value) for line in request.headers.getlist("cookie")
+                   for item in line.split(";") for name, _, value in [item.strip().partition("=")]]
         try:
-            if len(fields) != 2 or set(request.args) != {"claim_id", "state"} or len(cookies) != 1:
+            ids = [value for name, value in fields if name == "claim_id"]
+            if len(ids) != 1:
                 raise ClaimError("invalid_return")
-            service.callback(request.args["claim_id"], request.host_url.rstrip("/"), cookies[0], request.args["state"])
+            cookie_name = service.callback_fields(
+                ids[0], fields, cookies, request.host_url.rstrip("/"),
+                direct=not _is_direct_ingress_request() and _is_direct_loopback_connection(),
+            )
         except ClaimError as exc:
             # Never echo browser inputs or clear the real initiator's nonce on a bad navigation.
             code = "claim_unavailable" if exc.code == "claim_unavailable" else "invalid_return"
-            return redirect("/settings/remote-access?claim_error=" + code, code=303)
-        response = redirect("/settings/remote-access", code=303)
-        response.delete_cookie("avibe_claim_browser", path="/remote/claim/callback")
+            response = redirect("/settings/remote-access?claim_error=" + code, code=303)
+        else:
+            response = redirect("/settings/remote-access", code=303)
+            response.delete_cookie(cookie_name, path="/remote/claim/callback")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
     return _claim_route(callback)
