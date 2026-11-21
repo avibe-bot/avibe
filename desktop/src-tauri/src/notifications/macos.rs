@@ -232,7 +232,17 @@ fn post(identifier: String, copy: NotificationCopy, extra: Extra, outcome: Outco
                 (outcome.refused)();
             }
         });
-        center().addNotificationRequest_withCompletionHandler(&request, Some(&added));
+        if extra.category.is_none() {
+            center().addNotificationRequest_withCompletionHandler(&request, Some(&added));
+            return;
+        }
+        // Categories are set asynchronously. A post that names one waits for
+        // the center to read the set back, so its buttons are there: on the
+        // real-package probe, a post made right after the set showed no Options.
+        let registered = RcBlock::new(move |_categories: NonNull<NSSet<UNNotificationCategory>>| {
+            center().addNotificationRequest_withCompletionHandler(&request, Some(&added));
+        });
+        center().getNotificationCategoriesWithCompletionHandler(&registered);
     });
 }
 
