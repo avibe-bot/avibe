@@ -357,6 +357,10 @@ final class AppModel: ObservableObject {
     /// stop, or a sign-out clears it, and it is settled only for the
     /// identity it was made under.
     private var deferredOpen: (runtime: MobileRuntimeContext, identity: Int)?
+    /// The session check that an open is waiting for, because avibe.bot's
+    /// last confirmation of the session is past its lifetime
+    /// (`confirmSessionThenOpen`). One at a time.
+    private var sessionConfirmation: Task<Void, Never>?
     /// The identity of a runtime opened while the listener fault covered
     /// it: it shows only the reopen message, and no WebView is made for it.
     /// (A runtime the fault reaches later keeps its WebView under the
@@ -2404,10 +2408,81 @@ final class AppModel: ObservableObject {
             runtimeOpenBackgroundTime += runtimeOpenTiming.now - backgroundedAt
             runtimeOpenBackgroundedAt = nil
         }
+        if hasCompletedBootstrap,
+           route.runtime != nil || runtimeOpenAttempt != nil,
+           !sessionCoordinator.sessionConfirmationIsCurrent
+        {
+            // The App stayed alive past the confirmation's lifetime: as a
+            // cold start would, the page is closed and avibe.bot asked
+            // before anything of the instance is loaded again.
+            confirmSessionThenOpen()
+            return
+        }
         guard let attemptID = runtimeOpenAttempt?.id else {
             return
         }
         scheduleRuntimeOpenTimers(attemptID: attemptID)
+    }
+
+    /// avibe.bot's last confirmation of the session is past its lifetime
+    /// (`MobileSessionCoordinator.sessionConfirmationLifetime`), and an
+    /// instance is to open or is open: whatever is open is closed, avibe.bot
+    /// is asked, and then the account's selected instance opens, if it still
+    /// lists it. With no answer (offline, a failed read) the App stops at
+    /// the instance list; a signed-out or changed account, or an instance
+    /// that left the list, is handled as after any session read.
+    private func confirmSessionThenOpen() {
+        if let previous = runtimeOpenAttempt {
+            lastRuntimeOpenTermination = RuntimeOpenTermination(
+                attemptID: previous.id,
+                instanceName: previous.runtime.instance.name,
+                lastPhase: previous.phase,
+                reason: .replaced
+            )
+        }
+        runtimeOpenAttempt = nil
+        cancelRuntimeOpenTimers()
+        stopRuntime()
+        if case .accountOverBrowser = route {
+            // The account page stays; only the runtime under it goes. An
+            // instance chosen there opens through this check.
+            route = .onboarding(.account)
+            return
+        }
+        route = .loading
+        guard sessionConfirmation == nil else {
+            // The check under way opens what is selected when it answers.
+            return
+        }
+        sessionConfirmation = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            await self.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            let checked = try? await self.sessionCoordinator.refresh()
+            self.sessionConfirmation = nil
+            guard self.route == .loading, self.runtimeOpenAttempt == nil else {
+                // Something else took the screen meanwhile (an account
+                // transition from the answer itself, the instance list).
+                return
+            }
+            guard
+                let checked,
+                self.sessionCoordinator.sessionConfirmationIsCurrent,
+                let runtime = self.sessionCoordinator.restorableRuntime(
+                    from: checked,
+                    opensOffline: self.hasUsableCachedPage(for:)
+                )
+            else {
+                self.clearPendingPushOpened()
+                self.route = .onboarding(.instances)
+                return
+            }
+            self.openRuntime(runtime)
+            self.settleListedAvailability(runtime, checked: checked)
+        }
     }
 
     @discardableResult
@@ -2424,6 +2499,13 @@ final class AppModel: ObservableObject {
                 != WebOrigin(url: runtime.instance.url)?.serialized
         {
             clearPendingPushOpened()
+        }
+        // Nothing of an instance is loaded on a session avibe.bot has not
+        // confirmed within its lifetime: its address may no longer lead to
+        // that instance. The check comes first, then the open.
+        guard sessionCoordinator.sessionConfirmationIsCurrent else {
+            confirmSessionThenOpen()
+            return true
         }
         let turnTarget = liveActivityTarget
         turnActivities.selectTarget(turnTarget)
@@ -2501,6 +2583,12 @@ final class AppModel: ObservableObject {
     /// Fault: the reopen message alone.
     private func settleOpen(of runtime: MobileRuntimeContext, identity: Int) {
         guard let directPathController else {
+            return
+        }
+        // An open held across the end of the confirmation's lifetime (in
+        // the background): no WebView before avibe.bot has answered.
+        guard sessionCoordinator.sessionConfirmationIsCurrent else {
+            confirmSessionThenOpen()
             return
         }
         // About to act on the gate: a failure already recorded is delivered

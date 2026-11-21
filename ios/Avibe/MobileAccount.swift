@@ -620,6 +620,17 @@ final class MobileSessionCoordinator {
     /// no credentials), so a cold start can open the selected instance before
     /// checking again. It follows `snapshot`: gone whenever that is.
     private static let lastGoodSessionKey = "avibe.mobile.lastGoodSession"
+    /// When avibe.bot last answered, signed in, for the account of that
+    /// session (seconds since 1970). It goes with the session.
+    private static let lastGoodSessionConfirmedAtKey = "avibe.mobile.lastGoodSessionConfirmedAt"
+    /// How long after avibe.bot last confirmed the session an instance may
+    /// be opened before asking again. An instance address that leaves an
+    /// account cannot go to another account for 30 days, so within this
+    /// time the address still leads to the instance avibe.bot listed; past
+    /// it nothing of an instance is loaded until avibe.bot has answered.
+    /// It must stay clearly shorter than that wait. It trusts this device's
+    /// clock (a confirmation dated in the future counts as none).
+    static let sessionConfirmationLifetime: TimeInterval = 14 * 24 * 60 * 60
     /// When each instance was last opened as the selected runtime, per
     /// account: `[accountID: [instanceID: seconds since 1970]]`.
     private static let instanceUseKey = "avibe.mobile.instanceUse"
@@ -628,6 +639,7 @@ final class MobileSessionCoordinator {
     private static let pushAccountKey = "avibe.mobile.pushAccount"
 
     private let defaults: UserDefaults
+    private let now: () -> Date
     private let controlPlane: MobileControlPlaneConfiguration
     private let websiteDataStore: AccountWebsiteDataStore
     private let transportFactory: TransportFactory
@@ -780,9 +792,11 @@ final class MobileSessionCoordinator {
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
         onPreparePushLogout: @escaping @MainActor (PushRevokeReason) async -> Void = { _ in },
-        onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in }
+        onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in },
+        now: @escaping () -> Date = Date.init
     ) {
         self.defaults = defaults
+        self.now = now
         self.lastAdvertisedProviders = defaults.stringArray(forKey: Self.advertisedProvidersKey)
             .map { names in MobileSignInProvider.allCases.filter { names.contains($0.rawValue) } }
         self.lastAdvertisedPasskey = defaults.bool(forKey: Self.advertisedPasskeyKey)
@@ -1300,7 +1314,7 @@ final class MobileSessionCoordinator {
                 self.healthAuthorizationAvailable = true
                 self.onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
                 // avibe.bot answered for this account.
-                self.snapshotIsUnconfirmed = false
+                self.sessionWasConfirmed()
                 return self.state(for: fresh)
             case .secondFactorRequired:
                 // Owing the second factor neither ends the session nor names
@@ -1898,7 +1912,7 @@ final class MobileSessionCoordinator {
             onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
             secondFactorEmail = nil
             snapshot = fresh
-            snapshotIsUnconfirmed = false
+            sessionWasConfirmed()
             pushAccountID = fresh.account.id
             scheduleInstancePushReconcile(for: fresh)
             return state(for: fresh)
@@ -1994,6 +2008,9 @@ final class MobileSessionCoordinator {
             phase == .ready,
             snapshot == nil,
             authoritativeTransition == nil,
+            // Past the confirmation's lifetime the stored session opens
+            // nothing: this launch asks avibe.bot first.
+            sessionConfirmationIsCurrent,
             let selection = storedSelection(),
             let data = defaults.data(forKey: Self.lastGoodSessionKey),
             let stored = try? JSONDecoder().decode(MobileSessionSnapshot.self, from: data),
@@ -2042,9 +2059,31 @@ final class MobileSessionCoordinator {
             ))
         else {
             defaults.removeObject(forKey: Self.lastGoodSessionKey)
+            defaults.removeObject(forKey: Self.lastGoodSessionConfirmedAtKey)
             return
         }
         defaults.set(data, forKey: Self.lastGoodSessionKey)
+    }
+
+    /// avibe.bot answered, signed in, for this account: the session is
+    /// confirmed as of now. Nothing else dates it: not reading it back from
+    /// the device, not a check that failed.
+    private func sessionWasConfirmed() {
+        snapshotIsUnconfirmed = false
+        defaults.set(now().timeIntervalSince1970, forKey: Self.lastGoodSessionConfirmedAtKey)
+    }
+
+    /// Whether avibe.bot confirmed the session within
+    /// `sessionConfirmationLifetime`. False with no record of it (a session
+    /// stored by a build from before the record), or one dated in the
+    /// future.
+    var sessionConfirmationIsCurrent: Bool {
+        let confirmedAt = defaults.double(forKey: Self.lastGoodSessionConfirmedAtKey)
+        guard confirmedAt > 0 else {
+            return false
+        }
+        let age = now().timeIntervalSince1970 - confirmedAt
+        return age >= 0 && age < Self.sessionConfirmationLifetime
     }
 
     /// The selected instance to open from `state`: listed available, or
