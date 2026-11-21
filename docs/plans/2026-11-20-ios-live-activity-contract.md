@@ -68,9 +68,9 @@ Examples are the `bridge_v2` vectors. The `bridge` vectors are version 1 and are
 - The page passes the title it shows in the conversation header (`null` for a Bot's session).
 - ChatPage tests fail on any React duplicate-key warning: the stacked copies came from two siblings sharing `key={sessionId}`.
 
-**Words** (zh / en). The row's two strings are new; the other two are reused:
+**Words** (zh / en; reviewed 2026-11-22). The row's two strings are new; the other two are reused:
 - Title: 「在锁屏上显示进度」 / "Show progress on the Lock Screen"
-- Description: 「离开 Avibe 时，如果正在看的会话还在处理，就在锁屏和灵动岛上显示进度。」 / "When you leave Avibe while the conversation you're viewing is still working, show its progress on the Lock Screen and in the Dynamic Island."
+- Description: 「离开 Avibe 时，如果正在看的会话还在处理，就在锁屏和灵动岛上显示进度。」 / "When you leave Avibe while the conversation you are viewing is still working, its progress appears on the Lock Screen and in the Dynamic Island."
 - System off (reused): 「实时活动在系统设置里关着」 / "Live Activities are off in Settings", and 「去设置」 / "Settings"
 
 The version-1 toasts and the in-conversation frames (`app-offer`, `app-tracking`, `app-system-off`, `app-chips`, `app-start-refused`) are removed. The setting row is drawn as a `proposed` frame.
