@@ -118,14 +118,16 @@ class EventLoopWatchdog:
     def arm_warm_freeze(self) -> str:
         """Arm the one-shot freeze of the warmed heap; idempotent, never resets the warm-up.
 
-        It fires at the first natural full collection after two hours of uptime that
-        ends with no Vibey model stream open (the counter below; other backends'
-        gateway streams are not counted). A live Turn does not hold it back: on a busy
-        machine a Turn is almost always live. Cost: objects frozen then are never
-        collected until unfreeze or restart, and an unreachable cycle that passes
-        through a frozen object also keeps whatever it references later. That is not
-        bounded by the heap at freeze time; the field trial's memory guard and the
-        unfreeze command are the safeguard.
+        It fires at the first natural full collection after two hours of uptime,
+        whatever is running or streaming then: on the owner's machine moments with no
+        open model stream were 2 in 1,827 slow collections, so any such condition is
+        no condition. Cost: objects frozen then are never collected by the cycle
+        collector until unfreeze or restart (reference counting still frees acyclic
+        ones, such as request bodies and stream buffers, as each stream ends), and an
+        unreachable cycle that passes through a frozen object also keeps whatever it
+        references later. That is not bounded by the heap at freeze time; the field
+        trial's memory guard and the unfreeze command are the safeguard. The number
+        of Vibey streams open at the freeze is logged, so what they left can be read.
         """
         with self._freeze_lock:
             if self._freeze_state == "off" and not gc.get_freeze_count():
@@ -146,17 +148,16 @@ class EventLoopWatchdog:
         return self._freeze_state
 
     def _apply_warm_freeze(self) -> None:
-        # On the loop thread, which alone opens and closes model streams, so the
-        # stream count cannot change between this check and the freeze.
-        # The count before freezing is cheap (empty unless another component froze
-        # first, which this trial must not take over); after freezing it would walk
-        # the whole permanent generation, so it is not logged.
+        # On the loop thread. The count before freezing is cheap (empty unless another
+        # component froze first, which this trial must not take over); after freezing
+        # it would walk the whole permanent generation, so it is not logged.
         with self._freeze_lock:
-            if self._freeze_state != "armed" or _active_requests or self._stopped.is_set() or gc.get_freeze_count():
+            if self._freeze_state != "armed" or self._stopped.is_set() or gc.get_freeze_count():
                 return
             gc.freeze()
             self._freeze_state = "frozen"
-        logger.warning("Warm GC trial frozen")
+            streams = _active_requests
+        logger.warning("Warm GC trial frozen: open_streams=%d", streams)
 
     def arm_warm_census(self, controller) -> bool:
         # Called on the controller loop; idempotent even after the sample fires.
@@ -183,8 +184,7 @@ class EventLoopWatchdog:
                 self._trigger_candidates = info.get('candidates', -1)
                 self._trigger_uptime = self._monotonic() - self._watchdog_birth
                 self._census_due = True  # scalar signal only; no object enumeration in a collector callback
-            if (self._freeze_state == "armed" and info['generation'] == 2 and started_at >= self._freeze_since
-                    and not _active_requests):
+            if self._freeze_state == "armed" and info['generation'] == 2 and started_at >= self._freeze_since:
                 self._freeze_due = True  # scalar signal only; applied by the loop at its next answer
             duration = self._monotonic() - started_at
             if duration > GC_SLOW_SECONDS:
