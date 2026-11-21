@@ -1,6 +1,7 @@
 // D2 (Desktop): answer an Agent from the macOS notification, confirm a follow-up into the Mac's Reminders,
 // and the honest result when an action does not go through. The notifications are illustrations (macOS
-// draws them); Settings and the chat are the shipped layout and chat page with the proposed pieces.
+// draws them); Settings is the shipped layout with the proposed pieces. The owner decided (2026-11-21) that
+// an answer that did not go through is explained by its follow-up notification alone: no in-app notice.
 import { useTranslation } from 'react-i18next';
 
 import { frames } from '../../frame';
@@ -8,10 +9,8 @@ import {
   DesktopNotificationsSettings,
   MacNotification,
   MacScreenCorner,
-  OutcomeNotice,
   type DesktopDeviceState,
 } from '../../kit/desktop-notification-actions';
-import { agentSays, chatDesktop, chatFixtures, chatRoute, userSays } from '../chat/fixtures';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
 
 const useCopy = () => {
@@ -111,50 +110,9 @@ function OutcomeNotifications() {
   );
 }
 
-function Notices() {
-  const t = useCopy();
-  return (
-    <div className="flex h-full flex-col gap-3 bg-background px-4 py-4">
-      <OutcomeNotice kind="handled-elsewhere" choice={t('✅ 合并', '✅ Merge')} />
-      <OutcomeNotice kind="stale" />
-      <OutcomeNotice kind="not-delivered" />
-      <OutcomeNotice kind="expired" />
-      <OutcomeNotice kind="reminders-denied" />
-    </div>
-  );
-}
-
 const settings = (state: DesktopDeviceState) => settingsPage('notifications', <DesktopNotificationsSettings state={state} />);
 const settingsRoute = '/settings/notifications';
 const settingsData = settingsFixtures({}, { desktopShell: true });
-
-const handled = (lang: 'zh' | 'en') => chatFixtures({
-  session: { title: lang === 'zh' ? 'Dock 修复交付' : 'Dock fix delivery', agent_name: 'claude', agent_backend: 'claude', agent_variant: 'claude', model: 'claude-opus-5-5' },
-  messages: [
-    userSays(lang === 'zh' ? '#4031 评审过了告诉我。' : 'Tell me when #4031 passes review.', 40),
-    agentSays(
-      lang === 'zh' ? 'PR #4031 的 Codex 评审已通过，CI 全绿。要我现在合并吗？' : 'Codex review on PR #4031 passed and CI is green. Merge it now?',
-      12,
-      {
-        content: {
-          quick_replies: lang === 'zh' ? ['✅ 合并', '👀 我先看看', '⏸ 先不合'] : ['✅ Merge', '👀 Let me look first', '⏸ Not yet'],
-          quick_reply_chosen: lang === 'zh' ? '✅ 合并' : '✅ Merge',
-        },
-      },
-    ),
-    userSays(lang === 'zh' ? '✅ 合并' : '✅ Merge', 9),
-    agentSays(lang === 'zh' ? '已合并 #4031，master 上的构建在跑。' : 'Merged #4031; the master build is running.', 8),
-  ],
-});
-
-const inChat = (lang: 'zh' | 'en') => () => (
-  <div className="relative h-full">
-    {chatDesktop()}
-    <div className="pointer-events-none absolute inset-x-0 top-[64px] px-6">
-      <OutcomeNotice kind="handled-elsewhere" choice={lang === 'zh' ? '✅ 合并' : '✅ Merge'} />
-    </div>
-  </div>
-);
 
 const designFrames = frames([
   { name: 'question-options', title: '通知 · 等你回复 · 选项展开（示意）', width: 960, height: 420, status: 'approved', render: () => <QuestionNotification open /> },
@@ -165,9 +123,6 @@ const designFrames = frames([
   { name: 'settings-needs-permission', title: '设置 · 通知 · 本设备 · 系统未允许通知', width: 1440, height: 900, status: 'approved', route: settingsRoute, fixtures: settingsData, render: settings('needs-permission') },
   { name: 'settings-reminders-denied', title: '设置 · 通知 · 本设备 · 提醒事项被拒绝', width: 1440, height: 900, status: 'approved', route: settingsRoute, fixtures: settingsData, render: settings('reminders-denied') },
   { name: 'settings-unsupported', title: '设置 · 通知 · 本设备 · 系统版本不支持提醒事项', width: 1440, height: 900, status: 'approved', route: settingsRoute, fixtures: settingsData, render: settings('unsupported') },
-  { name: 'notices', title: '会话 · 从通知打开时的结果提示', width: 1100, height: 260, status: 'approved', render: () => <Notices /> },
-  { name: 'in-chat-handled', title: '会话 · 已在另一端处理（中文内容）', width: 1192, height: 640, status: 'approved', route: chatRoute(), fixtures: handled('zh'), render: inChat('zh') },
-  { name: 'in-chat-handled-en', title: '会话 · 已在另一端处理（英文内容）', width: 1192, height: 640, status: 'approved', route: chatRoute(), fixtures: handled('en'), render: inChat('en') },
 ]);
 
 export default designFrames;

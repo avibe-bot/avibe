@@ -3,7 +3,7 @@
 // with product tokens to fix the words, the buttons, and their order.
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CheckCheck, ChevronDown, Clock, CloudOff, MessageSquareReply, ShieldOff } from 'lucide-react';
+import { ChevronDown } from 'lucide-react';
 
 import { SettingsPageShell } from '@/components/settings/SettingsPageShell';
 import { SettingsPanel, SettingsRow, ToggleSwitch } from '@/components/settings/SettingsPrimitives';
@@ -99,48 +99,6 @@ export function MacScreenCorner({ children, note }: { children: ReactNode; note?
         </div>
         <div className="absolute right-4 top-4 flex flex-col items-end gap-3">{children}</div>
       </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* In-app outcome notice                                               */
-/* ------------------------------------------------------------------ */
-
-export type OutcomeKind = 'handled-elsewhere' | 'stale' | 'expired' | 'not-delivered' | 'reminders-denied';
-
-const outcomeIcon: Record<OutcomeKind, typeof CheckCheck> = {
-  'handled-elsewhere': CheckCheck,
-  stale: MessageSquareReply,
-  expired: Clock,
-  'not-delivered': CloudOff,
-  'reminders-denied': ShieldOff,
-};
-
-/** Shown above the transcript when the chat opens from a notification whose action did not go through. */
-export function OutcomeNotice({ kind, choice }: { kind: OutcomeKind; choice?: string }) {
-  const t = pick(useLang());
-  const Icon = outcomeIcon[kind];
-  const text: Record<OutcomeKind, string> = {
-    'handled-elsewhere': t(`已经在其他设备上回复了「${choice ?? ''}」，通知里的选择没有再发送。`, `Already answered "${choice ?? ''}" on another device. Your choice in the notification wasn't sent.`),
-    stale: t('这条消息之后会话已经有了新进展，通知里的回复没有发送。看完最新内容再回复。', "The conversation moved on after this message, so the reply from the notification wasn't sent. Read the latest, then reply."),
-    expired: t('这条提醒事项请求已经过期，没有添加。需要的话请 Agent 再提一次。', "This reminder request expired and nothing was added. Ask the Agent again if you still need it."),
-    'not-delivered': t('当时连不上这个实例，通知里的回复没有送达。现在可以在这里重新回复。', "This instance couldn't be reached, so the reply from the notification wasn't delivered. You can answer here now."),
-    'reminders-denied': t('Avibe 没有「提醒事项」的访问权限，这条提醒没有添加。', "Avibe can't access Reminders, so this reminder wasn't added."),
-  };
-  const action: Partial<Record<OutcomeKind, string>> = {
-    'reminders-denied': t('打开系统设置', 'Open System Settings'),
-  };
-  return (
-    <div
-      role="status"
-      className="mx-auto flex w-full max-w-[1080px] items-center gap-2 rounded-md border border-edge bg-surface-2 px-3 py-2 text-[12px] text-muted shadow-elevation-0"
-    >
-      <Icon aria-hidden className="size-3.5 shrink-0" />
-      <span className="min-w-0 flex-1">{text[kind]}</span>
-      {action[kind] && (
-        <Button variant="ghost" size="sm" className="h-6 px-2 text-[12px]">{action[kind]}</Button>
-      )}
     </div>
   );
 }
