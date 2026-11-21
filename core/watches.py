@@ -2511,6 +2511,10 @@ class ManagedWatchService:
             status = None
             try:
                 host = await asyncio.to_thread(_job_host, target)
+                if getattr(self.controller, "shutdown_requested", False):
+                    # Before the look, which may enforce the job's deadline (a kill).
+                    self._begin_stop()
+                    return
                 status = await host.wait(target["job_id"], deadline_s=0)
             except KeyError:
                 status = None  # the job record is gone: report what is known

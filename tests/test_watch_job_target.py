@@ -1049,3 +1049,42 @@ def test_a_shutdown_during_a_poll_leaves_the_job_watch_for_the_next_start(tmp_pa
 
     assert store.get_watch(watch_id).enabled
     assert _follow_ups(watch_id) == []
+
+
+def test_a_shutdown_while_the_job_host_is_built_enforces_no_deadline(tmp_path: Path, monkeypatch) -> None:
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    original_host = watches_module._job_host
+    waited: list[str] = []
+
+    def job_host(target):
+        entered.set()
+        assert release.wait(5)
+        host = original_host(target)
+        original_wait = host.wait
+
+        async def wait(job_id, **kwargs):
+            waited.append(job_id)
+            return await original_wait(job_id, **kwargs)
+
+        host.wait = wait
+        return host
+
+    async def run() -> None:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 30")
+        await host.hand_over(job_id)
+        monkeypatch.setattr(watches_module, "_job_host", job_host)
+        service = _service(store)
+        await _start_service(service)
+        assert await asyncio.to_thread(entered.wait, 5)
+        service.controller.shutdown_requested = True
+        release.set()
+        await asyncio.sleep(0.3)
+        await service.stop()
+        await host.kill(job_id)
+
+    asyncio.run(run())
+    assert waited == []
