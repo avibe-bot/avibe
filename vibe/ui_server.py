@@ -9051,6 +9051,16 @@ def _device_viewer():
     return None
 
 
+def _device_issuer_scope(viewer):
+    from vibe.account_session_revoke import pairing_epoch
+    from vibe.remote_access import device_binding
+    binding, _, _, caller = viewer
+    config = _load_remote_access_config()
+    if config and (binding == device_binding(config) or (not binding and not caller)):
+        return pairing_epoch(config)
+    return None
+
+
 def _device_owner_scope(viewer):
     config = _load_remote_access_config()
     if not config or not viewer[0]:
@@ -9105,7 +9115,7 @@ async def device_list():
             conn.exec_driver_sql('BEGIN')
             from storage.device_account_signout import recent
             now = int(time.time())
-            return (*device_catalog.snapshot(conn, viewer, *scope, now, paths=paths), recent(conn, binding, subject, owner, now))
+            return (*device_catalog.snapshot(conn, viewer, *scope, now, paths=paths), recent(conn, _device_issuer_scope(viewer) or binding, subject, owner, now))
     try:
         rows, _, unlinked, history = await asyncio.to_thread(load)
     except DeviceError as exc:
@@ -9237,15 +9247,14 @@ def device_sign_out(device_id=None):
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
-    from vibe.account_session_revoke import pairing_epoch
-    host_config = _load_remote_access_config() if binding and not caller else None
-    host_epoch = pairing_epoch(host_config) if host_config and remote_access.device_binding(host_config) == binding else None
+    issuer_scope = _device_issuer_scope(viewer)
+    host_epoch = issuer_scope if binding and not caller else None
     try:
         context = _request_authorization_context()
         delegate = bool(binding and owner and (not caller or context.instance_access_source == 'owner'))
         ids, count, results, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
-                                      delegate=delegate, host_epoch=host_epoch)
+                                      delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
     if device_id is not None and not (ids or results):

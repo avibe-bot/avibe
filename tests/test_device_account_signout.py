@@ -42,9 +42,15 @@ def paired(monkeypatch):
     return cfg, clock, enroll, stop, read
 
 
-def fake_issuer(monkeypatch, code):
+def fake_issuer(monkeypatch, code, *, addresses=('8.8.8.8',), offline=()):
+    import ipaddress
     calls = []
     class Connection:
+        def __init__(self, address):
+            self.address = address
+        def connect(self):
+            if self.address in offline:
+                raise OSError('fixture_unreachable')
         def request(self, method, path, body, headers):
             calls.append((method, path, json.loads(body), headers))
         def getresponse(self):
@@ -53,9 +59,9 @@ def fake_issuer(monkeypatch, code):
             return SimpleNamespace(status=code)
         def close(self):
             pass
-    monkeypatch.setattr(remote_access, '_resolve_pairing_backend_addresses', lambda *_: (__import__('ipaddress').ip_address('8.8.8.8'),))
+    monkeypatch.setattr(remote_access, '_resolve_pairing_backend_addresses', lambda *_: tuple(ipaddress.ip_address(a) for a in addresses))
     monkeypatch.setattr(remote_access, '_validated_backend_proxy_url', lambda *_: None)
-    monkeypatch.setattr(remote_access, '_validated_backend_connection', lambda *_: Connection())
+    monkeypatch.setattr(remote_access, '_validated_backend_connection', lambda host, *_: Connection(host))
     return calls
 
 
@@ -171,6 +177,41 @@ def test_expired_lease_replays_without_budget_reset_or_late_overwrite(paired, mo
     assert worker.run_once(lambda: cfg) and len(calls) == 1
     worker._settle(digest, first, 401, clock[0])
     assert read()[0]['account_results'][0]['status'] == 'accepted'
+
+
+def test_unusable_dns_preserves_work_and_retries_all_validated_addresses(paired, monkeypatch):
+    cfg, clock, enroll, stop, read = paired
+    target = enroll('A', A)
+    enroll('B', B)
+    stop(target)
+    blocked = fake_issuer(monkeypatch, 204, addresses=('10.0.0.1',))
+    for _ in range(33):
+        assert worker.run_once(lambda: cfg)
+        clock[0] += 3600
+    assert not blocked and read()[0]['account_results'][0]['status'] == 'pending'
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.execute(select(jobs.c.answers, jobs.c.reference)).one() == (0, A)
+    calls = fake_issuer(monkeypatch, 204, addresses=('8.8.8.8', '1.1.1.1'), offline=('8.8.8.8',))
+    assert worker.run_once(lambda: cfg) and len(calls) == 1
+    assert read()[0]['account_results'][0]['status'] == 'accepted'
+
+
+def test_explicit_answer_budget_only_counts_replies(paired, monkeypatch):
+    cfg, clock, enroll, stop, read = paired
+    target = enroll('A', A)
+    enroll('B', B)
+    stop(target)
+    no_reply = fake_issuer(monkeypatch, None, addresses=('8.8.8.8', '1.1.1.1'))
+    worker.run_once(lambda: cfg)
+    assert len(no_reply) == 1  # Bytes may have reached the issuer. No immediate replay on the next address.
+    calls = fake_issuer(monkeypatch, 503)
+    for _ in range(31):
+        clock[0] += 3600
+        worker.run_once(lambda: cfg)
+    assert read()[0]['account_results'][0]['status'] == 'pending'
+    clock[0] += 3600
+    worker.run_once(lambda: cfg)
+    assert len(calls) == 32 and read()[0]['account_results'][0]['status'] == 'unconfirmed'
 
 
 def test_age_limit_is_unconfirmed_and_erases_ref(paired, monkeypatch):

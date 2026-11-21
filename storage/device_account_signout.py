@@ -21,13 +21,13 @@ class AccountSessionSignedOut(PermissionError):
     pass
 
 
-def enroll(conn, *, sid, subject, epoch, reference, expires_at):
+def enroll(conn, *, sid, subject, binding, epoch, reference, expires_at):
     if not reference or not epoch:
         return
     digest = hashlib.sha256(json.dumps([epoch, subject, reference]).encode()).hexdigest()
     if conn.scalar(select(jobs.c.digest).where(jobs.c.digest == digest)):
         raise AccountSessionSignedOut('account_session_signed_out')
-    conn.execute(refs.insert().values(sid=sid, epoch=epoch, digest=digest, reference=reference, expires_at=expires_at))
+    conn.execute(refs.insert().values(sid=sid, cookie_binding=binding, epoch=epoch, digest=digest, reference=reference, expires_at=expires_at))
 
 
 def _job(conn, row, now):
@@ -40,7 +40,7 @@ def _job(conn, row, now):
     if old and old.status != 'unconfirmed':
         return old.status, old.reason, row.digest if old.status == 'pending' else None
     values = dict(epoch=row.epoch, reference=row.reference, status='pending', reason='queued',
-                  created_at=now, next_at=now, attempts=0)
+                  created_at=now, next_at=now, attempts=0, answers=0)
     if old:  # A different explicit action targets a still-enrolled sibling; prior receipts remain terminal.
         conn.execute(jobs.update().where(jobs.c.digest == row.digest).values(**values))
     else:
@@ -48,7 +48,7 @@ def _job(conn, row, now):
     return 'pending', 'queued', row.digest
 
 
-def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, selection, push_devices, now):
+def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, selection, push_devices, now, receipt_scope=None):
     """Called under the same BEGIN IMMEDIATE as the local tombstone writes."""
     joined = sessions.outerjoin(refs, refs.c.sid == sessions.c.session_id)
     rows = conn.execute(select(sessions.c.device_id, sessions.c.subject, sessions.c.kind, sessions.c.display_name,
@@ -100,7 +100,7 @@ def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, sele
         kind, name = labels[key]
         op = uuid.uuid4().hex
         expiry = None if any(job for _, _, job in counts) else now + RECEIPT_TTL
-        parents.append(dict(id=op, binding=binding, subject=subject, device_id=device, kind=kind, display_name=name,
+        parents.append(dict(id=op, binding=receipt_scope or binding, subject=subject, device_id=device, kind=kind, display_name=name,
                             created_at=now, expires_at=expiry))
         aggregate = Counter()
         for (status, reason, job), count in counts.items():

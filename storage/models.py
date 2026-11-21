@@ -1520,6 +1520,7 @@ remote_device_sessions = Table(
 remote_account_refs = Table(
     "remote_account_refs", metadata,
     Column("sid", String, primary_key=True),
+    Column("cookie_binding", String, nullable=False, index=True),
     Column("epoch", String, nullable=False, index=True),
     Column("expires_at", Integer, nullable=False, index=True),
     Column("digest", String, nullable=False, index=True),
@@ -1535,7 +1536,8 @@ remote_account_revocations = Table(
     Column("status", String, nullable=False),
     Column("reason", String),
     Column("reference", String),  # Null as soon as dispatch terminates.
-    Column("attempts", Integer, nullable=False),
+    Column("attempts", Integer, nullable=False),  # Lease serial/backoff, not proof the issuer answered.
+    Column("answers", Integer, nullable=False),
     Column("created_at", Integer, nullable=False),
     Column("next_at", Integer),  # Also the lease expiration, null for completed fences.
     Column("forget_at", Integer),

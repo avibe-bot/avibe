@@ -4887,8 +4887,7 @@ def _json_request_to_validated_backend(
     if connection_target.requires_proxy and not proxy_url:
         raise RuntimeError("pairing_backend_proxy_required")
     last_network_error: Exception | None = None
-    for connect_host in connection_target.connect_hosts:
-        connection = _validated_backend_connection(connect_host, connection_target, timeout, proxy_url)
+    for connection in _validated_backend_connections(connection_target, timeout, proxy_url):
         try:
             connection.request("POST", request_path, body=body, headers=request_headers)
             response = connection.getresponse()
@@ -4924,6 +4923,12 @@ def _validated_backend_proxy_url(url: str) -> str | None:
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise RuntimeError("unsupported_https_proxy_scheme")
     return proxy_url
+
+
+def _validated_backend_connections(target: _ValidatedPairingBackend, timeout: float, proxy_url: str | None):
+    """Only validated addresses, using the approved proxy and certificate policy. Caller closes each candidate."""
+    for host in target.connect_hosts:
+        yield _validated_backend_connection(host, target, timeout, proxy_url)
 
 
 def _validated_backend_connection(

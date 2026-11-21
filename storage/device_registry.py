@@ -154,7 +154,7 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
             import time
             if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
                 raise AccountSessionSignedOut('account_session_signed_out')
-            enroll(conn, sid=sid, subject=subject, epoch=epoch, reference=reference, expires_at=expires_at)
+            enroll(conn, sid=sid, subject=subject, binding=binding, epoch=epoch, reference=reference, expires_at=expires_at)
         if fresh and written.rowcount:
             device_activity.record(conn,kind='signedIn',binding=binding,subject=subject,device=key,now=now)
 
@@ -350,7 +350,7 @@ def revoke_sid(conn, sid, expiry, now):
     return pending
 
 
-def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False):
+def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False, receipt_scope=None):
     """One atomic selection + revocation; None device means the caller's bulk scope."""
     stmt = select(sessions.c.session_id, sessions.c.expires_at).where(
         sessions.c.binding == binding,
@@ -396,7 +396,7 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_
         from storage.device_account_signout import stage
         results = stage(conn, binding=binding, actor=subject, delegate=delegate, caller=caller,
                         keeper_device=keeper.device_id if keeper else None, target=device_id,
-                        selection=stmt.whereclause, push_devices=stopped, now=now)
+                        selection=stmt.whereclause, push_devices=stopped, now=now, receipt_scope=receipt_scope)
         keys = {(r.device_id, r.subject) for r in rows}
         from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
         # Match list_devices' live-session predicate, excluding push-only and revoked rows.

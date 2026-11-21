@@ -70,6 +70,10 @@ def _claim(config, now):
         _expire_page(conn, jobs, jobs.c.digest, jobs.c.forget_at, now)
         if config is not None:
             _retire_old_pairings(conn, epoch or '', now)
+            from vibe.remote_access import device_binding
+            cookie = device_binding(config)
+            for retired in (refs.c.cookie_binding < cookie, refs.c.cookie_binding > cookie):
+                conn.execute(refs.delete().where(refs.c.sid.in_(select(refs.c.sid).where(retired).limit(32))))
         if not epoch or not config.remote_access.vibe_cloud.runtime_credentials():
             return None  # A paused/missing config is not an attempt or rejection.
         limit = conn.execute(select(pairings.c.blocked_until, pairings.c.refused).where(pairings.c.epoch == epoch)).first()
@@ -93,7 +97,7 @@ def _pairing_gate(conn, epoch, *, until=0, refused=0):
 def _settle(digest, attempt, code, now):
     with get_cached_sqlite_engine().begin() as conn:
         conn.exec_driver_sql('BEGIN IMMEDIATE')
-        row = conn.execute(select(jobs.c.created_at, jobs.c.epoch).where(
+        row = conn.execute(select(jobs.c.created_at, jobs.c.epoch, jobs.c.answers).where(
             jobs.c.digest == digest, jobs.c.attempts == attempt, jobs.c.next_at.is_not(None))).first()
         if row is None:  # A stale worker cannot overwrite the next lease's answer.
             return
@@ -114,10 +118,11 @@ def _settle(digest, attempt, code, now):
             if code == 429:
                 _pairing_gate(conn, row.epoch, until=now + 600)
                 delay = max(delay, 600)
-            if attempt >= MAX_TRIES or now >= row.created_at + MAX_AGE:
+            answers = row.answers + int(code is not None)
+            if answers >= MAX_TRIES or now >= row.created_at + MAX_AGE:
                 _finish(conn, target, 'unconfirmed', 'retry_exhausted', now)
             else:
-                conn.execute(jobs.update().where(target).values(next_at=now + delay, reason='retrying'))
+                conn.execute(jobs.update().where(target).values(next_at=now + delay, answers=answers, reason='retrying'))
                 conn.execute(items.update().where(items.c.job == digest).values(reason='retrying'))
 
 

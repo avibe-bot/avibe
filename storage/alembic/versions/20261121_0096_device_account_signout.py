@@ -15,6 +15,7 @@ def upgrade() -> None:
     op.create_table(
         "remote_account_refs",
         sa.Column("sid", sa.String(), primary_key=True),
+        sa.Column("cookie_binding", sa.String(), nullable=False),
         sa.Column("epoch", sa.String(), nullable=False),
         sa.Column("expires_at", sa.Integer(), nullable=False),
         sa.Column("digest", sa.String(), nullable=False),
@@ -23,6 +24,7 @@ def upgrade() -> None:
         sa.Column("reason", sa.String()),
         if_not_exists=True,
     )
+    op.create_index('ix_remote_account_refs_cookie_binding', 'remote_account_refs', ['cookie_binding'], if_not_exists=True)
     op.create_index("ix_remote_account_refs_digest", "remote_account_refs", ['digest'], if_not_exists=True)
     op.create_index("ix_remote_account_refs_epoch", "remote_account_refs", ['epoch'], if_not_exists=True)
     op.create_index("ix_remote_account_refs_expires_at", "remote_account_refs", ['expires_at'], if_not_exists=True)
@@ -34,6 +36,7 @@ def upgrade() -> None:
         sa.Column("reason", sa.String()),
         sa.Column("reference", sa.String()),
         sa.Column("attempts", sa.Integer(), nullable=False),
+        sa.Column("answers", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.Integer(), nullable=False),
         sa.Column("next_at", sa.Integer()),
         sa.Column("forget_at", sa.Integer()),

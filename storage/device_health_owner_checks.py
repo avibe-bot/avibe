@@ -30,6 +30,7 @@ def run_once(load_config):
     from storage.mobile_store import MobileStore
     from vibe import permissions
     from vibe.account_session_revoke import pairing_epoch
+    from vibe.remote_access import device_binding
 
     now = int(time.time())
     engine = get_cached_sqlite_engine()
@@ -48,7 +49,7 @@ def run_once(load_config):
         return False
     epoch = pairing_epoch(cfg)
     owner = None
-    if epoch == row['epoch']:
+    if epoch == row['epoch'] and device_binding(cfg) == row['binding']:
         # Do not hold a config, registry or private-store lock across external I/O.
         try:
             response = permissions.get_current_permissions(cfg)
@@ -69,7 +70,7 @@ def run_once(load_config):
                 return True  # Superseded by another explicit action.
             now = int(time.time())
             if (not owner or owner != row['owner_email'] or row['expires_at'] <= now
-                    or pairing_epoch(current) != row['epoch']):
+                    or pairing_epoch(current) != row['epoch'] or device_binding(current) != row['binding']):
                 return True
             link = conn.scalar(select(links.c.mobile_id).where(links.c.mobile_id == row['mobile_id'],
                 links.c.binding == row['binding'], links.c.subject == row['subject'], links.c.device_id == row['device_id'],

@@ -23,13 +23,13 @@ def verified_reference(claims):
 
 
 def pairing_epoch(config):
-    """Never retarget work to a replacement secret, cookie binding, backend or instance."""
+    """Identity of the authenticated issuer pairing, even while remote access is Off."""
     if config is None:
         return None
     cloud = config.remote_access.vibe_cloud
-    if not cloud.instance_secret or not cloud.session_secret or not cloud.instance_id:
+    if not cloud.instance_secret or not cloud.instance_id:
         return None
-    identity = [cloud.backend_url.rstrip('/'), cloud.instance_id, cloud.instance_secret, cloud.session_secret]
+    identity = [cloud.backend_url.rstrip('/'), cloud.instance_id, cloud.instance_secret]
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
@@ -37,23 +37,28 @@ def dispatch(credentials, reference):
     """Exactly one request, no redirects, no unbounded bodies/errors, no target in URL."""
     base, instance, secret = credentials
     if not _REF.fullmatch(reference) or instance in {'.', '..'}:
-        return 400
+        return None
     try:
-        target, error = remote_access._normalize_pairing_backend_url(base)
+        target, _ = remote_access._normalize_pairing_backend_url(base)
         if target is None:
-            return None if error == 'pairing_backend_unresolvable' else 400
+            return None  # Local URL/DNS admission is not a refusal from the issuer.
         path = (urlsplit(target.base_url).path.rstrip('/') + '/api/v1/instances/' + quote(instance, safe='')
                 + '/account-sessions/revoke')
         proxy = remote_access._validated_backend_proxy_url(target.base_url)
         if target.requires_proxy and not proxy:
             return None
-        conn = remote_access._validated_backend_connection(target.connect_hosts[0], target, 5.0, proxy)
-        try:
-            conn.request('POST', path, body=json.dumps({'account_session_ref': reference}).encode(),
-                         headers={'Host': target.host_header, 'Content-Type': 'application/json',
-                                  'X-Vibe-Device-Secret': secret})
-            return conn.getresponse().status
-        finally:
-            conn.close()
+        for conn in remote_access._validated_backend_connections(target, 5.0, proxy):
+            try:
+                try:
+                    conn.connect()
+                except (OSError, http.client.HTTPException):
+                    continue  # No revoke bytes sent. Try the next validated address.
+                conn.request('POST', path, body=json.dumps({'account_session_ref': reference}).encode(),
+                             headers={'Host': target.host_header, 'Content-Type': 'application/json',
+                                      'X-Vibe-Device-Secret': secret})
+                return conn.getresponse().status
+            finally:
+                conn.close()
+        return None
     except (OSError, ValueError, RuntimeError, http.client.HTTPException):
         return None
