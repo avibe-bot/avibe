@@ -18,18 +18,17 @@ export function LiveActivitySettingRow() {
   const mounted = useRef(false);
   const saving = useRef(false);
   const request = useRef(0);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
     if (!supported || saving.current) return;
     const id = ++request.current;
-    try {
-      const result = await nativeLiveActivitySetting();
+    return nativeLiveActivitySetting().then((result) => {
       if (mounted.current && id === request.current) {
         setSetting(result);
         setFailed(result === null);
       }
-    } catch {
+    }).catch(() => {
       if (mounted.current && id === request.current) { setSetting(null); setFailed(true); }
-    }
+    });
   }, [supported]);
   useEffect(() => {
     mounted.current = true;
