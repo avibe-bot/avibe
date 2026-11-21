@@ -410,6 +410,25 @@ def test_generic_config_save_rejects_connector_control_changes(
     assert V2Config.load().remote_access.vibe_cloud.transport_protocol == "auto"
 
 
+@pytest.mark.parametrize("update", [
+    {"session_secret": ""}, {"instance_id": "other-instance"},
+    {"instance_secret": ""}, {"backend_url": "https://other.example"},
+    {"tunnel_token": "different-token"}, {"issuer": "https://other.example"},
+])
+def test_generic_settings_cannot_replace_or_clear_pairing(tmp_path, monkeypatch, update):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = _full_config_payload()
+    payload["remote_access"] = {"vibe_cloud": {
+        "enabled": False, "instance_id": "original", "instance_secret": "test-secret",
+        "session_secret": "test-session-secret", "tunnel_token": "test-tunnel",
+    }}
+    V2Config.from_payload(payload).save()
+    with pytest.raises(ValueError, match="Pairing identity"):
+        api.save_config({"remote_access": {"vibe_cloud": update}}, generic_remote_access=True)
+    saved = V2Config.load().remote_access.vibe_cloud
+    assert (saved.instance_id, saved.instance_secret, saved.enabled) == ("original", "test-secret", False)
+
+
 def test_generic_runtime_save_validates_an_unchanged_stale_bind_address(
     monkeypatch,
     tmp_path,

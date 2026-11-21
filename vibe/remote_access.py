@@ -5273,6 +5273,16 @@ _PAIRING_IDENTITY_FIELDS = (
 )
 
 
+def pairing_identity_settings_changed(previous: V2Config | None, candidate: V2Config) -> bool:
+    """The settings API may toggle access, but not install or erase its identity."""
+    source = (previous or V2Config.default()).remote_access.vibe_cloud
+    target = candidate.remote_access.vibe_cloud
+    return any(
+        getattr(source, field) != getattr(target, field)
+        for field in _PAIRING_IDENTITY_FIELDS if field != "enabled"
+    )
+
+
 def _pending_pairing_dir(*, create: bool = False) -> Path:
     directory = paths.get_state_dir()
     if create:

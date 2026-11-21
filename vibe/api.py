@@ -1283,6 +1283,9 @@ def save_config(
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         from vibe import remote_access
 
+        if generic_remote_access and remote_access.pairing_identity_settings_changed(base_config, config):
+            raise ValueError("Pairing identity must be changed through the remote access pairing flow")
+
         # Admit the pairing clear before publishing the separate settings
         # store: an unreadable journal or failed fence must reject this
         # request without already changing its Discord guild scope.
