@@ -478,19 +478,29 @@ final class AppModel: ObservableObject {
     /// cached page, and this device's path choice for it. Only for an
     /// address the signed-in account does not list and nothing shows.
     private func removeDepartedInstanceData(origin: String, accountID: String) async -> Bool {
-        guard
-            let address = WebOrigin.parseConfigured(origin),
-            // Not during a sign-out, a reset or a change of account: the
-            // store is about to go, with everything in it.
-            sessionCoordinator.settledAccountID == accountID,
-            !sessionCoordinator.currentInstances.contains(where: {
-                WebOrigin(url: $0.url)?.serialized == origin
-            }),
-            route.runtime.flatMap({ WebOrigin(url: $0.instance.url)?.serialized }) != origin
-        else {
+        guard let address = WebOrigin.parseConfigured(origin) else {
             return false
         }
         let store = websiteDataStore.identifier
+        // Asked now, and again right before each thing is deleted: the
+        // removal is prepared across suspensions, and the address may be
+        // listed again meanwhile.
+        let stillDeparted = { [weak self] () -> Bool in
+            guard let self else {
+                return false
+            }
+            // Not during a sign-out, a reset or a change of account: the
+            // store is about to go, with everything in it.
+            return self.sessionCoordinator.settledAccountID == accountID
+                && self.websiteDataStore.identifier == store
+                && !self.sessionCoordinator.currentInstances.contains(where: {
+                    WebOrigin(url: $0.url)?.serialized == origin
+                })
+                && self.route.runtime.flatMap({ WebOrigin(url: $0.instance.url)?.serialized }) != origin
+        }
+        guard stillDeparted() else {
+            return false
+        }
         // Cookies belong to a host: kept while another address the account
         // lists, or avibe.bot itself, is on that host.
         let hostInUse = sessionCoordinator.controlPlaneURL.host == address.host
@@ -507,8 +517,9 @@ final class AppModel: ObservableObject {
                 self?.recordRuntimeReleaseBarrier(
                     WebsiteDataStoreReleaseBarrier(webViews: [webView])
                 )
-            }
-        ) else {
+            },
+            stillWanted: stillDeparted
+        ), stillDeparted() else {
             return false
         }
         RuntimePageCache(directory: RuntimePageCache.root

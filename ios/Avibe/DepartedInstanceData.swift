@@ -158,12 +158,16 @@ enum InstanceSiteDataCleaner {
     /// `removingCookies`: false when the host is still one the account uses
     /// (cookies belong to a host, not to an origin). `willUse` receives the
     /// WebView before anything is loaded, for a caller that tracks the
-    /// WebViews of a store.
+    /// WebViews of a store. `stillWanted` is asked again right before each
+    /// thing is deleted (the page is prepared across suspensions, and the
+    /// address may have been listed again meanwhile): false stops there,
+    /// with nothing more removed.
     static func clean(
         origin: WebOrigin,
         in dataStore: WKWebsiteDataStore,
         removingCookies: Bool = true,
-        willUse: (WKWebView) -> Void = { _ in }
+        willUse: (WKWebView) -> Void = { _ in },
+        stillWanted: () -> Bool = { true }
     ) async -> Bool {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
@@ -195,7 +199,8 @@ enum InstanceSiteDataCleaner {
         )
         guard
             await loader.finished(within: loadTimeout),
-            webView.url.flatMap({ WebOrigin(url: $0, requiresHTTPS: false) }) == origin
+            webView.url.flatMap({ WebOrigin(url: $0, requiresHTTPS: false) }) == origin,
+            stillWanted()
         else {
             return false
         }
@@ -205,6 +210,9 @@ enum InstanceSiteDataCleaner {
             in: nil,
             contentWorld: world
         ) as? Bool
+        guard stillWanted() else {
+            return false
+        }
         if removingCookies {
             let cookies = dataStore.httpCookieStore
             for cookie in await cookies.allCookies()

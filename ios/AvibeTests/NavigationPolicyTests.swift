@@ -5409,12 +5409,10 @@ extension NavigationPolicyTests {
     /// domain stays. No request reaches the address while it is cleaned.
     @MainActor
     func testOnlyTheDepartedAddressesStorageIsRemoved() async throws {
-        let storeIdentifier = UUID()
-        let store = WKWebsiteDataStore(forIdentifier: storeIdentifier)
-        addTeardownBlock {
-            // Best effort: the store is the test's own.
-            try? await WKWebsiteDataStore.remove(forIdentifier: storeIdentifier)
-        }
+        // A persistent store, as the account's is. It is not removed after
+        // the test: removing a store WebKit's processes still hold ended the
+        // test host on the hosted simulator.
+        let store = WKWebsiteDataStore(forIdentifier: UUID())
         let departed = try XCTUnwrap(WebOrigin.parseConfigured("https://old-name.avibe-test.example"))
         let sibling = try XCTUnwrap(WebOrigin.parseConfigured("https://other-name.avibe-test.example"))
 
@@ -5481,6 +5479,24 @@ extension NavigationPolicyTests {
         let stored = #"["yes",["conversations"],["pages"],"page_set=1"]"#
         let before = try await run(read, at: departed.url)
         XCTAssertEqual(before, stored)
+
+        // Asked right before anything is deleted: an address listed again
+        // meanwhile keeps everything.
+        var asked = 0
+        let refused = await InstanceSiteDataCleaner.clean(
+            origin: departed,
+            in: store,
+            stillWanted: {
+                asked += 1
+                return false
+            }
+        )
+        XCTAssertFalse(refused)
+        XCTAssertEqual(asked, 1)
+        let untouched = try await run(read, at: departed.url)
+        XCTAssertEqual(untouched, stored)
+        let untouchedCookies = await cookies.allCookies().count
+        XCTAssertEqual(untouchedCookies, 5)
 
         let cleaned = await InstanceSiteDataCleaner.clean(origin: departed, in: store)
         XCTAssertTrue(cleaned)
