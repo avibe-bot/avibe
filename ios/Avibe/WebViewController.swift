@@ -8,6 +8,8 @@ import WebKit
 /// anything: the page gets every touch exactly as before.
 final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDelegate {
     private weak var tracked: UITouch?
+    /// A touch was handed to the capture and its end not yet.
+    private var following = false
 
     init() {
         super.init(target: nil, action: nil)
@@ -20,7 +22,20 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         guard tracked == nil, let touch = touches.first, let webView = view as? WKWebView else { return }
         tracked = touch
-        NativeHoldCapture.shared.touchDown(at: touch.location(in: webView), in: webView, timestamp: touch.timestamp)
+        following = true
+        NativeHoldCapture.shared.touchDown(
+            at: touch.location(in: webView), in: webView, timestamp: touch.timestamp,
+            // The touch itself knows when the finger lifts, whether or not
+            // UIKit goes on telling this recogniser.
+            liftedAt: { [weak touch] in Self.liftTime(of: touch) }
+        )
+    }
+
+    /// When `touch` lifted, by its own time; nil while the finger is down. A
+    /// touch that is gone has lifted.
+    private static func liftTime(of touch: UITouch?) -> TimeInterval? {
+        guard let touch else { return ProcessInfo.processInfo.systemUptime }
+        return touch.phase == .ended || touch.phase == .cancelled ? touch.timestamp : nil
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -39,6 +54,7 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
     private func finish(_ touches: Set<UITouch>) {
         guard let tracked, touches.contains(tracked) else { return }
         self.tracked = nil
+        following = false
         if let webView = view as? WKWebView {
             NativeHoldCapture.shared.touchEnded(in: webView, timestamp: tracked.timestamp)
         }
@@ -48,8 +64,14 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
 
     override func reset() {
         super.reset()
-        // UIKit took the gesture back without ending the touch for us.
-        if tracked != nil, let webView = view as? WKWebView { NativeHoldCapture.shared.touchEnded(in: webView) }
+        // UIKit took the gesture back without ending the touch for us: so it
+        // is on a surface whose page took the press for itself. The lift's
+        // time is still the touch's own.
+        if following, let webView = view as? WKWebView {
+            let lifted = tracked.flatMap { Self.liftTime(of: $0) }
+            NativeHoldCapture.shared.touchEnded(in: webView, timestamp: lifted)
+        }
+        following = false
         tracked = nil
     }
 

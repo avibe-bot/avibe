@@ -164,6 +164,10 @@ final class NativeHoldCapture {
         let downAt: Int
         /// The touch's own time at touch-down (`UITouch.timestamp`).
         var downStamp: TimeInterval?
+        /// Asks the touch itself: nil while the finger is down, else the
+        /// time it lifted. UIKit does not tell the observer of a lift on a
+        /// surface whose page took the press for itself.
+        var liftedAt: (@MainActor () -> TimeInterval?)?
         /// How long the touch lasted by its own times, when that made it a tap.
         var tapMs: Int?
         var recognised = false
@@ -550,7 +554,12 @@ final class NativeHoldCapture {
     /// A finger came down in `webView` at `point` (its own points). On one
     /// of the page's surfaces the App prepares the microphone, without
     /// starting it, and times the hold itself.
-    func touchDown(at point: CGPoint, in webView: WKWebView, timestamp: TimeInterval? = nil) {
+    /// `liftedAt` asks the touch itself whether the finger has lifted (nil
+    /// while it is down, else when it lifted, by the touch's own time).
+    func touchDown(
+        at point: CGPoint, in webView: WKWebView, timestamp: TimeInterval? = nil,
+        liftedAt: (@MainActor () -> TimeInterval?)? = nil
+    ) {
         guard hold == nil, running == nil, surfacesWebView === webView,
               let surface = surfaces.first(where: { $0.rect.contains(point) }),
               !VoiceCaptureAudioState.active, !isInBackground(), audio.permissionGranted
@@ -561,6 +570,7 @@ final class NativeHoldCapture {
         )
         self.hold = hold
         hold.downStamp = timestamp
+        hold.liftedAt = liftedAt
         hold.timings.route = audio.route
         hold.timings.holdMs = Int((holdSeconds * 1000).rounded())
         hold.timings.variant = "quiet"
@@ -602,6 +612,15 @@ final class NativeHoldCapture {
             // a lift among them ends the press first, as a tap.
             hold.cancelTimer = self.onceTouchesAreHeard { [weak self, weak hold] in
                 guard let self, let hold, self.hold === hold, !hold.recognised else { return }
+                // And the touch itself is asked. On a surface whose page took
+                // the press for itself, UIKit tells the observer of the lift
+                // only when it resets it, which a tap that raises the keyboard
+                // delays past this moment.
+                if let lifted = hold.liftedAt?() {
+                    if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+                    self.cancelHold(hold, why: "tap")
+                    return
+                }
                 self.recognise(hold)
             }
         }

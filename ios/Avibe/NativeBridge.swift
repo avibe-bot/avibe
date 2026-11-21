@@ -46,7 +46,11 @@ struct NativeShellMetadata: Equatable {
         "voiceCapture": 1,
         // The App recognises a hold on the page's surfaces itself
         // (`voice.holdSurfaces`, `voice.holdAdopt`, `voice.holdReject`).
-        "voiceHold": 1,
+        // 2: a tap is never taken for a hold, however late the App learns
+        // that the finger lifted. The page names surfaces only from 2 on;
+        // the one build that announced 1 (TestFlight 50.1) could give a tap
+        // on the composer the hold's cue.
+        "voiceHold": 2,
     ]
 
     let shellVersion: String
