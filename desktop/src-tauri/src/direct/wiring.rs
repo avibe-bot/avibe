@@ -6,7 +6,8 @@
 //! main window's instance view (its "runtime") and the app windows opened
 //! from it. It is found by account, instance origin and that view's own
 //! label, never by an installation ID, and it ends when that view does: on
-//! sign-out, a switch of instance, or a change of the choice of path.
+//! sign-out, a switch of instance, or a change of the choice of path. A view
+//! that is only between two documents (loading, reloading) keeps it.
 //!
 //! The rules it keeps:
 //! - an instance whose choice is "Cloudflare tunnel only", or any instance
@@ -67,6 +68,9 @@ pub struct Published {
     pub target: Target,
     /// That view's label, new for every sign-in or switch.
     pub runtime: String,
+    /// Whether the instance's own document is in the view now. It is not
+    /// for a moment while the view loads or reloads.
+    pub document: bool,
 }
 
 /// A client's listener, as native routing needs it. Deliberately not `Debug`.
@@ -99,6 +103,8 @@ struct Session {
     runtime: Option<String>,
     windows: Vec<String>,
     routed: Vec<String>,
+    /// Since when the view's document has not been the instance's.
+    away: Option<Instant>,
     /// A rendezvous has been answered in this session.
     ready: bool,
     /// It only learns whether the instance answers; it routes no window.
@@ -110,6 +116,10 @@ struct Session {
 /// that window to become the published instance view. The shell gives a new
 /// instance view 30 seconds to load.
 const UNPUBLISHED: Duration = Duration::from_secs(60);
+/// How long a session's instance view may be without the instance's document
+/// (loading, reloading) before the session ends. Sign-out, a switch and a
+/// change of the choice do not wait for it.
+const AWAY: Duration = Duration::from_secs(30);
 /// After a session's listener ended, or none could be started, how long
 /// before another is started for the same instance view.
 const COOLING: Duration = Duration::from_secs(60);
@@ -205,6 +215,7 @@ impl Wiring {
             runtime: runtime.map(str::to_owned),
             windows: runtime.map(str::to_owned).into_iter().collect(),
             routed: Vec::new(),
+            away: None,
             ready: false,
             scout,
             opened: now,
@@ -275,9 +286,21 @@ impl Wiring {
             // A scout has nothing left to learn once the instance answered.
             let allowed = self.permitted(&session.target) && (!session.scout || !self.reached(&session.target));
             let keep = match (&session.runtime, published) {
-                (Some(runtime), Some(shown)) => allowed && shown.runtime == *runtime && shown.target == session.target,
+                (Some(runtime), Some(shown)) => {
+                    let same = allowed && shown.runtime == *runtime && shown.target == session.target;
+                    if same && !shown.document {
+                        // The same view, between two of its documents.
+                        let since = *session.away.get_or_insert(now);
+                        now.saturating_duration_since(since) < AWAY
+                    } else {
+                        session.away = None;
+                        same
+                    }
+                }
                 (Some(_), None) => false,
-                (None, Some(shown)) if shown.target == session.target && session.windows.contains(&shown.runtime) => {
+                (None, Some(shown))
+                    if shown.document && shown.target == session.target && session.windows.contains(&shown.runtime) =>
+                {
                     session.runtime = Some(shown.runtime.clone());
                     allowed
                 }
@@ -293,7 +316,7 @@ impl Wiring {
             }
         }
         self.sessions = kept;
-        if let Some(shown) = published {
+        if let Some(shown) = published.filter(|shown| shown.document) {
             let held = self
                 .sessions
                 .iter()
@@ -390,11 +413,11 @@ impl Wiring {
     }
 
     /// The window a session asks its rendezvous through: its instance view,
-    /// once that is published.
+    /// once that is published, while the instance's document is in it.
     pub fn asks_through(&self, session: u64) -> Option<&str> {
         self.sessions
             .iter()
-            .find(|candidate| candidate.id == session)
+            .find(|candidate| candidate.id == session && candidate.away.is_none())
             .and_then(|found| found.runtime.as_deref())
     }
 

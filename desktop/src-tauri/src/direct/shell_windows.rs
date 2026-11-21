@@ -1,5 +1,9 @@
 //! What `shell.rs` asks of a WebView2. Every call ends on its apartment.
-use crate::direct::{rendezvous::Request, webview_windows, wiring::Material};
+use crate::direct::{
+    rendezvous::{Reply, Request},
+    webview_windows,
+    wiring::Material,
+};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview};
 use tokio::sync::oneshot;
@@ -8,22 +12,18 @@ use tokio::sync::oneshot;
 /// used once in a run of the app.
 static ANSWERING: Mutex<Vec<(String, i64)>> = Mutex::new(Vec::new());
 
-/// WebView2's own defaults, which giving any argument replaces
-/// (`wry`'s `webview2` module): no "mini menu", no SmartScreen.
-const DEFAULTS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
-
 pub fn ask(
     view: &Webview,
     request: Request,
     current: impl Fn() -> bool + Send + 'static,
-    done: impl FnOnce(Option<String>) + Send + 'static,
+    done: impl FnOnce(Reply) + Send + 'static,
 ) {
     let _ = view.with_webview(move |platform| {
         // SAFETY: Tauri runs this closure on the WebView2 apartment.
         let Ok(core) = (unsafe { platform.controller().CoreWebView2() }) else {
             return;
         };
-        webview_windows::fetch_rendezvous(&core, &request, current, move |reply| done(reply.body()));
+        webview_windows::fetch_rendezvous(&core, &request, current, done);
     });
 }
 
@@ -58,10 +58,10 @@ pub fn answer(app: &AppHandle, window: String, material: Material) {
 }
 
 pub fn arguments(host: &str, material: &Material) -> Option<String> {
-    Some(format!(
-        "{DEFAULTS} {}",
-        webview_windows::route_argument(host, material.proxy)?
-    ))
+    Some(super::window_arguments(&webview_windows::route_argument(
+        host,
+        material.proxy,
+    )?))
 }
 
 /// The route of an open window cannot be taken off: when its client is

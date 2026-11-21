@@ -7,7 +7,7 @@
 //! that could identify an instance.
 use super::{
     choices::{Choices, Mode},
-    rendezvous::{origin_of, Request},
+    rendezvous::{origin_of, Reply, Request},
     wiring::{Effect, Material, Published, Routing, Target, Wiring},
     Client,
 };
@@ -174,8 +174,9 @@ pub(crate) fn poke(app: &AppHandle) {
     }
 }
 
-/// The instance view the main window holds: a signed-in instance of another
-/// computer whose own document is in that view.
+/// The instance view the main window holds: the view of a signed-in
+/// instance of another computer, and whether that instance's own document
+/// is in it right now (it is not for a moment while the view loads).
 fn published(app: &AppHandle) -> Option<Published> {
     let client = app.try_state::<instance_client::Client>()?;
     let state = client.coordinator.state();
@@ -189,9 +190,14 @@ fn published(app: &AppHandle) -> Option<Published> {
     };
     let account = state.account.identity?.id;
     let view = instance_client::runtime_webview(app)?;
-    if view.label() == crate::MAIN_WINDOW || origin_of(view.url().ok()?.as_str())? != canonical_origin {
+    if view.label() == crate::MAIN_WINDOW {
         return None;
     }
+    let document = view
+        .url()
+        .ok()
+        .and_then(|url| origin_of(url.as_str()))
+        .is_some_and(|origin| origin == canonical_origin);
     Some(Published {
         target: Target {
             account,
@@ -199,6 +205,7 @@ fn published(app: &AppHandle) -> Option<Published> {
             instance: instance_id,
         },
         runtime: view.label().to_owned(),
+        document,
     })
 }
 
@@ -357,7 +364,11 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
             due = Instant::now() + Duration::from_secs(1);
             continue;
         };
-        let asking = client.refresh(|endpoint| ask(app.clone(), state.clone(), session, window, origin, endpoint));
+        // The core takes the answer's body; every other outcome is "no answer" to it.
+        let asking = client.refresh(|endpoint| {
+            let asked = ask(app.clone(), state.clone(), session, window, origin, endpoint);
+            async move { asked.await.body() }
+        });
         let answered = tokio::select! {
             biased;
             _ = &mut stopped => break false,
@@ -389,7 +400,8 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
 }
 
 /// Asks the rendezvous through `window`, which must still be the session's
-/// instance view when the request starts and when its answer arrives.
+/// instance view when the request starts and when its answer arrives. How it
+/// ended is the adapter's own word; a window that is gone is "not ready".
 async fn ask(
     app: AppHandle,
     state: Arc<Direct>,
@@ -397,11 +409,13 @@ async fn ask(
     window: String,
     origin: String,
     endpoint: String,
-) -> Option<String> {
-    let request = Request::new(&origin, &endpoint)?;
+) -> Reply {
+    let Some(request) = Request::new(&origin, &endpoint) else {
+        return Reply::Failed;
+    };
     let (answer, answered) = oneshot::channel();
     let handle = app.clone();
-    app.run_on_main_thread(move || {
+    let sent = app.run_on_main_thread(move || {
         let Some(view) = handle.get_webview(&window) else {
             return;
         };
@@ -412,12 +426,14 @@ async fn ask(
                     && instance_client::runtime_webview(&handle).is_some_and(|view| view.label() == window)
             }
         };
-        native::ask(&view, request, current, move |body| {
-            let _ = answer.send(body);
+        native::ask(&view, request, current, move |reply| {
+            let _ = answer.send(reply);
         });
-    })
-    .ok()?;
-    answered.await.ok().flatten()
+    });
+    match sent {
+        Ok(()) => answered.await.unwrap_or(Reply::NotReady),
+        Err(_) => Reply::NotReady,
+    }
 }
 
 /// What a Windows window that shows another computer's instance answers a
@@ -436,6 +452,21 @@ pub(crate) fn remote_instance_permission(kind: PermissionKind) -> PermissionResp
         PermissionKind::Notifications => PermissionResponse::Deny,
         _ => PermissionResponse::Default,
     }
+}
+
+/// The browser arguments `wry` gives every WebView2 by default
+/// (`wry` 0.57.0, `src/webview2/mod.rs`): no "mini menu" and no SmartScreen,
+/// and media that may start without a gesture (its `autoplay`, which is on
+/// and which Tauri leaves on). Giving a window any argument of ours replaces
+/// all of them, so a routed window is given them back; a routed and an
+/// unrouted window then differ in the route alone.
+pub(crate) const WRY_DEFAULT_ARGUMENTS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
+
+/// The whole of a routed window's browser arguments.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn window_arguments(route_argument: &str) -> String {
+    format!("{WRY_DEFAULT_ARGUMENTS} {route_argument}")
 }
 
 /// A route for a window that is about to be created, where a route can only

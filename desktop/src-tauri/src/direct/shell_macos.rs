@@ -1,5 +1,9 @@
 //! What `shell.rs` asks of a WKWebView. Every call ends on the main thread.
-use crate::direct::{rendezvous::Request, webview_macos, wiring::Material};
+use crate::direct::{
+    rendezvous::{Reply, Request},
+    webview_macos,
+    wiring::Material,
+};
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_web_kit::WKWebView;
 use tauri::{AppHandle, Manager, Webview};
@@ -21,10 +25,10 @@ pub fn ask(
     view: &Webview,
     request: Request,
     current: impl Fn() -> bool + Send + 'static,
-    done: impl FnOnce(Option<String>) + Send + 'static,
+    done: impl FnOnce(Reply) + Send + 'static,
 ) {
     with(view, move |webview, main| {
-        webview_macos::fetch_rendezvous(webview, main, &request, current, move |reply| done(reply.body()));
+        webview_macos::fetch_rendezvous(webview, main, &request, current, done);
     });
 }
 

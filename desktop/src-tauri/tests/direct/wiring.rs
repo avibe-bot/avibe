@@ -1,6 +1,6 @@
 use super::{
     choices::{Choices, Mode},
-    shell::remote_instance_permission,
+    shell::{remote_instance_permission, window_arguments, WRY_DEFAULT_ARGUMENTS},
     wiring::{Effect, Material, Published, Routing, Target, Wiring},
 };
 use std::time::Duration;
@@ -23,6 +23,15 @@ fn shown(origin: &str, runtime: &str) -> Published {
     Published {
         target: target(origin),
         runtime: runtime.to_owned(),
+        document: true,
+    }
+}
+
+/// The same view while the instance's document is not in it.
+fn away(origin: &str, runtime: &str) -> Published {
+    Published {
+        document: false,
+        ..shown(origin, runtime)
     }
 }
 
@@ -464,6 +473,7 @@ fn an_instance_the_direct_path_cannot_name_gets_no_session() {
                 instance: instance.to_owned(),
             },
             runtime: "main-runtime-1".to_owned(),
+            document: true,
         };
         assert_eq!(
             wiring.reconcile(Some(&published), |_| true, now),
@@ -541,4 +551,92 @@ fn a_remote_instance_window_refuses_notifications_and_nothing_else() {
             "{kind:?}"
         );
     }
+}
+
+#[test]
+fn a_view_between_two_documents_keeps_its_session_for_a_while() {
+    let now = Instant::now();
+    let later = |seconds: u64| now + Duration::from_secs(seconds);
+    let mut wiring = live();
+    // No session starts for a view that does not hold the instance's document yet.
+    assert_eq!(wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, now), []);
+    let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+    wiring.window_created(session, "show-1");
+    wiring.probed(session, true);
+
+    // The view reloads: the session and its routes stay, and nothing is
+    // asked through a document that is not the instance's.
+    assert_eq!(
+        wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(10)),
+        []
+    );
+    assert_eq!(wiring.asks_through(session), None);
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(session));
+    assert_eq!(
+        wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(39)),
+        []
+    );
+    // The document is back: asking goes on, and a later absence is counted anew.
+    assert_eq!(
+        wiring.reconcile(Some(&shown(ONE, "main-runtime-1")), |_| true, later(40)),
+        []
+    );
+    assert_eq!(wiring.asks_through(session), Some("main-runtime-1"));
+    assert_eq!(
+        wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(100)),
+        []
+    );
+    assert_eq!(
+        wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(129)),
+        []
+    );
+    // Half a minute without the instance's document ends it, route first.
+    assert_eq!(
+        wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(130)),
+        [retire(session, &["main-runtime-1", "show-1"])]
+    );
+
+    // What really ends a session does not wait: sign-out, a switch, and the
+    // choice, each while the view is between documents.
+    for ending in 0..3 {
+        let mut wiring = live();
+        let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+        assert_eq!(
+            wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(1)),
+            []
+        );
+        let effects = match ending {
+            0 => wiring.reconcile(None, |_| true, later(2)),
+            1 => wiring.reconcile(Some(&away(TWO, "main-runtime-2")), |_| true, later(2)),
+            _ => wiring.choose(ACCOUNT, ONE, Mode::Tunnel),
+        };
+        assert_eq!(effects, [retire(session, &[])], "{ending}");
+    }
+}
+
+/// A routed window gets back every argument `wry` gives an unrouted one, so
+/// the two differ in the route alone. The constant is `wry` 0.57.0's own
+/// composition (`src/webview2/mod.rs`: its `--disable-features` line, and
+/// `--autoplay-policy=no-user-gesture-required` because its `autoplay` is on
+/// by default and Tauri leaves it on). A change of the `wry` version fails
+/// here until that file has been read again.
+#[test]
+fn a_routed_window_keeps_the_arguments_wry_gives_every_window() {
+    assert_eq!(
+        WRY_DEFAULT_ARGUMENTS,
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
+    );
+    assert_eq!(
+        window_arguments("--proxy-pac-url=data:x"),
+        format!("{WRY_DEFAULT_ARGUMENTS} --proxy-pac-url=data:x")
+    );
+    let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"));
+    let wry = lock
+        .split("[[package]]")
+        .find(|package| package.contains("\nname = \"wry\"\n"))
+        .expect("wry is a dependency");
+    assert!(
+        wry.contains("\nversion = \"0.57.0\"\n"),
+        "wry changed: read its default browser arguments again (src/webview2/mod.rs) and update WRY_DEFAULT_ARGUMENTS"
+    );
 }
