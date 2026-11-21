@@ -814,6 +814,44 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertFalse(capture.isLatestSurfacesRequest(second, of: webView))
     }
 
+    /// A hold's input stops on its own queue, a moment after the take ends:
+    /// what it sends until then is the take's, and `ended` comes after it.
+    func testATakesLastAudioArrivesBeforeItsEndWhenTheInputStopsLater() throws {
+        let audio = FakeAudio()
+        audio.holdsStop = true
+        let (capture, webView) = makeHoldCapture(audio)
+        let take = try hold(capture, in: webView)
+        _ = try capture.adopt(take: take, webView: webView).get()
+        audio.onPCM?(Data([1, 0]))
+        XCTAssertEqual(heard, [.pcm(Data([1, 0]))])
+
+        capture.stop(take: take)
+        XCTAssertNil(capture.currentTake)
+        // The main queue's next turn comes before the input has stopped.
+        drain()
+        audio.onPCM?(Data([2, 0]))
+        drain()
+        XCTAssertEqual(heard, [.pcm(Data([1, 0]))])
+
+        audio.finishStop()
+        drain()
+        XCTAssertEqual(heard, [.pcm(Data([1, 0])), .pcm(Data([2, 0])), .ended(reason: nil)])
+        // Nothing after its end.
+        audio.onPCM?(Data([3, 0]))
+        drain()
+        XCTAssertEqual(heard.count, 3)
+
+        // An untaken hold's is dropped all the same.
+        heard = []
+        let untaken = try hold(capture, in: webView)
+        audio.onPCM?(Data([4, 0]))
+        capture.reject(take: untaken, webView: webView)
+        audio.onPCM?(Data([5, 0]))
+        audio.finishStop()
+        drain()
+        XCTAssertTrue(heard.isEmpty)
+    }
+
     /// Adopted before any audio (the usual order: the page answers within a
     /// few tens of ms), the first audio still goes to the page at once.
     func testTheFirstAudioGoesAtOnceWhenThePageTookTheHoldBeforeIt() throws {
@@ -1478,8 +1516,19 @@ private final class FakeAudio: NativeHoldCaptureAudio {
         return .init(activateMs: 12, engineMs: 34, categoryMs: 7)
     }
 
-    func stop() {
+    /// The input says it has stopped only when `finishStop()` is called.
+    var holdsStop = false
+    private var stops: [@MainActor () -> Void] = []
+
+    func finishStop() {
+        let waiting = stops
+        stops = []
+        waiting.forEach { $0() }
+    }
+
+    func stop(stopped: @escaping @MainActor () -> Void) {
         calls.append("stop")
+        if holdsStop { stops.append(stopped) } else { stopped() }
     }
 }
 
