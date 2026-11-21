@@ -124,7 +124,7 @@ All three: Owner by current authorization or direct loopback (A1); JSON;
 named below.
 
 - `GET /api/instance-address` →
-  `{ok, hostname, public_url, eligible, ineligible_reason, hold_days (from avibe.bot's `release_delay_seconds`; null until first read),
+  `{ok, hostname, public_url, eligible, ineligible_reason, hold_days (from avibe.bot's `release_delay_seconds`; null until first read), release_at_if_changed_now (passed through; null when avibe.bot cannot give a date),
   operation, unrecognized_change, cleanup, health}`.
   `operation`: `null` or `{state:"pending"|"applying"|"failed", hostname, error}`.
   `unrecognized_change`: `null` or `{previous_hostname, hostname, noticed_at}`.
@@ -134,7 +134,7 @@ named below.
   state, cleared_at}]}]`.
   `health`: `{connected:boolean, cleanup:"none"|"pending"}`.
 - `POST /api/instance-address/preview` `{prefix}` →
-  `{ok, confirmation_id, expires_at, hostname, is_return, hold_days,
+  `{ok, confirmation_id, expires_at, hostname, is_return, hold_days, release_at_if_changed_now,
   devices:[…as above without state], health_connected, shares_affected}`.
   Local refusals only: `invalid_prefix`, `same_address`, `rename_ineligible`,
   `operation_in_progress`. No availability check: the name is not asked of
@@ -229,9 +229,14 @@ The limit on names comes back as `409 name_holding_limit_reached` with
 
 Settled with the direct lane (coordinator Session `ses8mgme5623t`): C3.
 
-Open with the backend writer: the real `release_at` of each cleanup name in
-`hostname-state`, and the date the active name would be released if it were
-changed now, so the dialog can show a real date before the rename.
+Dates (settled 11:32): each cleanup entry is `{hostname, hold_until,
+release_at}` and the state carries `active_release_at_if_renamed_now`; both
+release fields are UTC strings or null. `hold_until` is the latest end of the
+cleanup route and, with the fresh listing, the only date that bounds cleaning.
+`release_at` is for display only and never permits cleaning. The estimate is
+"if changed now, no earlier than"; null means the date cannot be given, and
+the page then shows no date and does not add 30 days itself. After a commit
+the receipt's `previous_release_at` and the latest state are what is shown.
 
 ## Residuals, in plain words
 
