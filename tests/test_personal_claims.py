@@ -3,6 +3,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import ipaddress
 import json
 import threading
 from uuid import uuid4
@@ -94,13 +95,16 @@ def claim_peer(pairing_host, monkeypatch):
 
 
 @pytest.fixture(params=["loopback", "private_network"])
-def owner_browser(request, claim_peer):
+def owner_browser(request, claim_peer, monkeypatch):
     """The initiating owner's browser: on this machine, or another computer on an admitted home network."""
     if request.param == "loopback":
         return "http://localhost", {}
     config = V2Config.load()
     config.ui.setup_host = "192.168.2.3"
     config.save()
+    # Once bound, the tunnel's wildcard bind also requires the peer on the setup host's interface subnet.
+    # Pin that interface instead of reading this machine's.
+    monkeypatch.setattr(ui_server, "_local_interface_network", lambda *_a, **_k: ipaddress.ip_network("192.168.2.0/24"))
     return "http://192.168.2.3:15131", {"REMOTE_ADDR": "192.168.2.4"}
 
 
