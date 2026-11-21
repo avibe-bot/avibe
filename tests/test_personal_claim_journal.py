@@ -43,8 +43,39 @@ def test_constrained_pair_replays_same_request_until_receipt_matches(pairing_hos
     journal, error = remote_access._read_pending_pairing_record()
     assert not error and journal['phase'] == 'prepared'
     assert journal['personal_claim']['binding_disposition'] == 'existing'
-    recovered = remote_access._retry_installation_pairing(journal)
-    assert recovered['ok'] and recovered['binding_disposition'] == 'existing'
+    if bad_receipt:
+        recovered = remote_access._retry_installation_pairing(journal)
+        assert recovered['ok'] and recovered['binding_disposition'] == 'existing'
+    else:
+        # A new UI process starts with only this journal. Its first tick must not
+        # interpret the now invalid source credential as a detector observation.
+        workers, probes = [], []
+
+        class Worker:
+            def __init__(self, *, target, **_):
+                self.target = target
+
+            def start(self):
+                workers.append(self.target)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(remote_access, '_AUTHORIZATION_REVISION_POLL_STARTED', False)
+            patch.setattr(remote_access.threading, 'Thread', Worker)
+            remote_access.start_authorization_revision_polling()
+        assert len(workers) == 1
+
+        class EndTick(Exception):
+            pass
+
+        def stop_tick(delay):
+            assert delay > 0
+            raise EndTick
+
+        monkeypatch.setattr(remote_access.time, 'sleep', stop_tick)
+        monkeypatch.setattr(remote_access, 'sync_authorization_revision_once', lambda **_: probes.append(True))
+        with pytest.raises(EndTick):
+            workers[0]()
+        assert not probes
     assert requests[0] == requests[1] and requests[0]['redeem_request_id']
     assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_B'
     assert 'bound' not in claims._outcome()
@@ -69,6 +100,8 @@ def test_off_binding_is_not_repaired_or_replaced(claim_peer):
 def test_legacy_prepared_survives_refusal_then_can_be_superseded_by_matching_accept(claim_peer):
     record = remote_access._new_pairing_claim(V2Config.load(), "https://avibe.bot", "original", pairing_key="fixture-old")
     remote_access._write_pending_pairing_record(record)
+    assert remote_access._drive_pending_pairing() == (True, 60)
+    assert not claim_peer.calls
     assert _claim("different")["state"] == "declined"
     assert remote_access._read_pending_pairing_record() == (record, None)
     assert _claim()["state"] == "bound"
@@ -129,7 +162,7 @@ def test_changed_source_only_supersedes_on_owner_accept(claim_peer, monkeypatch)
     assert len(claim_peer.challenges) == 3
 
 
-@pytest.mark.parametrize("via", ["legacy", "fresh_start", "explicit_recovery"])
+@pytest.mark.parametrize("via", ["legacy", "fresh_start", "explicit_recovery", "startup"])
 def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, monkeypatch, via):
     from tests.test_pairing_recovery import _fail_config_publication_once
     from tests.test_personal_claims import _start
@@ -148,6 +181,9 @@ def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, m
         monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: calls.append(V2Config.load().remote_access.vibe_cloud.instance_id))
         assert _start(client).get_json()["code"] == "already_bound"
         assert calls == ["inst_A"]
+    elif via == "startup":
+        monkeypatch.setattr(remote_access, '_json_request', lambda *a, **kw: pytest.fail('sealed response was already redeemed'))
+        assert remote_access._drive_pending_pairing() == (True, 1)
     else:
         assert claims.recover_pairing(ident)["state"] == "bound"
     assert len(claim_peer.challenges) == 1 and client.get(route).get_json() == {"state": "bound"}

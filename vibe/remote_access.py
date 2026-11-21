@@ -2307,6 +2307,32 @@ def sync_authorization_revision_once(
             _AUTHORIZATION_REVISION_SYNC_LOCK.release()
 
 
+def _drive_pending_pairing() -> tuple[bool, int]:
+    """One scheduled recovery step; a journal always preempts probing the old key.
+
+    Never recreate a claim, fill missing evidence, or supply new redemption
+    inputs here. The two replay entry points acquire admission and recheck the
+    observed operation against protected storage before they do any work.
+    """
+    record, error = _read_pending_pairing_record()
+    if error:
+        return True, 60
+    if record is None:
+        return False, 0
+    if record['phase'] == 'prepared' and record.get('redeem_request') and (
+        record.get('personal_claim') or record.get('desktop_enrollment')
+    ) and not record.get('desktop_failure'):
+        result = _retry_installation_pairing(record)
+    elif record['phase'] in ('redeemed', 'applied'):
+        result = _persist_pairing(None, device_name=record['device_name'], operation_id=record['operation_id'])
+    else:
+        return True, 60  # Legacy ambiguous / terminal / not yet authorized. No automatic dispatch.
+    if result.get('ok'):
+        return True, 1  # Reload the new generation on the next tick, including its Off choice.
+    retry = result.get('retry_after_seconds')
+    return True, min(60, max(1, retry)) if type(retry) is int else 0
+
+
 def start_authorization_revision_polling(
     config: V2Config | None = None,
     *,
@@ -2321,7 +2347,19 @@ def start_authorization_revision_polling(
     def loop() -> None:
         from vibe.binding_health import RevisionMonitor
         monitor = RevisionMonitor()
+        retry_delay = 1
         while True:
+            try:
+                pending, delay = _drive_pending_pairing()
+            except Exception:
+                # Local damage or transient I/O is not a negative credential verdict.
+                pending, delay = True, 0
+            if pending:
+                monitor.reset()
+                time.sleep(max(retry_delay, delay))
+                retry_delay = min(60, retry_delay * 2)
+                continue
+            retry_delay = 1
             result = sync_authorization_revision_once(monitor=monitor)
             if not result.get("ok") and result.get("error") not in {
                 "authorization_revision_deferred",
