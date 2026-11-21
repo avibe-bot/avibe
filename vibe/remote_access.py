@@ -38,7 +38,7 @@ from config.atomic_io import write_atomic
 from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock, config_recovery_refusal
 from vibe import api, cloudflare_network, runtime
 from vibe import instance_address, tunnel_quality
-from vibe.binding_admission import pairing_operation
+from vibe.binding_admission import pairing_operation, publication_operation, run_pairing_operation
 from vibe.shutdown_diagnostics import register_shutdown_hook
 
 logger = logging.getLogger(__name__)
@@ -5545,6 +5545,8 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
     source_fingerprint = payload.get("source_fingerprint")
     if not isinstance(source_fingerprint, str) or len(source_fingerprint) != 64:
         return None, "pending pairing record source fingerprint is invalid"
+    if 'source_was_bound' in payload and type(payload['source_was_bound']) is not bool:
+        return None, 'pending pairing source binding flag is invalid'
     source_instance_id = payload.get("source_instance_id")
     if not isinstance(source_instance_id, str):
         return None, "pending pairing record source instance is invalid"
@@ -6099,7 +6101,6 @@ def _bound_http_pair_forbidden(config: V2Config, pending=None) -> bool:
                 or (pending and pending.get("source_instance_id")))
 
 
-@pairing_operation
 def pair(
     pairing_key: str, backend_url: str, device_name: str = "avibe", *,
     desktop_enrollment: Any = None, unbound_only: bool = False,
@@ -6111,11 +6112,24 @@ def pair(
         return {"ok": False, "error": "invalid_pairing_key"}  # Requires the exact constrained journal.
     if desktop_enrollment is not None:
         try:
-            return _pair_desktop(pairing_key, backend_url, device_name, desktop_enrollment)
+            return run_pairing_operation('desktop', _pair_desktop, pairing_key, backend_url, device_name, desktop_enrollment)
         except desktop_local_instance.LocalInstanceError as exc:
             return {"ok": False, "error": exc.code, "status": exc.status}
         except (OSError, _PairingLockUnavailable):
             return {"ok": False, "error": "pairing_local_write_unavailable", "status": 503}
+    if not pairing_key and not unbound_only:
+        # The Desktop client retries without its key. This read selects only a
+        # candidate: _retry_installation_pairing checks the entire request under lock.
+        record, _ = _read_pending_pairing_record()
+        if record and record.get('desktop_enrollment') and record['phase'] == 'prepared' and record.get('redeem_request'):
+            return _resume_installation_request(record)
+    return _pair_key(pairing_key, backend_url, device_name, unbound_only=unbound_only)
+
+
+@pairing_operation
+def _pair_key(pairing_key, backend_url, device_name, *, unbound_only):
+    from vibe import desktop_local_instance
+
     if not pairing_key:
         # The existing recovery owner can resume a Desktop redemption after a
         # process restart, without requiring the UI to retain its pairing key.
@@ -6131,12 +6145,7 @@ def pair(
             if not record:
                 return {"ok": False, "error": "missing_pairing_key"}
         if not error and record and record.get("redeem_request") and record["phase"] == "prepared":
-            try:
-                return _retry_installation_pairing(record)
-            except desktop_local_instance.LocalInstanceError as exc:
-                return {"ok": False, "error": exc.code, "status": exc.status}
-            except (OSError, _PairingLockUnavailable):
-                return {"ok": False, "error": "pairing_recovery_unavailable", "status": 503}
+            return _resume_installation_request(record)
         return _persist_pairing(None, device_name=device_name, operation_id=record["operation_id"] if unbound_only else None)
     backend, backend_url_error = _normalize_pairing_backend_url(backend_url)
     if backend_url_error or backend is None:
@@ -6301,8 +6310,23 @@ def _issuer_replay_refused(record):
                 and record.get('replay_outcome') == 'issuer_replay_refused')
 
 
-@pairing_operation
+def _resume_installation_request(record):
+    from vibe import desktop_local_instance
+
+    try:
+        return _retry_installation_pairing(record)
+    except desktop_local_instance.LocalInstanceError as exc:
+        return {'ok': False, 'error': exc.code, 'status': exc.status}
+    except (OSError, _PairingLockUnavailable):
+        return {'ok': False, 'error': 'pairing_recovery_unavailable', 'status': 503}
+
+
 def _retry_installation_pairing(claim: Mapping[str, Any]) -> dict[str, Any]:
+    kind = 'desktop' if claim.get('desktop_enrollment') else 'pairing'
+    return run_pairing_operation(kind, _retry_admitted_installation_pairing, claim)
+
+
+def _retry_admitted_installation_pairing(claim):
     from vibe import desktop_local_instance
 
     with _pairing_persist_lock():
@@ -6554,6 +6578,7 @@ def _persist_pairing_impl(
             record = {
                 **record,
                 "phase": "redeemed",
+                "source_was_bound": was_bound,
                 "pairing": _pairing_response_payload(result, session_secret),
                 "target_identity": target_identity,
                 "target_fingerprint": _pairing_identity_fingerprint(target_identity),
@@ -6730,8 +6755,10 @@ def _persist_pairing_impl(
     assert config is not None
     start_result = None
     if config.remote_access.vibe_cloud.enabled:
-        start_result = (start(config) if record['source_instance_id'] == '' else
-                        _continue_requested_after_pairing(config))
+        # Older sealed records have no source credential flag: preserve their
+        # conservative Off behavior when an instance ID was already present.
+        was_bound = record.get('source_was_bound', bool(record['source_instance_id']))
+        start_result = _continue_requested_after_pairing(config) if was_bound else start(config)
         if start_result is not None:
             _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     result = _pairing_result_status(config, start_result=start_result)
@@ -6740,7 +6767,7 @@ def _persist_pairing_impl(
     return result
 
 
-@pairing_operation
+@publication_operation
 def _persist_pairing(
     result: Mapping[str, Any] | None,
     *,

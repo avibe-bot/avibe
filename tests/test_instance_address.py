@@ -1301,12 +1301,13 @@ def test_b8_a_settings_save_cannot_write_the_address_and_a_new_pairing_inherits_
         with pytest.raises(ValueError, match="not by a settings save"):
             api.save_config({"remote_access": {"vibe_cloud": {field: value}}}, generic_remote_access=True)
     assert binding().active_host == NEW
-    # Clearing a field and then setting it in a second save is the same write in two steps.
-    api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": ""}}}, generic_remote_access=True)
+    # AV-13 supersedes B8's empty-value exception: Off is not an unpair.
+    with pytest.raises(ValueError, match="binding is not changed by saving settings"):
+        api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": ""}}}, generic_remote_access=True)
     with pytest.raises(ValueError, match="not by a settings save"):
         api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": f"https://{OLD}/auth/callback"}}},
                         generic_remote_access=True)
-    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "redirect_uri", f"https://{NEW}/auth/callback"))
+    assert settings_service.load_config().remote_access.vibe_cloud.redirect_uri == f"https://{NEW}/auth/callback"
     # Turning remote access off through the same save still works.
     api.save_config({"remote_access": {"vibe_cloud": {"enabled": False}}}, generic_remote_access=True)
     assert settings_service.load_config().remote_access.vibe_cloud.enabled is False

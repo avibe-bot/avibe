@@ -813,7 +813,15 @@ def test_registered_remote_access_writes_default_to_owner(monkeypatch, tmp_path)
             response = _request_remote_access(client, method, path, headers)
             policy_role = http_authorization_policy(method, path).minimum_role
             admitted = _context(role, remote=True).has_role(policy_role or "owner")
-            if admitted and (method, path) == ("POST", "/api/remote-access/direct/suspend"):
+            if http_authorization_policy(method, path).direct_loopback_only:
+                # This transport constraint precedes session/role authorization.
+                assert response.status_code == 403, (role, method, path)
+                assert response.get_json()['error'] == 'direct_loopback_required'
+            elif admitted and (method, path) == ('POST', '/api/remote-access/vibe-cloud/pair'):
+                # The ordinary key handler also refuses replacing a bound instance remotely.
+                assert response.status_code == 403
+                assert response.get_json()['error'] == 'local_operator_required'
+            elif admitted and (method, path) == ("POST", "/api/remote-access/direct/suspend"):
                 # This stop-before-discard barrier additionally requires a
                 # co-located CLI token and actual loopback peer. Even a remote
                 # Owner must not cross the independent process-local boundary.

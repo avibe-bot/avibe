@@ -9143,15 +9143,6 @@ def remote_access_vibe_cloud_pair():
         return jsonify({"ok": False, "error": "invalid_request"}), 400
     local_pair = not _is_direct_ingress_request() and _is_direct_loopback_connection()
     desktop = {}
-    if not local_pair:
-        from vibe import desktop_local_instance as local
-        try:
-            if remote_access._bound_http_pair_forbidden(local._config(), local._pending()):
-                return jsonify({"ok": False, "error": "local_operator_required"}), 403
-        except (OSError, local.LocalInstanceError):
-            return jsonify({"ok": False, "error": "pairing_recovery_unavailable"}), 503
-        # Check again under the writer lock, before any one-time redeem or keyless replay.
-        desktop["unbound_only"] = True
     if "desktop_enrollment" in payload:
         if not local_pair or not _same_origin(
             _request_origin(request.headers.get("Origin")) or "", request.host_url.rstrip("/")
@@ -9165,6 +9156,15 @@ def remote_access_vibe_cloud_pair():
         ):
             return jsonify({"ok": False, "error": "invalid_request"}), 400
         desktop["desktop_enrollment"] = payload["desktop_enrollment"]
+    elif not local_pair:
+        from vibe import desktop_local_instance as local
+        try:
+            if remote_access._bound_http_pair_forbidden(local._config(), local._pending()):
+                return jsonify({"ok": False, "error": "local_operator_required"}), 403
+        except (OSError, local.LocalInstanceError):
+            return jsonify({"ok": False, "error": "pairing_recovery_unavailable"}), 503
+        # Check again under the writer lock, before any one-time redeem or keyless replay.
+        desktop["unbound_only"] = True
     result = remote_access.pair(
         payload.get("pairing_key", ""),
         payload.get("backend_url", "https://avibe.bot"),

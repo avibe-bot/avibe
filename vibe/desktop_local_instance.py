@@ -141,7 +141,7 @@ def prepare(account_id: Any, expected_binding_revision: Any) -> dict[str, Any]:
     from vibe.binding_admission import OperationBusy, admitted
 
     try:
-        with admitted("pairing"):
+        with admitted("desktop"):
             return _prepare_admitted(account_id, expected_binding_revision)
     except OperationBusy:
         raise LocalInstanceError("operation_in_progress") from None

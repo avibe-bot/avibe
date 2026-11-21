@@ -10,7 +10,7 @@ import os
 import threading
 
 from config import paths
-from storage.lock import MigrationFileLock, MigrationLockTimeout
+from storage.lock import MigrationFileLock, MigrationLockTimeout, try_shared_file_lease
 
 
 class OperationBusy(Exception):
@@ -20,15 +20,25 @@ class OperationBusy(Exception):
 _owner = threading.local()
 
 
+def run_pairing_operation(kind, operation, *args, **kwargs):
+    try:
+        with admitted(kind):
+            return operation(*args, **kwargs)
+    except OperationBusy:
+        return {'ok': False, 'error': 'operation_in_progress', 'status': 409}
+
+
 def pairing_operation(operation):
-    """Enter before selecting a journal or dispatching anything to the issuer."""
     @wraps(operation)
     def run(*args, **kwargs):
-        try:
-            with admitted('pairing'):
-                return operation(*args, **kwargs)
-        except OperationBusy:
-            return {'ok': False, 'error': 'operation_in_progress', 'status': 409}
+        return run_pairing_operation('pairing', operation, *args, **kwargs)
+    return run
+
+
+def publication_operation(operation):
+    @wraps(operation)
+    def run(*args, **kwargs):
+        return run_pairing_operation('publication', operation, *args, **kwargs)
     return run
 
 
@@ -49,7 +59,14 @@ def reset_in_progress():
 
 def check_rename_admission():
     from vibe import instance_address
-    if instance_address._state_path().is_symlink():
+    state = instance_address._state_path()
+    try:
+        state.lstat()
+    except FileNotFoundError:
+        return  # No rename to exclude. Pairing still checks config before redeem.
+    except OSError:
+        raise OperationBusy() from None
+    if state.is_symlink():
         raise OperationBusy()
     binding = instance_address.current_binding()
     if binding is None and paths.get_config_path().exists():
@@ -73,23 +90,46 @@ def transfer_to_pairing():
 
 
 @contextmanager
+def _binding_lease(path, desktop):
+    # Only guarded Desktop callers can share admission. Their reservation and
+    # exact request CAS live under the config lock; a lost reply must not keep
+    # the client from retrying that request while its old handler finishes.
+    if desktop:
+        handle = try_shared_file_lease(path)
+        if handle is None:
+            raise OperationBusy()
+        with handle:
+            yield
+    else:
+        lock = MigrationFileLock(path, timeout_seconds=0)
+        try:
+            lock.acquire()
+        except MigrationLockTimeout:
+            raise OperationBusy() from None
+        try:
+            yield
+        finally:
+            lock.release()
+
+
+@contextmanager
 def admitted(kind):
-    if kind not in ('address', 'pairing', 'reset'):
+    if kind not in ('address', 'pairing', 'desktop', 'publication', 'reset'):
         raise ValueError('invalid operation kind')
     root = paths.get_state_dir()
     key = (os.path.realpath(root), kind)
     current = getattr(_owner, 'key', None)
     if current is not None:
-        if current != key:
+        # A shared Desktop lease can publish its CAS-guarded result, but may
+        # never be promoted to ordinary key pairing or another exclusive writer.
+        nested = (current[0] == key[0] and (
+            current[1] == 'pairing' and kind in ('desktop', 'publication') or
+            current[1] == 'desktop' and kind == 'publication'))
+        if current != key and not nested:
             raise OperationBusy()
         yield
         return
-    lock = MigrationFileLock(root / 'remote-binding-admission.lock', timeout_seconds=0)
-    try:
-        lock.acquire()
-    except MigrationLockTimeout:
-        raise OperationBusy() from None
-    try:
+    with _binding_lease(root / 'remote-binding-admission.lock', kind == 'desktop'):
         if kind != 'reset' and reset_in_progress():
             raise OperationBusy()
         if kind == 'address':
@@ -97,12 +137,10 @@ def admitted(kind):
             record, error = _read_pending_pairing_record()
             if error is not None or (record is not None and not _issuer_replay_refused(record)):
                 raise OperationBusy()
-        elif kind == 'pairing':
+        elif kind in ('pairing', 'desktop', 'publication'):
             check_rename_admission()
         _owner.key = key
         try:
             yield
         finally:
             del _owner.key
-    finally:
-        lock.release()

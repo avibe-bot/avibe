@@ -31,6 +31,12 @@ From the worktree: `.venv/bin/python -m pytest -q --disable-warnings @docs/plans
 
 The separately owned CLI suite at the R2 handoff: **46/48 passed**. The two cases to revisit are `test_an_attempt_avibe_bot_refused_for_good_is_not_called_unrecorded_and_needs_a_new_step` (terminal refusal is not an unfinished binding; consume the overview reason), and `test_a_reset_that_cannot_be_replaced_safely_says_so_and_asks_nothing` (a damaged pairing file plus a damaged reset marker now allows the existing fresh reset confirmation when scope is safe). No CLI code or tests were changed in this backend round.
 
+## Full-suite compatibility checks
+
+The backend selection now includes the entire Desktop local enrollment, key-pairing, instance authorization, and instance-address suites. Desktop may retry a lost local POST while the old redeem is still in flight: read descriptor → prepare the same operation → keyless replay → renew only on an exact expiry → guarded pair. The reservation and exact request comparison still serialize writes; reset, address changes, ordinary keys and constrained claims cannot enter during this retry. A late response cannot alter the replacement.
+
+First complete key pairing enables and starts the connector even if the configuration contains an instance ID but no device secret. Once a device credential exists, replacement preserves Off. The publication journal retains this distinction through restart. Settings cannot erase a binding to turn it Off (the B8 amendment is in `instance-address-change.md`).
+
 ## Still gated
 
 Next writer: terminal interaction, command help and bilingual public docs. Preserve the separate destructive confirmation and subsequent ordinary account/hostname consent. Do not promise recovery of an old name, notify the old owner, or imply independent tunnel/model/Vault credentials were rotated. This Runtime cannot certify issuer deployment or revoke a copy of the whole config.
