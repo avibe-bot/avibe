@@ -66,7 +66,7 @@ class _BoundSource(_Source):
         # Never reconcile an uncertain earlier redemption by starting another claim.
         with config_file_lock():
             config, pending = local._config(), local._pending()
-            if pending is not None:
+            if pending is not None and not remote_access._issuer_replay_refused(pending):
                 raise ClaimError("pairing_recovery_required")
             cloud = config.remote_access.vibe_cloud
             if not cloud.instance_id and not any((cloud.instance_secret, cloud.client_id, cloud.tunnel_token, cloud.session_secret)):
@@ -74,7 +74,7 @@ class _BoundSource(_Source):
             if not all((cloud.backend_url, cloud.instance_id, cloud.instance_secret)):
                 raise ClaimError("local_binding_unavailable")
             installation = local.ensure_installation_id()
-            return cls(installation, local.claim_revision(config, installation, None), socket.gethostname(),
+            return cls(installation, local.claim_revision(config, installation, pending), socket.gethostname(),
                        cloud.backend_url, cloud.instance_id, cloud.instance_secret)
 
     def client(self):
@@ -652,8 +652,8 @@ class RebindClaims(RedirectClaims):
             claim_id = flow.ticket.id if flow and flow.ticket else None
         attempt = self.state(claim_id) if claim_id else None
         active = flow and (not attempt or attempt["state"] not in ("error", "bound", "declined"))
-        unavailable = ("pairing_recovery_required" if pending else "not_bound" if not bound else
-                       "operation_in_progress" if active or instance_address._any_journal_stored() else None)
+        unavailable = ("pairing_recovery_required" if pending and not remote_access._issuer_replay_refused(pending) else "not_bound" if not bound else
+                       "operation_in_progress" if active or instance_address._journal(instance_address._binding_from_config(cfg)) is not None else None)
         eligible = (unavailable is None and (attempt or {}).get('reason_code') in _RESET_REASONS
                     and flow and flow.reset_browser is not None)
         return {"binding_state": state, "connector_still_running": remote_access._is_cloudflared_pid(remote_access._read_pid()),

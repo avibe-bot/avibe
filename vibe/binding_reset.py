@@ -83,9 +83,9 @@ def _file_stamps():
     return {'identity_file': _file_stamp(local._identity_path()), 'pairing_file': _file_stamp(remote._pending_pairing_path())}
 
 
-def _seal(config):
+def _seal(config, *, replace=False):
     """Caller owns reset admission and the config lock after verifying consent."""
-    if gate.reset_in_progress():
+    if gate.reset_in_progress() != replace:
         raise ClaimError('operation_in_progress')
     cloud = config.remote_access.vibe_cloud
     record = {'schema': 1, 'operation': secrets.token_hex(16), 'phase': 'retire', 'source': _stamp(cloud),
@@ -112,8 +112,25 @@ def _verify_stage(record, config):
             raise ClaimError('local_binding_changed')
 
 
+def _repair_reason(config):
+    try:
+        record = _read()
+    except ClaimError:
+        return 'reset_record_damaged'
+    try:
+        _verify_stage(record, config)
+    except ClaimError:
+        allowed = ({record['source']} if record['phase'] == 'retire' else {record['source'], record['target']}
+                   if record['phase'] == 'clear' else {record['target']})
+        return 'binding_changed' if _stamp(config.remote_access.vibe_cloud) not in allowed else 'files_changed'
+    return None
+
+
 def _advance(record):
-    from storage import device_registry, instance_address_clearing, remote_access_authorization_service
+    from storage import device_registry
+    from storage.models import (instance_address_clearings, instance_address_clearing_receipts,
+                                remote_access_authorizations, remote_device_sessions)
+    from sqlalchemy import select
     from storage.db import get_cached_sqlite_engine
     from storage.importer import ensure_sqlite_state
     from storage.mobile_store import MobileStore, mobile_store_path
@@ -130,10 +147,14 @@ def _advance(record):
         from vibe.direct_certificates import discard_direct_certificates
         discard_direct_certificates()
         if not remote.stop(cfg).get('ok'):
-            raise ClaimError('reset_repair_required')
-        device_registry.retire_binding(record['registry'], now=int(time.time()))
-        if record['instance']:
-            remote_access_authorization_service.delete_for_instance(record['instance'])
+            raise ClaimError('reset_in_progress')  # transient failure; the same sealed phase can retry
+        # Explicit reset detaches this entire data root, not just the instance ID
+        # still readable in its config. In particular repair can start after clear.
+        with get_cached_sqlite_engine().begin() as conn:
+            generations = set(conn.scalars(select(remote_device_sessions.c.binding).distinct()))
+            conn.execute(remote_access_authorizations.delete())
+        for generation in generations | {record['registry']}:
+            device_registry.retire_binding(generation, now=int(time.time()))
     elif phase == 'clear':
         with config_file_lock():
             cfg = local._config()
@@ -148,7 +169,8 @@ def _advance(record):
     elif phase == 'address':
         instance_address._state_path().unlink(missing_ok=True)
         with get_cached_sqlite_engine().begin() as conn:
-            instance_address_clearing.forget_except(conn, instance_id=record['instance'], keep_hostnames=())
+            conn.execute(instance_address_clearing_receipts.delete())
+            conn.execute(instance_address_clearings.delete())
     elif phase == 'health':
         if os.path.lexists(mobile_store_path()):
             if not MobileStore(existing_only=True).revoke(caller='binding-reset').get('purged'):
@@ -181,7 +203,7 @@ def _cli_snapshot():
                 files['identity_file'], files['pairing_file'])):
         raise ClaimError('not_bound')
     record, error = remote._read_pending_pairing_record()
-    if not error and record and record.get('phase') in ('prepared', 'redeemed', 'applied'):
+    if not error and record and not remote._issuer_replay_refused(record) and record.get('phase') in ('prepared', 'redeemed', 'applied'):
         stamp = _stamp(cloud)
         if (record['phase'] != 'prepared' or record.get('redeem_request')) and stamp in (
                 record['source_fingerprint'], record.get('target_fingerprint')):
@@ -195,7 +217,7 @@ def _cli_snapshot():
     return config, (_stamp(cloud), files)
 
 
-def reset_interactively(*, confirm):
+def reset_interactively(*, confirm, repair=False):
     """CLI adapter only. A trusted prompt returns literal True after explicit consent.
 
     Do not hold a config lock across input, or accept a serialized confirmation
@@ -205,6 +227,9 @@ def reset_interactively(*, confirm):
     _require_local_terminal()
     if not callable(confirm):
         raise ClaimError('invalid_request')
+    if repair:
+        from vibe.binding_recovery import _repair
+        return _repair(confirm=confirm, keep_pairing=False)
     with gate.admitted('reset'), config_file_lock():
         _, before = _cli_snapshot()
     try:

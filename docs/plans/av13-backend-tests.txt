@@ -1,3 +1,7 @@
+tests/test_binding_recovery.py
+tests/test_member_management_parity.py::test_complete_registered_api_management_inventory
+tests/test_pairing_recovery.py::test_publication_preserves_real_connector_request
+tests/test_remote_authorization_revision.py::test_pending_pairing_keeps_remote_organization_session_current
 tests/test_binding_health.py
 tests/test_binding_reset.py
 tests/test_binding_retirement.py

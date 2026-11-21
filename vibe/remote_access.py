@@ -2343,7 +2343,7 @@ def _drive_pending_pairing() -> tuple[bool, int]:
         return False, 0
     if record['phase'] == 'prepared' and record.get('redeem_request') and (
         record.get('personal_claim') or record.get('desktop_enrollment')
-    ) and not record.get('desktop_failure'):
+    ) and not record.get('desktop_failure') and not _issuer_replay_refused(record):
         result = _retry_installation_pairing(record)
     elif record['phase'] in ('redeemed', 'applied'):
         result = _persist_pairing(None, device_name=record['device_name'], operation_id=record['operation_id'])
@@ -6239,7 +6239,8 @@ def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: st
             return {"ok": False, "error": "local_instance_conflict"}
         from vibe.personal_claim_client import is_constrained_key
         if binding_disposition is not None:
-            if (binding_disposition not in ("existing", "new") or not is_constrained_key(key)
+            if (pending and not _issuer_replay_refused(pending) or
+                    binding_disposition not in ("existing", "new") or not is_constrained_key(key)
                     or not config.remote_access.vibe_cloud.instance_secret or not config.remote_access.vibe_cloud.instance_id):
                 return {"ok": False, "error": "local_binding_changed"}
         elif key.startswith("vrp2_") or config.remote_access.vibe_cloud.instance_secret or config.remote_access.vibe_cloud.instance_id:
@@ -6294,6 +6295,12 @@ def _pair_desktop(
     return _retry_installation_pairing(claim)
 
 
+def _issuer_replay_refused(record):
+    return bool(record and record.get('phase') == 'prepared'
+                and (record.get('personal_claim') or {}).get('binding_disposition') in ('existing', 'new')
+                and record.get('replay_outcome') == 'issuer_replay_refused')
+
+
 @pairing_operation
 def _retry_installation_pairing(claim: Mapping[str, Any]) -> dict[str, Any]:
     from vibe import desktop_local_instance
@@ -6309,6 +6316,8 @@ def _retry_installation_pairing(claim: Mapping[str, Any]) -> dict[str, Any]:
             )) != claim["source_fingerprint"]
         ):
             return {"ok": False, "error": "local_binding_changed", "status": 409}
+    if _issuer_replay_refused(claim):
+        return {'ok': False, 'error': 'issuer_replay_refused', 'status': 409}
     backend, error = _normalize_pairing_backend_url(claim["backend_url"])
     if error or backend is None:
         return {"ok": False, "error": error or "invalid_pairing_backend_url"}
@@ -6347,6 +6356,19 @@ def _redeem_pairing_claim(
                 "retry_after_seconds": retry_after,
                 "pairing": {"ok": False, "recoverable": True, "cause": "pairing_redeem_pending"},
             }
+        # This answer is about the exact constrained request. It says no
+        # more replay, NOT that the issuer never committed or rolled back.
+        code = exc.payload.get('error')
+        if ((claim.get('personal_claim') or {}).get('binding_disposition') in ('existing', 'new')
+                and ((exc.status == 409 and code == 'registration_indeterminate') or
+                     (exc.status in (400, 401, 403, 404, 409, 410, 422)
+                      and isinstance(code, str) and code in _DEFINITIVE_PAIRING_REDEEM_ERRORS))):
+            with _pairing_persist_lock():
+                current, error = _read_pending_pairing_record()
+                if error or current != claim:
+                    return {'ok': False, 'error': 'local_binding_changed', 'status': 409}
+                _write_pending_pairing_record({**claim, 'replay_outcome': 'issuer_replay_refused'})
+            return {'ok': False, 'error': 'issuer_replay_refused', 'status': 409}
         # Legacy "invalid"/"used" errors collapse several histories. Only the
         # request-bound expired/unconsumed proof permits Desktop grant renewal.
         definitive = (

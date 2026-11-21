@@ -6,7 +6,6 @@ crash) the opposite operation's journal retains its reservation.
 """
 from contextlib import contextmanager
 from functools import wraps
-import json
 import os
 import threading
 
@@ -48,6 +47,31 @@ def reset_in_progress():
     return os.path.lexists(reset_intent_path())
 
 
+def check_rename_admission():
+    from vibe import instance_address
+    if instance_address._state_path().is_symlink():
+        raise OperationBusy()
+    binding = instance_address.current_binding()
+    if binding is None and paths.get_config_path().exists():
+        raise OperationBusy()
+    if binding and instance_address._journal(binding) is not None:
+        raise OperationBusy()
+
+
+@contextmanager
+def transfer_to_pairing():
+    """The outer reset owner keeps the OS lock while completing its chosen handoff."""
+    root = os.path.realpath(paths.get_state_dir())
+    if getattr(_owner, 'key', None) != (root, 'reset') or reset_in_progress():
+        raise OperationBusy()
+    check_rename_admission()
+    _owner.key = (root, 'pairing')
+    try:
+        yield
+    finally:
+        _owner.key = (root, 'reset')
+
+
 @contextmanager
 def admitted(kind):
     if kind not in ('address', 'pairing', 'reset'):
@@ -74,20 +98,7 @@ def admitted(kind):
             if record is not None or error is not None:
                 raise OperationBusy()
         elif kind == 'pairing':
-            from vibe import instance_address
-            path = instance_address._state_path()
-            if path.is_symlink():
-                raise OperationBusy()
-            try:
-                state = json.loads(path.read_text(encoding='utf-8'))
-            except FileNotFoundError:
-                pass
-            except (OSError, ValueError, RecursionError):
-                raise OperationBusy() from None
-            else:
-                if (not isinstance(state, dict) or state.get('schema_version') != instance_address._STATE_SCHEMA_VERSION
-                        or 'journal' not in state or state['journal'] is not None):
-                    raise OperationBusy()
+            check_rename_admission()
         _owner.key = key
         try:
             yield
