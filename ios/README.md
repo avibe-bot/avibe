@@ -1719,35 +1719,37 @@ production instance is used.
 
 ## Turn Live Activities
 
-**Withdrawn (11-21, owner):** the App no longer announces `liveActivities`, the
-four `liveActivity.*` methods answer `unsupported`, the chat page renders no
-entry, and at launch the App ends every Turn Live Activity an earlier build
-left and forgets its ledger, with no instance request
-(`NativeShellMetadata.liveActivitiesAvailable`,
-`TurnActivityCoordinator.endAllLocally`). The code below stays, unreachable.
+The shell always announces `liveActivities: 2`: `liveActivity.setting`,
+`setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
+`stop` calls return `unsupported`. The Web requires capability version 2, so
+older TestFlight builds never show the setting or a conversation entry.
 
-The `liveActivities: 1` bridge exposes `liveActivity.status`, `start`, `stop`, and
-`openSettings`. A person explicitly tracks one running Turn. Its immutable Agent
-name and session title stay in local ActivityAttributes; only phase and Unix
-seconds reach the instance tracking API and APNs. The exact wire contract and
-shared vectors live in `docs/plans/2026-11-20-ios-live-activity-contract.md` and
+The device-only setting defaults off. On launch with it off, earlier cards end
+locally and their tokens are forgotten without contacting an instance. Turning
+it off explicitly ends cards and sends best-effort DELETE `disabled`.
+
+`TurnActivityCoordinator` keeps the latest visible conversation observation and
+prefetches its running Turn on observation changes and foreground entry. Only
+`UIScene.willDeactivateNotification` can create a card, while the App is active,
+with the device and system settings enabled, a matching prefetched Turn, and an
+active relay registration. Activity.request runs first; failure leaves the old
+card and its observers intact. On success, displaced observers stop and the
+replacement is persisted before the callback returns. A UIKit background task
+then ends the old card, sends DELETE `replaced`, waits up to ten
+seconds for the new token, and PUTs. No conversation control, toast, or hint is
+rendered. Agent names and titles stay in immutable phone-local attributes.
+
+The persisted shown-Turn ledger survives dismissal, replacement, timeout,
+logout, and relaunch. A Turn cannot create another card; entries are retained
+for up to 30 days, including Turns that outlive ActivityKit's eight-hour limit.
+The registration ledger separately tracks requested_at and whether the current
+token received a successful PUT. Token rotation and foreground reconciliation
+follow the shared contract. A 503 or lost PUT response leaves an unregistered
+card for a later foreground/token retry. Registered cards GET on foreground.
+Instance requests reuse the account-owned transport and its session authority
+checks. The normative contract and vectors are in
+`docs/plans/2026-11-20-ios-live-activity-contract.md` and
 `tests/fixtures/live_activity/contract_vectors.json`.
-
-`TurnActivityCoordinator` owns start admission, initial and rotated activity push
-tokens, foreground reconciliation, system dismissal, and account/instance
-cleanup. A phone-local ledger lets it retire server tracking for a card removed
-while the App was away. Only an explicit start can create a card, including after
-a prior dismissal or stop of the same still-running Turn. It uses the account's
-WebKit store and existing same-origin CSRF transport, and releases those WebViews
-through the account transition's existing release barriers. The ledger persists
-the Activity.request Unix second (requested_at on every PUT) and whether PUT has
-returned 200 for the current token. A token rotation clears that registration mark
-until its PUT succeeds. An unregistered card survives a 503 or lost response,
-retries PUT on foreground or token rotation, and ends if still unregistered eight
-hours after Activity.request. Registered cards only GET on foreground; actual
-token updates still PUT. A refused registration ends immediately, except a terminal
-Turn response retains its final card for one hour. Local HTTP responses never
-advance stale deadlines without instance confirmation.
 
 `TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
 renders the reviewed `ios/live-activity/*` frames in English and Simplified
