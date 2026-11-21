@@ -20793,6 +20793,10 @@ def run_ui_server(host: str, port: int) -> None:
             from vibe import remote_access
             remote_access.start_authorization_revision_polling()
             remote_access.start_resource_acl_sync_polling()
+            # The pollers above forward address hints; without its worker a
+            # pairing published later by another process would never have an
+            # address change applied.
+            _start_instance_address()
         print(f"UI Server running at http://{host}:{port}")
 
         # Retry binding in case of TIME_WAIT or port still held by old server during reload

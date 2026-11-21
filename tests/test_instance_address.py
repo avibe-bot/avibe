@@ -177,10 +177,10 @@ def run():
     """What the worker thread does, on this thread: read when asked to, then advance the journal."""
 
     while True:
-        if instance_address._worker_read_requested.is_set():
-            instance_address._worker_read_requested.clear()
-            instance_address.refresh_state(force=True)
-        if instance_address._advance_operation() <= 0 and not instance_address._worker_read_requested.is_set():
+        read = instance_address._read_when_asked()
+        if instance_address._advance_operation() <= 0 and (
+            not read or not instance_address._worker_read_requested.is_set()
+        ):
             return
 
 
@@ -915,6 +915,40 @@ def test_b4_a_further_change_seen_while_a_journal_is_open_is_adopted_when_it_clo
     run()
     assert binding().active_host == THIRD
     assert [entry["hostname"] for entry in instance_address.describe()["cleanup"]] == [OLD, NEW]
+
+
+def test_c4_a_phone_paired_on_the_old_address_while_a_returning_name_settles_is_ended_too(address, monkeypatch):
+    plane, clocks = address
+    rename_to("new")
+    run()
+    before = health_pairing()
+    during, after = [], []
+    settle = instance_address._sleep
+
+    def pair_while_the_name_settles(seconds):
+        # The address being left is still served during the settle; a phone can finish pairing there.
+        if seconds == instance_address.REACTIVATION_SETTLE_SECONDS and not during:
+            during.append(health_pairing())
+        settle(seconds)
+
+    monkeypatch.setattr(instance_address, "_sleep", pair_while_the_name_settles)
+    instance_address._hooks.update(
+        wake_pages=lambda: after or after.append(health_pairing()), close_connections=lambda hosts: None)
+    rename_to("old")
+    run()
+    assert binding().active_host == OLD and during and before not in active_health_devices()
+    assert active_health_devices() == after  # only the phone paired on the new address is left
+
+
+def test_b4_a_read_that_is_owed_survives_a_failed_request(address):
+    plane, _ = address
+    instance_address.note_generation_hint(plane.generation + 1)  # avibe.bot says something changed
+    plane.fail = RuntimeError("resource_acl_device_unavailable")
+    assert instance_address._read_when_asked() is False and instance_address._worker_read_requested.is_set()
+    plane.fail = None
+    plane.move(NEW, "an-outside-operation")
+    run()
+    assert binding().active_host == NEW
 
 
 def test_a5_a_change_made_elsewhere_is_adopted_without_deleting_anything(address):

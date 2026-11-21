@@ -1122,10 +1122,7 @@ def _worker_loop() -> None:
         _worker_wake.wait(timeout=delay if delay > 0 else None)
         _worker_wake.clear()
         try:
-            if _worker_read_requested.is_set():
-                _worker_read_requested.clear()
-                refresh_state(force=True)
-            delay = _advance_operation()
+            delay = _advance_operation() if _read_when_asked() else min(_advance_operation() or 30.0, 30.0)
         except Exception:
             logger.warning("instance address: operation step failed; it will be retried", exc_info=True)
             delay = 15.0
@@ -1137,6 +1134,26 @@ def _any_journal_stored() -> bool:
     except (OSError, ValueError):
         return False
     return isinstance(payload, dict) and isinstance(payload.get("journal"), dict)
+
+
+def _read_when_asked() -> bool:
+    """Read the state if a read was asked for. ``False`` while one is still owed.
+
+    The request stands until a read succeeds: a change seen while a journal was
+    open, or a hint, must not be lost to one failed request, because nothing
+    else would ask again once the generation is recorded.
+    """
+
+    if not _worker_read_requested.is_set():
+        return True
+    binding = current_binding()
+    if binding is None or not binding.paired or not is_managed_name(binding.active_host):
+        _worker_read_requested.clear()  # nothing to read for; a pairing or a hint asks again
+        return True
+    if refresh_state(force=True):
+        _worker_read_requested.clear()
+        return True
+    return False
 
 
 def _journal(binding: Binding) -> dict[str, Any] | None:
@@ -1329,7 +1346,10 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             journal = _flip(binding, journal, read, target)
         except _StaleState:
             return 2.0
-        done("flip", previous_hostname=previous, destructive=destructive, origin=journal["origin"])
+        # The cut-off written before the switch stands only if the process died
+        # between the config write and this record; it errs towards keeping data.
+        done("flip", previous_hostname=previous, destructive=destructive, origin=journal["origin"],
+             health_cutoff=journal.get("switched_at") or journal.get("health_cutoff"))
         binding = current_binding() or binding
         wake = _hooks.get("wake_pages")
         if wake is not None:
@@ -1453,6 +1473,10 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
         _authority = None
     if previous != target:
         update_config_fields(mutate)
+        # The moment the old address stopped being served. A Health pairing made
+        # before it was made there, also one completed while a returning name
+        # settled; one made after it belongs to the new address.
+        journal = {**journal, "switched_at": datetime.now(timezone.utc).isoformat()}
     with _LOCK:
         flipped = current_binding()
         if flipped is None or flipped.active_host != target:
