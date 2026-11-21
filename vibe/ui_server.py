@@ -8316,8 +8316,9 @@ _UI_RUNTIME_ACTIVE = False
 def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
     if not _UI_RUNTIME_ACTIVE:
         return
-    from vibe import remote_access
+    from vibe import connection_runtime, remote_access
 
+    connection_runtime.start()  # also covers first config save or pairing after UI boot
     remote_access.start_runtime_monitoring(config)
 
 
@@ -20442,7 +20443,8 @@ def run_ui_server(host: str, port: int) -> None:
         elif config_load_error is None:
             # A fresh UI can precede its first config file. Link/Desktop may publish
             # from another process; policy workers must notice before any UI restart.
-            from vibe import remote_access
+            from vibe import connection_runtime, remote_access
+            connection_runtime.start()  # an external Link does not call the UI setup hook
             remote_access.start_authorization_revision_polling()
             remote_access.start_resource_acl_sync_polling()
         print(f"UI Server running at http://{host}:{port}")

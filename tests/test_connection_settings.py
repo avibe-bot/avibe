@@ -38,7 +38,7 @@ def outcome():
 
 
 @pytest.mark.parametrize('local,current,target,allowed', [(False, True, False, False), (False, False, True, True), (True, True, False, True)])
-def test_endpoint_gate_and_no_automatic_switch_reversal(rig, local, current, target, allowed):
+def test_endpoint_gate_and_no_automatic_switch_reversal(rig, monkeypatch, local, current, target, allowed):
     rig.cfg.remote_access.vibe_cloud.direct = current
     rig.cfg.save()
     actor = cs.Actor(cs.binding(rig.cfg), local)
@@ -50,11 +50,40 @@ def test_endpoint_gate_and_no_automatic_switch_reversal(rig, local, current, tar
         return
     op = cr.prepare(actor, 'direct', target)
     assert cs.value(V2Config.load(), 'direct') is current  # before the response task
+    def elapse(seconds):
+        assert cs.value(V2Config.load(), 'direct') is current
+        rig.clock[0] += seconds
+
+    monkeypatch.setattr(cr, 'time', SimpleNamespace(sleep=elapse))
+    started = rig.clock[0]
     cr.apply(actor, op)
+    assert rig.clock[0] - started == (0 if local else 1)
     assert outcome()['result'] == 'applied'
     rig.clock[0] += 3600
     cr.recover_startup()
     assert cs.value(V2Config.load(), 'direct') is target
+
+
+@pytest.mark.parametrize('key', ['direct', 'relay'])
+def test_remote_switch_rechecks_health_after_allowing_response_to_drain(rig, monkeypatch, key):
+    # A sample can age out during the grace period. Do not retire the endpoint
+    # based on the pre-response sample; the journal lets the page read the refusal.
+    if key == 'relay':
+        cs.enroll_from_host(rig.cfg)
+        rig.cfg.remote_access.vibe_cloud.public_relay_trial = True
+        rig.cfg.save()
+    cr.observe_public_path(rig.cfg, rig.active, True, SimpleNamespace(successes=(True,)), rig.clock[0])
+    rig.clock[0] += 59.5
+    op = cr.prepare(rig.actor, key, False)
+
+    def elapse(seconds):
+        assert cs.value(V2Config.load(), key) is True
+        rig.clock[0] += seconds
+
+    monkeypatch.setattr(cr, 'time', SimpleNamespace(sleep=elapse))
+    cr.apply(rig.actor, op)
+    assert cs.value(V2Config.load(), key) is True
+    assert (outcome()['id'], outcome()['reason']) == (op['id'], 'tunnel_unhealthy')
 
 
 def test_one_fresh_success_only_for_this_connector(rig):
@@ -142,6 +171,42 @@ def test_interrupted_change_reopens_journal_and_debt_finishes(rig, monkeypatch):
     monkeypatch.setattr(cr, '_repair_runtime', lambda *a: True)
     cr.recover()
     assert (outcome()['id'], outcome()['result']) == (old_id, 'restored')
+
+
+@pytest.mark.parametrize('address,previous,target', [('192.0.2.1', '4', '6'), ('2001:db8::1', '6', '4')])
+def test_stopped_connector_refuses_family_incompatible_with_saved_outbound(rig, monkeypatch, address, previous, target):
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.edge_ip_version, cloud.edge_bind_address = previous, address
+    rig.cfg.save()
+    monkeypatch.setattr(ra, '_read_pid', lambda: None)
+    monkeypatch.setattr(ra, 'network_interfaces', lambda: {'interfaces': [{'address': address}]})
+    with pytest.raises(cs.ConnectionError, match='invalid_connection_change') as error:
+        cr.prepare(rig.actor, 'ipFamily', target)
+    assert error.value.status == 400
+    assert not cs.journal.path.exists()
+    assert cs.value(V2Config.load(), 'ipFamily') == previous
+
+
+@pytest.mark.parametrize('entry', ['page', 'legacy'])
+@pytest.mark.parametrize('past_bound', [False, True])
+def test_noop_preserves_pending_runtime_repair(rig, monkeypatch, past_bound, entry):
+    op = cs.journal.begin(rig.cfg, 'protocol', 'quic')
+    rig.cfg.remote_access.vibe_cloud.transport_protocol = 'quic'
+    rig.cfg.save()
+    cs.journal.restore(cs.journal.load(rig.cfg), 'verification_failed')
+    if past_bound:
+        rig.clock[0] += cs.RESTORE_SECONDS + 1
+    monkeypatch.setattr(cr, '_repair_runtime', lambda *args: False)
+    assert cr.recover() is False
+    assert cs.value(V2Config.load(), 'protocol') == 'auto'
+    if entry == 'page':
+        assert cr.prepare(rig.actor, 'protocol', 'auto') is None
+    else:
+        monkeypatch.setattr(ra, 'status', lambda config=None: {})
+        assert ra.apply_settings({'transport_protocol': 'auto'})['settings_applied'] is False
+    monkeypatch.setattr(cr, '_repair_runtime', lambda *args: True)
+    assert cr.recover()
+    assert (outcome()['id'], outcome()['result']) == (op['id'], 'restored')
 
 
 def test_explicit_new_intent_supersedes_recovery(rig):

@@ -231,10 +231,17 @@ class Journal:
         if state.get("pinAttempt") and fields & {FIELDS[k] for k in AUTOMATIC}:
             state.pop("pinAttempt")
             dirty = True
-        if state.get("debt") and FIELDS[state["debt"]["setting"]] in fields:
+        def replaced(op):
+            if not op or FIELDS[op['setting']] not in fields:
+                return False
+            # A page or legacy-form save which affirms the recovery target must
+            # not forget the live connector still needs to catch up with disk.
+            return op['state'] != 'restoring' or value(config, op['setting']) != op['from']
+
+        if replaced(state.get('debt')):
             state.pop("debt")
             dirty = True
-        if state["operation"] and FIELDS[state["operation"]["setting"]] in fields:
+        if replaced(state['operation']):
             self.finish(state, "superseded", "superseded")
         elif dirty:
             self.save(state)

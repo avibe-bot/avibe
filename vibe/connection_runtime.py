@@ -160,9 +160,9 @@ def prepare(actor, key, new):
             pid_state = tunnel._cloudflared_pid_state(tunnel._read_pid())
             if pid_state == 'unknown':
                 raise cs.ConnectionError('connection_state_unavailable', 503)
-            if key == 'outbound' and new:
+            if key in {'ipFamily', 'outbound'}:
                 prospective = copy.deepcopy(config)
-                prospective.remote_access.vibe_cloud.edge_bind_address = new
+                setattr(prospective.remote_access.vibe_cloud, cs.FIELDS[key], new)
                 if tunnel.edge_binding_error(prospective):
                     raise cs.ConnectionError('invalid_connection_change', 400)
             stopped = pid_state in {'dead', 'other'}
@@ -222,6 +222,10 @@ def apply(actor, reservation):
     key, new, op_id = (reservation[k] for k in ('setting', 'to', 'id'))
     try:
         if key in cs.SWITCHES:
+            if not actor.local:
+                # The ASGI body was sent; give the old direct stream a chance
+                # to carry it before retiring the endpoint. No locks held here.
+                time.sleep(1.0)
             with tunnel._connector_lifecycle(), tunnel._RECOVERY_LOCK, tunnel._CONNECTOR_LOCK, config_file_lock():
                 config = V2Config.load()
                 _bound(actor, config)
