@@ -11,8 +11,8 @@ import WebKit
 /// so what is under test is the claim no unit test can make: that the App's
 /// observer cancels and delays nothing the page does with a touch.
 ///
-/// The Simulator has no usable microphone on CI: a hold there ends as the
-/// App's `failed` and the page's own failed start. Both are clean ends.
+/// On a simulator with no usable microphone a hold ends as the App's
+/// `failed` and the page's own failed start. Both are clean ends.
 @MainActor
 final class FixtureHoldViewController: UIViewController {
     static let origin = "https://current.example.invalid"

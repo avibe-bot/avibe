@@ -11,12 +11,13 @@ import XCTest
 /// scrolls, buttons and a sheet still get their own touches, and a hold ends
 /// cleanly however the microphone answers.
 ///
-/// The Simulator has no usable microphone on CI. With the App's default
-/// (the microphone starts at touch-down) every touch on a surface there ends
-/// as the App's `failed`, so those tests accept that; the same touches are
-/// run with the microphone starting at recognition, where a tap is counted
-/// as a tap and a hold is recognised whatever the microphone does. With a
-/// microphone a hold is recorded and sent. Audio itself is a device check.
+/// No check depends on a microphone. The CI Simulator has had a working one
+/// in every run, and a hold there is recorded and sent. Where a simulator
+/// has none, a touch on a surface ends as the App's `failed` with the App's
+/// default (the microphone starts at touch-down), so those tests accept
+/// that; the same touches are run with the microphone starting at
+/// recognition, where a hold is recognised whatever the microphone does.
+/// Audio itself is a device check.
 final class HoldTouchUITests: XCTestCase {
     private var app: XCUIApplication!
 
@@ -302,7 +303,18 @@ final class HoldTouchUITests: XCTestCase {
     private func requireFollowedWithNoCue(
         _ what: String, file: StaticString = #filePath, line: UInt = #line
     ) {
-        requireEvidence("hold ", "The App did not follow the touch", file: file, line: line)
+        // A line of the App's own following, which only its observer's path writes: the page's
+        // own start leaves `hold page …`, and proves nothing of the observer.
+        let own = ["hold taps", "hold early", "hold quiet", "hold late"]
+        let followed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { [self] _, _ in own.contains { kept().contains($0) } }, object: nil
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [followed], timeout: 5), .completed,
+            "The App did not follow the touch: none of \(own) in what it kept (\(kept())). "
+                + "With 'none', check that the fixture has the microphone. \(facts())",
+            file: file, line: line
+        )
         XCTAssertFalse(kept().contains(" rec="), "\(what) was recognised as a hold by the App; \(facts())", file: file, line: line)
         XCTAssertFalse(
             label(beginning: "events=")?.contains("recognised") ?? true,
