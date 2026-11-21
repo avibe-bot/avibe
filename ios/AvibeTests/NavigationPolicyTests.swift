@@ -937,7 +937,18 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     func testSignedInFixtureRejectsBootstrapFailureOnThePickerRoute() async throws {
         do {
-            _ = try await makePushTapAppModel(sessionResponse: .status(503))
+            // What `makePushTapAppModel` does, without recording the
+            // rejection this test expects as a failure.
+            let (appModel, requests) = try await makeFixtureAppModel(
+                sessionResponse: .status(503)
+            )
+            try await WebKitReadiness.waitForSignedInFixture(
+                appModel,
+                accountID: "account-1",
+                instanceIDs: ["instance-1", "instance-2"],
+                requests: requests,
+                recordsFailure: false
+            )
             XCTFail("A failed bootstrap must not admit a signed-in fixture")
         } catch let error as FixtureReadinessError {
             // A readiness timeout must not satisfy this regression: prove the
@@ -3817,13 +3828,17 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     private func makePushTapAppModel(
         pushOpenedNow: @escaping () -> Date = Date.init,
-        sessionResponse: LocalHTTPResponse? = nil
+        sessionResponse: LocalHTTPResponse? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws -> AppModel {
         let (appModel, requests) = try await makeFixtureAppModel(
             pushOpenedNow: pushOpenedNow,
             sessionResponse: sessionResponse
         )
-        try await waitForSignedInInstances(appModel, requests: requests)
+        try await waitForSignedInInstances(
+            appModel, requests: requests, file: file, line: line
+        )
         return appModel
     }
 
@@ -3941,10 +3956,13 @@ final class NavigationPolicyTests: XCTestCase {
         _ appModel: AppModel,
         accountID: String = "account-1",
         instanceIDs: Set<String> = ["instance-1", "instance-2"],
-        requests: FixtureRequestLog
+        requests: FixtureRequestLog,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
         try await WebKitReadiness.waitForSignedInFixture(
-            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests
+            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests,
+            file: file, line: line
         )
     }
 
@@ -4687,14 +4705,22 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
     func loadHTML(
         _ html: String,
         baseURL: URL,
-        in webView: WKWebView
+        in webView: WKWebView,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            navigation = webView.loadHTMLString(html, baseURL: baseURL)
-            if navigation == nil {
-                finish(with: .failure(TestWaitError.navigationNotCreated))
+        do {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                navigation = webView.loadHTMLString(html, baseURL: baseURL)
+                if navigation == nil {
+                    finish(with: .failure(TestWaitError.navigationNotCreated))
+                }
             }
+        } catch {
+            throw recordThrown(
+                "The fixture document did not load", error, file: file, line: line
+            )
         }
     }
 
