@@ -28,6 +28,12 @@ final class HoldTouchUITests: XCTestCase {
         app.launchEnvironment["AVIBE_FIXTURE_HOLD"] = "1"
     }
 
+    override func tearDown() {
+        // What the page and the App said at the end, pass or fail: the run's record.
+        print("[hold smoke] \(name): \(facts())")
+        super.tearDown()
+    }
+
     // MARK: The page's own touches
 
     func testATapFocusesTheInputAndTheKeyboardTypesIntoIt() {
@@ -66,7 +72,26 @@ final class HoldTouchUITests: XCTestCase {
         XCTAssertEqual(label(beginning: "events="), "events=", facts())
         XCTAssertEqual(label(beginning: "state="), "state=idle", facts())
         // A button is no hold surface: the App followed nothing.
-        XCTAssertEqual(evidence(), "none")
+        XCTAssertEqual(kept(), "none")
+    }
+
+    /// The control for the drags below: a box the page did not name, so the
+    /// App follows nothing on it.
+    func testADragOnABoxThatIsNoSurfaceScrollsThePage() {
+        launch()
+        web.staticTexts["Control box"].swipeUp()
+        XCTAssertTrue(waitFor("scrolled=yes"), "A drag on an unnamed box did not scroll; \(facts())")
+        XCTAssertEqual(kept(), "none", "The App followed a touch on a box that is no surface; \(facts())")
+    }
+
+    /// A slower drag, as a finger's: down, a moment, then up the page.
+    func testASlowDragThatStartsOnAHoldSurfaceScrollsThePage() {
+        launch()
+        let start = web.staticTexts["Plain surface"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -220)))
+        XCTAssertTrue(waitFor("scrolled=yes"), "A slow drag that began on a hold surface did not scroll; \(facts())")
+        requireEvidence("hold ", "The App did not follow the drag")
+        XCTAssertFalse(label(beginning: "events=")?.contains("recognised") ?? true, "A scroll was taken for a hold; \(facts())")
     }
 
     func testADragThatStartsOnAHoldSurfaceScrollsThePage() {
@@ -103,7 +128,7 @@ final class HoldTouchUITests: XCTestCase {
         XCTAssertEqual(label(beginning: "events="), "events=", "A press on the sheet was taken for a hold; \(facts())")
         XCTAssertEqual(label(beginning: "state="), "state=idle", facts())
         // The page named no surface while the sheet was up: the App followed nothing.
-        XCTAssertEqual(evidence(), "none")
+        XCTAssertEqual(kept(), "none")
         web.buttons["Close sheet"].tap()
         XCTAssertTrue(waitFor("surfaces=input+plain"), facts())
     }
@@ -190,6 +215,10 @@ final class HoldTouchUITests: XCTestCase {
             "The hold page did not load"
         )
         XCTAssertTrue(waitFor("surfaces=input+plain"), "The App did not take the page's surfaces; \(facts())")
+        // The first touch after a launch is slow on a CI simulator (the fixture's other
+        // tests warm up too): one on a line of text, which is nothing's surface.
+        web.staticTexts["ready=yes"].tap()
+        XCTAssertTrue(waitFor("warm=yes"), "The warm-up touch did not reach the page; \(facts())")
     }
 
     private func waitFor(_ text: String, timeout: TimeInterval = 10) -> Bool {
@@ -210,20 +239,26 @@ final class HoldTouchUITests: XCTestCase {
         return label(beginning: prefix)
     }
 
-    /// What the App kept of the touches it followed (`NativeHoldTimings`).
+    /// What the fixture publishes: what the App kept of the touches it followed
+    /// (`NativeHoldTimings`), then each touch as UIKit delivered it.
     private func evidence() -> String {
         (app.otherElements["fixture-hold-evidence"].value as? String) ?? "missing"
+    }
+
+    /// Only what the App kept: `none` when it followed nothing.
+    private func kept() -> String {
+        evidence().components(separatedBy: " || ").first ?? "missing"
     }
 
     private func requireEvidence(
         _ part: String, _ message: String, file: StaticString = #filePath, line: UInt = #line
     ) {
         let found = XCTNSPredicateExpectation(
-            predicate: NSPredicate { [self] _, _ in evidence().contains(part) }, object: nil
+            predicate: NSPredicate { [self] _, _ in kept().contains(part) }, object: nil
         )
         XCTAssertEqual(
             XCTWaiter.wait(for: [found], timeout: 5), .completed,
-            "\(message): no '\(part)' in what the App kept (\(evidence())). "
+            "\(message): no '\(part)' in what the App kept (\(kept())). "
                 + "With 'none', check that the fixture has the microphone. \(facts())",
             file: file, line: line
         )
@@ -231,7 +266,7 @@ final class HoldTouchUITests: XCTestCase {
 
     /// Everything the page says of itself, for a failure's message.
     private func facts() -> String {
-        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled="]
+        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag="]
         return "page: " + names.compactMap { label(beginning: $0) }.joined(separator: " ")
             + "; App: " + evidence()
     }
@@ -257,7 +292,6 @@ final class HoldTouchUITests: XCTestCase {
         )
         // The App followed it: its own line for the hold, with how it ended.
         requireEvidence(" end=", "The App did not follow the hold", file: file, line: line)
-        print("[hold smoke] \(facts())")
     }
 
     /// Not stuck: a tap focuses the input and typing reaches it.
