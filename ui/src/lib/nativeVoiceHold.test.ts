@@ -214,6 +214,73 @@ describe('the hold surfaces the iOS App follows', () => {
     expect(named().at(-1)).toEqual({ surfaces: [] });
   });
 
+  // A page sliding in is drawn as a picture of itself for a moment: every touch goes to the
+  // root, and the composer of the page just opened reads as covered when it is first measured.
+  it('measures once more, by itself, a surface that read as covered, and does not go on asking', async () => {
+    const composer = box(0, 700, 390, 60);
+    const measured = vi.spyOn(composer, 'getBoundingClientRect');
+    let sliding = true;
+    document.elementFromPoint = (x, y) => (sliding ? document.documentElement : topAt(x, y));
+    registerHoldSurface('composer', surface(composer));
+    await settle();
+    expect(named()).toEqual([]);
+    // The slide ends; nothing renders, scrolls or is touched.
+    sliding = false;
+    await vi.advanceTimersByTimeAsync(400);
+    expect(named()).toEqual([{ surfaces: [{ id: 'composer', x: 0, y: 700, width: 390, height: 60 }], holdMs: 200 }]);
+
+    // Under a sheet that stays: measured once more at rest, then left alone.
+    sliding = true;
+    refreshHoldSurfaces();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(named().at(-1)).toEqual({ surfaces: [] });
+    const measures = measured.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(measured.mock.calls.length).toBe(measures);
+  });
+
+  it('measures a sheet where it came to rest though the page behind it scrolls without pause', async () => {
+    const composer = box(0, 700, 390, 60);
+    registerHoldSurface('composer', surface(composer));
+    await settle();
+    // Added below the screen, not yet over the composer when it is first measured; then it rises.
+    let top = 900;
+    const sheet = box(0, 0, 390, 470);
+    sheet.getBoundingClientRect = () => new DOMRect(0, top, 390, 470);
+    await settle();
+    expect(named()).toHaveLength(1);
+    top = 300;
+    // A reply streaming in: the list scrolls every 100 ms, and never stops.
+    for (let step = 0; step < 4; step += 1) {
+      window.dispatchEvent(new Event('scroll'));
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(named().at(-1)).toEqual({ surfaces: [] });
+  });
+
+  // The main Bot's face is lifted above its button's box (MobileChrome): it is the button's.
+  it('names the part of a surface that sticks out of its box, and takes a hold on it', async () => {
+    const button = box(150, 780, 90, 60);
+    const face = document.createElement('span');
+    face.getBoundingClientRect = () => new DOMRect(168, 760, 54, 54);
+    const name = document.createElement('span');
+    name.getBoundingClientRect = () => new DOMRect(170, 818, 50, 14);
+    button.append(face, name);
+    const held = surface(button);
+    registerHoldSurface('bot', held);
+    await settle();
+    expect(named()).toEqual([{
+      surfaces: [{ id: 'bot', x: 150, y: 780, width: 90, height: 60 }, { id: 'bot_1', x: 168, y: 760, width: 54, height: 54 }],
+      holdMs: 200,
+    }]);
+    // On the face above the box: followed. Beside the face, above the box: not.
+    expect(holdFollowed('bot', 195, 765)).toBe(true);
+    expect(holdFollowed('bot', 155, 765)).toBe(false);
+    emit({ phase: 'recognised', take: 'n1', surface: 'bot_1' });
+    expect(held.recognised).toHaveBeenCalledWith('n1');
+    expect(call.mock.calls.some(([method]) => method === 'voice.holdReject')).toBe(false);
+  });
+
   it('keeps a surface as the App has it while a press is live there, whatever lies over it', async () => {
     let live = false;
     const composer = box(0, 700, 390, 60);
