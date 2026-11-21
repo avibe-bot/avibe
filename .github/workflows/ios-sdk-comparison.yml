@@ -6,9 +6,6 @@ name: ios-sdk-comparison
 # page. Fixture data only.
 on:
   workflow_dispatch:
-  push:
-    # Only while the Xcode 27 move is under review; removed before merge.
-    branches: [ci/ios-xcode-27]
 
 permissions:
   contents: read
