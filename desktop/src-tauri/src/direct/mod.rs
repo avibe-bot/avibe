@@ -92,6 +92,24 @@ impl Client {
         self.apply(answer.as_deref(), sent).await
     }
 
+    /// A missing reply is not a withdrawal. Preserve only an already usable
+    /// link, under its original monotonic deadline and path monitor; never
+    /// extend admission or create an endpoint without a validated offer.
+    pub async fn refresh_reply<F>(&mut self, fetch: impl FnOnce(String) -> F) -> bool
+    where
+        F: std::future::Future<Output = rendezvous::Reply>,
+    {
+        use rendezvous::Reply;
+        let sent = Instant::now();
+        match tokio::time::timeout(std::time::Duration::from_secs(5), fetch(self.key.public().to_string())).await {
+            Ok(Reply::Ready(body)) => self.apply(Some(&body), sent).await,
+            Err(_) | Ok(Reply::NotReady | Reply::Failed | Reply::Refused(408 | 429 | 500..=599)) => {
+                self.listener.is_alive() && self.links.borrow().as_ref().is_some_and(|l| l.usable())
+            }
+            Ok(Reply::Refused(_) | Reply::Controlled) => self.apply(None, sent).await,
+        }
+    }
+
     /// The route describes the proxy, not direct-path readiness. Its port and
     /// credential survive loss of direct. Drop the client only after native detach.
     pub fn route(&self) -> Option<Route<'_>> {
@@ -159,6 +177,11 @@ impl Client {
         if !self.listener.is_alive() || !link.usable() {
             return false;
         }
+        self.publish(link);
+        true
+    }
+
+    fn publish(&mut self, link: Arc<Link>) {
         self.links.send_replace(Some(link.clone()));
         let tx = self.links.clone();
         self.monitor = Some(tokio::spawn(async move {
@@ -184,7 +207,6 @@ impl Client {
             });
             link.retire();
         }));
-        true
     }
 }
 impl Drop for Client {

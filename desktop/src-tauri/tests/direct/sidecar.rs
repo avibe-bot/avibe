@@ -3,9 +3,10 @@
 //! private offer. The production answer parser never admits loopback.
 use super::{
     connect::Authority,
-    listener::Listener,
     offer::Offer,
+    rendezvous::Reply,
     transport::{self, Link},
+    Client,
 };
 use serde_json::{json, Value};
 use std::{
@@ -17,7 +18,6 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     process::Command,
-    sync::watch,
     time::{timeout, Instant},
 };
 
@@ -53,9 +53,11 @@ async fn run() {
         .find(|s| s.is_ipv4())
         .expect("IPv4 fixture")
         .port();
-    let key = iroh::SecretKey::generate();
-    let who = key.public();
-    let ep = transport::bind(key).await.unwrap();
+    let mut client = Client::new("desktop-test-app.avibe.bot", "fixture".into())
+        .await
+        .unwrap();
+    let who = client.key.public();
+    let ep = transport::bind(client.key.clone()).await.unwrap();
     assert!(ep.id() == who);
     let admit = json!({"type":"admission","endpoint_id":who.to_string(),"ttl_seconds":30});
     control.write_all(format!("{admit}\n").as_bytes()).await.unwrap();
@@ -77,6 +79,9 @@ async fn run() {
                 r.read_exact(&mut data).await.unwrap();
                 assert_eq!(&data, b"opaque");
                 r.get_mut().write_all(b"answer").await.unwrap();
+                // Hold the ingress end open: only client retirement may end the stream.
+                let mut end = [0];
+                assert!(matches!(r.read(&mut end).await, Ok(0) | Err(_)));
             }
         }
     });
@@ -109,18 +114,18 @@ async fn run() {
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
-    let (_tx, rx) = watch::channel(Some(link.clone()));
-    let listener = Listener::bind(host, rx).await.unwrap();
+    client.endpoint = Some(ep);
+    client.publish(link.clone());
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let (user, pass) = listener.credential.native_login();
+    let (user, pass) = client.listener.credential.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
-    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, listener.port)).await.unwrap();
+    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, client.listener.port))
+        .await
+        .unwrap();
     socket
         .write_all(
-            format!(
-                "CONNECT desktop-test-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\nopaque"
-            )
-            .as_bytes(),
+            format!("CONNECT desktop-test-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n")
+                .as_bytes(),
         )
         .await
         .unwrap();
@@ -131,14 +136,30 @@ async fn run() {
     line.clear();
     r.read_line(&mut line).await.unwrap();
     assert_eq!(line, "\r\n");
+    for reply in [Reply::NotReady, Reply::Failed, Reply::Refused(503)] {
+        assert!(client.refresh_reply(|_| async { reply }).await);
+        assert!(!deadlines.has_changed().unwrap());
+    }
+    assert!(client.refresh_reply(|_| std::future::pending()).await);
+    assert_eq!(*deadlines.borrow(), renewed_until);
+    // Same established stream, after the failed renewals; no CONNECT replay.
+    r.get_mut().write_all(b"opaque").await.unwrap();
     let mut answer = [0; 6];
     r.read_exact(&mut answer).await.unwrap();
     assert_eq!(&answer, b"answer");
+    renewal.generation = "ci".into();
+    renewal.until = Instant::now() + Duration::from_millis(250);
+    assert!(link.renew(&renewal));
+    let mut changes = client.links.subscribe();
+    timeout(Duration::from_secs(3), changes.wait_for(Option::is_none))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!client.refresh_reply(|_| async { Reply::Failed }).await);
+    let mut end = [0];
+    assert!(matches!(r.read(&mut end).await, Ok(0) | Err(_)));
     ingress_task.await.unwrap();
-    drop(r);
-    drop(listener);
-    link.retire();
+    drop(client);
     control.write_all(b"{\"type\":\"stop\"}\n").await.unwrap();
     assert!(child.wait().await.unwrap().success());
-    ep.close().await;
 }
