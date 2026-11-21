@@ -458,8 +458,76 @@ final class AppModel: ObservableObject {
                 outside: liveOrigins,
                 accountID: accountID
             )
+            // And, once two answers a day apart agree, what such an
+            // address left in the account's WebKit store.
+            await self?.departedInstanceData.reconcile(live: liveOrigins, accountID: accountID)
         }
     )
+
+    /// The addresses this account opened here, and the removal of what one
+    /// left behind once it is no longer the account's.
+    private lazy var departedInstanceData = DepartedInstanceData(
+        defaults: defaults,
+        currentStore: { [weak self] in self?.websiteDataStore.identifier },
+        clean: { [weak self] origin, accountID in
+            await self?.removeDepartedInstanceData(origin: origin, accountID: accountID) ?? false
+        }
+    )
+
+    /// Removes what `origin` stored in the account's WebKit store, its
+    /// cached page, and this device's path choice for it. Only for an
+    /// address the signed-in account does not list and nothing shows.
+    private func removeDepartedInstanceData(origin: String, accountID: String) async -> Bool {
+        guard let address = WebOrigin.parseConfigured(origin) else {
+            return false
+        }
+        let store = websiteDataStore.identifier
+        // Asked now, and again right before each thing is deleted: the
+        // removal is prepared across suspensions, and the address may be
+        // listed again meanwhile.
+        let stillDeparted = { [weak self] () -> Bool in
+            guard let self else {
+                return false
+            }
+            // Not during a sign-out, a reset or a change of account: the
+            // store is about to go, with everything in it.
+            return self.sessionCoordinator.settledAccountID == accountID
+                && self.websiteDataStore.identifier == store
+                && !self.sessionCoordinator.currentInstances.contains(where: {
+                    WebOrigin(url: $0.url)?.serialized == origin
+                })
+                && self.route.runtime.flatMap({ WebOrigin(url: $0.instance.url)?.serialized }) != origin
+        }
+        guard stillDeparted() else {
+            return false
+        }
+        // Cookies belong to a host: kept while another address the account
+        // lists, or avibe.bot itself, is on that host.
+        let hostInUse = sessionCoordinator.controlPlaneURL.host == address.host
+            || sessionCoordinator.currentInstances.contains {
+                WebOrigin(url: $0.url)?.host == address.host
+            }
+        guard await InstanceSiteDataCleaner.clean(
+            origin: address,
+            in: websiteDataStore.dataStore,
+            removingCookies: !hostInUse,
+            willUse: { [weak self] webView in
+                // A store rotation waits for this WebView as for any other
+                // of the store.
+                self?.recordRuntimeReleaseBarrier(
+                    WebsiteDataStoreReleaseBarrier(webViews: [webView])
+                )
+            },
+            stillWanted: stillDeparted
+        ), stillDeparted() else {
+            return false
+        }
+        RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(store.uuidString, isDirectory: true))
+            .removePage(accountID: accountID, origin: origin)
+        directPathPreferences.set(.automatic, accountID: accountID, origin: origin)
+        return true
+    }
 
     private lazy var turnActivities = TurnActivityCoordinator(
         defaults: defaults,
@@ -2625,6 +2693,13 @@ final class AppModel: ObservableObject {
         guard sessionCoordinator.sessionConfirmationIsCurrent else {
             confirmSessionThenOpen()
             return true
+        }
+        if let origin = WebOrigin(url: runtime.instance.url)?.serialized {
+            departedInstanceData.noteOpened(
+                accountID: runtime.account.id,
+                origin: origin,
+                store: runtime.websiteDataStoreID
+            )
         }
         if NativeShellMetadata.liveActivitiesAvailable {
             let turnTarget = liveActivityTarget
