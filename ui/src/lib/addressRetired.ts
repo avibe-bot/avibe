@@ -22,9 +22,19 @@ const REPORT_TIMEOUT_MS = 2_000;
  *  frame, which alone names the new address. */
 const FRAME_WAIT_MS = 3_000;
 const LOCAL_DATABASES = ['avibe-local-store', 'avibe-local-snapshots'];
-/** The two counters by which another tab of this origin knows that what it
- *  captured is void (``signOutGeneration.ts``, the local store's epoch). */
-const WRITE_FENCE_KEYS = [SIGN_OUT_GENERATION_KEY, 'avibe.local-store.epoch.v1'];
+/** Every counter by which another tab of this origin knows that what it
+ *  captured is void: ``signOutGeneration.ts``, the local store's epoch, the
+ *  boot session's generation. Clearing localStorage resets them all. */
+const WRITE_FENCE_KEYS = [
+  SIGN_OUT_GENERATION_KEY,
+  'avibe.local-store.epoch.v1',
+  'avibe.boot-session.generation.v1',
+];
+/** Left behind for the other tabs of this origin. The counters only stop the
+ *  stores that have one; a draft, a layout, a recent file have none. So a tab
+ *  that sees this marker asks the instance and, if the address is retired,
+ *  clears itself and leaves too. */
+const RETIRED_MARKER_KEY = 'avibe.address-retired.v1';
 const RECEIPT_SHAPE = /^[A-Za-z0-9_-]{43}$/;
 /** The only shape a new address can have. The frame comes over this page's own
  *  authenticated stream; this is a second lock on where the page may be sent. */
@@ -135,7 +145,7 @@ function leaveWriteFence(): void {
   // A value no tab can have captured: the time of this clearing. It is all that
   // stays behind under this address.
   const fence = String(Date.now());
-  for (const key of WRITE_FENCE_KEYS) window.localStorage.setItem(key, fence);
+  for (const key of [...WRITE_FENCE_KEYS, RETIRED_MARKER_KEY]) window.localStorage.setItem(key, fence);
 }
 
 /** One request to the old address, after the page emptied its storage. Script
@@ -192,6 +202,50 @@ export function noteRetiredAddressResponse(): void {
   window.setTimeout(() => {
     void leaveRetiredAddress(null);
   }, FRAME_WAIT_MS);
+}
+
+let checkingMarker = false;
+
+/** Another tab, or the cleaning page, left the marker. The marker alone proves
+ *  nothing: a name that was taken back is this Avibe's address again and the
+ *  marker is then stale. Only the instance's own answer decides. */
+async function checkRetiredMarker(): Promise<void> {
+  if (leaving || checkingMarker || typeof window === 'undefined') return;
+  try {
+    if (window.localStorage.getItem(RETIRED_MARKER_KEY) === null) return;
+  } catch {
+    return;
+  }
+  checkingMarker = true;
+  try {
+    const response = await fetch('/api/session', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    });
+    if (isRetiredAddressResponse(response)) {
+      noteRetiredAddressResponse();
+    } else if (response.ok) {
+      window.localStorage.removeItem(RETIRED_MARKER_KEY);
+    }
+  } catch {
+    // Unreachable: this tab's next answered request decides (apiFetch).
+  } finally {
+    checkingMarker = false;
+  }
+}
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key === RETIRED_MARKER_KEY && event.newValue !== null) void checkRetiredMarker();
+  });
+  // A tab that was frozen saw no storage event; it looks when it comes back.
+  window.addEventListener('pageshow', () => void checkRetiredMarker());
+  document.addEventListener('resume', () => void checkRetiredMarker());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void checkRetiredMarker();
+  });
+  void checkRetiredMarker();
 }
 
 export function handleAddressRetiredFrame(data: string): void {

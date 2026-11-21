@@ -359,11 +359,14 @@ def test_e3_the_cleaning_script_leaves_the_write_fence_the_app_reads():
     from pathlib import Path
 
     ui = Path(__file__).resolve().parents[1] / "ui" / "src" / "lib"
-    sign_out, epoch = instance_address_responses.WRITE_FENCE_KEYS
+    sign_out, epoch, boot = instance_address_responses.WRITE_FENCE_KEYS
+    marker = instance_address_responses.RETIRED_MARKER_KEY
     assert f"SIGN_OUT_GENERATION_KEY = '{sign_out}'" in (ui / "signOutGeneration.ts").read_text(encoding="utf-8")
     assert f"STORE_EPOCH_KEY = '{epoch}'" in (ui / "localStore" / "index.ts").read_text(encoding="utf-8")
-    assert f"'{epoch}'" in (ui / "addressRetired.ts").read_text(encoding="utf-8")
-    assert json.dumps([sign_out, epoch]) in instance_address_responses.CLEANING_SCRIPT
+    assert f"BOOT_SESSION_GENERATION_KEY = '{boot}'" in (ui / "bootSession.ts").read_text(encoding="utf-8")
+    page = (ui / "addressRetired.ts").read_text(encoding="utf-8")
+    assert all(f"'{key}'" in page for key in (epoch, boot, marker))
+    assert json.dumps([sign_out, epoch, boot, marker]) in instance_address_responses.CLEANING_SCRIPT
 
 
 def test_e3_the_replacement_worker_and_the_inline_script_match_the_policy(address):
@@ -642,6 +645,23 @@ def test_c4_a_phone_paired_on_the_new_address_before_the_health_step_is_kept(add
     run()
     assert binding().active_host == NEW
     assert active_health_devices() == paired_after and old_phone not in paired_after
+
+
+def test_f2_a_page_that_reports_the_moment_it_is_woken_is_marked(address):
+    plane, _ = address
+    _cookie, sid = sign_in()
+    receipt = instance_address.receipt_for_session(sid)
+    accepted = []
+    # Pages are woken before the sessions are ended; a fast page reports at once.
+    instance_address._hooks.update(
+        wake_pages=lambda: accepted or accepted.append(instance_address.record_cleared(OLD, receipt)),
+        close_connections=lambda hosts: None,
+    )
+    rename_to("new")
+    run()
+    assert accepted == [True]
+    (old,) = instance_address.describe()["cleanup"]
+    assert [device["state"] for device in old["devices"]] == ["cleared"]
 
 
 def test_a5_a_change_made_elsewhere_is_adopted_without_deleting_anything(address):

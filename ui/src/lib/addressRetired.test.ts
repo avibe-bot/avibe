@@ -30,7 +30,9 @@ async function databaseNames(): Promise<string[]> {
 }
 
 const EPOCH_KEY = 'avibe.local-store.epoch.v1';
-const FENCE_KEYS = new Set([EPOCH_KEY, 'avibe.sign-out-generation.v1']);
+const BOOT_GENERATION_KEY = 'avibe.boot-session.generation.v1';
+const MARKER_KEY = 'avibe.address-retired.v1';
+const FENCE_KEYS = new Set([EPOCH_KEY, 'avibe.sign-out-generation.v1', BOOT_GENERATION_KEY, MARKER_KEY]);
 
 /** Everything localStorage holds apart from the write fence. */
 function heldKeys(): string[] {
@@ -143,7 +145,34 @@ describe('a page on a retired address', () => {
     expect(readSignOutGeneration()).not.toBe(captured.signOut);
     expect(readSignOutGeneration()).toBeGreaterThan(1_000_000_000_000);
     expect(window.localStorage.getItem(EPOCH_KEY)).not.toBe(captured.epoch);
-    expect(Object.keys(window.localStorage).sort()).toEqual([EPOCH_KEY, 'avibe.sign-out-generation.v1'].sort());
+    // The boot session's own counter too: a guard check in flight in another tab
+    // must not record the signed-in reader, email included, after the clearing.
+    expect(Number(window.localStorage.getItem(BOOT_GENERATION_KEY))).toBeGreaterThan(1_000_000_000_000);
+    expect(Object.keys(window.localStorage).sort()).toEqual([...FENCE_KEYS].sort());
+  });
+
+  it('another tab that sees the marker asks the instance, then clears itself and leaves', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url, init });
+      return new Response(null, { status: url === '/api/session' ? 410 : 204, headers: { 'X-Avibe-Address': 'retired' } });
+    }));
+    const address = await load();
+    address.setAddressStreamProbe(() => false);
+    window.localStorage.setItem(MARKER_KEY, '1763700000000');
+    window.dispatchEvent(new StorageEvent('storage', { key: MARKER_KEY, newValue: '1763700000000' }));
+    await vi.waitFor(() => expect(replaced).toEqual(['/']));
+    expect(fetchCalls[0].url).toBe('/api/session');
+    expect(heldKeys()).toEqual([]);
+    expect(await databaseNames()).toEqual([]);
+  });
+
+  it('a stale marker on an address that is this Avibe\'s again is removed and nothing is cleared', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"remote":true}', { status: 200 })));
+    window.localStorage.setItem(MARKER_KEY, '1763700000000');
+    await load(); // the check on load
+    await vi.waitFor(() => expect(window.localStorage.getItem(MARKER_KEY)).toBeNull());
+    expect(window.localStorage.getItem('avibe.session-drafts.v1')).toBe('unsent text');
+    expect(replaced).toEqual([]);
   });
 
   it('goes to the old root and reports nothing when a store cannot be deleted', async () => {

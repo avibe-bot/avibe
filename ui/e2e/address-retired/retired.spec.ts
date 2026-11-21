@@ -169,9 +169,15 @@ async function probe(page: Page) {
 }
 
 const EMPTY = { databases: [], caches: [], workers: 0 };
-// A cleaning page's script leaves only the two counters that stop a tab of the
-// old app, still open elsewhere, from writing its data back.
-const FENCE = ['avibe.local-store.epoch.v1', 'avibe.sign-out-generation.v1'];
+// A cleaning page's script leaves only the counters that stop a tab of the old
+// app, still open elsewhere, from writing its data back, and the marker that
+// tells such a tab to clear itself too.
+const FENCE = [
+  'avibe.address-retired.v1',
+  'avibe.boot-session.generation.v1',
+  'avibe.local-store.epoch.v1',
+  'avibe.sign-out-generation.v1',
+];
 
 function expectOnlyTheFence(local: string[], browserName: string): void {
   expect(local).not.toContain('avibe.session-drafts.v1');

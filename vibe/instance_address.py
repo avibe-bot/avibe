@@ -1181,6 +1181,11 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
         previous = journal.get("previous_hostname") or ""
         if binding.active_host != target:
             previous = binding.active_host
+        if binding.active_host != target and binding.active_host:
+            # The list and its receipts exist before any page is told to clear,
+            # or a page that reports at once would be reporting to nothing. The
+            # sign-out transaction snapshots again for a session that began since.
+            _snapshot_devices(binding, binding.active_host)
         if destructive and not isinstance(journal.get("health_targets"), list):
             # Fixed before the new address can be reached: a phone paired there
             # afterwards is not this change's to delete, however late the Health
@@ -1322,6 +1327,26 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
         )
     remote_access.discard_managed_active_hostnames()
     remote_access.record_connector_public_url(public_url)
+
+
+def _snapshot_devices(binding: Binding, hostname: str) -> None:
+    from storage import instance_address_clearing
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from vibe import remote_access
+
+    ensure_sqlite_state()
+    registry_binding = remote_access.device_binding(_load_config())
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+        instance_address_clearing.snapshot(
+            conn,
+            instance_id=binding.instance_id,
+            hostname=hostname,
+            binding=registry_binding,
+            now=int(_wall()),
+            receipt_hash_for=lambda session_id: receipt_hash(receipt_for_session(session_id)),
+        )
 
 
 def _end_sessions(binding: Binding, previous: str) -> None:
