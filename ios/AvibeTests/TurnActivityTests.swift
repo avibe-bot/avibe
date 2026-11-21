@@ -542,8 +542,9 @@ final class TurnActivityTests: XCTestCase {
     }
 
 
-    func testVersionTwoCapabilityAndMethodsAreRecognized() {
-        XCTAssertEqual(NativeShellMetadata.capabilities["liveActivities"], 2)
+    func testLockScreenProgressCapabilityReplacesLegacyCapability() {
+        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
+        XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         for method in ["setting", "setSetting", "observe", "openSettings", "status", "start", "stop"] {
             guard case .success(let request) = NativeBridgeRequest.parse(["method": "liveActivity." + method, "params": [:]]) else {
                 XCTFail("Missing bridge method: " + method); continue

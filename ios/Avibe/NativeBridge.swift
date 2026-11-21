@@ -33,7 +33,7 @@ struct NativeShellMetadata: Equatable {
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
-        "liveActivities": 2,
+        "lockScreenProgress": 1,
         "push": 1,
         "systemSchedule": 1,
         "viewport": 1,

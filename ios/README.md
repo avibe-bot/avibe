@@ -1719,10 +1719,12 @@ production instance is used.
 
 ## Turn Live Activities
 
-The shell always announces `liveActivities: 2`: `liveActivity.setting`,
+The shell always announces `lockScreenProgress: 1`: `liveActivity.setting`,
 `setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
-`stop` calls return `unsupported`. The Web requires capability version 2, so
-older TestFlight builds never show the setting or a conversation entry.
+`stop` calls return `unsupported`. The shell never announces `liveActivities`,
+so older Web bundles do not activate the retired entry's bridge observers. The
+new Web requires `lockScreenProgress`, so older TestFlight builds never show the
+setting or a conversation entry.
 
 The device-only setting defaults off. On launch with it off, earlier cards end
 locally and their tokens are forgotten without contacting an instance. Turning
