@@ -8,8 +8,8 @@
 use super::{
     choices::{Choices, Mode},
     rendezvous::{origin_of, Reply, Request},
-    wiring::{Effect, Material, Published, Routing, Target, Wiring},
-    Client,
+    wiring::{Effect, Material, Pace, Published, Routing, Target, Wiring},
+    Client, RefreshOutcome,
 };
 use crate::instance_client;
 use avibe_runtime_host::instance_client::protocol::ClientTarget;
@@ -31,18 +31,6 @@ use tokio::{
 pub(crate) const MENU_AUTOMATIC: &str = "direct-connection-automatic";
 pub(crate) const MENU_TUNNEL: &str = "direct-connection-tunnel";
 
-/// A rendezvous answer lasts five minutes; it is asked again at four.
-const RENEW: Duration = Duration::from_secs(240);
-/// After an unanswered rendezvous: sooner at first (the page may still be
-/// loading), then rarely, so an instance that offers no direct path is asked
-/// about four times an hour.
-const RETRY: [Duration; 5] = [
-    Duration::from_secs(5),
-    Duration::from_secs(15),
-    Duration::from_secs(60),
-    Duration::from_secs(300),
-    Duration::from_secs(900),
-];
 /// How often a session looks at the clock, to notice that the computer slept.
 const GLANCE: Duration = Duration::from_secs(30);
 /// How often open windows are looked at while any session exists.
@@ -346,7 +334,7 @@ fn start(app: &AppHandle, state: &Arc<Direct>, session: u64, client: Client) {
 /// runs out, and sooner after the computer slept.
 async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Client, mut stopped: oneshot::Receiver<()>) {
     let mut lifetime = client.listener_lifetime();
-    let mut failures = 0usize;
+    let mut pace = Pace::default();
     let mut due = Instant::now();
     let mut glanced = (Instant::now(), SystemTime::now());
     let ended = loop {
@@ -380,28 +368,21 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
             due = Instant::now() + Duration::from_secs(1);
             continue;
         };
-        // The core takes the answer's body; every other outcome is "no answer" to it.
-        let asking = client.refresh(|endpoint| {
-            let asked = ask(app.clone(), state.clone(), session, window, origin, endpoint);
-            async move { asked.await.body() }
-        });
-        let answered = tokio::select! {
+        // The core hears how the request ended in the adapter's own words:
+        // it keeps a link through a page that was not ready or a request
+        // that failed, and retires it on a refusal or a changed selection.
+        let asking =
+            client.refresh_reply(|endpoint| ask(app.clone(), state.clone(), session, window, origin, endpoint));
+        let outcome = tokio::select! {
             biased;
             _ = &mut stopped => break false,
-            answered = asking => answered,
+            outcome = asking => outcome,
         };
-        let effects = lock(&state.wiring).probed(session, answered);
+        let effects = lock(&state.wiring).probed(session, outcome == RefreshOutcome::Renewed);
         for effect in effects {
             perform(&app, &state, effect).await;
         }
-        due = Instant::now()
-            + if answered {
-                failures = 0;
-                RENEW
-            } else {
-                failures += 1;
-                RETRY[(failures - 1).min(RETRY.len() - 1)]
-            };
+        due = pace.next(&outcome, Instant::now());
     };
     if ended {
         // The listener is gone for good: take its route off before anything else.
@@ -415,9 +396,13 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
     drop(client);
 }
 
-/// Asks the rendezvous through `window`, which must still be the session's
-/// instance view when the request starts and when its answer arrives. How it
-/// ended is the adapter's own word; a window that is gone is "not ready".
+/// Asks the rendezvous through `window`, and says how it ended in the
+/// adapter's own words. `window` must still be the session's instance view
+/// when the request starts and when its answer arrives: if the session
+/// ended meanwhile, or its view is another one or is gone, the answer is
+/// "the selection changed", whatever the instance said. A view that is only
+/// between two documents is still the selection; the adapter then finds no
+/// document of the instance and says "not ready".
 async fn ask(
     app: AppHandle,
     state: Arc<Direct>,
@@ -433,12 +418,13 @@ async fn ask(
     let handle = app.clone();
     let sent = app.run_on_main_thread(move || {
         let Some(view) = handle.get_webview(&window) else {
+            let _ = answer.send(Reply::SelectionChanged);
             return;
         };
         let current = {
             let handle = handle.clone();
             move || {
-                lock(&state.wiring).asks_through(session) == Some(window.as_str())
+                lock(&state.wiring).selects(session, &window)
                     && instance_client::runtime_webview(&handle).is_some_and(|view| view.label() == window)
             }
         };
@@ -447,8 +433,9 @@ async fn ask(
         });
     });
     match sent {
-        Ok(()) => answered.await.unwrap_or(Reply::NotReady),
-        Err(_) => Reply::NotReady,
+        // The adapter could not be reached at all: nothing was learned.
+        Ok(()) => answered.await.unwrap_or(Reply::Failed),
+        Err(_) => Reply::Failed,
     }
 }
 

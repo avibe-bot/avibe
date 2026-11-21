@@ -24,6 +24,7 @@
 use super::{
     choices::{Choices, Mode},
     connect::Authority,
+    RefreshOutcome,
 };
 use std::{net::SocketAddrV4, time::Duration};
 use tokio::time::Instant;
@@ -126,6 +127,61 @@ const AWAY: Duration = Duration::from_secs(30);
 /// After a session's listener ended, or none could be started, how long
 /// before another is started for the same instance view.
 const COOLING: Duration = Duration::from_secs(60);
+
+/// A rendezvous answer lasts five minutes; it is asked again at four.
+const RENEW: Duration = Duration::from_secs(240);
+/// After an unanswered rendezvous: sooner at first (the page may still be
+/// loading), then rarely, so an instance that offers no direct path is asked
+/// about four times an hour.
+const RETRY: [Duration; 5] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(60),
+    Duration::from_secs(300),
+    Duration::from_secs(900),
+];
+/// Never sooner than this after a try, however little of a kept admission
+/// is left.
+const SOONEST: Duration = Duration::from_secs(1);
+
+/// When one session asks its rendezvous next, from how each try ended.
+#[derive(Default)]
+pub struct Pace {
+    /// Tries in a row without a fresh answer.
+    failures: usize,
+    /// The last try left the session with a direct link.
+    linked: bool,
+}
+
+impl Pace {
+    pub fn next(&mut self, outcome: &RefreshOutcome, now: Instant) -> Instant {
+        let after = match outcome {
+            RefreshOutcome::Renewed => {
+                (self.failures, self.linked) = (0, true);
+                RENEW
+            }
+            // The link is kept under the admission it had. The core says by
+            // when to ask again so that it does not run out between two
+            // tries: that bound wins over the ladder.
+            RefreshOutcome::Retained { retry_before } => {
+                (self.failures, self.linked) = (self.failures + 1, true);
+                self.ladder().min(*retry_before).max(SOONEST)
+            }
+            // No link. One that was just lost is asked for again from the
+            // ladder's first step, not from where its kept tries had got to.
+            RefreshOutcome::Retired => {
+                self.failures = if self.linked { 1 } else { self.failures + 1 };
+                self.linked = false;
+                self.ladder()
+            }
+        };
+        now + after
+    }
+
+    fn ladder(&self) -> Duration {
+        RETRY[self.failures.clamp(1, RETRY.len()) - 1]
+    }
+}
 
 pub struct Wiring {
     routing: Routing,
@@ -437,6 +493,16 @@ impl Wiring {
                 detach: session.routed,
             })
             .collect()
+    }
+
+    /// Whether `window` is still the session's instance view: the selection
+    /// a rendezvous through it was started for. A view that is between two
+    /// documents is still the selection; a session that ended, or whose
+    /// view is another one, is not.
+    pub fn selects(&self, session: u64, window: &str) -> bool {
+        self.sessions
+            .iter()
+            .any(|candidate| candidate.id == session && candidate.runtime.as_deref() == Some(window))
     }
 
     /// The window a session asks its rendezvous through: its instance view,

@@ -1,7 +1,8 @@
 use super::{
     choices::{Choices, Mode},
     shell::{remote_instance_permission, window_arguments, WRY_DEFAULT_ARGUMENTS},
-    wiring::{Effect, Material, Published, Routing, Target, Wiring},
+    wiring::{Effect, Material, Pace, Published, Routing, Target, Wiring},
+    RefreshOutcome,
 };
 use std::time::Duration;
 use tauri::webview::{PermissionKind, PermissionResponse};
@@ -572,13 +573,17 @@ fn a_view_between_two_documents_keeps_its_session_for_a_while() {
     wiring.window_created(session, "show-1");
     wiring.probed(session, true);
 
+    assert!(wiring.selects(session, "main-runtime-1"));
+    assert!(!wiring.selects(session, "main-runtime-2") && !wiring.selects(session + 1, "main-runtime-1"));
     // The view reloads: the session and its routes stay, and nothing is
-    // asked through a document that is not the instance's.
+    // asked through a document that is not the instance's. It is still the
+    // selection: an answer that was on its way is not "the selection changed".
     assert_eq!(
         wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(10)),
         []
     );
     assert_eq!(wiring.asks_through(session), None);
+    assert!(wiring.selects(session, "main-runtime-1"));
     assert_eq!(wiring.shared(ACCOUNT, ONE), Some(session));
     assert_eq!(
         wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(39)),
@@ -603,6 +608,8 @@ fn a_view_between_two_documents_keeps_its_session_for_a_while() {
         wiring.reconcile(Some(&away(ONE, "main-runtime-1")), |_| true, later(130)),
         [retire(session, &["main-runtime-1", "show-1"])]
     );
+    // A session that ended selects nothing.
+    assert!(!wiring.selects(session, "main-runtime-1"));
 
     // What really ends a session does not wait: sign-out, a switch, and the
     // choice, each while the view is between documents.
@@ -685,4 +692,50 @@ fn the_shell_keeps_looking_only_while_a_session_could_still_start() {
     assert!(!wiring.awaits(Some(&published)));
     assert_eq!(wiring.probed(scout, true), [retire(scout, &[])]);
     assert!(!wiring.awaits(Some(&published)));
+}
+
+/// A fresh answer is renewed at four of its five minutes. No link: a ladder
+/// that ends at four times an hour. A link kept through an unanswered
+/// rendezvous: asked about again within the core's bound, so it does not
+/// run out between two rare tries, and never in a spin.
+#[test]
+fn the_next_rendezvous_comes_before_a_kept_admission_runs_out() {
+    let now = Instant::now();
+    let after = |pace: &mut Pace, outcome: RefreshOutcome| pace.next(&outcome, now).duration_since(now).as_millis();
+    let retained = |milliseconds: u64| RefreshOutcome::Retained {
+        retry_before: Duration::from_millis(milliseconds),
+    };
+
+    // An instance that never answers: 5 s, 15 s, 1 min, 5 min, then every 15 min.
+    let mut pace = Pace::default();
+    assert_eq!(
+        [(); 7].map(|()| after(&mut pace, RefreshOutcome::Retired)),
+        [5_000, 15_000, 60_000, 300_000, 900_000, 900_000, 900_000]
+    );
+    // An answer: four minutes, and the ladder starts over after it.
+    assert_eq!(after(&mut pace, RefreshOutcome::Renewed), 240_000);
+    assert_eq!(after(&mut pace, RefreshOutcome::Renewed), 240_000);
+
+    // A missed renewal with the link kept: the core's bound, every time,
+    // however far the ladder has grown.
+    assert_eq!(
+        [(); 6].map(|()| after(&mut pace, retained(5_000))),
+        [5_000, 5_000, 5_000, 5_000, 5_000, 5_000]
+    );
+    // The ladder where it is the sooner of the two.
+    let mut fresh = Pace::default();
+    assert_eq!(after(&mut fresh, retained(60_000)), 5_000);
+    assert_eq!(after(&mut fresh, retained(60_000)), 15_000);
+    assert_eq!(after(&mut fresh, retained(60_000)), 60_000);
+    // Nearly out: soon, but not in a spin.
+    assert_eq!(after(&mut pace, retained(2_500)), 2_500);
+    assert_eq!(after(&mut pace, retained(300)), 1_000);
+    assert_eq!(after(&mut pace, retained(0)), 1_000);
+    // The kept link is lost after all: asked for again from the ladder's
+    // first step, not from where the kept tries had got to.
+    assert_eq!(after(&mut pace, RefreshOutcome::Retired), 5_000);
+    assert_eq!(after(&mut pace, RefreshOutcome::Retired), 15_000);
+    // And an answer that comes back is renewed as any other.
+    assert_eq!(after(&mut pace, RefreshOutcome::Renewed), 240_000);
+    assert_eq!(after(&mut pace, RefreshOutcome::Retired), 5_000);
 }
