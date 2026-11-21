@@ -202,15 +202,12 @@ fn published(app: &AppHandle) -> Option<Published> {
 }
 
 /// Whether the system's own proxy settings rule out a direct route to
-/// `host` now (`Wiring::system_proxy` has the rule). They can change at any
+/// `host` now (`Wiring::system_proxy` has the rule; the direct core reads
+/// the settings, as it does for its own public leg). They can change at any
 /// time, so they are read at every look and before every window that would
-/// be routed, never remembered.
-///
-/// The reading of those settings belongs to the direct core, which needs the
-/// same facts for its public leg (D1c). Until that is merged this answers
-/// "ruled out" for every host, so no session starts and nothing is routed.
-async fn system_proxy_rules_out(_host: &str) -> bool {
-    true
+/// be routed, never remembered. Settings that cannot be read rule it out.
+async fn system_proxy_rules_out(host: &str) -> bool {
+    !Client::system_proxy_allows_route(host).await
 }
 
 /// One look at the app, off the main thread: reads a window's URL.
