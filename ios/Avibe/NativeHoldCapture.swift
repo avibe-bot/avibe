@@ -272,6 +272,7 @@ final class NativeHoldCapture {
     /// The press being followed, until its take is adopted or it ends.
     private var hold: Hold?
     private let after: @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> (() -> Void)
+    private let onceTouchesAreHeard: @MainActor (@escaping @MainActor () -> Void) -> (() -> Void)
     private let uptimeMs: () -> Int
     private let haptic: NativeHoldHaptic
     private let startsAtTouchDown: () -> Bool
@@ -301,12 +302,15 @@ final class NativeHoldCapture {
 
     /// `afterQueued` runs its work once what the input already sent to the
     /// main queue has arrived (by default, the main queue's next turn);
-    /// `isInBackground` says whether the App is in the background.
+    /// `isInBackground` says whether the App is in the background;
+    /// `onceTouchesAreHeard` runs its work once every touch event that has
+    /// reached the App has been handled (`whenTouchesAreHeard`).
     init(
         audio: NativeHoldCaptureAudio,
         afterQueued: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
         isInBackground: @escaping () -> Bool = { UIApplication.shared.applicationState == .background },
         after: (@MainActor (TimeInterval, @escaping @MainActor () -> Void) -> (() -> Void))? = nil,
+        onceTouchesAreHeard: (@MainActor (@escaping @MainActor () -> Void) -> (() -> Void))? = nil,
         uptimeMs: @escaping () -> Int = { Int(DispatchTime.now().uptimeNanoseconds / 1_000_000) },
         haptic: NativeHoldHaptic? = nil,
         startsAtTouchDown: @escaping () -> Bool = { !NativeHoldQuietSwitch.isOn },
@@ -319,6 +323,7 @@ final class NativeHoldCapture {
         self.afterQueued = afterQueued
         self.isInBackground = isInBackground
         self.after = after ?? { delay, work in NativeHoldCapture.mainTimer(delay, work) }
+        self.onceTouchesAreHeard = onceTouchesAreHeard ?? { work in NativeHoldCapture.whenTouchesAreHeard(work) }
         self.uptimeMs = uptimeMs
         self.haptic = haptic ?? .system()
         self.startsAtTouchDown = startsAtTouchDown
@@ -589,7 +594,16 @@ final class NativeHoldCapture {
         }
         hold.cancelTimer = after(holdSeconds) { [weak self, weak hold] in
             guard let self, let hold, self.hold === hold, !hold.recognised else { return }
-            self.recognise(hold)
+            // The threshold has passed by the clock, which does not say the
+            // finger is still down: on a busy main thread this block can run
+            // while the touch's end waits to be handled, and a tap would get
+            // the cue and keep the microphone. The hold is recognised once
+            // every touch event that has reached the App has been handled;
+            // a lift among them ends the press first, as a tap.
+            hold.cancelTimer = self.onceTouchesAreHeard { [weak self, weak hold] in
+                guard let self, let hold, self.hold === hold, !hold.recognised else { return }
+                self.recognise(hold)
+            }
         }
     }
 
@@ -622,12 +636,16 @@ final class NativeHoldCapture {
     func touchEnded(in webView: WKWebView, timestamp: TimeInterval? = nil) {
         guard let hold, hold.webView === webView else { return }
         guard hold.recognised else {
+            // Counted by the touch's own length: this block may run late.
+            if let down = hold.downStamp, let up = timestamp {
+                hold.tapMs = max(0, Int(((up - down) * 1000).rounded()))
+            }
             cancelHold(hold, why: "tap")
             return
         }
-        // A finger lifted just before the threshold on a busy main thread:
-        // the timer's block can run before this one. By the touch's own
-        // times it was a tap, and its audio is dropped as a tap's. The page
+        // A lift that reached the App only after the hold was recognised (the
+        // system delivered it late), from before the threshold by the touch's
+        // own times: a tap, and its audio is dropped as a tap's. The page
         // cannot have taken it yet: its answer comes after this block.
         if let down = hold.downStamp, let up = timestamp, (up - down) * 1000 < Double(hold.timings.holdMs),
            let take = running, take.hold === hold, !take.adopted {
@@ -757,6 +775,24 @@ final class NativeHoldCapture {
         take.detached = true
         take.pending = Data()
         end(reason: why)
+    }
+
+    /// Runs `work` on the main thread once it has handled every touch event
+    /// that has reached the App; the returned closure cancels.
+    ///
+    /// UIKit hands touches to the App from a source of the main run loop.
+    /// The loop calls its `beforeWaiting` observers only in a pass in which
+    /// no such source had anything to do, so by then a lift that had arrived
+    /// has been delivered. With the main thread idle that is at once.
+    static func whenTouchesAreHeard(_ work: @escaping @MainActor () -> Void) -> (() -> Void) {
+        let observer = CFRunLoopObserverCreateWithHandler(
+            kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, false, 0
+        ) { _, _ in
+            MainActor.assumeIsolated { work() }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+        return { CFRunLoopObserverInvalidate(observer) }
     }
 
     /// Timers on the main queue; the returned closure cancels.
