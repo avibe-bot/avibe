@@ -150,6 +150,11 @@ _RETAINED_OWNER_ROUTES = {
     # Using a reset card spends a consumable that cannot be given back: a signed-in
     # Member manages the rest of the Model Hub, not this.
     ("POST", "/api/models/sources/{source_id}/reset-cards/use"),
+    # Changing this Avibe's address ends every session and gives the old name
+    # away after its waiting period (docs/plans/instance-address-change.md A1).
+    ("GET", "/api/instance-address"),
+    ("POST", "/api/instance-address/preview"),
+    ("POST", "/api/instance-address/change"),
 }
 
 
@@ -192,7 +197,8 @@ def test_complete_registered_api_management_inventory():
     # + 1 Model Hub reset card use (Owner role, classified in _RETAINED_OWNER_ROUTES).
     # + 3 personal installation claim methods (Owner; browser return is not an API route).
     # + 8 device function, activity and Health ticket methods.
-    assert len(endpoints) == 369
+    # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
+    assert len(endpoints) == 372
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),

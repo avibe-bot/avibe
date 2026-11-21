@@ -908,6 +908,7 @@ _BROWSER_COMMANDS = (
     "run test:vault-integrity",
     "run test:chat-selection",
     "run test:badge-triggers",
+    "run test:address-retired",
     "run test:workbench-general-build -- composer-mention-picker.spec.ts",
     "run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts",
     "run test:safe-browser",

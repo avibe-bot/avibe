@@ -1,0 +1,173 @@
+{
+  "receipt": "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR",
+  "document": {
+    "status": 410,
+    "headers": [
+      [
+        "clear-site-data",
+        "\"cache\", \"storage\""
+      ],
+      [
+        "cache-control",
+        "no-store"
+      ],
+      [
+        "referrer-policy",
+        "no-referrer"
+      ],
+      [
+        "x-content-type-options",
+        "nosniff"
+      ],
+      [
+        "x-robots-tag",
+        "noindex"
+      ],
+      [
+        "content-security-policy",
+        "default-src 'none'; script-src 'sha256-faXKWRvkRuAnd25o8kQEnVWOIGW8EIVsDCCdyhC5DHQ='; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "x-avibe-address",
+        "retired"
+      ],
+      [
+        "content-type",
+        "text/html; charset=utf-8"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_remote_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_remote_oauth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_oauth_device=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "vibe_csrf_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "avibe_claim_browser=; Path=/remote/claim/callback; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ]
+    ],
+    "body": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex\"><meta name=\"avibe-address-receipt\" content=\"RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR\"><title>Avibe</title></head><body><p>This Avibe has a new address. People who can access it can open it after signing in at avibe.bot.</p><p><a href=\"https://avibe.bot\" rel=\"noreferrer\">avibe.bot</a></p><script>(async function(){var ok=true,m=document.querySelector('meta[name=\"avibe-address-receipt\"]'),r=m&&m.content;try{localStorage.clear();var f=String(Date.now());[\"avibe.sign-out-generation.v1\", \"avibe.local-store.epoch.v1\", \"avibe.boot-session.generation.v1\", \"avibe.address-retired.v1\"].forEach(function(k){localStorage.setItem(k,f)})}catch(e){ok=false}try{sessionStorage.clear()}catch(e){ok=false}try{var names=[\"avibe-local-store\", \"avibe-local-snapshots\"];if(indexedDB.databases){(await indexedDB.databases()).forEach(function(d){if(d&&d.name&&names.indexOf(d.name)<0)names.push(d.name)})}await Promise.all(names.map(function(n){return new Promise(function(res){var q=indexedDB.deleteDatabase(n);q.onsuccess=function(){res()};q.onerror=function(){ok=false;res()};q.onblocked=function(){ok=false;res()}})}))}catch(e){ok=false}try{if(self.caches){var keys=await caches.keys();await Promise.all(keys.map(function(k){return caches.delete(k)}))}}catch(e){ok=false}try{if(navigator.serviceWorker){var regs=await navigator.serviceWorker.getRegistrations();for(var i=0;i<regs.length;i++){try{var s=await regs[i].pushManager.getSubscription();if(s)await s.unsubscribe()}catch(e){}await regs[i].unregister()}}}catch(e){ok=false}try{document.cookie.split(';').forEach(function(c){var n=c.split('=')[0].trim();if(n){document.cookie=n+'=; Max-Age=0; Path=/';document.cookie=n+'=; Max-Age=0; Path=/; Secure'}})}catch(e){}if(ok&&r){try{await fetch(\"/__avibe/address-cleared\",{method:'POST',body:r,credentials:'omit',cache:'no-store'})}catch(e){}}})();</script></body></html>"
+  },
+  "worker": {
+    "status": 200,
+    "headers": [
+      [
+        "clear-site-data",
+        "\"cache\", \"storage\""
+      ],
+      [
+        "cache-control",
+        "no-store"
+      ],
+      [
+        "referrer-policy",
+        "no-referrer"
+      ],
+      [
+        "x-content-type-options",
+        "nosniff"
+      ],
+      [
+        "x-robots-tag",
+        "noindex"
+      ],
+      [
+        "content-security-policy",
+        "default-src 'none'; script-src 'sha256-faXKWRvkRuAnd25o8kQEnVWOIGW8EIVsDCCdyhC5DHQ='; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "x-avibe-address",
+        "retired"
+      ],
+      [
+        "content-type",
+        "text/javascript; charset=utf-8"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_remote_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_remote_oauth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_oauth_device=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "vibe_csrf_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "avibe_claim_browser=; Path=/remote/claim/callback; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ]
+    ],
+    "body": "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(event){event.waitUntil((async function(){try{var s=await self.registration.pushManager.getSubscription();if(s)await s.unsubscribe()}catch(e){}try{var keys=await caches.keys();await Promise.all(keys.map(function(k){return caches.delete(k)}))}catch(e){}try{var names=[\"avibe-local-store\", \"avibe-local-snapshots\"];if(indexedDB.databases){(await indexedDB.databases()).forEach(function(d){if(d&&d.name&&names.indexOf(d.name)<0)names.push(d.name)})}names.forEach(function(n){try{indexedDB.deleteDatabase(n)}catch(e){}})}catch(e){}await self.registration.unregister()})())});self.addEventListener('push',function(){});"
+  },
+  "report": {
+    "status": 204,
+    "headers": [
+      [
+        "clear-site-data",
+        "\"cache\""
+      ],
+      [
+        "cache-control",
+        "no-store"
+      ],
+      [
+        "referrer-policy",
+        "no-referrer"
+      ],
+      [
+        "x-content-type-options",
+        "nosniff"
+      ],
+      [
+        "x-robots-tag",
+        "noindex"
+      ],
+      [
+        "content-security-policy",
+        "default-src 'none'; script-src 'sha256-faXKWRvkRuAnd25o8kQEnVWOIGW8EIVsDCCdyhC5DHQ='; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      ],
+      [
+        "x-avibe-address",
+        "retired"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_remote_session=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_remote_oauth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "__Host-vibe_oauth_device=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "vibe_csrf_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ],
+      [
+        "set-cookie",
+        "avibe_claim_browser=; Path=/remote/claim/callback; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
+      ]
+    ],
+    "body": ""
+  }
+}

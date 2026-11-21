@@ -37,7 +37,7 @@ from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock, config_recovery_refusal
 from vibe import api, cloudflare_network, runtime
-from vibe import tunnel_quality
+from vibe import instance_address, tunnel_quality
 from vibe.shutdown_diagnostics import register_shutdown_hook
 
 logger = logging.getLogger(__name__)
@@ -670,9 +670,53 @@ def _normalize_active_hostnames(value: Any) -> tuple[str, ...]:
         hostname = item.strip().lower().rstrip(".")
         if not hostname or "/" in hostname or ":" in hostname or hostname in seen:
             continue
+        # A managed name is active only by this computer's own record
+        # (``public_url``). This list is avibe.bot's last answer, kept without
+        # expiry: it may add custom hostnames, never keep a former managed name
+        # served (docs/plans/instance-address-change.md B7).
+        if instance_address.is_managed_name(hostname):
+            continue
         seen.add(hostname)
         normalized.append(hostname)
     return tuple(normalized)
+
+
+def discard_managed_active_hostnames() -> None:
+    """Rewrite the stored snapshot without managed names, as part of an address switch."""
+
+    global _ACTIVE_HOSTNAMES_CACHE
+
+    state_path = _active_hostnames_state_path()
+    with _ACTIVE_HOSTNAMES_LOCK:
+        _ACTIVE_HOSTNAMES_CACHE = None
+        payload = runtime.read_json(state_path)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return
+        payload["active_hostnames"] = list(_normalize_active_hostnames(payload.get("active_hostnames")))
+        try:
+            runtime.write_json(state_path, payload)
+        except OSError as exc:
+            logger.warning("failed to rewrite remote access hostname snapshot: %s", exc)
+
+
+def record_connector_public_url(public_url: str) -> None:
+    """Keep the running connector's recorded signature in step with an address switch.
+
+    The tunnel and its token do not change with the address. Without this the
+    next Start or reconcile would see a different signature and bounce it.
+    """
+
+    try:
+        with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS):
+            state = _read_state()
+            if state is None or "public_url" not in state or state["public_url"] == public_url:
+                return
+            state["public_url"] = public_url
+            runtime.write_json(_state_path(), state)
+    except _ConnectorLifecycleBusy:
+        logger.warning("Could not record the new address on the connector state; the next start may restart the tunnel")
+    except OSError:
+        logger.warning("Could not record the new address on the connector state", exc_info=True)
 
 
 def _replace_active_hostnames(config: V2Config, value: Any) -> frozenset[str]:
@@ -1758,6 +1802,7 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
         except Exception:
             logger.debug("Direct runtime-status response handoff failed")
         _replace_active_hostnames(config, result.get("active_hostnames"))
+        instance_address.note_generation_hint(result.get("hostname_generation"))
         reported_kind = _normalized_instance_kind(result.get("instance_kind"))
         if reported_kind is not None:
             # Capture-before-IO: overlapping heartbeats can arrive out of
@@ -2207,6 +2252,7 @@ def sync_authorization_revision_once(
         if not _authorization_revision_sync_configured(config):
             return {"ok": False, "error": "authorization_revision_sync_not_configured"}
         result = _device_json_request(config, "GET", "authorization-revision")
+        instance_address.note_generation_hint(result.get("hostname_generation"))
         revision = _replace_authorization_revision(
             config,
             result.get("authorization_revision"),
