@@ -33,8 +33,10 @@ export function SetupRemoteAccess() {
     return () => { current = false; };
   }, [navigate]);
 
-  // A claim this tab left open is followed on the Devices page, with its way to cancel.
-  const open = flow.phase === 'waiting' || flow.phase === 'binding' || flow.lost !== null;
+  // A claim this tab left open is followed on the Devices page, with its way to cancel: also one
+  // the instance is still trying to hand to avibe.bot, which would otherwise hold this optional
+  // step with both of its buttons off and nothing said.
+  const open = flow.phase === 'waiting' || flow.phase === 'retrying' || flow.phase === 'binding' || flow.lost !== null;
   useEffect(() => {
     if (open) navigate(DEVICES_PATH, { replace: true });
   }, [navigate, open]);

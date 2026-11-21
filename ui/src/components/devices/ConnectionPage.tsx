@@ -141,6 +141,10 @@ export function ConnectionPage() {
   const renameFrom = useRef<string | null>(null);
   /** The dialog of a running change was closed: its end is not brought back as a dialog. */
   const renameDismissed = useRef(false);
+  /** Which request of the rename dialog is the current one. The page outlives the dialog, so an
+   *  answer is acted on as the dialog's only while nothing has closed it or changed the name
+   *  since the request was sent. */
+  const renameRun = useRef(0);
   /** The address a change this page sent is heading for, until the page has seen how it ended. */
   const [tracking, setTracking] = useState<string | null>(null);
   const [rebind, setRebind] = useState<RebindState | undefined>();
@@ -406,18 +410,22 @@ export function ConnectionPage() {
   const renameContinue = () => {
     if (rename?.step !== 'form' || !rename.name) return;
     const { name } = rename;
+    renameRun.current += 1;
+    const run = renameRun.current;
+    const current = () => alive.current && renameRun.current === run;
     setStep({ step: 'form', name, busy: true });
     void (async () => {
       try {
         const answer = await api.previewRename(name, devices.find((each) => each.self)?.id);
-        if (!alive.current) return;
+        // Closed, or another name typed, while this was on its way: it is nobody's answer now.
+        if (!current()) return;
         preview.current = { ...answer, name };
         setStep({
           step: 'confirm', name, hostname: answer.hostname, countdown: RENAME_CONFIRM_WAIT, isReturn: answer.isReturn,
           releaseAt: answer.releaseAt, holdDays: answer.holdDays, healthConnected: answer.healthConnected, devices: answer.devices,
         });
       } catch (error) {
-        if (alive.current) setStep({ step: 'form', name, refusal: refusalOf(error) });
+        if (current()) setStep({ step: 'form', name, refusal: refusalOf(error) });
       }
     })();
   };
@@ -429,6 +437,16 @@ export function ConnectionPage() {
     renameFrom.current = previous || null;
     renameDismissed.current = false;
     lostChange.current = null;
+    renameRun.current += 1;
+    const run = renameRun.current;
+    // The change was sent and cannot be unsent by closing its dialog. It is followed either way;
+    // only the dialog does not come back to someone who closed it, except to say the address
+    // has changed.
+    const follow = () => {
+      setTracking(pending.hostname);
+      if (renameRun.current === run) setStep({ step: 'pending', hostname: pending.hostname });
+      else renameDismissed.current = true;
+    };
     setStep({ ...step, busy: true });
     void (async () => {
       try {
@@ -438,28 +456,25 @@ export function ConnectionPage() {
         if (answer.state === 'applied') {
           renameFrom.current = null;
           setStep({ step: 'done', hostname: answer.hostname, previous, retired: next?.retired.find((each) => each.hostname === previous) ?? null });
-        } else {
-          setTracking(pending.hostname);
-          setStep({ step: 'pending', hostname: pending.hostname });
-        }
+        } else follow();
       } catch (error) {
         if (!alive.current) return;
         if (error instanceof LostAnswer) {
           // Unknown: the address state says whether the change is running, done, or never arrived.
           lostChange.current = { reads: 0 };
-          setTracking(pending.hostname);
-          setStep({ step: 'pending', hostname: pending.hostname });
+          follow();
           return;
         }
         renameFrom.current = null;
         await readAddress();
-        if (alive.current) setStep({ step: 'form', name: pending.name, refusal: refusalOf(error) });
+        if (alive.current && renameRun.current === run) setStep({ step: 'form', name: pending.name, refusal: refusalOf(error) });
       }
     })();
   };
 
   const renameClose = () => {
     if (renameRunning) renameDismissed.current = true;
+    renameRun.current += 1;
     setStep(undefined);
     preview.current = null;
     if (addressOpen) go(CONNECTION_PATH, true);
@@ -593,7 +608,10 @@ export function ConnectionPage() {
       onRunDiagnostics={runDiagnostics}
       onChangeDomain={() => go(CONNECTION_ADDRESS_PATH)}
       onShowCleanup={(retired: RetiredName) => setStep({ step: 'cleanup', retired })}
-      onRenameNameChange={(name) => setStep({ step: 'form', name: name.trim().toLowerCase() })}
+      onRenameNameChange={(name) => {
+        renameRun.current += 1;
+        setStep({ step: 'form', name: name.trim().toLowerCase() });
+      }}
       onRenameContinue={renameContinue}
       onRenameConfirm={renameConfirm}
       onRenameClose={renameClose}

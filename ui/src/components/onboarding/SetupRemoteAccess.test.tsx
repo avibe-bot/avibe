@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '../../i18n';
 import { DevicesApiError, devicesApi, type ClaimForm } from '../devices/api';
-import { readClaimMarker } from '../devices/claimFlow';
+import { readClaimMarker, writeClaimMarker } from '../devices/claimFlow';
 import { said } from '../devices/testText';
 import { SetupRemoteAccess } from './SetupRemoteAccess';
 import { offersRemoteAccessStep } from './setupRemoteAccessStep';
@@ -73,6 +73,14 @@ describe('Setup · remote access', () => {
     await waitFor(() => expect(cancel).toHaveBeenCalledWith('claim-late'));
     expect(submit).not.toHaveBeenCalled();
     expect(readClaimMarker()).toBeNull();
+  });
+
+  it.each(['pending', 'waiting', 'approved'])('hands a claim this tab left open (%s) to the Devices page, and never holds the step', async (state) => {
+    // `waiting`: the instance could not reach avibe.bot yet and keeps trying.
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state });
+    mount();
+    expect(await screen.findByText('devices')).toBeTruthy();
   });
 
   it('skips to the workbench', async () => {

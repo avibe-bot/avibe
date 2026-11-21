@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import i18n from '../../i18n';
-import { DevicesApiError, LostAnswer, devicesApi } from './api';
+import { DevicesApiError, LostAnswer, devicesApi, type RenamePreview } from './api';
 import { readClaimMarker, writeClaimMarker } from './claimFlow';
 import { ConnectionPage } from './ConnectionPage';
 import { ConnectionPageView, type ConnectionPageViewProps } from './ConnectionPageView';
@@ -331,6 +331,68 @@ describe('ConnectionPage · the domain', () => {
     }
     expect(await within(dialog).findByText('已清理')).toBeTruthy();
     expect(within(dialog).queryByText('未确认')).toBeNull();
+  });
+
+  it('drops the answer to a 「继续」 that was closed or retyped before it arrived', async () => {
+    const answers: Array<(value: RenamePreview) => void> = [];
+    const asked = vi.spyOn(devicesApi, 'previewRename').mockImplementation(() => new Promise((resolve) => { answers.push(resolve); }));
+    const previewOf = (name: string): RenamePreview => ({
+      confirmationId: `conf-${name}`, hostname: `${name}-app.avibe.bot`, isReturn: false, holdDays: 30,
+      releaseAt: '2026-12-23T00:00:00.000Z', healthConnected: false, devices: [],
+    });
+    mount('/settings/remote-access/connection/address');
+
+    // Closed while the first answer is on its way: the confirmation does not open on a page
+    // that has gone back to the connection settings.
+    fireEvent.change(await screen.findByRole('textbox', { name: '新名称' }), { target: { value: 'first' } });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await waitFor(() => expect(asked).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection'));
+    await act(async () => { answers[0](previewOf('first')); });
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // Another name typed while an answer is on its way: the older answer cannot replace it.
+    fireEvent.click(screen.getByRole('button', { name: '更改域名' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: '新名称' }), { target: { value: 'second' } });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await waitFor(() => expect(asked).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: 'third' } });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await waitFor(() => expect(asked).toHaveBeenCalledTimes(3));
+    await act(async () => { answers[1](previewOf('second')); });
+    expect(screen.queryByText('改成 second-app.avibe.bot？')).toBeNull();
+    await act(async () => { answers[2](previewOf('third')); });
+    expect(await screen.findByText('改成 third-app.avibe.bot？')).toBeTruthy();
+  });
+
+  it('does not bring back the dialog of a change that was confirmed and then closed, and still follows it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const newHost = 'maxwell-app.avibe.bot';
+    vi.spyOn(devicesApi, 'previewRename').mockResolvedValue({ confirmationId: 'conf-1', hostname: newHost, isReturn: false, holdDays: 30, releaseAt: '2026-12-23T00:00:00.000Z', healthConnected: false, devices: [] });
+    let answer!: (value: { state: 'pending' }) => void;
+    vi.spyOn(devicesApi, 'changeAddress').mockReturnValue(new Promise((resolve) => { answer = resolve; }) as never);
+    const read = vi.spyOn(devicesApi, 'address').mockResolvedValue(address());
+    mount('/settings/remote-access/connection/address');
+
+    fireEvent.change(await screen.findByRole('textbox', { name: '新名称' }), { target: { value: 'maxwell' } });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await screen.findByText(`改成 ${newHost}？`);
+    for (let second = 0; second < 6; second += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+    fireEvent.click(screen.getByRole('button', { name: '更改域名' }));
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    // avibe.bot has not answered yet: said in the row, no dialog returns.
+    await act(async () => { answer({ state: 'pending' }); });
+    expect(await screen.findByText(`正在把域名改为 ${newHost}…`)).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // It went through: that is said, because the address is a different one now.
+    read.mockResolvedValue(address({ hostname: newHost, retired: [{ hostname: host, releaseAt: '2026-12-23T00:00:00.000Z', devices: [] }] }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(await screen.findByText(`域名已改为 ${newHost}`)).toBeTruthy();
   });
 
   it('reopens on a change that is still running, and offers no second one', async () => {

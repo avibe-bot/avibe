@@ -310,7 +310,8 @@ export function DevicesPage() {
 
   const signOut = useCallback((device: Device) => act(async () => {
     const answer = await api.signOut(device.id);
-    setDetail(undefined);
+    // Only its own panel is closed: another device opened meanwhile stays open.
+    setDetail((current) => (current === device.id ? undefined : current));
     setNotice(noticeFrom(answer, {
       device: deviceName(t, device),
       // The row the page just acted on says whose it was: no guess.
