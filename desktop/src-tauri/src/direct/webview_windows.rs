@@ -55,11 +55,16 @@ pub fn fetch_rendezvous(
     done: impl FnOnce(Reply) + 'static,
 ) {
     let origin = request.origin().to_owned();
-    if !current() {
-        done(Reply::SelectionChanged);
-        return;
-    }
-    if !shows(view, &origin) {
+    // Whatever is delivered, and from whichever path (a failed frame lookup
+    // or a world that could not be made included), is delivered for the
+    // selection as it is at that moment: `done` asks `current` itself, every
+    // time, and a selection that is no longer current gets `SelectionChanged`.
+    let current = Rc::new(current);
+    let done = {
+        let current = current.clone();
+        move |reply: Reply| done(reply.for_selection(current()))
+    };
+    if !current() || !shows(view, &origin) {
         done(Reply::NotReady);
         return;
     }
@@ -92,13 +97,8 @@ pub fn fetch_rendezvous(
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 let reply = Reply::read(text.as_deref());
-                // The selection changed while the request ran: nothing the
-                // instance said is this selection's any more.
-                if !current() {
-                    done(Reply::SelectionChanged);
-                    return;
-                }
-                // Only a ready answer depends on which document gave it.
+                // Only a ready answer depends on which document gave it:
+                // everything else is delivered at once.
                 if !matches!(reply, Reply::Ready(_)) {
                     done(reply);
                     return;
@@ -107,13 +107,8 @@ pub fn fetch_rendezvous(
                 // its answer is then not this document's to give.
                 let fourth = third.clone();
                 top_document(&third, origin.clone(), move |after| {
-                    if !current() {
-                        done(Reply::SelectionChanged);
-                    } else if after.is_some_and(|after| after == document) && shows(&fourth, &origin) {
-                        done(reply);
-                    } else {
-                        done(Reply::Failed);
-                    }
+                    let same = after.is_some_and(|after| after == document) && shows(&fourth, &origin);
+                    done(if same { reply } else { Reply::Failed });
                 });
             });
         });

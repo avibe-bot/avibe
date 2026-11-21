@@ -51,12 +51,11 @@ pub fn fetch_rendezvous(
     current: impl Fn() -> bool + 'static,
     done: impl FnOnce(Reply) + 'static,
 ) {
-    if !current() {
-        done(Reply::SelectionChanged);
-        return;
-    }
-    if !shows(webview, request.origin()) {
-        done(Reply::NotReady);
+    // Whatever is delivered, and from whichever path, is delivered for the
+    // selection as it is at that moment.
+    let done = move |reply: Reply, current: &dyn Fn() -> bool| done(reply.for_selection(current()));
+    if !current() || !shows(webview, request.origin()) {
+        done(Reply::NotReady, &current);
         return;
     }
     let arguments = request.arguments();
@@ -82,22 +81,15 @@ pub fn fetch_rendezvous(
             None
         };
         let reply = Reply::read(text.as_deref());
-        // The selection changed while the request ran: nothing the instance
-        // said is this selection's any more.
-        if !current() {
-            done(Reply::SelectionChanged);
-            return;
-        }
-        // A navigation committed meanwhile: a ready answer is then not this
-        // document's to give.
-        if !shows(&view, &origin) {
-            done(match reply {
-                Reply::Ready(_) => Reply::Failed,
-                other => other,
-            });
-            return;
-        }
-        done(reply);
+        // The selection may have changed while the request ran: nothing
+        // the instance said is then this selection's any more (`done`). A
+        // navigation may have committed meanwhile: a ready answer is then
+        // not this document's to give.
+        let reply = match reply {
+            Reply::Ready(_) if !shows(&view, &origin) => Reply::Failed,
+            other => other,
+        };
+        done(reply, &current);
     });
     // SAFETY: Main thread; every argument is a plain NSString, the frame is
     // the main frame, and the world is this adapter's own.

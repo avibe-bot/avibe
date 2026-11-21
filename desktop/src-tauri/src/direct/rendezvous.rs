@@ -142,6 +142,17 @@ pub enum Reply {
 }
 
 impl Reply {
+    /// What an adapter delivers for a request whose selection is, or is no
+    /// longer, the one on show. Every completion of an adapter passes
+    /// through this, so no outcome can outlive the selection it was for.
+    pub fn for_selection(self, current: bool) -> Self {
+        if current {
+            self
+        } else {
+            Reply::SelectionChanged
+        }
+    }
+
     /// What `Client::refresh` takes.
     pub fn body(self) -> Option<String> {
         match self {
