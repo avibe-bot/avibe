@@ -134,6 +134,29 @@ impl Epoch {
         }
     }
 }
+// Filter by name at every stored path, including expired entries. Never edit the live jar on save.
+fn remove_memory_only_cookies(store: &mut CookieStore) {
+    let keys: Vec<_> = store
+        .iter_any()
+        .filter(|cookie| {
+            matches!(
+                cookie.name(),
+                "__Host-avibe-sign-in-proof" | "__Host-avibe-sign-in-start"
+            )
+        })
+        .map(|cookie| {
+            (
+                String::from(&cookie.domain),
+                String::from(&cookie.path),
+                cookie.name().to_owned(),
+            )
+        })
+        .collect();
+    for (domain, path, name) in keys {
+        store.remove(&domain, &path, &name);
+    }
+}
+
 impl NativeSession {
     pub fn new(origin: Url, transport: Arc<dyn Transport>) -> Self {
         Self {
@@ -146,7 +169,7 @@ impl NativeSession {
     pub fn restore(origin: Url, transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
         let cookies =
             cookie_store::serde::json::load(bytes).map_err(|_| ClientError::new("credentials_unavailable"))?;
-        let result = Self {
+        let mut result = Self {
             origin,
             cookies,
             transport,
@@ -159,6 +182,8 @@ impl NativeSession {
         }) {
             return Err(ClientError::new("credentials_unavailable"));
         }
+        // Older versions may have saved a proof or an unfinished ceremony.
+        remove_memory_only_cookies(&mut result.cookies);
         Ok(result)
     }
     pub fn fence(&mut self, epoch: Epoch) {
@@ -172,7 +197,9 @@ impl NativeSession {
     }
     pub fn persist(&self) -> Result<Vec<u8>, ClientError> {
         let mut bytes = Vec::new();
-        cookie_store::serde::json::save_incl_expired_and_nonpersistent(&self.cookies, &mut bytes)
+        let mut eligible = self.cookies.clone();
+        remove_memory_only_cookies(&mut eligible);
+        cookie_store::serde::json::save_incl_expired_and_nonpersistent(&eligible, &mut bytes)
             .map_err(|_| ClientError::new("credentials_unavailable"))?;
         Ok(bytes)
     }
