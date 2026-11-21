@@ -5283,4 +5283,240 @@ extension NavigationPolicyTests {
         }
     }
 
+    // MARK: A departed instance address
+
+    /// An address the account opened is forgotten, and what it stored
+    /// removed, only after avibe.bot has answered twice without listing it,
+    /// at least a day apart. One answer alone removes nothing (a wrong or
+    /// empty list cannot delete an instance's local data); an address that
+    /// is listed again, or opened again, starts over; a removal that fails
+    /// is tried again; a WebKit store that is gone took its data with it.
+    @MainActor
+    func testADepartedAddressIsRemovedOnlyAfterTwoAnswersADayApart() async throws {
+        let suite = "DepartedInstanceData.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        var store = UUID()
+        var removed: [String] = []
+        var removalSucceeds = true
+        let data = DepartedInstanceData(
+            defaults: defaults,
+            now: { clock },
+            currentStore: { store },
+            clean: { origin, accountID in
+                removed.append("\(accountID) \(origin)")
+                return removalSucceeds
+            }
+        )
+        let one = "https://one.example"
+        let two = "https://two.example"
+        let hour: TimeInterval = 60 * 60
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        data.noteOpened(accountID: "a", origin: two, store: store)
+
+        // Listed: nothing is counted.
+        await data.reconcile(live: [one, two], accountID: "a")
+        XCTAssertNil(data.entries(accountID: "a")[one]?.missingSince)
+
+        // Missing once, and again within the day: nothing is removed.
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(data.entries(accountID: "a")[one]?.missingSince, clock)
+        clock += 23 * hour
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, [])
+
+        // Listed again: it starts over.
+        await data.reconcile(live: [one, two], accountID: "a")
+        XCTAssertNil(data.entries(accountID: "a")[one]?.missingSince)
+        clock += 2 * hour
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, [])
+
+        // Opened again: it starts over too.
+        clock += 25 * hour
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, [])
+
+        // Another account's answer counts nothing against this one's.
+        clock += 25 * hour
+        await data.reconcile(live: [], accountID: "b")
+        XCTAssertEqual(removed, [])
+
+        // Missing in a second answer a day later: removed. A removal that
+        // fails keeps the address for the next answer.
+        removalSucceeds = false
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, ["a \(one)"])
+        XCTAssertNotNil(data.entries(accountID: "a")[one])
+        removalSucceeds = true
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, ["a \(one)", "a \(one)"])
+        XCTAssertNil(data.entries(accountID: "a")[one])
+        XCTAssertNotNil(data.entries(accountID: "a")[two])
+
+        // An empty list is one answer like any other.
+        await data.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(removed.count, 2)
+        clock += 24 * hour
+        await data.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(removed, ["a \(one)", "a \(one)", "a \(two)"])
+        XCTAssertEqual(data.entries(accountID: "a"), [:])
+
+        // The store changed (a sign-out, another account): its data went
+        // with it, so the record goes with no removal.
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        store = UUID()
+        await data.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(data.entries(accountID: "a"), [:])
+        XCTAssertEqual(removed.count, 3)
+    }
+
+    /// The removal itself, in a WebKit store with two sibling addresses of
+    /// one registrable domain (as two instances of an account are): the
+    /// departed address loses its localStorage, IndexedDB, Cache Storage and
+    /// cookies; the sibling keeps all of its own, and a cookie of the parent
+    /// domain stays. No request reaches the address while it is cleaned.
+    @MainActor
+    func testOnlyTheDepartedAddressesStorageIsRemoved() async throws {
+        let store = WKWebsiteDataStore(forIdentifier: UUID())
+        let departed = try XCTUnwrap(WebOrigin.parseConfigured("https://old-name.avibe-test.example"))
+        let sibling = try XCTUnwrap(WebOrigin.parseConfigured("https://other-name.avibe-test.example"))
+
+        func run(_ script: String, at url: URL) async throws -> String {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = store
+            let webView = WKWebView(frame: .zero, configuration: configuration)
+            let loader = SimulatedPageLoader()
+            webView.navigationDelegate = loader
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/html; charset=utf-8"]
+            ))
+            webView.loadSimulatedRequest(
+                URLRequest(url: url),
+                response: response,
+                responseData: Data("<!doctype html><title>stored</title>".utf8)
+            )
+            try await loader.finished()
+            let result = try await webView.callAsyncJavaScript(
+                script, arguments: [:], in: nil, contentWorld: .page
+            )
+            return try XCTUnwrap(result as? String)
+        }
+        let seed = """
+            localStorage.setItem("kept", "yes");
+            await new Promise((resolve, reject) => {
+              const open = indexedDB.open("conversations", 1);
+              open.onupgradeneeded = () => open.result.createObjectStore("s");
+              open.onerror = () => reject(open.error);
+              open.onsuccess = () => {
+                const tx = open.result.transaction("s", "readwrite");
+                tx.objectStore("s").put("v", "k");
+                tx.oncomplete = () => { open.result.close(); resolve(); };
+                tx.onerror = () => reject(tx.error);
+              };
+            });
+            const cache = await caches.open("pages");
+            await cache.put("/page", new Response("x"));
+            document.cookie = "page_set=1; path=/; max-age=86400";
+            return "seeded";
+            """
+        let read = """
+            const databases = (await indexedDB.databases()).map((database) => database.name);
+            const cacheNames = await caches.keys();
+            return JSON.stringify([localStorage.getItem("kept"), databases, cacheNames, document.cookie]);
+            """
+        func httpOnlyCookie(_ name: String, domain: String) throws -> HTTPCookie {
+            try XCTUnwrap(HTTPCookie(properties: [
+                .name: name, .value: "1", .domain: domain, .path: "/",
+                .secure: "TRUE", .expires: Date().addingTimeInterval(86_400),
+                HTTPCookiePropertyKey("HttpOnly"): "TRUE",
+            ]))
+        }
+        let cookies = store.httpCookieStore
+        for origin in [departed, sibling] {
+            let seeded = try await run(seed, at: origin.url)
+            XCTAssertEqual(seeded, "seeded")
+            try await cookies.setCookie(httpOnlyCookie("session", domain: origin.host))
+        }
+        try await cookies.setCookie(httpOnlyCookie("parent", domain: ".avibe-test.example"))
+        let stored = #"["yes",["conversations"],["pages"],"page_set=1"]"#
+        let before = try await run(read, at: departed.url)
+        XCTAssertEqual(before, stored)
+
+        let cleaned = await InstanceSiteDataCleaner.clean(origin: departed, in: store)
+        XCTAssertTrue(cleaned)
+
+        let afterDeparted = try await run(read, at: departed.url)
+        XCTAssertEqual(afterDeparted, #"[null,[],[],""]"#)
+        let afterSibling = try await run(read, at: sibling.url)
+        XCTAssertEqual(afterSibling, stored)
+        let left = await cookies.allCookies().map { "\($0.name)@\($0.domain)" }.sorted()
+        XCTAssertEqual(left, [
+            "page_set@other-name.avibe-test.example",
+            "parent@.avibe-test.example",
+            "session@other-name.avibe-test.example",
+        ])
+
+        // A real local address: nothing is requested from it, neither by
+        // the seeding pages (simulated) nor by the removal.
+        let requests = LockedCounter()
+        let server = try LocalHTTPServer { _ in
+            _ = requests.next()
+            return .status(404)
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let local = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let seededLocal = try await run(seed, at: local.url)
+        XCTAssertEqual(seededLocal, "seeded")
+        let cleanedLocal = await InstanceSiteDataCleaner.clean(origin: local, in: store)
+        XCTAssertTrue(cleanedLocal)
+        let afterLocal = try await run(read, at: local.url)
+        XCTAssertTrue(afterLocal.hasPrefix(#"[null,[],[],"#), afterLocal)
+        try await Task.sleep(for: .seconds(1))
+        XCTAssertEqual(requests.count, 0)
+    }
+}
+
+@MainActor
+private final class SimulatedPageLoader: NSObject, WKNavigationDelegate {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func finished() async throws {
+        if let result {
+            return try result.get()
+        }
+        try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+
+    private func settle(_ outcome: Result<Void, Error>) {
+        guard result == nil else {
+            return
+        }
+        result = outcome
+        continuation?.resume(with: outcome)
+        continuation = nil
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        settle(.success(()))
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        settle(.failure(error))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        settle(.failure(error))
+    }
 }

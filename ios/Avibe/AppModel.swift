@@ -458,8 +458,46 @@ final class AppModel: ObservableObject {
                 outside: liveOrigins,
                 accountID: accountID
             )
+            // And, once two answers a day apart agree, what such an
+            // address left in the account's WebKit store.
+            await self?.departedInstanceData.reconcile(live: liveOrigins, accountID: accountID)
         }
     )
+
+    /// The addresses this account opened here, and the removal of what one
+    /// left behind once it is no longer the account's.
+    private lazy var departedInstanceData = DepartedInstanceData(
+        defaults: defaults,
+        currentStore: { [weak self] in self?.websiteDataStore.identifier },
+        clean: { [weak self] origin, accountID in
+            await self?.removeDepartedInstanceData(origin: origin, accountID: accountID) ?? false
+        }
+    )
+
+    /// Removes what `origin` stored in the account's WebKit store, its
+    /// cached page, and this device's path choice for it. Only for an
+    /// address the signed-in account does not list and nothing shows.
+    private func removeDepartedInstanceData(origin: String, accountID: String) async -> Bool {
+        guard
+            let address = WebOrigin.parseConfigured(origin),
+            sessionCoordinator.currentAccount?.id == accountID,
+            !sessionCoordinator.currentInstances.contains(where: {
+                WebOrigin(url: $0.url)?.serialized == origin
+            }),
+            route.runtime.flatMap({ WebOrigin(url: $0.instance.url)?.serialized }) != origin
+        else {
+            return false
+        }
+        let store = websiteDataStore.identifier
+        guard await InstanceSiteDataCleaner.clean(origin: address, in: websiteDataStore.dataStore) else {
+            return false
+        }
+        RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(store.uuidString, isDirectory: true))
+            .removePage(accountID: accountID, origin: origin)
+        directPathPreferences.set(.automatic, accountID: accountID, origin: origin)
+        return true
+    }
 
     private lazy var turnActivities = TurnActivityCoordinator(
         defaults: defaults,
@@ -2612,6 +2650,13 @@ final class AppModel: ObservableObject {
         guard sessionCoordinator.sessionConfirmationIsCurrent else {
             confirmSessionThenOpen()
             return true
+        }
+        if let origin = WebOrigin(url: runtime.instance.url)?.serialized {
+            departedInstanceData.noteOpened(
+                accountID: runtime.account.id,
+                origin: origin,
+                store: runtime.websiteDataStoreID
+            )
         }
         let turnTarget = liveActivityTarget
         turnActivities.selectTarget(turnTarget)
