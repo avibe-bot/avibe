@@ -8056,7 +8056,8 @@
       "retrying": "暂时连不上 avibe.bot，这次请求还开着，Avibe 在重试…",
       "slow": "已连接，但比较慢",
       "unsteady": "已连接，但不太稳定",
-      "tunnelUnknown": "现在读不到连接的状态"
+      "tunnelUnknown": "现在读不到连接的状态",
+      "optimizing": "已连接，正在优化线路"
     },
     "claim": {
       "account": "账号",

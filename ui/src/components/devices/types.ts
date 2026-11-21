@@ -214,9 +214,10 @@ export type SwitchRefusal = { row: 'direct' | 'relay' | 'autoRecovery' | 'profil
  * The tunnel as the status reports it: its round trip, and the protocol in use. `down` only when
  * there is in fact no connection (not running, no connection registered, or requests through it
  * failing). A connected tunnel that is slow is `slow`; one short of its connections, with errors,
- * or still settling after a recovery is `unsteady`. What cannot be read is `unknown`.
+ * or still settling after a recovery is `unsteady`; one being evaluated for a better route is
+ * `optimizing`, connected like the others. What cannot be read is `unknown`.
  */
-export type TunnelStatus = { state: 'up' | 'slow' | 'unsteady' | 'down' | 'unknown'; ms?: number; active?: 'quic' | 'http2' | null };
+export type TunnelStatus = { state: 'up' | 'slow' | 'unsteady' | 'optimizing' | 'down' | 'unknown'; ms?: number; active?: 'quic' | 'http2' | null };
 
 // ── Changing the domain (docs/plans/instance-address-change.md) ────────────────────────────────
 

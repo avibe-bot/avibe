@@ -188,12 +188,15 @@ export function tunnelFromStatus(status: RemoteAccessStatus | null, now: number 
   const effective = quality.transport?.effective || quality.protocol;
   const active = effective === 'quic' || effective === 'http2' ? effective : null;
   if (quality.ha_connections === 0 || getTunnelRequestPathDisplayState(quality.request_path) === 'unavailable') return { state: 'down', active };
+  // An optimization that is running (`recovering`) is not a fault: the tunnel is connected and a
+  // better route is being evaluated, which is what the page says.
   const grade = getTunnelQualityDisplayState(quality, true);
   const latency = quality.request_path?.latency_ms?.p95 ?? quality.rtt_ms?.median;
   return {
     state: grade === 'good' || grade === 'fair' ? 'up'
       : grade === 'poor' || grade === 'critical' ? 'slow'
-        : grade === 'degraded' || grade === 'recovering' ? 'unsteady' : 'unknown',
+        : grade === 'degraded' ? 'unsteady'
+          : grade === 'recovering' ? 'optimizing' : 'unknown',
     ms: typeof latency === 'number' ? Math.round(latency) : undefined,
     active,
   };

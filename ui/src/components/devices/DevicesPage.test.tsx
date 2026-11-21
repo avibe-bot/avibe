@@ -162,16 +162,24 @@ describe('DevicesPage · turning remote access on', () => {
     expect(readClaimMarker()).toBeNull();
   });
 
-  it('hands a bind-again that comes back here to the connection page', async () => {
-    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
-    mount();
+  it('hands a bind-again that comes back here to the connection page, that once and not on any later visit', async () => {
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now(), away: true });
+    const first = mount();
     expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
+    first.unmount();
+
+    // The attempt is still kept (only its starter may confirm binding as a new computer), and the
+    // same tab can open Devices again like any other page.
+    expect(readClaimMarker()).toMatchObject({ kind: 'rebind', id: 'rebind-1' });
+    mount();
+    expect(await screen.findByRole('button', { name: '开启远程访问' })).toBeTruthy();
+    expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access');
   });
 
   // With the product's own router (a data router), where two navigations in one tick do not both
   // happen: the later one wins. One navigation carries the bind-again on, with the callback's word.
   it('hands a refused bind-again return on in one navigation, and is never left loading', async () => {
-    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now(), away: true });
     const capabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true, is_instance_owner: true };
     const router = createMemoryRouter([
       { path: '/settings/remote-access', element: <DevicesPage /> },
@@ -307,6 +315,24 @@ describe('DevicesPage · devices', () => {
     expect(await screen.findByText(said('没有收到回答，这正是关闭成功时的样子'))).toBeTruthy();
     expect(screen.queryByText(said('没有完成，请再试一次。'))).toBeNull();
     expect(screen.queryByText(said('现在读不到远程访问的状态。'))).toBeNull();
+  });
+
+  it('takes "it worked" back when a later read shows remote access still on', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([{ ...macbook, self: undefined }, { ...chrome, self: true, online: { path: 'tunnel' } }]));
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    // The request never left (the phone dropped off the network for a moment): nothing was turned off.
+    const stop = vi.spyOn(devicesApi, 'stop').mockRejectedValue(new LostAnswer());
+    mount('/settings/remote-access', 'owner', true);
+
+    fireEvent.click(await screen.findByRole('switch', { name: '远程访问' }));
+    fireEvent.click(await screen.findByRole('button', { name: '关闭远程访问' }));
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    // The read that follows goes through the tunnel that was supposed to be gone.
+    expect(await screen.findByText(said('没有收到结果，不确定有没有完成。下面是重新读取到的状态。'))).toBeTruthy();
+    expect(screen.queryByText(said('这正是关闭成功时的样子'))).toBeNull();
+    expect(screen.getByRole('switch', { name: '远程访问' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getAllByText('Cloudflare 隧道').length).toBeGreaterThan(0);
   });
 
   it('does not call a device list it could not read empty', async () => {

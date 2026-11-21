@@ -153,7 +153,7 @@ export function useClaimFlow({ kind, locale, onEnd, returned = null, submit = su
         void cancelRoute(form.claimId).catch(() => undefined);
         return;
       }
-      writeClaimMarker({ kind, id: form.claimId, at: Date.now() });
+      writeClaimMarker({ kind, id: form.claimId, at: Date.now(), away: true });
       setClaimId(form.claimId);
       submit(form);
       // The page is leaving; if it does not (a test, a blocked navigation), follow the claim here.

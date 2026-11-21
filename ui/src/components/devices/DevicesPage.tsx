@@ -14,7 +14,7 @@ import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { copyTextToClipboard } from '@/lib/utils';
 import { DevicesApiError, LostAnswer, devicesApi as api, type SignOutAnswer } from './api';
-import { readClaimMarker, returnRefusal } from './claimFlow';
+import { arriveFromClaim, returnRefusal } from './claimFlow';
 import { DevicesPageView } from './DevicesPageView';
 import { deviceName } from './format';
 import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, instanceUrl } from './paths';
@@ -106,8 +106,10 @@ export function DevicesPage() {
   // The callback's own refusal arrives as one allowlisted word in the address, read once here.
   const [returned] = useState(() => returnRefusal(location.search));
   // A bind-again started from the connection page comes back here (the claim's return is one
-  // fixed address): it is followed there, with the callback's word if there is one.
-  const [rebindReturn] = useState(() => readClaimMarker()?.kind === 'rebind');
+  // fixed address): it is followed there, with the callback's word if there is one. Only that one
+  // arrival is handed on: the same tab opening Devices later, while the attempt is still kept for
+  // what only its starter may do, is an ordinary visit.
+  const [rebindReturn] = useState(() => arriveFromClaim('rebind'));
   const [claimIssue, setClaimIssue] = useState<ClaimProblem | undefined>(() => (returned && !rebindReturn ? claimProblem(returned) : undefined));
   const [notice, setNotice] = useState<SignOutNotice | undefined>();
   const alive = useRef(true);
@@ -131,6 +133,9 @@ export function DevicesPage() {
       if (remote.status === 'fulfilled' && remote.value && typeof remote.value.paired === 'boolean') {
         setStatus(remote.value);
         setStatusRead('known');
+        // Read again through a tunnel that was supposed to be gone: it was not turned off after
+        // all. What is known is only that the answer was lost.
+        if (remote.value.running) setProblem((current) => (current === 'offFromAfar' ? 'lost' : current));
       } else {
         setStatusRead('unknown');
       }

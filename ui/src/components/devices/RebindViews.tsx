@@ -16,6 +16,8 @@ import type { RebindDialog, RebindState } from './types';
 export type RebindActions = {
   onRebind?: () => void;
   onRebindConfirm?: () => void;
+  /** Cancel this tab's own request while avibe.bot has not approved it. */
+  onRebindCancel?: () => void;
   onRebindAsNew?: () => void;
   onRebindAsNewConfirm?: () => void;
   onRebindClose?: () => void;
@@ -34,13 +36,16 @@ function Line({ children, tone = 'muted' }: { children: string; tone?: 'muted' |
 }
 
 /** The row under 「更改域名」. What it says and offers follows the binding's state alone. */
-export function RebindRow({ state, canReset, needsBrowser, actions }: {
+export function RebindRow({ state, canReset, needsBrowser, open, actions }: {
   state: RebindState;
   /** This browser started the attempt avibe.bot refused, so it may confirm the reset. */
   canReset?: boolean;
   /** Inside Avibe Desktop: binding again passes avibe.bot in a browser, so the row opens this
    *  computer's own page there instead of starting it. */
   needsBrowser?: boolean;
+  /** This tab's own request is open and not approved yet (or the instance is trying avibe.bot
+   *  again): the row says so and offers the one thing to do, cancelling it. */
+  open?: 'waiting' | 'retrying';
   actions: RebindActions;
 }) {
   const { t } = useTranslation();
@@ -113,12 +118,16 @@ export function RebindRow({ state, canReset, needsBrowser, actions }: {
       );
       break;
   }
+  if (open && state.state !== 'remote') {
+    lines = <Line>{t(open === 'retrying' ? 'devices.reach.retrying' : 'devices.reach.waiting')}</Line>;
+    control = <Button variant="ghost" size="compact" className="shrink-0" onClick={actions.onRebindCancel}>{t('common.cancel')}</Button>;
+  }
   return (
     <div id="rebind" className="flex flex-col gap-2 border-t border-border px-5 py-3 md:flex-row md:items-center md:gap-3">
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium text-foreground">{t('devices.rebind.title')}</div>
         {lines}
-        {needsBrowser && (state.state === 'ready' || state.state === 'asNewOffered') && <Line>{t('devices.rebind.inBrowser')}</Line>}
+        {needsBrowser && !open && (state.state === 'ready' || state.state === 'asNewOffered') && <Line>{t('devices.rebind.inBrowser')}</Line>}
       </div>
       {control}
     </div>

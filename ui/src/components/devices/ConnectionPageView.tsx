@@ -79,6 +79,8 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   canReset?: boolean;
   /** Inside Avibe Desktop: binding again is done in a browser on this computer. */
   rebindNeedsBrowser?: boolean;
+  /** This tab's own bind-again request is still open at avibe.bot: it can be cancelled. */
+  rebindOpen?: 'waiting' | 'retrying';
   /** A confirmed bind-again step is being carried out. */
   rebindBusy?: boolean;
 };
@@ -273,7 +275,7 @@ function RelayRow({ relay, direct, refused, busy, onChange }: {
 
 export function ConnectionPageView({
   load, connection, tunnel, remote, via, path, preference, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
-  rename, rebind, rebindDialog, canReset, rebindNeedsBrowser, rebindBusy, ...actions
+  rename, rebind, rebindDialog, canReset, rebindNeedsBrowser, rebindOpen, rebindBusy, ...actions
 }: ConnectionPageViewProps) {
   const { t, i18n } = useTranslation();
   const shell = (children: ReactNode) => (
@@ -323,7 +325,7 @@ export function ConnectionPageView({
           <Button variant="ghost" size="compact" className="shrink-0" onClick={() => actions.onShowCleanup?.(each)}>{t('devices.rename.showCleanup')}</Button>
         </div>
       ))}
-      {rebind && <RebindRow state={rebind} canReset={canReset} needsBrowser={rebindNeedsBrowser} actions={actions} />}
+      {rebind && <RebindRow state={rebind} canReset={canReset} needsBrowser={rebindNeedsBrowser} open={rebindOpen} actions={actions} />}
     </SettingsPanel>
   ) : null;
   const dialogs = (
@@ -359,7 +361,7 @@ export function ConnectionPageView({
   const pending = Boolean(change && (change.state === 'applying' || change.state === 'verifying' || change.state === 'restoring' || change.state === 'unknown'));
   const statusFor = (setting: TunnelSetting) => (change?.setting === setting ? <ChangeLine change={change} /> : null);
   const set = actions.onSettingChange;
-  const connected = tunnel.state === 'up' || tunnel.state === 'slow' || tunnel.state === 'unsteady';
+  const connected = tunnel.state === 'up' || tunnel.state === 'slow' || tunnel.state === 'unsteady' || tunnel.state === 'optimizing';
   const tunnelInUse = remote && via === 'tunnel' && connected;
   const directBadge: { label: string; variant: BadgeVariant } = {
     label: t(directStateKeys[direct]),
@@ -410,6 +412,8 @@ export function ConnectionPageView({
             <div role="status" className="mt-1 text-[11px] leading-relaxed text-gold-ink">
               {t(tunnel.state === 'slow' ? 'devices.reach.slow' : 'devices.reach.unsteady')}
             </div>
+          ) : tunnel.state === 'optimizing' ? (
+            <div role="status" className="mt-1 text-[11px] leading-relaxed text-muted">{t('devices.reach.optimizing')}</div>
           ) : null}
           control={tunnel.state === 'down'
             ? <Badge variant="warning">{t('devices.connection.notConnected')}</Badge>

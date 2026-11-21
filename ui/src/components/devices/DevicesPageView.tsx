@@ -245,7 +245,9 @@ function ReachCard({ reach, operate = false, optimize, actions }: {
       : reach.tunnel === 'unknown'
         ? t('devices.reach.tunnelUnknown')
         : joinParts(t, [
-            t(reach.tunnel === 'slow' ? 'devices.reach.slow' : reach.tunnel === 'unsteady' ? 'devices.reach.unsteady' : 'devices.reach.good'),
+            t(reach.tunnel === 'slow' ? 'devices.reach.slow'
+              : reach.tunnel === 'unsteady' ? 'devices.reach.unsteady'
+                : reach.tunnel === 'optimizing' ? 'devices.reach.optimizing' : 'devices.reach.good'),
             reach.ms ? t('remoteAccess.direct.legMs', { ms: reach.ms }) : null,
             reach.direct ? t('devices.reach.directOn') : null,
           ]);

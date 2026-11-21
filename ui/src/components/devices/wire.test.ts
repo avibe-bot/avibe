@@ -152,7 +152,8 @@ describe('tunnelFromStatus', () => {
     expect(read({ tunnel_quality: sample({ grade: 'poor' }) }).state).toBe('slow');
     expect(read({ tunnel_quality: sample({ state: 'degraded', grade: 'fair', ha_connections: 2 }) }).state).toBe('unsteady');
     expect(read({ tunnel_quality: sample({ state: 'degraded', grade: 'critical' }) }).state).toBe('unsteady');
-    expect(read({ tunnel_quality: sample({ state: 'recovering' }) }).state).toBe('unsteady');
+    // An evaluation in progress is not unsteadiness: it is said as what it is.
+    expect(read({ tunnel_quality: sample({ state: 'recovering' }) })).toEqual({ state: 'optimizing', ms: 120, active: 'quic' });
     expect(read({ tunnel_quality: sample() })).toEqual({ state: 'up', ms: 120, active: 'quic' });
     expect(read({ tunnel_quality: sample({ grade: 'fair' }) }).state).toBe('up');
   });

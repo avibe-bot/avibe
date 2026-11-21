@@ -16,6 +16,10 @@ export type ClaimMarker = {
   at: number;
   /** The address the local API reported while the claim was being accepted. */
   host?: string;
+  /** The page left for avibe.bot with this claim and has not been back since. The return lands on
+   *  the Devices page whatever started it, so this is what tells that one arrival from any later
+   *  visit; it is taken down the first time a page sees it. */
+  away?: boolean;
 };
 
 function storage(): Storage | null {
@@ -33,7 +37,11 @@ export function readClaimMarker(now: number = Date.now()): ClaimMarker | null {
     const value = JSON.parse(raw) as Partial<ClaimMarker> | null;
     if (!value || (value.kind !== 'claim' && value.kind !== 'rebind') || typeof value.id !== 'string' || typeof value.at !== 'number') return null;
     if (now - value.at > MARKER_TTL_MS || value.at > now + 60_000) return null;
-    return { kind: value.kind, id: value.id, at: value.at, host: typeof value.host === 'string' ? value.host : undefined };
+    return {
+      kind: value.kind, id: value.id, at: value.at,
+      host: typeof value.host === 'string' ? value.host : undefined,
+      away: value.away === true || undefined,
+    };
   } catch {
     return null;
   }
@@ -45,6 +53,14 @@ export function writeClaimMarker(marker: ClaimMarker): void {
   } catch {
     // Without session storage the claim still runs; only reopening the page forgets it.
   }
+}
+
+/** The page is back from avibe.bot: true exactly once per trip, for the kind asked about. */
+export function arriveFromClaim(kind: ClaimKind): boolean {
+  const marker = readClaimMarker();
+  if (marker?.kind !== kind || !marker.away) return false;
+  writeClaimMarker({ ...marker, away: undefined });
+  return true;
 }
 
 export function clearClaimMarker(): void {

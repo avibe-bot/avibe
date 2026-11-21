@@ -316,6 +316,22 @@ describe('ConnectionPage · binding again', () => {
     await waitFor(() => expect(fields).toEqual({ user_code: 'CODE', redirect_state: 'STATE' }));
   });
 
+  it('lets a bind-again that was left half-way at avibe.bot be cancelled from the row', async () => {
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now(), away: true });
+    const follow = vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'pending' });
+    const cancel = vi.spyOn(devicesApi, 'cancelRebind').mockImplementation(async () => { follow.mockResolvedValue({ state: 'cancelling' }); });
+    mount();
+
+    expect(await screen.findByText(said('正在等待 avibe.bot 上的确认…'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重新绑定' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('rebind-1'));
+    // Cancelled: said once, and the row offers binding again.
+    expect(await screen.findByText(said('已取消，什么都没有绑定。'), {}, { timeout: 4000 })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: '重新绑定' })).toBeTruthy();
+    expect(readClaimMarker()).toBeNull();
+  });
+
   it('offers binding as a new computer only after a refusal that allows it, to the browser that started the attempt', async () => {
     vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' });
     vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'other_account' });

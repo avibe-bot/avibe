@@ -124,6 +124,7 @@ const designFrames = frames([
   rebind('rebind-remote', '重新绑定 · 远程会话：只说要回到那台电脑上做，没有按钮', WIDE, { state: 'remote' }, { remote: true, via: 'tunnel' }),
   rebind('rebind-desktop', '重新绑定 · 在 Avibe Desktop 里：一个按钮，在这台电脑的浏览器里打开这一页继续', WIDE, { state: 'ready' }, { rebindNeedsBrowser: true }),
   rebind('rebind-working', '重新绑定 · 请求已发出', WIDE, { state: 'ready', busy: true }),
+  rebind('rebind-open', '重新绑定 · 请求发出后中途回来了：说还在等 avibe.bot 上的确认，可以取消', WIDE, { state: 'ready', busy: true }, { rebindOpen: 'waiting' }),
   rebind('rebind-rejected', '重新绑定 · avibe.bot 已连续拒绝这台电脑的绑定；隧道还在跑不代表绑定被接受', WIDE, { state: 'ready', rejected: true, tunnelRunning: true }),
   rebind('rebind-replay-refused', '重新绑定 · 之前的一次绑定被彻底拒绝了', WIDE, { state: 'ready', replayRefused: true }),
   rebind('rebind-active-elsewhere', '重新绑定 · 被拒：那个 Avibe 15 分钟内还在另一台电脑上活跃', WIDE, { state: 'ready', refusal: { code: 'active_pairing_recent' } }),

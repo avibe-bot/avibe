@@ -8056,7 +8056,8 @@
       "retrying": "avibe.bot cannot be reached right now. The request is still open and Avibe keeps trying…",
       "slow": "Connected, but slow",
       "unsteady": "Connected, but unsteady",
-      "tunnelUnknown": "The connection's state cannot be read right now"
+      "tunnelUnknown": "The connection's state cannot be read right now",
+      "optimizing": "Connected; optimizing the route"
     },
     "claim": {
       "account": "Account",
