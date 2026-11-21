@@ -602,6 +602,51 @@ enum HealthAccountEvent {
     case authenticated(accountID: String, instanceIDs: [String])
 }
 
+/// avibe.bot's last signed-in answer for the session stored on this device,
+/// and how long it lets an instance be loaded before avibe.bot is asked
+/// again.
+///
+/// An instance address that leaves an account cannot become another
+/// account's for 30 days. So within `lifetime` of a confirmation the stored
+/// address still leads to the instance avibe.bot listed; past it nothing of
+/// an instance is loaded (not by a cold start, an open, or the Action
+/// Button's background take) until avibe.bot has answered. `lifetime` must
+/// stay clearly shorter than that wait. It trusts this device's clock: a
+/// clock set back makes an old confirmation look recent; one dated in the
+/// future counts as none.
+enum MobileSessionConfirmation {
+    /// Seconds since 1970, written by the account coordinator only. It goes
+    /// with the stored session.
+    static let key = "avibe.mobile.lastGoodSessionConfirmedAt"
+    static let lifetime: TimeInterval = 14 * 24 * 60 * 60
+    /// From this age on, an App that is running asks avibe.bot again on its
+    /// own (a quiet read behind the open page), so a confirmation does not
+    /// run out under someone who keeps using the App.
+    static let renewalAge: TimeInterval = 7 * 24 * 60 * 60
+
+    /// False with no record (a session stored by a build from before it),
+    /// or one dated in the future.
+    static func isCurrent(in defaults: UserDefaults, now: Date = Date()) -> Bool {
+        age(in: defaults, now: now).map { $0 < lifetime } ?? false
+    }
+
+    /// Current, and old enough to be asked for again.
+    static func isDueForRenewal(in defaults: UserDefaults, now: Date = Date()) -> Bool {
+        age(in: defaults, now: now).map { $0 >= renewalAge && $0 < lifetime } ?? false
+    }
+
+    /// How long ago avibe.bot confirmed; nil with no record, or one dated
+    /// in the future.
+    private static func age(in defaults: UserDefaults, now: Date) -> TimeInterval? {
+        let confirmedAt = defaults.double(forKey: key)
+        guard confirmedAt > 0 else {
+            return nil
+        }
+        let age = now.timeIntervalSince1970 - confirmedAt
+        return age >= 0 ? age : nil
+    }
+}
+
 @MainActor
 final class MobileSessionCoordinator {
     typealias TransportFactory = @MainActor (
@@ -628,6 +673,7 @@ final class MobileSessionCoordinator {
     private static let pushAccountKey = "avibe.mobile.pushAccount"
 
     private let defaults: UserDefaults
+    private let now: () -> Date
     private let controlPlane: MobileControlPlaneConfiguration
     private let websiteDataStore: AccountWebsiteDataStore
     private let transportFactory: TransportFactory
@@ -780,9 +826,11 @@ final class MobileSessionCoordinator {
         onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
         onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
         onPreparePushLogout: @escaping @MainActor (PushRevokeReason) async -> Void = { _ in },
-        onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in }
+        onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in },
+        now: @escaping () -> Date = Date.init
     ) {
         self.defaults = defaults
+        self.now = now
         self.lastAdvertisedProviders = defaults.stringArray(forKey: Self.advertisedProvidersKey)
             .map { names in MobileSignInProvider.allCases.filter { names.contains($0.rawValue) } }
         self.lastAdvertisedPasskey = defaults.bool(forKey: Self.advertisedPasskeyKey)
@@ -1300,7 +1348,7 @@ final class MobileSessionCoordinator {
                 self.healthAuthorizationAvailable = true
                 self.onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
                 // avibe.bot answered for this account.
-                self.snapshotIsUnconfirmed = false
+                self.sessionWasConfirmed()
                 return self.state(for: fresh)
             case .secondFactorRequired:
                 // Owing the second factor neither ends the session nor names
@@ -1898,7 +1946,7 @@ final class MobileSessionCoordinator {
             onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
             secondFactorEmail = nil
             snapshot = fresh
-            snapshotIsUnconfirmed = false
+            sessionWasConfirmed()
             pushAccountID = fresh.account.id
             scheduleInstancePushReconcile(for: fresh)
             return state(for: fresh)
@@ -1994,6 +2042,9 @@ final class MobileSessionCoordinator {
             phase == .ready,
             snapshot == nil,
             authoritativeTransition == nil,
+            // Past the confirmation's lifetime the stored session opens
+            // nothing: this launch asks avibe.bot first.
+            sessionConfirmationIsCurrent,
             let selection = storedSelection(),
             let data = defaults.data(forKey: Self.lastGoodSessionKey),
             let stored = try? JSONDecoder().decode(MobileSessionSnapshot.self, from: data),
@@ -2042,9 +2093,29 @@ final class MobileSessionCoordinator {
             ))
         else {
             defaults.removeObject(forKey: Self.lastGoodSessionKey)
+            defaults.removeObject(forKey: MobileSessionConfirmation.key)
             return
         }
         defaults.set(data, forKey: Self.lastGoodSessionKey)
+    }
+
+    /// avibe.bot answered, signed in, for this account: the session is
+    /// confirmed as of now. Nothing else dates it: not reading it back from
+    /// the device, not a read that failed.
+    private func sessionWasConfirmed() {
+        snapshotIsUnconfirmed = false
+        defaults.set(now().timeIntervalSince1970, forKey: MobileSessionConfirmation.key)
+    }
+
+    /// Whether avibe.bot confirmed the stored session within its lifetime
+    /// (`MobileSessionConfirmation`).
+    var sessionConfirmationIsCurrent: Bool {
+        MobileSessionConfirmation.isCurrent(in: defaults, now: now())
+    }
+
+    /// Whether that confirmation is old enough to ask avibe.bot again.
+    var sessionConfirmationIsDueForRenewal: Bool {
+        MobileSessionConfirmation.isDueForRenewal(in: defaults, now: now())
     }
 
     /// The selected instance to open from `state`: listed available, or

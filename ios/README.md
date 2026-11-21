@@ -49,6 +49,21 @@ and Web resizing cannot both run.
   older than that question) is refused with a native alert saying to update the
   instance. Any other page, such as a Show Page opened on its own under
   `/show/` or `/p/`, is refused without that alert.
+- A cold start opens the account's last instance before asking avibe.bot
+  (the session is checked behind it), but only while avibe.bot's last signed-in
+  answer for that session is at most 14 days old. Past that, with no record of
+  one, or with one dated in the future, nothing of an instance is loaded until
+  avibe.bot has answered: the App asks first and then opens, and with no answer
+  it stops at the instance list. The same holds for any open, for a page still
+  open when the App returns to the foreground, for the Action Button's
+  background take (past the limit it asks for the App instead), and for a Live
+  Activity's requests (sent only to an address the session lists, within the
+  limit). An App that keeps running renews the confirmation itself: from 7 days
+  on, a return to the foreground reads the session quietly behind the open
+  page. Reason: an instance address
+  that leaves an account cannot become another account's for 30 days, so within
+  14 days of a confirmation the address still leads to the instance avibe.bot
+  listed. The limit trusts the phone's clock.
 - On a cold start the App may show the instance's last page from its own
   cache (stored per store, account and origin, at most a day old). A cached page
   whose bytes carry `<meta name="avibe-cached-shell" content="1">` comes from a
