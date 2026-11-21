@@ -260,7 +260,9 @@ class _PairingChanged(Exception):
 
 def _require_instance(instance_id: str) -> None:
     current = current_binding()
-    if current is None or current.instance_id != instance_id:
+    if current is None:
+        raise OSError("instance address: local pairing temporarily unreadable")
+    if current.instance_id != instance_id:
         raise _PairingChanged()
 
 

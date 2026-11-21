@@ -1162,6 +1162,37 @@ def test_b2_a_read_disowned_by_a_401_cannot_grant_cleaning_or_move_the_address(a
     assert is_cleaning(get(NEW))  # only a read made after the refusal grants it again
 
 
+def test_rename_worker_retries_unreadable_binding_without_another_hint(address, monkeypatch):
+    plane, _ = address
+    rename_to("new")
+    read_binding = instance_address.current_binding
+    interrupted = False
+
+    def intermittent_read():
+        nonlocal interrupted
+        if plane.operations and not interrupted:
+            interrupted = True  # first guard after the issuer committed
+            return None
+        return read_binding()
+
+    monkeypatch.setattr(instance_address, "current_binding", intermittent_read)
+    waits = []
+
+    def wait(timeout):
+        if waits and timeout is None:
+            raise StopIteration  # no external wake arrives: worker would now stay idle
+        assert len(waits) < 10, "rename did not finish"
+        waits.append(timeout)
+
+    monkeypatch.setattr(instance_address._worker_wake, "wait", wait)
+    with pytest.raises(StopIteration):
+        instance_address._worker_loop()
+    assert interrupted and len(waits) > 1
+    assert binding().active_host == NEW
+    requests = [payload["operation_id"] for _, suffix, payload in plane.calls if suffix == "hostname-renames"]
+    assert len(requests) == 2 and requests[0] == requests[1]
+
+
 def test_e7_the_last_check_before_the_headers_never_waits_for_the_role_lock(address):
     import threading
 
