@@ -254,4 +254,4 @@ jobs:
           set -euo pipefail
           cargo build --locked -p avibe-desktop --example retired_workbench_probe --all-features
           python src-tauri/tests/run_cookie_probe.py target/debug/examples/retired_workbench_probe \
-            --log "$RUNNER_TEMP/retired-workbench-probe.log"
+            --timeout 120 --log "$RUNNER_TEMP/retired-workbench-probe.log"

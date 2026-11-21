@@ -86,6 +86,12 @@ import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPu
 import { useLatestRef } from '../lib/useLatestRef';
 import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
 import {
+  ADDRESS_RETIRED_EVENT,
+  handleAddressRetiredFrame,
+  rememberAddressReceipt,
+  setAddressStreamProbe,
+} from '../lib/addressRetired';
+import {
   configMutationsToPayload,
   type ConfigMutation,
 } from '../lib/configMutations';
@@ -3443,6 +3449,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     eventSourceRef.current = source;
+    setAddressStreamProbe(() => eventSourceRef.current?.readyState === EventSource.OPEN);
     setWorkbenchEventConnectionState('reconnecting');
     getWorkbenchEventReconnectLoop().attemptStarted();
     source.addEventListener('connected', (e: MessageEvent) => {
@@ -3464,10 +3471,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           sub_id?: number;
           interval_ms?: unknown;
           via?: unknown;
+          address_receipt?: unknown;
           type?: string;
           data?: unknown;
         };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
+        if (sourceKind === 'browser') rememberAddressReceipt(parsed.address_receipt);
         // How this very stream reached the instance (ui/design: mobile-app/direct-tag).
         if (sourceKind === 'browser') {
           setLiveStreamVia(parsed.via === 'direct' || parsed.via === 'other' ? parsed.via : null);
@@ -3573,6 +3582,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // This account's voice answer changed in another tab or on another device (lib/voiceConsent).
     source.addEventListener('voice.consent.updated', () => {
       void refreshVoiceConsent();
+    });
+    // The stream's own last frame when this address stops being this Avibe's:
+    // clear everything held under it, then go where the frame says.
+    source.addEventListener(ADDRESS_RETIRED_EVENT, (e: MessageEvent) => {
+      handleAddressRetiredFrame(e.data);
     });
     source.addEventListener('remote.authorization', (e: MessageEvent) => {
       try {

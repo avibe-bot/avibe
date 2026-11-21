@@ -84,6 +84,12 @@ final class TurnActivityCoordinator {
     private let activities: @MainActor () -> [any TurnActivityHandle]
     private let create: Create
     private let requestOverride: Request?
+    /// Whether a request may go to a record's instance now: the session
+    /// lists that address for that account, and avibe.bot confirmed the
+    /// session within its lifetime (`MobileSessionConfirmation`). A row
+    /// kept from an earlier launch names an address that may since have
+    /// left the account; nothing is loaded from it or sent to it then.
+    private let mayRequest: @MainActor (Target) -> Bool
     private var clients: [UUID: VoiceCaptureInstanceClient] = [:]
     private var ledger: Ledger
     private var tokenTasks: [String: Task<Void, Never>] = [:]
@@ -104,8 +110,10 @@ final class TurnActivityCoordinator {
          create: @escaping Create = { attributes, state in
              SystemTurnActivity(try Activity.request(attributes: attributes,
                  content: ActivityContent(state: state, staleDate: state.staleDate), pushType: .token))
-         }, request: Request? = nil) {
+         }, request: Request? = nil,
+         mayRequest: @escaping @MainActor (Target) -> Bool) {
         self.defaults = defaults
+        self.mayRequest = mayRequest
         self.now = now
         self.enabled = enabled
         self.activities = activities
@@ -236,6 +244,23 @@ final class TurnActivityCoordinator {
         for record in missing { await remove(record, reason: reason) }
     }
 
+    /// Ends every Turn Live Activity on this phone at once and forgets the
+    /// ledger, telling no instance (the entry is withdrawn, 11-21). The
+    /// ledger goes first: a reconcile running meanwhile then finds no record
+    /// to register or DELETE, and only ends what it finds.
+    func endAllLocally() async {
+        epoch += 1
+        tokenTasks.values.forEach { $0.cancel() }
+        tokenTasks.removeAll()
+        stateTasks.values.forEach { $0.cancel() }
+        stateTasks.removeAll()
+        ledger = Ledger()
+        save()
+        for activity in activities() where activity.state != .dismissed {
+            await activity.end(nil, immediately: true)
+        }
+    }
+
     func removeInstances(outside origins: Set<String>, accountID: String) async {
         let removed = activities().filter {
             $0.attributes.accountID == accountID && !origins.contains($0.attributes.instanceOrigin)
@@ -335,6 +360,10 @@ final class TurnActivityCoordinator {
         if let data = try? JSONEncoder().encode(ledger) { defaults.set(data, forKey: Self.ledgerKey) }
     }
     private func request(_ target: Target, _ method: String, _ path: String, _ body: [String: Any]?) async throws -> VoiceCaptureInstanceClient.Response {
+        // The one way out to an instance: refused for an address the
+        // session no longer vouches for. A refused removal is left to the
+        // instance's own expiry.
+        guard mayRequest(target) else { throw NativePushError.unavailable }
         if let requestOverride { return try await requestOverride(target, method, path, body) }
         guard let url = URL(string: target.instanceOrigin), let origin = WebOrigin(url: url) else { throw NativePushError.unavailable }
         let id = UUID()

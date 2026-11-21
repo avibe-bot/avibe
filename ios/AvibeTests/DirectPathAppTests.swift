@@ -4806,6 +4806,249 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    /// A session avibe.bot last confirmed more than its lifetime ago opens
+    /// nothing on a cold start: the App asks avibe.bot first, with no runtime
+    /// and no account restored meanwhile, and only then opens the instance
+    /// if the account still lists it. With no answer, or the instance gone
+    /// from the list, it stops at the instance list. (Within the lifetime
+    /// the instance opens before the answer:
+    /// `testAColdStartOpensTheLastInstanceBeforeTheAccountIsChecked`.)
+    @MainActor
+    func testAColdStartPastTheConfirmationsLifetimeAsksAvibeBotBeforeOpening() async throws {
+        let withoutInstanceOne = LocalHTTPResponse.json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-2","name":"Two","host":"instance-two.example",
+             "url":"https://instance-two.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true}]}
+            """)
+        let rows: [(name: String, answer: LocalHTTPResponse, opens: Bool)] = [
+            ("still listed", Self.signedInSessionAnswer, true),
+            ("no longer listed", withoutInstanceOne, false),
+            ("no answer", .status(500), false),
+        ]
+        for row in rows {
+            let first = try await makeApp(directTransport: nil)
+            _ = try await select("instance-1", in: first)
+            let defaults = try XCTUnwrap(appDefaults)
+            confirmSession(in: defaults, daysAgo: 15)
+
+            let session = SessionAnswerOverride()
+            let started = FixtureEvent(description: "session read: \(row.name)")
+            let release = DispatchSemaphore(value: 0)
+            session.hold(row.answer, started: started, release: release)
+            let next = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { session.response },
+                reusingDefaults: defaults
+            )
+            await fulfillment(
+                of: [started.expectation],
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
+            )
+            // avibe.bot is being asked, and nothing of the instance exists.
+            XCTAssertEqual(next.route, .loading, row.name)
+            XCTAssertNil(next.runtimeOpenAttempt, row.name)
+            XCTAssertNil(next.mobileSessionCoordinator.currentAccount, row.name)
+
+            release.signal()
+            if row.opens {
+                _ = try await waitForBrowser("instance-1", in: next)
+                XCTAssertTrue(next.mobileSessionCoordinator.sessionConfirmationIsCurrent, row.name)
+            } else {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    next.route == .onboarding(.instances)
+                }
+                XCTAssertNil(next.runtimeOpenAttempt, row.name)
+            }
+        }
+    }
+
+    /// An App that stays alive past the confirmation's lifetime: on its
+    /// return to the foreground the page is closed and avibe.bot asked
+    /// before the instance opens again; an open made past the lifetime
+    /// (another instance chosen) waits for the answer the same way; with no
+    /// answer the App stops at the instance list. Within the lifetime a
+    /// return changes nothing.
+    @MainActor
+    func testAnAppAlivePastTheConfirmationsLifetimeClosesItsPageAndAsksFirst() async throws {
+        let center = NotificationCenter()
+        let session = SessionAnswerOverride()
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { session.response },
+            runtimeOpenNotificationCenter: center
+        )
+        let defaults = try XCTUnwrap(appDefaults)
+        let returnToTheForeground = {
+            center.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        }
+        let runtime = try await select("instance-1", in: app)
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+
+        // Confirmed within a week: a return reads nothing.
+        let confirmedAtKey = "avibe.mobile.lastGoodSessionConfirmedAt"
+        let confirmedAtSignIn = defaults.double(forKey: confirmedAtKey)
+        returnToTheForeground()
+        try await Task.sleep(for: AppModel.sessionRenewalDelay + .milliseconds(1_500))
+        XCTAssertEqual(defaults.double(forKey: confirmedAtKey), confirmedAtSignIn)
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+
+        // More than a week old, still within the lifetime: the session is
+        // read quietly behind the open page, and the record renewed.
+        confirmSession(in: defaults, daysAgo: 8)
+        let quiet = FixtureEvent(description: "the quiet session read")
+        let releaseQuiet = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: quiet, release: releaseQuiet)
+        returnToTheForeground()
+        XCTAssertEqual(app.route, .browser(runtime))
+        await fulfillment(
+            of: [quiet.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+        releaseQuiet.signal()
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            Date().timeIntervalSince1970 - defaults.double(forKey: confirmedAtKey) < 60
+        }
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+
+        // Past the lifetime: closed at the return, opened after the answer.
+        confirmSession(in: defaults, daysAgo: 15)
+        let started = FixtureEvent(description: "session read after the return")
+        let release = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: started, release: release)
+        returnToTheForeground()
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        await fulfillment(
+            of: [started.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        release.signal()
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertGreaterThan(try XCTUnwrap(app.runtimeOpenAttempt).id, opened)
+        XCTAssertTrue(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
+
+        // An open made past the lifetime waits for the answer too.
+        confirmSession(in: defaults, daysAgo: 15)
+        let startedAgain = FixtureEvent(description: "session read before another instance opens")
+        let releaseAgain = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: startedAgain, release: releaseAgain)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        await fulfillment(
+            of: [startedAgain.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(app.route, .loading)
+        releaseAgain.signal()
+        _ = try await waitForBrowser("instance-2", in: app)
+
+        // A shortcut (or a notification tap) that arrives while avibe.bot
+        // is being asked waits for the answer, then opens what it names:
+        // its page is told the path.
+        confirmSession(in: defaults, daysAgo: 15)
+        let startedForAPath = FixtureEvent(description: "session read with a shortcut waiting")
+        let releaseForAPath = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: startedForAPath, release: releaseForAPath)
+        returnToTheForeground()
+        await fulfillment(
+            of: [startedForAPath.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        app.openSelectedInstance(path: "/chat/waited")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        releaseForAPath.signal()
+        let reopened = try await waitForBrowser("instance-2", in: app)
+        let controller = try makeRuntimeController(app, reopened)
+        app.registerRuntimeController(controller, for: reopened)
+        let page = try RuntimePage(controller: controller)
+        defer { page.close() }
+        try await page.load(
+            """
+            <!doctype html><script>
+            window.changes = [];
+            window.addEventListener("avibe:native:push.opened", (event) => {
+              if (!window.changes.includes(event.detail.url)) {
+                window.changes.push(event.detail.url);
+              }
+            });
+            </script>
+            """,
+            baseURL: reopened.instance.url
+        )
+        app.didFinishRuntimeLoading()
+        try await eventually { try await page.changes() == #"["/chat/waited"]"# }
+
+        // No answer: the instance list, and what waited goes with it.
+        confirmSession(in: defaults, daysAgo: 15)
+        session.replace(with: .status(500))
+        returnToTheForeground()
+        XCTAssertEqual(app.route, .loading)
+        app.openSelectedInstance(path: "/chat/dropped")
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            app.route == .onboarding(.instances)
+        }
+        XCTAssertNil(app.runtimeOpenAttempt)
+        XCTAssertFalse(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
+        withExtendedLifetime(controller) {}
+    }
+
+    /// With a direct transport an open waits for its route before its
+    /// WebView exists. The confirmation's lifetime ending in that wait holds
+    /// the open too: no browser before avibe.bot has answered.
+    @MainActor
+    func testAnOpenWhoseRouteWasPreparedAcrossTheLifetimesEndAsksFirst() async throws {
+        let session = SessionAnswerOverride()
+        let app = try await makeApp(
+            directTransport: StandInDirectTransport(),
+            sessionResponse: { session.response }
+        )
+        let defaults = try XCTUnwrap(appDefaults)
+        var browsers: [String] = []
+        let opened = app.$route.sink { route in
+            if case .browser(let runtime) = route {
+                browsers.append(runtime.instance.id)
+            }
+        }
+        defer { opened.cancel() }
+        let started = FixtureEvent(description: "session read before the prepared open")
+        let release = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: started, release: release)
+
+        // The open starts on a current confirmation and waits for its
+        // route; the lifetime ends before that wait does.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNotNil(app.runtimeOpenAttempt)
+        confirmSession(in: defaults, daysAgo: 15)
+
+        await fulfillment(
+            of: [started.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(browsers, [])
+        XCTAssertEqual(app.route, .loading)
+        release.signal()
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(browsers, ["instance-1"])
+    }
+
+    /// Dates avibe.bot's last confirmation of the stored session.
+    private func confirmSession(in defaults: UserDefaults, daysAgo days: Double) {
+        defaults.set(
+            Date().addingTimeInterval(-days * 24 * 60 * 60).timeIntervalSince1970,
+            forKey: "avibe.mobile.lastGoodSessionConfirmedAt"
+        )
+    }
+
     /// The control plane's ordinary signed-in answer for account-1.
     private static var signedInSessionAnswer: LocalHTTPResponse {
         .json("""

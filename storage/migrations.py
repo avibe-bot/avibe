@@ -177,6 +177,8 @@ HEAD_TABLES = INITIAL_TABLES | {
     "remote_account_pairings",
     "remote_signout_receipts",
     "remote_signout_items",
+    "instance_address_clearings",
+    "instance_address_clearing_receipts",
     "remote_device_sessions",
     "remote_device_push_links",
     "remote_device_deadlines",

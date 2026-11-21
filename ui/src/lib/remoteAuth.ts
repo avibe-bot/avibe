@@ -1,3 +1,4 @@
+import { isRetiredAddressResponse, noteRetiredAddressResponse } from './addressRetired';
 import { clearLocalSnapshots, forgetLocalSnapshots } from './localSnapshots';
 import { forgetBootSession } from './bootSession';
 import { wipeLocalStore } from './localStore';
@@ -130,6 +131,11 @@ async function probeRemoteAuthorization(): Promise<void> {
       credentials: 'same-origin',
       headers: { Accept: 'application/json' },
     });
+    if (isRetiredAddressResponse(response)) {
+      // Not a sign-out: the address itself is retired, and that path clears more.
+      noteRetiredAddressResponse();
+      return;
+    }
     const session = await response.json().catch(() => null) as {
       remote?: boolean;
       authenticated?: boolean;

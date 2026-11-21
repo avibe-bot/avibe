@@ -156,6 +156,12 @@ vi.mock('./AgentRoutePicker', () => ({
   },
 }));
 
+// Withdrawn (owner, 11-21): even if the entry came back into the tree, this
+// marker would show it; the chat page must render none.
+vi.mock('./LiveActivityEntry', () => ({
+  LiveActivityEntry: () => <div data-testid="live-activity-entry" />,
+}));
+
 vi.mock('./useShowPageAnnotation', () => ({
   useShowPageAnnotation: () => ({
     state: { enabled: false, mode: 'smart' },
@@ -305,5 +311,22 @@ describe('Send now on the queue strip', () => {
 
     expect(mocks.api.sendQueuedNow).toHaveBeenCalledWith(SESSION, 'q1');
     expect(document.activeElement).toBe(draft);
+  });
+});
+
+describe('the Lock Screen progress entry', () => {
+  it('is not on the chat page, even in a shell that advertises Live Activities', async () => {
+    const call = vi.fn(async () => ({ enabled: true, tracking: false }));
+    vi.stubGlobal('avibeNative', {
+      contract: 1, platform: 'ios', shellVersion: 'test',
+      capabilities: { liveActivities: 1 }, call, on: () => () => {},
+    });
+
+    mount();
+    await screen.findByText('next step');
+
+    expect(screen.queryByTestId('live-activity-entry')).toBeNull();
+    expect(screen.queryByText(/liveActivity\./)).toBeNull();
+    expect(call.mock.calls.filter(([method]) => String(method).startsWith('liveActivity.'))).toEqual([]);
   });
 });

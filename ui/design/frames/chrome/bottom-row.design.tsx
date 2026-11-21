@@ -74,8 +74,8 @@ const shots: { name: string; title: string; render: () => ReactNode; hover?: str
     name: 'desktop-local', title: '侧边栏底部 · 桌面应用（本机）',
     render: shell(<DesktopAccountRowView {...rowProps(false)} localUpdater={<VersionBadge openUpward />} />),
   },
-  // The trigger's wash shows only under the pointer, with the dot and the name centred in it and
-  // the same inset on both sides; no hover tip (Max, 2026-11-20).
+  // The trigger's wash shows only under the pointer; the dot keeps the Apps button's inset inside it, so
+  // it starts on the same left line as the icons above. No hover tip (Max, 2026-11-20).
   {
     name: 'desktop-local-hover', title: '侧边栏底部 · 桌面应用（本机）· 指针悬停在账户按钮上',
     render: shell(<DesktopAccountRowView {...rowProps(false)} localUpdater={<VersionBadge openUpward />} />),
