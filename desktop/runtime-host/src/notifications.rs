@@ -443,6 +443,8 @@ pub struct AnswerRequest {
 #[derive(Deserialize)]
 struct MessageEvent {
     id: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
     session_id: Option<String>,
     platform: Option<String>,
     author: Option<String>,
@@ -453,7 +455,13 @@ struct MessageEvent {
 
 impl MessageEvent {
     fn question(self) -> Option<AnswerRequest> {
-        if self.id.is_empty() || self.author.as_deref() != Some("agent") || self.platform.as_deref() != Some("avibe") {
+        // Only a `result` counts as unread, which is what withdraws the
+        // notification once the question is read anywhere.
+        if self.id.is_empty()
+            || self.author.as_deref() != Some("agent")
+            || self.platform.as_deref() != Some("avibe")
+            || self.kind.as_deref() != Some("result")
+        {
             return None;
         }
         let session_id = self.session_id.filter(|id| !id.is_empty())?;
@@ -1024,8 +1032,9 @@ async fn notify_question(
             .forget(receipt.id());
         return;
     }
-    // A question is a Workbench message: reading its Session withdraws it.
-    receipt.confirm_workbench_session(true);
+    // A question is a new Workbench message: reading its Session withdraws
+    // it, also when that happened before the shell sampled it as unread.
+    receipt.confirm_unread_message();
     let source = detail.as_ref().and_then(SessionDetail::source);
     sink.deliver_answer_request(request, source, preferences.presentation_generation, receipt);
 }
@@ -1107,6 +1116,7 @@ mod tests {
             "session_id": "ses_a",
             "platform": "avibe",
             "author": "agent",
+            "type": "result",
             "text": "PR #4031 passed review.\n\nMerge it now?",
             "content": { "quick_replies": ["Yes", "No"], "quick_reply_revision": REVISION },
         })
@@ -1139,6 +1149,7 @@ mod tests {
         let variants: Vec<(&str, serde_json::Value)> = vec![
             ("/author", serde_json::json!("user")),
             ("/platform", serde_json::json!("slack")),
+            ("/type", serde_json::json!("assistant")),
             ("/session_id", serde_json::json!("")),
             ("/content/quick_replies", serde_json::json!([])),
             ("/content/quick_replies", serde_json::json!(["Yes", " "])),
