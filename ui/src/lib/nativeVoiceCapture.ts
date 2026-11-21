@@ -46,6 +46,11 @@ const nativeEnd = (reason: string | undefined): VoiceNativeEnd => (
   NATIVE_ENDS.has(reason as VoiceNativeEnd) ? reason as VoiceNativeEnd : 'other'
 );
 
+/** The most samples handed on at once: 100 ms, what the App sends at a time. A take the App
+ *  began at touch-down arrives first as everything since then, in one event (over a second of
+ *  audio); live recognition takes frames, not one of any size. */
+const MAX_SAMPLES_AT_ONCE = NATIVE_CAPTURE_SAMPLE_RATE / 10;
+
 /** Readings held back to be paced out: a chunk's worth, about 100 ms. */
 const MAX_QUEUED_LEVELS = 8;
 
@@ -207,7 +212,9 @@ export class NativePcmCapture implements VoicePcmCapture {
     if (event.take !== this.take || this.stopped) return;
     if (event.pcm) {
       const samples = decodePcm(event.pcm);
-      if (samples && samples.length > 0) this.deliver(samples);
+      for (let from = 0; samples && from < samples.length; from += MAX_SAMPLES_AT_ONCE) {
+        this.deliver(samples.slice(from, from + MAX_SAMPLES_AT_ONCE));
+      }
     }
     if (event.ended) {
       if (!this.stopping) {

@@ -136,8 +136,12 @@ type Press = {
   /** The iOS App follows this press (lib/nativeVoiceHold): its word is waited for a moment past
    *  `holdMs` before the page recognises the hold itself. */
   followed: boolean;
-  /** The page's own recognition has begun: the App's word comes too late for this press. */
+  /** The page's own recognition has begun (its timer ran): it runs once. */
   reached: boolean;
+  /** The App's take was taken for this press: the page's own recognition stops where it is. */
+  taken: boolean;
+  /** A mouse (or trackpad) press: the App times a finger, and its word is not for this one. */
+  mouse: boolean;
 };
 
 /** What the gesture reads from a pointer event, React's or the window's. */
@@ -213,9 +217,11 @@ const vibrate = () => {
   }
 };
 
-const impactFeedback = (style: NativeImpactStyle) => {
+/** `elsewhere`: whether a browser without the App's haptics buzzes instead. Its one buzz cannot
+ *  tell two crossings apart, so only the crossing into cancel has it, as before. */
+const impactFeedback = (style: NativeImpactStyle, elsewhere = true) => {
   void nativeHapticImpact(style).then((handled) => {
-    if (!handled) vibrate();
+    if (!handled && elsewhere) vibrate();
   });
 };
 
@@ -312,6 +318,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   // A permission answer may arrive after another press, dismissal, or unmount.
   // Its stream is always stopped, but its error belongs only to the original ask.
   const permissionAsk = useRef<symbol | null>(null);
+  // Reads the App's microphone answer again (below): the first allow is given to WebKit.
+  const askMicRef = useRef<() => void>(() => undefined);
 
   const toPhase = useCallback((next: HoldPhase) => {
     phaseRef.current = next;
@@ -610,14 +618,16 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Voice goes to a third-party AI service: nothing is recorded before this account said yes
     // (ui/design: composer/voice-consent/*). The question, asked again after a "no", takes this
     // press, as the system's microphone question does: after Allow, the next press records.
+    // The App's word may come while these two are read (a busy page): its take then is the
+    // press's, and this recognition stops here, before a start of its own.
     const consent = await resolveVoicePress();
-    if (press.current !== current) return;
+    if (press.current !== current || current.taken) return;
     if (consent !== 'granted') {
       end(null);
       return;
     }
     const permission = await permissionState();
-    if (press.current !== current) return;
+    if (press.current !== current || current.taken) return;
     if (permission === 'denied') {
       end('denied');
       return;
@@ -636,6 +646,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       void request.then(
         (stream) => {
           allowedOnAsk = true;
+          // The App's microphone is allowed with it: its surface can be named from here.
+          askMicRef.current();
           trace.micSettled(requestedAt);
           stream.getTracks().forEach((track) => track.stop());
           // A permission probe records no audio; `mic: ok` is only a stream grant.
@@ -662,8 +674,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
    *  not record now); the App then drops what it recorded. */
   const adoptHold = useCallback((nativeTake: string): boolean => {
     const current = press.current;
-    if (!current || current.reached || take.current || phaseRef.current !== 'pressing') return false;
+    // The page's own recognition may be under way (its timer ran, its checks are being read):
+    // until it has started a take of its own, the App's, recorded since touch-down, is the better one.
+    if (!current || current.mouse || current.taken || take.current || phaseRef.current !== 'pressing') return false;
     if (availableRef.current !== true || voiceConsentForPress() !== 'granted') return false;
+    current.taken = true;
     current.reached = true;
     clearTimeout(current.timer);
     cancelAnimationFrame(current.frame);
@@ -676,7 +691,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
    *  hold itself, at its own threshold, and its own start says what is wrong. */
   const holdUnfollowed = useCallback(() => {
     const current = press.current;
-    if (!current || current.reached || !current.followed) return;
+    if (!current || current.reached) return;
     current.followed = false;
     clearTimeout(current.timer);
     current.timer = setTimeout(() => void holdReached(), Math.max(0, current.gesture.holdMs - (Date.now() - current.startedAt)));
@@ -696,19 +711,21 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     return `hold-${surfaceCount}`;
   });
   const followable = hasNativeVoiceHold();
-  useEffect(() => {
-    // Asked again after each take: the first one's answer was WebKit's question.
-    if (!followable || phase !== 'idle' || micAllowedRef.current) return;
-    let alive = true;
+  const askMic = useCallback(() => {
+    if (!hasNativeVoiceHold() || micAllowedRef.current) return;
     void nativeVoicePermission().then((state) => {
-      if (!alive || state !== 'granted') return;
+      if (state !== 'granted' || !mounted.current) return;
       micAllowedRef.current = true;
       setMicAllowed(true);
     });
-    return () => {
-      alive = false;
-    };
-  }, [followable, phase]);
+  }, []);
+  useEffect(() => {
+    askMicRef.current = askMic;
+  }, [askMic]);
+  useEffect(() => {
+    // Asked until it is allowed, after each press: the first answer is to WebKit's question.
+    if (followable && phase === 'idle') askMic();
+  }, [askMic, followable, phase]);
   const adoptHoldRef = useRef(adoptHold);
   const holdUnfollowedRef = useRef(holdUnfollowed);
   useEffect(() => {
@@ -721,13 +738,16 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const unregister = registerHoldSurface(surfaceId, {
       holdMs: { ...HOLD_GESTURE, ...(typeof touch === 'function' ? touch('touch') : touch) }.holdMs,
       element: () => {
-        const at = phaseRef.current;
         // A take being finalized, or one cut off, owns the surface: a press there is not a hold.
-        if (at === 'settling' || at === 'interrupted') return null;
+        if (phaseRef.current !== 'idle') return null;
         if (availableRef.current !== true || !micAllowedRef.current || voiceConsentForPress() !== 'granted') return null;
-        // Whether a new press would be taken; a press already down keeps its surface to its end.
-        if (at === 'idle' && latest.current.canHold && !latest.current.canHold('touch')) return null;
+        if (latest.current.canHold && !latest.current.canHold('touch')) return null;
         return latest.current.surface?.() ?? surfaceElement.current;
+      },
+      // A press already down keeps its surface to its end, whatever a new press would be told.
+      live: () => {
+        const at = phaseRef.current;
+        return at === 'pressing' || at === 'listening' || at === 'recording' || at === 'armed';
       },
       recognised: (nativeTake) => adoptHoldRef.current(nativeTake),
       failed: () => holdUnfollowedRef.current(),
@@ -880,7 +900,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     armed.current = next;
     // Into the cancel position and back out of it feel different (owner decision, 2026-11-21).
     // The App gives both itself for a hold it recognised, at the same two lines.
-    if (!take.current.adopt) impactFeedback(next ? 'rigid' : 'soft');
+    if (!take.current.adopt) impactFeedback(next ? 'rigid' : 'soft', next);
     const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
     // Before the microphone is capturing, an unarmed press stays a press (no listening card yet);
     // a take the App began has had its cue, and shows its card.
@@ -968,6 +988,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       unfollow,
       followed,
       reached: false,
+      taken: false,
+      mouse: event.pointerType === 'mouse',
     };
     setOutcome(null);
     setProgress(0);
