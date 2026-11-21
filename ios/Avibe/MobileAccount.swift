@@ -619,16 +619,31 @@ enum MobileSessionConfirmation {
     /// with the stored session.
     static let key = "avibe.mobile.lastGoodSessionConfirmedAt"
     static let lifetime: TimeInterval = 14 * 24 * 60 * 60
+    /// From this age on, an App that is running asks avibe.bot again on its
+    /// own (a quiet read behind the open page), so a confirmation does not
+    /// run out under someone who keeps using the App.
+    static let renewalAge: TimeInterval = 7 * 24 * 60 * 60
 
     /// False with no record (a session stored by a build from before it),
     /// or one dated in the future.
     static func isCurrent(in defaults: UserDefaults, now: Date = Date()) -> Bool {
+        age(in: defaults, now: now).map { $0 < lifetime } ?? false
+    }
+
+    /// Current, and old enough to be asked for again.
+    static func isDueForRenewal(in defaults: UserDefaults, now: Date = Date()) -> Bool {
+        age(in: defaults, now: now).map { $0 >= renewalAge && $0 < lifetime } ?? false
+    }
+
+    /// How long ago avibe.bot confirmed; nil with no record, or one dated
+    /// in the future.
+    private static func age(in defaults: UserDefaults, now: Date) -> TimeInterval? {
         let confirmedAt = defaults.double(forKey: key)
         guard confirmedAt > 0 else {
-            return false
+            return nil
         }
         let age = now.timeIntervalSince1970 - confirmedAt
-        return age >= 0 && age < lifetime
+        return age >= 0 ? age : nil
     }
 }
 
@@ -2096,6 +2111,11 @@ final class MobileSessionCoordinator {
     /// (`MobileSessionConfirmation`).
     var sessionConfirmationIsCurrent: Bool {
         MobileSessionConfirmation.isCurrent(in: defaults, now: now())
+    }
+
+    /// Whether that confirmation is old enough to ask avibe.bot again.
+    var sessionConfirmationIsDueForRenewal: Bool {
+        MobileSessionConfirmation.isDueForRenewal(in: defaults, now: now())
     }
 
     /// The selected instance to open from `state`: listed available, or

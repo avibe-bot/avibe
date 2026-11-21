@@ -5364,17 +5364,22 @@ final class MobileOnboardingTests: XCTestCase {
             clock = date
             return makeCoordinator(defaults: defaults, transports: transports + spares(), now: { clock })
         }
-        let rows: [(name: String, after: TimeInterval, opensFirst: Bool)] = [
-            ("at once", 0, true),
-            ("a moment before the lifetime ends", lifetime - 1, true),
-            ("as the lifetime ends", lifetime, false),
-            ("long after", 45 * 24 * 60 * 60, false),
-            ("the clock set back before the confirmation", -60, false),
+        let renewalAge = MobileSessionConfirmation.renewalAge
+        XCTAssertEqual(renewalAge, 7 * 24 * 60 * 60)
+        let rows: [(name: String, after: TimeInterval, opensFirst: Bool, renews: Bool)] = [
+            ("at once", 0, true, false),
+            ("a moment before it is asked for again", renewalAge - 1, true, false),
+            ("old enough to be asked for again", renewalAge, true, true),
+            ("a moment before the lifetime ends", lifetime - 1, true, true),
+            ("as the lifetime ends", lifetime, false, false),
+            ("long after", 45 * 24 * 60 * 60, false, false),
+            ("the clock set back before the confirmation", -60, false, false),
         ]
         for row in rows {
             let relaunched = relaunch(at: signedInAt.addingTimeInterval(row.after))
             XCTAssertEqual(relaunched.restoreLastGoodSession() != nil, row.opensFirst, row.name)
             XCTAssertEqual(relaunched.sessionConfirmationIsCurrent, row.opensFirst, row.name)
+            XCTAssertEqual(relaunched.sessionConfirmationIsDueForRenewal, row.renews, row.name)
             // Refused, it leaves no account behind for anything to open.
             XCTAssertEqual(relaunched.currentAccount?.id, row.opensFirst ? "account-1" : nil, row.name)
             // Reading the session back never dates it.
@@ -5420,6 +5425,36 @@ final class MobileOnboardingTests: XCTestCase {
         _ = try await running.logout()
         XCTAssertNil(defaults.object(forKey: confirmedAtKey))
         XCTAssertNil(defaults.object(forKey: "avibe.mobile.lastGoodSession"))
+    }
+
+    /// The Action Button's background take reads the stored selection
+    /// without the account coordinator. It has a target only while
+    /// avibe.bot's confirmation of the stored session is current; past it,
+    /// or with no record, it has none (the take then asks for the App).
+    func testTheBackgroundTakeHasNoTargetPastTheConfirmationsLifetime() throws {
+        let defaults = makeDefaults()
+        let store = UUID()
+        defaults.set(
+            Data(#"{"accountID":"account-1","instanceID":"instance-1","url":"https://alex-app.avibe.bot"}"#.utf8),
+            forKey: VoiceCaptureTarget.selectionKey
+        )
+        defaults.set(store.uuidString, forKey: VoiceCaptureTarget.storeIdentifierKey)
+        let confirmed = { (daysAgo: Double) in
+            defaults.set(
+                Date().addingTimeInterval(-daysAgo * 24 * 60 * 60).timeIntervalSince1970,
+                forKey: MobileSessionConfirmation.key
+            )
+        }
+        XCTAssertNil(VoiceCaptureTarget.current(defaults: defaults))
+        confirmed(13)
+        let target = try XCTUnwrap(VoiceCaptureTarget.current(defaults: defaults))
+        XCTAssertEqual(target.accountID, "account-1")
+        XCTAssertEqual(target.storeIdentifier, store)
+        XCTAssertEqual(target.origin, WebOrigin.parseConfigured("https://alex-app.avibe.bot"))
+        confirmed(15)
+        XCTAssertNil(VoiceCaptureTarget.current(defaults: defaults))
+        confirmed(-1)
+        XCTAssertNil(VoiceCaptureTarget.current(defaults: defaults))
     }
 
     /// The last session avibe.bot confirmed, kept on the device so a cold

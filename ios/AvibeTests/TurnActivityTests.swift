@@ -24,7 +24,8 @@ final class TurnActivityTests: XCTestCase {
         defaults = nil
         super.tearDown()
     }
-    private func coordinator(enabled: Bool = true, now: @escaping @MainActor () -> Date = { Date() }, response: TurnActivityCoordinator.Request? = nil) -> TurnActivityCoordinator {
+    private func coordinator(enabled: Bool = true, now: @escaping @MainActor () -> Date = { Date() }, response: TurnActivityCoordinator.Request? = nil,
+                             mayRequest: @escaping @MainActor (TurnActivityCoordinator.Target) -> Bool = { _ in true }) -> TurnActivityCoordinator {
         let owner = TurnActivityCoordinator(defaults: defaults, now: now, enabled: { enabled }, activities: { self.cards }, create: { attributes, state in
             let card = FakeTurnActivity(attributes: attributes, content: state)
             self.cards.append(card)
@@ -34,7 +35,7 @@ final class TurnActivityTests: XCTestCase {
             if let response { return try await response(target, method, path, body) }
             if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
             return .init(status: 200, json: ["activity": self.initial.merging(["status": "tracking"]) { _, new in new }], redirected: false)
-        })
+        }, mayRequest: mayRequest)
         owner.selectTarget(target)
         return owner
     }
@@ -118,6 +119,32 @@ final class TurnActivityTests: XCTestCase {
         let result = await start(relaunched)
         XCTAssertEqual(result["ok"] as? Bool, true)
         await relaunched.endAll(reason: "logout")
+    }
+
+    /// A row kept from an earlier launch names an instance address. Once the
+    /// session no longer vouches for that address (it left the account's
+    /// list, or avibe.bot has not confirmed the session within its
+    /// lifetime), nothing is sent to it: the row goes, with no request.
+    func testAKeptRowSendsNothingToAnAddressTheSessionNoLongerVouchesFor() async {
+        let owner = coordinator()
+        _ = await start(owner)
+        _ = owner.invalidateRequests()
+        cards.removeAll()
+        calls.removeAll()
+        var asked: [TurnActivityCoordinator.Target] = []
+        let relaunched = coordinator(mayRequest: { target in
+            asked.append(target)
+            return false
+        })
+        await relaunched.reconcile(target: target)
+        XCTAssertFalse(asked.isEmpty)
+        XCTAssertTrue(asked.allSatisfy { $0 == target })
+        XCTAssertTrue(calls.isEmpty)
+        // The row is gone: a later launch asks nothing more for it.
+        calls.removeAll()
+        let later = coordinator()
+        await later.reconcile(target: target)
+        XCTAssertTrue(calls.isEmpty)
     }
 
     func testAccountAndInstanceBoundariesEndEveryCardImmediately() async {

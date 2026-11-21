@@ -4885,7 +4885,33 @@ final class DirectPathAppTests: XCTestCase {
         let runtime = try await select("instance-1", in: app)
         let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
 
+        // Confirmed within a week: a return reads nothing.
+        let confirmedAtKey = "avibe.mobile.lastGoodSessionConfirmedAt"
+        let confirmedAtSignIn = defaults.double(forKey: confirmedAtKey)
         returnToTheForeground()
+        try await Task.sleep(for: AppModel.sessionRenewalDelay + .milliseconds(1_500))
+        XCTAssertEqual(defaults.double(forKey: confirmedAtKey), confirmedAtSignIn)
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+
+        // More than a week old, still within the lifetime: the session is
+        // read quietly behind the open page, and the record renewed.
+        confirmSession(in: defaults, daysAgo: 8)
+        let quiet = FixtureEvent(description: "the quiet session read")
+        let releaseQuiet = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: quiet, release: releaseQuiet)
+        returnToTheForeground()
+        XCTAssertEqual(app.route, .browser(runtime))
+        await fulfillment(
+            of: [quiet.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+        releaseQuiet.signal()
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            Date().timeIntervalSince1970 - defaults.double(forKey: confirmedAtKey) < 60
+        }
         XCTAssertEqual(app.route, .browser(runtime))
         XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
 

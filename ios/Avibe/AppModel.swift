@@ -361,6 +361,11 @@ final class AppModel: ObservableObject {
     /// last confirmation of the session is past its lifetime
     /// (`confirmSessionThenOpen`). One at a time.
     private var sessionConfirmation: Task<Void, Never>?
+    /// The quiet session read that renews an ageing confirmation behind an
+    /// open page (`renewSessionConfirmationIfDue`), and whether its read is
+    /// in flight (it holds the account meanwhile).
+    private var sessionRenewal: Task<Void, Never>?
+    private var sessionRenewalIsReading = false
     /// The identity of a runtime opened while the listener fault covered
     /// it: it shows only the reopen message, and no WebView is made for it.
     /// (A runtime the fault reaches later keeps its WebView under the
@@ -456,7 +461,12 @@ final class AppModel: ObservableObject {
         }
     )
 
-    private lazy var turnActivities = TurnActivityCoordinator(defaults: defaults)
+    private lazy var turnActivities = TurnActivityCoordinator(
+        defaults: defaults,
+        mayRequest: { [weak self] target in
+            self?.sessionVouches(forAccount: target.accountID, origin: target.instanceOrigin) ?? false
+        }
+    )
 
     private lazy var nativePushCoordinator = NativePushCoordinator(
         keychain: pushKeychain,
@@ -1585,7 +1595,7 @@ final class AppModel: ObservableObject {
     /// the bootstrap or a session check an open depends on is under way:
     /// it opens against the answered session. Only the latest waits.
     private var holdsInstanceOpens: Bool {
-        !hasCompletedBootstrap || sessionConfirmation != nil
+        !hasCompletedBootstrap || sessionConfirmation != nil || sessionRenewalIsReading
     }
 
     /// Delivers the request that waited, once nothing holds it any more.
@@ -2430,10 +2440,55 @@ final class AppModel: ObservableObject {
             confirmSessionThenOpen(atTheReturn: true)
             return
         }
+        renewSessionConfirmationIfDue()
         guard let attemptID = runtimeOpenAttempt?.id else {
             return
         }
         scheduleRuntimeOpenTimers(attemptID: attemptID)
+    }
+
+    /// How long after a return the quiet read starts: what brought the App
+    /// back (a notification tap, a shortcut) is handled first.
+    static let sessionRenewalDelay: Duration = .seconds(2)
+
+    /// An App that keeps running reads its session only at launch, so its
+    /// confirmation would run out after `MobileSessionConfirmation.lifetime`
+    /// and the page be closed for a check. From `renewalAge` on, a return to
+    /// the foreground with an instance open reads the session quietly
+    /// behind the page instead. Its answer acts as any session read's does
+    /// (a signed-out or changed account, or an instance gone from the list,
+    /// closes the page); no answer changes nothing.
+    private func renewSessionConfirmationIfDue() {
+        guard
+            hasCompletedBootstrap,
+            sessionRenewal == nil,
+            sessionConfirmation == nil,
+            route.runtime != nil,
+            sessionCoordinator.sessionConfirmationIsDueForRenewal
+        else {
+            return
+        }
+        sessionRenewal = Task { [weak self] in
+            try? await Task.sleep(for: Self.sessionRenewalDelay)
+            guard let self else {
+                return
+            }
+            defer { self.sessionRenewal = nil }
+            await self.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            guard
+                self.sessionConfirmation == nil,
+                self.sessionCoordinator.sessionConfirmationIsDueForRenewal
+            else {
+                return
+            }
+            self.sessionRenewalIsReading = true
+            _ = try? await self.sessionCoordinator.refresh()
+            self.sessionRenewalIsReading = false
+            // A tap or shortcut that arrived during the read.
+            self.deliverPendingInstanceOpen()
+        }
     }
 
     /// avibe.bot's last confirmation of the session is past its lifetime
@@ -2443,6 +2498,18 @@ final class AppModel: ObservableObject {
     /// lists it. With no answer (offline, a failed read) the App stops at
     /// the instance list; a signed-out or changed account, or an instance
     /// that left the list, is handled as after any session read.
+    /// Whether work that reaches an instance without its page (a Live
+    /// Activity's requests) may go to `origin` for `accountID`: the session
+    /// lists that address for that account, and avibe.bot confirmed the
+    /// session within its lifetime.
+    private func sessionVouches(forAccount accountID: String, origin: String) -> Bool {
+        sessionCoordinator.sessionConfirmationIsCurrent
+            && sessionCoordinator.currentAccount?.id == accountID
+            && sessionCoordinator.currentInstances.contains {
+                WebOrigin(url: $0.url)?.serialized == origin
+            }
+    }
+
     /// `atTheReturn`: nothing asked for an open (the App came back to the
     /// foreground); under the account page only the runtime goes then.
     private func confirmSessionThenOpen(atTheReturn: Bool = false) {
