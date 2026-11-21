@@ -1038,11 +1038,13 @@ const PetSurface: React.FC = () => {
             timer: window.setTimeout(() => void (async () => {
               // A freshly shown window can get the press but none of the moves
               // after it, so before calling this a hold, ask the shell where the
-              // pointer is: moved means a drag, released means nothing.
-              const pointer = petBridge.shellDrags() ? await petBridge.pointer().catch(() => null) : null;
-              if (!epoch.isCurrent()) return;
+              // pointer is: moved means a drag, released means nothing. The
+              // answer belongs to this press only: a release and a new press
+              // while it is on its way discard it.
               const press = pressRef.current;
               if (!press || press.held || press.dragged) return;
+              const pointer = petBridge.shellDrags() ? await petBridge.pointer().catch(() => null) : null;
+              if (!epoch.isCurrent() || pressRef.current !== press || press.held || press.dragged) return;
               if (pointer?.down === false) { pressRef.current = null; return; }
               if (pointer && Math.hypot(pointer.x - press.x, pointer.y - press.y) >= DRAG_SLOP) { beginDrag(press); return; }
               press.held = true;

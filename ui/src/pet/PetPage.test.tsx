@@ -3649,6 +3649,27 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     });
   }
 
+  it('discards a pointer answer that arrives after its press was released and a new one began', async () => {
+    const answers: ReturnType<typeof deferred<unknown>>[] = [];
+    const invoke = recording((command, args) => {
+      if (command === 'pet_ready') return ready();
+      if (command === 'pet_pointer') { const answer = deferred<unknown>(); answers.push(answer); return answer.promise; }
+      if (command === 'pet_drag') return new Promise(() => {});
+      return { revision: args?.revision ?? 1, layout: bottom };
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending')).toBe(false));
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    await waitFor(() => expect(answers).toHaveLength(1));
+    fireEvent.pointerUp(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 2, clientX: 10, clientY: 10 });
+    // The first press's answer says "moved": it must not turn the new press into a drag.
+    await act(async () => answers[0].resolve({ x: 60, y: 10, down: true }));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_drag')).toBe(false);
+  });
+
   it('draws a published snapshot before acknowledging it, and ignores an older one', async () => {
     const invoke = recording((command, args) => command === 'pet_ready' ? ready() : { revision: args?.revision ?? 1, layout: top });
     shell(invoke);
