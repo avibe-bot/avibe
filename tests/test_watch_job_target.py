@@ -1012,3 +1012,40 @@ def test_a_job_watch_polls_and_a_hand_over_do_their_file_and_database_work_off_t
     assert threads["lease"] - {loop_thread}
     # Polled every 0.05 s here (1 s in production): noticed within a few polls.
     assert noticed < 2.0
+
+
+@pytest.mark.parametrize("found", [KeyError, ValueError, None], ids=["record-gone", "unreadable", "finished"])
+def test_a_shutdown_during_a_poll_leaves_the_job_watch_for_the_next_start(tmp_path: Path, monkeypatch, found) -> None:
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    original_host = watches_module._job_host
+
+    def job_host(target):
+        entered.set()
+        assert release.wait(5)
+        if found is not None:
+            raise found("synthetic")
+        return original_host(target)
+
+    async def run() -> tuple[str, ManagedWatchStore]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "exit 0" if found is None else "sleep 30")
+        watch_id = await host.hand_over(job_id)
+        monkeypatch.setattr(watches_module, "_job_host", job_host)
+        service = _service(store)
+        await _start_service(service)
+        assert await asyncio.to_thread(entered.wait, 5)
+        service.controller.shutdown_requested = True
+        release.set()
+        await asyncio.sleep(0.3)
+        await service.stop()
+        if found is not None:
+            await host.kill(job_id)
+        return watch_id, store
+
+    watch_id, store = asyncio.run(run())
+
+    assert store.get_watch(watch_id).enabled
+    assert _follow_ups(watch_id) == []

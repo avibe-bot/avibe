@@ -2507,23 +2507,32 @@ class ManagedWatchService:
                     await self._commit_lifetime_timeout_async(watch)
                     return
             target = watch.job_target
+            failure: Exception | None = None
+            status = None
             try:
                 host = await asyncio.to_thread(_job_host, target)
                 status = await host.wait(target["job_id"], deadline_s=0)
             except KeyError:
                 status = None  # the job record is gone: report what is known
-            except ValueError as exc:
+            except Exception as exc:
+                failure = exc
+            # The look above awaited; a shutdown that began meanwhile leaves this Watch
+            # for the next start, whatever the look found.
+            if getattr(self.controller, "shutdown_requested", False):
+                self._begin_stop()
+                return
+            if isinstance(failure, ValueError):
                 # Unreadable state (its deadline, say): the Watch cannot keep its promises
                 # for this job, so it stops the command, and lets go only once the job
                 # host confirms nothing of it runs.
                 if await _stop_job(target, JOB_STOP_UNREADABLE):
                     await self._commit_job_result_async(watch)
                 else:
-                    await self._hold_unmanageable_job_async(watch, exc)
+                    await self._hold_unmanageable_job_async(watch, failure)
                 return
-            except Exception as exc:
+            if failure is not None:
                 # Possibly transient (I/O): keep the job, say so, and look again later.
-                await self._hold_unmanageable_job_async(watch, exc)
+                await self._hold_unmanageable_job_async(watch, failure)
                 return
             if status is None or status.state != "running":
                 await self._commit_job_result_async(watch)
