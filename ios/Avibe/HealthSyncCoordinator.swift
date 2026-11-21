@@ -104,11 +104,12 @@ final class HealthSyncCoordinator: ObservableObject {
     /// Whether a confirmed instance list no longer lists `candidate`'s
     /// instance at its origin: gone from the list, or listed at another
     /// origin (renamed). Only the current account's list decides, and an
-    /// unknown list decides nothing; nor does an empty one, as the account
-    /// event treats it.
+    /// unknown list decides nothing. A confirmed empty list (the account has
+    /// no instance left) does not list it either: a deleted instance's name
+    /// can later belong to another account.
     private func delisted(_ candidate: HealthDeviceIdentity) -> Bool {
         guard candidate.accountID == currentAccountID,
-              let listed = instancesProvider?(), !listed.isEmpty else { return false }
+              let listed = instancesProvider?() else { return false }
         return listed[candidate.instanceID] != candidate.origin
     }
 
