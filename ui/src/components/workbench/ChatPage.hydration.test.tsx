@@ -280,6 +280,53 @@ describe('ChatPage transcript hydration', () => {
     Reflect.deleteProperty(document, 'hasFocus');
   });
 
+  it.each([
+    { surface: 'the phone App', native: true, marked: true },
+    { surface: 'a browser', native: false, marked: false },
+  ])('marks a shown chat read without page focus only in $surface', async ({ native, marked }) => {
+    // A push tap opens the conversation in a new App web view, which has no focus
+    // until the reader taps inside it. In the App a shown page is in front of the
+    // reader; in a browser an unfocused window may not be.
+    mocks.realInbox = true;
+    document.hasFocus = () => false;
+    if (native) {
+      Object.defineProperty(window, 'avibeNative', {
+        configurable: true,
+        value: {
+          contract: 1,
+          platform: 'ios',
+          shellVersion: '1.0 (1)',
+          capabilities: {},
+          call: vi.fn(() => new Promise(() => {})),
+          on: vi.fn(() => () => undefined),
+        },
+      });
+    }
+    mocks.api.connectWorkbenchEvents.mockImplementation(() => () => {});
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
+    mocks.api.listInbox.mockResolvedValue({ sessions: [], next_cursor: null, unread_by_session: { 'session-new': 1 } });
+    mocks.api.markSessionRead.mockResolvedValue({ updated: 1, unread_counts: {}, unread_by_session: {} });
+
+    try {
+      render(
+        <WorkbenchInboxProvider>
+          <MemoryRouter initialEntries={['/chat/session-new']}>
+            <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+          </MemoryRouter>
+        </WorkbenchInboxProvider>,
+      );
+      await waitFor(() => expect(mocks.api.listInbox).toHaveBeenCalled());
+      await act(async () => {
+        for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      if (marked) await waitFor(() => expect(mocks.api.markSessionRead).toHaveBeenCalledWith('session-new', undefined, { handleError: false }));
+      else expect(mocks.api.markSessionRead).not.toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(window, 'avibeNative');
+    }
+  });
+
   it('waits for a new count or a read elsewhere before marking a chat read again after the write is refused', async () => {
     // The Inbox clears the count at once and puts it back when the write is
     // refused; the open chat must not read that as a new unread and re-send.

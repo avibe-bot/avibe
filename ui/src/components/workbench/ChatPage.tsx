@@ -60,7 +60,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
+import { canMarkConversationRead, usePageActive, usePagePresented } from '../../lib/pageActivity';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
@@ -390,6 +390,7 @@ export const ChatPage: React.FC = () => {
   const routeSurfaceActive = useRouteSurfaceActive();
   const windowChrome = useDesktopWindowChrome();
   const pageActive = usePageActive();
+  const pagePresented = usePagePresented();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
@@ -3197,7 +3198,7 @@ export const ChatPage: React.FC = () => {
     // consume the owner's unread state.
     if (!canChat) return;
     if (!canMarkConversationRead({
-      pageActive,
+      pageActive: pagePresented,
       routeSurfaceActive,
       sessionReady: !loading && session?.id === sessionId,
       viewResolved: showPageViewResolved,
@@ -3227,7 +3228,7 @@ export const ChatPage: React.FC = () => {
     session?.id,
     showPageViewResolved,
     historicalWindow,
-    pageActive,
+    pagePresented,
     routeSurfaceActive,
     showPageActive,
     isDesktop,

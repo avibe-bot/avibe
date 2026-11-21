@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react';
 
+import { isNativeShell } from './native';
+
 export type PageActivitySnapshot = {
   visibilityState: DocumentVisibilityState;
   hasFocus: boolean;
@@ -382,4 +384,18 @@ const subscribeDocumentVisible = (listener: () => void): (() => void) => {
  */
 export function useDocumentVisible(): boolean {
   return useSyncExternalStore(subscribeDocumentVisible, readDocumentVisible, () => true);
+}
+
+/**
+ * Whether what the page shows is in front of the reader, for reading it. In a
+ * browser that is `usePageActive`: a visible window the user has not focused may
+ * not be looked at. A phone App's web view fills the App, so there a shown page
+ * is in front of the reader. Its focus only says whether the web view was tapped
+ * since it loaded, and a push tap opens the conversation in a new one, so focus
+ * is not asked there.
+ */
+export function usePagePresented(): boolean {
+  const active = usePageActive();
+  const visible = useDocumentVisible();
+  return isNativeShell() ? visible : active;
 }
