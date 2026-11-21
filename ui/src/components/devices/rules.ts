@@ -2,24 +2,26 @@
 // ask the same questions (does this need a confirmation?) before they open one.
 import type { TFunction } from 'i18next';
 
-import { healthText } from './format';
-import type { Device, DeviceActivity, DeviceCapability } from './types';
+import type { TranslationKey } from '@/i18n/types';
+import { dayText, healthText } from './format';
+import { instanceUrl } from './paths';
+import type { AccountResult, Device, DeviceActivity, DeviceFunction, RenameDevice, SignedOutDevice, TunnelSetting } from './types';
 
 /** The Avibe App's TestFlight invitation; TestFlight lists the App as 「Avibe OS」. */
 export const TESTFLIGHT_INVITE_URL = 'https://testflight.apple.com/join/HXqwMqeX';
-/** The address a phone opens this Avibe at. */
-export const instanceUrl = (host: string) => `https://${host}`;
 /** Every domain this Avibe can claim ends so. */
 export const DOMAIN_SUFFIX = '-app.avibe.bot';
+/** The name part of a domain this Avibe can claim, or the host as it is. */
+export const prefixOf = (host: string) => (host.endsWith(DOMAIN_SUFFIX) ? host.slice(0, -DOMAIN_SUFFIX.length) : host);
 
 /** Signing a device out loses something only when it synced health data (whether or not Health
  *  is still on): then it asks first. */
 export const signOutNeedsConfirm = (device: Device) =>
-  device.capabilities.some((each) => each.kind === 'health' && (each.on || Boolean(each.syncedAt)));
+  device.functions.some((each) => each.kind === 'health' && (each.on || Boolean(each.syncedAt)));
 
 /** Turning a device's Health off deletes what it synced (`mobile_store.revoke` purges it), and only
  *  the iPhone can connect it again: it always asks first. */
-export const capabilityOffNeedsConfirm = (capability: DeviceCapability) => capability.kind === 'health';
+export const functionOffNeedsConfirm = (fn: DeviceFunction) => fn.kind === 'health';
 
 /** Signing out every other device always asks first. */
 export const signOutOthersNeedsConfirm = () => true;
@@ -29,14 +31,13 @@ export const signOutOthersNeedsConfirm = () => true;
 export const turnOffNeedsConfirm = (devices: Device[]) => devices.find((each) => each.self)?.kind !== 'host';
 
 /**
- * How a function shows in a device's detail: a switch, or its state only. Someone else's device is
- * theirs to change; Computer Use seen from another device changes only on that computer; Health,
- * once off, connects again only on the iPhone.
+ * How a function shows in a device's detail: a switch, or its state only. The instance says whether
+ * this viewer may change it; Computer Use is never changed here; Health, once off, connects again
+ * only on the iPhone. A switch that would be refused when pressed is never drawn.
  */
-export const capabilityControl = (device: Device, capability: DeviceCapability): 'switch' | 'state' => {
-  if (device.group !== 'mine') return 'state';
-  if (capability.kind === 'computerUse' && capability.fixed) return 'state';
-  if (capability.kind === 'health' && !capability.on) return 'state';
+export const functionControl = (fn: DeviceFunction): 'switch' | 'state' => {
+  if (fn.kind === 'computerUse' || !fn.canChange) return 'state';
+  if (fn.kind === 'health' && !fn.on) return 'state';
   return 'switch';
 };
 
@@ -44,10 +45,13 @@ export const capabilityControl = (device: Device, capability: DeviceCapability):
 export const othersSignedIn = (devices: Device[]) =>
   devices.filter((each) => each.group === 'mine' && each.kind !== 'host' && !each.self);
 
+/** Every remote device, mine or not (what the computer itself can sign out at once). */
+export const remoteDevices = (devices: Device[]) => devices.filter((each) => each.kind !== 'host');
+
 /** How many of everyone's devices besides this one turning remote access off locks out: all but
  *  the host. While this device is not known it is one of them, so it is not counted twice. */
 export const lockedOutCount = (devices: Device[]) => {
-  const remote = devices.filter((each) => each.group !== 'unattributed' && each.kind !== 'host' && !each.self);
+  const remote = devices.filter((each) => each.group !== 'unattributed' && each.kind !== 'host' && !each.self && !each.pushOnly);
   return devices.some((each) => each.self) ? remote.length : Math.max(0, remote.length - 1);
 };
 
@@ -58,27 +62,95 @@ export const newestFirst = (items: DeviceActivity[]) =>
 /** How many entries the Devices page itself shows; the rest are in the activity list. */
 export const RECENT_ACTIVITY_LIMIT = 5;
 
-/** One activity entry, in the page's own words. */
+/** One activity entry, in the page's own words. A device no longer listed is said as such. */
 export function activityText(t: TFunction, language: string, item: DeviceActivity): string {
   const { event } = item;
+  const device = item.device ?? t('devices.activity.formerDevice');
   switch (event.kind) {
     case 'signedIn':
-      return t('devices.activity.signedIn', { device: event.device });
+      return t('devices.activity.signedIn', { device });
     case 'signedOut':
-      return t('devices.activity.signedOut', { device: event.device });
-    case 'healthRead':
+      return event.actor
+        ? t('devices.activity.signedOutBy', { device, actor: event.actor })
+        : t('devices.activity.signedOut', { device });
+    case 'healthRead': {
+      const data = healthText(t, language, event.data);
+      const days = event.fromDay === event.toDay
+        ? t('devices.activity.day', { day: dayText(event.fromDay, language) })
+        : t('devices.activity.days', { from: dayText(event.fromDay, language), to: dayText(event.toDay, language) });
       return event.task
-        ? t('devices.activity.healthReadFor', { count: event.days, data: healthText(t, language, event.data), task: event.task })
-        : t('devices.activity.healthRead', { count: event.days, data: healthText(t, language, event.data) });
-    case 'healthConnected':
-      return t('devices.activity.healthConnected', { device: event.device, data: healthText(t, language, event.data) });
+        ? t('devices.activity.healthReadFor', { days, data, task: event.task })
+        : t('devices.activity.healthRead', { days, data });
+    }
     case 'alarmCreated':
-      return event.confirmedOn
-        ? t('devices.activity.alarmConfirmed', { label: event.label, device: event.confirmedOn })
-        : t('devices.activity.alarmCreated', { label: event.label });
-    case 'directOn':
-      return t('devices.activity.directOn');
+    case 'reminderCreated': {
+      const alarm = event.kind === 'alarmCreated';
+      const what = event.label
+        ? t(alarm ? 'devices.activity.alarmLabelled' : 'devices.activity.reminderLabelled', { label: event.label })
+        : t(alarm ? 'devices.activity.alarm' : 'devices.activity.reminder');
+      return event.confirmed ? t('devices.activity.confirmedOn', { what, device }) : what;
+    }
     case 'remoteAccessOn':
-      return t('devices.activity.remoteAccessOn', { host: event.host });
+      return t('devices.activity.remoteAccessOn');
+    case 'remoteAccessOff':
+      return t('devices.activity.remoteAccessOff');
   }
 }
+
+const accountKeys = {
+  queued: 'devices.signedOut.queued',
+  retrying: 'devices.signedOut.retrying',
+  accepted: 'devices.signedOut.accepted',
+  sharedSignIn: 'devices.signedOut.sharedSignIn',
+  keeperUnknown: 'devices.signedOut.keeperUnknown',
+  refusedCredential: 'devices.signedOut.refusedCredential',
+  refused: 'devices.signedOut.refused',
+  unconfirmed: 'devices.signedOut.unconfirmed',
+  unknown: 'devices.signedOut.unknown',
+} as const satisfies Record<Exclude<AccountResult, 'localOnly'>, TranslationKey>;
+
+/**
+ * What avibe.bot did about a signed-out device's account sign-in, one sentence per distinct
+ * result. Never "ended": accepted is accepted. Where only this Avibe's sign-in ended, the advice
+ * depends on whose device it was; where that is not known, both halves are said.
+ */
+export function accountResultTexts(t: TFunction, device: Pick<SignedOutDevice, 'owner' | 'results'>): string[] {
+  return [...new Set(device.results)].map((result) => {
+    if (result !== 'localOnly') return t(accountKeys[result]);
+    if (device.owner === 'mine') return t('devices.signedOut.localOnlyMine');
+    if (device.owner === 'others') return t('devices.signedOut.localOnlyOthers');
+    return t('devices.signedOut.localOnlyEither');
+  });
+}
+
+/** A tunnel setting's stored value, as its own control names it. */
+export function settingValueText(t: TFunction, setting: TunnelSetting, raw: string): string {
+  switch (setting) {
+    case 'protocol':
+      return raw === 'auto' ? t('remoteAccess.protocolAuto') : raw === 'quic' ? 'QUIC' : raw === 'http2' ? 'HTTP/2' : raw;
+    case 'ipFamily':
+      return raw === 'auto' ? t('remoteAccess.ipAuto') : raw === '4' ? t('remoteAccess.ipV4') : raw === '6' ? t('remoteAccess.ipV6') : raw;
+    case 'outbound':
+      return raw || t('remoteAccess.outboundSystem');
+  }
+}
+
+const settingNameKeys = {
+  protocol: 'remoteAccess.protocol',
+  ipFamily: 'remoteAccess.ipFamily',
+  outbound: 'remoteAccess.outboundInterface',
+} as const satisfies Record<TunnelSetting, TranslationKey>;
+export const settingName = (t: TFunction, setting: TunnelSetting) => t(settingNameKeys[setting]);
+
+/** The devices a rename lists before it happens: the viewer's own, each with how to sign out there. */
+export const renameDevices = (devices: Device[]): RenameDevice[] => devices
+  .filter((each) => each.group === 'mine')
+  .map((each) => ({
+    id: each.id,
+    name: each.name,
+    kind: each.client.kind === 'homeScreen' ? 'homeScreen' : each.kind,
+    self: each.self,
+    pushOnly: each.pushOnly,
+  }));
+
+export { instanceUrl };

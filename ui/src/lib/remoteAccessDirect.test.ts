@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import i18n from '../i18n';
 import { deviceUsingText, type DeviceUsing } from './remoteAccessDirect';
 
-// ui/design: settings/remote-access/direct-app-*
+// ui/design: settings/devices-connection/app*
 describe('deviceUsingText', () => {
   const text = async (lang: 'zh' | 'en', using: DeviceUsing) => {
     await i18n.changeLanguage(lang);

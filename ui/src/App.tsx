@@ -23,7 +23,8 @@ import {
   PermissionsPage,
   preloadInitialRoute,
   ProjectsPage,
-  RemoteAccessPage,
+  ConnectionPage,
+  DevicesPage,
   SettingsBackendPage,
   SettingsBackendsPage,
   SettingsClaudeProviderPage,
@@ -44,6 +45,7 @@ import {
   SkillsPage,
   UserList,
   VaultsPage,
+  SetupRemoteAccess,
   Wizard,
   StandaloneAppRoute,
 } from './routePages';
@@ -105,6 +107,11 @@ const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ def
 const ShowPageRoute = lazy(() =>
   import('./components/apps/ShowPageRoute').then((m) => ({ default: m.ShowPageRoute })),
 );
+// The one screen a browser sees after it bound this computer from a private-network address
+// (ui/design: settings/devices/moved*). Rare, so it stays out of the main entry.
+const OpenNewAddress = lazy(() =>
+  import('./components/devices/OpenNewAddress').then((m) => ({ default: m.OpenNewAddress })),
+);
 // Settings → Models (Model Hub, L4). Lazy so its code + framer-motion Reorder
 // stay out of the main entry. The backend capability gate below must accept the
 // route before React renders this lazy component and requests its chunk.
@@ -115,6 +122,8 @@ import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCap
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
+import { copyTextToClipboard } from './lib/utils';
+import { readClaimMarker } from './components/devices/claimFlow';
 import { isNativeShell, onNativePushOpened } from './lib/native';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
@@ -236,6 +245,21 @@ const accessBlockedCode = (error: unknown): string | null => {
 // the setup wizard.
 const AccessBlocked = ({ code }: { code: string | null }) => {
     const { t } = useTranslation();
+    // This browser turned remote access on from a private-network address a moment ago: binding
+    // succeeded, and that is why this address stopped opening Avibe. Say so, with the way on. The
+    // claim is recognised by what this tab kept from the local API, never by the address bar.
+    const moved = code === 'remote_access_host_mismatch' ? readClaimMarker() : null;
+    if (moved) {
+        return (
+            <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
+                <div className="w-full max-w-md">
+                    <Suspense fallback={null}>
+                        <OpenNewAddress host={moved.host} onCopy={(url) => { void copyTextToClipboard(url); }} />
+                    </Suspense>
+                </div>
+            </main>
+        );
+    }
     return (
         <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
             <Card className="max-w-md w-full">
@@ -882,7 +906,11 @@ const settingsRoute = () => (
     <Route path="platforms" element={<SettingsPlatformsPage />} />
     <Route path="platforms/groups" element={<ChannelList isPage />} />
     <Route path="platforms/users" element={<UserList />} />
-    <Route path="remote-access" element={<RemoteAccessPage />} />
+    {/* 「设备」 keeps the old path: the claim's return and saved links point here. */}
+    <Route path="remote-access" element={<DevicesPage />} />
+    <Route path="remote-access/activity" element={<DevicesPage />} />
+    <Route path="remote-access/connection" element={<ConnectionPage />} />
+    <Route path="remote-access/connection/address" element={<ConnectionPage />} />
     <Route path="backends" element={<SettingsBackendsPage />} />
     <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
     <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
@@ -919,6 +947,7 @@ const WorkbenchRouteSurface = () => {
     fallbackElement={<Navigate to="/" replace />}
   >
     <Route path="/setup" element={<Wizard />} />
+    <Route path="/setup/remote-access" element={<SetupRemoteAccess />} />
 
     {/* Workbench mode — `/` is the canvas root, the five capability
         entries (Inbox + Agents/Skills/Harness/Vaults) live alongside it. */}

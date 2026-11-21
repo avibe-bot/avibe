@@ -1,0 +1,381 @@
+/** @vitest-environment jsdom */
+
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
+import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
+import i18n from '../../i18n';
+import { DevicesApiError, devicesApi, type ClaimForm } from './api';
+import { readClaimMarker, writeClaimMarker } from './claimFlow';
+import { DevicesPage } from './DevicesPage';
+import { DevicesPageView } from './DevicesPageView';
+import { accountResultTexts, functionControl, lockedOutCount } from './rules';
+import { said } from './testText';
+import type { Device, Reach } from './types';
+import type { DevicesSnapshot } from './wire';
+
+// ui/design: settings/devices/*
+vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+
+const host = 'max-app.avibe.bot';
+const account = 'max@example.test';
+const on: Reach = { state: 'on', host, account, tunnel: 'good', ms: 120 };
+
+const macbook: Device = {
+  id: 'host', group: 'mine', kind: 'host', name: 'MacBook', client: { kind: 'runtime' }, self: true,
+  functions: [{ kind: 'computerUse', status: 'ready' }, { kind: 'notifications', on: true, canChange: true }],
+};
+const iphone: Device = {
+  id: 'iphone', group: 'mine', kind: 'iphone', name: 'iPhone', account, client: { kind: 'app' }, online: { path: 'punched', ms: 38 },
+  functions: [{ kind: 'notifications', on: true, canChange: true }, { kind: 'health', on: true, canChange: true, data: ['steps'] }],
+};
+const chrome: Device = { id: 'chrome', group: 'mine', kind: 'browser', name: 'Chrome', account, client: { kind: 'browser' }, functions: [] };
+const sara: Device = { ...chrome, id: 'sara', group: 'others', name: 'Sara Chrome', account: 'sara@example.test', person: 'sara@example.test', functions: [{ kind: 'notifications', on: true, canChange: false }] };
+
+const snapshot = (devices: Device[], extra: Partial<DevicesSnapshot> = {}): DevicesSnapshot => ({ devices, unlinkedHealth: [], signedOut: [], bulk: null, ...extra });
+const paired = { ok: true, enabled: true, paired: true, running: true, public_url: `https://${host}` };
+const unpaired = { ok: true, enabled: false, paired: false, running: false };
+
+function Where() {
+  const location = useLocation();
+  return <div data-testid="where">{`${location.pathname}${location.search}`}</div>;
+}
+
+function mount(path = '/settings/remote-access', who: 'owner' | 'member' | 'guest' = 'owner') {
+  const owner = who === 'owner';
+  // A Member may operate the instance (`can_manage_instance`) without being its owner.
+  const capabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: who !== 'guest', is_instance_owner: owner };
+  return render(
+    <InstanceAuthorizationContext.Provider value={{ remote: !owner, instanceKind: 'personal', instanceRole: owner ? 'owner' : 'member', capabilities }}>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/settings/remote-access" element={<><DevicesPage /><Where /></>} />
+          <Route path="/settings/remote-access/activity" element={<DevicesPage />} />
+          <Route path="/settings/remote-access/connection" element={<Where />} />
+        </Routes>
+      </MemoryRouter>
+    </InstanceAuthorizationContext.Provider>,
+  );
+}
+
+const api = vi.mocked(devicesApi, { partial: true });
+let submitted: { action: string; fields: Record<string, string>; policy: string | undefined } | null;
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh');
+  window.sessionStorage.clear();
+  submitted = null;
+  vi.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(function submit(this: HTMLFormElement) {
+    submitted = {
+      action: this.action,
+      fields: Object.fromEntries(Array.from(this.querySelectorAll('input')).map((input) => [input.name, input.value])),
+      policy: document.querySelector<HTMLMetaElement>('meta[name="referrer"]')?.content,
+    };
+  });
+  vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook]));
+  vi.spyOn(devicesApi, 'status').mockResolvedValue(unpaired as never);
+  vi.spyOn(devicesApi, 'activity').mockResolvedValue([]);
+  vi.spyOn(devicesApi, 'address').mockResolvedValue(null);
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe('DevicesPage · turning remote access on', () => {
+  it('has no pairing-key field, and takes the user code and state only from the local API\'s answer', async () => {
+    const form: ClaimForm = {
+      claimId: 'claim-1', action: 'https://avibe.bot/api/v1/claims/redirect-entry', method: 'POST',
+      fields: { user_code: 'FROM-API', redirect_state: 'state-from-api' }, referrerPolicy: 'strict-origin',
+    };
+    vi.spyOn(devicesApi, 'startClaim').mockResolvedValue(form);
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'pending' });
+    // Whatever the address bar carries is not a source of either value.
+    mount('/settings/remote-access?user_code=EVIL&redirect_state=EVIL&claim_id=EVIL');
+
+    const turnOn = await screen.findByRole('button', { name: '开启远程访问' });
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText(said('组织的 Avibe 用控制台里的配对密钥绑定：在这台电脑的终端运行 vibe remote pair。'))).toBeTruthy();
+    fireEvent.click(turnOn);
+
+    await waitFor(() => expect(submitted).not.toBeNull());
+    expect(api.startClaim).toHaveBeenCalledWith('zh');
+    expect(submitted).toEqual({ action: form.action, fields: form.fields, policy: 'strict-origin' });
+    expect(readClaimMarker()).toMatchObject({ kind: 'claim', id: 'claim-1' });
+    expect(JSON.stringify(window.sessionStorage)).not.toContain('EVIL');
+  });
+
+  it('shows "open the new address" when the status read fails because this browser lost admission', async () => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim')
+      .mockResolvedValueOnce({ state: 'accepting', hostname: host })
+      .mockRejectedValue(new DevicesApiError(503, 'remote_access_host_mismatch', {}));
+    mount();
+
+    expect(await screen.findByText('远程访问已开启', {}, { timeout: 4000 })).toBeTruthy();
+    // The address is the one the local API reported while it was accepting, nothing else.
+    expect(screen.getByRole('link', { name: `https://${host}` }).getAttribute('href')).toBe(`https://${host}`);
+    expect(screen.getByText(said('这个页面是从局域网地址打开的，绑定后需要登录，所以不再更新。'))).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('points to avibe.bot when the new address was never read', async () => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim').mockRejectedValue(new DevicesApiError(503, 'remote_access_host_mismatch', {}));
+    mount();
+
+    expect(await screen.findByText(said('从现在起，请用新地址打开这个 Avibe。登录 avibe.bot 就能看到并打开它。'))).toBeTruthy();
+    expect(screen.getByRole('link', { name: '打开 avibe.bot' }).getAttribute('href')).toBe('https://avibe.bot/app');
+  });
+
+  it('says a refused return in one sentence and drops the word from the address', async () => {
+    mount('/settings/remote-access?claim_error=invalid_return');
+    expect(await screen.findByText(said('没有开启：从 avibe.bot 回来的这一步没有通过验证，什么都没有绑定。请再开启一次。'))).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access'));
+  });
+
+  it('follows an open request with a way to cancel it, and says an unknown refusal with its code', async () => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    const claim = vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'pending' });
+    vi.spyOn(devicesApi, 'cancelClaim').mockResolvedValue();
+    mount();
+
+    expect(await screen.findByText(said('正在等待 avibe.bot 上的确认…'))).toBeTruthy();
+    claim.mockResolvedValue({ state: 'error', code: 'local_claim_unavailable' });
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    await waitFor(() => expect(api.cancelClaim).toHaveBeenCalledWith('claim-1'));
+    expect(await screen.findByText(said('avibe.bot 没有完成这次请求，什么都没有绑定。（代码：local_claim_unavailable）'), {}, { timeout: 4000 })).toBeTruthy();
+    expect(readClaimMarker()).toBeNull();
+  });
+
+  it('hands a bind-again that comes back here to the connection page', async () => {
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    mount();
+    expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
+  });
+});
+
+describe('DevicesPage · devices', () => {
+  beforeEach(() => {
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+  });
+
+  it('signs a plain browser out at once and says what avibe.bot was told, never that the sign-in ended', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
+    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
+      signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner: 'unknown', results: ['accepted'] }], healthCleanupPending: true,
+    });
+    mount();
+
+    fireEvent.click(await screen.findByText('Chrome'));
+    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+    await waitFor(() => expect(api.signOut).toHaveBeenCalledWith('chrome'));
+    const notice = await screen.findByRole('status');
+    expect(within(notice).getByText('已在这个 Avibe 上退出 Chrome')).toBeTruthy();
+    expect(within(notice).getByText(said('已通知 avibe.bot 结束它的账号登录。'))).toBeTruthy();
+    // Pending clean-up is conditional: the row showed no Health, so it is not claimed to have had any.
+    expect(within(notice).getByText(said('如果它同步过健康数据，清理尚未确认。'))).toBeTruthy();
+    expect(document.body.textContent).not.toContain('已结束');
+  });
+
+  it('asks before signing out a device that synced Health, and names the local-only half for whose device it was', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone, sara]));
+    const signOut = vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
+      signedOut: [{ id: 'o1', device: 'iPhone', kind: 'iphone', owner: 'unknown', results: ['localOnly'] }], healthCleanupPending: true,
+    });
+    mount();
+
+    fireEvent.click(await screen.findByText('iPhone'));
+    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+    expect(signOut).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: '退出并删除健康数据' }));
+    await waitFor(() => expect(signOut).toHaveBeenCalledWith('iphone'));
+    // The row the page acted on was one of the viewer's own: only that half is said.
+    expect(await screen.findByText(said('在那台设备上退出 avibe.bot；设备不在手边'))).toBeTruthy();
+    expect(screen.queryByText(said('就在「访问」里移除对方'))).toBeNull();
+    expect(screen.getByText(said('它同步过的健康数据，清理尚未确认。'))).toBeTruthy();
+  });
+
+  it('turns Health off only after a confirmation, and disconnects an unproven pairing by its own id', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone], { unlinkedHealth: [{ id: 'pairing-9', device: 'iPhone 13', data: ['sleep'] }] }));
+    const revoke = vi.spyOn(devicesApi, 'revokeHealth').mockResolvedValue();
+    const revokeUnlinked = vi.spyOn(devicesApi, 'revokeUnlinkedHealth').mockResolvedValue();
+    mount();
+
+    fireEvent.click(await screen.findByText('iPhone'));
+    fireEvent.click(await screen.findByRole('switch', { name: '健康' }));
+    expect(revoke).not.toHaveBeenCalled();
+    expect(screen.getByText(said('已同步的健康数据会删除。要再用，在 iPhone 上重新连接健康。'))).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '关闭健康' }));
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith('iphone'));
+
+    // Back on the device's detail; the unproven pairing is a row of the page itself.
+    fireEvent.click(await screen.findByRole('button', { name: '关闭' }));
+    fireEvent.click(await screen.findByRole('button', { name: '断开' }));
+    fireEvent.click(await screen.findByRole('button', { name: '关闭健康' }));
+    await waitFor(() => expect(revokeUnlinked).toHaveBeenCalledWith('pairing-9'));
+  });
+
+  it('says so when a switch needs the device itself, and changes nothing on the page', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone]));
+    vi.spyOn(devicesApi, 'setFunction').mockRejectedValue(new DevicesApiError(409, 'device_enrollment_required', {}));
+    mount();
+
+    fireEvent.click(await screen.findByText('iPhone'));
+    fireEvent.click(await screen.findByRole('switch', { name: '通知' }));
+    expect(await screen.findByText(said('要先在那台设备上打开这一项。'))).toBeTruthy();
+    expect(screen.getByRole('switch', { name: '通知' }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('signs out every other device only after a confirmation, through the one route that keeps the asker', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, { ...iphone, self: true }, chrome, { ...chrome, id: 'safari', name: 'Safari' }].map((each) => (each.id === 'host' ? { ...each, self: undefined } : each)), { bulk: 'other_sessions' }));
+    const others = vi.spyOn(devicesApi, 'signOutOthers').mockResolvedValue({ signedOut: [], healthCleanupPending: false });
+    const one = vi.spyOn(devicesApi, 'signOut');
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '退出其他所有设备' }));
+    expect(others).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button', { name: '全部退出' }));
+    await waitFor(() => expect(others).toHaveBeenCalledTimes(1));
+    expect(one).not.toHaveBeenCalled();
+  });
+
+  // A Member may operate the instance (`can_manage_instance`) and still is not its owner
+  // (docs/plans/member-instance-operations.md): starting, stopping and optimizing the tunnel are
+  // operation; binding is identity.
+  it('PERMISSIONS-018 keeps Member transport usable while pairing is disabled', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([{ ...chrome, self: true }]));
+    const status = vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    const stop = vi.spyOn(devicesApi, 'stop').mockImplementation(async () => {
+      status.mockResolvedValue({ ...paired, running: false } as never);
+      return { ...paired, running: false } as never;
+    });
+    const start = vi.spyOn(devicesApi, 'start').mockImplementation(async () => {
+      status.mockResolvedValue(paired as never);
+      return paired as never;
+    });
+    const optimize = vi.spyOn(devicesApi, 'optimizeRoute').mockResolvedValue(paired as never);
+    const claim = vi.spyOn(devicesApi, 'startClaim');
+    mount('/settings/remote-access', 'member');
+
+    // Nothing of the owner's: no binding, no connection settings, no domain, nobody else's devices.
+    const remoteAccess = await screen.findByRole('switch', { name: '远程访问' });
+    expect(screen.queryByRole('button', { name: '开启远程访问' })).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByText('连接方式')).toBeNull();
+    expect(screen.queryByText('其他人的设备')).toBeNull();
+    expect(api.activity).not.toHaveBeenCalled();
+    expect(api.address).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /优化线路/ }));
+    await waitFor(() => expect(optimize).toHaveBeenCalledOnce());
+
+    // Turning it off from afar asks first, as it does for the owner.
+    fireEvent.click(remoteAccess);
+    expect(stop).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog').textContent).toContain('所有远程设备（包括这一台）都打不开');
+    fireEvent.click(screen.getByRole('button', { name: '关闭远程访问' }));
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole('switch', { name: '远程访问' }).getAttribute('aria-checked')).toBe('false'));
+    fireEvent.click(screen.getByRole('switch', { name: '远程访问' }));
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it('PERMISSIONS-018 offers an unbound Member nothing to bind with', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([{ ...chrome, self: true }]));
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(unpaired as never);
+    const claim = vi.spyOn(devicesApi, 'startClaim');
+    mount('/settings/remote-access', 'member');
+    expect(await screen.findByText('Chrome')).toBeTruthy();
+    await waitFor(() => expect(api.status).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: '开启远程访问' })).toBeNull();
+    expect(screen.queryByRole('switch', { name: '远程访问' })).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('PERMISSIONS-018 preserves the Owner\'s controls (bound=%s)', async (bound) => {
+    vi.spyOn(devicesApi, 'status').mockResolvedValue((bound ? paired : unpaired) as never);
+    mount('/settings/remote-access', 'owner');
+    if (bound) {
+      expect(await screen.findByRole('switch', { name: '远程访问' })).toBeTruthy();
+      expect(screen.getByText('连接方式')).toBeTruthy();
+    } else {
+      expect(await screen.findByRole('button', { name: '开启远程访问' })).toBeTruthy();
+    }
+  });
+
+  it('shows someone who may not operate the instance their own devices and nothing else', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([{ ...chrome, self: true }]));
+    mount('/settings/remote-access', 'guest');
+
+    expect(await screen.findByText('Chrome')).toBeTruthy();
+    expect(screen.getByText(said('你登录了这个 Avibe 的设备。'))).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: '远程访问' })).toBeNull();
+    expect(screen.queryByText('连接方式')).toBeNull();
+    expect(api.status).not.toHaveBeenCalled();
+    expect(api.activity).not.toHaveBeenCalled();
+    expect(api.address).not.toHaveBeenCalled();
+  });
+
+  it('shows the notice that the address was changed somewhere else, with the way to bind again', async () => {
+    vi.spyOn(devicesApi, 'address').mockResolvedValue({
+      hostname: 'sam-app.avibe.bot', eligible: true, retired: [], healthConnected: false,
+      unrecognizedChange: { previousHostname: host, hostname: 'sam-app.avibe.bot' },
+    });
+    mount();
+
+    expect(await screen.findByText('这个 Avibe 的地址在别处被改了')).toBeTruthy();
+    expect(screen.getByText(said('如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。'))).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '去重新绑定' }));
+    expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
+  });
+});
+
+describe('DevicesPageView', () => {
+  it('groups devices by the list each one names, and keeps other people\'s functions read-only', () => {
+    const orphan: Device = { id: 'orphan', group: 'unattributed', kind: 'browser', name: null, client: { kind: 'browser' }, pushOnly: true, functions: [] };
+    render(<DevicesPageView reach={on} devices={[macbook, iphone, sara, orphan]} detail="sara" />);
+    expect(screen.getByText('我的设备')).toBeTruthy();
+    expect(screen.getByText('其他人的设备')).toBeTruthy();
+    expect(screen.getByText('认不出主人的通知设备')).toBeTruthy();
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).queryByRole('switch')).toBeNull();
+    expect(within(dialog).getByText(said('这是别人的设备，功能由对方在自己的设备上开关。'))).toBeTruthy();
+  });
+
+  it('names the path of a device only where a connection is observed', () => {
+    render(<DevicesPageView reach={on} devices={[macbook, iphone, { ...chrome, lastActiveAt: new Date(Date.now() - 3 * 86_400_000).toISOString() }]} />);
+    expect(screen.getAllByText('打洞直连').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Cloudflare 隧道')).toBeNull();
+  });
+
+  it('never draws a switch that would be refused', () => {
+    expect(functionControl({ kind: 'notifications', on: true, canChange: true })).toBe('switch');
+    expect(functionControl({ kind: 'notifications', on: true, canChange: false })).toBe('state');
+    expect(functionControl({ kind: 'health', on: false, canChange: true, data: [] })).toBe('state');
+    expect(functionControl({ kind: 'computerUse', status: 'ready' })).toBe('state');
+  });
+
+  it('says both halves of the local-only advice only when whose device it was is not known', () => {
+    const t = i18n.t.bind(i18n);
+    const [mine] = accountResultTexts(t, { owner: 'mine', results: ['localOnly'] });
+    const [others] = accountResultTexts(t, { owner: 'others', results: ['localOnly'] });
+    const [either] = accountResultTexts(t, { owner: 'unknown', results: ['localOnly', 'localOnly'] });
+    expect(mine).toContain('在那台设备上退出 avibe.bot');
+    expect(mine).not.toContain('移除对方');
+    expect(others).toContain('在「访问」里移除对方');
+    expect(others).not.toContain('账号安全');
+    expect(either).toContain('是你自己的设备的话');
+    expect(either).toContain('是别人的设备的话');
+    expect(accountResultTexts(t, { owner: 'mine', results: ['queued'] })).toEqual(['已排队，还没有通知到 avibe.bot。远程访问关着或这台电脑休眠时会一直等着。']);
+  });
+
+  it('counts who is locked out without counting notification-only rows', () => {
+    const push: Device = { ...chrome, id: 'push', pushOnly: true };
+    expect(lockedOutCount([{ ...macbook, self: undefined }, { ...iphone, self: true }, chrome, push])).toBe(1);
+  });
+});

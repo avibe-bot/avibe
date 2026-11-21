@@ -1,87 +1,86 @@
 // Settings · Devices · 连接方式 (ui/design: settings/devices-connection/*), the page behind the
 // Devices page's 「连接方式」 row. Nothing here is needed by an ordinary user: everything defaults to
-// automatic, and the Devices page shows only the path in use. Groups split by whose choice it is:
-// the path this device uses (the Avibe App only), what this Avibe offers (the Cloudflare tunnel,
-// direct, the relay), and the tunnel's own settings, drawn with Settings · Remote access's own
-// controls. A change made over a remote connection that could cut it is applied on trial: unless
-// the same device comes back and keeps it, the instance puts the old value back by itself. Last,
-// for the owner at the computer or in a browser: the domain, and a plain rename.
-// A view: props only.
+// automatic. Groups split by whose choice it is: the path this device uses (the Avibe App only),
+// what this Avibe offers (the Cloudflare tunnel, direct, the relay where enrolled), and the
+// tunnel's own settings. The instance verifies a changed tunnel setting itself and puts the old
+// value back: there is no keep button and no countdown, only one status line. Direct and the relay
+// are ordinary switches, refused with one sentence when the change could cut the person off. Last,
+// for the owner: the domain, its rename, and binding remote access again.
+// A view: props only. `ConnectionPage` reads the APIs and passes handlers.
 import type { ReactNode } from 'react';
-import { ChevronRight, Route, Stethoscope } from 'lucide-react';
+import { Check, CircleHelp, History, LoaderCircle, Stethoscope, TriangleAlert, Undo2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
-import type { RemoteAccessSettings } from '@/context/ApiContext';
 import type { TranslationKey } from '@/i18n/types';
 import { deviceUsingText } from '@/lib/remoteAccessDirect';
 import {
-  TunnelAutoRecoverySwitch,
-  TunnelIpFamilyControl,
-  TunnelOutboundSelect,
-  TunnelProfileControl,
-  TunnelProtocolControl,
+  TunnelAutoRecoverySwitch, TunnelIpFamilyControl, TunnelOutboundSelect, TunnelProfileControl, TunnelProtocolControl,
 } from '../remoteAccess/TunnelControls';
+import { TunnelDetails, type TunnelDetailsProps } from '../remoteAccess/TunnelDetails';
 import { SettingsPageShell } from '../settings/SettingsPageShell';
 import { SettingsPanel, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
-import { Input } from '../ui/input';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { KeptTail } from '../ui/kept-tail';
-import { BackToDevices } from './DevicesPageView';
-import { DOMAIN_SUFFIX } from './rules';
-import { timeParts } from './format';
-import {
-  TRIAL_WINDOW_SECONDS,
-  type ConnectionChange,
-  type DeviceUsing,
-  type DirectPreference,
-  type DirectState,
-  type Rename,
-  type TunnelState,
+import { deviceTime, longDay, timeParts } from './format';
+import { ActionRow, BackToDevices, Notice, OptimizeRow } from './parts';
+import { RebindDialogs, RebindRow, type RebindActions } from './RebindViews';
+import { RenameDialogs, type RenameActions } from './RenameDialogs';
+import { settingName, settingValueText } from './rules';
+import { renameRefusalText } from './texts';
+import type {
+  AddressState, ConnectionSetting, ConnectionState, DeviceUsing, DirectPreference, DirectState, OptimizeState, RebindDialog, RebindState,
+  RelayState, RenameDevice, RenameStep, RetiredName, SwitchRefusal, TunnelChange, TunnelSetting, TunnelStatus,
 } from './types';
 
-export type ConnectionPageActions = {
-  onPreferenceChange?: (mode: DirectPreference['mode']) => void;
-  onDirectChange?: (on: boolean) => void;
-  onRelayChange?: (on: boolean) => void;
-  onSettingChange?: <K extends keyof RemoteAccessSettings>(key: K, value: RemoteAccessSettings[K]) => void;
-  onOptimizeRoute?: () => void;
-  onOpenDiagnostics?: () => void;
-  onKeepTrial?: () => void;
-  onPutBack?: () => void;
-  onChangeDomain?: () => void;
-  onRenameNameChange?: (name: string) => void;
-  onRenameContinue?: () => void;
-  onRenameConfirm?: () => void;
-  onRenameCancel?: () => void;
+export type ConnectionPageActions = RenameActions & RebindActions & {
   /** Back to the Devices page. */
   onBack?: () => void;
+  onRetry?: () => void;
+  onPreferenceChange?: (mode: DirectPreference['mode']) => void;
+  onSettingChange?: (setting: ConnectionSetting, to: string | boolean) => void;
+  onOptimizeRoute?: () => void;
+  onOpenDiagnostics?: () => void;
+  onCloseDiagnostics?: () => void;
+  onRunDiagnostics?: () => void;
+  onChangeDomain?: () => void;
+  onShowCleanup?: (retired: RetiredName) => void;
 };
 
 export type ConnectionPageViewProps = ConnectionPageActions & {
-  /** Where the page is open: at the machine itself, a browser elsewhere, or the Avibe App. */
-  viewer: 'local' | 'browser' | 'app';
-  tunnel: TunnelState;
-  direct: DirectState;
-  relay: boolean;
-  /** The relay's switch, shown only when the container turns it on; otherwise the row shows its
-   *  state only. */
-  relayEditable?: boolean;
-  /** The Avibe App's own path, as it reports it; null before it has. */
+  /** `unavailable`: the state cannot be trusted right now, so no setting is shown. */
+  load: 'loading' | 'ready' | 'unavailable';
+  connection: ConnectionState | null;
+  tunnel: TunnelStatus;
+  /** The session comes from elsewhere, not from the computer that runs Avibe. */
+  remote: boolean;
+  /** How this page's own connection came in, once it is observed. */
+  via?: 'tunnel' | 'direct' | null;
+  /** The Avibe App's own path and choice; absent outside an App that offers the choice. */
   path?: DeviceUsing | null;
-  /** The Avibe App's own path choice. */
   preference?: DirectPreference;
-  /** A change is on trial: the same device came back and may keep it for `seconds` more. */
-  trial?: { change: ConnectionChange; seconds: number };
-  /** A trial ended without this device coming back: the old value is in place again. */
-  reverted?: ConnectionChange;
-  /** This Avibe's domain, for the owner: the last row of the page, and the way to change it. */
+  refused?: SwitchRefusal;
+  /** A switch whose change is on its way: it waits. */
+  sending?: ConnectionSetting;
+  optimize?: OptimizeState;
+  /** 「连接诊断与网络路径」, open. */
+  diagnostics?: TunnelDetailsProps;
+  /** This Avibe's domain, for the owner: the last panel of the page. */
   host?: string;
-  rename?: Rename;
-  /** A change is being applied: the controls wait. */
-  busy?: boolean;
+  address?: AddressState | null;
+  /** The viewer's own devices, listed in the rename form. */
+  renameDevices?: RenameDevice[];
+  rename?: RenameStep;
+  rebind?: RebindState;
+  rebindDialog?: RebindDialog;
+  /** This browser started the attempt avibe.bot refused, so it may confirm a reset. */
+  canReset?: boolean;
+  /** Inside Avibe Desktop: binding again is done in a browser on this computer. */
+  rebindNeedsBrowser?: boolean;
+  /** A confirmed bind-again step is being carried out. */
+  rebindBusy?: boolean;
 };
 
 type BadgeVariant = 'info' | 'success' | 'secondary' | 'warning';
@@ -93,6 +92,7 @@ const directStateKeys = {
   denied: 'devices.connection.stateDenied',
   'awaiting-certificate': 'devices.connection.stateAwaitingCertificate',
   'not-running': 'devices.connection.stateNotRunning',
+  unknown: 'devices.connection.stateUnknown',
 } as const satisfies Record<DirectState, TranslationKey>;
 
 const directWhyKeys = {
@@ -102,99 +102,94 @@ const directWhyKeys = {
   'not-running': 'devices.connection.whyNotRunning',
 } as const satisfies Partial<Record<DirectState, TranslationKey>>;
 
-const settingKeys = {
-  protocol: 'remoteAccess.protocol',
-  ipFamily: 'remoteAccess.ipFamily',
-  profile: 'remoteAccess.optimizationProfile',
-  outbound: 'remoteAccess.outboundInterface',
-  autoRecovery: 'remoteAccess.autoRecovery',
-  direct: 'remoteAccess.direct.label',
-  relay: 'remoteAccess.direct.usingRelay',
-} as const satisfies Record<ConnectionChange['setting'], TranslationKey>;
-
-const ipKeys = { auto: 'remoteAccess.ipAuto', '4': 'remoteAccess.ipV4', '6': 'remoteAccess.ipV6' } as const satisfies Record<RemoteAccessSettings['edge_ip_version'], TranslationKey>;
-const profileKeys = {
-  stable: 'remoteAccess.profileStable',
-  balanced: 'remoteAccess.profileBalanced',
-  low_latency: 'remoteAccess.profileLowLatency',
-} as const satisfies Record<RemoteAccessSettings['optimization_profile'], TranslationKey>;
-
 const revertedKeys = {
   today: 'devices.connection.choiceRevertedToday',
   yesterday: 'devices.connection.choiceRevertedYesterday',
   other: 'devices.connection.choiceRevertedDated',
 } as const satisfies Record<NonNullable<ReturnType<typeof timeParts>>['day'], TranslationKey>;
 
+const failedKeys = {
+  saved_restored_runtime_pending: 'devices.connection.change.failedRuntimePending',
+  storage_restore_failed: 'devices.connection.change.failedStorage',
+  candidate_not_ready: 'devices.connection.change.failedNotReady',
+  connection_change_busy: 'devices.connection.change.failedBusy',
+  settings_not_applied: 'devices.connection.change.failedNotApplied',
+  unknown: 'devices.connection.change.failedUnknown',
+} as const satisfies Record<Extract<TunnelChange, { state: 'failed' }>['reason'], TranslationKey>;
+
 const protocolName = (protocol: 'quic' | 'http2') => (protocol === 'quic' ? 'QUIC' : 'HTTP/2');
 
-/** One side of a change, as the page's own controls name it. */
-function changeValue(t: TFunction, change: ConnectionChange, side: 'to' | 'from'): string {
-  switch (change.setting) {
-    case 'protocol': {
-      const value = change[side];
-      return value === 'auto' ? t('remoteAccess.protocolAuto') : protocolName(value);
-    }
-    case 'ipFamily':
-      return t(ipKeys[change[side]]);
-    case 'profile':
-      return t(profileKeys[change[side]]);
-    case 'outbound':
-      return change[side] || t('remoteAccess.outboundSystem');
-    default:
-      return t(change[side] ? 'devices.connection.valueOn' : 'devices.connection.valueOff');
+/** One status line for a tunnel change, in each state the instance can report. */
+function changeLine(t: TFunction, change: TunnelChange): { icon: typeof Check; tone: string; text: string; busy?: boolean } {
+  const from = 'from' in change ? settingValueText(t, change.setting, change.from) : '';
+  switch (change.state) {
+    case 'applying':
+      return { icon: LoaderCircle, tone: 'text-muted', text: t('devices.connection.change.applying'), busy: true };
+    case 'verifying':
+      return { icon: LoaderCircle, tone: 'text-muted', text: t('devices.connection.change.verifying'), busy: true };
+    case 'restoring':
+      return { icon: LoaderCircle, tone: 'text-muted', text: t('devices.connection.change.restoring', { from }), busy: true };
+    case 'applied':
+      return { icon: Check, tone: 'text-mint-ink', text: t('devices.connection.change.applied') };
+    case 'superseded':
+      return { icon: History, tone: 'text-muted', text: t('devices.connection.change.superseded') };
+    case 'restored':
+      return {
+        icon: Undo2,
+        tone: 'text-gold-ink',
+        text: t(change.reason === 'verification_failed'
+          ? 'devices.connection.change.restoredFailed'
+          : change.reason === 'verification_unavailable' ? 'devices.connection.change.restoredUnavailable' : 'devices.connection.change.restoredPlain', { from }),
+      };
+    case 'failed':
+      return {
+        icon: change.reason === 'saved_restored_runtime_pending' || change.reason === 'storage_restore_failed' ? TriangleAlert : Undo2,
+        tone: change.reason === 'storage_restore_failed' ? 'text-destructive-ink' : 'text-gold-ink',
+        text: t(failedKeys[change.reason], { from }),
+      };
+    case 'unknown':
+      return { icon: CircleHelp, tone: 'text-muted', text: t('devices.connection.change.unknown') };
   }
 }
 
-const changeParams = (t: TFunction, change: ConnectionChange) => ({
-  setting: t(settingKeys[change.setting]),
-  value: changeValue(t, change, 'to'),
-  back: changeValue(t, change, 'from'),
-});
-
-function PathRow({ name, detail, state, why, ms, control }: {
-  name: string; detail: string; state: { label: string; variant: BadgeVariant }; why?: string; ms?: number | null; control?: ReactNode;
-}) {
+function ChangeLine({ change }: { change: TunnelChange }) {
   const { t } = useTranslation();
+  const { icon: Icon, tone, text, busy } = changeLine(t, change);
   return (
-    <div className={`flex items-center gap-3 border-b border-border px-5 py-3 last:border-b-0 ${state.variant === 'info' ? 'bg-cyan/[0.06]' : ''}`}>
-      <div className="min-w-0 flex-1">
-        <div className="text-[13px] font-medium text-foreground">{name}</div>
-        <div className={`mt-0.5 text-[11px] leading-relaxed ${why ? 'text-gold-ink' : 'text-muted'}`}>{why ?? detail}</div>
+    <div role="status" className={`mt-1 flex items-start gap-1.5 text-[11px] leading-relaxed ${tone}`}>
+      <Icon className={`mt-0.5 size-3.5 shrink-0 ${busy ? 'motion-safe:animate-spin' : ''}`} />
+      <span><KeptTail text={text} /></span>
+    </div>
+  );
+}
+
+function Row({ title, hint, status, control, tone }: { title: string; hint?: ReactNode; status?: ReactNode; control?: ReactNode; tone?: 'info' }) {
+  return (
+    <div className={`flex flex-col gap-2 border-b border-border px-5 py-3 last:border-b-0 md:flex-row md:items-center md:justify-between md:gap-6 ${tone === 'info' ? 'bg-cyan/[0.06]' : ''}`}>
+      <div className="min-w-0">
+        <div className="text-[13px] font-medium text-foreground">{title}</div>
+        {hint && <div className="mt-0.5 text-[11px] leading-relaxed text-muted">{typeof hint === 'string' ? <KeptTail text={hint} /> : hint}</div>}
+        {status}
       </div>
-      {typeof ms === 'number' && <span className="shrink-0 text-[11px] tabular-nums text-muted">{t('remoteAccess.direct.legMs', { ms })}</span>}
-      <Badge variant={state.variant} className="shrink-0">{state.label}</Badge>
       {control && <div className="shrink-0">{control}</div>}
     </div>
   );
 }
 
-function Setting({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+function Refused({ refusal }: { refusal: SwitchRefusal }) {
+  const { t } = useTranslation();
+  const text = refusal.reason === 'tunnel_unhealthy'
+    ? t(refusal.row === 'direct' ? 'devices.connection.refusedDirect' : 'devices.connection.refusedRelay')
+    : refusal.reason === 'connection_change_busy' ? t('devices.connection.refusedBusy') : t('devices.connection.refusedUnknown');
   return (
-    <div className="flex flex-col gap-2 border-b border-border px-5 py-3 last:border-b-0 md:flex-row md:items-center md:justify-between md:gap-6">
-      <div className="min-w-0">
-        <div className="text-[13px] font-medium text-foreground">{title}</div>
-        {hint && <div className="mt-0.5 text-[11px] leading-relaxed text-muted">{hint}</div>}
-      </div>
-      <div className="shrink-0">{children}</div>
+    <div role="alert" className="mt-1 flex items-start gap-1.5 text-[11px] leading-relaxed text-gold-ink">
+      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+      <span><KeptTail text={text} /></span>
     </div>
   );
 }
 
-function NavRow({ icon: Icon, label, onClick }: { icon: typeof Route; label: string; onClick?: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center gap-3 border-b border-border px-5 py-3 text-left text-[13px] text-foreground transition-colors last:border-b-0 hover:bg-field/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-    >
-      <Icon className="size-4 shrink-0 text-muted" />
-      <span className="flex-1">{label}</span>
-      <ChevronRight className="size-4 text-muted" />
-    </button>
-  );
-}
-
-/** The Avibe App's own choice: automatic, or the Cloudflare tunnel only. */
+/** The Avibe App's own choice: automatic first, or the Cloudflare tunnel only. */
 function PreferenceGroup({ path, preference, onChange }: {
   path?: DeviceUsing | null; preference: DirectPreference; onChange?: (mode: DirectPreference['mode']) => void;
 }) {
@@ -203,6 +198,7 @@ function PreferenceGroup({ path, preference, onChange }: {
     ['automatic', t('devices.connection.automatic'), t('devices.connection.automaticHint')],
     ['tunnel', t('devices.connection.tunnelOnly'), t('devices.connection.tunnelOnlyHint')],
   ] as const;
+  const reverted = preference.reverted ? timeParts(preference.reverted.at, i18n.language) : null;
   return (
     <SettingsPanel
       title={t('devices.connection.thisDevice')}
@@ -231,248 +227,291 @@ function PreferenceGroup({ path, preference, onChange }: {
           );
         })}
       </div>
-      <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted">{t('devices.connection.choiceHint')}</p>
+      <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted"><KeptTail text={t('devices.connection.choiceHint')} /></p>
       {preference.reverted && (
         <p role="status" className="border-t border-border bg-gold/10 px-5 py-2.5 text-[11px] leading-relaxed text-foreground">
-          {(() => {
-            const parts = timeParts(preference.reverted.at, i18n.language);
-            return parts ? t(revertedKeys[parts.day], { date: parts.date, time: parts.time }) : t('devices.connection.choiceRevertedUndated');
-          })()}
+          <KeptTail text={reverted ? t(revertedKeys[reverted.day], { date: reverted.date, time: reverted.time }) : t('devices.connection.choiceRevertedUndated')} />
         </p>
       )}
     </SettingsPanel>
   );
 }
 
-function RenameDialogs({ host, rename, actions }: { host: string; rename: Rename; actions: ConnectionPageActions }) {
+function RelayRow({ relay, direct, refused, busy, onChange }: {
+  relay: RelayState; direct: DirectState; refused?: SwitchRefusal; busy?: boolean; onChange?: (on: boolean) => void;
+}) {
   const { t } = useTranslation();
-  const close = (open: boolean) => { if (!open) actions.onRenameCancel?.(); };
-  if (rename.step === 'form') {
-    const taken = rename.nameState === 'taken';
-    return (
-      <Dialog open onOpenChange={close}>
-        <DialogContent className="max-w-[480px]" closeLabel={t('common.close')}>
-          <DialogHeader>
-            <DialogTitle>{t('devices.rename.title')}</DialogTitle>
-            <DialogDescription>{t('devices.rename.current', { host })}</DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-1.5">
-            <div className="flex min-w-0 items-center gap-2">
-              <Input
-                className="w-48 text-[13px]"
-                value={rename.name}
-                readOnly={!actions.onRenameNameChange}
-                onChange={actions.onRenameNameChange ? (event) => actions.onRenameNameChange?.(event.target.value) : undefined}
-                aria-label={t('devices.rename.newName')}
-                aria-invalid={taken || undefined}
-              />
-              <span className="truncate font-mono text-[12px] text-muted">{t('devices.claim.suffix')}</span>
-            </div>
-            {taken && <span className="text-[11px] text-destructive-ink">{t('devices.claim.taken')}</span>}
-          </div>
-          <div className="rounded-lg bg-field px-4 py-3">
-            <div className="text-[12px] font-semibold text-foreground">{t('devices.rename.after')}</div>
-            <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-[12px] leading-relaxed text-muted">
-              <li><KeptTail text={t('devices.rename.void', { host, days: rename.voidDays })} /></li>
-              <li><KeptTail text={t('devices.rename.signedOut')} /></li>
-              <li><KeptTail text={t('devices.rename.links')} /></li>
-              <li><KeptTail text={t('devices.rename.homeScreen')} /></li>
-              {rename.health && <li><KeptTail text={t('devices.rename.health')} /></li>}
-              <li><KeptTail text={t('devices.rename.direct')} /></li>
-            </ul>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={actions.onRenameCancel}>{t('common.cancel')}</Button>
-            <Button variant="default" disabled={taken || !rename.name} onClick={actions.onRenameContinue}>{t('common.continue')}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    );
-  }
-  if (rename.step === 'confirm') {
-    const waiting = rename.countdown > 0;
-    return (
-      <Dialog open onOpenChange={close}>
-        <DialogContent className="max-w-md" closeLabel={t('common.close')}>
-          <DialogHeader>
-            <DialogTitle>{t('devices.rename.confirmTitle', { host: `${rename.name}${DOMAIN_SUFFIX}` })}</DialogTitle>
-            <DialogDescription><KeptTail text={t('devices.rename.confirmBody', { host })} /></DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={actions.onRenameCancel}>{t('common.cancel')}</Button>
-            <Button variant="destructive" disabled={waiting} onClick={actions.onRenameConfirm}>
-              {waiting ? t('devices.rename.confirmCountdown', { seconds: rename.countdown }) : t('devices.rename.confirm')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    );
-  }
-  return null;
+  const status = refused ? <Refused refusal={refused} /> : relay.unavailable ? (
+    <div className="mt-1 text-[11px] leading-relaxed text-gold-ink">
+      <KeptTail
+        text={t(relay.unavailable === 'direct_permission_required'
+          ? 'devices.connection.relayNeedsPermission'
+          : relay.unavailable === 'relay_transport_unavailable' ? 'devices.connection.relayNoTransport' : 'devices.connection.relayUnavailable')}
+      />
+    </div>
+  ) : relay.enabled && direct !== 'off' ? (
+    <div className="mt-1 text-[11px] text-muted">{t(relay.connected ? 'devices.connection.relayConnected' : 'devices.connection.relayNotConnected')}</div>
+  ) : null;
+  return (
+    <Row
+      title={t('remoteAccess.direct.usingRelay')}
+      hint={t('devices.connection.relayDetail')}
+      status={status}
+      control={(
+        <ToggleSwitch
+          enabled={relay.enabled}
+          disabled={busy || Boolean(relay.unavailable)}
+          onClick={() => onChange?.(!relay.enabled)}
+          label={t('remoteAccess.direct.usingRelay')}
+        />
+      )}
+    />
+  );
 }
 
 export function ConnectionPageView({
-  viewer, tunnel, direct, relay, relayEditable = false, path, preference, trial, reverted, host, rename, busy, ...actions
+  load, connection, tunnel, remote, via, path, preference, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
+  rename, rebind, rebindDialog, canReset, rebindNeedsBrowser, rebindBusy, ...actions
 }: ConnectionPageViewProps) {
-  const { t } = useTranslation();
-  const remote = viewer !== 'local';
-  const inUse = { label: t('devices.connection.inUse'), variant: 'info' as const };
-  const available = { label: t('devices.connection.available'), variant: 'success' as const };
-  const directState = direct === 'ready'
-    ? available
-    : { label: t(directStateKeys[direct]), variant: direct === 'off' ? 'secondary' as const : 'warning' as const };
-  const why = direct in directWhyKeys ? t(directWhyKeys[direct as keyof typeof directWhyKeys]) : undefined;
-  const relayState = !relay ? { label: t('devices.connection.off'), variant: 'secondary' as const } : directState;
-  const using = (kind: DeviceUsing['kind']) => path?.kind === kind;
-  const rtt = (kind: DeviceUsing['kind']) => (path && path.kind === kind && 'rttMs' in path ? path.rttMs : null);
-  const { settings } = tunnel;
-  const set = actions.onSettingChange;
-
-  return (
-    <SettingsPageShell
-      title={t('devices.connection.title')}
-      subtitle={t('devices.connection.subtitle')}
-      activeTab="remote-access"
-    >
+  const { t, i18n } = useTranslation();
+  const shell = (children: ReactNode) => (
+    <SettingsPageShell title={t('devices.connection.title')} subtitle={t('devices.connection.subtitle')} activeTab="remote-access">
       <BackToDevices onBack={actions.onBack} />
-      {rename?.step === 'done' && host && (
-        <div role="status" className="rounded-xl border border-mint/40 bg-mint-soft px-5 py-3 text-[12px] leading-relaxed text-foreground">
-          <KeptTail text={t('devices.connection.renamed', { host, from: rename.from })} />
-        </div>
-      )}
-      {reverted && (
-        <div role="status" className="rounded-xl border border-gold/40 bg-gold/10 px-5 py-3 text-[12px] leading-relaxed text-foreground">
-          <KeptTail text={t('devices.connection.reverted', changeParams(t, reverted))} />
-        </div>
-      )}
-
-      {viewer === 'app' && preference && (
-        <PreferenceGroup path={path} preference={preference} onChange={actions.onPreferenceChange} />
-      )}
-
-      <SettingsPanel
-        title={t('devices.connection.offered')}
-        description={viewer === 'app' ? undefined : t('devices.connection.offeredBrowser')}
-      >
-        <PathRow
-          name={t('remoteAccess.direct.usingTunnel')}
-          detail={t('devices.connection.tunnelDetail')}
-          // A browser elsewhere comes in through the tunnel; the computer itself does not.
-          state={viewer === 'browser' || using('tunnel') ? inUse : available}
-          ms={tunnel.ms}
-        />
-        <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-3">
-          <div className="min-w-0">
-            <div className="text-[13px] font-medium text-foreground">{t('remoteAccess.direct.label')}</div>
-            <div className="mt-0.5 text-[11px] leading-relaxed text-muted">{t('devices.connection.directDetail')}</div>
+      {children}
+    </SettingsPageShell>
+  );
+  const ownerPanel = (host || rebind) ? (
+    <SettingsPanel>
+      {host && (
+        <div className="flex items-center gap-3 px-5 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium text-foreground">{t('devices.connection.domain')}</div>
+            <div className="mt-0.5 break-all font-mono text-[11px] text-muted">{host}</div>
+            {address?.operation && address.operation.state !== 'failed' && (
+              <div role="status" className="mt-1 text-[11px] leading-relaxed text-muted">{t('devices.rename.pendingTitle', { host: address.operation.hostname })}</div>
+            )}
+            {address?.operation?.state === 'failed' && (
+              <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink">
+                <KeptTail
+                  text={t('devices.rename.earlierFailed', {
+                    reason: address.operation.error
+                      ? renameRefusalText(t, i18n.language, address.operation.error)
+                      : t('devices.rename.refused.unknown', { code: 'unknown' }),
+                  })}
+                />
+              </div>
+            )}
           </div>
-          <ToggleSwitch
-            enabled={direct !== 'off'}
-            disabled={busy}
-            onClick={() => actions.onDirectChange?.(direct === 'off')}
-            label={t('remoteAccess.direct.label')}
-          />
+          {address?.eligible && (
+            <Button variant="ghost" size="compact" className="shrink-0 text-destructive-ink" onClick={actions.onChangeDomain}>
+              {t('devices.connection.changeDomain')}
+            </Button>
+          )}
         </div>
-        <PathRow
-          name={t('remoteAccess.direct.usingLan')}
-          detail={t('devices.connection.lanDetail')}
-          state={using('lan') ? inUse : directState}
-          why={why}
-          ms={rtt('lan')}
-        />
-        <PathRow
-          name={t('remoteAccess.direct.usingPunched')}
-          detail={t('devices.connection.punchedDetail')}
-          state={using('punched') ? inUse : directState}
-          why={why}
-          ms={rtt('punched')}
-        />
-        <PathRow
-          name={t('remoteAccess.direct.usingRelay')}
-          detail={t('devices.connection.relayDetail')}
-          state={using('relay') ? inUse : relayState}
-          why={relay ? why : undefined}
-          ms={rtt('relay')}
-          control={relayEditable ? (
-            <ToggleSwitch
-              enabled={relay}
-              disabled={busy || direct === 'off'}
-              onClick={() => actions.onRelayChange?.(!relay)}
-              label={t('remoteAccess.direct.usingRelay')}
+      )}
+      {/* Names given up and still kept for this account, each with its real day. */}
+      {address?.retired.map((each) => (
+        <div key={each.hostname} className="flex items-center gap-3 border-t border-border px-5 py-2.5">
+          <div className="min-w-0 flex-1">
+            <div className="break-all font-mono text-[11px] text-foreground">{each.hostname}</div>
+            <div className="text-[11px] leading-relaxed text-muted">
+              {each.releaseAt ? t('devices.rename.keptRow', { date: longDay(each.releaseAt, i18n.language) }) : t('devices.rename.keptRowPlain')}
+            </div>
+          </div>
+          <Button variant="ghost" size="compact" className="shrink-0" onClick={() => actions.onShowCleanup?.(each)}>{t('devices.rename.showCleanup')}</Button>
+        </div>
+      ))}
+      {rebind && <RebindRow state={rebind} canReset={canReset} needsBrowser={rebindNeedsBrowser} actions={actions} />}
+    </SettingsPanel>
+  ) : null;
+  const dialogs = (
+    <>
+      {rename && host && address && <RenameDialogs host={host} rename={rename} address={address} devices={renameDevices} actions={actions} />}
+      {rebindDialog && rebind && <RebindDialogs dialog={rebindDialog} state={rebind} host={host} busy={rebindBusy} actions={actions} />}
+    </>
+  );
+
+  if (load !== 'ready' || !connection) {
+    return shell(
+      <>
+        <SettingsPanel>
+          {load === 'loading' ? (
+            <div role="status" className="flex items-center gap-2.5 px-5 py-4 text-[13px] text-muted">
+              <LoaderCircle className="size-4 motion-safe:animate-spin" />
+              {t('common.loading')}
+            </div>
+          ) : (
+            <div role="alert" className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
+              <p className="text-[13px] leading-relaxed text-foreground"><KeptTail text={t('devices.connection.unavailable')} /></p>
+              <Button variant="secondary" size="sm" className="shrink-0" onClick={actions.onRetry}>{t('common.retry')}</Button>
+            </div>
+          )}
+        </SettingsPanel>
+        {ownerPanel}
+        {dialogs}
+      </>,
+    );
+  }
+
+  const { settings, direct, relay, change, returnedToAutomatic, temporaryRoute } = connection;
+  const pending = Boolean(change && (change.state === 'applying' || change.state === 'verifying' || change.state === 'restoring' || change.state === 'unknown'));
+  const statusFor = (setting: TunnelSetting) => (change?.setting === setting ? <ChangeLine change={change} /> : null);
+  const set = actions.onSettingChange;
+  const tunnelInUse = remote && via === 'tunnel' && tunnel.state === 'up';
+  const directBadge: { label: string; variant: BadgeVariant } = {
+    label: t(directStateKeys[direct]),
+    variant: direct === 'ready' ? 'success' : direct === 'off' || direct === 'unknown' ? 'secondary' : 'warning',
+  };
+  const why = direct in directWhyKeys ? t(directWhyKeys[direct as keyof typeof directWhyKeys]) : null;
+  const names = (list: TunnelSetting[]) => list.map((each) => settingName(t, each)).join(t('devices.listSeparator'));
+  const returnedAt = returnedToAutomatic ? deviceTime(returnedToAutomatic.at, t, i18n.language, 'stamp') : '';
+
+  return shell(
+    <>
+      {returnedToAutomatic && returnedToAutomatic.changes.length > 0 && (
+        <div role="status" className="flex gap-3 rounded-xl border border-gold/40 bg-gold/10 px-5 py-3">
+          <History className="mt-0.5 size-4 shrink-0 text-gold-ink" />
+          <p className="text-[12px] leading-relaxed text-foreground">
+            <KeptTail
+              text={t('devices.connection.returnedToAutomatic', {
+                time: returnedAt,
+                settings: returnedToAutomatic.changes
+                  .map((each) => t('devices.connection.returnedSetting', { setting: settingName(t, each.setting), from: settingValueText(t, each.setting, each.from) }))
+                  .join(t('devices.listSeparator')),
+              })}
             />
-          ) : undefined}
+          </p>
+        </div>
+      )}
+      {/* The tunnel runs on a released combination while the saved settings are unchanged. */}
+      {temporaryRoute && (
+        <Notice tone="plain">
+          <KeptTail
+            text={temporaryRoute.differences.length > 0
+              ? temporaryRoute.protocol
+                ? t('devices.connection.temporaryRoute', { protocol: protocolName(temporaryRoute.protocol), settings: names(temporaryRoute.differences) })
+                : t('devices.connection.temporaryRouteNoProtocol', { settings: names(temporaryRoute.differences) })
+              : t('devices.connection.temporaryRoutePlain')}
+          />
+        </Notice>
+      )}
+
+      {preference && <PreferenceGroup path={path} preference={preference} onChange={actions.onPreferenceChange} />}
+
+      <SettingsPanel title={t('devices.connection.offered')} description={preference ? undefined : t('devices.connection.offeredBrowser')}>
+        <Row
+          title={t('remoteAccess.direct.usingTunnel')}
+          hint={t('devices.connection.tunnelDetail')}
+          tone={tunnelInUse ? 'info' : undefined}
+          control={tunnel.state === 'down'
+            ? <Badge variant="warning">{t('devices.connection.notConnected')}</Badge>
+            : tunnel.state === 'unknown'
+              ? <Badge variant="secondary">{t('devices.connection.stateUnknown')}</Badge>
+              : <Badge variant={tunnelInUse ? 'info' : 'success'}>{t(tunnelInUse ? 'devices.connection.inUse' : 'devices.connection.available')}</Badge>}
         />
+        <Row
+          title={t('remoteAccess.direct.label')}
+          tone={via === 'direct' ? 'info' : undefined}
+          hint={(
+            <>
+              <KeptTail text={t('devices.connection.directDetail')} />
+              <br />
+              <KeptTail text={t('devices.connection.directOffWarning')} />
+            </>
+          )}
+          status={refused?.row === 'direct' ? <Refused refusal={refused} /> : null}
+          control={(
+            <div className="flex items-center gap-2.5">
+              {via === 'direct' && <Badge variant="info">{t('devices.connection.inUse')}</Badge>}
+              <ToggleSwitch
+                enabled={direct !== 'off'}
+                disabled={sending === 'direct' || direct === 'unknown'}
+                onClick={() => set?.('direct', direct === 'off')}
+                label={t('remoteAccess.direct.label')}
+              />
+            </div>
+          )}
+        />
+        {direct !== 'off' && (
+          <>
+            <Row
+              title={t('remoteAccess.direct.usingLan')}
+              hint={why ?? t('devices.connection.lanDetail')}
+              control={<Badge variant={directBadge.variant}>{directBadge.label}</Badge>}
+            />
+            <Row
+              title={t('remoteAccess.direct.usingPunched')}
+              hint={why ?? t('devices.connection.punchedDetail')}
+              control={<Badge variant={directBadge.variant}>{directBadge.label}</Badge>}
+            />
+          </>
+        )}
+        {relay && (
+          <RelayRow
+            relay={relay}
+            direct={direct}
+            refused={refused?.row === 'relay' ? refused : undefined}
+            busy={sending === 'relay'}
+            onChange={(on) => set?.('relay', on)}
+          />
+        )}
       </SettingsPanel>
 
-      <SettingsPanel
-        title={t('devices.connection.tunnelSettings')}
-        description={remote ? t('devices.connection.trialNote', { seconds: TRIAL_WINDOW_SECONDS }) : t('devices.connection.localNote')}
-      >
-        <Setting
+      <SettingsPanel title={t('devices.connection.tunnelSettings')} description={<KeptTail text={t('devices.connection.verifyNote')} />}>
+        <Row
           title={t('remoteAccess.protocol')}
           hint={settings.transport_protocol === 'auto'
             ? tunnel.active ? t('devices.connection.protocolAutomatic', { protocol: protocolName(tunnel.active) }) : undefined
             : t('devices.connection.protocolPinned')}
-        >
-          <TunnelProtocolControl value={settings.transport_protocol} onChange={(value) => set?.('transport_protocol', value)} disabled={busy} />
-        </Setting>
-        <Setting title={t('remoteAccess.ipFamily')}>
-          <TunnelIpFamilyControl value={settings.edge_ip_version} onChange={(value) => set?.('edge_ip_version', value)} disabled={busy} />
-        </Setting>
-        <Setting title={t('remoteAccess.outboundInterface')}>
-          <TunnelOutboundSelect
-            value={settings.edge_bind_address}
-            onChange={(value) => set?.('edge_bind_address', value)}
-            disabled={busy}
-            interfaces={tunnel.interfaces}
-            className="md:w-56"
-          />
-        </Setting>
-        <Setting title={t('remoteAccess.autoRecovery')}>
-          <TunnelAutoRecoverySwitch value={settings.auto_recovery} onChange={(value) => set?.('auto_recovery', value)} disabled={busy} />
-        </Setting>
-        <Setting title={t('remoteAccess.optimizationProfile')}>
-          <TunnelProfileControl value={settings.optimization_profile} onChange={(value) => set?.('optimization_profile', value)} disabled={busy} />
-        </Setting>
+          status={statusFor('protocol')}
+          control={<TunnelProtocolControl value={settings.transport_protocol} onChange={(value) => set?.('protocol', value)} disabled={pending} />}
+        />
+        <Row
+          title={t('remoteAccess.ipFamily')}
+          status={statusFor('ipFamily')}
+          control={<TunnelIpFamilyControl value={settings.edge_ip_version} onChange={(value) => set?.('ipFamily', value)} disabled={pending} />}
+        />
+        <Row
+          title={t('remoteAccess.outboundInterface')}
+          status={statusFor('outbound')}
+          control={(
+            <TunnelOutboundSelect
+              value={settings.edge_bind_address}
+              onChange={(value) => set?.('outbound', value)}
+              disabled={pending}
+              interfaces={connection.interfaces}
+              className="md:w-56"
+            />
+          )}
+        />
+        <Row
+          title={t('remoteAccess.autoRecovery')}
+          control={<TunnelAutoRecoverySwitch value={settings.auto_recovery} onChange={(value) => set?.('autoRecovery', value)} disabled={sending === 'autoRecovery'} />}
+        />
+        <Row
+          title={t('remoteAccess.optimizationProfile')}
+          control={<TunnelProfileControl value={settings.optimization_profile} onChange={(value) => set?.('profile', value)} disabled={sending === 'profile'} />}
+        />
       </SettingsPanel>
 
       <SettingsPanel>
-        <NavRow icon={Route} label={t('remoteAccess.optimizeRoute')} onClick={actions.onOptimizeRoute} />
-        <NavRow icon={Stethoscope} label={t('devices.connection.diagnostics')} onClick={actions.onOpenDiagnostics} />
+        <OptimizeRow optimize={optimize} onOptimize={actions.onOptimizeRoute} />
+        <ActionRow icon={Stethoscope} label={t('devices.connection.diagnostics')} onClick={actions.onOpenDiagnostics} />
       </SettingsPanel>
 
-      {host && viewer !== 'app' && (
-        <SettingsPanel>
-          <div className="flex items-center gap-3 px-5 py-3">
-            <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-foreground">{t('devices.connection.domain')}</div>
-              <div className="mt-0.5 truncate font-mono text-[11px] text-muted">{host}</div>
-            </div>
-            <Button variant="ghost" size="compact" className="text-destructive-ink" onClick={actions.onChangeDomain}>
-              {t('devices.connection.changeDomain')}
-            </Button>
-          </div>
-        </SettingsPanel>
-      )}
+      {ownerPanel}
+      {dialogs}
 
-      {rename && host && viewer !== 'app' && <RenameDialogs host={host} rename={rename} actions={actions} />}
-
-      {trial && (
-        <Dialog open onOpenChange={(open) => { if (!open) actions.onPutBack?.(); }}>
-          <DialogContent className="max-w-md" closeLabel={t('common.close')}>
+      {diagnostics && (
+        <Dialog open onOpenChange={(open) => { if (!open) actions.onCloseDiagnostics?.(); }}>
+          <DialogContent className="max-w-2xl content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
             <DialogHeader>
-              <DialogTitle>{t('devices.connection.trialTitle')}</DialogTitle>
-              <DialogDescription>
-                <KeptTail text={t('devices.connection.trialBody', { ...changeParams(t, trial.change), seconds: trial.seconds })} />
-              </DialogDescription>
+              <DialogTitle>{t('devices.connection.diagnostics')}</DialogTitle>
             </DialogHeader>
-            <DialogFooter>
-              <Button variant="ghost" onClick={actions.onPutBack}>{t('devices.connection.putBack')}</Button>
-              <Button variant="default" onClick={actions.onKeepTrial}>{t('devices.connection.keep', { seconds: trial.seconds })}</Button>
-            </DialogFooter>
+            <TunnelDetails {...diagnostics} onRun={actions.onRunDiagnostics} />
           </DialogContent>
         </Dialog>
       )}
-    </SettingsPageShell>
+    </>,
   );
 }

@@ -188,7 +188,7 @@ scenarios:
     status: covered
     kind: authorization
     layer: scenario
-    test: ui/src/components/RemoteAccess.test.tsx::PERMISSIONS-018 keeps Member transport usable while pairing is disabled
+    test: ui/src/components/devices/DevicesPage.test.tsx::PERMISSIONS-018 keeps Member transport usable while pairing is disabled
     given: The existing component renders with actual Member or Owner capability providers
     when: Paired and unpaired users interact with pairing and transport controls
     then: Member cannot submit pairing but can operate transport while Owner pairing remains usable
