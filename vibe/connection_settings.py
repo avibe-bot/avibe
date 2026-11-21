@@ -212,8 +212,12 @@ class Journal:
         if old:
             state['priorRepair'] = old
         prior = old or state.get('debt')
-        if prior and prior['setting'] == key and prior.get('generation'):
-            op['generation'] = prior['generation']  # rollback before promotion still owns only the old rejected generation
+        if prior and prior['setting'] == key:
+            # A failed handover can be on either side of promotion. Transfer
+            # those exact fences, not authority over the currently active PID.
+            for field in ('generation', 'candidateGeneration'):
+                if prior.get(field):
+                    op[field] = prior[field]
         state["operation"] = op
         self.save(state)
         return op
@@ -234,6 +238,9 @@ class Journal:
     def verifying(self, config, op_id, generation):
         state = self.load(config)
         op = self.owned(state, op_id, "applying")
+        if 'candidateGeneration' in op and op['candidateGeneration'] != generation:
+            raise ConnectionError('connection_change_superseded')
+        op.pop('candidateGeneration', None)
         op.update(state="verifying", generation=generation)
         self._retire_previous_repair(state, op)
         self.save(state)

@@ -1510,7 +1510,7 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
     def legacy_reserved(config):
         return operation_id is None and network_fields and journal.legacy_busy(config, network_fields)
 
-    def persist(new_settings: dict[str, Any], *, staged: bool = False):
+    def persist(new_settings: dict[str, Any], *, promotion: tuple[int, str] | None = None):
         with config_file_lock():
             live = V2Config.load()
             if legacy_reserved(live):
@@ -1523,10 +1523,28 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
                 raise RuntimeError("remote_access_settings_changed")
             if operation_id is not None:
                 state = journal.load(live)
-                journal.owned(state, operation_id, 'applying')['writeStarted'] = True
+                op = journal.owned(state, operation_id, 'applying')
+                if promotion is not None:
+                    # Write ahead of both config persistence and promotion. The
+                    # candidate record (including started_at) becomes the active
+                    # record unchanged. No post-promotion write is needed to
+                    # prove which connector this operation could have installed.
+                    pid, url = promotion
+                    candidate = connector_generation('candidate', pid=pid, metrics_url=url)
+                    if not candidate:
+                        raise RuntimeError('candidate_state_changed')
+                    if op.get('candidateGeneration'):
+                        # An inherited repair may straddle an earlier promotion.
+                        # Keep its actually active fence before staging this one.
+                        active = connector_generation()
+                        if not active:
+                            raise RuntimeError('active_state_unavailable')
+                        op['generation'] = active if active in (op.get('generation'), op['candidateGeneration']) else None
+                    op['candidateGeneration'] = candidate
+                op['writeStarted'] = True
                 journal.save(state)
             saved = api.save_config({"remote_access": {"vibe_cloud": new_settings}})
-            if not staged:
+            if promotion is None:
                 if operation_id is not None:
                     state = journal.load(saved)
                     journal.owned(state, operation_id, "applying")
@@ -1657,7 +1675,7 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
                     or _remote_access_settings(live_config) != previous_settings
                 ):
                     raise RuntimeError("remote_access_settings_changed")
-                candidate_config = persist(payload, staged=True)
+                candidate_config = persist(payload, promotion=(candidate_pid, metrics_url))
             try:
                 replaced = _promote_candidate_connector(candidate_pid, runtime_signature=_runtime_signature(candidate_config, binary))
             except Exception:
@@ -1694,11 +1712,12 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
     }
 
 
-def connector_generation() -> str | None:
-    active = _state_connector("active") or {}
-    if not active.get("started_at") or not active.get("metrics_url") or not _is_cloudflared_pid(active.get("pid")):
+def connector_generation(slot: str = 'active', *, pid: int | None = None, metrics_url: str | None = None) -> str | None:
+    record = _state_connector(slot) or {}
+    if ((pid is not None and record.get('pid') != pid) or (metrics_url is not None and record.get('metrics_url') != metrics_url)
+            or not record.get('started_at') or not record.get('metrics_url') or not _is_cloudflared_pid(record.get('pid'))):
         return None
-    return hashlib.sha256(json.dumps([active["pid"], active["started_at"], active["metrics_url"]]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([record['pid'], record['started_at'], record['metrics_url']]).encode()).hexdigest()
 
 
 def live_direct_status(config: V2Config, *, wait_for_setting: bool = False) -> dict[str, Any] | None:

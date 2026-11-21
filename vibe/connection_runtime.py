@@ -339,10 +339,11 @@ def _repair_runtime(config, op, at_bound):
         if tunnel._running_signature(pid) == tunnel._runtime_signature(config, binary):
             active = tunnel._state_connector('active') or {}
             return active.get('pid') == pid and (_registered(active.get('metrics_url')) or 0) > 0
-        if not op.get('generation') or op['generation'] != tunnel.connector_generation():
-            return False  # never retire a connector we cannot attribute to this change
+        active_generation = tunnel.connector_generation(pid=pid)
+        if not active_generation or active_generation not in (op.get('generation'), op.get('candidateGeneration')):
+            return False  # neither the inherited repair nor this operation's staged connector
         if at_bound:
-            if op.get('generation') and op['generation'] == tunnel.connector_generation():
+            if tunnel.connector_generation(pid=pid) == active_generation:
                 tunnel.runtime.stop_pid(pid, timeout=8)  # leave request in place for exited-connector recovery
             return False
     elif at_bound:

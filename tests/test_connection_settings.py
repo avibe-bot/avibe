@@ -145,12 +145,19 @@ def test_instance_verifies_after_drain_not_with_the_browser(rig, monkeypatch, ok
     monkeypatch.setattr(cr, 'tunnel_healthy', lambda cfg: baseline)
     monkeypatch.setattr(ra, 'status', lambda config=None: {'running': True})
     monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
-    monkeypatch.setattr(ra, '_start_candidate_connector', lambda *args: (222, 'fixture-new'))
+    records = {'active': rig.active}
+    monkeypatch.setattr(ra, '_state_connector', records.get)
+    monkeypatch.setattr(ra, '_is_cloudflared_pid', lambda pid: pid in (111, 222))
+    monkeypatch.setattr(ra.runtime, 'stop_pid', lambda *args, **kwargs: pytest.fail('unexpected process stop'))
+    def spawn(*args):
+        records['candidate'] = {'pid': 222, 'started_at': 2, 'metrics_url': 'fixture-new'}
+        return 222, 'fixture-new'
+    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
     monkeypatch.setattr(ra, '_wait_candidate_ready', lambda *args: True)
     events = []
     def promote(*args, **kwargs):
         events.append('promote')
-        rig.active.update(pid=222, started_at=2, metrics_url='fixture-new')
+        rig.active.update(records.pop('candidate'))
         return {'pid': 111}
     monkeypatch.setattr(ra, '_promote_candidate_connector', promote)
     monkeypatch.setattr(ra, '_drain_tracked_connector', lambda c: events.append('drain') or drained)
@@ -169,6 +176,49 @@ def test_instance_verifies_after_drain_not_with_the_browser(rig, monkeypatch, ok
         cr.recover()
     assert outcome()['reason'] == expected
     assert cs.value(V2Config.load(), 'protocol') == ('http2' if expected == 'verified' else 'auto')
+
+
+@pytest.mark.parametrize('same_connector', [True, False])
+def test_restart_after_promotion_with_failed_verifying_write(rig, monkeypatch, same_connector):
+    # Use the real promotion and on-disk connector state; no child process or
+    # network is needed to lose the following journal write and restart.
+    ra._replace_state_connector('active', dict(rig.active))
+    monkeypatch.setattr(ra, '_state_connector', lambda key: ra._read_state().get(key))
+    monkeypatch.setattr(ra, '_read_pid', lambda: ra._read_state()['pid'])
+    monkeypatch.setattr(ra, '_is_cloudflared_pid', lambda pid: pid in (111, 222))
+    monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
+    monkeypatch.setattr(ra, 'status', lambda cfg=None: {'running': True})
+    candidate = {'pid': 222, 'started_at': 2, 'metrics_url': 'fixture-new'}
+    def spawn(*args):
+        ra._replace_state_connector('candidate', dict(candidate))
+        return candidate['pid'], candidate['metrics_url']
+    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
+    monkeypatch.setattr(ra, '_wait_candidate_ready', lambda *args: True)
+    monkeypatch.setattr(ra, '_connector_ready_now', lambda *args: True)
+    monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: True)
+    monkeypatch.setattr(cr, '_public_check', lambda url: pytest.fail('verification was never journaled'))
+    stopped = []
+    monkeypatch.setattr(ra.runtime, 'stop_pid', lambda pid, timeout: stopped.append(pid) or True)
+    save = cs.journal.save
+    interrupted = []
+    def lose_write(state):
+        if (state.get('operation') or {}).get('state') == 'verifying':
+            interrupted.append(ra._read_state()['active']['pid'])
+            raise OSError('fixture: verification record not written')
+        save(state)
+    monkeypatch.setattr(cs.journal, 'save', lose_write)
+    change = cr.prepare(rig.actor, 'protocol', 'http2')
+    cr.apply(rig.actor, change)
+    assert interrupted == [222] and not stopped
+    if not same_connector:
+        ra._replace_state_connector('active', dict(candidate, started_at=3, metrics_url='fixture-successor'))
+    monkeypatch.setattr(cs, 'journal', cs.Journal(lambda: rig.clock[0]))
+    cr.recover_startup()
+    assert cs.value(V2Config.load(), 'protocol') == 'auto'
+    rig.clock[0] += cs.RESTORE_SECONDS + 1
+    assert not cr.recover()
+    assert stopped == ([222] if same_connector else [])
+    assert rig.request.is_file()
 
 
 def test_no_connector_saves_without_start_or_probe(rig, monkeypatch):
