@@ -349,17 +349,28 @@ describe('native shell bridge', () => {
 
 // The App recognises a hold on the surfaces the page names (ios/Avibe/NativeHoldCapture.swift).
 describe("the iOS App's own hold recognition", () => {
-  const capabilities = { voice: 1, voiceCapture: 1, voiceHold: 1 };
+  const capabilities = { voice: 1, voiceCapture: 1, voiceHold: 2 };
   const surface = { id: 'composer', x: 0, y: 700, width: 390, height: 60 };
 
   it('is there only in an App that both recognises holds and records them', () => {
     expect(hasNativeVoiceHold()).toBe(false);
-    installBridge({ capabilities: { voice: 1, voiceHold: 1 } });
+    installBridge({ capabilities: { voice: 1, voiceHold: 2 } });
     expect(hasNativeVoiceHold()).toBe(false);
     installBridge({ capabilities: { voice: 1, voiceCapture: 1 } });
     expect(hasNativeVoiceHold()).toBe(false);
     installBridge({ capabilities });
     expect(hasNativeVoiceHold()).toBe(true);
+    installBridge({ capabilities: { ...capabilities, voiceHold: 3 } });
+    expect(hasNativeVoiceHold()).toBe(true);
+  });
+
+  // The one build that announced version 1 (TestFlight 50.1) could give a tap the hold's cue:
+  // for it the page names nothing, and the App follows nothing.
+  it('asks the first build of it (version 1) for nothing', async () => {
+    const call = installBridge({ capabilities: { ...capabilities, voiceHold: 1 } });
+    expect(hasNativeVoiceHold()).toBe(false);
+    await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe('failed');
+    expect(call).not.toHaveBeenCalled();
   });
 
   it('names surfaces with the threshold, takes them back with an empty list, and reads why the App does not follow', async () => {

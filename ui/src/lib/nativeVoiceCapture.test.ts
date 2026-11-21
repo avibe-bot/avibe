@@ -27,7 +27,7 @@ let startAnswer: () => Promise<unknown>;
 let adoptAnswer: () => Promise<unknown>;
 let permission: string;
 
-const install = (capabilities: Record<string, number> = { voice: 1, voiceCapture: 1, voiceHold: 1 }) => {
+const install = (capabilities: Record<string, number> = { voice: 1, voiceCapture: 1, voiceHold: 2 }) => {
   listeners = [];
   holdListeners = [];
   call = vi.fn(async (method: string) => {

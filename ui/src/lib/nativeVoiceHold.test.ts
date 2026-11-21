@@ -21,7 +21,7 @@ let listeners: ((detail: HoldDetail) => void)[] = [];
 /** The App's answers to `voice.holdSurfaces`, in order; `ok` once they run out. */
 let answers: (string | Promise<unknown>)[] = [];
 
-const install = (capabilities: Record<string, number> = { voice: 1, voiceCapture: 1, voiceHold: 1 }) => {
+const install = (capabilities: Record<string, number> = { voice: 1, voiceCapture: 1, voiceHold: 2 }) => {
   listeners = [];
   call = vi.fn(async (method: string) => {
     if (method !== 'voice.holdSurfaces') return null;
@@ -447,14 +447,18 @@ describe('the hold surfaces the iOS App follows', () => {
     expect(holdFollowed('composer', 100, 720)).toBe(true);
   });
 
-  it('does nothing in an App that does not recognise holds itself', async () => {
-    install({ voice: 1, voiceCapture: 1 });
-    const unregister = registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
-    await settle();
-    expect(call).not.toHaveBeenCalled();
-    expect(listeners).toHaveLength(0);
-    expect(holdFollowed('composer', 100, 720)).toBe(false);
-    unregister();
+  // An App without it; and the one build that announced version 1 (TestFlight 50.1), which
+  // could take a tap for a hold: the page names nothing there, so that App follows nothing.
+  it('does nothing in an App that does not recognise holds itself, or whose recognition is the first build\'s', async () => {
+    for (const capabilities of [{ voice: 1, voiceCapture: 1 }, { voice: 1, voiceCapture: 1, voiceHold: 1 }]) {
+      install(capabilities);
+      const unregister = registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
+      await settle();
+      expect(call, JSON.stringify(capabilities)).not.toHaveBeenCalled();
+      expect(listeners).toHaveLength(0);
+      expect(holdFollowed('composer', 100, 720)).toBe(false);
+      unregister();
+    }
   });
 
   it('goes on hearing the App until it has been told the last surface went', async () => {
