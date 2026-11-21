@@ -5430,7 +5430,9 @@ def _pairing_response_payload(result: Mapping[str, Any], session_secret: str) ->
     return {
         field: result.get(field)
         for field in (*_PAIRING_REQUIRED_FIELDS, *_PAIRING_SEAL_EXTRA_FIELDS)
-    } | {"session_secret": session_secret}
+    } | {"session_secret": session_secret} | (
+        {"binding_disposition": result["binding_disposition"]} if "binding_disposition" in result else {}
+    )
 
 
 def _validate_pairing_response(result: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -5505,6 +5507,18 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
             or not _same_pairing_request(payload, payload.get("backend_url", ""), retry["pairing_key"])
         ):
             return None, "pending Desktop redemption request is invalid"
+        if personal:
+            from vibe.personal_claim_client import is_constrained_key
+
+            disposition = desktop.get("binding_disposition")
+            key = (retry or {}).get("pairing_key", "")
+            if "binding_disposition" in desktop or key.startswith("vrp2_"):
+                if disposition not in ("existing", "new") or not is_constrained_key(key) or not source_instance_id:
+                    return None, "invalid constrained claim request"
+                if phase in {"redeemed", "applied"} and (
+                    not isinstance(payload.get("pairing"), dict) or payload["pairing"].get("binding_disposition") != disposition
+                ):
+                    return None, "invalid constrained pairing receipt"
     if phase in {"redeemed", "applied"}:
         pairing = payload.get("pairing")
         target_identity = payload.get("target_identity")
@@ -6000,6 +6014,8 @@ def pair(
     from vibe import desktop_local_instance
 
     pairing_key = (pairing_key or "").strip()
+    if pairing_key.startswith("vrp2_"):
+        return {"ok": False, "error": "invalid_pairing_key"}  # Requires the exact constrained journal.
     if desktop_enrollment is not None:
         try:
             return _pair_desktop(pairing_key, backend_url, device_name, desktop_enrollment)
@@ -6113,7 +6129,8 @@ def _with_redeem_request(claim, backend_url: str, device_name: str, key: str) ->
 
 
 def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: str, installation: str,
-                        subject: str, claim_id: str, instance_id: str, hostname: str) -> dict[str, Any]:
+                        subject: str, claim_id: str, instance_id: str, hostname: str,
+                        binding_disposition: str | None = None) -> dict[str, Any]:
     """Atomic handoff into the same request-bound pairing journal used by Desktop."""
     from vibe import desktop_local_instance as local
     from storage.importer import ensure_sqlite_state
@@ -6126,9 +6143,18 @@ def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: st
             return {"ok": False, "error": "local_binding_changed"}
         if pending and (pending["phase"] != "prepared" or pending.get("desktop_enrollment")):
             return {"ok": False, "error": "local_instance_conflict"}
+        from vibe.personal_claim_client import is_constrained_key
+        if binding_disposition is not None:
+            if (binding_disposition not in ("existing", "new") or not is_constrained_key(key)
+                    or not config.remote_access.vibe_cloud.instance_secret or not config.remote_access.vibe_cloud.instance_id):
+                return {"ok": False, "error": "local_binding_changed"}
+        elif key.startswith("vrp2_") or config.remote_access.vibe_cloud.instance_secret or config.remote_access.vibe_cloud.instance_id:
+            return {"ok": False, "error": "local_binding_changed"}
         claim = _with_redeem_request(_new_pairing_claim(config, backend_url, device), backend_url, device, key)
         claim["personal_claim"] = {"claim_id": claim_id, "installation_id": installation, "account_id": subject,
                                    "instance_id": instance_id, "public_url": "https://" + hostname}
+        if binding_disposition is not None:
+            claim["personal_claim"]["binding_disposition"] = binding_disposition
         _write_pending_pairing_record(claim)
     return _retry_installation_pairing(claim)
 
@@ -6247,7 +6273,16 @@ def _redeem_pairing_claim(
             **({} if claim.get("personal_claim") else {"detail": str(exc)}),
             "pairing": {"ok": False, "recoverable": bool(claim.get("redeem_request")), "cause": "pairing_request_failed"},
         }
+    personal = claim.get("personal_claim") or {}
+    disposition = personal.get("binding_disposition")
+    if disposition is not None and (not isinstance(result, Mapping) or result.get("binding_disposition") != disposition):
+        # Network dispatch may already have committed. Preserve the exact replay journal;
+        # an unrecognized receipt neither permits local publication nor proves rollback.
+        return {"ok": False, "error": "pairing_redeem_indeterminate", "pairing": {"ok": False, "recoverable": True}}
     normalized_result, response_error = _validate_pairing_response(result)
+    if disposition is not None and (response_error or normalized_result["instance_id"] != personal["instance_id"]
+            or normalized_result["public_url"] != personal["public_url"]):
+        return {"ok": False, "error": "pairing_redeem_indeterminate", "pairing": {"ok": False, "recoverable": True}}
     if response_error:
         return _pairing_failure_after_claim(claim, {
             "ok": False,
@@ -6544,7 +6579,9 @@ def _persist_pairing_impl(
             from vibe.personal_claim_client import ClaimError
             from vibe.personal_claims import record_bound
             try:
-                record_bound(personal["claim_id"], persisted_identity)
+                record_bound(personal["claim_id"], persisted_identity, **(
+                    {"disposition": personal["binding_disposition"]} if "binding_disposition" in personal else {}
+                ))
             except (OSError, ClaimError):
                 return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         from vibe.binding_health import clear_after_publication
@@ -6566,7 +6603,10 @@ def _persist_pairing_impl(
     if config.remote_access.vibe_cloud.enabled:
         start_result = start(config)
         _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
-    return _pairing_result_status(config, start_result=start_result)
+    result = _pairing_result_status(config, start_result=start_result)
+    if disposition := (record.get("personal_claim") or {}).get("binding_disposition"):
+        result["binding_disposition"] = disposition
+    return result
 
 
 def _persist_pairing(

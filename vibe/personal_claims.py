@@ -125,10 +125,14 @@ def _binding_stamp(identity):
     return remote_access._pairing_identity_fingerprint({k: identity[k] for k in ("backend_url", "instance_id", "instance_secret")})
 
 
-def record_bound(claim_id, identity):
+def record_bound(claim_id, identity, *, disposition=None):
     """Called under the publication lock before retirement, including by legacy Resume."""
     saved = _outcome()
     saved["bound"] = {"claim_id": claim_id, "generation": _binding_stamp(identity)}
+    if disposition is not None:
+        if disposition not in ("existing", "new"):
+            raise ClaimError("invalid_claim_response")
+        saved["bound"]["binding_disposition"] = disposition
     if saved.get("claim_id") == claim_id:
         saved.pop("claim_id")
         saved.pop("expires_at", None)

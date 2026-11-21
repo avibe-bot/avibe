@@ -116,6 +116,10 @@ class Issuance:
     binding_disposition: str | None = None
 
 
+def is_constrained_key(key: str) -> bool:
+    return isinstance(key, str) and key.startswith("vrp2_") and _TOKEN32.fullmatch(key[5:]) is not None
+
+
 @dataclass(frozen=True)
 class Pending:
     delay: int
@@ -351,7 +355,7 @@ class ConstrainedClaimsClient(ClaimsClient):
 
     def _disposition(self, data, key):
         disposition = data.get("binding_disposition")
-        if disposition not in ("existing", "new") or not key.startswith("vrp2_") or not _TOKEN32.fullmatch(key[5:]):
+        if disposition not in ("existing", "new") or not is_constrained_key(key):
             raise ClaimError("invalid_claim_response")
         return disposition
 

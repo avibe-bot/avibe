@@ -12,6 +12,45 @@ def _claim(subject="owner-id"):
     return claims.run_link(expected_subject=subject, show_link=lambda _: None)
 
 
+@pytest.mark.parametrize('bad_receipt', [{}, {'binding_disposition': 'new'}, {'binding_disposition': True}])
+def test_constrained_pair_replays_same_request_until_receipt_matches(pairing_host, monkeypatch, bad_receipt):
+    from uuid import uuid4
+    from vibe import desktop_local_instance as local
+
+    assert remote_access.pair('key_A', 'https://backend.test')['ok']
+    cfg = V2Config.load()
+    installation = local.ensure_installation_id()
+    key = 'vrp2_' + 'A' * 43
+    claim_id = str(uuid4())
+    requests = []
+
+    def redeem(_url, payload, **_kw):
+        requests.append(dict(payload))
+        receipt = bad_receipt if len(requests) == 1 else {'binding_disposition': 'existing'}
+        return {**_response('inst_B'), **receipt}
+
+    monkeypatch.setattr(remote_access, '_json_request', redeem)
+    assert not remote_access.pair(key, 'https://backend.test')['ok']
+    assert not requests
+    result = remote_access.pair_personal_claim(
+        key=key, backend_url='https://backend.test', device='fixture',
+        revision=local.claim_revision(cfg, installation, None), installation=installation,
+        subject='owner-id', claim_id=claim_id, instance_id='inst_B', hostname='fixture.avibe.bot',
+        binding_disposition='existing',
+    )
+    assert result['error'] == 'pairing_redeem_indeterminate'
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    journal, error = remote_access._read_pending_pairing_record()
+    assert not error and journal['phase'] == 'prepared'
+    assert journal['personal_claim']['binding_disposition'] == 'existing'
+    recovered = remote_access._retry_installation_pairing(journal)
+    assert recovered['ok'] and recovered['binding_disposition'] == 'existing'
+    assert requests[0] == requests[1] and requests[0]['redeem_request_id']
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_B'
+    assert claims._outcome()['bound']['binding_disposition'] == 'existing'
+    assert remote_access._read_pending_pairing_record() == (None, None)
+
+
 def test_off_binding_is_not_repaired_or_replaced(claim_peer):
     assert _claim()["state"] == "bound"
     cfg = V2Config.load()
