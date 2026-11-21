@@ -5,7 +5,7 @@
 // It lives in the app's own menus (the tray menu on macOS and Windows, and the macOS application
 // menu), right after 「切换实例」: a 「连接方式」 item whose submenu holds the two choices, the one
 // for the instance on show ticked. While this computer's own instance is on show there is nothing
-// to choose and the item is greyed. The system draws these menus; `NativeMenu` is a stand-in for
+// to choose and the item is greyed. The system draws these menus; `MenuPanel` is a stand-in for
 // them, as `kit/desktop-native-show-window.tsx` is for the title bar. The other items are the
 // shell's shipped ones, in the shell's order (`install_native_tray` in `desktop/src-tauri/src/lib.rs`).
 //
