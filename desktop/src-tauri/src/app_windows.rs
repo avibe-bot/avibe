@@ -908,6 +908,12 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
     {
         builder = builder.proxy_url(proxy);
     }
+    // The direct session of the instance view this window was opened from,
+    // if it has one; its route here where that can only be given now.
+    let direct_route = crate::direct::shell::app_window_route(app, &source.runtime.origin);
+    if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
+        builder = builder.additional_browser_args(arguments);
+    }
 
     let window = match builder.build() {
         Ok(window) => window,
@@ -930,6 +936,9 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         }
     };
     entry.document.bind(window.as_ref());
+    if let Some(route) = direct_route {
+        crate::direct::shell::window_created(app, &label, route);
+    }
     // A Show window's share entry, in its title bar (ui/design:
     // show-pages/desktop-native-entry/titlebar-*). It only asks the page to
     // open its share popover; sharing itself stays `show_share`'s.
@@ -973,6 +982,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
             // Destruction is not evidence of cookie erasure. Keep the receipt
             // and directory until the existing retirement operation completes.
             cleanup_entry.retired.store(true, Ordering::SeqCst);
+            crate::direct::shell::poke(&cleanup_app);
         }
     });
     let projected = if source.runtime.disposable {
