@@ -5,7 +5,7 @@
 // claim it. Renaming clears what it can by itself: an open page clears its own data and moves to
 // the new address, and any browser that opens the old address during the waiting period is cleared
 // and told it moved. What it cannot reach, it says plainly. Draft copy, inline in both languages.
-import { Check, Globe, KeyRound, Laptop, Monitor, RotateCcw, Smartphone, TriangleAlert } from 'lucide-react';
+import { Check, Globe, Laptop, Monitor, RotateCcw, Smartphone, TriangleAlert } from 'lucide-react';
 
 import { ClaimFields } from '@/components/devices/DevicesPageView';
 import { SettingsPanel } from '@/components/settings/SettingsPrimitives';
@@ -14,32 +14,10 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { useDraft } from './draft';
+import { Para } from './devices-text';
 
 type D = (zh: string, en: string) => string;
 
-/**
- * A paragraph whose last line never holds only a word or two. Chinese breaks between any two
- * characters and `text-wrap: pretty` does not reliably prevent that, so the tail (at least eight
- * characters, or three English words, cut at a word boundary) is one unbreakable run, and an
- * address is never split across lines.
- */
-export function Para({ text }: { text: string }) {
-  const cjk = /[\u3400-\u9fff]/.test(text);
-  const segments = Array.from(new Intl.Segmenter(cjk ? 'zh' : 'en', { granularity: 'word' }).segment(text));
-  let start = text.length;
-  let words = 0;
-  for (let index = segments.length - 1; index >= 0; index -= 1) {
-    const segment = segments[index];
-    start = segment.index;
-    if (segment.isWordLike) words += 1;
-    if (cjk ? text.length - start >= 8 && segment.isWordLike : words >= 3) break;
-  }
-  const keepAddresses = (part: string) => part.split(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i).map((piece, index) => (
-    index % 2 === 1 ? <span key={index} className="whitespace-nowrap">{piece}</span> : piece
-  ));
-  if (start <= 0) return <span className="whitespace-nowrap">{text}</span>;
-  return <>{keepAddresses(text.slice(0, start))}<span className="whitespace-nowrap">{text.slice(start)}</span></>;
-}
 
 export const DOMAIN_SUFFIX = '-app.avibe.bot';
 
@@ -74,9 +52,6 @@ export type RenameReject =
   /** Every name it may hold is in use (none waiting): binding another computer needs one deleted. */
   | { kind: 'limitInUse'; limit: number };
 
-/** How the one thing renaming cannot clean is said; Product picks one. */
-export type ResidueWording = 'a' | 'b' | 'c';
-
 export type RenameDialogProps = {
   step: 'form' | 'confirm' | 'done';
   /** The domain now (`form`, `confirm`) or the one it was (`done`). */
@@ -91,7 +66,6 @@ export type RenameDialogProps = {
   health: boolean;
   held?: HeldName[];
   reject?: RenameReject;
-  residue?: ResidueWording;
   /** `confirm`: seconds before the button can be pressed. */
   countdown?: number;
   /** While refused, fold away what renaming would do (Product compares both). */
@@ -105,30 +79,26 @@ const howToSignOut = (d: D, device: RenameDevice, host: string) => {
   if (device.self) return d('就是这台：改名时会自己清理并跳到新地址。', 'This one: it clears itself and moves to the new address when you rename.');
   switch (device.kind) {
     case 'host': return d('运行 Avibe 的电脑：不用做什么。', 'The computer running Avibe: nothing to do.');
-    case 'iphone': return d('在 Avibe App 的账号菜单里选「退出登录」。', 'In the Avibe App, choose Sign out in the account menu.');
-    case 'desktop': return d('在 Avibe Desktop 的账号菜单里选「退出登录」。', 'In Avibe Desktop, choose Sign out in the account menu.');
-    case 'homeScreen': return d('打开主屏幕上的 Avibe，在账号菜单里选「退出登录」。', 'Open Avibe from the home screen and choose Sign out in the account menu.');
-    case 'browser': return d(`在那个浏览器里打开 ${host}，在账号菜单里选「退出登录」。`, `In that browser, open ${host} and choose Sign out in the account menu.`);
+    case 'iphone': return d('在 Avibe App 里打开「实例」，点你的账号，选「在此设备退出」。', 'In the Avibe App, open Instances, tap your account, then choose Sign out on this device.');
+    case 'desktop': return d('在 Avibe Desktop 里打开「实例」，点「账户」下的账号，选「在此设备退出」。', 'In Avibe Desktop, open Instances, choose your account under Account, then Sign out on this device.');
+    case 'homeScreen': return d('打开主屏幕上的 Avibe，在「更多」里选「退出登录」。', 'Open Avibe from the home screen and choose Sign out under More.');
+    case 'browser': return d(`在那个浏览器里打开 ${host}，点头像选「退出登录」（手机上在「更多」里）。`, `In that browser, open ${host}, click your avatar and choose Sign out (on a phone, under More).`);
   }
 };
 
-/** The one thing renaming cannot reach, in three wordings for Product to pick from. Never small print. */
-function Residue({ wording, host, releaseOn }: { wording: ResidueWording; host: string; releaseOn: Day }) {
+/** The one thing renaming cannot reach (Product, 12:32: wording B). Never small print. Afterwards its
+ *  last sentence says what can still be done. */
+function Residue({ host, releaseOn, after }: { host: string; releaseOn: Day; after: boolean }) {
   const d = useDraft();
-  const text = {
-    a: d(
-      `有一处清不到：在 ${releaseOn.zh}之前一次也没再打开过 ${host} 的浏览器（比如同事只用过一次的电脑），里面的对话记录会一直留着。以后拿到这个名字的人，有可能在那台浏览器上读到。`,
-      `One thing cannot be cleared: a browser that does not open ${host} even once before ${releaseOn.en} (say, a colleague's computer you used once) keeps its conversations. Whoever takes this name later could read them in that browser.`,
-    ),
-    b: d(
+  const text = after
+    ? d(
+      `清不到的：如果某个浏览器在 ${releaseOn.zh}之前没有再打开过 ${host}，它里面的对话记录不会被清掉，以后领取这个名字的人可能读到。担心的话，在那台设备上打开一次 ${host}，或者退出登录。`,
+      `Not cleared: a browser that does not open ${host} again before ${releaseOn.en} keeps its conversations, and whoever claims the name later could read them. If that worries you, open ${host} once on that device, or sign out there.`,
+    )
+    : d(
       `清不到的：如果某个浏览器在 ${releaseOn.zh}之前没有再打开过 ${host}，它里面的对话记录不会被清掉，以后领取这个名字的人可能读到。担心的话，改名前先在那台设备上退出。`,
       `Not cleared: a browser that does not open ${host} again before ${releaseOn.en} keeps its conversations, and whoever claims the name later could read them. If that worries you, sign out on that device before renaming.`,
-    ),
-    c: d(
-      `Avibe 只能清理会再打开旧地址的浏览器。很久不用的浏览器（例如借用过一次的电脑）里的对话记录会留下；名字被别人领走后，对方有可能读到。`,
-      `Avibe can only clear browsers that open the old address again. A browser left unused (a computer you borrowed once, say) keeps its conversations; once someone else claims the name, they could read them.`,
-    ),
-  }[wording];
+    );
   return (
     <div role="note" className="flex gap-3 rounded-lg border border-gold/40 bg-gold/10 px-4 py-3">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-gold-ink" />
@@ -166,8 +136,8 @@ function DeviceChecklist({ devices, host, after }: { devices: RenameDevice[]; ho
       })}
       <p className="border-t border-border px-4 py-2 text-[11px] leading-relaxed text-muted">
         <Para text={d(
-          '这里只有现在还登录着的设备。登录早已过期的浏览器不在清单里，清单全部打勾也不代表没有残留。',
-          'Only devices signed in now are listed. Browsers whose sign-in expired long ago are not here, so a fully ticked list does not mean nothing is left.',
+          '这里只有现在还登录着的设备。登录早已过期的浏览器、通过分享链接来过的访客不在清单里，清单全部打勾也不代表没有残留。',
+          'Only devices signed in now are listed. Browsers whose sign-in expired long ago, and visitors who came through a shared link, are not here, so a fully ticked list does not mean nothing is left.',
         )} />
       </p>
     </div>
@@ -216,7 +186,7 @@ function RejectLine({ reject }: { reject: RenameReject }) {
   return <span role="alert" className="text-[11px] leading-relaxed text-destructive-ink"><Para text={text} /></span>;
 }
 
-export function RenameDialog({ step, host, name, releaseOn, devices, health, held = [], reject, residue = 'a', countdown = 0, collapseOnReject = false }: RenameDialogProps) {
+export function RenameDialog({ step, host, name, releaseOn, devices, health, held = [], reject, countdown = 0, collapseOnReject = true }: RenameDialogProps) {
   const d = useDraft();
   const newHost = `${name}${DOMAIN_SUFFIX}`;
   const reclaiming = held.some((each) => each.name === name);
@@ -253,11 +223,11 @@ export function RenameDialog({ step, host, name, releaseOn, devices, health, hel
             <DialogDescription>
               <Para text={allCleared
                 ? d('清单里的设备都已清理，并退出了登录。', 'Every listed device has been cleared and signed out.')
-                : d('设备再打开旧地址时会自己清理。还没确认的，等它们打开过一次就会变成「已清理」。', 'A device clears itself the next time it opens the old address. Those not confirmed yet turn to Cleared once they have.')} />
+                : d('设备再打开旧地址时会自己清理，前提是运行 Avibe 的这台电脑开着。还没确认的，打开过一次就会变成「已清理」。', 'A device clears itself the next time it opens the old address, as long as the computer running Avibe is on. Those not confirmed yet turn to Cleared once they have opened it.')} />
             </DialogDescription>
           </DialogHeader>
           <DeviceChecklist devices={devices} host={host} after />
-          <Residue wording={residue} host={host} releaseOn={releaseOn} />
+          <Residue host={host} releaseOn={releaseOn} after />
           <DialogFooter>
             <Button variant="default">{d('完成', 'Done')}</Button>
           </DialogFooter>
@@ -304,7 +274,7 @@ export function RenameDialog({ step, host, name, releaseOn, devices, health, hel
         {!(collapseOnReject && reject) && (
           <>
             <Consequences host={host} releaseOn={releaseOn} health={health} />
-            <Residue wording={residue} host={host} releaseOn={releaseOn} />
+            <Residue host={host} releaseOn={releaseOn} after={false} />
             <DeviceChecklist devices={devices} host={host} after={false} />
           </>
         )}
@@ -349,26 +319,24 @@ export function UnrecognizedChangeBanner({ host }: { host: string }) {
           )} />
         </p>
       </div>
-      <Button variant="destructive" size="sm" className="shrink-0">{d('重新绑定', 'Bind again')}</Button>
+      <Button variant="destructive" size="sm" className="shrink-0">{d('去重新绑定', 'Go to Bind again')}</Button>
     </div>
   );
 }
 
-/** At the computer that runs Avibe: bind remote access again. The old device key stops working at once. */
+/** At the computer that runs Avibe, in the domain's panel under 「更改域名」: bind remote access again.
+ *  Rarely needed, so a quiet row (Product, 12:32). */
 export function RebindRow() {
   const d = useDraft();
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-edge bg-surface px-5 py-3 shadow-elevation-0 md:flex-row md:items-center md:justify-between">
-      <div className="flex min-w-0 items-start gap-3">
-        <KeyRound className="mt-0.5 size-4 shrink-0 text-muted" />
-        <div className="min-w-0">
-          <div className="text-[13px] font-medium text-foreground">{d('重新绑定远程访问', 'Bind remote access again')}</div>
-          <div className="text-[11px] leading-relaxed text-muted">
-            <Para text={d('怀疑有人动过这台电脑的远程访问时用：旧的设备密钥会作废。', 'For when you suspect someone changed this computer’s remote access: the old device key stops working.')} />
-          </div>
+    <div className="flex items-center gap-3 border-t border-border px-5 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-[13px] font-medium text-foreground">{d('重新绑定远程访问', 'Bind remote access again')}</div>
+        <div className="mt-0.5 text-[11px] leading-relaxed text-muted">
+          <Para text={d('怀疑有人动过这台电脑的远程访问时用：旧的设备密钥会作废。', 'For when you suspect someone changed this computer’s remote access: the old device key stops working.')} />
         </div>
       </div>
-      <Button variant="secondary" size="sm" className="shrink-0">{d('重新绑定', 'Bind again')}</Button>
+      <Button variant="ghost" size="compact" className="shrink-0">{d('重新绑定', 'Bind again')}</Button>
     </div>
   );
 }
@@ -382,8 +350,8 @@ export function RebindDialog({ host, account }: { host: string; account: string 
           <DialogTitle className="text-balance">{d('重新绑定远程访问？', 'Bind remote access again?')}</DialogTitle>
           <DialogDescription>
             <Para text={d(
-              `这台电脑会用 ${account} 重新向 avibe.bot 登记。旧的设备密钥立即作废，用它做的任何事都会失效。所有设备都会退出，要重新登录；这台电脑上的页面不受影响。${host} 不变；绑定后可以在「更改域名」里拿回你等待期内的旧名字。`,
-              `This computer registers with avibe.bot again as ${account}. The old device key stops working at once, and anything done with it stops too. Every device is signed out and signs in again; pages on this computer are not affected. ${host} stays; afterwards you can take back an old name still in its waiting period under Change the domain.`,
+              `这台电脑会用 ${account} 重新向 avibe.bot 登记。旧的设备密钥立即作废。所有设备都会退出，要重新登录；这台电脑上的页面不受影响。${host} 不变；之后可以在「更改域名」里拿回你等待期内的旧名字。`,
+              `This computer registers with avibe.bot again as ${account}. The old device key stops working at once. Every device is signed out and signs in again; pages on this computer are not affected. ${host} stays; afterwards you can take back an old name still in its waiting period under Change the domain.`,
             )} />
           </DialogDescription>
         </DialogHeader>

@@ -90,6 +90,8 @@ export type DevicesPageViewProps = DevicesPageActions & {
   add?: AddKind;
   /** Owner-only content under how this Avibe is reached (a row a later change adds there). */
   afterReach?: ReactNode;
+  /** Content under the device lists, above recent activity (a panel a later change adds there). */
+  afterDevices?: ReactNode;
 };
 
 const noop = () => undefined;
@@ -539,7 +541,7 @@ function Confirm({ title, body, action, actions }: { title: string; body: string
 }
 
 export function DevicesPageView({
-  reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, afterReach, ...actions
+  reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, afterReach, afterDevices, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
   // Each device says which list it belongs to; push rows whose origin cannot be shown
@@ -625,6 +627,8 @@ export function DevicesPageView({
           {others.map((each) => <DeviceRow key={each.id} device={each} onOpen={actions.onOpenDevice} />)}
         </SettingsPanel>
       )}
+
+      {afterDevices}
 
       {owner && latest.length > 0 && (
         <SettingsPanel

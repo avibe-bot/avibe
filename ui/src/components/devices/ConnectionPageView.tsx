@@ -79,6 +79,8 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   /** This Avibe's domain, for the owner: the last row of the page, and the way to change it. */
   host?: string;
   rename?: Rename;
+  /** Further rows in the domain's panel, under 「更改域名」 (a quiet entry a later change adds there). */
+  domainRows?: ReactNode;
   /** A change is being applied: the controls wait. */
   busy?: boolean;
 };
@@ -311,7 +313,7 @@ function RenameDialogs({ host, rename, actions }: { host: string; rename: Rename
 }
 
 export function ConnectionPageView({
-  viewer, tunnel, direct, relay, relayEditable = false, path, preference, trial, reverted, host, rename, busy, ...actions
+  viewer, tunnel, direct, relay, relayEditable = false, path, preference, trial, reverted, host, rename, busy, domainRows, ...actions
 }: ConnectionPageViewProps) {
   const { t } = useTranslation();
   const remote = viewer !== 'local';
@@ -451,6 +453,7 @@ export function ConnectionPageView({
               {t('devices.connection.changeDomain')}
             </Button>
           </div>
+          {domainRows}
         </SettingsPanel>
       )}
 

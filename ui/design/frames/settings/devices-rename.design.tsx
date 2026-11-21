@@ -2,7 +2,7 @@
 // remote access again (kit/devices-rename.tsx). The old name is held for a waiting period (one
 // number; 30 days now) in which only this account can take it back; renaming clears what it can by
 // itself and says plainly what it cannot. The dialogs open over the shipped 「连接方式」 page at the
-// computer itself; 「重新绑定」 sits on the Devices page under how this Avibe is reached.
+// computer itself; 「重新绑定」 is a quiet row beside 「更改域名」 at the bottom of that page.
 import { frames, type FrameSpec } from '../../frame';
 import { ConnectionPageView, type ConnectionPageViewProps } from '@/components/devices/ConnectionPageView';
 import { DevicesPageView } from '@/components/devices/DevicesPageView';
@@ -80,35 +80,35 @@ const phone: Device = {
   id: 'iphone', group: 'mine', kind: 'iphone', name: 'iPhone 15 Pro', online: { path: 'tunnel' },
   client: { kind: 'app', version: '3.2.8', platform: 'iOS 26.1' }, capabilities: [{ kind: 'notifications', on: true }],
 };
-const devicesPage = (dialog: boolean, banner = false) => settingsPage('remote-access', (
+const devicesPage = () => settingsPage('remote-access', (
+  <DevicesPageView
+    reach={{ state: 'on', host: 'sam-app.avibe.bot', account, tunnel: 'good', ms: 120, direct: true }}
+    ownerEmail={account}
+    devices={[hostDevice, phone]}
+    afterReach={<UnrecognizedChangeBanner host="sam-app.avibe.bot" />}
+  />
+));
+const rebindPage = (dialog: boolean) => settingsPage('remote-access', (
   <>
-    <DevicesPageView
-      reach={{ state: 'on', host, account, tunnel: 'good', ms: 120, direct: true }}
-      ownerEmail={account}
-      devices={[hostDevice, phone]}
-      afterReach={banner ? <UnrecognizedChangeBanner host="sam-app.avibe.bot" /> : <RebindRow />}
-    />
+    <ConnectionPageView {...page} domainRows={<RebindRow />} />
     {dialog && <RebindDialog host={host} account={account} />}
   </>
 ));
 
 const designFrames = frames([
   // Before: the new name, what happens, the one thing that cannot be cleared, and the devices.
-  frame('form', '更改域名 · 第一步：新名称、改名后会怎样、清不到的那一处（写法 A）、设备和怎么在上面退出', WIDE, base, { themes: ['light', 'dark'] }),
-  frame('form-residue-b', '更改域名 · 清不到的那一处：写法 B', WIDE, { ...base, residue: 'b' }),
-  frame('form-residue-c', '更改域名 · 清不到的那一处：写法 C', WIDE, { ...base, residue: 'c' }),
+  frame('form', '更改域名 · 第一步：新名称、改名后会怎样、清不到的那一处、设备和怎么在上面退出', WIDE, base, { themes: ['light', 'dark'] }),
   frame('form-phone', '更改域名 · 第一步 · 375 宽', PHONE, base),
   frame('reclaim', '更改域名 · 拿回自己等待期内的旧名字：点一下就选回去，不占额度', WIDE,
     { ...base, host: 'maxwell-app.avibe.bot', name: 'max', held: [{ name: 'max', until: t('11 月 24 日', 'November 24') }] }),
   frame('reject-taken', '更改域名 · 名称已被占用', WIDE, { ...base, name: 'alex', reject: { kind: 'taken' } }),
   frame('reject-held', '更改域名 · 这个名字在别人的等待期里', WIDE, { ...base, name: 'sam', reject: { kind: 'held' } }),
-  // Renaming may end at the limit plus the name just left, so it is refused at 6 (the API's real count).
-  frame('reject-limit', '更改域名 · 账号已持有 6 个名字（含冷却中的），写明最早哪天释放；下半部分照常显示', WIDE,
+  // Renaming may end at the limit plus the name just left, so it is refused at 6 (the API's real count);
+  // refused, the dialog folds away what renaming would do (Product, 12:32).
+  frame('reject-limit', '更改域名 · 账号已持有 6 个名字（含冷却中的）：写明最早哪天释放，下面收起', { width: 1440, height: 800 },
     { ...base, name: 'maxim', reject: { kind: 'renameLimit', count: NAME_LIMIT + 1, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }] }),
-  frame('reject-limit-collapsed', '更改域名 · 同一拒绝，收起后果、提醒和设备清单（供比较）', { width: 1440, height: 800 },
-    { ...base, name: 'maxim', reject: { kind: 'renameLimit', count: NAME_LIMIT + 1, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }], collapseOnReject: true }),
-  frame('reject-limit-collapsed-phone', '更改域名 · 收起的拒绝 · 375 宽', PHONE,
-    { ...base, name: 'maxim', reject: { kind: 'renameLimit', count: NAME_LIMIT + 1, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }], collapseOnReject: true }),
+  frame('reject-limit-phone', '更改域名 · 到上限的拒绝 · 375 宽', PHONE,
+    { ...base, name: 'maxim', reject: { kind: 'renameLimit', count: NAME_LIMIT + 1, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }] }),
   frame('confirm', '更改域名 · 第二次确认：按钮先停 3 秒', { width: 1440, height: 900 }, { ...base, step: 'confirm', countdown: 3 }),
   // After: the same list, each device cleared or not confirmed yet; the reminder stays.
   frame('done-mixed', '改名之后 · 同一张清单：已清理 / 未确认 · 上次活跃，仍带清不到的那句', { width: 1440, height: 1100 },
@@ -127,12 +127,14 @@ const designFrames = frames([
   { name: 'claim-limit-in-use', title: '领取 · 5 个名字都在用（没有等待中的）：先删除一个实例', width: 1440, height: 640, status: 'proposed', themes: ['light'],
     route, fixtures, render: settingsPage('remote-access', <ClaimLimitCard account={account} name="max-macmini" reject={{ kind: 'limitInUse', limit: NAME_LIMIT }} />) },
   // Binding remote access again, at the computer itself: the old device key stops working.
-  { name: 'rebind', title: '设备页 · 「重新绑定远程访问」入口（在运行 Avibe 的电脑上）', width: 1440, height: 900, status: 'proposed', themes: ['light'],
-    route, fixtures, render: devicesPage(false) },
+  { name: 'rebind', title: '连接方式 · 最下面「更改域名」旁一行安静的「重新绑定远程访问」（在运行 Avibe 的电脑上）', width: 1440, height: 1300, status: 'proposed', themes: ['light'],
+    route, fixtures, render: rebindPage(false) },
+  { name: 'rebind-phone', title: '连接方式 · 重新绑定的那一行 · 375 宽', width: 375, height: 1900, status: 'proposed', themes: ['light'],
+    route, fixtures, render: rebindPage(false) },
   { name: 'rebind-confirm', title: '重新绑定 · 确认：旧的设备密钥立即作废；之后可拿回等待期内的旧名字', width: 1440, height: 900, status: 'proposed', themes: ['light'],
-    route, fixtures, render: devicesPage(true) },
+    route, fixtures, render: rebindPage(true) },
   { name: 'unrecognized-change', title: '设备页 · 地址在这台 Avibe 之外被改了：醒目提示，先重新绑定再拿回名字', width: 1440, height: 900, status: 'proposed', themes: ['light'],
-    route, fixtures, render: devicesPage(false, true) },
+    route, fixtures, render: devicesPage() },
 ]);
 
 export default designFrames;

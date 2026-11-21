@@ -16,6 +16,7 @@ import { SettingsPageShell } from '@/components/settings/SettingsPageShell';
 import { SettingsPanel, ToggleSwitch } from '@/components/settings/SettingsPrimitives';
 import { Badge } from '@/components/ui/badge';
 import { useDraft } from './draft';
+import { Para } from './devices-text';
 
 type D = (zh: string, en: string) => string;
 type Setting = 'protocol' | 'ipFamily' | 'outbound';
@@ -67,7 +68,7 @@ function ChangeLine({ change }: { change: TunnelChange }) {
   return (
     <div role="status" className={`mt-1 flex items-center gap-1.5 text-[11px] leading-relaxed ${tone}`}>
       <Icon className={`size-3.5 shrink-0 ${change.state === 'verifying' ? 'motion-safe:animate-spin' : ''}`} />
-      <span className="text-pretty">{text}</span>
+      <span><Para text={text} /></span>
     </div>
   );
 }
@@ -77,7 +78,7 @@ function Row({ title, hint, status, control, tone }: { title: string; hint?: Rea
     <div className={`flex flex-col gap-2 border-b border-border px-5 py-3 last:border-b-0 md:flex-row md:items-center md:justify-between md:gap-6 ${tone === 'info' ? 'bg-cyan/[0.06]' : ''}`}>
       <div className="min-w-0">
         <div className="text-[13px] font-medium text-foreground">{title}</div>
-        {hint && <div className="mt-0.5 text-pretty text-[11px] leading-relaxed text-muted">{hint}</div>}
+        {hint && <div className="mt-0.5 text-[11px] leading-relaxed text-muted">{typeof hint === 'string' ? <Para text={hint} /> : hint}</div>}
         {status}
       </div>
       <div className="shrink-0">{control}</div>
@@ -90,10 +91,10 @@ function Refused({ reason }: { reason: 'tunnel_unhealthy' | 'connection_change_b
   return (
     <div role="alert" className="mt-1 flex items-start gap-1.5 text-[11px] leading-relaxed text-gold-ink">
       <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-      <span className="text-pretty">
-        {reason === 'tunnel_unhealthy'
+      <span>
+        <Para text={reason === 'tunnel_unhealthy'
           ? d('没有改：Cloudflare 隧道此刻不通，你正靠直连连着，改了会断开。', 'Not changed: the Cloudflare tunnel is down right now and you are connected through direct, so the change would cut you off.')
-          : d('没有改：另一项更改还在进行，稍后再试。', 'Not changed: another change is still in progress. Try again shortly.')}
+          : d('没有改：另一项更改还在进行，稍后再试。', 'Not changed: another change is still in progress. Try again shortly.')} />
       </span>
     </div>
   );
@@ -113,11 +114,11 @@ export function ConnectionV2({ viewer, direct, relay, change, refused, returnedT
       {returnedToAutomatic && (
         <div role="status" className="flex gap-3 rounded-xl border border-gold/40 bg-gold/10 px-5 py-3">
           <History className="mt-0.5 size-4 shrink-0 text-gold-ink" />
-          <p className="text-pretty text-[12px] leading-relaxed text-foreground">
-            {d(
+          <p className="text-[12px] leading-relaxed text-foreground">
+            <Para text={d(
               `${pick(returnedToAutomatic.at)}，Cloudflare 隧道连续 3 分钟连不上，固定的设置已改回自动：${returnedToAutomatic.changes.map((each) => `${settingName(d)[each.setting]}（原来是「${pick(each.from)}」）`).join('、')}。`,
               `${pick(returnedToAutomatic.at)}: the Cloudflare tunnel could not connect for 3 minutes, so fixed settings went back to Automatic: ${returnedToAutomatic.changes.map((each) => `${settingName(d)[each.setting]} (was ${pick(each.from)})`).join(', ')}.`,
-            )}
+            )} />
           </p>
         </div>
       )}
@@ -133,12 +134,12 @@ export function ConnectionV2({ viewer, direct, relay, change, refused, returnedT
           title={d('直连', 'Direct')}
           hint={(
             <>
-              {d('Avibe App 能直接连到这台电脑时就不绕路。关掉后都走 Cloudflare 隧道。', 'The Avibe App goes straight to this computer when it can. When off, everything uses the Cloudflare tunnel.')}
+              <Para text={d('Avibe App 能直接连到这台电脑时就不绕路。关掉后都走 Cloudflare 隧道。', 'The Avibe App goes straight to this computer when it can. When off, everything uses the Cloudflare tunnel.')} />
               <br />
-              {d(
+              <Para text={d(
                 '注意：所在网络到不了 Cloudflare、正靠直连连着的手机，关掉直连后会断开，直到换到到得了的网络。',
                 'Note: a phone connected through direct on a network that cannot reach Cloudflare is cut off when direct is turned off, until it moves to a network that can.',
-              )}
+              )} />
             </>
           )}
           status={refused?.row === 'direct' ? <Refused reason={refused.reason} /> : null}
