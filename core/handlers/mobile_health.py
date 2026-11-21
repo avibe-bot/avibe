@@ -21,15 +21,19 @@ def current_identity(store: MobileStore) -> dict:
     An answer that cannot confirm the owner pauses this call; only a live,
     confirmed owner change revokes and purges (explicit revoke/unpair aside).
     """
-    from config.v2_config import V2Config
+    from config.v2_config import V2Config, config_file_lock
     from vibe import permissions
+    from vibe.account_session_revoke import pairing_epoch
+    from vibe.binding_admission import reset_in_progress
+    from vibe.remote_access import device_binding
 
     unavailable = MobileError("instance_eligibility_unavailable", 503)
     try:
         config = V2Config.load()
         cloud = config.remote_access.vibe_cloud
-        if cloud.runtime_credentials() is None:
+        if reset_in_progress() or cloud.runtime_credentials() is None:
             raise unavailable
+        observed = store.active_device()
         result = permissions.get_current_permissions(config)
     except permissions.PermissionsError:
         raise unavailable from None
@@ -42,9 +46,15 @@ def current_identity(store: MobileStore) -> dict:
     if not owner or not cloud.instance_id or instance["id"] != cloud.instance_id:
         raise unavailable
     identity = {"id": instance["id"], "name": instance.get("name") or instance["id"], "owner": owner}
-    device = store.active_device()
-    if device and (device["instance_id"], device["owner"]) != (identity["id"], identity["owner"]):
-        store.revoke(caller="instance-policy")  # Live, confirmed: this is no longer the paired owner's instance.
+    # Network I/O holds no local lock. Only the generation that asked for
+    # this answer may use it to read or purge; reset and publication use the
+    # same config lock. A stale answer is unavailability, not an owner change.
+    with config_file_lock():
+        current = V2Config.load()
+        if (reset_in_progress() or current.remote_access.vibe_cloud.runtime_credentials() is None
+                or pairing_epoch(current) != pairing_epoch(config) or device_binding(current) != device_binding(config)):
+            raise unavailable
+        store.retire_other_identities(instance=identity['id'], owner=owner, expected_device=observed['id'] if observed else None)
     return identity
 
 
