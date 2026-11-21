@@ -19,7 +19,7 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / ".github/workflows"
 HOSTED = {
     "ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04", "ubuntu-24.04-arm",
     "macos-latest", "macos-13", "macos-14", "macos-15", "macos-15-intel",
-    "macos-26", "macos-26-intel", "windows-latest", "windows-2022",
+    "macos-26", "macos-26-intel", "xcode-27", "xcode-27-xlarge", "windows-latest", "windows-2022",
     "windows-2025", "windows-11-arm",
 }
 SIGNER = ("model-hub-engine-channel.yml", "sign")

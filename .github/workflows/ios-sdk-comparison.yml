@@ -135,8 +135,9 @@ jobs:
         if: ${{ always() && !cancelled() }}
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet pillow
-          python3 ios/scripts/sdk_comparison.py --before "$RUNNER_TEMP/attachments/26.6" \
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pillow
+          "$RUNNER_TEMP/venv/bin/python" ios/scripts/sdk_comparison.py --before "$RUNNER_TEMP/attachments/26.6" \
             --after "$RUNNER_TEMP/attachments/27.2" --output "$RUNNER_TEMP/comparison"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
