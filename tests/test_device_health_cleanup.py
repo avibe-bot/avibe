@@ -148,6 +148,32 @@ def test_deferred_loopback_cleanup_does_not_retarget(install, monkeypatch, chang
             assert mobile.execute('SELECT revoked_at FROM devices WHERE id=?', (mid,)).fetchone()[0] is None
 
 
+def test_deferred_private_store_failure_expires_without_erasure(install, monkeypatch):
+    from storage import device_health_owner_checks as worker
+    from storage.models import device_health_owner_checks as checks
+    from vibe import ui_server
+    store = MobileStore()
+    _, viewer, target = phone(install, 'phone')
+    identity, payload = code_for(store, viewer)
+    mid = registry.pair(store, payload, identity)['device_id']
+    install.remote_access.vibe_cloud.instance_secret = 'test-device-secret'
+    local, origin = ui_server.app.test_client(), 'http://127.0.0.1:5123'
+    assert sign_out(local, target + '/sign-out', origin).get_json()['health_cleanup_pending']
+    def unavailable(*args, **kwargs):
+        raise OSError('private_store_unavailable')
+    with monkeypatch.context() as m:
+        m.setattr(MobileStore, 'revoke_confirmed_pairing', unavailable)
+        with pytest.raises(OSError):
+            worker.run_once(lambda: install)
+    with get_cached_sqlite_engine().begin() as conn:
+        assert conn.scalar(select(checks.c.mobile_id)) == mid
+        conn.execute(checks.update().values(next_at=0, expires_at=0))
+    worker.run_once(lambda: install)
+    assert [p['pairing_id'] for p in listing(local, origin)['unlinked_health']] == [mid]
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.scalar(select(checks.c.mobile_id)) is None
+
+
 def test_missing_private_store_is_not_replaced_by_empty_cleanup(install):
     store = MobileStore()
     _, viewer, target = phone(install, "lost")

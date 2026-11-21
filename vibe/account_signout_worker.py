@@ -64,7 +64,9 @@ def _claim(config, now):
     with get_cached_sqlite_engine().begin() as conn:
         conn.exec_driver_sql('BEGIN IMMEDIATE')
         _expire_page(conn, refs, refs.c.sid, refs.c.expires_at, now)
-        _expire_page(conn, receipts, receipts.c.id, receipts.c.expires_at, now)
+        expired_receipts = select(receipts.c.id).where(receipts.c.expires_at <= now).order_by(receipts.c.expires_at).limit(32)
+        conn.execute(items.delete().where(items.c.receipt.in_(expired_receipts)))
+        conn.execute(receipts.delete().where(receipts.c.id.in_(expired_receipts)))
         _expire_page(conn, jobs, jobs.c.digest, jobs.c.forget_at, now)
         if config is not None:
             _retire_old_pairings(conn, epoch or '', now)

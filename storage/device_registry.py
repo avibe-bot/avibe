@@ -10,6 +10,7 @@ from sqlalchemy.dialects.sqlite import insert
 
 from storage.db import get_cached_sqlite_engine
 from storage.models import remote_device_deadlines as deadlines
+from storage.models import remote_account_refs as account_refs
 from storage.models import remote_device_sessions as sessions
 from storage import device_activity, device_functions, device_health_registry
 from storage import device_push_registry as device_push
@@ -102,6 +103,7 @@ def prune(conn, now):
     from storage.models import device_session_extensions as ext
     expired_sessions = select(sessions.c.session_id).where(sessions.c.expires_at <= now).order_by(
         sessions.c.expires_at, sessions.c.session_id).limit(32)
+    conn.execute(account_refs.delete().where(account_refs.c.sid.in_(expired_sessions)))
     conn.execute(ext.delete().where(ext.c.session_id.in_(expired_sessions)))
     conn.execute(sessions.delete().where(sessions.c.session_id.in_(expired_sessions)))
 
@@ -342,6 +344,7 @@ def revoke_sid(conn, sid, expiry, now):
         pending = _end_functions(conn,row['binding'],row['subject'],row['device_id'],now,[sid],bool(sibling),row['device_id'],row['subject'],
                                  visible=row['cookie_exp'] > now and row['expires_at'] > now)
     from storage.models import device_session_extensions as ext
+    conn.execute(account_refs.delete().where(account_refs.c.sid == sid))
     conn.execute(ext.delete().where(ext.c.session_id == sid))
     conn.execute(sessions.delete().where(sessions.c.session_id == sid))
     return pending
@@ -437,7 +440,9 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_
                 )
             )
             from storage.models import device_session_extensions as ext
-            conn.execute(ext.delete().where(ext.c.session_id.in_(stmt.with_only_columns(sessions.c.session_id))))
+            selected_ids = stmt.with_only_columns(sessions.c.session_id)
+            conn.execute(account_refs.delete().where(account_refs.c.sid.in_(selected_ids)))
+            conn.execute(ext.delete().where(ext.c.session_id.in_(selected_ids)))
             conn.execute(sessions.delete().where(stmt.whereclause))
         prune(conn, now)
     deferred = device_health_registry.finish_pending(get_cached_sqlite_engine(), pending)

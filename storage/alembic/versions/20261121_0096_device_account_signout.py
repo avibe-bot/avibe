@@ -14,7 +14,7 @@ MIGRATION_COMPATIBILITY = "additive"
 def upgrade() -> None:
     op.create_table(
         "remote_account_refs",
-        sa.Column("sid", sa.String(), sa.ForeignKey("remote_device_sessions.session_id", ondelete="CASCADE"), primary_key=True),
+        sa.Column("sid", sa.String(), primary_key=True),
         sa.Column("epoch", sa.String(), nullable=False),
         sa.Column("expires_at", sa.Integer(), nullable=False),
         sa.Column("digest", sa.String(), nullable=False),
@@ -39,8 +39,8 @@ def upgrade() -> None:
         sa.Column("forget_at", sa.Integer()),
         if_not_exists=True,
     )
-    op.create_index("ix_rar_forget", "remote_account_revocations", ['forget_at'], if_not_exists=True, sqlite_where=sa.text("forget_at IS NOT NULL"))
-    op.create_index("ix_rar_next", "remote_account_revocations", ['epoch', 'next_at'], if_not_exists=True, sqlite_where=sa.text("next_at IS NOT NULL"))
+    op.create_index("ix_rar_forget", "remote_account_revocations", ['forget_at'], if_not_exists=True)
+    op.create_index("ix_rar_next", "remote_account_revocations", ['epoch', 'next_at'], if_not_exists=True)
     op.create_index("ix_remote_account_revocations_epoch", "remote_account_revocations", ['epoch'], if_not_exists=True)
     op.create_table(
         "remote_account_pairings",
@@ -67,7 +67,7 @@ def upgrade() -> None:
     op.create_table(
         "remote_signout_items",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("receipt", sa.String(), sa.ForeignKey("remote_signout_receipts.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("receipt", sa.String(), nullable=False),
         sa.Column("job", sa.String()),
         sa.Column("status", sa.String(), nullable=False),
         sa.Column("reason", sa.String()),
@@ -81,8 +81,13 @@ def upgrade() -> None:
     op.create_table(
         'device_health_owner_checks',
         sa.Column('mobile_id', sa.String(), primary_key=True),
-        *(sa.Column(name, sa.String(), nullable=False) for name in
-          ('operation', 'epoch', 'binding', 'subject', 'device_id', 'owner_email', 'linked_at')),
+        sa.Column('operation', sa.String(), nullable=False),
+        sa.Column('epoch', sa.String(), nullable=False),
+        sa.Column('binding', sa.String(), nullable=False),
+        sa.Column('subject', sa.String(), nullable=False),
+        sa.Column('device_id', sa.String(), nullable=False),
+        sa.Column('owner_email', sa.String(), nullable=False),
+        sa.Column('linked_at', sa.String(), nullable=False),
         sa.Column('next_at', sa.Integer(), nullable=False), sa.Column('expires_at', sa.Integer(), nullable=False),
         if_not_exists=True,
     )

@@ -1519,7 +1519,7 @@ remote_device_sessions = Table(
 # Runtime-private authority; never attach these values to cookies or public device rows.
 remote_account_refs = Table(
     "remote_account_refs", metadata,
-    Column("sid", String, ForeignKey("remote_device_sessions.session_id", ondelete="CASCADE"), primary_key=True),
+    Column("sid", String, primary_key=True),
     Column("epoch", String, nullable=False, index=True),
     Column("expires_at", Integer, nullable=False, index=True),
     Column("digest", String, nullable=False, index=True),
@@ -1539,8 +1539,8 @@ remote_account_revocations = Table(
     Column("created_at", Integer, nullable=False),
     Column("next_at", Integer),  # Also the lease expiration, null for completed fences.
     Column("forget_at", Integer),
-    Index("ix_rar_next", "epoch", "next_at", sqlite_where=text("next_at IS NOT NULL")),
-    Index("ix_rar_forget", "forget_at", sqlite_where=text("forget_at IS NOT NULL")),
+    Index("ix_rar_next", "epoch", "next_at"),
+    Index("ix_rar_forget", "forget_at"),
 )
 
 device_health_owner_checks = Table(
@@ -1581,7 +1581,7 @@ remote_signout_receipts = Table(
 remote_signout_items = Table(
     "remote_signout_items", metadata,
     Column("id", Integer, primary_key=True),
-    Column("receipt", String, ForeignKey("remote_signout_receipts.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("receipt", String, nullable=False, index=True),
     Column("job", String, index=True),  # Detached when complete; not a replayable credential.
     Column("status", String, nullable=False),
     Column("reason", String),
