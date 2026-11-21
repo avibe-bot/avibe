@@ -638,13 +638,17 @@ fn a_routed_window_keeps_the_arguments_wry_gives_every_window() {
         window_arguments("--proxy-pac-url=data:x"),
         format!("{WRY_DEFAULT_ARGUMENTS} --proxy-pac-url=data:x")
     );
+    // By lines: a Windows checkout ends them differently.
     let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.lock"));
-    let wry = lock
-        .split("[[package]]")
-        .find(|package| package.contains("\nname = \"wry\"\n"))
-        .expect("wry is a dependency");
-    assert!(
-        wry.contains("\nversion = \"0.57.0\"\n"),
+    let mut lines = lock.lines().skip_while(|line| line.trim() != r#"name = "wry""#);
+    assert_eq!(
+        lines.next().map(str::trim),
+        Some(r#"name = "wry""#),
+        "wry is a dependency"
+    );
+    assert_eq!(
+        lines.next().map(str::trim),
+        Some(r#"version = "0.57.0""#),
         "wry changed: read its default browser arguments again (src/webview2/mod.rs) and update WRY_DEFAULT_ARGUMENTS"
     );
 }
