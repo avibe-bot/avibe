@@ -3,7 +3,7 @@
 Status: rule table for review; no code yet. Base `master` `ca534deea`
 (#4107, migration 0096; this work takes 0097). Backend
 half: avibe-bot-backend `docs/plans/personal-hostname-release.md` (candidate
-`1ae26668`, "Backend ↔ instance wire"). What was settled with that writer is
+`af1aac0f`, "Backend ↔ instance wire"). What was settled with that writer is
 listed under [Contract points to settle](#contract-points-to-settle).
 
 ## Background
