@@ -32,24 +32,31 @@ export type HoldSurface = {
  *  recognises the hold itself. The App's event normally arrives before the page's own timer. */
 export const NATIVE_HOLD_GRACE_MS = 100;
 
-/** The App takes at most this many surfaces. */
-const MAX_SURFACES = 8;
+/** The App takes at most this many boxes. */
+const MAX_BOXES = 8;
+/** A surface's own box, and at most this many of its children's that stick out of it. */
+const MAX_PARTS = 2;
 
 const surfaces = new Map<string, HoldSurface>();
 /** What the App has before the page names anything: no surface. */
 const NOTHING = JSON.stringify([[], 0]);
-/** The last list sent (as text, and by surface), and the rectangles of the last list the App
- *  said it follows. */
+/** The last list sent (as text, and each surface's boxes), and the boxes of the last list the
+ *  App said it follows. */
 let sent = NOTHING;
-let named = new Map<string, NativeVoiceHoldSurface>();
-let followed = new Map<string, NativeVoiceHoldSurface>();
+let named = new Map<string, NativeVoiceHoldSurface[]>();
+let followed: NativeVoiceHoldSurface[] = [];
 let request = 0;
 let scheduled = false;
-let later: ReturnType<typeof setTimeout> | null = null;
+/** Measuring once more: after a scroll has stopped, and after the page has come to rest. */
+let afterScroll: ReturnType<typeof setTimeout> | null = null;
+let atRest: ReturnType<typeof setTimeout> | null = null;
+/** The measure now due is the one made at rest: it asks for no further one. */
+let resting = false;
 let unlisten: (() => void) | null = null;
 
 /** How long after a scroll, or after something was put over the page or taken off it (a sheet
- *  rising, a dialog closing), the surfaces are measured once more: where they came to rest. */
+ *  rising, a dialog closing, the slide to another page), the surfaces are measured once more:
+ *  where they came to rest. */
 const SETTLE_MS = 300;
 
 /** The WebView's own points for a box of the layout viewport: the App compares them with the
@@ -76,6 +83,10 @@ const toWebView = (left: number, top: number, width: number, height: number) => 
   };
 };
 
+/** A surface's box in the App's list: its own under the surface's id, a part's under `id_1`… */
+const partId = (id: string, part: number): string => (part === 0 ? id : `${id}_${part}`);
+const surfaceOf = (boxId: string): string => boxId.replace(/_\d+$/, '');
+
 /** Whether a touch in the element's box reaches it: it is what lies on top at its centre, and
  *  nothing has made it inert. A surface under a sheet, a dialog or a viewer is not one: the App
  *  acts on a touch before the page sees it, and would open the microphone for whatever covers it. */
@@ -85,35 +96,59 @@ const reachable = (element: Element, box: DOMRect): boolean => {
   return Boolean(top) && element.contains(top);
 };
 
-const measure = (): { list: NativeVoiceHoldSurface[]; holdMs: number } => {
+/** The element's box, and those of its children that stick out of it (the main Bot's face is
+ *  lifted above its button): a touch on any of them is the element's. */
+const boxesOf = (element: Element, box: DOMRect): DOMRect[] => {
+  const boxes = [box];
+  for (const child of element.children) {
+    if (boxes.length > MAX_PARTS) break;
+    const part = child.getBoundingClientRect();
+    const inside = part.left >= box.left && part.right <= box.right && part.top >= box.top && part.bottom <= box.bottom;
+    if (part.width > 0 && part.height > 0 && !inside) boxes.push(part);
+  }
+  return boxes;
+};
+
+/** The list for the App, and whether a surface was left out only because something lies over
+ *  it now (which may be passing: a page sliding in, a card fading out). */
+const measure = (): { list: NativeVoiceHoldSurface[]; holdMs: number; covered: boolean } => {
   const list: NativeVoiceHoldSurface[] = [];
   let holdMs = 0;
-  if (!coversViewport()) return { list, holdMs };
+  let covered = false;
+  if (!coversViewport()) return { list, holdMs, covered };
   for (const [id, surface] of surfaces) {
     // One threshold for the App: the first surface's. A surface that holds differently is the page's.
     if (holdMs && surface.holdMs !== holdMs) continue;
-    let rect: NativeVoiceHoldSurface | undefined;
+    let boxes: NativeVoiceHoldSurface[] | undefined;
     if (surface.live()) {
       // Its own card may lie over it now; it is the App's as last named until the press is over.
-      rect = named.get(id);
+      boxes = named.get(id);
     } else {
       const element = surface.element();
       if (!element || !element.isConnected) continue;
       const box = element.getBoundingClientRect();
-      if (!(box.width > 0 && box.height > 0) || !reachable(element, box)) continue;
-      rect = { id, ...toWebView(box.left, box.top, box.width, box.height) };
+      if (!(box.width > 0 && box.height > 0)) continue;
+      if (!reachable(element, box)) {
+        covered = true;
+        continue;
+      }
+      boxes = boxesOf(element, box).map((part, index) => ({
+        id: partId(id, index),
+        ...toWebView(part.left, part.top, part.width, part.height),
+      }));
     }
-    if (!rect) continue;
+    if (!boxes || boxes.length === 0 || list.length + boxes.length > MAX_BOXES) continue;
     holdMs = surface.holdMs;
-    list.push(rect);
-    if (list.length === MAX_SURFACES) break;
+    list.push(...boxes);
   }
-  return { list, holdMs };
+  return { list, holdMs, covered };
 };
 
 const send = (): void => {
   scheduled = false;
-  if (hasNativeVoiceHold()) tell();
+  const rested = resting;
+  resting = false;
+  if (hasNativeVoiceHold() && tell() && !rested) measureAtRest();
   // The last surface went: the App has been told, and has nothing more to say.
   if (surfaces.size === 0) {
     unlisten?.();
@@ -121,19 +156,22 @@ const send = (): void => {
   }
 };
 
-const tell = (): void => {
-  const { list, holdMs } = measure();
+/** Tells the App the list if it changed. True when a surface was left out as covered. */
+const tell = (): boolean => {
+  const { list, holdMs, covered } = measure();
   const next = JSON.stringify([list, holdMs]);
-  if (next === sent) return;
+  if (next === sent) return covered;
   sent = next;
-  named = new Map(list.map((surface) => [surface.id, surface]));
+  named = new Map();
+  for (const box of list) named.set(surfaceOf(box.id), [...(named.get(surfaceOf(box.id)) ?? []), box]);
   request += 1;
   const mine = request;
   void nativeVoiceHoldSurfaces(list, holdMs).then((answer) => {
     // A list overtaken by a later one says nothing: that one's answer does.
     if (mine !== request || answer === 'superseded') return;
-    followed = new Map(answer === 'ok' ? list.map((surface) => [surface.id, surface]) : []);
+    followed = answer === 'ok' ? list : [];
   });
+  return covered;
 };
 
 /** Measures the surfaces again, soon, and tells the App if they changed. */
@@ -144,29 +182,38 @@ export const refreshHoldSurfaces = (): void => {
   else setTimeout(send, 0);
 };
 
+/** Measures once more when what is moving has come to rest. One such measure is waited for at
+ *  a time, and it asks for no further one: a surface that stays covered is not polled. */
+const measureAtRest = (): void => {
+  if (atRest) return;
+  atRest = setTimeout(() => {
+    atRest = null;
+    resting = true;
+    refreshHoldSurfaces();
+  }, SETTLE_MS);
+};
+
 /** Measures again now, and once more when what moved has come to rest. */
 const refreshAndSettle = (): void => {
   refreshHoldSurfaces();
-  if (later) clearTimeout(later);
-  later = setTimeout(() => {
-    later = null;
-    refreshHoldSurfaces();
-  }, SETTLE_MS);
+  if (atRest) clearTimeout(atRest);
+  atRest = null;
+  measureAtRest();
 };
 
 /** Measures once a scroll has stopped: a surface that scrolls with its page (a home's composer)
  *  is where it was named until then, and holds through the page meanwhile. */
 const refreshAfterScroll = (): void => {
-  if (later) clearTimeout(later);
-  later = setTimeout(() => {
-    later = null;
+  if (afterScroll) clearTimeout(afterScroll);
+  afterScroll = setTimeout(() => {
+    afterScroll = null;
     refreshHoldSurfaces();
   }, SETTLE_MS);
 };
 
 const listen = (): (() => void) => {
   const off = onNativeVoiceHold((event) => {
-    const surface = event.surface ? surfaces.get(event.surface) : undefined;
+    const surface = event.surface ? surfaces.get(surfaceOf(event.surface)) : undefined;
     if (event.phase === 'recognised') {
       // Not a hold the page sees (the surface moved, the press already ended): the App drops it,
       // and the surfaces are measured again in case it was the list that was wrong.
@@ -196,8 +243,10 @@ const listen = (): (() => void) => {
     off?.();
     observer?.disconnect();
     overlays?.disconnect();
-    if (later) clearTimeout(later);
-    later = null;
+    if (afterScroll) clearTimeout(afterScroll);
+    if (atRest) clearTimeout(atRest);
+    afterScroll = null;
+    atRest = null;
     window.removeEventListener('pointerdown', refreshHoldSurfaces, { capture: true });
     window.removeEventListener('scroll', refreshAfterScroll, { capture: true });
     window.removeEventListener('resize', refreshHoldSurfaces);
@@ -206,7 +255,7 @@ const listen = (): (() => void) => {
   };
 };
 
-/** Adds a surface under `id` (letters, digits, `-` and `_`); the returned function takes it back. */
+/** Adds a surface under `id` (letters, digits and `-`); the returned function takes it back. */
 export const registerHoldSurface = (id: string, surface: HoldSurface): (() => void) => {
   if (!hasNativeVoiceHold()) return () => undefined;
   surfaces.set(id, surface);
@@ -229,8 +278,9 @@ export const registerHoldSurface = (id: string, surface: HoldSurface): (() => vo
 /** Whether the App follows a press at this point of the layout viewport on surface `id`: it said
  *  so for a box that holds the point. The page then waits `NATIVE_HOLD_GRACE_MS` for its word. */
 export const holdFollowed = (id: string, clientX: number, clientY: number): boolean => {
-  const box = followed.get(id);
-  if (!box) return false;
   const point = toWebView(clientX, clientY, 0, 0);
-  return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
+  return followed.some((box) => (
+    surfaceOf(box.id) === id
+    && point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height
+  ));
 };
