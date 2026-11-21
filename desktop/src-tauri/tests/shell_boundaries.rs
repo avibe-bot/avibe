@@ -169,6 +169,7 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-desktop-notifications",
             "main-instance-client",
             "main-window-focus",
+            "show-share",
             "update-popover"
         ])
     );
@@ -221,6 +222,28 @@ fn native_app_windows_are_main_only_and_loopback_scoped() {
 }
 
 #[test]
+fn show_share_is_one_command_for_the_workbench_and_show_windows_on_loopback() {
+    let grant = read_json(crate_dir().join("capabilities/show-share.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW, "avibe-app-show-*"]));
+    assert!(grant.get("webviews").is_none());
+    assert_eq!(grant["local"], false);
+    assert_eq!(grant["permissions"], serde_json::json!(["allow-desktop-show-share"]));
+    let patterns = loopback_patterns(&grant);
+    for (url, allowed) in [
+        ("http://127.0.0.1:5123/apps/show/ses-1?standalone=1", true),
+        ("http://[::1]:6174/", true),
+        ("https://studio-app.avibe.bot/apps/show/ses-1", false),
+        ("http://127.0.0.1.evil.example/", false),
+        ("tauri://localhost/index.html", false),
+    ] {
+        let url = url::Url::parse(url).unwrap();
+        assert_eq!(patterns.iter().any(|pattern| pattern.test(&url)), allowed, "{url}");
+    }
+}
+
+/// A Show app window may share its own Show (`show-share`) and do nothing else;
+/// every other native app window gets no IPC at all.
+#[test]
 fn no_capability_grants_ipc_to_native_app_windows() {
     use std::collections::BTreeMap;
     use tauri::utils::acl::{capability::Capability, manifest::Manifest, resolved::Resolved};
@@ -242,8 +265,16 @@ fn no_capability_grants_ipc_to_native_app_windows() {
     for target in [Target::MacOS, Target::Windows] {
         let resolved = Resolved::resolve(&manifests, capabilities.clone(), target).expect("valid permissions");
         assert!(!resolved.allowed_commands.is_empty());
+        let mut show_commands = std::collections::BTreeSet::new();
         for (command, grants) in resolved.allowed_commands {
             for grant in grants {
+                let reaches = |label: &str| {
+                    grant
+                        .windows
+                        .iter()
+                        .chain(&grant.webviews)
+                        .any(|pattern| pattern.matches(label))
+                };
                 for label in [
                     "avibe-app-files",
                     "avibe-app-files--new-1",
@@ -251,20 +282,26 @@ fn no_capability_grants_ipc_to_native_app_windows() {
                     "avibe-app-terminal--new-2",
                     "avibe-app-editor",
                     "avibe-app-editor--new-3",
+                    "avibe-app-preview",
+                    "avibe-app-library",
+                ] {
+                    assert!(!reaches(label), "{command} must not grant IPC to {label}");
+                }
+                for label in [
                     "avibe-app-show-73657373696f6e2d31",
                     "avibe-app-show-73657373696f6e2d31--new-4",
                 ] {
-                    assert!(
-                        !grant
-                            .windows
-                            .iter()
-                            .chain(&grant.webviews)
-                            .any(|pattern| pattern.matches(label)),
-                        "{command} must not grant IPC to {label}"
-                    );
+                    if reaches(label) {
+                        show_commands.insert(command.clone());
+                    }
                 }
             }
         }
+        assert_eq!(
+            show_commands.into_iter().collect::<Vec<_>>(),
+            vec!["desktop_show_share".to_owned()],
+            "a Show window may only share its own Show"
+        );
     }
 }
 
@@ -677,6 +714,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_open",
         "focus_main_window",
         "update_popover_fit",
+        "desktop_show_share",
     ];
     let declared: Vec<&str> = commands
         .into_iter()

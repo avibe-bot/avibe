@@ -85,6 +85,17 @@ fn optional_mtime<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<O
 fn bounded(value: &str, max: usize) -> bool {
     value.len() <= max && !value.contains('\0')
 }
+/// The title a repeated launch gives the window it reuses: its request's,
+/// except for a Show window. Its page names it after the Show's current
+/// title (`show_window_title`), and a Dock tile, a search result or an
+/// in-flight request may still carry the Show's old name. A new Show window
+/// still starts with the request's title until its page names it.
+fn reused_title<'a>(target: &AppWindowTarget, request: &'a Request) -> Option<&'a str> {
+    match target {
+        AppWindowTarget::ShowPage(_) => None,
+        AppWindowTarget::Builtin(_) => request.title.as_deref().filter(|title| !title.trim().is_empty()),
+    }
+}
 fn request_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -378,6 +389,16 @@ impl Source {
             child,
         })
     }
+    // Read only by the macOS share effects (`show_share::macos`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn document_current(&self) -> bool {
+        !self
+            .child
+            .as_ref()
+            .is_some_and(|entry| entry.retired.load(Ordering::SeqCst))
+            && self.document.owns(&self.view)
+            && self.document.generation.load(Ordering::SeqCst) == self.generation
+    }
     fn current(&self) -> bool {
         if self
             .child
@@ -400,6 +421,81 @@ impl Source {
             && self.document.generation.load(Ordering::SeqCst) == self.generation
             && self.view.url().is_ok_and(|url| same_origin(&self.runtime.origin, &url))
     }
+}
+
+/// Who may share a Show (`show_share`): the Workbench, or a Show app window
+/// the shell opened for exactly one Show, both on this computer's Runtime. The
+/// window's registered identity and current document decide it, never the
+/// page's request; `current` turns false once that document is gone.
+// Its route and current-document reads serve only the macOS share effects.
+#[derive(Clone)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct ShareSource {
+    source: Source,
+    show: Option<String>,
+    route: Option<String>,
+}
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl ShareSource {
+    /// The Show this window was opened for, or `None` for the Workbench.
+    pub(crate) fn bound_show(&self) -> Option<&str> {
+        self.show.as_deref()
+    }
+    /// The path the shell opened a Show window at, `/apps/show/<id>`.
+    pub(crate) fn bound_route(&self) -> Option<&str> {
+        self.route.as_deref()
+    }
+    pub(crate) fn current(&self) -> bool {
+        self.source.current() && (self.show.is_some() || crate::pet::is_workbench(&self.source.view))
+    }
+    /// The same document is still loaded, read without a round trip through
+    /// the event loop, so it holds on the main thread inside a WebView call.
+    pub(crate) fn document_current(&self) -> bool {
+        self.source.document_current()
+    }
+    /// The Runtime still holds its receipt (`AppRuntime::receipt_current`):
+    /// safe on the main thread; the caller checks the URL.
+    pub(crate) fn receipt_current(&self) -> bool {
+        self.source.runtime.receipt_current(self.source.view.app_handle())
+    }
+    pub(crate) fn view(&self) -> &Webview {
+        &self.source.view
+    }
+    pub(crate) fn origin(&self) -> &Url {
+        &self.source.runtime.origin
+    }
+}
+fn is_loopback(origin: &Url) -> bool {
+    origin.scheme() == "http" && matches!(origin.host_str(), Some("127.0.0.1" | "[::1]"))
+}
+pub(crate) fn share_source(view: &Webview) -> Option<ShareSource> {
+    let source = Source::capture(view)?;
+    if !is_loopback(&source.runtime.origin) {
+        return None;
+    }
+    let mut route = None;
+    let show = match &source.child {
+        None => {
+            if !crate::pet::is_workbench(view) {
+                return None;
+            }
+            None
+        }
+        Some(child) => {
+            let AppWindowTarget::ShowPage(id) = &child.target else {
+                return None;
+            };
+            // The document is still the Show route the shell opened.
+            let expected = target_url(&source.runtime.origin, &child.target);
+            if view.url().ok()?.path() != expected.path() {
+                return None;
+            }
+            route = Some(expected.path().to_owned());
+            Some(id.clone())
+        }
+    };
+    let candidate = ShareSource { source, show, route };
+    candidate.current().then_some(candidate)
 }
 
 fn snapshot_script(snapshot: &Snapshot, event: bool) -> String {
@@ -695,7 +791,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         let window = app.get_webview_window(&label).expect("registered app window");
         let snapshot = Snapshot::new(request, &label);
         *entry.snapshot.lock().expect("snapshot") = snapshot.clone();
-        if let Some(title) = request.title.as_deref().filter(|title| !title.trim().is_empty()) {
+        if let Some(title) = reused_title(&target, request) {
             let _ = window.set_title(title);
         }
         // The destination stays unchanged: repeated Editor/Terminal requests
@@ -772,6 +868,12 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
             .incognito(source.runtime.disposable)
             .initialization_script(NATIVE_APP_WINDOW_MARKER)
             .initialization_script(PROTOCOL_SCRIPT)
+            // Only a Show window learns it can share and export; `show_share` checks again.
+            .initialization_script(if matches!(target, AppWindowTarget::ShowPage(_)) {
+                crate::show_share::show_window_markers()
+            } else {
+                String::new()
+            })
             .initialization_script(initial_snapshot(&snapshot))
             .on_navigation(move |url| navigation_for(&app_for_nav, &label_for_nav, &doc_for_nav, url))
             .on_new_window(|url, _| crate::handle_new_window_request(url))
@@ -789,6 +891,10 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
                     let _ = view.eval(snapshot_script(&snapshot, true));
                 }
             });
+    // A Show window is named after its Show, as its page names its document.
+    if matches!(target, AppWindowTarget::ShowPage(_)) {
+        builder = crate::show_window_title::follow(builder);
+    }
     if let Some(path) = path {
         builder = builder.data_directory(path);
     }
@@ -824,6 +930,17 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         }
     };
     entry.document.bind(window.as_ref());
+    // A Show window's share entry, in its title bar (ui/design:
+    // show-pages/desktop-native-entry/titlebar-*). It only asks the page to
+    // open its share popover; sharing itself stays `show_share`'s.
+    #[cfg(target_os = "macos")]
+    if matches!(target, AppWindowTarget::ShowPage(_)) && crate::show_share::supported() {
+        crate::macos_show_titlebar::install(
+            &window,
+            crate::product_text("chat.showPage.share").unwrap_or_else(|| "Share".to_owned()),
+            target_url(&source.runtime.origin, &target).path().to_owned(),
+        );
+    }
     let cleanup_app = app.clone();
     let cleanup_label = label.clone();
     let cleanup_entry = entry.clone();
@@ -1155,6 +1272,27 @@ mod tests {
         )
         .unwrap()
     }
+    // Review of 9b67dcd0: a Show renamed since a Dock tile, a search result or an
+    // in-flight request took its name must not have that old name written back
+    // when the request reuses the open window. The page names a Show window.
+    #[test]
+    fn a_reused_show_window_keeps_the_title_its_page_gave_it() {
+        let mut stale = request("showpage", json!(null));
+        stale.title = Some("Old name".into());
+        let target = stale.target(true).unwrap();
+        assert_eq!(
+            reused_title(&target, &stale),
+            None,
+            "a stale launcher name is not written back"
+        );
+        // Other App windows are still named by their launch.
+        let mut editor = request("editor", json!({"path":"/tmp/a.md"}));
+        editor.title = Some("a.md".into());
+        assert_eq!(reused_title(&editor.target(true).unwrap(), &editor), Some("a.md"));
+        editor.title = Some("  ".into());
+        assert_eq!(reused_title(&editor.target(true).unwrap(), &editor), None);
+    }
+
     // The old owner accepted only four targets and silently discarded state.
     // This table pins the shared native data boundary, not UI resolution policy.
     #[test]

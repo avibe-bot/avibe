@@ -912,6 +912,18 @@ pub(crate) struct AppRuntime {
 
 impl AppRuntime {
     pub fn current(&self, app: &AppHandle) -> bool {
+        self.receipt_current(app)
+            && app
+                .get_webview(&self.label)
+                .is_some_and(|view| view.url().is_ok_and(|url| app_origin_matches(&self.origin, &url)))
+    }
+
+    /// `current` without the WebView's URL: the epoch, the presentation owner
+    /// and the published Runtime role. It takes only atomics and std mutexes
+    /// that no holder keeps across a wait for the main thread, so it may be
+    /// called on the main thread, inside a WebView call, where a URL getter
+    /// would re-enter the event loop. The caller checks the URL itself.
+    pub fn receipt_current(&self, app: &AppHandle) -> bool {
         let Some(client) = app.try_state::<Client>() else {
             return false;
         };
@@ -932,9 +944,6 @@ impl AppRuntime {
         let admitted = role && !state.account && !state.staging && state.pending_commit.is_none();
         drop(state);
         admitted
-            && app
-                .get_webview(&self.label)
-                .is_some_and(|view| view.url().is_ok_and(|url| app_origin_matches(&self.origin, &url)))
     }
 
     pub fn webview(&self, app: &AppHandle) -> Option<Webview> {

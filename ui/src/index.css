@@ -119,6 +119,18 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --color-island-foreground: #ffffff;
 }
 
+/* macOS window chrome, as a design frame draws it standing in for the system
+   (ui/design: show-pages/desktop-native-entry/*): the traffic lights' colours,
+   the title bar's side inset, its title size and its toolbar symbol size. */
+@theme {
+  --color-traffic-close: #ff5f57;
+  --color-traffic-minimize: #febc2e;
+  --color-traffic-zoom: #28c840;
+  --spacing-titlebar-inset: 9px;
+  --spacing-titlebar-symbol: 15px;
+  --text-titlebar: 13px;
+}
+
 /* Motion (docs/plans/web-ui-motion.md §4; ui/design: motion/tokens/sheet). A
    moment picks one duration and one curve from here; nothing animates on a
    literal. Durations: `instant` answers a press, `fast` moves small things
