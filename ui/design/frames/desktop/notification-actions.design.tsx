@@ -157,17 +157,17 @@ const inChat = (lang: 'zh' | 'en') => () => (
 );
 
 const designFrames = frames([
-  { name: 'question-options', title: '通知 · 等你回复 · 选项展开（示意）', width: 960, height: 420, status: 'proposed', render: () => <QuestionNotification open /> },
-  { name: 'question-reply', title: '通知 · 等你回复 · 在通知里回复（示意）', width: 960, height: 420, status: 'proposed', render: () => <QuestionNotification reply /> },
-  { name: 'reminder-confirm', title: '通知 · 添加到提醒事项 · 确认（示意）', width: 960, height: 420, status: 'proposed', render: () => <ReminderNotification /> },
-  { name: 'outcomes', title: '通知 · 动作没有生效时的结果（示意）', width: 960, height: 560, status: 'proposed', render: () => <OutcomeNotifications /> },
-  { name: 'settings-ready', title: '设置 · 通知 · 本设备 · 都已允许', width: 1440, height: 900, status: 'proposed', route: settingsRoute, fixtures: settingsData, render: settings('ready') },
-  { name: 'settings-needs-permission', title: '设置 · 通知 · 本设备 · 系统未允许通知', width: 1440, height: 900, status: 'proposed', route: settingsRoute, fixtures: settingsData, render: settings('needs-permission') },
-  { name: 'settings-reminders-denied', title: '设置 · 通知 · 本设备 · 提醒事项被拒绝', width: 1440, height: 900, status: 'proposed', route: settingsRoute, fixtures: settingsData, render: settings('reminders-denied') },
-  { name: 'settings-unsupported', title: '设置 · 通知 · 本设备 · 系统版本不支持提醒事项', width: 1440, height: 900, status: 'proposed', route: settingsRoute, fixtures: settingsData, render: settings('unsupported') },
-  { name: 'notices', title: '会话 · 从通知打开时的结果提示', width: 1100, height: 260, status: 'proposed', render: () => <Notices /> },
-  { name: 'in-chat-handled', title: '会话 · 已在另一端处理（中文内容）', width: 1192, height: 640, status: 'proposed', route: chatRoute(), fixtures: handled('zh'), render: inChat('zh') },
-  { name: 'in-chat-handled-en', title: '会话 · 已在另一端处理（英文内容）', width: 1192, height: 640, status: 'proposed', route: chatRoute(), fixtures: handled('en'), render: inChat('en') },
+  { name: 'question-options', title: '通知 · 等你回复 · 选项展开（示意）', width: 960, height: 420, status: 'approved', render: () => <QuestionNotification open /> },
+  { name: 'question-reply', title: '通知 · 等你回复 · 在通知里回复（示意）', width: 960, height: 420, status: 'approved', render: () => <QuestionNotification reply /> },
+  { name: 'reminder-confirm', title: '通知 · 添加到提醒事项 · 确认（示意）', width: 960, height: 420, status: 'approved', render: () => <ReminderNotification /> },
+  { name: 'outcomes', title: '通知 · 动作没有生效时的结果（示意）', width: 960, height: 560, status: 'approved', render: () => <OutcomeNotifications /> },
+  { name: 'settings-ready', title: '设置 · 通知 · 本设备 · 都已允许', width: 1440, height: 900, status: 'approved', route: settingsRoute, fixtures: settingsData, render: settings('ready') },
+  { name: 'settings-needs-permission', title: '设置 · 通知 · 本设备 · 系统未允许通知', width: 1440, height: 900, status: 'approved', route: settingsRoute, fixtures: settingsData, render: settings('needs-permission') },
+  { name: 'settings-reminders-denied', title: '设置 · 通知 · 本设备 · 提醒事项被拒绝', width: 1440, height: 900, status: 'approved', route: settingsRoute, fixtures: settingsData, render: settings('reminders-denied') },
+  { name: 'settings-unsupported', title: '设置 · 通知 · 本设备 · 系统版本不支持提醒事项', width: 1440, height: 900, status: 'approved', route: settingsRoute, fixtures: settingsData, render: settings('unsupported') },
+  { name: 'notices', title: '会话 · 从通知打开时的结果提示', width: 1100, height: 260, status: 'approved', render: () => <Notices /> },
+  { name: 'in-chat-handled', title: '会话 · 已在另一端处理（中文内容）', width: 1192, height: 640, status: 'approved', route: chatRoute(), fixtures: handled('zh'), render: inChat('zh') },
+  { name: 'in-chat-handled-en', title: '会话 · 已在另一端处理（英文内容）', width: 1192, height: 640, status: 'approved', route: chatRoute(), fixtures: handled('en'), render: inChat('en') },
 ]);
 
 export default designFrames;
