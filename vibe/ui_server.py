@@ -8178,7 +8178,7 @@ def web_push_test():
             send_web_push(subscription=subscription, payload=notification)
             with engine.begin() as conn:
                 web_push_service.mark_send_success(
-                    conn,
+                    conn, subscription=subscription,
                     endpoint=subscription["endpoint"],
                     badge_count=badge_count,
                 )
@@ -8188,7 +8188,7 @@ def web_push_test():
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             with engine.begin() as conn:
                 web_push_service.mark_send_failure(
-                    conn,
+                    conn, subscription=subscription,
                     endpoint=subscription["endpoint"],
                     disable=status_code in {404, 410},
                 )

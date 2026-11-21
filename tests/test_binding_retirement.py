@@ -48,6 +48,14 @@ def test_same_id_publication_crash_cannot_resurrect_old_or_retire_new(pairing_ho
     enroll(old, 'old')
     subscribe('remote:owner', 'unattested')
     subscribe('local', 'local')
+    # Keep a sender's snapshot of a remote endpoint with *no* registry link.
+    from core.web_push import send_web_push
+    import pywebpush
+    handed_to_provider = []
+    monkeypatch.setattr(pywebpush, 'webpush', lambda **kw: handed_to_provider.append(kw['subscription_info']['endpoint']))
+    with engine.connect() as conn:
+        [old_endpoint] = push.list_enabled(conn, user_key='remote:owner')
+        [local_endpoint] = push.list_enabled(conn, user_key='local')
     _fail_config_publication_once(monkeypatch)
     assert remote_access.pair('rotate-in-place', base)['error'] == 'pairing_save_failed_after_redeem'
     record, error = remote_access._read_pending_pairing_record()
@@ -65,6 +73,16 @@ def test_same_id_publication_crash_cannot_resurrect_old_or_retire_new(pairing_ho
     assert new != old
     enroll(new, 'current')
     subscribe('remote:owner', 'unattested')
+    with pytest.raises(ValueError, match='push_delivery_unavailable'):
+        send_web_push(subscription=old_endpoint, payload={'title': 'fixture'})
+    assert not handed_to_provider
+    with engine.begin() as conn:
+        # Late provider failure, after a new registration reused the same URL.
+        push.mark_send_failure(conn, endpoint=old_endpoint['endpoint'], disable=True, subscription=old_endpoint)
+        [fresh_endpoint] = push.list_enabled(conn, user_key='remote:owner')
+    send_web_push(subscription=local_endpoint, payload={'title': 'fixture'})
+    send_web_push(subscription=fresh_endpoint, payload={'title': 'fixture'})
+    assert handed_to_provider == [local_endpoint['endpoint'], fresh_endpoint['endpoint']]
     registry.retire_binding(old, now=5)
     with engine.connect() as conn:
         assert conn.scalar(select(sessions.c.session_id).where(sessions.c.binding == new)) == 'current'

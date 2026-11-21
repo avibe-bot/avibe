@@ -473,7 +473,8 @@ def _drop_authority() -> None:
 
 
 def _cleanup_lease_path() -> Path:
-    return paths.get_state_dir() / 'address-cleanup-responses.lock'
+    from vibe.binding_admission import publication_lease_path
+    return publication_lease_path()
 
 
 def cleanup_publication_lock():

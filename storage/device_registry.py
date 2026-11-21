@@ -35,6 +35,7 @@ def retire_binding(binding, *, now):
     A replay after publication must never select endpoints a second time.
     """
     from storage.models import device_session_extensions as ext, web_push_subscriptions as push
+    from storage.models import live_activity_trackings as tracks
     from storage import web_push_service
 
     with get_cached_sqlite_engine().begin() as conn:
@@ -43,6 +44,10 @@ def retire_binding(binding, *, now):
             return
         conn.execute(insert(state_meta).values(key='remote_access.retired_registry.v1:' + binding,
                                                value_json='true', updated_at=str(now)))
+        web_push_service.record_binding_retirement(conn, binding, now)
+        conn.execute(tracks.update().where(tracks.c.owner_user_key.like('remote:%'), tracks.c.status == 'tracking')
+                     .values(status='stopped', stop_reason='registration_unavailable', confirmed_at=now,
+                             pending_state=None, updated_at=now))
         old_sids = select(sessions.c.session_id).where(sessions.c.binding == binding)
         for endpoint, user_key in conn.execute(select(push.c.endpoint, push.c.user_key).where(
                 push.c.user_key.like('remote:%'))).all():

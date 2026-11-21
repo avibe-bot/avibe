@@ -33,6 +33,11 @@ def pairing_operation(operation):
     return run
 
 
+def publication_lease_path():
+    # Never unlink: readers in the UI and controller must lock the same inode.
+    return paths.get_state_dir() / 'address-cleanup-responses.lock'
+
+
 def reset_intent_path():
     return paths.get_state_dir() / 'remote-binding-reset.json'
 
