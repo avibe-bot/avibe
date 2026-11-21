@@ -5,6 +5,9 @@ mod connect;
 #[cfg(test)]
 #[path = "../../tests/direct/sidecar.rs"]
 mod interop;
+#[cfg(test)]
+#[path = "../../tests/direct/lifecycle.rs"]
+mod lifecycle_tests;
 mod listener;
 mod offer;
 #[cfg(test)]
@@ -16,7 +19,7 @@ mod transport;
 
 use connect::Authority;
 use futures_util::StreamExt;
-use iroh::{Endpoint, TransportAddr};
+use iroh::{Endpoint, SecretKey, TransportAddr};
 use listener::Listener;
 use offer::Offer;
 use std::sync::Arc;
@@ -39,25 +42,30 @@ pub struct Route<'a> {
 pub struct Client {
     host: Authority,
     instance: String,
-    endpoint: Endpoint,
+    key: SecretKey,
+    endpoint: Option<Endpoint>,
     links: watch::Sender<Option<Arc<Link>>>,
-    listener: Option<Listener>,
+    listener: Listener,
     monitor: Option<JoinHandle<()>>,
 }
 impl Client {
-    /// Create only for the current managed origin, once per signed-in native
-    /// session. No TCP listener or browser routing on this initial path.
+    /// The native shell calls this only for a direct-eligible, signed-in managed
+    /// instance. Prepare its authenticated loopback proxy for environment creation.
+    /// Until an eligible rendezvous succeeds it serves only public fallback.
     pub async fn new(host: &str, instance: String) -> Option<Self> {
         let host = Authority::managed(host)?;
         if instance.is_empty() {
             return None;
         }
+        let (links, rx) = watch::channel(None);
+        let listener = Listener::bind(host.clone(), rx).await?;
         Some(Self {
             host,
             instance,
-            endpoint: transport::bind().await?,
-            links: watch::channel(None).0,
-            listener: None,
+            key: SecretKey::generate(),
+            endpoint: None,
+            links,
+            listener,
             monitor: None,
         })
     }
@@ -69,25 +77,20 @@ impl Client {
         F: std::future::Future<Output = Option<String>>,
     {
         let sent = Instant::now();
-        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), fetch(self.endpoint.id().to_string()))
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), fetch(self.key.public().to_string()))
             .await
             .ok()
             .flatten();
-        let ready = self.apply(answer.as_deref(), sent).await;
-        if !ready {
-            self.listener.take();
-        }
-        ready
+        self.apply(answer.as_deref(), sent).await
     }
 
-    /// No route before a successful probe, or after expiry or loss. A listener
-    /// already referenced by a browser may still serve public fallback until
-    /// the native caller detaches the route and drops this session's client.
+    /// The route describes the proxy, not direct-path readiness. Its port and
+    /// credential survive loss of direct. Drop the client only after native detach.
     pub fn route(&self) -> Option<Route<'_>> {
-        if !self.links.borrow().as_ref().is_some_and(|link| link.usable()) {
+        let listener = &self.listener;
+        if !listener.is_alive() {
             return None;
         }
-        let listener = self.listener.as_ref()?;
         let (username, password) = listener.credential.native_login();
         Some(Route {
             host: self.host.host(),
@@ -95,6 +98,13 @@ impl Client {
             username,
             password,
         })
+    }
+
+    /// Subscribe before route installation. `changed().await` returning `Err`
+    /// means this listener ended: detach the native route and rebuild if eligible.
+    /// Direct-path availability or refresh failure does not close this signal.
+    pub fn listener_lifetime(&self) -> watch::Receiver<()> {
+        self.listener.health()
     }
 
     fn retire(&mut self) {
@@ -109,9 +119,12 @@ impl Client {
     /// command or message handler accepts a rendezvous answer from a page.
     async fn apply(&mut self, answer: Option<&str>, sent: Instant) -> bool {
         let Some(offer) =
-            answer.and_then(|body| Offer::parse(body, &self.host, &self.instance, self.endpoint.id(), sent))
+            answer.and_then(|body| Offer::parse(body, &self.host, &self.instance, self.key.public(), sent))
         else {
             self.retire();
+            if let Some(endpoint) = self.endpoint.take() {
+                endpoint.close().await;
+            }
             return false;
         };
         if self.links.borrow().as_ref().is_some_and(|link| link.renew(&offer)) {
@@ -120,13 +133,22 @@ impl Client {
         // Retire previous authority before starting a replacement. Never use a
         // stale result to make a new stream while waiting for the next probe.
         self.retire();
-        let Some(link) = Link::dial(&self.endpoint, offer, &self.host).await else {
+        if !self.listener.is_alive() || Instant::now() >= offer.until {
+            return false;
+        }
+        if self.endpoint.is_none() {
+            self.endpoint = tokio::time::timeout_at(offer.until, transport::bind(self.key.clone()))
+                .await
+                .ok()
+                .flatten();
+        }
+        let Some(endpoint) = self.endpoint.as_ref() else {
             return false;
         };
-        if self.listener.is_none() {
-            self.listener = Listener::bind(self.host.clone(), self.links.subscribe()).await;
-        }
-        if self.listener.is_none() || !link.usable() {
+        let Some(link) = Link::dial(endpoint, offer, &self.host).await else {
+            return false;
+        };
+        if !self.listener.is_alive() || !link.usable() {
             return false;
         }
         self.links.send_replace(Some(link.clone()));

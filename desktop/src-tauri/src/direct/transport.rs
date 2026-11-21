@@ -19,7 +19,7 @@ pub(super) trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
 pub(super) type Stream = Box<dyn Duplex>;
 
-pub(super) async fn bind() -> Option<Endpoint> {
+pub(super) async fn bind(key: iroh::SecretKey) -> Option<Endpoint> {
     let keep_alive = Duration::from_millis(1500);
     let config = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(0))
@@ -35,6 +35,7 @@ pub(super) async fn bind() -> Option<Endpoint> {
         .receive_observed_address_reports(false)
         .build();
     Endpoint::builder(presets::Minimal)
+        .secret_key(key)
         .relay_mode(RelayMode::Disabled)
         .clear_address_lookup()
         .portmapper_config(PortmapperConfig::Disabled)

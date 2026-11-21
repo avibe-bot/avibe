@@ -36,6 +36,10 @@ impl Credential {
 pub(super) struct Listener {
     pub port: u16,
     pub credential: Arc<Credential>,
+    // Retain the bound port until the native owner detaches, even if the
+    // accept worker dies. Another process must not inherit a published port.
+    _reservation: Arc<TcpListener>,
+    health: watch::Receiver<()>,
     task: JoinHandle<()>,
 }
 impl Drop for Listener {
@@ -45,30 +49,90 @@ impl Drop for Listener {
 }
 impl Listener {
     pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Self> {
+        Self::bind_via(host, links, |h| async move {
+            public::open(&h).await.map(|s| Box::new(s) as Stream)
+        })
+        .await
+    }
+    pub(super) fn is_alive(&self) -> bool {
+        self.health.has_changed().is_ok() && !self.task.is_finished()
+    }
+    pub(super) fn health(&self) -> watch::Receiver<()> {
+        self.health.clone()
+    }
+    pub(super) async fn bind_via<F, Fut>(
+        host: Authority,
+        links: watch::Receiver<Option<Arc<Link>>>,
+        open_public: F,
+    ) -> Option<Self>
+    where
+        F: Fn(Authority) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future<Output = Option<Stream>> + Send + 'static,
+    {
         let credential = Arc::new(Credential::generate()?);
-        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.ok()?;
+        let socket = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.ok()?);
+        let reservation = socket.clone();
+        let (live, health) = watch::channel(());
         let port = socket.local_addr().ok()?.port();
         let key = credential.clone();
         let task = tokio::spawn(async move {
+            let _live = live;
             let mut clients = JoinSet::new();
-            loop {
-                tokio::select! {
-                    _=clients.join_next(), if !clients.is_empty()=>{},
-                    incoming=socket.accept()=>{let Ok((socket,peer))=incoming else{break}; if !peer.ip().is_loopback() || clients.len()>=64 {continue}
-                        let h=host.clone();let key=key.clone();let links=links.clone();
-                        clients.spawn(async move {serve(socket,&h,&key.header,|| async {
-                            let link=links.borrow().clone();
-                            let fallback=async {public::open(&h).await.map(|s|Box::new(s) as Stream)};
-                            match link {
-                                Some(l) if l.usable()=>l.plan.choose(l.open(&h),fallback).await,
-                                _=>timeout(Duration::from_secs(8),fallback).await.ok().flatten(),
-                            }
-                        }).await;});
-                    }
+            while let Ok((socket, peer)) = accept_with_retry(|| socket.accept()).await {
+                while clients.try_join_next().is_some() {}
+                if !peer.ip().is_loopback() || clients.len() >= 64 {
+                    continue;
                 }
+                let h = host.clone();
+                let key = key.clone();
+                let links = links.clone();
+                let dial = open_public.clone();
+                clients.spawn(async move {
+                    serve(socket, &h, &key.header, || async {
+                        let link = links.borrow().clone();
+                        let fallback = dial(h.clone());
+                        match link {
+                            Some(l) if l.usable() => l.plan.choose(l.open(&h), fallback).await,
+                            _ => timeout(Duration::from_secs(8), fallback).await.ok().flatten(),
+                        }
+                    })
+                    .await;
+                });
             }
+            // No new accepts. Notify route owners before draining live streams.
+            drop(_live);
+            while clients.join_next().await.is_some() {}
         });
-        Some(Self { port, credential, task })
+        Some(Self {
+            port,
+            credential,
+            task,
+            health,
+            _reservation: reservation,
+        })
+    }
+}
+async fn accept_with_retry<T, F: Future<Output = std::io::Result<T>>>(
+    mut accept: impl FnMut() -> F,
+) -> std::io::Result<T> {
+    let mut backoff = Duration::from_millis(25);
+    loop {
+        match accept().await {
+            Ok(value) => return Ok(value),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                ) || matches!(e.raw_os_error(), Some(23 | 24 | 10024 | 10055)) =>
+            {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 async fn serve<F: Future<Output = Option<Stream>>>(
@@ -121,4 +185,58 @@ async fn serve<F: Future<Output = Option<Stream>>>(
         return;
     }
     let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        future::ready,
+        io::{Error, ErrorKind},
+    };
+    #[tokio::test(start_paused = true)]
+    async fn temporary_accept_errors_back_off_and_terminal_errors_are_returned() {
+        let start = tokio::time::Instant::now();
+        let mut n = 0;
+        let actual = accept_with_retry(|| {
+            n += 1;
+            ready(if n <= 2 {
+                Err(Error::from(ErrorKind::ConnectionAborted))
+            } else {
+                Ok(7)
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(actual, 7);
+        assert_eq!(n, 3);
+        assert_eq!(start.elapsed(), Duration::from_millis(75));
+        let end = accept_with_retry(|| ready(Err::<(), _>(Error::from(ErrorKind::InvalidInput))))
+            .await
+            .unwrap_err();
+        assert_eq!(end.kind(), ErrorKind::InvalidInput);
+    }
+    #[tokio::test]
+    async fn a_terminated_listener_withdraws_route_and_keeps_its_port_reserved_until_detach() {
+        let c = crate::direct::Client::new("desk-app.avibe.bot", "one".into())
+            .await
+            .unwrap();
+        let addr = c.route().unwrap().proxy;
+        let mut life = c.listener_lifetime();
+        c.listener.task.abort();
+        assert!(life.changed().await.is_err());
+        assert!(c.route().is_none());
+        assert!(TcpListener::bind(addr).await.is_err());
+        let reservation = Arc::downgrade(&c.listener._reservation);
+        drop(c);
+        // The worker's cancellation is asynchronous. Test our own socket's
+        // lifetime, not whether the OS immediately reuses an ephemeral port.
+        timeout(Duration::from_secs(2), async {
+            while reservation.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 }

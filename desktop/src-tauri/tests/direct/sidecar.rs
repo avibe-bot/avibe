@@ -53,8 +53,10 @@ async fn run() {
         .find(|s| s.is_ipv4())
         .expect("IPv4 fixture")
         .port();
-    let ep = transport::bind().await.unwrap();
-    let who = ep.id();
+    let key = iroh::SecretKey::generate();
+    let who = key.public();
+    let ep = transport::bind(key).await.unwrap();
+    assert!(ep.id() == who);
     let admit = json!({"type":"admission","endpoint_id":who.to_string(),"ttl_seconds":30});
     control.write_all(format!("{admit}\n").as_bytes()).await.unwrap();
     let host = Authority::managed("desktop-test-app.avibe.bot").unwrap();
