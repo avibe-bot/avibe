@@ -17,11 +17,11 @@
 // and the other three move behind `•••`. One native button instead of three, at the cost of a second
 // click and a second level for the annotation mode.
 //
-// Proposed, and not shipped: the native title bar and its buttons are a stand-in
+// Approved group, implemented in AppKit: the native title bar and its buttons remain a stand-in
 // (`kit/desktop-native-show-controls.tsx`) for AppKit's title bar and `macos_show_titlebar.rs`,
 // which no web component renders. The annotate popover, the share popover and the Show below them
-// are the shipped components. One new string, `apps.window.openInBrowser`, which a native window
-// needs because it has no tabs; every other label is one the Workbench window already reads.
+// are the shipped components. `apps.window.openInBrowser` is the native-only label; the Workbench
+// retains its own open-in-new-tab label.
 import type { ReactNode } from 'react';
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
@@ -73,9 +73,8 @@ const HEIGHT = 748;
 const MIN_WIDTH = 720;
 const MIN_HEIGHT = 508;
 
-/** Proposed copy for `apps.window.openInBrowser`: a native window has no tabs, so the Workbench's
- *  "open in new tab" label cannot stand in for it. It moves to `src/i18n` when the design ships. */
-const browserLabel = (lang: 'zh' | 'en') => (lang === 'zh' ? '在浏览器打开' : 'Open in Browser');
+/** The shipped native-only label; the Workbench keeps its open-in-new-tab copy. */
+const browserLabel = (lang: 'zh' | 'en') => (lang === 'zh' ? zh : en).apps.window.openInBrowser;
 
 interface State {
   name: string;
@@ -144,7 +143,7 @@ const designFrames = frames(states.flatMap(({ name, title: frameTitle, render, c
     title: `${frameTitle} · ${lang === 'zh' ? '中文' : 'English'}`,
     width: width ?? WIDTH,
     height: height ?? HEIGHT,
-    status: 'proposed',
+    status: name.startsWith('group-') ? 'approved' : 'proposed',
     themes: ['light', 'dark'],
     route: `/apps/show/${sid}?standalone=1`,
     fixtures: appsFixtures(api(lang), {

@@ -930,15 +930,58 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         }
     };
     entry.document.bind(window.as_ref());
-    // A Show window's share entry, in its title bar (ui/design:
-    // show-pages/desktop-native-entry/titlebar-*). It only asks the page to
-    // open its share popover; sharing itself stays `show_share`'s.
+    // ui/design: show-pages/desktop-native-controls/group-*. The shell owns the
+    // four native buttons; existing web controls own annotation and sharing.
     #[cfg(target_os = "macos")]
     if matches!(target, AppWindowTarget::ShowPage(_)) && crate::show_share::supported() {
+        let control_window = window.clone();
+        let control_entry = entry.clone();
+        let labels = [
+            ("chat.showPage.annotate.toggle", "Annotate"),
+            ("apps.window.openChat", "Open Chat"),
+            ("chat.showPage.share", "Share"),
+            ("apps.window.openInBrowser", "Open in Browser"),
+        ]
+        .map(|(key, fallback)| crate::product_text(key).unwrap_or_else(|| fallback.to_owned()));
         crate::macos_show_titlebar::install(
             &window,
-            crate::product_text("chat.showPage.share").unwrap_or_else(|| "Share".to_owned()),
+            labels,
             target_url(&source.runtime.origin, &target).path().to_owned(),
+            move |action| {
+                use crate::macos_show_titlebar::Action;
+                let app = control_window.app_handle();
+                if control_entry.retired.load(Ordering::SeqCst) {
+                    return;
+                }
+                let Some(main) = control_entry.runtime.webview(app) else {
+                    return;
+                };
+                let AppWindowTarget::ShowPage(session) = &control_entry.target else {
+                    return;
+                };
+                match action {
+                    Action::Chat => {
+                        // SPA navigation keeps this Runtime document and its Show windows alive.
+                        let session = serde_json::to_string(session).expect("session is JSON");
+                        let _ = main.eval(format!(
+                            "window.dispatchEvent(new CustomEvent('avibe:desktop-show-chat',{{detail:{session}}}));"
+                        ));
+                        crate::focus_or_restore_main_window(app);
+                    }
+                    Action::Browser => {
+                        let mut url = control_entry.runtime.origin.clone();
+                        url.set_path(&format!("/show/{}/", session.replace(':', "%3A")));
+                        url.set_query(None);
+                        url.set_fragment(None);
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if tauri_plugin_opener::open_url(url.as_str(), None::<&str>).is_err() {
+                                eprintln!("failed to open the Show in the system browser");
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+            },
         );
     }
     let cleanup_app = app.clone();

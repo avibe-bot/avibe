@@ -3639,6 +3639,7 @@
       "maximize": "最大化",
       "restore": "还原",
       "openInNewTab": "在新标签页打开",
+      "openInBrowser": "在浏览器打开",
       "openChat": "打开聊天"
     },
     "preview": {
