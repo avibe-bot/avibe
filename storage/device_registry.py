@@ -350,14 +350,21 @@ def revoke_sid(conn, sid, expiry, now):
     return pending
 
 
-def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False, receipt_scope=None):
-    """One atomic selection + revocation; None device means the caller's bulk scope."""
+def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False, receipt_scope=None,
+             prepare=None):
+    """One atomic selection + revocation; None device means the caller's bulk scope.
+
+    ``prepare(conn)`` runs first inside the same transaction, while the rows this
+    call will delete are still readable (the address change snapshots them).
+    """
     stmt = select(sessions.c.session_id, sessions.c.expires_at).where(
         sessions.c.binding == binding,
         sessions.c.expires_at > now,
     )
     with get_cached_sqlite_engine().begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
+        if prepare is not None:
+            prepare(conn)
         keeper = None
         if caller:
             keeper = conn.execute(

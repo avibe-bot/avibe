@@ -1246,6 +1246,9 @@
     }
   },
   "remote_access": {
+    "address_retired": {
+      "line": "这个 Avibe 换了新地址。能访问它的人，在 avibe.bot 登录后可以打开。"
+    },
     "oauth_error": {
       "sign_in_again": "重新登录",
       "diagnostics_summary": "技术细节",
