@@ -3503,6 +3503,8 @@ def _start_candidate_connector(
     config: V2Config,
     binary: str,
     requested_protocol: str,
+    *,
+    pin_attempt: str | None = None,
 ) -> tuple[int, str]:
     metrics_url = _allocate_metrics_url()
     candidate_pid = runtime.spawn_background(
@@ -3519,22 +3521,32 @@ def _start_candidate_connector(
         stderr_path=_candidate_cloudflared_stderr_path(),
         requested_protocol=requested_protocol,
     )
+    if pin_attempt:
+        candidate['pin_attempt'] = pin_attempt  # replica ownership, not an authorization token
     _replace_state_connector("candidate", candidate)
     return candidate_pid, metrics_url
 
 
-def _discard_candidate_connector(pid: int) -> None:
+def _discard_candidate_connector(pid: int, *, grace_seconds: float = 8, expected_url: str | None = None) -> None:
+    if expected_url is not None:
+        # Never retire a promoted, superseded, or unidentifiable comparison.
+        record = _state_connector('candidate') or {}
+        if record.get('pid') != pid or record.get('metrics_url') != expected_url or (_state_connector('active') or {}).get('pid') == pid:
+            return
     state = _cloudflared_pid_state(pid)
     if state == "cloudflared":
-        runtime.stop_pid(pid, timeout=8)
+        runtime.stop_pid(pid, timeout=grace_seconds)
         state = _cloudflared_pid_state(pid)
     if state not in {"dead", "other"}:
         logger.warning("Preserving Tunnel candidate with unverified process identity pid=%s", pid)
         return
     try:
         with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS), _CONNECTOR_LOCK:
-            _candidate_pid_path().unlink(missing_ok=True)
             candidate = _state_connector("candidate") or {}
+            if expected_url is not None and (candidate.get('pid') != pid or candidate.get('metrics_url') != expected_url):
+                return
+            if _read_pid_file(_candidate_pid_path()) == pid:
+                _candidate_pid_path().unlink(missing_ok=True)
             if candidate.get("pid") == pid:
                 _replace_state_connector("candidate", None)
     except _ConnectorLifecycleBusy:
@@ -4500,6 +4512,18 @@ def _reconcile_orphan_candidate() -> None:
         active_pid = active.get("pid") if isinstance(active.get("pid"), int) else _read_pid()
         active_state = _cloudflared_pid_state(active_pid)
 
+        if candidate.get('pin_attempt') and candidate_pid != active_pid:
+            # A comparison replica is never a general recovery candidate. A
+            # live pin worker owns its cleanup; on restart, retire (never adopt)
+            # the orphan, using the same platform stop policy as handovers.
+            from vibe.connection_settings import journal
+            with config_file_lock():
+                attempt = journal.load(V2Config.load()).get('pinAttempt') or {}
+                if attempt.get('id') == candidate['pin_attempt'] and attempt.get('boot') == journal.boot:
+                    return
+            _discard_candidate_connector(candidate_pid, grace_seconds=RECOVERY_DRAIN_SECONDS, expected_url=candidate['metrics_url'])
+            return
+
         if candidate_pid == active_pid:
             with _CONNECTOR_LOCK:
                 state = _read_state() or {}
@@ -4850,7 +4874,10 @@ def _start(
         if record_request:
             try:
                 _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
-                _connector_requested_path().touch()
+                # Reaffirming an existing request is not a stop/start: keep the
+                # inode and mtime used to fence pending connector ownership.
+                if not _connector_requested_path().is_file():
+                    _connector_requested_path().touch()
             except OSError:
                 # The connector still starts; without the request the monitor
                 # just does not restart it if it exits.
@@ -4873,7 +4900,9 @@ def _start(
         if current.get("running"):
             running_sig = _running_signature(current.get("pid"))
             desired_sig = _runtime_signature(config, binary)
-            if running_sig == desired_sig and _running_connector_has_metrics(current.get("pid")):
+            from vibe.connection_runtime import keep_temporary_connector
+            if ((running_sig == desired_sig or keep_temporary_connector(config, binary, running_sig))
+                    and _running_connector_has_metrics(current.get("pid"))):
                 _retire_legacy_cloudflared(config, binary)
                 _report_runtime_status_async(config, event="start")
                 return {**current, "ok": True, "started": False}

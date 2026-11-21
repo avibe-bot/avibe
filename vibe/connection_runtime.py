@@ -122,6 +122,11 @@ def view(actor):
         config = V2Config.load()
         _bound(actor, config)
         result = cs.journal.inspect(config)
+        route = _active_pin_route(config, cs.journal.load(config))
+        result['temporaryRoute'] = None if route is None else {
+            'phase': route['phase'], 'protocol': route['protocol'],
+            'differences': [key for key in route['relaxed'] if cs.value(config, key) != cs.AUTOMATIC[key]],
+        }
         live = direct_lifecycle.status_for_config(config)
         cloud = config.remote_access.vibe_cloud
         direct = 'not-running'
@@ -183,8 +188,17 @@ def prepare(actor, key, new):
             return None  # reaffirming a value does not cancel an in-flight pin retry
         if key in cs.SWITCHES:
             _switch_gate(actor, config, key, new)
+        cancel_pin = None
         if key in cs.AUTOMATIC:
-            if tunnel._connector_lane_reserved_locked():
+            route = _active_pin_route(config, state)
+            attempt = state.get('pinAttempt')
+            if attempt and route and route['attempt'] == attempt and key in route['relaxed']:
+                cancel_pin = attempt['id']
+            candidate = tunnel._state_connector('candidate') or {}
+            if tunnel._connector_lane_reserved_locked() and not (
+                    cancel_pin and not tunnel._RECOVERY_THREAD and not tunnel._pending_tail_rollback()
+                    and (not candidate or candidate.get('pin_attempt') == cancel_pin)
+                    and (candidate or tunnel._state_connector('draining'))):
                 raise cs.ConnectionError('connection_change_busy')
             pid_state = tunnel._cloudflared_pid_state(tunnel._read_pid())
             if pid_state == 'unknown':
@@ -209,7 +223,7 @@ def prepare(actor, key, new):
             if stopped:
                 cs.journal.finish(state, 'applied', 'saved_without_connector')
             return None
-        op = cs.journal.begin(config, key, new, baseline=tunnel_healthy(config))
+        op = cs.journal.begin(config, key, new, baseline=tunnel_healthy(config), cancel_pin=cancel_pin)
         _wake.set()
         return op
 
@@ -265,6 +279,22 @@ def apply(actor, reservation):
                 cs.journal.finish(cs.journal.load(config), 'applied', 'saved')
                 direct_lifecycle.notify_config_changed(config)
             return
+        if reservation.get('retiringPin'):
+            # Admission already revoked the pin writer. Let its in-flight
+            # replica retire outside the locks before borrowing the same slot.
+            deadline = cs.journal.clock() + 2 * tunnel.RECOVERY_DRAIN_SECONDS + 5
+            while True:
+                with config_file_lock():
+                    live = V2Config.load()
+                    _bound(actor, live)
+                    cs.journal.applying(live, op_id)
+                candidate = tunnel._state_connector('candidate') or {}
+                if not candidate and not tunnel._state_connector('draining'):
+                    break
+                if ((candidate and candidate.get('pin_attempt') != reservation['retiringPin'])
+                        or cs.journal.clock() >= deadline):
+                    raise cs.ConnectionError('candidate_cleanup_unavailable')
+                time.sleep(0.25)
         result = tunnel.apply_settings({cs.FIELDS[key]: new}, operation_id=op_id, expected_binding=actor.binding)
         if not result.get('ok'):
             reason = ('candidate_not_ready' if result.get('detail') == 'candidate_not_ready'
@@ -370,8 +400,18 @@ def recover(*, startup=False):
             state = cs.journal.load(config)
             # The foreground request still gets a bounded outcome if reconciliation
             # is busy. Startup storage repair itself does not need the connector lock.
-            if state.get('pinAttempt', {}).get('boot', cs.journal.boot) != cs.journal.boot:
-                state.pop('pinAttempt')
+            attempt = state.get('pinAttempt') or {}
+            route_attempt = (state.get('pinRoute') or {}).get('attempt') or {}
+            if any(item and item.get('boot') != cs.journal.boot for item in (attempt, route_attempt)):
+                # A new UI process starts from disk. Do not resume a comparison
+                # whose observations belong to its predecessor. If a completed
+                # config write beat its receipt, acknowledge only that exact write.
+                record = state.pop('pinRoute', None) or {}
+                state.pop('pinAttempt', None)
+                if (record.get('phase') == 'committing' and record.get('relaxed') and route_attempt == attempt
+                        and _request_identity() == attempt['request'] and tunnel.connector_generation() == record['generation']
+                        and _match_pins(config, {k: v for k, v in attempt['pins'].items() if k not in record['relaxed']})):
+                    state['returnedToAutomatic'] = _pin_receipt(record)
                 cs.journal.save(state)
             op = state['operation']
             if op and op['state'] != 'restoring':
@@ -486,10 +526,12 @@ def _pin_live(attempt):
     return config, state
 
 
-def _wait_registered(pid, url):
+def _wait_registered(pid, url, *, while_owned=None):
     deadline = cs.journal.clock() + tunnel.RECOVERY_READY_TIMEOUT_SECONDS
     last = None
     while cs.journal.clock() < deadline:
+        if while_owned is not None and not while_owned():
+            return None
         process = tunnel._cloudflared_pid_state(pid)
         if process in {'dead', 'other'}:
             return False
@@ -503,66 +545,250 @@ def _wait_registered(pid, url):
 
 
 def _pin_candidate_plan(config, pins):
-    """Freeze transport hints before spawning candidates that could change the monitor snapshot."""
-    if 'protocol' in pins:
-        saved = pins['protocol']
-        return ((False, saved), (True, tunnel._other_transport(saved)))
-    hint = tunnel._initial_connector_protocol(config)
-    if hint == 'auto':
-        # Read the last effective transport, not the next candidate's requested transport.
-        hint = tunnel._effective_protocol(None, None)
-    if hint in ('quic', 'http2'):
-        return ((False, hint), (True, hint))
-    # A different transport may work with the owner's original IP or egress.
-    # Test both there before permitting *any* attempt with those pins removed.
-    return tuple((relax, protocol) for relax in (False, True) for protocol in ('http2', 'quic'))
+    """Try both transports at each distinct egress tier, preserving the family before releasing it."""
+    first = tunnel._initial_connector_protocol(config)
+    if first == 'auto':
+        first = tunnel._effective_protocol(None, None)
+    if first not in ('quic', 'http2'):
+        first = 'http2'
+    transports = (first, tunnel._other_transport(first))
+    tiers = [()]
+    for field in ('outbound', 'ipFamily'):
+        if field in pins:
+            tiers.append((*tiers[-1], field))
+    return tuple((tier, protocol) for tier in tiers for protocol in transports)
+
+
+def _pin_trial(config, relaxed, protocol):
+    trial = copy.deepcopy(config)
+    for key in relaxed:
+        setattr(trial.remote_access.vibe_cloud, cs.FIELDS[key], cs.AUTOMATIC[key])
+    return trial
+
+
+def _pin_anchor(generation):
+    """A negative control only counts against a still-registered working generation."""
+    active = tunnel._state_connector('active') or {}
+    return bool(generation and tunnel.connector_generation() == generation
+                and (_registered(active.get('metrics_url')) or 0) > 0)
+
+
+def _pin_leg(attempt, relaxed, protocol, *, anchor=None, promote=None):
+    """Borrow the candidate slot. Controls retire by platform policy; they never replace the active replica."""
+    pid = None
+    try:
+        with tunnel._connector_lifecycle(), tunnel._RECOVERY_LOCK, config_file_lock():
+            config, _ = _pin_live(attempt)
+            binary = tunnel._resolve_binary(config)
+            if not binary or tunnel._connector_lane_reserved_locked() or (anchor and not _pin_anchor(anchor)):
+                return None
+            trial = _pin_trial(config, relaxed, protocol)
+            pid, url = tunnel._start_candidate_connector(trial, binary, protocol, pin_attempt=attempt['id'])
+        def owned():
+            with config_file_lock():
+                _pin_live(attempt)
+            return not anchor or _pin_anchor(anchor)
+        ready = _wait_registered(pid, url, while_owned=owned)
+        with tunnel._connector_lifecycle(), tunnel._CONNECTOR_LOCK, config_file_lock():
+            live, state = _pin_live(attempt)
+            if (tunnel._resolve_binary(live) != binary or tunnel._runtime_signature(config, binary) != tunnel._runtime_signature(live, binary)
+                    or (anchor and not _pin_anchor(anchor))):
+                return None
+            if ready is not True or promote is None:
+                return ready
+            # Stage intent before promotion; the slot, PID, start time and metrics
+            # address identify the candidate even across a failed subsequent write.
+            generation = tunnel.connector_generation('candidate', pid=pid, metrics_url=url)
+            if not generation:
+                return None
+            promote(generation, state)
+            replaced = tunnel._promote_candidate_connector(pid, runtime_signature=tunnel._runtime_signature(trial, binary), registered_only=True)
+            pid = None
+        if not tunnel._drain_tracked_connector(replaced):
+            return None
+        return True
+    finally:
+        if pid is not None:
+            tunnel._discard_candidate_connector(pid, grace_seconds=tunnel.RECOVERY_DRAIN_SECONDS, expected_url=url)
+
+
+def _stage_pin_route(attempt, protocol, relaxed, phase, *, remember=False, previous=None):
+    def stage(generation, state):
+        record = {'attempt': attempt, 'generation': generation, 'protocol': protocol,
+                  'relaxed': list(relaxed), 'phase': phase, 'remember': remember}
+        if previous is not None:
+            record['previous'] = previous
+        state['pinRoute'] = record
+        cs.journal.save(state)
+    return stage
+
+
+def _pin_pause(attempt, phase):
+    with config_file_lock():
+        live = V2Config.load()
+        state = cs.journal.load(live)
+        if state.get('pinAttempt') != attempt:
+            return  # an Owner or new pairing has already superseded us
+        record = state.get('pinRoute')
+        if record and record['attempt'] == attempt:
+            previous = record.pop('previous', None)
+            if previous and tunnel.connector_generation() == previous['generation']:
+                state['pinRoute'] = record = previous
+            record['phase'] = phase
+        state.pop('pinAttempt', None)
+        cs.journal.save(state)
+
+
+def _active_pin_route(config, state):
+    """Look up this active generation, not a staged or superseded promotion.
+
+    Readable from another start/CLI process: only the UI recovery lifecycle
+    retires records on a boot change. A CLI has a different Journal.boot.
+    """
+    record = state.get('pinRoute')
+    if not record or not _requested(config):
+        return None
+    generation = tunnel.connector_generation()
+    if not generation:
+        return None
+    if generation != record['generation']:
+        record = record.get('previous')
+        if not record or generation != record['generation']:
+            return None
+    attempt = record['attempt']
+    if _request_identity() != attempt['request']:
+        return None
+    pins = attempt['pins']
+    if (_match_pins(config, pins) or record['phase'] == 'committing' and
+            _match_pins(config, {k: v for k, v in pins.items() if k not in record['relaxed']})):
+        return record
+    return None
+
+
+def keep_temporary_connector(config, binary, running_signature):
+    if not running_signature or not cs.journal.path.exists():
+        return False
+    with config_file_lock():
+        try:
+            route = _active_pin_route(config, cs.journal.load(config))
+        except cs.ConnectionError:
+            # A damaged, optional record is not a blanket signature exemption.
+            return False
+        if not route:
+            return False
+        trial = _pin_trial(config, route['relaxed'], route['protocol'])
+        return running_signature == tunnel._runtime_signature(trial, binary)
+
+
+def _pin_receipt(record):
+    return dict(at=cs.now(), reason='tunnel_unreachable', changes=[
+        {'setting': key, 'from': record['attempt']['pins'][key], 'to': cs.AUTOMATIC[key]} for key in record['relaxed']])
+
+
+def _finish_pin_commit(attempt):
+    # The write-ahead record names both endpoints of the settings write and the
+    # exact generation allowed to complete it. An I/O error leaves it intact.
+    with tunnel._connector_lifecycle(), tunnel._CONNECTOR_LOCK, config_file_lock():
+        live = V2Config.load()
+        state = cs.journal.load(live)
+        record = state.get('pinRoute') or {}
+        if state.get('pinAttempt') != attempt or record.get('attempt') != attempt or record.get('phase') != 'committing':
+            return
+        before = attempt['pins']
+        after = {key: val for key, val in before.items() if key not in record['relaxed']}
+        at_target = _match_pins(live, after)
+        if (not _requested(live) or _request_identity() != attempt['request'] or attempt['boot'] != cs.journal.boot
+                or not (at_target or _match_pins(live, before))
+                or tunnel.connector_generation() not in (None, record['generation'])):
+            # In particular, a failed final promotion leaves its previous
+            # working replica serving. Keep the _start exemption for that
+            # generation; the staged generation must never authorize a write.
+            _pin_pause(attempt, 'combination_unverified')
+            return
+        if not _pin_anchor(record['generation']):
+            # No evidence to change disk. Release the reservation without
+            # dropping a receipt for an already durable write (save runs last).
+            if at_target and record['relaxed']:
+                state['returnedToAutomatic'] = _pin_receipt(record)
+                state.pop('pinRoute')
+            else:
+                record['phase'] = 'comparison_unavailable'
+            state.pop('pinAttempt')
+            cs.journal.save(state)
+            return
+        receipt = _pin_receipt(record)
+        changes = receipt['changes']
+        if record['remember']:
+            tunnel._set_preferred_protocol(record['protocol'])
+        if changes:
+            if not at_target:
+                for change in changes:
+                    setattr(live.remote_access.vibe_cloud, cs.FIELDS[change['setting']], change['to'])
+                live.save()
+            state['returnedToAutomatic'] = receipt
+        state.pop('pinRoute')
+        state.pop('pinAttempt')
+        cs.journal.save(state)
+
+
+def _compare_pin_route(attempt, record):
+    anchor = record['generation']
+    working = tuple(record['relaxed'])
+    transport = record['protocol']
+    causes = []
+    for key in working:
+        # All controls compare against the same registered replica, not the
+        # preceding control. Restoring one setting never mutates the working one.
+        trial = tuple(field for field in working if field != key)
+        protocol = attempt['pins']['protocol'] if key == 'protocol' else transport
+        result = _pin_leg(attempt, trial, protocol, anchor=anchor)
+        if result is None:
+            _pin_pause(attempt, 'comparison_unavailable')
+            return
+        if not result:
+            causes.append(key)
+    final = tuple(causes)
+    protocol = attempt['pins'].get('protocol', transport) if 'protocol' not in final else transport
+    remember = ('protocol' in final or ('protocol' not in attempt['pins'] and record['remember']))
+    stage = _stage_pin_route(attempt, protocol, final, 'committing', remember=remember, previous=record)
+    if working:
+        # A surviving registration is not a fresh dial. Even when every
+        # restored pin failed, retry the working combination before blaming
+        # pins; a fresh identical replica need not displace the active one.
+        with config_file_lock():
+            _, state = _pin_live(attempt)
+            state['pinRoute']['phase'] = 'confirming'
+            cs.journal.save(state)
+        if _pin_leg(attempt, final, protocol, anchor=anchor, promote=stage if final != working else None) is not True:
+            _pin_pause(attempt, 'combination_unverified')
+            return
+    if final == working:
+        with tunnel._connector_lifecycle(), config_file_lock():
+            _, state = _pin_live(attempt)
+            if not _pin_anchor(anchor):
+                _pin_pause(attempt, 'comparison_unavailable')
+                return
+            stage(anchor, state)
+    _finish_pin_commit(attempt)
 
 
 def _pin_candidates(attempt, plan):
-    for automatic, protocol in plan:
-        pid = None
-        try:
-            with tunnel._connector_lifecycle(), tunnel._RECOVERY_LOCK, config_file_lock():
-                config, _ = _pin_live(attempt)
-                binary = tunnel._resolve_binary(config)
-                if not binary or tunnel._connector_lane_reserved_locked():
-                    return
-                trial = copy.deepcopy(config)
-                if automatic:
-                    for key in attempt['pins']:
-                        setattr(trial.remote_access.vibe_cloud, cs.FIELDS[key], cs.AUTOMATIC[key])
-                pid, url = tunnel._start_candidate_connector(trial, binary, protocol)
-            ready = _wait_registered(pid, url)
-            if ready is not True:
-                if ready is None:
-                    return
-                continue
-            with tunnel._connector_lifecycle(), tunnel._CONNECTOR_LOCK:
-                with config_file_lock():
-                    live, state = _pin_live(attempt)
-                    if tunnel._resolve_binary(live) != binary or tunnel._runtime_signature(config, binary) != tunnel._runtime_signature(live, binary):
-                        return
-                replaced = tunnel._promote_candidate_connector(pid, runtime_signature=tunnel._runtime_signature(trial, binary), registered_only=True)
-                pid = None
-                if automatic:
-                    with config_file_lock():
-                        live, state = _pin_live(attempt)
-                        changes = []
-                        for key, old in attempt['pins'].items():
-                            setattr(live.remote_access.vibe_cloud, cs.FIELDS[key], cs.AUTOMATIC[key])
-                            changes.append(dict(setting=key, **{'from': old, 'to': cs.AUTOMATIC[key]}))
-                        state['returnedToAutomatic'] = dict(at=cs.now(), reason='tunnel_unreachable', changes=changes)
-                        # A restart must know which transport actually registered
-                        # before the saved protocol is allowed to become auto.
-                        tunnel._set_preferred_protocol(protocol)
-                        live.save()
-                        state.pop('pinAttempt')
-                        cs.journal.save(state)
-            tunnel._drain_tracked_connector(replaced)
-            return
-        finally:
-            if pid is not None:
-                tunnel._discard_candidate_connector(pid)
+    for egress, protocol in plan:
+        changed_transport = 'protocol' in attempt['pins'] and protocol != attempt['pins']['protocol']
+        relaxed = (('protocol',) if changed_transport else ()) + egress
+        alternate = protocol != plan[0][1]
+        needs_record = bool(relaxed or alternate)
+        stage = (_stage_pin_route(attempt, protocol, relaxed, 'comparing', remember=alternate)
+                 if needs_record else lambda generation, state: None)
+        result = _pin_leg(attempt, relaxed, protocol, promote=stage)
+        if result is False:
+            continue
+        if result and needs_record:
+            with config_file_lock():
+                _, state = _pin_live(attempt)
+                record = state['pinRoute']
+            _compare_pin_route(attempt, record)
+        return
 
 
 def _consume_pin_attempt():
@@ -570,15 +796,28 @@ def _consume_pin_attempt():
         return
     with config_file_lock():
         config = V2Config.load()
-        attempt = cs.journal.load(config).get('pinAttempt')
-    if not attempt:
+        state = cs.journal.load(config)
+        attempt, record = state.get('pinAttempt'), state.get('pinRoute')
+    if not attempt or attempt['boot'] != cs.journal.boot:
         return
     try:
+        if record and record['attempt'] == attempt:
+            if record['phase'] == 'committing':
+                _finish_pin_commit(attempt)
+            elif _pin_anchor(record['generation']):
+                _compare_pin_route(attempt, record)
+            else:
+                _pin_pause(attempt, 'comparison_unavailable')
+            return
         _pin_candidates(attempt, _pin_candidate_plan(config, attempt['pins']))
+    except cs.ConnectionError as exc:
+        if exc.code == 'connection_change_superseded':
+            _pin_pause(attempt, 'superseded')
+        raise
     finally:
         with config_file_lock():
             state = cs.journal.load(V2Config.load())
-            if state.get('pinAttempt') == attempt:
+            if state.get('pinAttempt') == attempt and (state.get('pinRoute') or {}).get('attempt') != attempt:
                 state.pop('pinAttempt')
                 cs.journal.save(state)
 

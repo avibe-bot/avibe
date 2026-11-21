@@ -198,15 +198,25 @@ class Journal:
     def save(self, state: dict) -> None:
         write_atomic(self.path, json.dumps(state, separators=(",", ":")))
 
-    def begin(self, config, key, new, *, baseline=False) -> dict:
+    def begin(self, config, key, new, *, baseline=False, cancel_pin=None) -> dict:
         state = self.load(config)
         old = state["operation"]
         if old and not (old["state"] == "restoring" and old["setting"] == key):
             raise ConnectionError("connection_change_busy")
-        if state.get("pinAttempt"):
-            raise ConnectionError("connection_change_busy")
+        if state.get('pinAttempt') and state['pinAttempt']['id'] != cancel_pin:
+            raise ConnectionError('connection_change_busy')
         op = {"id": secrets.token_hex(16), "setting": key, "from": value(config, key), "to": new,
               "state": "applying", "baseline": baseline, "boot": self.boot, "until": self.clock() + STALE_OPERATION_SECONDS}
+        if cancel_pin:
+            # Revoke the writer and reserve the edit in the same file replacement.
+            # Keep the active-generation exception until the owner's edit takes over.
+            route = state.get('pinRoute') or {}
+            if (state.get('pinAttempt') or {}).get('id') != cancel_pin or (route.get('attempt') or {}).get('id') != cancel_pin:
+                raise ConnectionError('connection_change_superseded')
+            state.pop('pinAttempt')
+            route['phase'] = 'owner_edit'
+            op['retiringPin'] = cancel_pin
+            op['until'] += 75  # two existing stop_pid waits after cancellation
         # Reserving a candidate is not a connector handover. Suspend the old
         # foreground repair; any already-backgrounded debt stays in its slot.
         if old:

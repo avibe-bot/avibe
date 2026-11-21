@@ -458,9 +458,211 @@ def test_pin_outage_survives_ordinary_candidates_without_stealing_the_lane(rig, 
     assert cs.value(V2Config.load(), 'protocol') == 'quic'
 
 
+@pytest.fixture
+def pin_fleet(rig, monkeypatch, connector_clock):
+    """Distinct candidate and active metrics; every sample uses the connector's own clock."""
+    slots = {'active': dict(rig.active)}
+    starts = []
+    fleet = SimpleNamespace(slots=slots, starts=starts, sample=None)
+    def spawn(cfg, binary, protocol, *, pin_attempt):
+        assert not slots.get('candidate') and not slots.get('draining')
+        pid = 300 + len(starts)
+        record = dict(pid=pid, started_at=connector_clock.monotonic(), metrics_url=f'fixture-{pid}',
+                      pin_attempt=pin_attempt, requested_protocol=protocol, ipFamily=cs.value(cfg, 'ipFamily'), outbound=cs.value(cfg, 'outbound'))
+        slots['candidate'] = record
+        starts.append(record)
+        return pid, record['metrics_url']
+    def counts(url):
+        if url == rig.active['metrics_url']:
+            return 0
+        record = next(r for r in slots.values() if r['metrics_url'] == url)
+        return fleet.sample(record, connector_clock.monotonic() - record['started_at'])
+    def discard(pid, *, grace_seconds, expected_url):
+        assert grace_seconds == ra.RECOVERY_DRAIN_SECONDS
+        assert (pid, expected_url) == (slots['candidate']['pid'], slots['candidate']['metrics_url'])
+        assert slots['active']['pid'] != pid
+        del slots['candidate']
+    def promote(pid, **kwargs):
+        candidate = slots.pop('candidate')
+        assert candidate['pid'] == pid and kwargs['registered_only']
+        slots['draining'], slots['active'] = slots['active'], candidate
+        return slots['draining']
+    monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
+    monkeypatch.setattr(ra, '_state_connector', slots.get)
+    monkeypatch.setattr(ra, '_read_pid', lambda: slots['active']['pid'])
+    monkeypatch.setattr(ra, '_is_cloudflared_pid', lambda pid: any(r['pid'] == pid for r in slots.values()))
+    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
+    monkeypatch.setattr(cr, '_registered', counts)
+    monkeypatch.setattr(ra, '_discard_candidate_connector', discard)
+    monkeypatch.setattr(ra, '_promote_candidate_connector', promote)
+    monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: slots.pop('draining') == old)
+    return fleet
+
+
+@pytest.fixture
+def transport_outage(rig, monkeypatch, connector_clock, pin_fleet):
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.transport_protocol, cloud.tunnel_token = 'quic', 'fixture-tunnel'
+    rig.cfg.save()
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
+    pin_fleet.sample = lambda record, age: int(record['requested_protocol'] == 'http2' and age >= 5)
+    queue_outage(rig, connector_clock)
+    return pin_fleet
+
+
+@pytest.mark.parametrize('fault', ['preference', 'config', 'receipt'])
+def test_pin_commit_survives_storage_fault(rig, monkeypatch, transport_outage, fault):
+    # The only connector that can register is HTTP/2; IPv4 is unrelated.
+    journal = cs.journal
+    with monkeypatch.context() as fail:
+        def unavailable(*args, **kwargs):
+            raise OSError('injected storage failure')
+        if fault == 'preference':
+            fail.setattr(ra, '_set_preferred_protocol', unavailable)
+        elif fault == 'config':
+            fail.setattr(V2Config, 'save', unavailable)
+        else:
+            save = journal.save
+            def receipt(state):
+                if state.get('returnedToAutomatic'):
+                    unavailable()
+                return save(state)
+            fail.setattr(journal, 'save', receipt)
+        with pytest.raises(OSError):
+            cr._consume_pin_attempt()
+    route = journal.load(V2Config.load())['pinRoute']
+    assert route['phase'] == 'committing' and route['generation'] == ra.connector_generation()
+    before = len(transport_outage.starts)
+    cr._consume_pin_attempt()
+    current = V2Config.load()
+    assert len(transport_outage.starts) == before and cs.value(current, 'protocol') == 'auto'
+    assert cs.value(current, 'ipFamily') == '4' and ra._stored_preferred_protocol() == 'http2'
+    state = journal.load(current)
+    assert 'pinAttempt' not in state and 'pinRoute' not in state
+    assert [c['setting'] for c in state['returnedToAutomatic']['changes']] == ['protocol']
+
+
+@pytest.mark.parametrize('fence', ['generation', 'request', 'pair', 'edit'])
+def test_superseded_generation_cannot_finish_pending_pin_write(rig, monkeypatch, transport_outage, fence):
+    with monkeypatch.context() as fail:
+        fail.setattr(ra, '_set_preferred_protocol', lambda p: (_ for _ in ()).throw(OSError('fixture')))
+        with pytest.raises(OSError):
+            cr._consume_pin_attempt()
+    live = V2Config.load()
+    if fence == 'generation':
+        transport_outage.slots['active']['started_at'] += 1  # same PID and address are not the same process
+    elif fence == 'request':
+        rig.request.unlink()
+    elif fence == 'pair':
+        live.remote_access.vibe_cloud.instance_secret = 'replacement-pair'
+        live.save()
+    else:
+        live.remote_access.vibe_cloud.transport_protocol = 'http2'
+        live.save()
+    cr._consume_pin_attempt()
+    live = V2Config.load()
+    state = cs.journal.load(live)
+    assert cs.value(live, 'protocol') == ('http2' if fence == 'edit' else 'quic')
+    assert not state.get('pinAttempt') and not state['returnedToAutomatic'] and not ra._stored_preferred_protocol()
+
+
+@pytest.mark.parametrize('phase', ['comparing', 'confirming'])
+def test_owner_edit_preempts_attribution_without_retiring_active(rig, monkeypatch, transport_outage, phase):
+    fleet = transport_outage
+    base_sample = fleet.sample
+    owner = []
+    def sample(record, age):
+        candidate = fleet.slots.get('candidate')
+        if candidate == record and not owner:
+            state = cs.journal.load(V2Config.load())
+            if (state.get('pinRoute') or {}).get('phase') == phase:
+                assert cr.prepare(rig.actor, 'protocol', 'quic') is None  # no-op must not cancel
+                with pytest.raises(cs.ConnectionError, match='binding_changed'):
+                    cr.prepare(cs.Actor('wrong-pair'), 'protocol', 'http2')
+                monkeypatch.setattr(ra, '_connector_lane_reserved_locked', lambda: bool(fleet.slots.get('candidate')))
+                owner.append(cr.prepare(rig.actor, 'protocol', 'http2'))
+        return base_sample(record, age)
+    fleet.sample = sample
+    with pytest.raises(cs.ConnectionError, match='superseded'):
+        cr._consume_pin_attempt()
+    assert owner[0]['retiringPin'] and 'candidate' not in fleet.slots
+    live = V2Config.load()
+    assert not cs.journal.load(live).get('pinAttempt') and not cs.journal.inspect(live)['returnedToAutomatic']
+    assert cs.value(live, 'protocol') == 'quic' and fleet.slots['active']['requested_protocol'] == 'http2'
+    assert not ra._stored_preferred_protocol()
+    # Owner reservation is valid, and apply proceeds into the ordinary verification path.
+    called = []
+    monkeypatch.setattr(ra, 'apply_settings', lambda payload, **kwargs: called.append((payload, kwargs)) or {'ok': False})
+    cr.apply(rig.actor, owner[0])
+    assert called == [({'transport_protocol': 'http2'}, {'operation_id': owner[0]['id'], 'expected_binding': rig.actor.binding})]
+
+
+@pytest.mark.parametrize('entry', ['api', 'config', 'ui_start', 'cli'])
+def test_start_entries_keep_registered_temporary_connector(rig, monkeypatch, transport_outage, entry):
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe import cli, ui_server as ui
+    # Force an unknown online comparison. The active HTTP/2 path must survive
+    # normal starts even when called by a process with a different journal.boot.
+    fleet = transport_outage
+    sample = fleet.sample
+    fleet.sample = lambda record, age: None if len(fleet.starts) == 3 and record == fleet.slots.get('candidate') else sample(record, age)
+    cr._consume_pin_attempt()
+    live = V2Config.load()
+    active = fleet.slots['active']
+    assert cr.view(rig.actor)['temporaryRoute'] == dict(phase='comparison_unavailable', protocol='http2', differences=['protocol'])
+    tmp = cr._pin_trial(live, ['protocol'], 'http2')
+    monkeypatch.setattr(ra, '_running_signature', lambda pid: ra._runtime_signature(tmp, 'fixture-binary'))
+    monkeypatch.setattr(ra, '_running_connector_has_metrics', lambda pid: pid == active['pid'])
+    monkeypatch.setattr(ra, '_ensure_cloudflared_pin', lambda config: None)
+    monkeypatch.setattr(ra, 'status', lambda cfg=None: {'running': True, 'pid_state': 'cloudflared', 'pid': active['pid']})
+    monkeypatch.setattr(ra, '_stop_connector', lambda *args: pytest.fail('unrelated start displaced temporary route'))
+    monkeypatch.setattr(ra, '_retire_legacy_cloudflared', lambda *args: None)
+    started = []
+    monkeypatch.setattr(ra, '_report_runtime_status_async', lambda cfg, **kwargs: started.append(kwargs['event']))
+    monkeypatch.setattr(ui, '_ensure_remote_access_monitoring', lambda *args: None)
+    monkeypatch.setattr(ui, '_remote_status_for_viewer', lambda result: result)
+    if entry == 'cli':
+        monkeypatch.setattr(cs, 'journal', cs.Journal())  # foreign process, same state files
+        assert cli.cmd_remote_start(SimpleNamespace(json=False)) == 0
+    elif entry == 'ui_start':
+        ui._reconcile_remote_access_for_ui_start(live)
+    else:
+        client = ui.app.test_client()
+        if entry == 'config':
+            # Exercise the actual post-save reconcile dispatch, not any unrelated service lifecycle.
+            monkeypatch.setattr(ui, '_save_config_and_runtime_decisions', lambda *a, **kw: (live, True, False, False, []))
+        response = client.post('/api/config' if entry == 'config' else '/api/remote-access/start',
+                               json={'remote_access': {}} if entry == 'config' else {}, headers=csrf_headers(client))
+        assert response.status_code == 200
+    assert started == ['start'] and fleet.slots['active'] == active
+    assert cs.value(V2Config.load(), 'protocol') == 'quic'
+    assert not cr.keep_temporary_connector(live, 'different-binary', ra._runtime_signature(tmp, 'fixture-binary'))
+    active['started_at'] += 1
+    assert cr.view(rig.actor)['temporaryRoute'] is None
+
+
+@pytest.mark.parametrize('receipt_written', [False, True])
+def test_ui_restart_discards_transient_route_without_inventing_result(rig, monkeypatch, transport_outage, receipt_written):
+    save = cs.journal.save
+    def crash(state):
+        if ((state.get('returnedToAutomatic') if receipt_written else (state.get('pinRoute') or {}).get('phase') == 'confirming')):
+            raise OSError('simulated interruption')
+        return save(state)
+    monkeypatch.setattr(cs.journal, 'save', crash)
+    with pytest.raises(OSError):
+        cr._consume_pin_attempt()
+    monkeypatch.setattr(cs, 'journal', cs.Journal(lambda: rig.clock[0]))
+    cr.recover_startup()
+    live = V2Config.load()
+    state = cs.journal.load(live)
+    assert not state.get('pinRoute') and not state.get('pinAttempt')
+    assert cs.value(live, 'protocol') == ('auto' if receipt_written else 'quic')
+    assert bool(state['returnedToAutomatic']) == receipt_written
+
+
 @pytest.mark.parametrize('field,pinned', [('ipFamily', '4'), ('outbound', '192.0.2.1')])
 @pytest.mark.parametrize('saved,automatic,expected_return', [(True, None, False), (False, True, True), (False, False, False), (None, None, False)])
-def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monkeypatch, connector_clock, field, pinned, saved, automatic, expected_return):
+def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monkeypatch, connector_clock, pin_fleet, field, pinned, saved, automatic, expected_return):
     cloud = rig.cfg.remote_access.vibe_cloud
     cloud.edge_ip_version = 'auto'
     setattr(cloud, cs.FIELDS[field], pinned)
@@ -480,28 +682,21 @@ def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monke
     attempt = cs.journal.load(rig.cfg)['pinAttempt']
     assert cr.prepare(rig.actor, 'protocol', cs.value(rig.cfg, 'protocol')) is None
     assert cs.journal.load(rig.cfg)['pinAttempt'] == attempt
-    attempts = []
-    monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
-    def spawn(cfg, binary, protocol):
+    def sample(record, elapsed):
         assert cs.value(V2Config.load(), field) == pinned
-        assert protocol == 'http2'  # Saved and relaxed IP/outbound candidates both use the remembered transport.
-        attempts.append((cs.value(cfg, field), connector_clock.monotonic()))
-        return len(attempts), 'fixture'
-    def registration(url):
-        result = saved if len(attempts) == 1 else automatic
-        if result is None:
-            return None  # Missing metrics must not be treated as a failed saved pin.
-        return int(result and connector_clock.monotonic() - attempts[-1][1] >= 8.030)
-    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
-    monkeypatch.setattr(cr, '_registered', registration)
-    monkeypatch.setattr(ra, '_discard_candidate_connector', lambda pid: None)
-    monkeypatch.setattr(ra, '_promote_candidate_connector', lambda pid, **kw: {})
-    monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: True)
+        result = saved if record[field] == pinned else automatic
+        return None if result is None else int(result and elapsed >= 8.030)
+    pin_fleet.sample = sample
     cr._consume_pin_attempt()
     relaxed = cs.AUTOMATIC[field]
-    assert [v for v, _ in attempts] == ([pinned, relaxed] if saved is False else [pinned])
+    expected = [(pinned, 'http2')]
     if saved is False:
-        assert attempts[1][1] - attempts[0][1] == pytest.approx(30)
+        expected += [(pinned, 'quic'), (relaxed, 'http2'),
+                     (pinned, 'http2') if automatic else (relaxed, 'quic')]
+        if automatic:
+            expected.append((relaxed, 'http2'))  # confirm the fresh final dial, not the surviving registration
+        assert pin_fleet.starts[1]['started_at'] - pin_fleet.starts[0]['started_at'] == pytest.approx(30)
+    assert [(r[field], r['requested_protocol']) for r in pin_fleet.starts] == expected
     assert cs.value(V2Config.load(), field) == (relaxed if expected_return else pinned)
     assert bool(cs.journal.inspect(rig.cfg)['returnedToAutomatic']) == expected_return
 
@@ -510,21 +705,21 @@ def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monke
 H4, Q4, HA, QA = ('http2', '4'), ('quic', '4'), ('http2', 'auto'), ('quic', 'auto')
 
 
-@pytest.mark.parametrize('pin,hints,usable,working_family,expected_legs,returned', [
-    ('quic', ('quic', 'http2'), {'http2'}, '4', [Q4, HA], True),
-    ('http2', ('http2', 'quic'), {'quic'}, '4', [H4, QA], True),
-    ('auto', ('http2', 'quic'), {'http2'}, '4', [H4], False),
-    ('auto', ('http2', None), {'http2'}, '6', [H4, HA], True),
-    ('auto', (None, 'http2'), {'http2'}, '4', [H4], False),
-    ('auto', (None, 'quic'), {'quic'}, '6', [Q4, QA], True),
-    ('auto', (None, None), {'http2'}, '4', [H4], False),
-    ('auto', (None, None), {'quic'}, '4', [H4, Q4], False),
-    ('auto', (None, None), {'http2'}, '6', [H4, Q4, HA], True),
-    ('auto', (None, None), {'quic'}, '6', [H4, Q4, HA, QA], True),
-    ('auto', (None, None), set(), '4', [H4, Q4, HA, QA], False),
-    ('quic', ('quic', None), set(), '4', [Q4, HA], False),
+@pytest.mark.parametrize('pin,hints,usable,working_family,search,control,released', [
+    ('quic', ('quic', 'http2'), {'http2'}, '4', [Q4, H4], [Q4], {'protocol'}),
+    ('http2', ('http2', 'quic'), {'quic'}, '4', [H4, Q4], [H4], {'protocol'}),
+    ('auto', ('http2', 'quic'), {'http2'}, '4', [H4], [], set()),
+    ('auto', ('http2', None), {'http2'}, '6', [H4, Q4, HA], [H4], {'ipFamily'}),
+    ('auto', (None, 'http2'), {'http2'}, '4', [H4], [], set()),
+    ('auto', (None, 'quic'), {'quic'}, '6', [Q4, H4, QA], [Q4], {'ipFamily'}),
+    ('auto', (None, None), {'http2'}, '4', [H4], [], set()),
+    ('auto', (None, None), {'quic'}, '4', [H4, Q4], [], set()),
+    ('auto', (None, None), {'http2'}, '6', [H4, Q4, HA], [H4], {'ipFamily'}),
+    ('auto', (None, None), {'quic'}, '6', [H4, Q4, HA, QA], [Q4], {'ipFamily'}),
+    ('auto', (None, None), set(), '4', [H4, Q4, HA, QA], [], set()),
+    ('quic', ('quic', None), set(), '4', [Q4, H4, QA, HA], [], set()),
 ])
-def test_pin_transport_registration_and_restart(rig, monkeypatch, connector_clock, pin, hints, usable, working_family, expected_legs, returned):
+def test_pin_transport_registration_and_restart(rig, monkeypatch, connector_clock, pin_fleet, pin, hints, usable, working_family, search, control, released):
     # Drive the real registration poll. On a UDP-blocked route explicit HTTP/2
     # first registered in 6.379 s; literal auto first registered in 96.674 s.
     # The reverse-protocol and address-family cases are contract simulations.
@@ -537,28 +732,17 @@ def test_pin_transport_registration_and_restart(rig, monkeypatch, connector_cloc
     ra.runtime.write_json(hist, {'schema_version': 2, 'preferred_protocol': preferred, 'context': {'keep': True}})
     if observed:
         ra.runtime.write_json(ra._quality_state_path(), {'schema_version': 2, 'protocol': observed})
-    monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-bin')
-    legs = []
-    def spawn(cfg, binary, protocol):
-        # A sample written during the failed first leg must not change the plan.
-        ra.runtime.write_json(ra._quality_state_path(), {'schema_version': 2, 'protocol': 'http2'})
-        legs.append((protocol, cs.value(cfg, 'ipFamily'), rig.clock[0]))
-        return len(legs), 'fixture-metrics'
-    def registration(url):
-        protocol, family, started = legs[-1]
+    def sample(record, elapsed):
+        # New observations after planning must not reorder the search.
+        if elapsed == 0:
+            ra.runtime.write_json(ra._quality_state_path(), {'schema_version': 2, 'protocol': 'http2'})
         current = V2Config.load()
         assert (cs.value(current, 'protocol'), cs.value(current, 'ipFamily')) == (pin, '4')
         assert not cs.journal.inspect(current)['returnedToAutomatic']
-        if family not in (working_family, 'auto'):
-            return 0
-        delay = {'quic': 5., 'http2': 6.379, 'auto': 96.674}[protocol]
-        can_register = protocol in usable or (protocol == 'auto' and bool(usable))
-        return int(can_register and rig.clock[0] - started >= delay)
-    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
-    monkeypatch.setattr(cr, '_registered', registration)
-    monkeypatch.setattr(ra, '_discard_candidate_connector', lambda pid: None)
-    monkeypatch.setattr(ra, '_promote_candidate_connector', lambda *a, **kw: {})
-    monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: True)
+        protocol = record['requested_protocol']
+        return int(protocol in usable and record['ipFamily'] in (working_family, 'auto')
+                   and elapsed >= {'quic': 5., 'http2': 6.379}[protocol])
+    pin_fleet.sample = sample
     window = cs.PinFailureWindow(lambda: rig.clock[0])
     for _ in range(13):
         cr.observe_pins(window, rig.cfg, active=rig.active, pid_state='cloudflared',
@@ -566,27 +750,122 @@ def test_pin_transport_registration_and_restart(rig, monkeypatch, connector_cloc
         rig.clock[0] += 15
     assert cs.journal.load(rig.cfg).get('pinAttempt')
     cr._consume_pin_attempt()
-    assert [(p, f) for p, f, _ in legs] == expected_legs
-    assert [start - legs[0][2] for _, _, start in legs] == [30 * i for i in range(len(expected_legs))]
+    legs = pin_fleet.starts
+    assert [(r['requested_protocol'], r['ipFamily']) for r in legs] == search + control + (search[-1:] if released else [])
+    assert [r['started_at'] - legs[0]['started_at'] for r in legs[:len(search)]] == [30 * i for i in range(len(search))]
     if not usable:
-        assert connector_clock.monotonic() - legs[0][2] == 30 * len(expected_legs)
+        assert connector_clock.monotonic() - legs[0]['started_at'] == 30 * len(search)
     current = V2Config.load()
-    record = cs.journal.inspect(current)['returnedToAutomatic']
-    if returned:
-        assert {c['setting'] for c in record['changes']} == ({'ipFamily', 'protocol'} if pin != 'auto' else {'ipFamily'})
-        assert (cs.value(current, 'protocol'), cs.value(current, 'ipFamily')) == ('auto', 'auto')
-        monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)  # Cold-start lookup, without a quality snapshot.
-        assert ra._initial_connector_protocol(current) == expected_legs[-1][0]
-        assert ra.runtime.read_json(hist)['context'] == {'keep': True}
+    record = cs.journal.inspect(current)['returnedToAutomatic'] or {'changes': []}
+    assert {c['setting'] for c in record['changes']} == released
+    assert cs.value(current, 'protocol') == ('auto' if 'protocol' in released else pin)
+    assert cs.value(current, 'ipFamily') == ('auto' if 'ipFamily' in released else '4')
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
+    remembered = usable and search[-1][0] != search[0][0]
+    assert ra._stored_preferred_protocol() == (search[-1][0] if remembered else preferred)
+    if remembered:
+        assert ra._initial_connector_protocol(current) == search[-1][0]
+    assert ra.runtime.read_json(hist)['context'] == {'keep': True}
+
+
+def queue_outage(rig, clock):
+    window = cs.PinFailureWindow(clock.monotonic)
+    for _ in range(13):
+        cr.observe_pins(window, rig.cfg, active=rig.active, pid_state='cloudflared',
+                        sample=SimpleNamespace(registered_connections=0), interval_seconds=15)
+        clock.sleep(15)
+
+
+def test_surviving_connection_does_not_prove_new_connections_work(rig, monkeypatch, connector_clock, pin_fleet):
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', 'http2')
+    queue_outage(rig, connector_clock)
+    start = connector_clock.monotonic()
+    established = set()
+    def sample(record, elapsed):
+        # Admission depends only on time, never on family or transport.
+        if elapsed >= 6 and 60 <= connector_clock.monotonic() - start < 68:
+            established.add(record['pid'])
+        return int(record['pid'] in established)
+    pin_fleet.sample = sample
+    cr._consume_pin_attempt()
+    assert established == {pin_fleet.slots['active']['pid']}
+    live = V2Config.load()
+    assert cs.value(live, 'ipFamily') == '4'
+    state = cs.journal.load(live)
+    assert state['pinRoute']['phase'] == 'combination_unverified'
+    assert not state.get('pinAttempt') and not state['returnedToAutomatic']
+
+
+@pytest.mark.parametrize('final_result', ['registered', 'zero', 'unknown', 'promotion_failed'])
+def test_retain_working_replica_if_combined_settings_unconfirmed(rig, monkeypatch, connector_clock, pin_fleet, final_result):
+    # The original egress address is gone. Both transports initially fail with
+    # it. By comparison time QUIC is usable again; the combined QUIC/no-bind
+    # result must register before the address alone can be released.
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.transport_protocol, cloud.edge_bind_address = 'quic', '192.0.2.1'
+    rig.cfg.save()
+    queue_outage(rig, connector_clock)
+    def sample(record, age):
+        leg = pin_fleet.starts.index(record) + 1
+        if leg == 7 and final_result == 'unknown':
+            return None
+        return int(age >= 5 and (leg in (4, 5) or (leg == 7 and final_result in ('registered', 'promotion_failed'))))
+    pin_fleet.sample = sample
+    promote = ra._promote_candidate_connector
+    def switch(pid, **kwargs):
+        if final_result == 'promotion_failed' and len(pin_fleet.starts) == 7:
+            raise RuntimeError('injected pre-promotion failure')
+        return promote(pid, **kwargs)
+    monkeypatch.setattr(ra, '_promote_candidate_connector', switch)
+    if final_result == 'promotion_failed':
+        with pytest.raises(RuntimeError, match='injected'):
+            cr._consume_pin_attempt()
+    cr._consume_pin_attempt()
+    live = V2Config.load()
+    assert cs.value(live, 'protocol') == 'quic' and cs.value(live, 'ipFamily') == '4'
+    slots = pin_fleet.slots
+    assert 'candidate' not in slots and 'draining' not in slots
+    state = cs.journal.load(live)
+    assert not state.get('pinAttempt')
+    if final_result == 'registered':
+        assert cs.value(live, 'outbound') == '' and slots['active'] == pin_fleet.starts[6]
+        assert [c['setting'] for c in state['returnedToAutomatic']['changes']] == ['outbound']
     else:
-        assert not record and (cs.value(current, 'protocol'), cs.value(current, 'ipFamily')) == (pin, '4')
-        assert ra._stored_preferred_protocol() == preferred
+        assert cs.value(live, 'outbound') == '192.0.2.1' and slots['active'] == pin_fleet.starts[3]
+        assert not state['returnedToAutomatic']
+        assert cr.view(rig.actor)['temporaryRoute']['phase'] == 'combination_unverified'
 
 
-@pytest.mark.parametrize('unknown_leg', [1, 2, 3, 4])
+@pytest.mark.parametrize('working,decision_age', [(True, 5), (False, 30)])
+def test_comparison_stops_on_windows_only_after_decision(rig, monkeypatch, transport_outage, connector_clock, working, decision_age):
+    fleet = transport_outage
+    sample, discard = fleet.sample, ra._discard_candidate_connector
+    stopped = []
+    def counts(record, elapsed):
+        if len(fleet.starts) >= 3 and record == fleet.slots.get('candidate'):
+            return int(working and elapsed >= 5)
+        return sample(record, elapsed)
+    def stop_windows(pid, *, timeout):
+        assert pid != fleet.slots['active']['pid']
+        stopped.append((pid, connector_clock.monotonic()))
+        return True
+    def retire(pid, **kwargs):
+        assert ra.runtime.stop_pid(pid, timeout=kwargs['grace_seconds'])
+        discard(pid, **kwargs)
+    monkeypatch.setattr(ra.runtime, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(ra.runtime, 'pid_alive', lambda pid: True)
+    monkeypatch.setattr(ra.runtime, '_terminate_process_windows', stop_windows)
+    monkeypatch.setattr(ra, '_discard_candidate_connector', retire)
+    fleet.sample = counts
+    cr._consume_pin_attempt()
+    comparison = fleet.starts[2]
+    assert [when - comparison['started_at'] for pid, when in stopped if pid == comparison['pid']] == [decision_age]
+
+
+@pytest.mark.parametrize('unknown_leg', range(1, 7))
 def test_no_protocol_hint_unobservable_outbound_candidate_stops_recovery(rig, monkeypatch, connector_clock, unknown_leg):
     cloud = rig.cfg.remote_access.vibe_cloud
-    cloud.edge_ip_version, cloud.edge_bind_address = 'auto', '192.0.2.1'
+    cloud.edge_ip_version, cloud.edge_bind_address = '4', '192.0.2.1'
     rig.cfg.save()
     window = cs.PinFailureWindow(connector_clock.monotonic)
     for _ in range(13):
@@ -596,21 +875,132 @@ def test_no_protocol_hint_unobservable_outbound_candidate_stops_recovery(rig, mo
     monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
     monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-bin')
     starts, discarded = [], []
-    def spawn(cfg, binary, protocol):
-        starts.append((protocol, cs.value(cfg, 'outbound')))
+    def spawn(cfg, binary, protocol, *, pin_attempt):
+        starts.append((protocol, cs.value(cfg, 'ipFamily'), cs.value(cfg, 'outbound')))
         return len(starts), 'fixture-metrics'
     monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
     monkeypatch.setattr(cr, '_registered', lambda url: None if len(starts) == unknown_leg else 0)
-    monkeypatch.setattr(ra, '_discard_candidate_connector', discarded.append)
+    def discard(pid, *, grace_seconds, expected_url):
+        assert grace_seconds == ra.RECOVERY_DRAIN_SECONDS and expected_url == 'fixture-metrics'
+        discarded.append(pid)
+    monkeypatch.setattr(ra, '_discard_candidate_connector', discard)
     monkeypatch.setattr(ra, '_promote_candidate_connector', lambda *a, **kw: pytest.fail('unobservable candidate promoted'))
     start = connector_clock.monotonic()
     cr._consume_pin_attempt()
-    assert starts == [('http2', '192.0.2.1'), ('quic', '192.0.2.1'), ('http2', ''), ('quic', '')][:unknown_leg]
+    expected = [(p, fam, out) for fam, out in [('4', '192.0.2.1'), ('4', ''), ('auto', '')] for p in ('http2', 'quic')]
+    assert starts == expected[:unknown_leg]
     assert discarded == list(range(1, unknown_leg + 1))
     assert connector_clock.monotonic() - start == 30 * unknown_leg
     current = V2Config.load()
     assert cs.value(current, 'outbound') == '192.0.2.1' and not cs.journal.inspect(current)['returnedToAutomatic']
     assert not ra._stored_preferred_protocol()
+
+
+@pytest.mark.parametrize('usable_leg', [1, 2, 3, 4, 5, 6, None])
+def test_registration_search_tries_saved_family_before_releasing_it(rig, monkeypatch, connector_clock, usable_leg):
+    """An expired outbound pin must not hide a working IPv4-only route."""
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.transport_protocol, cloud.edge_bind_address = 'quic', '192.0.2.1'
+    rig.cfg.save()
+    window = cs.PinFailureWindow(connector_clock.monotonic)
+    for _ in range(13):
+        cr.observe_pins(window, rig.cfg, active=rig.active, pid_state='cloudflared',
+                        sample=SimpleNamespace(registered_connections=0), interval_seconds=15)
+        connector_clock.sleep(15)
+    attempts = []
+    class FirstPromotion(Exception):
+        pass
+    candidate_slot = {}
+    monkeypatch.setattr(ra, '_state_connector', lambda slot: candidate_slot if slot == 'candidate' else (rig.active if slot == 'active' else None))
+    monkeypatch.setattr(ra, '_is_cloudflared_pid', lambda pid: pid in (rig.active['pid'], candidate_slot.get('pid')))
+    def spawn(cfg, binary, protocol, *, pin_attempt):
+        attempts.append((protocol, cs.value(cfg, 'ipFamily'), cs.value(cfg, 'outbound'), connector_clock.monotonic()))
+        candidate_slot.update(pid=200 + len(attempts), started_at=connector_clock.monotonic(), metrics_url='fixture-metrics')
+        return candidate_slot['pid'], candidate_slot['metrics_url']
+    def count(url):
+        assert cs.value(V2Config.load(), 'outbound') == '192.0.2.1'
+        return int(len(attempts) == usable_leg and connector_clock.monotonic() - attempts[-1][-1] >= 6.379)
+    def promote(*args, **kwargs):
+        raise FirstPromotion  # Stop exactly at the first promotion, before any attribution work.
+    monkeypatch.setattr(ra, '_resolve_binary', lambda config: 'fixture-bin')
+    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
+    monkeypatch.setattr(ra, '_discard_candidate_connector', lambda *a, **kw: None)
+    monkeypatch.setattr(cr, '_registered', count)
+    monkeypatch.setattr(ra, '_promote_candidate_connector', promote)
+    start = connector_clock.monotonic()
+    with (pytest.raises(FirstPromotion) if usable_leg else nullcontext()):
+        cr._consume_pin_attempt()
+    routes = [(p, f, out) for f, out in [('4', '192.0.2.1'), ('4', ''), ('auto', '')] for p in ('quic', 'http2')]
+    expected = routes[:usable_leg]
+    assert [row[:3] for row in attempts] == expected
+    assert [row[3] - start for row in attempts] == [30 * i for i in range(len(expected))]
+    assert connector_clock.monotonic() - start == (30 * (usable_leg - 1) + 7 if usable_leg else 180)
+    assert cs.value(V2Config.load(), 'ipFamily') == '4'
+    assert not cs.journal.inspect(V2Config.load())['returnedToAutomatic']
+
+
+@pytest.mark.parametrize('comparison', ['missing', 'registered', 'failed'])
+def test_transport_rescue_requires_online_comparison_before_pin_write(rig, monkeypatch, connector_clock, comparison):
+    """A live HTTP/2 rescue alone never justifies dropping QUIC, IPv4, or egress."""
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.transport_protocol, cloud.edge_bind_address = 'quic', '192.0.2.1'
+    rig.cfg.save()
+    active, slots, starts, retired = dict(rig.active), {}, [], []
+    slots['active'] = active
+    def spawn(config, binary, protocol, *, pin_attempt):
+        pid = 300 + len(starts)
+        rec = {'pid': pid, 'started_at': connector_clock.monotonic(), 'metrics_url': f'fixture-{pid}',
+               'requested_protocol': protocol}
+        slots['candidate'] = rec
+        starts.append((rec, cs.value(config, 'ipFamily'), cs.value(config, 'outbound')))
+        return pid, rec['metrics_url']
+    def counts(url):
+        if url == slots['active']['metrics_url']:
+            return int(slots['active']['pid'] != active['pid'])
+        rec = slots['candidate']
+        assert url == rec['metrics_url']
+        if len(starts) == 3 and comparison == 'missing':
+            return None
+        works = rec['requested_protocol'] == 'http2' or len(starts) >= 3 and comparison == 'registered'
+        return int(works and connector_clock.monotonic() - rec['started_at'] >= 6.379)
+    def promote(pid, **kwargs):
+        old, candidate = slots['active'], slots.pop('candidate')
+        assert pid == candidate['pid']
+        if len(starts) == 2:
+            assert (cs.value(V2Config.load(), 'protocol'), cs.value(V2Config.load(), 'ipFamily')) == ('quic', '4')
+        slots['active'] = candidate
+        slots['draining'] = old
+        return old
+    def discard(pid, **kwargs):
+        assert pid == slots['candidate']['pid'] and pid != slots['active']['pid']
+        retired.append(pid)
+        slots.pop('candidate')
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
+    monkeypatch.setattr(ra, '_state_connector', slots.get)
+    monkeypatch.setattr(ra, '_read_pid', lambda: slots['active']['pid'])
+    monkeypatch.setattr(ra, '_is_cloudflared_pid', lambda pid: any(s['pid'] == pid for s in slots.values()))
+    monkeypatch.setattr(ra, '_resolve_binary', lambda config: 'fixture-bin')
+    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
+    monkeypatch.setattr(ra, '_promote_candidate_connector', promote)
+    monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: bool(slots.pop('draining', None)))
+    monkeypatch.setattr(ra, '_discard_candidate_connector', discard)
+    monkeypatch.setattr(cr, '_registered', counts)
+    window = cs.PinFailureWindow(connector_clock.monotonic)
+    for _ in range(13):
+        cr.observe_pins(window, rig.cfg, active=active, pid_state='cloudflared',
+                        sample=SimpleNamespace(registered_connections=0), interval_seconds=15)
+        connector_clock.sleep(15)
+    cr._consume_pin_attempt()
+    assert [row[0]['requested_protocol'] for row in starts[:3]] == ['quic', 'http2', 'quic']
+    current = V2Config.load()
+    assert all(row[1:] == ('4', '192.0.2.1') for row in starts)
+    assert (cs.value(current, 'ipFamily'), cs.value(current, 'outbound')) == ('4', '192.0.2.1')
+    record = cs.journal.inspect(current)['returnedToAutomatic']
+    if comparison == 'failed':
+        assert cs.value(current, 'protocol') == 'auto' and [change['setting'] for change in record['changes']] == ['protocol']
+    else:
+        assert cs.value(current, 'protocol') == 'quic' and not record
+    assert slots['active']['requested_protocol'] == ('quic' if comparison == 'registered' else 'http2')
 
 
 @pytest.fixture
