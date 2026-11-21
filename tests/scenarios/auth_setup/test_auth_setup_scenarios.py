@@ -1560,7 +1560,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path,
         monkeypatch.setenv("PATH", "")
         monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
-    monkeypatch.setattr(auth_module, "CLAUDE_SDK_AVAILABLE", True)
+    monkeypatch.setattr("modules.claude_sdk_compat.CLAUDE_SDK_AVAILABLE", True)
 
     harness = SimpleNamespace(launches=[], control_requests=[], disconnects=0)
 
@@ -1586,7 +1586,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path,
     # re-reads persisted config and has no IM session handler.
     service = AgentAuthService(vibe_api._WebControllerStub())
     monkeypatch.setattr(vibe_api, "_get_oauth_service", lambda: service)
-    monkeypatch.setattr(auth_module, "ClaudeSDKClient", FakeClaudeSDKClient)
+    monkeypatch.setattr("modules.claude_sdk_compat.ClaudeSDKClient", FakeClaudeSDKClient)
     runner = ScenarioRunner(harness)
 
     def save_cli_selector(current):
@@ -2435,7 +2435,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("core.agent_auth_service.ClaudeSDKClient", FakeClaudeSDKClient),
+            patch("modules.claude_sdk_compat.ClaudeSDKClient", FakeClaudeSDKClient),
         ):
             config = V2Config(
                 mode="self_host",

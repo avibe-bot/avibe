@@ -185,7 +185,7 @@ def test_missing_sdk_permission_allow_fallback_is_non_throwing(monkeypatch):
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", _block_claude_sdk)
-    module_path = Path(__file__).resolve().parents[1] / "modules" / "claude_sdk_compat.py"
+    module_path = Path(__file__).resolve().parents[1] / "modules" / "claude_sdk_runtime.py"
     spec = importlib.util.spec_from_file_location("claude_sdk_compat_missing", module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -215,7 +215,7 @@ def test_older_sdk_without_task_message_classes_stays_available(monkeypatch):
         return original_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", _hide_task_types)
-    module_path = Path(__file__).resolve().parents[1] / "modules" / "claude_sdk_compat.py"
+    module_path = Path(__file__).resolve().parents[1] / "modules" / "claude_sdk_runtime.py"
     spec = importlib.util.spec_from_file_location("claude_sdk_compat_older", module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -227,3 +227,28 @@ def test_older_sdk_without_task_message_classes_stays_available(monkeypatch):
     assert issubclass(module.TaskStartedMessage, module.SystemMessage)
     assert issubclass(module.TaskProgressMessage, module.SystemMessage)
     assert issubclass(module.TaskNotificationMessage, module.SystemMessage)
+
+
+def test_controller_start_loads_neither_the_claude_sdk_nor_the_mcp_client():
+    """Both load on first use only: about 63k tracked objects and 23 MiB that a
+    controller without the Claude Code backend or MCP servers never needs. A new
+    module-level ``from modules.claude_sdk_compat import <SDK name>`` or a top-level
+    ``import mcp`` on the start path would bring them back."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import core.controller, core.internal_server, core.agent_auth_service\n"
+        "import core.handlers.session_handler, modules.agents.claude_agent, modules.claude_client\n"
+        "from core.mcp_hub.runtime import McpRuntime\n"
+        "McpRuntime()\n"
+        "import modules.claude_sdk_compat as compat\n"
+        "assert compat.is_claude_sdk_buffer_error('x') is False\n"
+        "print(sorted(name for name in ('claude_agent_sdk', 'mcp') if name in sys.modules))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                            cwd=Path(__file__).resolve().parents[1])
+    assert result.stdout.strip().splitlines()[-1] == "[]"
+    # First use still works without any restart: the SDK loads then.
+    assert compat.ClaudeAgentOptions is not None

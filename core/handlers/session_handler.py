@@ -1,5 +1,7 @@
 """Session management handlers for Claude SDK sessions"""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -10,15 +12,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from modules.im import MessageContext
-from modules.claude_sdk_compat import (
-    CLAUDE_SDK_HOOKS_AVAILABLE,
-    CLAUDE_SDK_MAX_BUFFER_SIZE,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    HookMatcher,
-    PermissionResultAllow,
-    is_claude_sdk_buffer_error,
-)
+from modules import claude_sdk_compat as claude_sdk
+from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE, is_claude_sdk_buffer_error
 from modules.agents.native_sessions.base import build_resume_preview
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_PROCESS_OWNER_ENV,
@@ -80,6 +75,7 @@ CLAUDE_TEARDOWN_EXIT_PATTERN = re.compile(r"exit code:?\s*(-9|-15)\b")
 CLAUDE_INTENTIONAL_TEARDOWN_TTL_SECONDS = 120.0
 
 if TYPE_CHECKING:
+    from modules.claude_sdk_compat import ClaudeSDKClient
     from core.runtime_ownership import RuntimeResourceTarget
     from modules.agents.model_hub import ModelHubLaunch
 
@@ -1096,7 +1092,7 @@ class SessionHandler(BaseHandler):
 
     async def _allow_claude_bypass_tool(self, tool_name: str, tool_input: Dict[str, Any], context: Any):
         logger.info("Auto-approving Claude tool permission request in avibe bypass mode: %s", tool_name)
-        return PermissionResultAllow()
+        return claude_sdk.PermissionResultAllow()
 
     async def _guard_session_only_background_tools(
         self,
@@ -1151,13 +1147,13 @@ class SessionHandler(BaseHandler):
         self,
     ) -> Optional[Dict[str, Any]]:
         """Hook config enforcing the shared tool policy, or None when unavailable."""
-        if not CLAUDE_SDK_HOOKS_AVAILABLE or HookMatcher is None:
+        if not claude_sdk.CLAUDE_SDK_HOOKS_AVAILABLE or claude_sdk.HookMatcher is None:
             return None
         matcher = "|".join(session_only_background_tool_names())
 
         return {
             "PreToolUse": [
-                HookMatcher(
+                claude_sdk.HookMatcher(
                     matcher=matcher,
                     hooks=[self._guard_session_only_background_tools],
                 )
@@ -1794,7 +1790,7 @@ class SessionHandler(BaseHandler):
         if agent_allowed_tools is not None:
             option_kwargs["allowed_tools"] = agent_allowed_tools
 
-        options = ClaudeAgentOptions(**option_kwargs)
+        options = claude_sdk.ClaudeAgentOptions(**option_kwargs)
 
         # Log session creation details
         logger.info(f"Creating Claude client for {base_session_id} at {working_path}")
@@ -1822,7 +1818,7 @@ class SessionHandler(BaseHandler):
             raise ClaudeBackendDisabledError("claude backend disabled")
 
         # Create new Claude client
-        client = ClaudeSDKClient(options=options)
+        client = claude_sdk.ClaudeSDKClient(options=options)
         setattr(client, "_vibe_pending_skill_catalog", skill_catalog_sink[0] if skill_catalog_sink else None)
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
