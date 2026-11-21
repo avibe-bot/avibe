@@ -113,7 +113,7 @@ def publish_mobile_schedule_changed() -> None:
 
 
 class MobileStore:
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, existing_only: bool = False):
         self.path = path or mobile_store_path()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.path.parent.is_symlink() or not self.path.parent.is_dir():
@@ -123,7 +123,7 @@ class MobileStore:
             try:
                 if self.path.is_symlink():
                     raise MobileError("private_storage_unavailable", 503)
-                fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                fd = os.open(self.path, (0 if existing_only else os.O_CREAT) | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 try:
                     if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
                         raise MobileError("private_storage_unavailable", 503)
@@ -147,10 +147,13 @@ class MobileStore:
                         if statement.strip():
                             conn.execute(statement)
                     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                # Compatible with released v1 writers, which name every audit column.
+                if not any(col[1] == "device_id" for col in conn.execute("PRAGMA table_info(accesses)")):
+                    conn.execute("ALTER TABLE accesses ADD COLUMN device_id TEXT")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        conn = sqlite3.connect(self.path.absolute().as_uri() + '?mode=rw', uri=True, timeout=5, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA foreign_keys=ON")
@@ -181,10 +184,10 @@ class MobileStore:
         }
 
     @staticmethod
-    def _audit(conn, operation, *, caller, session_id=None, names=(), start=None, end=None):
+    def _audit(conn, operation, *, caller, session_id=None, names=(), start=None, end=None, device_id=None):
         conn.execute(
-            "INSERT INTO accesses(at,caller,session_id,operation,metrics,from_day,to_day) VALUES(?,?,?,?,?,?,?)",
-            (_now(), caller, session_id, operation, _json(list(names)), start, end),
+            "INSERT INTO accesses(at,caller,session_id,operation,metrics,from_day,to_day,device_id) VALUES(?,?,?,?,?,?,?,?)",
+            (_now(), caller, session_id, operation, _json(list(names)), start, end, device_id),
         )
 
     @staticmethod
@@ -280,7 +283,7 @@ class MobileStore:
             if row is None:
                 raise MobileError("device_unauthorized", 401)
 
-    def pair(self, payload: dict, identity: dict) -> dict:
+    def pair(self, payload: dict, identity: dict, *, reserved_device_id: str | None = None) -> dict:
         object_fields(payload, {"pairing_code", "device_name", "platform", "app_version", "metrics"},
                       {"installation_id"})
         code = text(payload["pairing_code"], limit=100)
@@ -307,7 +310,8 @@ class MobileStore:
                     (installation,),
                 ).fetchall():
                     self._revoke_device(conn, old["id"], now)
-            device_id, credential = "mdev_" + secrets.token_hex(16), secrets.token_urlsafe(32)
+            device_id = reserved_device_id or 'mdev_' + secrets.token_hex(16)
+            credential = secrets.token_urlsafe(32)
             conn.execute(
                 "INSERT INTO devices(id,credential_hash,installation_hash,instance_id,owner,name,"
                 "app_version,metrics,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -617,7 +621,8 @@ class MobileStore:
             if device_id is None:
                 conn.execute("UPDATE requests SET state='canceled',ended_at=? WHERE state IN ('queued','claimed')",
                              (now,))
-            conn.execute("DELETE FROM pairings")
+                conn.execute("DELETE FROM pairings")
+            # A targeted disconnect must not cancel unused codes on other phones.
             self._audit(conn, "health.revoke", caller=caller, session_id=session_id)
         publish_mobile_schedule_changed()
         return {"purged": True}
@@ -731,5 +736,6 @@ class MobileStore:
                         > timedelta(seconds=max_age) for value in queried
                     )
                 result[name] = {"items": items, "freshness": freshness}
-            self._audit(conn, "health.read", caller=caller, session_id=session_id, names=names, start=start, end=end)
+            self._audit(conn, "health.read", caller=caller, session_id=session_id, names=names,
+                        start=start, end=end, device_id=device["id"])
             return {"metrics": result}

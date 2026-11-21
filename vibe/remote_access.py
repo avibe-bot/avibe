@@ -4497,18 +4497,62 @@ def start_runtime_monitoring(config: V2Config | None = None) -> None:
     start_resource_acl_sync_polling(config)
 
 
+def _record_device_access_switch(config, enabled):
+    """Activity is observational: a ledger failure cannot undo a connector transition."""
+    try:
+        _write_device_access_switch(config, enabled)
+    except Exception:
+        logger.warning("Could not record the remote access switch")
+
+
+def _write_device_access_switch(config, enabled):
+    from storage import device_activity
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import remote_device_sessions
+    from sqlalchemy import select
+    from vibe.ui_request_context import has_request_context
+
+    config = config or V2Config.load()
+    if not config.remote_access.vibe_cloud.is_runtime_paired():
+        return
+    binding = device_binding(config)
+    device, subject = 'host', None
+    ensure_sqlite_state()
+    with get_cached_sqlite_engine().begin() as conn:
+        if has_request_context():
+            from vibe.ui_compat import g
+            from vibe.ui_server import _is_direct_loopback_connection
+            identity = getattr(g, 'remote_session_identity', None)
+            if identity:
+                subject = identity['sub']
+                device = conn.scalar(select(remote_device_sessions.c.device_id).where(
+                    remote_device_sessions.c.binding==binding, remote_device_sessions.c.subject==subject,
+                    remote_device_sessions.c.session_id==identity['browser_session_id']))
+                if not device:
+                    return
+            elif not _is_direct_loopback_connection():
+                return
+        device_activity.record(conn,kind='remoteAccessOn' if enabled else 'remoteAccessOff',
+                               binding=binding,subject=subject,device=device,now=int(time.time()))
+
+
 def stop(config: V2Config | None = None) -> dict[str, Any]:
     """Stop the connector and withdraw the request that keeps one running."""
 
     try:
         with _connector_lifecycle():
+            requested = _connector_requested_path().is_file()
             try:
                 _connector_requested_path().unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("Could not withdraw the tunnel connector request", exc_info=True)
                 result = _stop_connector(config)
                 return {**result, "ok": False, "error": "remote_access_request_withdraw_failed", "detail": str(exc)}
-            return _stop_connector(config)
+            result = _stop_connector(config)
+            if requested and result.get('ok'):
+                _record_device_access_switch(config, False)
+            return result
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "stopped": False}
 
@@ -4590,7 +4634,11 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
     install_failure = _ensure_cloudflared_pin(loaded)
     try:
         with _connector_lifecycle():
-            return _start(loaded or config, record_request=True, install_failure=install_failure)
+            requested = _connector_requested_path().is_file()
+            result = _start(loaded or config, record_request=True, install_failure=install_failure)
+            if result.get('ok') and not requested and _connector_requested_path().is_file():
+                _record_device_access_switch(loaded or config, True)
+            return result
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "started": False}
 
@@ -6780,7 +6828,12 @@ def _legacy_browser_session_id(secret: str, cookie_value: str) -> str:
 
 
 def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
-    """Durably sign one browser session out; return whether it was recorded.
+    recorded, _ = revoke_browser_session_with_cleanup(payload)
+    return recorded
+
+
+def revoke_browser_session_with_cleanup(payload: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Durably sign one browser session out; report revocation and deferred cleanup separately.
 
     The revocation is kept until the session's absolute cap, the latest
     ``exp`` any cookie of this browser session can carry, so a copy of an older
@@ -6791,25 +6844,25 @@ def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
 
     session_id = payload.get(_SESSION_BROWSER_ID_KEY)
     if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
-        return False
+        return False, False
     try:
         expires_at = int(payload.get("exp", 0))
     except (TypeError, ValueError):
-        return False
+        return False, False
     auth_time = _session_auth_time(payload)
     if auth_time is not None:
         expires_at = max(expires_at, auth_time + SESSION_ABSOLUTE_TTL_SECONDS)
     try:
-        remote_access_authorization_service.revoke_browser_session(
+        deferred = remote_access_authorization_service.revoke_browser_session(
             session_id,
             expires_at=expires_at,
             now=int(time.time()),
         )
     except Exception:
         logger.warning("browser session revocation persistence failed", exc_info=True)
-        return False
+        return False, False
     publish_browser_session_revoked(session_id)
-    return True
+    return True, bool(deferred)
 
 
 def publish_browser_session_revoked(session_id: str) -> None:

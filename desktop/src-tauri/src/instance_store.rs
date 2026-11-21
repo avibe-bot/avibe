@@ -110,6 +110,28 @@ pub(crate) fn destroy_completed(window: &Webview) -> Result<(), String> {
     Ok(())
 }
 
+/// The WebView store is retired first; then observe physical App-window removal
+/// on the same native event mechanism before releasing its directory receipt.
+pub(crate) fn destroy_window_completed(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let app = window.app_handle();
+    let label = window.label();
+    if app.get_window(label).is_some() {
+        window.destroy().map_err(|_| "app window destruction failed")?;
+    }
+    main_thread_barrier(app, "app window destruction completion timed out")?;
+    // Destroy uses the runtime's window-event queue. A following main-thread
+    // closure can run before Destroyed removes the manager entry, so observe
+    // that terminal event too. This waits for one destruction, never retries it.
+    let deadline = Instant::now() + ERASE_TIMEOUT;
+    while app.get_window(label).is_some() || app.get_webview(label).is_some() {
+        if Instant::now() >= deadline {
+            return Err("app window destruction timed out".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 fn main_thread_barrier(app: &AppHandle, timeout_error: &'static str) -> Result<(), String> {
     let (sender, receiver) = mpsc::channel();
     app.run_on_main_thread(move || {

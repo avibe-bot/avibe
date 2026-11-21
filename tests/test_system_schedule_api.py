@@ -69,14 +69,16 @@ def test_system_schedule_claim_is_csrf_guarded_and_bound_to_the_configured_insta
         "ok": True,
         "claim": {"action": "create", "leaseToken": "lease-a"},
     }
-    assert calls == [
-        {
-            "instance_id": "instance-a",
-            "device_id": "device-a",
-            "exclude_lease_tokens": [],
-            "allow_create": True,
-        }
-    ]
+    assert len(calls) == 1
+    forwarded = calls[0].copy()
+    principal = forwarded.pop('claimant')
+    assert principal.is_instance_owner and not principal.is_remote
+    viewer = forwarded.pop('device_viewer')
+    assert viewer is None or (viewer[1:] == (None, True, None))
+    assert forwarded == {
+        'instance_id': 'instance-a', 'device_id': 'device-a',
+        'exclude_lease_tokens': [], 'allow_create': True,
+    }
 
 
 def test_system_schedule_receipt_forwards_the_exact_device_lease(monkeypatch) -> None:

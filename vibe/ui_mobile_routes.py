@@ -19,6 +19,7 @@ from storage.mobile_store import MobileStore
 DEVICE_PREFIX = "/api/mobile/device/v1"
 _REQUEST_ID = r"mreq_[0-9a-f]{32}"
 _DEVICE_ROUTES = {
+    ("POST", f"{DEVICE_PREFIX}/binding-ticket"),
     ("POST", f"{DEVICE_PREFIX}/pair"),
     ("PUT", f"{DEVICE_PREFIX}/manifest"),
     ("PUT", f"{DEVICE_PREFIX}/health/days"),
@@ -96,7 +97,20 @@ def register_mobile_routes(app) -> None:
                     payload = await _body(request, optional=request.method == "DELETE")
                 path = request.scope["path"]
                 if path == f"{DEVICE_PREFIX}/pair":
-                    result = await asyncio.to_thread(store.pair, payload, identity)
+                    from storage.device_health_registry import pair
+                    result = await asyncio.to_thread(pair, store, payload, identity)
+                elif path == f"{DEVICE_PREFIX}/binding-ticket":
+                    from config.v2_config import V2Config
+                    from storage import device_health_tickets
+                    from vibe.remote_access import device_binding
+
+                    object_fields(payload, set())
+                    def issue_ticket():
+                        config = V2Config.load()
+                        if config.remote_access.vibe_cloud.instance_id != identity['id']:
+                            raise MobileError('instance_not_eligible', 403)
+                        return device_health_tickets.issue(store, device, device_binding(config))
+                    result = await asyncio.to_thread(issue_ticket)
                 elif path == f"{DEVICE_PREFIX}/manifest":
                     result = await asyncio.to_thread(store.manifest, device, payload)
                 elif path == f"{DEVICE_PREFIX}/health/days":
@@ -156,7 +170,9 @@ def register_mobile_routes(app) -> None:
                     or context.instance_id != identity["id"]
                 ):
                     raise MobileError("instance_not_eligible", 403)
-                result = await asyncio.to_thread(store.issue_pairing, text(payload["request_id"]), identity)
+                from storage.device_health_registry import issue_pairing
+                from vibe.ui_server import _device_viewer
+                result = await asyncio.to_thread(issue_pairing, store, text(payload['request_id']), identity, _device_viewer())
                 return JSONResponse(result, headers={"Cache-Control": "no-store"})
             except MobileError as error:
                 return mobile_error_response(error)

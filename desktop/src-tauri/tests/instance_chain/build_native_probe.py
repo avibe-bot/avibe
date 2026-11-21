@@ -29,8 +29,10 @@ def main():
     parser.add_argument("--shell-consumers", action="store_true")
     parser.add_argument("--account-feedback", action="store_true")
     parser.add_argument("--update-consumers", action="store_true")
+    parser.add_argument("--app-windows", action="store_true")
     parser.add_argument("--shell-fixture", type=Path)
     args = parser.parse_args()
+    assert not args.app_windows or (args.account_feedback and args.shell_consumers and not args.update_consumers)
     assert not any(part.endswith(".app") for part in args.output.resolve().parts), "native fixture must stay outside an application bundle"
     args.output.mkdir(parents=True, exist_ok=False)
     source = args.output / "source"
@@ -293,6 +295,7 @@ pub fn fixture_initial_account(app: &AppHandle) {
                                 .map(|value|LoopbackOrigin::parse(value).unwrap()).unwrap_or_else(||lifecycle.local.clone());
                             lifecycle.change(Some(origin));'''))
         update_adaptations = adapt_update_consumers(source) if args.update_consumers else {}
+        app_adaptations = adapt_app_windows(source) if args.app_windows else {}
         build(args, source, "", {
             "head":args.head, "bundle_sha256":args.bundle_sha256, "mode":"account-feedback",
             "library_original_sha256":hashlib.sha256(original_library).hexdigest(),
@@ -300,7 +303,7 @@ pub fn fixture_initial_account(app: &AppHandle) {
             "native_original_sha256":hashlib.sha256(native_original).hexdigest(),
             "native_fixture_sha256":hashlib.sha256(native.read_bytes()).hexdigest(),
             "updater_sha256":hashlib.sha256((source / "desktop/src-tauri/src/updater.rs").read_bytes()).hexdigest(),
-            "updater_key":"empty", "shell_adaptations": shell_adaptations, "update_adaptations": update_adaptations, "adaptations":["archive-only call to existing native menu owner",
+            "updater_key":"empty", "app_adaptations": app_adaptations, "shell_adaptations": shell_adaptations, "update_adaptations": update_adaptations, "adaptations":["archive-only call to existing native menu owner",
                                                  "optional one-shot failure after actual store retirement",
                                                  "bounded pause before error presentation owner check", "optional one-shot failure after actual native show/focus",
                                                  "quiet default: offscreen main and suppressed final OS focus/clamp only; foreground batch explicitly opts out",
@@ -716,6 +719,168 @@ def adapt_shell(args, source):
     pet.write_text(pet_source)
     shell_adaptations["recorded_peripheral_calls"] = ["notification.show", "window.set_badge_count", "shortcut.register", "shortcut.unregister", "open_url"]
     return shell_adaptations
+
+
+def adapt_app_windows(source):
+    """Finite real-owner controls; no shipped switch or alternate authority."""
+    library = source / "desktop/src-tauri/src/lib.rs"
+    owner = source / "desktop/src-tauri/src/app_windows.rs"
+    example = source / "desktop/src-tauri/examples/instance_client_probe.rs"
+    store = source / "desktop/src-tauri/src/instance_store.rs"
+    popup = source / "desktop/src-tauri/src/update_popover.rs"
+    native = source / "desktop/src-tauri/src/instance_client.rs"
+    support = source / "desktop/src-tauri/examples/support/fixture_shell.rs"
+    paths = (library, owner, example, store, popup, native, support)
+    before = {str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    library.write_text(library.read_text() + "\npub use app_windows::fixture as fixture_apps;\n")
+    text = owner.read_text()
+    text += '\n#[path = "../examples/support/fixture_app_windows.rs"]\npub mod fixture;\n'
+    text = text.replace(".center()", ".position(-20000., -20000.)")
+    text = text.replace("window.set_focus()", "crate::fixture_focus(|| window.set_focus())")
+    text = text.replace("window.unminimize()", 'fixture::physical(&window.as_ref().window(), "unminimize")')
+    text = text.replace("window.show()", 'fixture::physical(&window.as_ref().window(), "show")')
+    # The product's local store is an OS default store. Never access it in a
+    # test: all fixture local/control stores are ephemeral, explicitly limiting
+    # runtime evidence to separation of the test-owned stores.
+    text = text.replace(".incognito(source.runtime.disposable)", ".incognito(true)")
+    needle = "    let status = launch_owned(source, request, protocol).await;"
+    assert text.count(needle) == 1
+    text = text.replace(needle, '    fixture::pause("launch").await;\n' + needle +
+                        '\n    println!("{}",serde_json::json!({"event":"app_launch_finished","requestId":request.request_id,"status":status}));')
+    needle = "    let Some(source) = Source::capture(view) else {\n"
+    assert text.count(needle) == 1
+    text = text.replace(needle, needle + '        println!("{}",serde_json::json!({"event":"app_source_rejected","label":view.label(),"requestId":id}));\n')
+    needle = "    let source_for_callback = source.clone();"
+    assert text.count(needle) == 1
+    text = text.replace(needle, '    println!("{}",serde_json::json!({"event":"app_source_captured","label":view.label(),"requestId":id}));\n' + needle)
+    needle = '                            let _ = tx.send(raw == "true");'
+    assert text.count(needle) == 1
+    text = text.replace(needle, """                            tauri::async_runtime::spawn(async move {
+                                fixture::pause("deposit").await;
+                                let _ = tx.send(raw == "true");
+                            });""")
+    needle = "            let _ = tx.send(document_token_result(&raw));"
+    assert text.count(needle) == 1
+    text = text.replace(needle, """            tauri::async_runtime::spawn(async move {
+                fixture::pause("token").await;
+                let _ = tx.send(document_token_result(&raw));
+            });""")
+    needle = "    let window = match builder.build() {"
+    assert text.count(needle) == 1
+    text = text.replace(needle, '    let window = match if fixture::failure("build") { Err("fixture native construction".to_owned()) } else { builder.build().map_err(|error|error.to_string()) } {')
+    needle = "    let current = source.current();"
+    assert text.count(needle) == 1
+    text = text.replace(needle, '    fixture::pause("projected").await;\n' + needle)
+    needle = "            crate::instance_store::project(&child, &cookies, &epoch)"
+    assert text.count(needle) == 1
+    text = text.replace(needle, '            if fixture::failure("projection") { return Err("fixture native projection".to_owned()); }\n' + needle)
+    owner.write_text(text)
+    text = library.read_text()
+    for effect in ("show", "unminimize"):
+        needle = f"window.window().{effect}()"
+        assert text.count(needle) == 1
+        text = text.replace(needle, f'crate::fixture_apps::physical(&window.window(), "{effect}")')
+    needle = "                let _status = app_windows::open_show(launch).await;"
+    assert text.count(needle) == 1
+    text = text.replace(needle, needle + '\n                println!("{}",serde_json::json!({"event":"show_launch_finished","status":_status}));')
+    text = text.replace(".incognito(disposable)", ".incognito(true)")
+    needle = "    let window = builder.build().ok()?;"
+    assert text.count(needle) == 1
+    text = text.replace(needle, "    let window = builder.position(-20000., -20000.).focused(false).visible(false).build().ok()?;")
+    library.write_text(text)
+    text = native.read_text()
+    for receiver, effect, count in (("physical", "show", 1), ("physical", "unminimize", 1),
+                                    ("view.window()", "show", 1)):
+        needle = f"{receiver}.{effect}()"
+        assert text.count(needle) == count
+        text = text.replace(needle, f'crate::fixture_apps::physical(&{receiver}, "{effect}")')
+    native.write_text(text)
+    # Initial main uses the product builder too; the archive's context already
+    # supplies the private proxy. Account is always incognito in product source.
+    text = example.read_text()
+    needle = "    let app = tauri::Builder::default()\n"
+    assert text.count(needle) == 1
+    text = text.replace(needle, """    let builder = tauri::Builder::default();
+    #[cfg(target_os="macos")]
+    let builder = builder.activate_ignoring_other_apps(false);
+    let mut app = builder
+""")
+    needle = "    app.run(|app, event| {\n"
+    assert text.count(needle) == 1
+    # App::set_activation_policy reaches the owned runtime before run(), rather
+    # than enqueueing an AppHandle policy change after Tao's launched callback.
+    text = text.replace(needle, """    #[cfg(target_os="macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+""" + needle)
+    needle = "        .setup(move |app| {\n"
+    assert text.count(needle) == 1
+    text = text.replace(needle, needle + """            #[cfg(target_os="macos")]
+            {
+                use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+                let native=NSApplication::sharedApplication(objc2::MainThreadMarker::new().unwrap());
+                assert_eq!(native.activationPolicy(),NSApplicationActivationPolicy::Prohibited);
+                assert!(!native.isActive());
+                emit(json!({"event":"fixture_launch_policy","prohibited":true,"active":false}));
+            }
+""")
+    needle = ".invoke_handler(tauri::generate_handler![desktop_client_request])"
+    assert text.count(needle) == 1
+    text = text.replace(needle, """.invoke_handler(|invoke| {
+        if invoke.message.command() == "desktop_client_request" {
+            let handler: Box<dyn Fn(tauri::ipc::Invoke)->bool+Send+Sync> =
+                Box::new(tauri::generate_handler![desktop_client_request]);
+            handler(invoke)
+        } else { avibe_desktop_lib::fixture_apps::invoke(invoke) }
+    })""")
+    start = text.index("            let mut window_config=app.config().app.windows[0].clone();")
+    end = text.index('            if std::env::var("AVIBE_FIXTURE_FOREGROUND")', start)
+    text = text[:start] + "            avibe_desktop_lib::fixture_apps::main(app.handle());\n" + text[end:]
+    # The actual builder assigns the physical A5 receipt. Publish the fixture's
+    # local lifecycle only afterward, so its first candidate cannot capture the
+    # pre-window receipt (0) while the physical main is being registered (1).
+    needle = "            coordinator.local_origin(Some(local.clone()));\n"
+    assert text.count(needle) == 1
+    text = text.replace(needle, "")
+    needle = "            avibe_desktop_lib::fixture_apps::main(app.handle());\n"
+    text = text.replace(needle, needle + """            let fixture_origin = local_origin.lock().unwrap().clone();
+            coordinator.local_origin(fixture_origin);
+""")
+    needle = '                if instance_client::presentation_request('
+    assert text.count(needle) == 1
+    text = text.replace(needle, '                if let Some(allowed)=avibe_desktop_lib::fixture_apps::navigation(view,url) { return allowed; }\n' + needle)
+    needle = '                        "state"=>emit('
+    assert text.count(needle) == 1
+    text = text.replace(needle, '                        "app_control"=>avibe_desktop_lib::fixture_apps::control(&handle,command.clone()),\n' + needle)
+    # A missing explicit receiver must not fall back to the active Account.
+    text = text.replace('command["label"].as_str().and_then(|label|handle.get_webview(label)).or_else(||instance_client::active_webview(&handle))',
+                        'match command["label"].as_str() { Some(label)=>handle.get_webview(label), None=>instance_client::active_webview(&handle) }')
+    example.write_text(text)
+    text = store.read_text()
+    needle = '    let app = window.app_handle();\n    let label = window.label();'
+    assert text.count(needle) == 1
+    text = text.replace(needle, '    if crate::fixture_apps::failure("destroy") { return Err("fixture native window destruction".into()); }\n' + needle)
+    store.write_text(text)
+    text = popup.read_text().replace(".focused(true)", ".focused(false).incognito(true)")
+    needle = "    let Ok(window) = builder.build() else {"
+    assert text.count(needle) == 1
+    text = text.replace(needle, """    let _unused_builder = builder;
+    let Ok(window): Result<tauri::WebviewWindow, _> = crate::fixture_apps::popup_build() else {""")
+    text = text.replace("window.show()", 'crate::fixture_apps::physical(&window.as_ref().window(), "show")')
+    text = text.replace(".position(x, y)", ".position(-20000., -20000.)")
+    text = text.replace("window.set_focus()", "crate::fixture_focus(|| window.set_focus())")
+    text = text.replace('if !cfg!(target_os = "macos") {', 'if false {')
+    popup.write_text(text)
+    text = support.read_text()
+    needle = '    std::fs::create_dir_all(&data).unwrap();'
+    assert text.count(needle) == 1
+    support.write_text(text.replace(needle, needle + '\n    std::fs::write(data.join("update-auto.json"), r#"{"enabled":false}"#).unwrap();'))
+    return {"before": before, "after": {str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths},
+            "limits": ["local/default store replaced by test-owned incognito store",
+                       "process activation prohibited before event-loop run",
+                       "physical main/App hidden from creation; physical show/unminimize/focus suppressed",
+                       "popup construction excluded before parent attachment",
+                       "no visibility/foreground/minimize acceptance; role WebView show remains real",
+                       "no product startup or system URL handler"]}
 
 
 def build(args, source, public_key, record):

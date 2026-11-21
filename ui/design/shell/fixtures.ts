@@ -10,6 +10,11 @@ import type { DesignSocketMessage, DesignStreamEvent } from './network';
 
 /** What a frame can set. Everything is optional; omitted parts are empty, not loading. */
 export interface WorkbenchFixtures {
+  /** Design-only microphone preview; no capture or persisted preference. */
+  microphone?: {
+    platform: 'desktop' | 'ios';
+    state: import('@/components/settings/MicrophoneSettingsPage').MicrophoneSettingsState;
+  };
   capabilities?: InstanceCapabilities;
   /** What every ask-before-signing switch shows for turning it off; frames never reach the sandbox,
    *  so it is 'unavailable' (this build can't) unless a frame draws another state. */

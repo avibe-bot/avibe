@@ -86,7 +86,8 @@ vi.mock('../../context/ComposerBridgeContext', () => ({
   useRegisterComposerTarget: vi.fn(),
 }));
 
-vi.mock('../../context/WindowManagerContext', () => ({
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()),
   useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
 }));
 

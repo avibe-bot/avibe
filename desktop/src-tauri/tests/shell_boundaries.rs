@@ -482,7 +482,6 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
         "install(move |raw| crate::receive_native_deep_link(&app, [raw]))",
         "paramDescriptorForKeyword: DIRECT_OBJECT",
         "descriptor?.stringValue()",
-        "setEventHandler: &*handler",
         "forEventClass: GET_URL_EVENT",
         "andEventID: GET_URL_EVENT",
         "RunEvent::Exit",
@@ -490,6 +489,13 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
     ] {
         assert!(native.contains(required), "raw native delivery must retain {required}");
     }
+    // Cross-boundary constants only: the Apple Event macOS sends for a URL and
+    // the launch notification that reclaims it before the first delivery. The
+    // cold-launch ordering itself is AppKit runtime behaviour, checked on a
+    // packaged build (see the PR's TEST RC checks), not by source text.
+    assert!(native.contains("const GET_URL_EVENT: u32 = u32::from_be_bytes(*b\"GURL\");"));
+    assert!(native.contains("const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b\"----\");"));
+    assert!(native.contains("Some(NSApplicationWillFinishLaunchingNotification)"));
     for forbidden in [
         "Url::",
         "currentAppleEvent",
@@ -1828,4 +1834,14 @@ fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() 
     ] {
         assert!(!command.contains(forbidden), "the focus command must not {forbidden}");
     }
+}
+
+#[test]
+fn the_shell_asks_the_same_close_guard_key_the_app_pages_register() {
+    // The key is a cross-language byte contract; the close and quit behaviour
+    // itself is owned and tested in `app_windows`.
+    let windows = shipping_source("src/app_windows.rs");
+    let guard = read_to_string(&crate_dir().join("../../ui/src/apps/nativeWindowCloseGuard.ts"));
+    assert!(windows.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__"));
+    assert!(guard.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ ="));
 }

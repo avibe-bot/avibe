@@ -1,15 +1,13 @@
+import { isDesktopViewport } from '../../../lib/useIsDesktop';
+import { isNativeAppWindow } from '../../../lib/desktopShell';
+import { useAppLaunch } from '../../../apps/useAppLaunch';
 import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
-import { appLaunchIntent, appTabHref, type LaunchModifiers } from '../../../apps/appLaunch';
+import { appLaunchIntent, type LaunchModifiers } from '../../../apps/appLaunch';
 import { APP_LIST } from '../../../apps/registry';
-import { showAppRoutePath } from '../../apps/mobileDock';
 import { useShowPageInventory } from '../../useShowPages';
-import { useWindowManager } from '../../../context/WindowManagerContext';
-import { openLinkInNewContext } from '../../../lib/pwaNavigation';
-import { tryOpenDesktopAppWindow } from '../../../lib/desktopShell';
-import { isDesktopViewport } from '../../../lib/useIsDesktop';
 import { filterAppSearchResults, type AppSearchResult } from './appSearch';
 
 export function useAppSearchResults(query: string, enabled = true) {
@@ -48,57 +46,19 @@ export function useAppSearchResults(query: string, enabled = true) {
 }
 
 export function useOpenSearchApp() {
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('command-palette');
   const navigate = useNavigate();
   const location = useLocation();
 
   return useCallback(
     async (result: AppSearchResult, launch?: LaunchModifiers | null) => {
       const intent = launch ? appLaunchIntent(launch) : 'activate';
-      // Tab modifier held (click OR Enter) → hand the app to the browser as a real
-      // tab, the same rule the Dock and the App Library rows follow (§7.1m).
-      if (intent === 'newTab') {
-        const href = appTabHref({ appId: result.appId, sessionId: result.kind === 'showpage' ? result.sessionId : null });
-        if (href) {
-          openLinkInNewContext(href, 'noopener,noreferrer');
-          return;
-        }
-      }
-      const desktop = isDesktopViewport();
-      if (desktop) {
-        const sessionId = result.kind === 'showpage' ? result.sessionId : null;
-        const href = appTabHref({ appId: result.appId, sessionId });
-        if (href && await tryOpenDesktopAppWindow({
-          appId: result.appId,
-          sessionId,
-          title: result.title,
-          newWindow: intent === 'newWindow',
-        })) {
-          if (location.pathname === '/search') {
-            if (location.key === 'default') navigate('/inbox', { replace: true });
-            else navigate(-1);
-          }
-          return;
-        }
-        wm.openApp(result.appId, {
-          title: result.kind === 'showpage' ? result.title : undefined,
-          params:
-            result.kind === 'showpage'
-              ? { sessionId: result.sessionId, title: result.title }
-              : undefined,
-        });
-        if (location.pathname === '/search') {
-          if (location.key === 'default') navigate('/inbox', { replace: true });
-          else navigate(-1);
-        }
-        return;
-      }
-      if (result.kind === 'showpage') {
-        if (result.sessionId) navigate(showAppRoutePath(result.sessionId));
-      } else {
-        navigate(`/apps/${result.appId}`);
+      const outcome = await launchApp({ appId: result.appId, title: result.title, sessionId: result.kind === 'showpage' ? result.sessionId : undefined }, intent);
+      if (intent !== 'newTab' && (isDesktopViewport() || isNativeAppWindow()) && outcome !== 'stale' && outcome !== 'unknown' && location.pathname === '/search') {
+        if (location.key === 'default') navigate('/inbox', { replace: true });
+        else navigate(-1);
       }
     },
-    [location.key, location.pathname, navigate, wm],
+    [location.key, location.pathname, navigate, launchApp],
   );
 }

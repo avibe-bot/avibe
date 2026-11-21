@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
+import { MemoryRouter } from 'react-router-dom';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,8 +13,9 @@ import { AppsLauncher } from './AppsLauncher';
 const windowManager = vi.hoisted(() => ({ openApp: vi.fn() }));
 const drag = vi.hoisted(() => ({ active: false, dropToDock: vi.fn() }));
 
+vi.mock('../lib/useIsDesktop', () => ({ isDesktopViewport: () => true }));
 vi.mock('./apps/Dock', () => ({ Dock: () => <div data-testid="dock-content">Dock content</div> }));
-vi.mock('../context/WindowManagerContext', () => ({ useWindowManager: () => windowManager }));
+vi.mock('../context/WindowManagerContext', async (importOriginal) => ({ ...await importOriginal<typeof import('../context/WindowManagerContext')>(), useWindowManager: () => windowManager }));
 vi.mock('../context/showPageDrag', () => ({
   useShowPageDrag: () => drag,
 }));
@@ -27,9 +29,9 @@ void i18n.use(initReactI18next).init({
 });
 
 const launcher = (active = true) => (
-  <I18nextProvider i18n={i18n}>
+  <MemoryRouter><I18nextProvider i18n={i18n}>
     <RouteSurfaceActiveContext.Provider value={active}><AppsLauncher /></RouteSurfaceActiveContext.Provider>
-  </I18nextProvider>
+  </I18nextProvider></MemoryRouter>
 );
 
 const renderLauncher = () => render(launcher());
@@ -74,7 +76,7 @@ describe('AppsLauncher foreground affordance', () => {
     fireEvent.contextMenu(button, { clientX: 12, clientY: 18 });
     const openLibrary = screen.getByRole('menuitem', { name: 'Open App Library' });
     fireEvent.click(openLibrary);
-    expect(windowManager.openApp).toHaveBeenCalledWith('library');
+    expect(windowManager.openApp).toHaveBeenCalledWith('library', expect.objectContaining({ reuse: true, params: expect.objectContaining({ launchRequestId: expect.any(String) }) }));
   });
 
   it('removes its body portal on final unmount', () => {

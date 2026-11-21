@@ -1,3 +1,4 @@
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -75,9 +76,10 @@ const ShowPageWindow: React.FC<{
 // apps full screen (P5), so no free-floating windows there.
 export const WindowLayer: React.FC<{ active?: boolean }> = ({ active = true }) => {
   const { t } = useTranslation();
+  const launchApp = useAppLaunch('dock-shortcut');
   const api = useApi();
   const { order, pins } = useDock();
-  const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
+  const { windows, close, minimize, setParams, setTitle, confirmClose } =
     useWindowManager();
   // The layer is mounted shell-wide so a window survives navigation, but it only
   // reads the inventory once a window exists. Every other reader (Dock,
@@ -223,40 +225,14 @@ export const WindowLayer: React.FC<{ active?: boolean }> = ({ active = true }) =
       if (sessionId === null && !APP_REGISTRY[appId]) return;
 
       e.preventDefault();
-      const own = windowsRef.current.filter((win) =>
-        sessionId === null
-          ? win.appId === appId
-          : win.appId === 'showpage' && win.params?.sessionId === sessionId,
-      );
-      const visible = own.filter((win) => !win.minimized);
-      const focusWindowDom = (id: string) =>
-        document.querySelector<HTMLElement>(`[data-window-id="${id}"]`)?.focus({ preventScroll: true });
-      if (visible.length > 0) {
-        const target = visible.reduce((top, win) => (win.z > top.z ? win : top));
-        focus(target.id);
-        focusWindowDom(target.id);
-        return;
-      }
-      if (own.length > 0) {
-        const target = own.reduce((top, win) => (win.z > top.z ? win : top));
-        restore(target.id);
-        focusWindowDom(target.id);
-        return;
-      }
-      if (sessionId === null) {
-        const id = openApp(appId);
-        window.requestAnimationFrame(() => focusWindowDom(id));
-        return;
-      }
       const page = dockRef.current.pages.find((candidate) => candidate.session_id === sessionId);
       const snapshot = dockRef.current.pins.find((pin) => pin.session_id === sessionId)?.title_snapshot?.trim();
       const title = page ? page.title?.trim() || t('chat.untitled') : snapshot || t('chat.untitled');
-      const id = openApp('showpage', { title, params: { sessionId, title } });
-      window.requestAnimationFrame(() => focusWindowDom(id));
+      void launchApp({ appId, ...(sessionId ? { sessionId, title } : {}) });
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [active, focus, openApp, restore, t]);
+  }, [active, launchApp, t]);
 
   // Session mutations broadcast `session.activity`. Keep every open Show Page
   // window's title live, and treat archive as terminal for the frame plus every
@@ -309,7 +285,7 @@ export const WindowLayer: React.FC<{ active?: boolean }> = ({ active = true }) =
           // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
           // the sidebar and maximize fills the whole screen. This layer (z-20) sits ABOVE the sidebar
           // (z-10), but below the portaled Apps launcher and Dock (z-30).
-          className="pointer-events-none fixed inset-x-0 bottom-0 top-[var(--shell-titlebar-inset)] z-20 hidden md:block"
+          className={`pointer-events-none fixed inset-x-0 bottom-0 top-[var(--shell-titlebar-inset)] z-20 ${standaloneTab ? 'block' : 'hidden md:block'}`}
         >
           {windows.map((w) => {
             // For a showpage window, join the inventory (already loaded above — no new

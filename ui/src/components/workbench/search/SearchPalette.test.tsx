@@ -18,7 +18,8 @@ vi.mock('../../useShowPages', async () => {
     return { pages: [], loading: false, loaded: true };
   } };
 });
-vi.mock('../../../context/WindowManagerContext', () => ({ useWindowManager: () => ({ openApp: vi.fn() }) }));
+vi.mock('../../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../context/WindowManagerContext')>()), useWindowManager: () => ({ openApp: vi.fn() }) }));
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({ lng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
 const results = { sessions: [{ session_id: 's1', title: 'Search fixture', project_name: '项目', archived: true,

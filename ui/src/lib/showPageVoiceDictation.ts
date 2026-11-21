@@ -19,6 +19,7 @@ import {
 import { createVoiceActivity, reportVoiceSilenceGate, VOICE_SPEECH_RMS } from './voiceActivity';
 import { VoiceCaptureTrace, type VoiceCaptureClass, type VoiceCaptureEntry } from './voiceCaptureTrace';
 import { VoiceTakeKeeper, type VoiceTakeKeep } from './voiceTakeKeeper';
+import { requestVoiceInputStream } from './voiceInput';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   VoiceRealtimeSession,
@@ -161,7 +162,7 @@ export class ShowPageVoiceDictation {
     this.cleanupContext = { before: input.before, after: input.after };
     this.dependencies = {
       getUserMedia: dependencies.getUserMedia
-        ?? (() => navigator.mediaDevices.getUserMedia({ audio: true })),
+        ?? (() => requestVoiceInputStream()),
       createPipeline: dependencies.createPipeline
         ?? ((options) => new VoiceRecordingPipeline(options)),
       createRealtime: dependencies.createRealtime

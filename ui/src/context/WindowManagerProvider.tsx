@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { APP_REGISTRY } from '../apps/registry';
+import { registerNativeWindowCloseConfirmation } from '../apps/nativeWindowCloseGuard';
 import {
   WINDOW_RESTORE_PARAM,
   loadWorkbenchWindows,
@@ -13,6 +15,7 @@ import { useLatestRef } from '@/lib/useLatestRef';
 import { DESKTOP_MEDIA_QUERY, isDesktopViewport } from '../lib/useIsDesktop';
 import {
   WindowManagerContext,
+  WindowLaunchLifetimeContext,
   type WindowBounds,
   type WindowInstance,
   type WindowManagerValue,
@@ -128,6 +131,18 @@ export const WindowManagerProvider: React.FC<{
     else closeGuards.current.delete(id);
   }, []);
 
+  // Inside a native App window, closing or quitting that window discards every
+  // window managed here, so any managed window's unsaved work is the native
+  // window's too: its own confirm message, with the shared button labels.
+  const { t } = useTranslation();
+  useEffect(() => registerNativeWindowCloseConfirmation(() => {
+    for (const read of closeGuards.current.values()) {
+      const message = read();
+      if (message) return { message, confirm: t('apps.editor.discardAndClose'), cancel: t('common.cancel') };
+    }
+    return null;
+  }), [t]);
+
   const setStateProvider = useCallback((id: string, getState: (() => unknown) | null) => {
     if (getState) stateProviders.current.set(id, getState);
     else stateProviders.current.delete(id);
@@ -203,7 +218,40 @@ export const WindowManagerProvider: React.FC<{
     if (active instanceof HTMLElement && active.closest('[data-window-id]')) active.blur();
   }, []);
 
+  // Requests outlive a transient launcher (e.g. the command palette), but never
+  // their owning window layer/document. No pending launch is saved in layout.
+  const [launchLifetime] = useState(() => {
+    let controller = new AbortController();
+    return {
+      get controller() { return controller; },
+      begin() { if (controller.signal.aborted) controller = new AbortController(); return controller; },
+    };
+  });
+  useLayoutEffect(() => {
+    let controller = launchLifetime.begin();
+    const retire = () => controller.abort();
+    // A back-forward cache restore keeps React mounted, so the layout effect does not run again.
+    // Requests from the hidden lifetime stay aborted; the restored page gets a new one.
+    const renew = (event: PageTransitionEvent) => { if (event.persisted) controller = launchLifetime.begin(); };
+    window.addEventListener('pagehide', retire);
+    window.addEventListener('pageshow', renew);
+    return () => { window.removeEventListener('pagehide', retire); window.removeEventListener('pageshow', renew); retire(); };
+  }, [launchLifetime]);
+
   const openApp = useCallback<WindowManagerValue['openApp']>((appId, opts) => {
+    if (opts?.reuse) {
+      const existing = windowsRef.current
+        .filter((win) => win.appId === appId && (appId !== 'showpage' || win.params?.sessionId === opts.params?.sessionId) && !closingIds.current.has(win.id))
+        .sort((a, b) => Number(a.minimized) - Number(b.minimized) || b.z - a.z)[0];
+      if (existing) {
+        const z = ++zSeq.current;
+        const activate = (current: WindowInstance[]) => current.map((win) => win.id === existing.id ? { ...win, title: opts.title ?? win.title, params: { ...win.params, ...opts.params }, minimized: false, z } : win);
+        windowsRef.current = activate(windowsRef.current);
+        setWindows(activate);
+        setFocusedId(existing.id);
+        return existing.id;
+      }
+    }
     const def = APP_REGISTRY[appId];
     const size = { ...DEFAULT_SIZE, ...def?.defaultSize };
     const i = openCount.current++ % CASCADE_WRAP;
@@ -218,9 +266,7 @@ export const WindowManagerProvider: React.FC<{
       height: size.height,
       ...opts?.bounds,
     };
-    setWindows((prev) => [
-      ...prev,
-      {
+    const opened: WindowInstance = {
         id,
         appId,
         title: opts?.title,
@@ -229,25 +275,28 @@ export const WindowManagerProvider: React.FC<{
         z,
         minimized: false,
         maximized: false,
-      },
-    ]);
+    };
+    windowsRef.current = [...windowsRef.current, opened];
+    setWindows((current) => [...current, opened]);
     setFocusedId(id);
     return id;
-  }, []);
+  }, [windowsRef]);
 
   const close = useCallback((id: string) => {
     closeGuards.current.delete(id);
     stateProviders.current.delete(id);
     closingIds.current.delete(id);
     const nextWindows = windowsRef.current.filter((window) => window.id !== id);
+    windowsRef.current = nextWindows;
     setFocusedId((current) => (current === id ? highestVisibleWindow(nextWindows)?.id ?? null : current));
-    setWindows(nextWindows);
+    setWindows((current) => current.filter((window) => window.id !== id));
   }, [windowsRef]);
 
   const minimize = useCallback((id: string) => {
     const nextWindows = windowsRef.current.map((window) => (window.id === id ? { ...window, minimized: true } : window));
+    windowsRef.current = nextWindows;
     setFocusedId((current) => (current === id ? highestVisibleWindow(nextWindows)?.id ?? null : current));
-    setWindows(nextWindows);
+    setWindows((current) => current.map((window) => window.id === id ? { ...window, minimized: true } : window));
   }, [windowsRef]);
 
   const restore = useCallback(
@@ -363,5 +412,5 @@ export const WindowManagerProvider: React.FC<{
     [windows, focusedId, announceForeground, openApp, close, focus, focusCanvas, minimize, restore, toggleMaximize, setBounds, setTitle, setParams, setCloseGuard, setStateProvider, markClosing, confirmClose, gestureActive],
   );
 
-  return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;
+  return <WindowLaunchLifetimeContext.Provider value={launchLifetime}><WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider></WindowLaunchLifetimeContext.Provider>;
 };
