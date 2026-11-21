@@ -16767,7 +16767,7 @@ def cmd_remote_status(args):
 
     result = remote_access.status()
     try:
-        binding_state, _ = remote_rebind.read_state()
+        binding_state = remote_rebind.read_state()[0]
     except Exception:
         binding_state = None  # The binding note is extra; status itself must still print.
     if binding_state in _REMOTE_BINDING_STATUS_LINES:

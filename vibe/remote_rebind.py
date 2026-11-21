@@ -274,13 +274,12 @@ TEXT = {
         "(code: {code})"
     ),
     "attempt_refused": (
-        "avibe.bot has refused that attempt, and repeating it will not change its\n"
-        "answer. That does not mean avibe.bot recorded nothing of it. Nothing more is\n"
-        "done with it here; binding this computer now takes a new step from you."
+        "avibe.bot has refused an earlier attempt to bind this computer, for good.\n"
+        "It is not tried again. That does not mean avibe.bot recorded nothing of it."
     ),
     "attempt_unusable": (
-        "The record of that attempt cannot be used on this computer. Avibe cannot\n"
-        "continue it, is not retrying it, and will not guess whether it completed."
+        "The record of that attempt cannot be used on this computer. It is not\n"
+        "continued or retried, and Avibe will not guess whether it completed."
     ),
     # Why an earlier reset cannot be continued: a category, never an identifier.
     "repair_record_damaged": "its record on this computer is damaged.",
@@ -288,44 +287,35 @@ TEXT = {
     "repair_files_changed": "this computer's binding files changed after it was started.",
     "repair_mismatch": "its record no longer matches this computer.",
     "repair_note": (
-        "An earlier reset of this computer's binding was started and cannot be\n"
-        "continued: {category}\n"
-        "That reset is not continued. What follows is a new reset of this computer as\n"
-        "it is now, and your earlier answer does not count for it."
+        "A reset of this computer was started earlier and cannot be continued:\n"
+        "{category}\n"
+        "What follows is a new reset of this computer as it is now."
     ),
-    "keep_title": "Two unfinished things are on this computer",
+    # Product's text for the one state with two unfinished records (November 22).
+    "keep_head": (
+        "Two unfinished things are on this computer:\n"
+        "  - a binding that was approved earlier and can still be completed"
+    ),
+    "keep_domain": "      Domain: {host}",
+    "keep_domain_unknown": "      Its domain is shown when it has finished.",
     "keep_body": (
-        "An earlier binding of this computer was approved and can still be completed.\n"
-        "A reset of this computer's binding was also started, and it cannot be\n"
-        "continued: {category}\n"
+        "  - a reset that was started and cannot be continued: {category}\n"
         "\n"
-        "This question is about completing the binding. It resets nothing.\n"
-        "\n"
-        "If you answer yes:\n"
-        "  - The earlier binding is completed, to the account and the domain that were\n"
-        "    approved for it. The domain is shown when it has finished.\n"
-        "  - The unfinished reset is withdrawn and goes no further. What it had\n"
-        "    already done is not undone: remote access may still be off afterwards,\n"
-        "    and the command to start it is then shown.\n"
-        "\n"
-        "If you answer anything else, both stay exactly as they are, and remote access\n"
-        "on this computer stays off."
+        "Answer yes to complete the binding and drop the reset. Remote access may\n"
+        "still be off afterwards; the command to turn it on is shown then.\n"
+        "Anything else leaves both as they are, with remote access off."
     ),
-    "keep_question": "Complete the earlier binding and withdraw the reset? [y/N] ",
-    "keep_declined": (
-        "Nothing changed. The earlier binding and the unfinished reset are both as they\n"
-        "were, and remote access on this computer stays off."
-    ),
-    "keep_withdrawn": "The unfinished reset was withdrawn.",
+    "keep_question": "Complete the binding and drop the reset? [y/N] ",
+    "keep_declined": "Nothing changed. Both are as they were, with remote access off.",
+    "keep_withdrawn": "The reset was dropped.",
     "keep_changed": (
         "This computer changed while you were answering, so nothing was done.\n"
         "To look again:\n" + COMMAND
     ),
     "repair_stuck": (
-        "A reset of this computer's binding was started, and it can neither be finished\n"
-        "nor replaced by a new one safely from here. Nothing more was changed.\n"
-        "Remote access stays off. Sessions, files and settings on this computer are\n"
-        "not affected.\n"
+        "A reset of this computer was started, and it can neither be finished nor\n"
+        "replaced by a new one safely from here. Nothing more was changed: remote\n"
+        "access stays off, and your data on this computer is not affected.\n"
         "For help, see https://docs.avibe.bot/troubleshoot/common-issues or ask an\n"
         "Agent in Avibe to report this to Avibe."
     ),
@@ -421,8 +411,8 @@ def _context() -> _Context:
     return _Context(url if host else "", host, port if 0 < port < 65536 else 5123, bound)
 
 
-def read_state() -> tuple[str, bool]:
-    """The local binding state and whether the tunnel process is running. Read-only."""
+def read_state() -> tuple[str, bool, str | None]:
+    """The local binding state, whether the tunnel process runs, and a reason. Read-only."""
     from vibe.desktop_local_instance import LocalInstanceError
     from vibe.personal_claim_client import ClaimError
     from vibe.personal_claims import rebind_claims
@@ -432,16 +422,18 @@ def read_state() -> tuple[str, bool]:
     except LocalInstanceError as exc:
         # An unreadable settings file blocks every writer; other local damage is
         # what the explicit reset exists to clear.
-        return ("config_unreadable" if exc.code == "local_binding_unavailable" else "damaged"), False
+        return ("config_unreadable" if exc.code == "local_binding_unavailable" else "damaged"), False, None
     except ClaimError:
-        return "damaged", False
+        return "damaged", False, None
     except (OSError, ValueError):
-        return "config_unreadable", False
+        return "config_unreadable", False, None
     state = view.get("binding_state")
-    return (state if state in STATE_LABELS else "damaged"), bool(view.get("connector_still_running"))
+    reason = view.get("reason_code")
+    return ((state if state in STATE_LABELS else "damaged"), bool(view.get("connector_still_running")),
+            reason if reason == "issuer_replay_refused" else None)
 
 
-def _print_state(state: str, tunnel: bool, ctx: _Context) -> None:
+def _print_state(state: str, tunnel: bool, ctx: _Context, reason: str | None = None) -> None:
     _say("heading")
     if ctx.url:
         _say("line_domain", url=ctx.url)
@@ -453,6 +445,11 @@ def _print_state(state: str, tunnel: bool, ctx: _Context) -> None:
         _say("rejected_note")
         if tunnel:
             _say("rejected_tunnel_note")
+    if reason == "issuer_replay_refused":
+        # Said once, here. The refused request no longer holds the binding in
+        # recovery, so what follows is the ordinary flow for the state shown.
+        print()
+        _say("attempt_refused")
 
 
 def _print_two_ways(ctx: _Context) -> None:
@@ -586,8 +583,8 @@ def _offer_reset(ctx: _Context, *, intro: str | None = None, bound: bool = True,
     if state == "declined":
         _say("reset_declined")
         return "declined"
-    # A replacement reset was sealed and has not run to the end.
-    _say("repair_stuck" if state == "reset_repair_required" else "reset_unfinished")
+    # Sealed and not run to the end, whatever stopped it: the same command continues.
+    _say("reset_unfinished")
     return "stopped"
 
 
@@ -619,20 +616,25 @@ def _repair_category(reason_code: object) -> str:
     return TEXT[REPAIR_CATEGORIES.get(reason_code if isinstance(reason_code, str) else "", "repair_mismatch")]
 
 
-def _offer_keep_binding(reason_code: object) -> dict | None:
+def _offer_keep_binding(view: dict) -> dict | None:
     """A recoverable binding next to a reset that cannot continue: complete the binding?
 
     This is never the reset question. Declining leaves both records as they are.
     Returns the backend's view after a yes, or None when the person declined.
+    The domain shown is handed back, so no other target can be confirmed.
     """
+    host = view.get("hostname") if isinstance(view.get("hostname"), str) else None
     answered = False
 
     def confirm() -> bool:
         nonlocal answered
         print()
-        _say("keep_title")
-        print()
-        _say("keep_body", category=_repair_category(reason_code))
+        _say("keep_head")
+        if host:
+            _say("keep_domain", host=host)
+        else:
+            _say("keep_domain_unknown")
+        _say("keep_body", category=_repair_category(view.get("reason_code")))
         print()
         try:
             answer = input(TEXT["keep_question"])
@@ -643,15 +645,15 @@ def _offer_keep_binding(reason_code: object) -> dict | None:
         return answered
 
     try:
-        view = _resume(confirm_pairing=confirm)
+        result = _resume(confirm_pairing=confirm, **({"expected_hostname": host} if host else {}))
     except KeyboardInterrupt:
         print()
-        view = {"state": "interrupted"}
+        result = {"state": "interrupted"}
     print()
     if not answered:
         _say("keep_declined")
         return None
-    return view
+    return result
 
 
 def _link(ctx: _Context, *, after_reset: bool, may_offer_reset: bool = True) -> int:
@@ -684,7 +686,7 @@ def _link(ctx: _Context, *, after_reset: bool, may_offer_reset: bool = True) -> 
         view = personal_claims.run_link(show_link=show, confirm=confirm, locale="en")
     except KeyboardInterrupt:
         print()
-        state, _ = read_state()
+        state = read_state()[0]
         if state == "pairing_recovery_required":
             _say("recovery_required")
         elif state in ("bound", "binding_rejected"):
@@ -751,7 +753,7 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
         _say("reset_continue" if started_as == "resetting" else "continue_attempt")
     view = _resume()
     if view.get("state") == "reset_repair_required" and view.get("next_action") == "confirm_resume_pairing":
-        kept = _offer_keep_binding(view.get("reason_code"))
+        kept = _offer_keep_binding(view)
         if kept is None:
             return 0
         if kept.get("state") == "reset_repair_required" or kept.get("state") == "interrupted":
@@ -761,7 +763,7 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
         view = kept
     state, reason = view.get("state"), view.get("reason_code")
     if state == "idle":  # Nothing left to continue: where does the computer stand now?
-        state, _ = read_state()
+        state = read_state()[0]
         if state in ("resetting", "pairing_recovery_required", "reset_repair_required"):
             state, reason = "operation_in_progress", None  # It reappeared under another writer.
     if state == "operation_in_progress":
@@ -781,6 +783,7 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
             ctx, intro=TEXT["repair_note"].format(category=_repair_category(reason)), repair=True))
     if state == "pairing_recovery_required":
         if reason == "issuer_replay_refused":
+            print()
             _say("attempt_refused")
             if _context().bound:
                 _print_two_ways(ctx)
@@ -813,9 +816,9 @@ def run() -> int:
     if not _interactive():
         print(TEXT["not_interactive"], file=sys.stderr)
         return 1
-    state, tunnel = read_state()
+    state, tunnel, reason = read_state()
     ctx = _context()
-    _print_state(state, tunnel, ctx)
+    _print_state(state, tunnel, ctx, reason)
     if state == "config_unreadable":
         print()
         _say("config_unreadable")

@@ -7,7 +7,7 @@ the explanation the public Chinese docs give for that prompt, not something the
 command prints. `{…}` is filled in at run time. Nothing here prints an
 installation id, a device key, a callback proof or the reset confirmation.
 
-Marks say who decided what. One passage is still open: **H9**.
+Marks say who decided what.
 
 ## How the command runs
 
@@ -20,7 +20,7 @@ Marks say who decided what. One passage is still open: **H9**.
 | not bound | binds it: link, wait, accept account and domain | E |
 | an earlier attempt is unfinished | one bounded step of that same attempt; never a second attempt beside it | H1 to H4 |
 | a reset is unfinished | one bounded step of that reset, then binds | H5 to H7, then F1, E |
-| a reset cannot continue | asks for a new reset (H8a), or says it cannot (H8b), or asks whether to complete the earlier binding instead (H9) | H8, H9 |
+| a reset cannot continue | asks for a new reset (H8a), or says it cannot (H8b), or asks whether to complete an earlier binding instead (H9) | H8, H9 |
 
 At a terminal the reset is offered on local state and a typed `yes`: the terminal
 cannot ask avibe.bot to bind a bound computer again (that is the browser way),
@@ -126,6 +126,19 @@ To look again:
 
 ```
 Avibe 判断不出这台电脑的绑定处于什么状态。什么都没有改变。再看一次：vibe remote rebind（代码：{code}）
+```
+
+**B6** · lead: said once here, not a dialogue · under the state lines when avibe.bot answered an earlier "Bind remote access again" with a final refusal (`reason_code: issuer_replay_refused`). The state shown is the ordinary one and the ordinary flow follows. How a person gets here: they approved binding again in the browser, the computer lost the reply, and avibe.bot then refused the saved request for good.
+
+```
+avibe.bot has refused an earlier attempt to bind this computer, for good.
+It is not tried again. That does not mean avibe.bot recorded nothing of it.
+```
+
+中文说明：
+
+```
+avibe.bot 已经彻底拒绝了之前的一次绑定，不会再重试。这不代表 avibe.bot 那边什么都没有记下。
 ```
 
 ## C. The two ways, shown when the computer is bound
@@ -746,32 +759,18 @@ Nothing new was started. To try again:
 还没有完成：暂时连不上 avibe.bot，或者它还没有答复。没有开始任何新的绑定。再试一次：vibe remote rebind
 ```
 
-**H4r** · new: backend round · `pairing_recovery_required` / `issuer_replay_refused`. Then C1 to D1 on a bound computer, or the link on one that is not. It does not say avibe.bot never recorded the attempt.
+**H4u** · shortened for a rare state · `pairing_recovery_required` / `pairing_record_unusable`. Not called final, no promise to retry. Then D1 introduced by the last line, if `reset_interactively` admits it. How a person gets here: a bind was interrupted and its saved record is from an older version or unreadable.
 
 ```
-avibe.bot has refused that attempt, and repeating it will not change its
-answer. That does not mean avibe.bot recorded nothing of it. Nothing more is
-done with it here; binding this computer now takes a new step from you.
-```
-
-中文说明：
-
-```
-avibe.bot 已经拒绝了那一次绑定，再重复也不会改变它的答复。这不代表 avibe.bot 那边什么都没有记下。这里不会再对它做任何事；现在要绑定这台电脑，需要你重新走一步。
-```
-
-**H4u** · new: backend round · `pairing_recovery_required` / `pairing_record_unusable`. Not called final, no promise to retry. Then D1 introduced by the second line, if `reset_interactively` admits it.
-
-```
-The record of that attempt cannot be used on this computer. Avibe cannot
-continue it, is not retrying it, and will not guess whether it completed.
+The record of that attempt cannot be used on this computer. It is not
+continued or retried, and Avibe will not guess whether it completed.
 Binding as a new computer clears that record.
 ```
 
 中文说明：
 
 ```
-那一次绑定的记录在这台电脑上已经用不了。Avibe 没法继续它，也不会重试，更不会猜它有没有完成。
+那一次绑定的记录在这台电脑上已经用不了。它不会被继续或重试，Avibe 也不会猜它有没有完成。
 作为一台新电脑重新绑定会清除这条记录。
 ```
 
@@ -827,13 +826,12 @@ does. To try again:
 暂时还完成不了。完成之前，这台电脑的远程访问保持关闭。再试一次：vibe remote rebind
 ```
 
-**H8a** · new: needs the same weight as D1; reads as a reset, not a repair · `reset_repair_required` with no recoverable binding next to it, and `reset_interactively(repair=True)` accepts. This paragraph, then all of D1. `{category}` is one of the four lines below.
+**H8a** · shortened; reads as a reset, not a repair; D1's weight · `reset_repair_required` with no recoverable binding next to it, and `reset_interactively(repair=True)` accepts. These three lines, then all of D1. `{category}` is one of the four endings. How a person gets here: a reset was cut short (power loss, a killed process) and the binding or its files then changed, or the record was damaged on disk.
 
 ```
-An earlier reset of this computer's binding was started and cannot be
-continued: {category}
-That reset is not continued. What follows is a new reset of this computer as
-it is now, and your earlier answer does not count for it.
+A reset of this computer was started earlier and cannot be continued:
+{category}
+What follows is a new reset of this computer as it is now.
 its record on this computer is damaged.
 this computer's binding changed after it was started.
 this computer's binding files changed after it was started.
@@ -843,18 +841,17 @@ its record no longer matches this computer.
 中文说明：
 
 ```
-之前开始的一次绑定重置没法继续：{category}
-那一次重置不会被继续。接下来是对这台电脑现在的状态重新做一次重置，你之前的回答对它不算数。
-四种情况：它在这台电脑上的记录已损坏／重置开始之后这台电脑的绑定变了／重置开始之后这台电脑的绑定文件变了／它的记录和这台电脑对不上。
+这台电脑之前开始过一次重置，它没法继续：{category}
+接下来是对这台电脑现在的状态重新做一次重置。
+四种原因：它在这台电脑上的记录已损坏／重置开始之后这台电脑的绑定变了／重置开始之后这台电脑的绑定文件变了／它的记录和这台电脑对不上。
 ```
 
-**H8b** · `reset_repair_required` and a new reset is refused before the question
+**H8b** · shortened · `reset_repair_required` and the backend cannot verify what a new reset would clear (for example the record is a link to somewhere else, or the data folder was moved). Nothing is asked.
 
 ```
-A reset of this computer's binding was started, and it can neither be finished
-nor replaced by a new one safely from here. Nothing more was changed.
-Remote access stays off. Sessions, files and settings on this computer are
-not affected.
+A reset of this computer was started, and it can neither be finished nor
+replaced by a new one safely from here. Nothing more was changed: remote
+access stays off, and your data on this computer is not affected.
 For help, see https://docs.avibe.bot/troubleshoot/common-issues or ask an
 Agent in Avibe to report this to Avibe.
 ```
@@ -862,68 +859,59 @@ Agent in Avibe to report this to Avibe.
 中文说明：
 
 ```
-这台电脑的绑定重置已经开始，但在这里既不能把它做完，也不能安全地换成一次新的重置。没有再改动任何东西。远程访问保持关闭；这台电脑上的会话、文件和设置不受影响。
+这台电脑开始过一次重置，在这里既不能把它做完，也不能安全地换成一次新的重置。没有再改动任何东西：远程访问保持关闭，这台电脑上的数据不受影响。
 求助：https://docs.avibe.bot/troubleshoot/common-issues ，或者请 Avibe 里的 Agent 把这个问题报告给 Avibe。
 ```
 
-**H9** · **Product: new, not yet decided** · `reset_repair_required` with `next_action=confirm_resume_pairing`: a reset that cannot continue and a binding that can still be completed are both on the computer. Its own question, through `resume_interactively(confirm_pairing=...)`; never the reset question. The function gives the terminal neither the account nor the domain of that binding, so the question cannot name them; the domain is printed when it has finished (H2).
+**H9** · Product: decided November 22, this text · `reset_repair_required` with `next_action=confirm_resume_pairing`. Its own question, through `resume_interactively(confirm_pairing=..., expected_hostname=...)`; never the reset question. The domain line is the approved domain the backend returns and is handed back with the answer; when the backend cannot give one, the second variant of that line is printed. Never an account id. How a person gets here: a bind was approved and cut short before it was saved, and a reset record on the same computer is damaged.
 
 ```
-Two unfinished things are on this computer
-An earlier binding of this computer was approved and can still be completed.
-A reset of this computer's binding was also started, and it cannot be
-continued: {category}
+Two unfinished things are on this computer:
+  - a binding that was approved earlier and can still be completed
+      Domain: {host}
+      Its domain is shown when it has finished.
+  - a reset that was started and cannot be continued: {category}
 
-This question is about completing the binding. It resets nothing.
-
-If you answer yes:
-  - The earlier binding is completed, to the account and the domain that were
-    approved for it. The domain is shown when it has finished.
-  - The unfinished reset is withdrawn and goes no further. What it had
-    already done is not undone: remote access may still be off afterwards,
-    and the command to start it is then shown.
-
-If you answer anything else, both stay exactly as they are, and remote access
-on this computer stays off.
-Complete the earlier binding and withdraw the reset? [y/N] 
+Answer yes to complete the binding and drop the reset. Remote access may
+still be off afterwards; the command to turn it on is shown then.
+Anything else leaves both as they are, with remote access off.
+Complete the binding and drop the reset? [y/N] 
 ```
 
 中文说明：
 
 ```
-这台电脑上有两件没做完的事
-之前有一次绑定已经得到确认，现在仍然可以完成。另外还开始过一次绑定重置，它没法继续：{category}
-这个问题问的是要不要完成那次绑定，它不会重置任何东西。
-如果回答 y：
-  - 完成之前那次绑定，绑定到当时确认的账号和域名；完成后会显示域名。
-  - 撤回没做完的重置，它不会再往下进行；它已经做过的部分不会恢复：之后远程访问可能仍然是关着的，那时会显示打开它的命令。
-其他任何回答：两件事都保持原样，这台电脑的远程访问保持关闭。
-完成之前那次绑定，并撤回重置？[y/N]
+这台电脑上有两件没做完的事：
+  - 之前确认过、现在仍然可以完成的一次绑定
+      域名：{host}（读不到域名时改为：完成后会显示它的域名）
+  - 一次已经开始、没法继续的重置：{category}
+回答 y：完成那次绑定，并放弃那次重置。之后远程访问可能仍然是关着的，那时会显示打开它的命令。
+其他任何回答：两件事都保持原样，远程访问保持关闭。
+完成绑定并放弃重置？[y/N]
 ```
 
 **H9a** · anything but `y` at H9
 
 ```
-Nothing changed. The earlier binding and the unfinished reset are both as they
-were, and remote access on this computer stays off.
+Nothing changed. Both are as they were, with remote access off.
 ```
 
 中文说明：
 
 ```
-什么都没有改变。之前那次绑定和没做完的重置都保持原样，这台电脑的远程访问保持关闭。
+什么都没有改变。两件事都保持原样，远程访问保持关闭。
 ```
 
 **H9b** · `y` at H9 and the reset was withdrawn; H2, H4 or H4b follows by what the binding step returned
 
 ```
-The unfinished reset was withdrawn.
+The reset was dropped.
 ```
 
 中文说明：
 
 ```
-没做完的重置已经撤回。
+那次重置已经放弃。
 ```
 
 **H9c** · `y` at H9 but the computer changed while the question was open
@@ -974,9 +962,12 @@ out, and leaves remote access off where it was off.
 - **G2**: the offer of a new computer after the loopback refusal stays, as a
   separate choice that defaults to no. **G8**: an unexplained refusal infers
   nothing and offers no reset (reviewer).
-- **Open: H9.** It states what happens to the binding. Two things for Product:
-  the wording, and that the question cannot name the account or the domain
-  because the backend does not hand them to the terminal.
-- **Open: H8b's help pointer.** The public troubleshooting page plus "ask an
-  Agent in Avibe to report this to Avibe", the repository's existing feedback
-  route. No new channel.
+- **H9** decided by Product on November 22: asked without the email, with the
+  approved domain when the backend can give it.
+- **B6**: a request avibe.bot refused for good is said once under the state
+  lines, not as a dialogue (lead).
+- **Rare states carry little text** (Product's limit): H4u, H8a and H8b are
+  shortened, and each rare state names how a person gets there. No further
+  question is added to this command without that line.
+- **H8b's help pointer** is the public troubleshooting page plus "ask an Agent
+  in Avibe to report this to Avibe", the repository's existing feedback route.

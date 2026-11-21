@@ -261,7 +261,7 @@ UNFINISHED = [
 @pytest.mark.parametrize("start,resumed,reread,sentence,code,binds", UNFINISHED)
 def test_unfinished_work_is_continued_not_restarted(terminal, monkeypatch, capsys, start, resumed, reread, sentence, code, binds):
     states = iter([start, reread])
-    monkeypatch.setattr(remote_rebind, "read_state", lambda: (next(states, "bound"), True))
+    monkeypatch.setattr(remote_rebind, "read_state", lambda: (next(states, "bound"), True, None))
     monkeypatch.setattr(remote_rebind, "_resume", lambda **_: resumed)
     monkeypatch.setattr(binding_reset, "reset_interactively", lambda **_: pytest.fail("a reset was offered"))
     linked = []
@@ -293,7 +293,7 @@ def _unfinished_attempt(monkeypatch, issuer):
     return sends
 
 
-def test_an_attempt_avibe_bot_refused_for_good_is_not_called_unrecorded_and_needs_a_new_step(bound_terminal, monkeypatch, capsys):
+def test_an_attempt_avibe_bot_refused_for_good_is_said_once_and_is_not_called_unrecorded(bound_terminal, monkeypatch, capsys):
     def refuse(_n):
         raise remote_access.BackendRequestError(409, {"error": "registration_indeterminate"})
 
@@ -303,11 +303,13 @@ def test_an_attempt_avibe_bot_refused_for_good_is_not_called_unrecorded_and_need
     assert _walk(bound_terminal, [""]) == 0
 
     out = capsys.readouterr().out
-    assert "Binding: an earlier attempt is unfinished" in out and "has refused that attempt" in out
-    assert "That does not mean avibe.bot recorded nothing of it." in out and "a new step from you" in out
-    # The new step is offered, never taken: the same two ways, the same question, default no.
-    assert out.index("a new step from you") < out.index("1. Bind remote access again") < out.index("Type yes")
-    assert len(sends) == 1 and _instance() == "inst_A"
+    # The refused request no longer holds the binding: the state is the ordinary one.
+    assert "Binding: bound" in out and "unfinished" not in out
+    assert out.count("has refused an earlier attempt to bind this computer, for good.") == 1
+    assert "That does not mean avibe.bot recorded nothing of it." in out
+    # No dialogue of its own: the same two ways and the same question, default no.
+    assert out.index("for good.") < out.index("1. Bind remote access again") < out.index("Type yes")
+    assert len(bound_terminal.prompts) == 1 and len(sends) == 1 and _instance() == "inst_A"
 
 
 def test_completing_an_earlier_binding_is_its_own_question_never_the_reset_question(bound_terminal, monkeypatch, capsys):
@@ -327,16 +329,22 @@ def test_completing_an_earlier_binding_is_its_own_question_never_the_reset_quest
     for answer in ("", "yes please", EOFError, KeyboardInterrupt):
         assert _walk(bound_terminal, [answer]) == 0
         out = capsys.readouterr().out
-        assert "Two unfinished things are on this computer" in out and "It resets nothing." in out
-        assert "its record on this computer is damaged." in out
+        assert "Two unfinished things are on this computer:" in out
+        assert "      Domain: fixture.avibe.bot" in out and "its record on this computer is damaged." in out
+        assert "Answer yes to complete the binding and drop the reset." in out
         assert "Type yes to bind as a new computer" not in out and "You lose:" not in out
-        assert out.rstrip().endswith("remote access on this computer stays off.")
+        assert out.rstrip().endswith("Both are as they were, with remote access off.")
         assert before == (gate.reset_intent_path().read_bytes(), remote_access._pending_pairing_path().read_bytes())
-    assert len(sends) == 1 and all("Complete the earlier binding" in prompt for prompt in bound_terminal.prompts)
+    assert len(sends) == 1 and all("Complete the binding and drop the reset?" in prompt for prompt in bound_terminal.prompts)
 
+    # The domain that was shown is the one handed back for the backend to hold the answer to.
+    asked_for = []
+    original = remote_rebind._resume
+    monkeypatch.setattr(remote_rebind, "_resume", lambda **kw: asked_for.append(kw.get("expected_hostname")) or original(**kw))
     assert _walk(bound_terminal, ["y"]) == 0
     out = capsys.readouterr().out
-    assert "The unfinished reset was withdrawn." in out and "Finished. This computer is bound: https://fixture.avibe.bot" in out
+    assert asked_for == [None, "fixture.avibe.bot"]
+    assert "The reset was dropped." in out and "Finished. This computer is bound: https://fixture.avibe.bot" in out
     # Completing the binding does not claim remote access is back: it names the command that starts it.
     assert out.rstrip().endswith("vibe remote start") and "restored" not in out
     assert len(sends) == 2 and sends[0] == sends[1] and not gate.reset_in_progress() and _instance() == "inst_A"
@@ -365,7 +373,7 @@ def test_a_reset_that_cannot_continue_is_replaced_only_by_asking_for_a_new_reset
     out = capsys.readouterr().out
     assert "Binding: a reset cannot finish" in out and category in out
     # It reads as a reset of this computer, with everything a reset says, not as a repair.
-    assert "What follows is a new reset of this computer" in out and "your earlier answer does not count" in out
+    assert "What follows is a new reset of this computer as it is now." in out
     assert out.index("You lose:") < out.index("This cannot be undone.") < out.index("Type yes to bind as a new computer.")
     assert "repair" not in out.lower()
     assert gate.reset_intent_path().read_bytes() == before and _instance() == "inst_A"
@@ -376,25 +384,38 @@ def test_a_reset_that_cannot_continue_is_replaced_only_by_asking_for_a_new_reset
     assert not gate.reset_in_progress() and bound_terminal.peer.decisions == ["owner-id"]
 
 
-def test_a_reset_that_cannot_be_replaced_safely_says_so_and_asks_nothing(bound_terminal, monkeypatch, capsys):
+@pytest.mark.parametrize("verifiable", [True, False])
+def test_a_reset_is_replaced_only_where_its_scope_can_be_verified(bound_terminal, monkeypatch, capsys, verifiable):
     from config.v2_config import config_file_lock
 
     with gate.admitted("reset"), config_file_lock():
         binding_reset._seal(V2Config.load())
-    gate.reset_intent_path().write_text("{")
+    marker = gate.reset_intent_path()
+    marker.write_text("{")
     remote_access._pending_pairing_path().write_text("not a pairing record")
+    if not verifiable:
+        # A record that is a link elsewhere says nothing safe about this data root.
+        elsewhere = marker.with_name("elsewhere.json")
+        marker.rename(elsewhere)
+        marker.symlink_to(elsewhere)
     _no_link(monkeypatch)
 
-    assert _walk(bound_terminal, []) == 1
+    assert _walk(bound_terminal, [""]) == (0 if verifiable else 1)
 
     out = capsys.readouterr().out
-    assert "nor replaced by a new one safely from here" in out and "docs.avibe.bot" in out
-    assert gate.reset_in_progress() and _instance() == "inst_A" and not bound_terminal.prompts
+    if verifiable:
+        # As wide as a first reset: the same question with the same weight, default no.
+        assert out.index("You lose:") < out.index("Type yes to bind as a new computer.")
+        assert out.rstrip().endswith("This computer's binding is as it was.") and len(bound_terminal.prompts) == 1
+    else:
+        assert "neither be finished nor\nreplaced by a new one safely from here" in out and "docs.avibe.bot" in out
+        assert not bound_terminal.prompts
+    assert gate.reset_in_progress() and _instance() == "inst_A"
 
 
 def test_status_start_and_pair_say_what_the_binding_needs(bound_terminal, monkeypatch, capsys):
     json_off = SimpleNamespace(json=False)
-    monkeypatch.setattr(remote_rebind, "read_state", lambda: ("binding_rejected", True))
+    monkeypatch.setattr(remote_rebind, "read_state", lambda: ("binding_rejected", True, None))
     assert cli.cmd_remote_status(json_off) == 0
     assert "  Binding: refused by avibe.bot. See: vibe remote rebind" in capsys.readouterr().out
     assert cli.cmd_remote_status(SimpleNamespace(json=True)) == 0
