@@ -25,10 +25,12 @@ export function DesktopAccountRowView({ state, onPresent, localUpdater, instance
   const instance = state.connection.committed.kind === 'local'
     ? state.local.slug ?? t('desktopClient.thisDevice') : state.connection.committed.name;
   const label = signedIn ? instance : t('desktopClient.signIn');
-  // The glyph and the label are one group centred in the trigger, with the same inset on both
-  // sides of the hover wash; a long instance name fills it and truncates. No hover tip, not even
-  // for a truncated name (Max, 2026-11-20): the label is the button's name.
-  const accountTrigger = <Button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-center gap-1.5 rounded-md border border-transparent px-2 text-xs [--press-scale:1]">
+  // The glyph starts where the Apps button's icon starts, one row up: the trigger has that button's 1px
+  // edge and px-4 inset, so the row reads from the same left line as the sidebar above it and the hover
+  // wash never ends at the dot. Centred in the trigger, the dot sat some 40 px further in, behind an empty
+  // stretch (the owner, 2026-11-21). A long instance name fills the trigger and truncates. No hover tip,
+  // not even for a truncated name (Max, 2026-11-20): the label is the button's name.
+  const accountTrigger = <Button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')} variant="ghost" className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-md border border-transparent pl-4 pr-1.5 text-left text-xs [--press-scale:1]">
     <StatusGlyph label={label}>
       {/* The icon fills its box where the dot leaves 2 px free, so it sits 2 px left: the same clear space
           before the name in every state, and the name does not move. */}
