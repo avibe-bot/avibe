@@ -210,7 +210,7 @@ describe('the hold surfaces the iOS App follows', () => {
     await settle();
     expect(named()).toHaveLength(1);
     top = 300;
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(500);
     expect(named().at(-1)).toEqual({ surfaces: [] });
   });
 
@@ -226,13 +226,13 @@ describe('the hold surfaces the iOS App follows', () => {
     expect(named()).toEqual([]);
     // The slide ends; nothing renders, scrolls or is touched.
     sliding = false;
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(500);
     expect(named()).toEqual([{ surfaces: [{ id: 'composer', x: 0, y: 700, width: 390, height: 60 }], holdMs: 200 }]);
 
     // Under a sheet that stays: measured once more at rest, then left alone.
     sliding = true;
     refreshHoldSurfaces();
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(500);
     expect(named().at(-1)).toEqual({ surfaces: [] });
     const measures = measured.mock.calls.length;
     await vi.advanceTimersByTimeAsync(5_000);
@@ -251,7 +251,7 @@ describe('the hold surfaces the iOS App follows', () => {
     expect(named()).toHaveLength(1);
     top = 300;
     // A reply streaming in: the list scrolls every 100 ms, and never stops.
-    for (let step = 0; step < 4; step += 1) {
+    for (let step = 0; step < 5; step += 1) {
       window.dispatchEvent(new Event('scroll'));
       await vi.advanceTimersByTimeAsync(100);
     }
@@ -281,6 +281,20 @@ describe('the hold surfaces the iOS App follows', () => {
     expect(call.mock.calls.some(([method]) => method === 'voice.holdReject')).toBe(false);
   });
 
+  // A scrolling input clips its text: a paragraph taller than the box reaches, unseen, over
+  // the buttons below it, and a touch there is theirs.
+  it('names only the box of a surface that clips what leaves it', async () => {
+    const input = box(0, 700, 390, 60);
+    input.style.overflowY = 'auto';
+    const paragraph = document.createElement('p');
+    paragraph.getBoundingClientRect = () => new DOMRect(0, 700, 390, 220);
+    input.append(paragraph);
+    registerHoldSurface('composer', surface(input));
+    await settle();
+    expect(named()).toEqual([{ surfaces: [{ id: 'composer', x: 0, y: 700, width: 390, height: 60 }], holdMs: 200 }]);
+    expect(holdFollowed('composer', 100, 800)).toBe(false);
+  });
+
   it('keeps a surface as the App has it while a press is live there, whatever lies over it', async () => {
     let live = false;
     const composer = box(0, 700, 390, 60);
@@ -289,7 +303,7 @@ describe('the hold surfaces the iOS App follows', () => {
     // The press's own card covers the box, and the box may no longer be one for a new press.
     live = true;
     box(0, 600, 390, 200);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(500);
     expect(named()).toHaveLength(1);
     expect(holdFollowed('composer', 100, 720)).toBe(true);
     live = false;
@@ -317,7 +331,7 @@ describe('the hold surfaces the iOS App follows', () => {
       await settle();
     }
     expect(tops()).toEqual([700, 650]);
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(500);
     expect(tops()).toEqual([700, 650, 600]);
 
     top = 500;
