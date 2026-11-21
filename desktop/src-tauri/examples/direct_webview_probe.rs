@@ -573,7 +573,9 @@ mod macos_probe {
         let stale = fetch(&webview, mtm, &request, || false);
         report.case(
             "another-origin-or-a-stale-selection-asks-nothing",
-            wrong_origin == Some(Reply::NotReady) && stale == Some(Reply::NotReady) && instance.rendezvous_requests().is_empty(),
+            wrong_origin == Some(Reply::NotReady)
+                && stale == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().is_empty(),
             json!({ "wrong_origin": format!("{wrong_origin:?}"), "stale": format!("{stale:?}"), "requests": instance.rendezvous_requests().len() }),
         );
 
@@ -589,7 +591,10 @@ mod macos_probe {
         });
         report.case(
             "an-answer-for-a-selection-that-changed-is-dropped",
-            loaded && changed == Some(Reply::Failed) && instance.rendezvous_requests().len() == 1 && *asked.borrow() == 2,
+            loaded
+                && changed == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().len() == 1
+                && *asked.borrow() == 2,
             json!({ "reply": format!("{changed:?}"), "requests": instance.rendezvous_requests().len(), "asked": *asked.borrow() }),
         );
 
@@ -1020,7 +1025,9 @@ mod windows_probe {
         let stale = fetch(&view, &request, || false);
         report.case(
             "another-origin-or-a-stale-selection-asks-nothing",
-            wrong_origin == Some(Reply::NotReady) && stale == Some(Reply::NotReady) && instance.rendezvous_requests().is_empty(),
+            wrong_origin == Some(Reply::NotReady)
+                && stale == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().is_empty(),
             json!({ "wrong_origin": format!("{wrong_origin:?}"), "stale": format!("{stale:?}"), "requests": instance.rendezvous_requests().len() }),
         );
 
@@ -1035,7 +1042,10 @@ mod windows_probe {
         });
         report.case(
             "an-answer-for-a-selection-that-changed-is-dropped",
-            loaded && changed == Some(Reply::Failed) && instance.rendezvous_requests().len() == 1 && *asked.borrow() == 2,
+            loaded
+                && changed == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().len() == 1
+                && *asked.borrow() == 2,
             json!({ "reply": format!("{changed:?}"), "requests": instance.rendezvous_requests().len(), "asked": *asked.borrow() }),
         );
 

@@ -114,4 +114,11 @@ fn only_a_complete_200_from_the_script_gives_a_body() {
         assert_eq!(Reply::read(reply), expected, "{reply:?}");
         assert_eq!(Reply::read(reply).body(), None);
     }
+    // The script never says that the selection changed: only native code
+    // knows the selection, and no reply of a page's world can claim it.
+    assert_eq!(Reply::SelectionChanged.body(), None);
+    for failure in ["selection", "selection-changed", "SelectionChanged"] {
+        let reply = format!(r#"{{"ok":false,"failure":"{failure}"}}"#);
+        assert_eq!(Reply::read(Some(&reply)), Reply::Failed, "{failure}");
+    }
 }

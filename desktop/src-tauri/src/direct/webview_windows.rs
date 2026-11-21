@@ -36,11 +36,18 @@ const CHALLENGE: &str = "Basic realm=\"Avibe Direct\"";
 /// instance's usual Origin and CSRF checks.
 ///
 /// `current` is the shell's own word that the selection this request was
-/// started for is still the one on show. It is asked, with the top frame's
-/// exact origin, before the request; when the answer arrives it is asked
-/// again, and the top frame must still be the same document (the same frame
-/// and the same loader). An answer that arrives for anything else is
-/// dropped.
+/// started for is still the one on show: the same session and the same
+/// instance view. It is asked, with the top frame's exact origin, before the
+/// request, and again when the answer arrives. A selection that is no longer
+/// current answers `SelectionChanged`, whatever the instance said. A
+/// document that is not the instance's (the view is loading or reloading in
+/// the same selection) answers `NotReady` before the request.
+///
+/// A ready answer is accepted only if the top frame is still the same
+/// document (the same frame and the same loader), which takes one more
+/// question to WebView2; otherwise it is dropped. Every other outcome, a
+/// refusal by the instance above all, needs no such look and is delivered
+/// at once, so nothing can make it arrive too late.
 pub fn fetch_rendezvous(
     view: &ICoreWebView2,
     request: &Request,
@@ -48,7 +55,11 @@ pub fn fetch_rendezvous(
     done: impl FnOnce(Reply) + 'static,
 ) {
     let origin = request.origin().to_owned();
-    if !current() || !shows(view, &origin) {
+    if !current() {
+        done(Reply::SelectionChanged);
+        return;
+    }
+    if !shows(view, &origin) {
         done(Reply::NotReady);
         return;
     }
@@ -81,16 +92,28 @@ pub fn fetch_rendezvous(
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 let reply = Reply::read(text.as_deref());
-                // A navigation may have committed, or the selection changed,
-                // while the request ran: its answer is then not this
-                // document's to give.
+                // The selection changed while the request ran: nothing the
+                // instance said is this selection's any more.
+                if !current() {
+                    done(Reply::SelectionChanged);
+                    return;
+                }
+                // Only a ready answer depends on which document gave it.
+                if !matches!(reply, Reply::Ready(_)) {
+                    done(reply);
+                    return;
+                }
+                // A navigation may have committed while the request ran:
+                // its answer is then not this document's to give.
                 let fourth = third.clone();
                 top_document(&third, origin.clone(), move |after| {
-                    let same = after.is_some_and(|after| after == document) && current() && shows(&fourth, &origin);
-                    done(match reply {
-                        Reply::Ready(_) if !same => Reply::Failed,
-                        other => other,
-                    });
+                    if !current() {
+                        done(Reply::SelectionChanged);
+                    } else if after.is_some_and(|after| after == document) && shows(&fourth, &origin) {
+                        done(reply);
+                    } else {
+                        done(Reply::Failed);
+                    }
                 });
             });
         });

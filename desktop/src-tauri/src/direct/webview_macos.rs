@@ -36,10 +36,14 @@ use super::rendezvous::{origin_of, script, Reply, Request, WORLD};
 /// could call. The request therefore carries this WebView's signed-in
 /// session and meets the instance's usual Origin and CSRF checks.
 ///
-/// `current` is the shell's own word that the selection and document this
-/// request was started for are still the ones on show. It is asked, with
-/// the document's exact origin, before the request and again when the
-/// answer arrives; an answer that arrives for anything else is dropped.
+/// `current` is the shell's own word that the selection this request was
+/// started for is still the one on show: the same session and the same
+/// instance view. It is asked, with the document's exact origin, before the
+/// request and again when the answer arrives. A selection that is no longer
+/// current answers `SelectionChanged`, whatever the instance said. A
+/// document that is not the instance's (the view is loading or reloading in
+/// the same selection, or a navigation committed meanwhile) answers
+/// `NotReady` before the request, and has a ready answer dropped after it.
 pub fn fetch_rendezvous(
     webview: &WKWebView,
     mtm: MainThreadMarker,
@@ -47,7 +51,11 @@ pub fn fetch_rendezvous(
     current: impl Fn() -> bool + 'static,
     done: impl FnOnce(Reply) + 'static,
 ) {
-    if !current() || !shows(webview, request.origin()) {
+    if !current() {
+        done(Reply::SelectionChanged);
+        return;
+    }
+    if !shows(webview, request.origin()) {
         done(Reply::NotReady);
         return;
     }
@@ -74,9 +82,15 @@ pub fn fetch_rendezvous(
             None
         };
         let reply = Reply::read(text.as_deref());
-        // A navigation may have committed, or the selection changed, while
-        // the request ran: its answer is then not this document's to give.
-        if !current() || !shows(&view, &origin) {
+        // The selection changed while the request ran: nothing the instance
+        // said is this selection's any more.
+        if !current() {
+            done(Reply::SelectionChanged);
+            return;
+        }
+        // A navigation committed meanwhile: a ready answer is then not this
+        // document's to give.
+        if !shows(&view, &origin) {
             done(match reply {
                 Reply::Ready(_) => Reply::Failed,
                 other => other,
