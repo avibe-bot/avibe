@@ -1709,6 +1709,13 @@ production instance is used.
 
 ## Turn Live Activities
 
+**Withdrawn (11-21, owner):** the App no longer announces `liveActivities`, the
+four `liveActivity.*` methods answer `unsupported`, the chat page renders no
+entry, and at launch the App ends every Turn Live Activity an earlier build
+left and forgets its ledger, with no instance request
+(`NativeShellMetadata.liveActivitiesAvailable`,
+`TurnActivityCoordinator.endAllLocally`). The code below stays, unreachable.
+
 The `liveActivities: 1` bridge exposes `liveActivity.status`, `start`, `stop`, and
 `openSettings`. A person explicitly tracks one running Turn. Its immutable Agent
 name and session title stay in local ActivityAttributes; only phase and Unix
