@@ -35,6 +35,8 @@ pub struct NativeNotificationCatalog {
     run_failed: NotificationCopy,
     run_canceled: NotificationCopy,
     answer_requested: NotificationCopy,
+    // Answering from a notification exists on macOS only.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     answer: AnswerCatalog,
 }
 
@@ -60,6 +62,7 @@ struct NotificationCopy {
     title: String,
     /// The second line macOS draws under the title; other systems leave it out.
     #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     subtitle: Option<String>,
     body: String,
 }
@@ -427,7 +430,9 @@ fn paint_badge(app: &AppHandle, total: u64) {
 }
 
 /// A one-off notice from the shell itself (not a Runtime event). It honors the
-/// shell's notification switch and nothing withdraws it.
+/// shell's notification switch and nothing withdraws it. Its callers (Ask
+/// Vibey, notification answers) exist on macOS only.
+#[cfg(target_os = "macos")]
 pub(crate) fn notice(app: &AppHandle, title: String, body: String) {
     if app
         .try_state::<Notifications>()
