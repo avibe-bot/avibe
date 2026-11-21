@@ -284,6 +284,16 @@ does not expose an action callback. Explicit cross-platform click =
 (macOS UNUserNotificationCenter delegate + Windows toast activation)**.
 No Workbench navigation or simulated click wiring is included in v1.
 
+**macOS since D2a:** every post goes through `UNUserNotificationCenter`
+(`src-tauri/src/notifications/macos.rs`), whose delegate is set in plugin
+setup, before the application finishes launching, so a click that launches
+Avibe still reaches it. A click opens what the notification is about through
+the existing deep-link path: a run's Session (`avibe://session/<id>`) or a
+Vault request (`avibe://vaults/request/<id>`); a notice without one only
+brings the main window forward. Authorization is asked once, by the first
+post. A development build without a bundle identity keeps the plugin path.
+Windows activation is unchanged.
+
 ## Frozen architecture split
 
 ```

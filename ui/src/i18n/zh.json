@@ -137,6 +137,22 @@
       "runCanceled": {
         "title": "运行已取消",
         "body": "后台工作已取消。"
+      },
+      "answerRequested": {
+        "title": "等你回复",
+        "body": "Agent 在等你回复。"
+      },
+      "answer": {
+        "reply": "回复…",
+        "send": "发送",
+        "placeholder": "回复这个会话",
+        "notSent": "没有发送",
+        "notDelivered": "没有送达",
+        "alreadyChoice": "已经在其他设备上回复了「{{choice}}」。",
+        "alreadyText": "已在其他设备上回复。",
+        "stale": "会话已经有了新进展。打开看看再回复。",
+        "gone": "这个会话已经打不开了。",
+        "unavailable": "连不上这个实例。打开 Avibe 重新回复。"
       }
     },
     "pet": {
@@ -3177,6 +3193,9 @@
       "desktopTitle": "桌面 App 系统通知",
       "desktopHint": "Vault 审批和后台任务完成。只对本机生效，和菜单栏里的开关是同一个。",
       "desktopHintMenuBar": "Vault 审批和后台任务完成。本机的开关在菜单栏图标 › 通知。",
+      "desktopHintAnswers": "Vault 审批、后台任务完成，以及 Agent 等你回复的消息。等你回复的消息可以直接在通知里选或回复。只对这台电脑生效，和菜单栏里的开关是同一个。",
+      "desktopDenied": "macOS 没有允许 Avibe 发通知，所以这台电脑收不到通知，也不能在通知里回复。",
+      "openSystemSettings": "打开系统设置",
       "desktopSaveFailed": "无法保存通知开关，请稍后重试。"
     }
   },

@@ -9,6 +9,8 @@
   },
   "permissions": [
     "allow-desktop-notifications-state",
-    "allow-desktop-notifications-set-enabled"
+    "allow-desktop-notifications-set-enabled",
+    "allow-desktop-notifications-authorization",
+    "allow-desktop-notifications-open-settings"
   ]
 }

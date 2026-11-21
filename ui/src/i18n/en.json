@@ -137,6 +137,22 @@
       "runCanceled": {
         "title": "Run canceled",
         "body": "Background work was canceled."
+      },
+      "answerRequested": {
+        "title": "Waiting for your answer",
+        "body": "An Agent is waiting for your answer."
+      },
+      "answer": {
+        "reply": "Reply…",
+        "send": "Send",
+        "placeholder": "Reply to this conversation",
+        "notSent": "Not sent",
+        "notDelivered": "Not delivered",
+        "alreadyChoice": "Already answered \"{{choice}}\" on another device.",
+        "alreadyText": "Already answered on another device.",
+        "stale": "The conversation has moved on. Open it to see the latest before replying.",
+        "gone": "This conversation can't be opened anymore.",
+        "unavailable": "Couldn't reach this instance. Open Avibe to answer again."
       }
     },
     "pet": {
@@ -3177,6 +3193,9 @@
       "desktopTitle": "Desktop app notifications",
       "desktopHint": "Vault approvals and finished background runs. This computer only; same switch as the menu bar.",
       "desktopHintMenuBar": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications.",
+      "desktopHintAnswers": "Vault approvals, finished background runs, and Agent messages waiting for your answer, which you can pick or reply to right in the notification. This computer only; same switch as the menu bar.",
+      "desktopDenied": "macOS hasn't allowed Avibe to send notifications, so this computer gets no alerts and you can't reply from them.",
+      "openSystemSettings": "Open System Settings",
       "desktopSaveFailed": "Couldn't save the notification switch. Try again."
     }
   },
