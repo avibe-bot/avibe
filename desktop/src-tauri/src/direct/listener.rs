@@ -70,7 +70,11 @@ impl Listener {
         F: Fn(Authority) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Option<Stream>> + Send + 'static,
     {
-        Self::bind_with_port(host, links, move |h, _| open_public(h)).await
+        Self::bind_with_port(host, links, move |h, _| {
+            let f = open_public(h);
+            async move { f.await.ok_or(public::OpenError::Unreachable) }
+        })
+        .await
     }
     async fn bind_with_port<F, Fut>(
         host: Authority,
@@ -79,7 +83,7 @@ impl Listener {
     ) -> Option<Self>
     where
         F: Fn(Authority, u16) -> Fut + Send + Sync + Clone + 'static,
-        Fut: Future<Output = Option<Stream>> + Send + 'static,
+        Fut: Future<Output = Result<Stream, public::OpenError>> + Send + 'static,
     {
         let credential = Arc::new(Credential::generate()?);
         let socket = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.ok()?);
@@ -105,7 +109,7 @@ impl Listener {
                         let fallback = dial(h.clone(), port);
                         match link {
                             Some(l) if l.usable() => l.plan.choose(l.open(&h), fallback).await,
-                            _ => timeout(Duration::from_secs(8), fallback).await.ok().flatten(),
+                            _ => timeout(Duration::from_secs(8), fallback).await.ok()?.ok(),
                         }
                     })
                     .await;
@@ -224,6 +228,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(response, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+    }
+    #[tokio::test]
+    async fn observed_denial_fails_authenticated_connect_despite_pending_lan_success() {
+        use crate::direct::selection::Selection;
+        let host = Authority::managed("desk-app.avibe.bot").unwrap();
+        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut browser = TcpStream::connect(socket.local_addr().unwrap()).await.unwrap();
+        let (accepted, _) = socket.accept().await.unwrap();
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            serve(accepted, &host, "Basic fixture", || async {
+                Selection::default()
+                    .choose(
+                        async {
+                            waiting.await.unwrap();
+                            Some(Box::new(tokio::io::duplex(16).0) as Stream)
+                        },
+                        async {
+                            // A LAN success is available if selection polls it again.
+                            release.send(()).unwrap();
+                            Err(public::OpenError::Terminal)
+                        },
+                    )
+                    .await
+            })
+            .await;
+        });
+        browser
+            .write_all(b"CONNECT desk-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: Basic fixture\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = Vec::new();
+        timeout(Duration::from_secs(3), browser.read_to_end(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        worker.await.unwrap();
+        assert_eq!(reply, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
     }
     #[tokio::test(start_paused = true)]
     async fn temporary_accept_errors_back_off_and_terminal_errors_are_returned() {

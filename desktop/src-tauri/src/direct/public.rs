@@ -65,46 +65,76 @@ async fn dial(host: &str, port: u16, proxy: bool, listener: u16) -> Option<TcpSt
     }
     None
 }
-pub(super) async fn open(a: &Authority, listener: u16) -> Option<TcpStream> {
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum OpenError {
+    Unreachable,
+    Terminal,
+}
+
+pub(super) async fn open(a: &Authority, listener: u16) -> Result<TcpStream, OpenError> {
     open_via(inspect(Some(a)).await, a, listener).await
 }
-async fn open_via(policy: Policy, a: &Authority, listener: u16) -> Option<TcpStream> {
+async fn open_via(policy: Policy, a: &Authority, listener: u16) -> Result<TcpStream, OpenError> {
+    use OpenError::{Terminal, Unreachable};
     match policy {
-        Policy::Direct => dial(a.host(), 443, false, listener).await,
+        Policy::Direct => dial(a.host(), 443, false, listener).await.ok_or(Unreachable),
         Policy::Http(host, port) => {
-            let mut s = dial(&host, port, true, listener).await?;
-            s.write_all(&a.direct_head()).await.ok()?;
+            let mut s = dial(&host, port, true, listener).await.ok_or(Unreachable)?;
+            s.write_all(&a.direct_head()).await.map_err(|_| Unreachable)?;
             // Consume just the HTTP head; do not lose any opaque bytes following it.
             // The caller's establishment deadline also bounds this handshake.
             let mut head = Vec::new();
+            let mut accepted_status = false;
             while head.len() < 8192 {
-                head.push(s.read_u8().await.ok()?);
+                head.push(s.read_u8().await.map_err(|_| Unreachable)?);
+                if !accepted_status && head.ends_with(b"\r\n") {
+                    let mut words = head[..head.len() - 2].split(|&b| b == b' ');
+                    if !matches!(words.next(), Some(b"HTTP/1.0" | b"HTTP/1.1"))
+                        || !matches!(words.next(), Some([b'2', b'0'..=b'9', b'0'..=b'9']))
+                    {
+                        return Err(Terminal);
+                    }
+                    accepted_status = true;
+                }
                 if head.ends_with(b"\r\n\r\n") {
-                    let mut words = head.split(|&b| b == b'\r').next()?.split(|&b| b == b' ');
-                    let version = words.next()?;
-                    let status = words.next()?;
-                    return (matches!(version, b"HTTP/1.0" | b"HTTP/1.1")
-                        && matches!(status, [b'2', b'0'..=b'9', b'0'..=b'9']))
-                    .then_some(s);
+                    return Ok(s);
                 }
             }
-            None
+            Err(Terminal)
         }
         #[cfg(any(windows, test))]
-        Policy::Configured => None,
-        Policy::Automatic | Policy::Unsupported => None,
+        Policy::Configured => Err(Terminal),
+        Policy::Automatic | Policy::Unsupported => Err(Terminal),
     }
 }
 
 #[cfg(target_os = "macos")]
+type MacSettings = objc2_foundation::NSDictionary<objc2_foundation::NSString, objc2::runtime::AnyObject>;
+
+#[cfg(target_os = "macos")]
 fn native(host: Option<&str>) -> Option<Policy> {
-    use objc2::{rc::Retained, runtime::AnyObject};
-    use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
-    type Dict = NSDictionary<NSString, AnyObject>;
     #[link(name = "CFNetwork", kind = "framework")]
     extern "C" {
-        fn CFNetworkCopySystemProxySettings() -> *mut Dict;
-        fn CFNetworkCopyProxiesForURL(u: *const NSURL, d: *const Dict) -> *mut NSArray<Dict>;
+        fn CFNetworkCopySystemProxySettings() -> *mut MacSettings;
+    }
+    // The Copy function transfers a retained, toll-free bridged NSDictionary.
+    let settings = unsafe { objc2::rc::Retained::from_raw(CFNetworkCopySystemProxySettings()) }?;
+    mac_policy(host, &settings)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_policy(host: Option<&str>, d: &MacSettings) -> Option<Policy> {
+    use objc2::rc::Retained;
+    use objc2_foundation::{NSArray, NSNumber, NSString, NSURL};
+    #[link(name = "CFNetwork", kind = "framework")]
+    extern "C" {
+        fn CFNetworkCopyProxiesForURL(u: *const NSURL, d: *const MacSettings) -> *mut NSArray<MacSettings>;
+        static kCFNetworkProxiesHTTPSEnable: *const NSString;
+        static kCFNetworkProxiesHTTPSProxy: *const NSString;
+        static kCFNetworkProxiesHTTPSPort: *const NSString;
+        static kCFNetworkProxiesSOCKSEnable: *const NSString;
+        static kCFNetworkProxiesSOCKSProxy: *const NSString;
+        static kCFNetworkProxiesSOCKSPort: *const NSString;
         static kCFProxyTypeKey: *const NSString;
         static kCFProxyTypeNone: *const NSString;
         static kCFProxyTypeHTTP: *const NSString;
@@ -119,7 +149,6 @@ fn native(host: Option<&str>) -> Option<Policy> {
     // CF containers, URL, strings and numbers are toll-free bridged. Copy
     // functions transfer +1 ownership. No script evaluation or credential API.
     unsafe {
-        let d = Retained::from_raw(CFNetworkCopySystemProxySettings())?;
         for key in [
             kCFNetworkProxiesProxyAutoConfigEnable,
             kCFNetworkProxiesProxyAutoDiscoveryEnable,
@@ -132,13 +161,35 @@ fn native(host: Option<&str>) -> Option<Policy> {
         }
         let Some(host) = host else { return Some(Policy::Direct) };
         let url = NSURL::URLWithString(&NSString::from_str(&format!("https://{host}/")))?;
-        let list = Retained::from_raw(CFNetworkCopyProxiesForURL(&*url, &*d))?;
+        let list = Retained::from_raw(CFNetworkCopyProxiesForURL(&*url, d))?;
         if list.count() == 0 {
             return None;
         }
         let proxy = list.objectAtIndex(0);
         let kind = proxy.objectForKey(&*kCFProxyTypeKey)?.downcast::<NSString>().ok()?;
         if *kind == *kCFProxyTypeNone {
+            // CFNetwork also returns None for an enabled but incomplete proxy.
+            // Trust its bypass decision only after checking the applicable endpoints.
+            for (enabled, name, port) in [
+                (
+                    kCFNetworkProxiesHTTPSEnable,
+                    kCFNetworkProxiesHTTPSProxy,
+                    kCFNetworkProxiesHTTPSPort,
+                ),
+                (
+                    kCFNetworkProxiesSOCKSEnable,
+                    kCFNetworkProxiesSOCKSProxy,
+                    kCFNetworkProxiesSOCKSPort,
+                ),
+            ] {
+                if let Some(flag) = d.objectForKey(&*enabled) {
+                    if flag.downcast::<NSNumber>().ok()?.boolValue() {
+                        let h = d.objectForKey(&*name)?.downcast::<NSString>().ok()?;
+                        let p = d.objectForKey(&*port)?.downcast::<NSNumber>().ok()?;
+                        endpoint(&h.to_string(), u16::try_from(p.longLongValue()).ok()?)?;
+                    }
+                }
+            }
             return Some(Policy::Direct);
         }
         if *kind == *kCFProxyTypeAutoConfigurationURL || *kind == *kCFProxyTypeAutoConfigurationJavaScript {

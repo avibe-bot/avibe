@@ -51,6 +51,35 @@ fn automatic_and_explicit_windows_settings_are_not_no_proxy() {
         assert!(windows_policy(h, false, "", v, "").is_none());
     }
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_incomplete_proxy_is_not_a_bypass() {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSArray, NSMutableDictionary, NSNumber, NSString};
+    let host = "desk-app.avibe.bot";
+    let h = Some(host);
+    let keys = ["HTTPSEnable", "HTTPSProxy", "HTTPSPort", "ExceptionsList"].map(NSString::from_str);
+    let on = NSNumber::new_i32(1);
+    let port = NSNumber::new_i32(8080);
+    let name = NSString::from_str("proxy.test");
+    let bypass = NSArray::from_slice(&[&*NSString::from_str(host)]);
+    let settings = NSMutableDictionary::<NSString, AnyObject>::new();
+    let set = |key: &NSString, value: &AnyObject| {
+        // Fixture owns the mutable dictionary; NSString implements NSCopying.
+        unsafe {
+            let _: () = objc2::msg_send![&*settings, setObject: value, forKey: key];
+        }
+    };
+    assert!(matches!(mac_policy(h, &settings), Some(Policy::Direct)));
+    set(&keys[0], &on);
+    assert!(mac_policy(h, &settings).is_none());
+    set(&keys[1], &name);
+    set(&keys[2], &port);
+    assert!(matches!(mac_policy(h, &settings), Some(Policy::Http(_, 8080))));
+    set(&keys[3], &bypass);
+    assert!(matches!(mac_policy(h, &settings), Some(Policy::Direct)));
+}
+
 #[tokio::test]
 async fn explicit_connect_has_no_credentials_and_preserves_opaque_bytes() {
     let a = Authority::managed("desk-app.avibe.bot").unwrap();
@@ -77,7 +106,7 @@ async fn explicit_connect_has_no_credentials_and_preserves_opaque_bytes() {
             assert_eq!(s.read_u16().await.unwrap(), 0xff01);
             s.write_u8(234).await.unwrap()
         } else {
-            assert!(result.is_none())
+            assert!(matches!(result, Err(OpenError::Terminal)))
         }
         server.await.unwrap();
     }
