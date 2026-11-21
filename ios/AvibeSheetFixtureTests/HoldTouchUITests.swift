@@ -47,6 +47,31 @@ final class HoldTouchUITests: XCTestCase {
         XCTAssertEqual(label(beginning: "events="), "events=", "A tap is no hold; \(facts())")
     }
 
+    /// The first touch after a cold launch, with no warm-up: the App's main
+    /// thread is busy from before the finger lifts until past the threshold,
+    /// and the lift is handled late. A tap all the same: no cue, nothing
+    /// said to the page. (TestFlight 50.1 recognised a hold here.)
+    func testTheFirstTapAfterAColdLaunchIsNoHold() {
+        for startsAtRecognition in [false, true] {
+            app = XCUIApplication()
+            app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+            app.launchEnvironment["AVIBE_FIXTURE_HOLD"] = "1"
+            launch(startsAtRecognition: startsAtRecognition, warm: false)
+            input.tap()
+            XCTAssertTrue(waitFor("focus=yes"), "The first tap did not focus the input; \(facts())")
+            requireEvidence("hold ", "The App did not follow the first tap")
+            // Long enough for a late cue to have come.
+            Thread.sleep(forTimeInterval: 2)
+            print("[hold smoke] first tap, startsAtRecognition=\(startsAtRecognition): \(facts())")
+            XCTAssertFalse(
+                label(beginning: "events=")?.contains("recognised") ?? true,
+                "The first tap after a cold launch was taken for a hold; \(facts())"
+            )
+            XCTAssertFalse(kept().contains(" rec="), "The App recognised a hold on a tap; \(facts())")
+            app.terminate()
+        }
+    }
+
     private func tapTheInput(startsAtRecognition: Bool) {
         launch(startsAtRecognition: startsAtRecognition)
         input.tap()
@@ -201,7 +226,7 @@ final class HoldTouchUITests: XCTestCase {
     private var web: XCUIElement { app.webViews.firstMatch }
     private var input: XCUIElement { web.textViews["Message"] }
 
-    private func launch(startsAtRecognition: Bool = false) {
+    private func launch(startsAtRecognition: Bool = false, warm: Bool = true) {
         if startsAtRecognition {
             // `NativeHoldQuietSwitch`, as its diagnostics link sets it.
             app.launchArguments += ["-avibe.voiceHold.startsAtRecognition", "YES"]
@@ -215,6 +240,7 @@ final class HoldTouchUITests: XCTestCase {
             "The hold page did not load"
         )
         XCTAssertTrue(waitFor("surfaces=input+plain"), "The App did not take the page's surfaces; \(facts())")
+        guard warm else { return }
         // The first touch after a launch is slow on a CI simulator (the fixture's other
         // tests warm up too): one on a line of text, which is nothing's surface.
         web.staticTexts["ready=yes"].tap()
