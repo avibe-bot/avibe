@@ -278,8 +278,8 @@ def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
             captured["matcher"] = matcher
             captured["hooks"] = hooks
 
-    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
-    monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
+    monkeypatch.setattr(sh.claude_sdk, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(sh.claude_sdk, "HookMatcher", _HookMatcher)
 
     handler = _handler()
     hooks = handler._build_claude_tool_policy_hooks()
@@ -300,16 +300,16 @@ def test_removed_environment_override_cannot_disable_claude_hooks(monkeypatch):
             self.matcher = matcher
             self.hooks = hooks
 
-    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
-    monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
+    monkeypatch.setattr(sh.claude_sdk, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(sh.claude_sdk, "HookMatcher", _HookMatcher)
     monkeypatch.setenv("AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS", "1")
 
     assert _handler()._build_claude_tool_policy_hooks() is not None
 
 
 def test_older_sdk_falls_back_to_a_name_level_deny_list(monkeypatch):
-    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
-    monkeypatch.setattr(sh, "HookMatcher", None)
+    monkeypatch.setattr(sh.claude_sdk, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    monkeypatch.setattr(sh.claude_sdk, "HookMatcher", None)
 
     handler = _handler()
     assert handler._build_claude_tool_policy_hooks() is None
@@ -322,7 +322,7 @@ def test_older_sdk_falls_back_to_a_name_level_deny_list(monkeypatch):
     assert len(disallowed) == len(set(disallowed))
 
 def test_disallowed_tools_constant_is_not_mutated(monkeypatch):
-    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    monkeypatch.setattr(sh.claude_sdk, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
     before = list(sh.CLAUDE_REMOTE_DISALLOWED_TOOLS)
 
     _handler()._claude_disallowed_tools(None)
