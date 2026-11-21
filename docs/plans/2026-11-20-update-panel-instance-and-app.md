@@ -1,8 +1,9 @@
 # The update panel names whose version it shows
 
-Status: **approved** by the owner on 2026-11-20 and built (`ui/design:
-update/instance-and-app`, drawn by the shipped components). Not yet run on a
-real desktop app: see the last Todo item.
+Status: **approved** by the owner on 2026-11-20, built (`ui/design:
+update/instance-and-app`, drawn by the shipped components), and exercised once
+on a real desktop app by the owner on 2026-11-21: see the last Todo item for
+what was and was not observed.
 
 ## Background
 
@@ -310,4 +311,14 @@ instance runs a build that contains 3.
 - [x] Shell: instance update actions on the account bridge; popup sizing (B1).
 - [x] Interface: `UpdatePanel` sections, bottom row, narrow-window badge, i18n;
       the frames switch to the shipped components and the kit copy is deleted (B2).
-- [ ] One run on a real desktop app connected to a remote instance.
+- [x] One run on a real desktop app connected to a remote instance. The owner,
+      2026-11-21, in his desktop app connected to his own standalone instance:
+      one click on the instance's Update in the panel. Observed on the
+      instance's computer: one update request, a 62 s install, a 21 s restart,
+      85 s from the request to ready, the instance from 3.2.8rc5 to 3.2.8rc8
+      (the latest when it ran; a standalone install is not pinned). Not
+      observed by anyone but him: the panel and the bottom row during that
+      minute, and whether other surfaces showed the install as running. He
+      then reported the bottom row's dot and name sitting behind an empty
+      stretch, centred in their trigger since #4034; they start at the
+      trigger's left inset again.

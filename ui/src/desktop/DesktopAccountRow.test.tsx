@@ -174,6 +174,20 @@ it.each([
   expect(trigger.hasAttribute('title')).toBe(false);
 });
 
+// The owner, 2026-11-21: 「在桌面端左下角的实例名称左边有大片空白」. The dot and the name had been centred in the
+// trigger, which is as wide as the row; they start at the trigger's left inset, the Apps button's own, in
+// every state (ui/design: chrome/bottom-row). jsdom lays nothing out, so this holds the classes that do it.
+it.each([
+  { remote: false, signedIn: true }, { remote: true, signedIn: true }, { remote: false, signedIn: false },
+])('the footer entry starts at the left of its row, not centred in it (remote=$remote, signedIn=$signedIn)', ({ remote, signedIn }) => {
+  mock.remote = remote; mock.signedIn = signedIn;
+  mount();
+  const classes = document.querySelector('[data-account-trigger]')!.className.split(/\s+/);
+  expect(classes).toContain('justify-start');
+  expect(classes).toContain('pl-4');
+  expect(classes).not.toContain('justify-center');
+});
+
 // Max, 2026-11-20: no hover tip in either state, not even for a name too long to show whole.
 it.each([
   { signedIn: false, slug: undefined },
