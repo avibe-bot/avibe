@@ -3663,6 +3663,10 @@ def _tail_candidate_protocol(config: V2Config, previous_protocol: str) -> str:
     configured = _configured_protocol(config)
     if configured != "auto":
         return configured
+    return _other_transport(previous_protocol)
+
+
+def _other_transport(previous_protocol: str) -> str:
     if previous_protocol == "quic":
         return "http2"
     if previous_protocol == "http2":

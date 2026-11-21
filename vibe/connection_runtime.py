@@ -502,9 +502,24 @@ def _wait_registered(pid, url):
     return False if last == 0 else None
 
 
-def _pin_candidates(attempt):
-    """Test saved pins first; use an explicit transport on both bounded attempts."""
-    for automatic in (False, True):
+def _pin_candidate_plan(config, pins):
+    """Freeze transport hints before spawning candidates that could change the monitor snapshot."""
+    if 'protocol' in pins:
+        saved = pins['protocol']
+        return ((False, saved), (True, tunnel._other_transport(saved)))
+    hint = tunnel._initial_connector_protocol(config)
+    if hint == 'auto':
+        # Read the last effective transport, not the next candidate's requested transport.
+        hint = tunnel._effective_protocol(None, None)
+    if hint in ('quic', 'http2'):
+        return ((False, hint), (True, hint))
+    # A different transport may work with the owner's original IP or egress.
+    # Test both there before permitting *any* attempt with those pins removed.
+    return tuple((relax, protocol) for relax in (False, True) for protocol in ('http2', 'quic'))
+
+
+def _pin_candidates(attempt, plan):
+    for automatic, protocol in plan:
         pid = None
         try:
             with tunnel._connector_lifecycle(), tunnel._RECOVERY_LOCK, config_file_lock():
@@ -516,13 +531,6 @@ def _pin_candidates(attempt):
                 if automatic:
                     for key in attempt['pins']:
                         setattr(trial.remote_access.vibe_cloud, cs.FIELDS[key], cs.AUTOMATIC[key])
-                protocol = tunnel._initial_connector_protocol(config)
-                if automatic and 'protocol' in attempt['pins']:
-                    protocol = tunnel._tail_candidate_protocol(trial, attempt['pins']['protocol'])
-                elif protocol == 'auto':
-                    # No remembered transport. Start where cloudflared would,
-                    # without delegating the 30 s decision to its slow fallback.
-                    protocol = 'quic'
                 pid, url = tunnel._start_candidate_connector(trial, binary, protocol)
             ready = _wait_registered(pid, url)
             if ready is not True:
@@ -561,11 +569,12 @@ def _consume_pin_attempt():
     if not cs.journal.path.exists():
         return
     with config_file_lock():
-        attempt = cs.journal.load(V2Config.load()).get('pinAttempt')
+        config = V2Config.load()
+        attempt = cs.journal.load(config).get('pinAttempt')
     if not attempt:
         return
     try:
-        _pin_candidates(attempt)
+        _pin_candidates(attempt, _pin_candidate_plan(config, attempt['pins']))
     finally:
         with config_file_lock():
             state = cs.journal.load(V2Config.load())
