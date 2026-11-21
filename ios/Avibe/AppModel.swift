@@ -2486,8 +2486,13 @@ final class AppModel: ObservableObject {
             self.sessionRenewalIsReading = true
             _ = try? await self.sessionCoordinator.refresh()
             self.sessionRenewalIsReading = false
-            // Push work the read held off (the account was busy).
-            self.nativePushCoordinator.resumeAfterAccountActivation()
+            // Push work the read held off (the account was busy), while
+            // the answer left the account and its open instance in place.
+            if let runtime = self.route.runtime,
+               self.sessionCoordinator.isCurrentRuntime(runtime)
+            {
+                self.nativePushCoordinator.resumeAfterAccountActivation()
+            }
             // A tap or shortcut that arrived during the read.
             self.deliverPendingInstanceOpen()
         }
