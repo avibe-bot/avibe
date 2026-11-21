@@ -381,9 +381,14 @@ final class DeviceDescriptionTests: XCTestCase {
             pushKeychain: keychain,
             pushGenerationStore: InMemoryPushGenerationStore(),
             pushInstallationMarker: marker,
+            // Stand-ins for the system's notification and badge centers, as
+            // the other AppModel fixtures use: the App's startup asks them,
+            // and a test host's first answer can be slow.
+            pushNotificationCenter: DeviceTestNotificationCenter(),
             systemScheduleStore: FileSystemSystemScheduleStore(
                 fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
             ),
+            badgeCenter: DeviceTestBadgeCenter(),
             healthCredentials: health
         )
         if waitForInstances {
@@ -395,20 +400,40 @@ final class DeviceDescriptionTests: XCTestCase {
         return appModel
     }
 
+    /// Waits for the App to reach a state. The bound is a ceiling for a slow
+    /// simulator, as in the other AppModel fixtures (an App's first startup
+    /// in a test process takes seconds there), not a schedule. Past it the
+    /// test stops at once rather than act on a state it never reached.
     @MainActor
     private func waitUntil(
-        timeout: TimeInterval = 5,
+        timeout: TimeInterval = 20,
+        file: StaticString = #filePath,
+        line: UInt = #line,
         _ condition: @MainActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() {
             guard Date() < deadline else {
-                XCTFail("Timed out waiting for the condition")
-                return
+                XCTFail("Timed out waiting for the condition", file: file, line: line)
+                throw WaitTimedOut()
             }
             try await Task.sleep(for: .milliseconds(20))
         }
     }
+}
+
+private struct WaitTimedOut: Error {}
+
+private final class DeviceTestNotificationCenter: PushNotificationCentering {
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] { [] }
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] { [] }
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
+}
+
+private final class DeviceTestBadgeCenter: AppBadgeCentering {
+    func badgeAllowed() async -> Bool { true }
+    func setBadgeCount(_ count: Int) async throws {}
 }
 
 private final class DeviceWebViewLoadProbe: NSObject, WKNavigationDelegate {
