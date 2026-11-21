@@ -1,4 +1,5 @@
 """Disposable config/journal and connector doubles. No phone, public tunnel or wall-clock sleeps."""
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -488,6 +489,144 @@ def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monke
     assert attempts == (['4', 'auto'] if saved is False else ['4'])
     assert cs.value(V2Config.load(), 'ipFamily') == expected
     assert bool(cs.journal.inspect(rig.cfg)['returnedToAutomatic']) == (expected == 'auto')
+
+
+@pytest.mark.parametrize('pin,preferred,usable,working_family,expected_legs,returned', [
+    ('quic', 'quic', {'http2'}, '4', [('quic', '4'), ('http2', 'auto')], True),
+    ('http2', 'http2', {'quic'}, '4', [('http2', '4'), ('quic', 'auto')], True),
+    ('auto', 'http2', {'http2'}, '4', [('http2', '4')], False),
+    ('auto', 'http2', {'http2'}, '6', [('http2', '4'), ('http2', 'auto')], True),
+    ('auto', None, {'quic'}, '4', [('quic', '4')], False),
+    ('quic', 'quic', set(), '4', [('quic', '4'), ('http2', 'auto')], False),
+])
+def test_pin_transport_registration_and_restart(rig, monkeypatch, pin, preferred, usable, working_family, expected_legs, returned):
+    # Drive the real registration poll. On a UDP-blocked route explicit HTTP/2
+    # first registered in 6.379 s; literal auto first registered in 96.674 s.
+    # The reverse-protocol and address-family cases are contract simulations.
+    rig.cfg.remote_access.vibe_cloud.transport_protocol = pin
+    rig.cfg.save()
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
+    hist = ra._quality_history_path()
+    hist.parent.mkdir(parents=True, exist_ok=True)
+    ra.runtime.write_json(hist, {'schema_version': 2, 'preferred_protocol': preferred, 'context': {'keep': True}})
+    monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-bin')
+    monkeypatch.setattr(cr, 'time', SimpleNamespace(sleep=lambda n: rig.clock.__setitem__(0, rig.clock[0] + n)))
+    legs = []
+    def spawn(cfg, binary, protocol):
+        legs.append((protocol, cs.value(cfg, 'ipFamily'), rig.clock[0]))
+        return len(legs), 'fixture-metrics'
+    def registration(url):
+        protocol, family, started = legs[-1]
+        current = V2Config.load()
+        assert (cs.value(current, 'protocol'), cs.value(current, 'ipFamily')) == (pin, '4')
+        assert not cs.journal.inspect(current)['returnedToAutomatic']
+        if family not in (working_family, 'auto'):
+            return 0
+        delay = {'quic': 5., 'http2': 6.379, 'auto': 96.674}[protocol]
+        can_register = protocol in usable or (protocol == 'auto' and bool(usable))
+        return int(can_register and rig.clock[0] - started >= delay)
+    monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
+    monkeypatch.setattr(cr, '_registered', registration)
+    monkeypatch.setattr(ra, '_discard_candidate_connector', lambda pid: None)
+    monkeypatch.setattr(ra, '_promote_candidate_connector', lambda *a, **kw: {})
+    monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: True)
+    window = cs.PinFailureWindow(lambda: rig.clock[0])
+    for _ in range(13):
+        cr.observe_pins(window, rig.cfg, active=rig.active, pid_state='cloudflared',
+                        sample=SimpleNamespace(registered_connections=0), interval_seconds=15)
+        rig.clock[0] += 15
+    assert cs.journal.load(rig.cfg).get('pinAttempt')
+    cr._consume_pin_attempt()
+    assert [(p, f) for p, f, _ in legs] == expected_legs
+    if len(legs) == 2:
+        assert legs[1][2] - legs[0][2] == 30
+    current = V2Config.load()
+    record = cs.journal.inspect(current)['returnedToAutomatic']
+    if returned:
+        assert {c['setting'] for c in record['changes']} == ({'ipFamily', 'protocol'} if pin != 'auto' else {'ipFamily'})
+        assert (cs.value(current, 'protocol'), cs.value(current, 'ipFamily')) == ('auto', 'auto')
+        monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)  # Cold-start lookup, without a quality snapshot.
+        assert ra._initial_connector_protocol(current) == expected_legs[-1][0]
+        assert ra.runtime.read_json(hist)['context'] == {'keep': True}
+    else:
+        assert not record and (cs.value(current, 'protocol'), cs.value(current, 'ipFamily')) == (pin, '4')
+        assert ra._stored_preferred_protocol() == preferred
+
+
+@pytest.fixture
+def connector_clock(rig, monkeypatch):
+    def advance(seconds):
+        rig.clock[0] += seconds
+    clock = SimpleNamespace(monotonic=cs.journal.clock, sleep=advance)
+    for module in (cr, ra, ra.runtime):
+        monkeypatch.setattr(module, 'time', clock)
+    return clock
+
+
+@pytest.mark.parametrize('mode,transition,expected', [
+    ('registration', 6.379, True), ('registration', 29, True), ('registration', 30.01, False),
+    ('full_ha', 7, True), ('full_ha', 8.01, False),
+])
+def test_connector_readiness_poll_budget(rig, monkeypatch, connector_clock, mode, transition, expected):
+    # One edge registration is sufficient for pin recovery. Startup instead
+    # waits for four; do not equate the quick tunnel's first registration with HA.
+    start = connector_clock.monotonic()
+    def counts(*args):
+        return int(connector_clock.monotonic() - start >= transition)
+    if mode == 'registration':
+        monkeypatch.setattr(cr, '_registered', counts)
+        result = cr._wait_registered(rig.active['pid'], 'fixture')
+        budget = 30
+    else:
+        def metrics(url):
+            return SimpleNamespace(ready=True, ha_connections=3 + counts())
+        monkeypatch.setattr(ra.tunnel_quality, 'scrape_metrics', metrics)
+        result = ra._wait_connector_ready(rig.active['pid'], 'fixture', timeout_seconds=ra.START_PREFERRED_READY_TIMEOUT_SECONDS)
+        budget = 8
+    assert result is expected
+    if not expected:
+        assert connector_clock.monotonic() - start == budget
+
+
+@pytest.mark.parametrize('duration,expected', [(3.607, True), (4.002, False)])
+def test_public_probe_three_attempts_share_one_deadline(rig, monkeypatch, connector_clock, duration, expected):
+    # Local Incus HTTP origin: the third reply completed at 10.821 s; a
+    # different run reached 12.006 s. These aren't Internet latency samples.
+    timeouts = []
+    def observe(client, url, *, attempts, timeout):
+        assert url == 'https://test.invalid/health' and attempts == 1
+        timeouts.append(timeout)
+        connector_clock.sleep(duration)
+        return SimpleNamespace(successes=[len(timeouts) == 3])
+    monkeypatch.setattr(ra, '_public_probe_session', lambda: nullcontext(None))
+    monkeypatch.setattr(ra.tunnel_quality, 'probe_request_path', observe)
+    assert cr._public_check('https://test.invalid/health') is expected
+    assert len(timeouts) == 3 and all(0 < n <= 4 for n in timeouts)
+
+
+@pytest.mark.parametrize('term_exit,escalates', [(0.376, False), (34.6, False), (35.4, True)])
+def test_old_connector_grace_before_escalation(rig, monkeypatch, connector_clock, term_exit, escalates):
+    # Exercise the actual POSIX drain loop, but intercept *every* OS action.
+    # A 35 s grace bounds TERM, not the whole switchover or even its KILL wait.
+    runtime = ra.runtime
+    pid = rig.active['pid']
+    signals = []
+    start = connector_clock.monotonic()
+    def send(target, signum):
+        assert target == pid
+        signals.append((signum, connector_clock.monotonic() - start))
+    def alive(target):
+        assert target == pid
+        return connector_clock.monotonic() - start < term_exit and not any(s == runtime.signal.SIGKILL for s, _ in signals)
+    monkeypatch.setattr(runtime, 'os', SimpleNamespace(name='posix', kill=send))
+    monkeypatch.setattr(runtime, 'pid_alive', alive)
+    monkeypatch.setattr(runtime, 'get_process_command', lambda target: 'fixture-connector')
+    monkeypatch.setattr(runtime, 'write_shutdown_intent', lambda *args, **kwargs: None)
+    monkeypatch.setattr(ra, '_read_state', lambda: {})
+    assert ra._drain_tracked_connector({'pid': pid})
+    assert [s for s, _ in signals] == [runtime.signal.SIGTERM] + ([runtime.signal.SIGKILL] if escalates else [])
+    if escalates:
+        assert 35 <= signals[-1][1] < 35.21
 
 
 def test_storage_restore_retries_after_bound_and_restart(rig, monkeypatch):

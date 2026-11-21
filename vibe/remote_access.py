@@ -151,6 +151,9 @@ _QUALITY_MONITOR_LOCK = threading.Lock()
 _QUALITY_MONITOR_STARTED = False
 _QUALITY_EVALUATOR = tunnel_quality.QualityEvaluator()
 _QUALITY_SNAPSHOT_LOCK = threading.Lock()
+# Join preference-only writes and full monitor checkpoints without acquiring
+# the recovery lock from a connector promotion or inventing a quality sample.
+_QUALITY_HISTORY_LOCK = threading.Lock()
 _QUALITY_SNAPSHOT: dict[str, Any] | None = None
 _QUALITY_SNAPSHOT_PATH: Path | None = None
 _RECOVERY_LOCK = threading.Lock()
@@ -3027,9 +3030,10 @@ def _persist_quality_snapshot(
             "recovery": json.loads(json.dumps(_RECOVERY_STATE)),
             "retry_policy_version": RECOVERY_RETRY_POLICY_VERSION,
             "context": _QUALITY_CONTEXT,
-            "preferred_protocol": _PREFERRED_PROTOCOL,
         }
-    runtime.write_json(quality_path.with_name(_quality_history_path().name), monitor_state)
+    with _QUALITY_HISTORY_LOCK:
+        monitor_state["preferred_protocol"] = _PREFERRED_PROTOCOL
+        runtime.write_json(quality_path.with_name(_quality_history_path().name), monitor_state)
     if publish and _snapshot_change_key(previous) != _snapshot_change_key(snapshot):
         try:
             from vibe.sse_broker import broker
@@ -3260,10 +3264,14 @@ def _set_preferred_protocol(protocol: str | None) -> None:
     global _PREFERRED_PROTOCOL
     if protocol not in {"quic", "http2", None}:
         return
-    _PREFERRED_PROTOCOL = protocol
-    snapshot = tunnel_quality_snapshot()
-    if snapshot is not None:
-        _persist_quality_snapshot(snapshot, publish=False)
+    with _QUALITY_HISTORY_LOCK:
+        path = _quality_history_path()
+        history = runtime.read_json(path)
+        if not isinstance(history, dict):
+            history = {"schema_version": 2}
+        history["preferred_protocol"] = protocol
+        runtime.write_json(path, history)
+        _PREFERRED_PROTOCOL = protocol
 
 
 def _tail_snapshot_matches_active_protocol(
@@ -4540,7 +4548,11 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
             _RECOVERY_STATE.clear()
             _RECOVERY_STATE.update(tunnel_quality.empty_recovery())
             _QUALITY_CONTEXT = None
-        persisted = runtime.read_json(_quality_history_path())
+        with _QUALITY_HISTORY_LOCK:
+            persisted = runtime.read_json(_quality_history_path())
+            if isinstance(persisted, dict) and persisted.get("schema_version") in {1, 2}:
+                preferred = persisted.get("preferred_protocol")
+                _PREFERRED_PROTOCOL = preferred if preferred in {"quic", "http2"} else None
         if isinstance(persisted, dict) and persisted.get("schema_version") in {1, 2}:
             evaluator_state = persisted.get("evaluator")
             if isinstance(evaluator_state, dict):
@@ -4558,8 +4570,6 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                 legacy=persisted.get("retry_policy_version") != RECOVERY_RETRY_POLICY_VERSION,
                 now=time.time(),
             )
-            preferred_protocol = persisted.get("preferred_protocol")
-            _PREFERRED_PROTOCOL = str(preferred_protocol) if preferred_protocol in {"quic", "http2"} else None
         orphan_candidate_pending = not _reconcile_orphan_candidate_when_free()
         _reconcile_connector_lifecycle()
         _normalize_orphaned_recovery_state()

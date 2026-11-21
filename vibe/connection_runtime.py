@@ -503,7 +503,7 @@ def _wait_registered(pid, url):
 
 
 def _pin_candidates(attempt):
-    """Failure of saved pins immediately precedes auto; a blind outage never writes auto."""
+    """Test saved pins first; use an explicit transport on both bounded attempts."""
     for automatic in (False, True):
         pid = None
         try:
@@ -516,7 +516,14 @@ def _pin_candidates(attempt):
                 if automatic:
                     for key in attempt['pins']:
                         setattr(trial.remote_access.vibe_cloud, cs.FIELDS[key], cs.AUTOMATIC[key])
-                pid, url = tunnel._start_candidate_connector(trial, binary, 'auto' if automatic else tunnel._configured_protocol(config))
+                protocol = tunnel._initial_connector_protocol(config)
+                if automatic and 'protocol' in attempt['pins']:
+                    protocol = tunnel._tail_candidate_protocol(trial, attempt['pins']['protocol'])
+                elif protocol == 'auto':
+                    # No remembered transport. Start where cloudflared would,
+                    # without delegating the 30 s decision to its slow fallback.
+                    protocol = 'quic'
+                pid, url = tunnel._start_candidate_connector(trial, binary, protocol)
             ready = _wait_registered(pid, url)
             if ready is not True:
                 if ready is None:
@@ -537,6 +544,9 @@ def _pin_candidates(attempt):
                             setattr(live.remote_access.vibe_cloud, cs.FIELDS[key], cs.AUTOMATIC[key])
                             changes.append(dict(setting=key, **{'from': old, 'to': cs.AUTOMATIC[key]}))
                         state['returnedToAutomatic'] = dict(at=cs.now(), reason='tunnel_unreachable', changes=changes)
+                        # A restart must know which transport actually registered
+                        # before the saved protocol is allowed to become auto.
+                        tunnel._set_preferred_protocol(protocol)
                         live.save()
                         state.pop('pinAttempt')
                         cs.journal.save(state)
