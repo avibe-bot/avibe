@@ -38,6 +38,7 @@ def test_scheduled_rejection_is_consecutive_persistent_and_reversible(config, mo
 
     monkeypatch.setattr(health, 'time', SimpleNamespace(time=lambda: now[0]))
     monkeypatch.setattr(remote, 'time', SimpleNamespace(monotonic=lambda: now[0], time=lambda: now[0]))
+    monkeypatch.setattr(remote, '_device_json_request', lambda *_: {'authorization_revision': 3})
     monkeypatch.setattr(health, 'read_revision', read)
     monkeypatch.setattr(remote.instance_address, 'note_generation_hint', lambda _: None)
     from storage import remote_access_authorization_service
@@ -64,6 +65,29 @@ def test_scheduled_rejection_is_consecutive_persistent_and_reversible(config, mo
     assert remote.sync_authorization_revision_once(monitor=monitor) == {'ok': True, 'authorization_revision': 3}
     assert reads == [1000, 1015, 1030, 1045, 1165, 1465]
     assert health.rejected_at(config) is None
+
+
+@pytest.mark.parametrize('answer', ['accepted', 'rejected'])
+def test_split_dns_can_refresh_watermark_but_never_changes_verdict(config, monkeypatch, answer):
+    import ipaddress
+    monkeypatch.setattr(remote, '_resolve_pairing_backend_addresses', lambda *_: (ipaddress.ip_address('10.2.3.4'),))
+    monkeypatch.setattr(remote, '_validated_backend_connections', lambda *_: pytest.fail('private address not pinned'))
+    calls = []
+    def established(cfg, method, suffix):
+        calls.append((method, suffix))
+        if answer == 'rejected':
+            raise remote.BackendRequestError(401, {'error': 'invalid_device_secret'})
+        return {'authorization_revision': 4}
+    monkeypatch.setattr(remote, '_device_json_request', established)
+    monitor = health.RevisionMonitor()
+    for _ in range(2):
+        monitor.next_probe = 0
+        result = remote.sync_authorization_revision_once(monitor=monitor)
+        assert result['ok'] == (answer == 'accepted')
+        assert monitor.first is None and health.rejected_at(config) is None
+    if answer == 'accepted':
+        assert remote._load_authorization_revision_snapshot(config)[0] == 4
+    assert calls == [('GET', 'authorization-revision')] * 2
 
 
 def test_delayed_rejection_cannot_affect_another_pairing_or_recovery(config, monkeypatch):

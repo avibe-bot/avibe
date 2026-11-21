@@ -72,10 +72,10 @@ def test_constrained_pair_replays_same_request_until_receipt_matches(pairing_hos
             raise EndTick
 
         monkeypatch.setattr(remote_access.time, 'sleep', stop_tick)
-        monkeypatch.setattr(remote_access, 'sync_authorization_revision_once', lambda **_: probes.append(True))
+        monkeypatch.setattr(remote_access, 'sync_authorization_revision_once', lambda **kw: probes.append(kw['monitor']))
         with pytest.raises(EndTick):
             workers[0]()
-        assert not probes
+        assert probes == [None]  # refresh the live binding, but no rejection evidence
     assert requests[0] == requests[1] and requests[0]['redeem_request_id']
     assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_B'
     assert 'bound' not in claims._outcome()

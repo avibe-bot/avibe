@@ -1342,6 +1342,43 @@ def test_remote_login_forces_revoked_authorization_revalidation(monkeypatch, tmp
     assert refresh_flags.count(True) == 1
 
 
+def test_pending_pairing_keeps_remote_organization_session_current(tmp_path, monkeypatch):
+    from vibe import binding_health
+    config = _paired_config(tmp_path)
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert remote_access.resolve_current_authorization(config, identity).current
+    remote_access._pending_pairing_path().write_text('{')
+    now = time.time() + 90  # beyond the freshness limit of the old watermark
+    monkeypatch.setattr(time, 'time', lambda: now)
+    calls = []
+    def live(_cfg, method, suffix, **kw):
+        calls.append((method, suffix))
+        return {'authorization_revision': 41}
+    monkeypatch.setattr(remote_access, '_device_json_request', live)
+    monkeypatch.setattr(binding_health, 'read_revision', lambda *_: pytest.fail('detector ran during recovery'))
+    class TickFinished(Exception):
+        pass
+    def sleep(_delay):
+        raise TickFinished
+    monkeypatch.setattr(remote_access.time, 'sleep', sleep)
+    workers = []
+    class Worker:
+        def __init__(self, *, target, **_):
+            workers.append(target)
+        def start(self):
+            pass
+    with monkeypatch.context() as patch:
+        patch.setattr(remote_access, '_AUTHORIZATION_REVISION_POLL_STARTED', False)
+        patch.setattr(remote_access.threading, 'Thread', Worker)
+        remote_access.start_authorization_revision_polling()
+    with pytest.raises(TickFinished):
+        workers[0]()
+    assert calls == [('GET', 'authorization-revision')]
+    assert remote_access.resolve_current_authorization(config, identity).current
+    assert remote_access._pending_pairing_path().read_text() == '{'
+
+
 @pytest.mark.parametrize('boundary', ['logout', 'retire-binding', 'reset-fence'])
 def test_browser_logout_invalidates_http_sse_and_websocket(monkeypatch, tmp_path, boundary):
     config = _paired_config(tmp_path)

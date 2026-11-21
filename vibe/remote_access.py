@@ -2250,6 +2250,7 @@ def sync_authorization_revision_once(
         return {"ok": False, "error": "authorization_revision_sync_in_progress"}
     observation = "unknown"
     observe = False
+    fallback = False
     try:
         config = config or V2Config.load()
         if monitor is not None and not monitor.due(config, time.monotonic()):
@@ -2261,7 +2262,17 @@ def sync_authorization_revision_once(
         else:
             from vibe.binding_health import read_revision
             observe = True
-            result = read_revision(config)
+            try:
+                result = read_revision(config)
+            except BackendRequestError:
+                # The validated reader raises this only for the exact device rejection.
+                raise
+            except (OSError, ValueError, RuntimeError, http.client.HTTPException):
+                # Split DNS and proxy virtual addresses may make pairing validation
+                # unavailable on a working installation. Keep its established,
+                # authenticated watermark transport; it never supplies a verdict.
+                fallback = True
+                result = _device_json_request(config, 'GET', 'authorization-revision')
         instance_address.note_generation_hint(result.get("hostname_generation"))
         revision = _replace_authorization_revision(
             config,
@@ -2277,11 +2288,12 @@ def sync_authorization_revision_once(
             )
         except Exception:
             logger.warning("Authorization revision context update failed", exc_info=True)
-        observation = "accepted"
+        if not fallback:
+            observation = "accepted"
         return {"ok": True, "authorization_revision": revision}
     except BackendRequestError as exc:
         error = exc.payload.get("error")
-        if exc.status == 401 and exc.payload == {"error": "invalid_device_secret"}:
+        if not fallback and exc.status == 401 and exc.payload == {"error": "invalid_device_secret"}:
             observation = "rejected"
         return {
             "ok": False,
@@ -2356,20 +2368,31 @@ def start_authorization_revision_polling(
 
     def loop() -> None:
         from vibe.binding_health import RevisionMonitor
+        from vibe.binding_admission import reset_in_progress
         monitor = RevisionMonitor()
         retry_delay = 1
+        retry_at = 0.
         while True:
-            try:
-                pending, delay = _drive_pending_pairing()
-            except Exception:
-                # Local damage or transient I/O is not a negative credential verdict.
-                pending, delay = True, 0
+            pending = True
+            if time.monotonic() >= retry_at:
+                try:
+                    pending, delay = _drive_pending_pairing()
+                except Exception:
+                    pending, delay = True, 0
+                if pending:
+                    retry_at = time.monotonic() + max(retry_delay, delay)
+                    retry_delay = min(60, retry_delay * 2)
+                else:
+                    retry_delay = 1
+                    retry_at = 0.
             if pending:
                 monitor.reset()
-                time.sleep(max(retry_delay, delay))
-                retry_delay = min(60, retry_delay * 2)
+                if not reset_in_progress():
+                    # Recovery owns the verdict, not the still-current session's
+                    # watermark. Reload config after the replay, even when it failed.
+                    sync_authorization_revision_once(monitor=None)
+                time.sleep(max(1, min(interval_seconds, retry_at - time.monotonic())))
                 continue
-            retry_delay = 1
             result = sync_authorization_revision_once(monitor=monitor)
             if not result.get("ok") and result.get("error") not in {
                 "authorization_revision_deferred",
