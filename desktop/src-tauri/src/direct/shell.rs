@@ -20,6 +20,7 @@ use std::{
 };
 use tauri::{
     menu::{CheckMenuItem, Submenu},
+    webview::{PermissionKind, PermissionResponse},
     AppHandle, Manager, Runtime,
 };
 use tokio::{
@@ -417,6 +418,24 @@ async fn ask(
     })
     .ok()?;
     answered.await.ok().flatten()
+}
+
+/// What a Windows window that shows another computer's instance answers a
+/// permission request: no to notifications, and nothing of its own to any
+/// other, which is then asked as it always was.
+///
+/// With that permission a page registers its push worker, and a worker that
+/// controls the instance's documents has every rendezvous refused: the
+/// window would never leave the tunnel. Nothing that works is lost: such a
+/// window is InPrivate, so a push subscription made in it could not outlive
+/// it, and the app turns system notifications off while another computer's
+/// instance is on show. WKWebView has no `PushManager`, so macOS needs no
+/// answer (`examples/direct_webview_probe.rs` holds it to that).
+pub(crate) fn remote_instance_permission(kind: PermissionKind) -> PermissionResponse {
+    match kind {
+        PermissionKind::Notifications => PermissionResponse::Deny,
+        _ => PermissionResponse::Default,
+    }
 }
 
 /// A route for a window that is about to be created, where a route can only

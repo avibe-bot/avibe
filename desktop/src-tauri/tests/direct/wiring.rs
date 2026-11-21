@@ -1,8 +1,10 @@
 use super::{
     choices::{Choices, Mode},
+    shell::remote_instance_permission,
     wiring::{Effect, Material, Published, Routing, Target, Wiring},
 };
 use std::time::Duration;
+use tauri::webview::{PermissionKind, PermissionResponse};
 use tokio::time::Instant;
 
 const ACCOUNT: &str = "account-1";
@@ -513,4 +515,29 @@ fn choices_read_what_they_can_and_treat_the_rest_as_automatic() {
     let mut choices = Choices::load(nested.clone());
     choices.set(ACCOUNT, ONE, Mode::Tunnel);
     assert_eq!(Choices::load(nested).mode(ACCOUNT, ONE), Mode::Tunnel);
+}
+
+/// A Windows window of another computer's instance refuses notifications,
+/// so its page never registers a push worker; every other permission gets
+/// no answer of the shell's, and is asked as it always was.
+#[test]
+fn a_remote_instance_window_refuses_notifications_and_nothing_else() {
+    assert!(matches!(
+        remote_instance_permission(PermissionKind::Notifications),
+        PermissionResponse::Deny
+    ));
+    for kind in [
+        PermissionKind::Microphone,
+        PermissionKind::Camera,
+        PermissionKind::Geolocation,
+        PermissionKind::ClipboardRead,
+        PermissionKind::DisplayCapture,
+        PermissionKind::Midi,
+        PermissionKind::Sensors,
+    ] {
+        assert!(
+            matches!(remote_instance_permission(kind), PermissionResponse::Default),
+            "{kind:?}"
+        );
+    }
 }

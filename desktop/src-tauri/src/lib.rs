@@ -2138,6 +2138,11 @@ fn build_main_child(
     if let Some(proxy) = &config.proxy_url {
         builder = builder.proxy_url(proxy.clone());
     }
+    // Another computer's instance on Windows asks for no notifications
+    // permission, so its page never registers a push worker.
+    if disposable && cfg!(windows) {
+        builder = builder.on_permission_request(|_, kind| direct::shell::remote_instance_permission(kind));
+    }
     // Another computer's instance, where a route to its direct listener can
     // only be given now (Windows). Never beside a configured proxy.
     let direct_route = if disposable {

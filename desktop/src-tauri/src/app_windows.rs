@@ -914,6 +914,11 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
     if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
         builder = builder.additional_browser_args(arguments);
     }
+    // As the instance view it was opened from: no notifications permission
+    // for another computer's instance on Windows.
+    if source.runtime.disposable && cfg!(windows) {
+        builder = builder.on_permission_request(|_, kind| crate::direct::shell::remote_instance_permission(kind));
+    }
 
     let window = match builder.build() {
         Ok(window) => window,
