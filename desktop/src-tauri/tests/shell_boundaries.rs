@@ -166,6 +166,7 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-computer-use-windows",
             "main-desktop-update",
             "main-app-windows",
+            "main-app-lock",
             "main-desktop-notifications",
             "main-instance-client",
             "main-window-focus",
