@@ -1451,7 +1451,9 @@ describe('a hold the iOS App recognises', () => {
     expect(pipeline.takes[1].finish).toHaveBeenCalledTimes(1);
   });
 
-  it('leaves the slide haptics of a hold the App recognised to the App', async () => {
+  // On a surface that takes the press for itself the App is not told of the finger's moves,
+  // so the slides' haptics are the page's for every hold, the App's own too.
+  it('gives the slide haptics of a hold the App recognised itself: rigid into cancel, soft back', async () => {
     const el = await mountFollowed();
     native.impact.mockClear();
     down(el);
@@ -1460,11 +1462,13 @@ describe('a hold the iOS App recognises', () => {
     await elapse(0);
     await flush();
     await speak('不要了');
+    // The cue itself was the App's.
+    expect(native.impact).not.toHaveBeenCalled();
     move(el, 500 - 81);
     expect(hold.phase).toBe('armed');
     move(el, 500 - 59);
     expect(hold.phase).toBe('recording');
-    expect(native.impact).not.toHaveBeenCalled();
+    expect(native.impact.mock.calls.map(([style]) => style)).toEqual(['rigid', 'soft']);
     expect(native.selection).not.toHaveBeenCalled();
   });
 
