@@ -144,6 +144,7 @@ def address(monkeypatch):
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
         ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
         ("_last_read_failed", None), ("_known_cleanup", None), ("_binding_failure_logged", None),
+        ("_read_refused", False),
     ):
         monkeypatch.setattr(instance_address, name, value)
     instance_address._worker_read_requested.clear()
@@ -938,6 +939,28 @@ def test_c4_a_phone_paired_on_the_old_address_while_a_returning_name_settles_is_
     run()
     assert binding().active_host == OLD and during and before not in active_health_devices()
     assert active_health_devices() == after  # only the phone paired on the new address is left
+
+
+def test_b4_an_owed_read_is_not_asked_for_ever_of_an_instance_that_has_no_former_names(address):
+    from config.v2_config import update_config_fields
+
+    plane, _ = address
+    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "instance_kind", "organization"))
+    plane.calls.clear()
+    instance_address._wake_worker(read_state=True)
+    assert instance_address._read_when_asked() is True and not instance_address._worker_read_requested.is_set()
+    assert plane.calls == []
+
+
+def test_b4_a_definitive_refusal_of_the_state_read_is_told_apart_from_a_fault(address):
+    plane, _ = address
+    plane.fail = remote_access.BackendRequestError(404, {})
+    instance_address._wake_worker(read_state=True)
+    assert instance_address._read_when_asked() is False and instance_address._read_refused is True
+    plane.fail = RuntimeError("resource_acl_device_unavailable")
+    assert instance_address._read_when_asked() is False and instance_address._read_refused is False
+    plane.fail = remote_access.BackendRequestError(503, {})
+    assert instance_address._read_when_asked() is False and instance_address._read_refused is False
 
 
 def test_b4_a_read_that_is_owed_survives_a_failed_request(address):

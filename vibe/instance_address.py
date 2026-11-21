@@ -407,6 +407,7 @@ _quiet_loaded_for: str | None = None
 _inflight: dict[str, int] = {}
 _last_read_started: float | None = None
 _last_read_failed: float | None = None
+_read_refused = False  # the last read got a definitive refusal from avibe.bot
 _known_cleanup: tuple[str, frozenset[str]] | None = None
 _read_lock = threading.Lock()
 _retired_at_flip: dict[str, str] = {}  # old host -> new origin, for streams open at the switch
@@ -682,6 +683,8 @@ def _read_is_stale_locked(read: _StateRead) -> bool:
 def _read_state_once(binding: Binding) -> _StateRead | None:
     """One read of ``hostname-state``. ``None`` when it gave no usable state."""
 
+    global _read_refused
+
     from vibe import remote_access
 
     with _LOCK:
@@ -694,9 +697,14 @@ def _read_state_once(binding: Binding) -> _StateRead | None:
             # The binding is no longer current: no cleaning anywhere, and no
             # reply still on its way may bring it back.
             _drop_authority()
+        # A definitive answer (not a throttle, not a server fault): asking again
+        # soon would get the same one.
+        _read_refused = 400 <= exc.status < 500 and exc.status != 429
         return None
     except Exception:
+        _read_refused = False
         return None
+    _read_refused = False
     state = _validated_state(binding, payload)
     with _LOCK:
         if state is None or epoch != _authority_epoch or current_binding() != binding:
@@ -1116,13 +1124,27 @@ def _wake_worker(*, read_state: bool = False) -> None:
     _worker_wake.set()
 
 
+_OWED_READ_RETRY_SECONDS = 30.0
+_OWED_READ_RETRY_MAX_SECONDS = 3600.0
+
+
 def _worker_loop() -> None:
     delay = 0.0
+    owed_delay = _OWED_READ_RETRY_SECONDS
     while True:
         _worker_wake.wait(timeout=delay if delay > 0 else None)
         _worker_wake.clear()
         try:
-            delay = _advance_operation() if _read_when_asked() else min(_advance_operation() or 30.0, 30.0)
+            if _read_when_asked():
+                owed_delay = _OWED_READ_RETRY_SECONDS
+                delay = _advance_operation()
+            else:
+                # Still owed. Network errors and server faults are asked again
+                # soon; a definitive refusal (an endpoint that is not there yet,
+                # a kind of instance it will never answer) ever more slowly.
+                retry = owed_delay
+                owed_delay = min(owed_delay * 2, _OWED_READ_RETRY_MAX_SECONDS) if _read_refused else _OWED_READ_RETRY_SECONDS
+                delay = min(_advance_operation() or retry, retry)
         except Exception:
             logger.warning("instance address: operation step failed; it will be retried", exc_info=True)
             delay = 15.0
@@ -1147,8 +1169,10 @@ def _read_when_asked() -> bool:
     if not _worker_read_requested.is_set():
         return True
     binding = current_binding()
-    if binding is None or not binding.paired or not is_managed_name(binding.active_host):
-        _worker_read_requested.clear()  # nothing to read for; a pairing or a hint asks again
+    if _eligibility(binding) is not None and (binding is None or _journal(binding) is None):
+        # Not a personal, paired instance on a managed name: it has no former
+        # names and nothing to read for. A pairing or a hint asks again.
+        _worker_read_requested.clear()
         return True
     if refresh_state(force=True):
         _worker_read_requested.clear()
