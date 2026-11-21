@@ -5283,4 +5283,226 @@ extension NavigationPolicyTests {
         }
     }
 
+    /// Draft probe (not for merge). Can a page the App itself supplies,
+    /// shown without the network at an address, delete that address's
+    /// stored data in the account's WebKit store, and only that address's?
+    @MainActor
+    func testProbeAPageOfOursClearsOnlyItsOwnAddressesStorage() async throws {
+        let store = WKWebsiteDataStore(forIdentifier: UUID())
+        let departed = try XCTUnwrap(URL(string: "https://old-name.avibe-probe.example/"))
+        let sibling = try XCTUnwrap(URL(string: "https://other-name.avibe-probe.example/"))
+        let world = WKContentWorld.world(name: "avibe-probe")
+
+        func run(
+            _ script: String,
+            at url: URL,
+            headers: [String: String] = [:],
+            ruleList: WKContentRuleList? = nil,
+            in contentWorld: WKContentWorld = .page
+        ) async throws -> String {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = store
+            if let ruleList {
+                configuration.userContentController.add(ruleList)
+            }
+            let webView = WKWebView(frame: .zero, configuration: configuration)
+            let loader = ProbeLoader()
+            webView.navigationDelegate = loader
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/html; charset=utf-8"].merging(headers) { $1 }
+            ))
+            webView.loadSimulatedRequest(
+                URLRequest(url: url),
+                response: response,
+                responseData: Data("<!doctype html><title>probe</title>".utf8)
+            )
+            try await loader.finished()
+            let result = try await webView.callAsyncJavaScript(
+                script, arguments: [:], in: nil, contentWorld: contentWorld
+            )
+            return result as? String ?? "nil"
+        }
+
+        let seed = """
+            localStorage.setItem("probe", "kept");
+            await new Promise((resolve, reject) => {
+              const open = indexedDB.open("probe-db", 1);
+              open.onupgradeneeded = () => open.result.createObjectStore("s");
+              open.onerror = () => reject(open.error);
+              open.onsuccess = () => {
+                const tx = open.result.transaction("s", "readwrite");
+                tx.objectStore("s").put("v", "k");
+                tx.oncomplete = () => { open.result.close(); resolve(); };
+                tx.onerror = () => reject(tx.error);
+              };
+            });
+            let cache = "unsupported";
+            try {
+              const opened = await caches.open("probe-cache");
+              await opened.put("/probe", new Response("x"));
+              cache = "written";
+            } catch (error) { cache = "error:" + error.name; }
+            document.cookie = "probe_js=1; path=/; max-age=86400; Secure";
+            return JSON.stringify({cache, sw: "serviceWorker" in navigator, secure: isSecureContext});
+            """
+        let read = """
+            let dbs = ["no databases()"];
+            try { dbs = (await indexedDB.databases()).map((db) => db.name); } catch (error) { dbs = ["error:" + error.name]; }
+            let cacheKeys = [];
+            try { cacheKeys = await caches.keys(); } catch (error) { cacheKeys = ["error:" + error.name]; }
+            return JSON.stringify({ls: localStorage.getItem("probe"), dbs, cacheKeys, cookie: document.cookie});
+            """
+        let clean = """
+            const out = {};
+            try { localStorage.clear(); sessionStorage.clear(); out.ls = "cleared"; } catch (error) { out.ls = "error:" + error.name; }
+            try {
+              const dbs = await indexedDB.databases();
+              out.idb = await Promise.all(dbs.map((db) => new Promise((resolve) => {
+                const request = indexedDB.deleteDatabase(db.name);
+                request.onsuccess = () => resolve("deleted");
+                request.onerror = () => resolve("error");
+                request.onblocked = () => resolve("blocked");
+              })));
+            } catch (error) { out.idb = "error:" + error.name; }
+            try {
+              const keys = await caches.keys();
+              await Promise.all(keys.map((key) => caches.delete(key)));
+              out.caches = keys.length;
+            } catch (error) { out.caches = "error:" + error.name; }
+            try {
+              if ("serviceWorker" in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                await Promise.all(registrations.map((registration) => registration.unregister()));
+                out.sw = registrations.length;
+              } else { out.sw = "none"; }
+            } catch (error) { out.sw = "error:" + error.name; }
+            return JSON.stringify(out);
+            """
+
+        // Seed both addresses (siblings under one registrable domain), and
+        // cookies a page cannot see: one per host, one for the parent domain.
+        let probed1 = try await run(seed, at: departed)
+        print("[probe] seed departed: \(probed1)")
+        let probed2 = try await run(seed, at: sibling)
+        print("[probe] seed sibling: \(probed2)")
+        func cookie(_ name: String, domain: String) throws -> HTTPCookie {
+            try XCTUnwrap(HTTPCookie(properties: [
+                .name: name, .value: "1", .domain: domain, .path: "/",
+                .secure: "TRUE", .expires: Date().addingTimeInterval(86_400),
+                HTTPCookiePropertyKey("HttpOnly"): "TRUE",
+            ]))
+        }
+        let cookies = store.httpCookieStore
+        try await cookies.setCookie(cookie("probe_http", domain: "old-name.avibe-probe.example"))
+        try await cookies.setCookie(cookie("probe_http", domain: "other-name.avibe-probe.example"))
+        try await cookies.setCookie(cookie("probe_parent", domain: ".avibe-probe.example"))
+        let probed3 = try await run(read, at: departed)
+        print("[probe] before departed: \(probed3)")
+        let probed4 = try await run(read, at: sibling)
+        print("[probe] before sibling: \(probed4)")
+        let recordsBefore = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes())
+        print("[probe] data records before: \(recordsBefore.map { "\($0.displayName) \($0.dataTypes.sorted())" })")
+        let probed5 = await cookies.allCookies().map { "\($0.name)@\($0.domain)" }.sorted()
+        print("[probe] cookies before: \(probed5)")
+
+        // The cleanup: our own document at the departed address, under a
+        // policy that lets it load nothing, its script run from the App in
+        // its own world.
+        let sealed = [
+            "Content-Security-Policy": "default-src 'none'",
+            "Cache-Control": "no-store",
+        ]
+        let probed6 = try await run(clean, at: departed, headers: sealed, in: world)
+        print("[probe] clean: \(probed6)")
+        for stored in await cookies.allCookies() where stored.domain == "old-name.avibe-probe.example" {
+            await cookies.deleteCookie(stored)
+        }
+
+        let afterDeparted = try await run(read, at: departed)
+        let afterSibling = try await run(read, at: sibling)
+        print("[probe] after departed: \(afterDeparted)")
+        print("[probe] after sibling: \(afterSibling)")
+        let cookiesAfter = await cookies.allCookies().map { "\($0.name)@\($0.domain)" }.sorted()
+        print("[probe] cookies after: \(cookiesAfter)")
+        let recordsAfter = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes())
+        print("[probe] data records after: \(recordsAfter.map { "\($0.displayName) \($0.dataTypes.sorted())" })")
+        XCTAssertTrue(afterDeparted.contains(#""ls":null"#), afterDeparted)
+        XCTAssertTrue(afterDeparted.contains(#""dbs":[]"#), afterDeparted)
+        XCTAssertTrue(afterDeparted.contains(#""cacheKeys":[]"#), afterDeparted)
+        XCTAssertTrue(afterSibling.contains(#""ls":"kept""#), afterSibling)
+        XCTAssertTrue(afterSibling.contains("probe-db"), afterSibling)
+        XCTAssertTrue(afterSibling.contains("probe_js=1"), afterSibling)
+        XCTAssertFalse(cookiesAfter.contains { $0.hasSuffix("@old-name.avibe-probe.example") }, "\(cookiesAfter)")
+        XCTAssertTrue(cookiesAfter.contains("probe_http@other-name.avibe-probe.example"), "\(cookiesAfter)")
+        XCTAssertTrue(cookiesAfter.contains("probe_parent@.avibe-probe.example"), "\(cookiesAfter)")
+
+        // No request reaches the address while our page is shown and its
+        // script runs: a real local server as the address.
+        let requests = LockedCounter()
+        let server = try LocalHTTPServer { _ in
+            _ = requests.next()
+            return .status(404)
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let probed7 = try await run(seed, at: baseURL)
+        print("[probe] seed local: \(probed7)")
+        let seededRequests = requests.count
+        let probed8 = try await run(clean, at: baseURL, headers: sealed, in: world)
+        print("[probe] clean local: \(probed8)")
+        let probed9 = try await run(read, at: baseURL)
+        print("[probe] after local: \(probed9)")
+        try await Task.sleep(for: .seconds(1))
+        print("[probe] requests to the local address: seeding \(seededRequests), in all \(requests.count)")
+        XCTAssertEqual(requests.count, 0)
+
+        // Does a rule list that blocks every load still let our page show?
+        let rules = try await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "avibe-probe-block-all",
+            encodedContentRuleList: #"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}}]"#
+        )
+        do {
+            let blocked = try await run(read, at: sibling, headers: sealed, ruleList: rules, in: world)
+            print("[probe] with a block-all rule list: \(blocked)")
+        } catch {
+            print("[probe] with a block-all rule list: failed \(error)")
+        }
+    }
+}
+
+private final class ProbeLoader: NSObject, WKNavigationDelegate {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func finished() async throws {
+        if let result {
+            return try result.get()
+        }
+        try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+
+    private func settle(_ outcome: Result<Void, Error>) {
+        result = outcome
+        continuation?.resume(with: outcome)
+        continuation = nil
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        settle(.success(()))
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        settle(.failure(error))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        settle(.failure(error))
+    }
 }
