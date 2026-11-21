@@ -61,8 +61,8 @@ that avibe.bot listed for this instance id.
 | ID | Who could do what | What would be lost | Rule | Acceptance check |
 |---|---|---|---|---|
 | B1 | A crash or lost reply between avibe.bot accepting the rename and this instance switching. | The instance believes the old name; visitors sent to the new name find nothing. | Before the first request the instance writes the intent to a crash-safe journal: operation id, expected generation, expected hostname, new prefix, who confirmed. It sends the identical tuple until it gets a final answer (`202` means repeat the same request after `Retry-After`). On a committed receipt it records the receipt, reads the hostname state, then applies in this order, each step idempotent and recorded: (1) roles and config (`public_url`, `redirect_uri`, OIDC client id) in one config write; (2) one database transaction: snapshot the device list, end all remote sessions, disable remote push subscriptions; (3) Health (C4); (4) wake open pages. On start and on every state read an unfinished journal entry resumes from its recorded step. | Kill the process after each step and after a lost `200`: on restart the same tuple is replayed, the end state is identical, nothing runs twice (Health deletion in particular), and no second operation id is minted. A refusal clears the journal and changes nothing. |
-| B2 | A stale or wrong view makes the instance send cleaning responses on the name it is serving. | Every visitor's cache and drafts wiped and everyone signed out, for as long as it lasts. | One local role table decides content and cleaning, read once per request. (a) The active Host always wins: a Host equal to the active name or in the active-hostname snapshot is never cleaned, whatever any list says. (b) A cleaning response needs the Host to be in the last cleanup list avibe.bot gave for this instance id, at a generation not older than the stored one, not past its `hold_until`, and read from avibe.bot within the last 60 seconds; otherwise the instance reads the state first (one read at a time per instance) and, if it cannot, answers the unknown-Host `503` with no clearing header and no script. (c) The instance never infers a role from a suffix, a timeout or its own journal alone. | Property test over role tables: no Host is both served and cleaned. For every route class (page, API, static asset, `/api/session`, `/auth/*`, `/p/*`, device route, WebSocket) on the active Host with that Host also injected into the cleanup list: content, never a clearing header. State unreachable or older than 60 s: `503`, no header. Past `hold_until`: `503`. |
-| B3 | Taking a name back: a cleaning response produced a moment earlier reaches a browser after the name is active again. | That browser's fresh sign-in and cache. | Before sending a request whose target is one of its own cleanup names, the instance moves that name to **quiet**, waits until cleaning responses already started on it are fully written, and records this in the journal. It becomes active only after the commit, the state read, and a 5-second settle. A refusal returns it to cleanup only after a fresh state read still lists it. | Hold a slow cleaning response open, take the name back: the name is not served until the response finished and the settle passed; no clearing header is produced for it after the journal says quiet. Refused take-back: name cleans again only after a fresh state lists it. |
+| B2 | A stale or wrong view makes the instance send cleaning responses on the name it is serving. | Every visitor's cache and drafts wiped and everyone signed out, for as long as it lasts. | One local role table decides content and cleaning, read once per request. (a) The active Host always wins: a Host equal to the active name or in the active-hostname snapshot is never cleaned, whatever any list says. (b) A cleaning response needs the Host to be in the last cleanup list avibe.bot gave for this instance id, at a generation not older than the stored one, not past its `hold_until`, and from a state read that was **started** no more than 60 seconds ago on the monotonic clock; this is checked again immediately before the response headers are written. Otherwise the instance reads the state first (one read at a time per instance) and, if it cannot, answers the unknown-Host `503` with no clearing header and no script. A restart, a `401` from the state read, or a process that was suspended past the 60 seconds drops the permission; a late or older reply cannot restore it. (c) The instance never infers a role from a suffix, a timeout or its own journal alone. | Property test over role tables: no Host is both served and cleaned. For every route class (page, API, static asset, `/api/session`, `/auth/*`, `/p/*`, device route, WebSocket) on the active Host with that Host also injected into the cleanup list: content, never a clearing header. State unreachable, or read started more than 60 s ago (measured from the start of the read, including a clock jump while suspended): `503`, no header. After restart with no fresh read: `503`. Past `hold_until`: `503`. A reply that arrives after a `401` does not re-enable cleaning. |
+| B3 | Taking a name back: a cleaning response produced a moment earlier reaches a browser after the name is active again. | That browser's fresh sign-in and cache. | Before sending a request whose target is one of its own cleanup names, the instance moves that name to **quiet**, waits until cleaning responses already started on it are fully written, and records this in the journal. avibe.bot does its half for a return from any requester: it stops listing the name for cleaning, raises the generation, and does not publish the name as active until every 60-second permission it handed out has run out (it answers `202` meanwhile; the instance replays). The name becomes active here only after the commit, a state read that names it active, and the local drain; a short settle is added but is not treated as proof that a browser has finished with an earlier response. A refusal returns it to cleanup only after a fresh state read still lists it. What cannot be promised by either side: recalling a response already on the network. | Hold a slow cleaning response open, take the name back: the name is not served until the response finished and the settle passed; no clearing header is produced for it after the journal says quiet. Refused take-back: name cleans again only after a fresh state lists it. |
 | B4 | Two renames in a row (A→B→C), then back (C→A). | A browser returning on any of the three ends in the wrong place. | Roles come from the state: after A→B→C, C is active and A and B are cleanup, each with its own `hold_until`. After C→A, A is active (B3), B and C are cleanup, and A's clearing list is closed (F4). A returning browser on a cleanup name is cleaned and told the Avibe moved; on the active name it is served and its old cache is wiped by the existing ended-session rule before sign-in. | Walk the three renames with one browser profile per name: each lands as stated; no profile is cleaned on the active name. |
 | B5 | Replies arrive out of order (overlapping heartbeats, a replayed receipt). | A newer role table overwritten by an older one. | The stored generation only grows; a state with a lower generation is dropped. A replayed receipt changes no role by itself: the state is read first. Active and cleanup overlapping in one state, or a malformed list, is treated as unreadable (B2b). | Deliver generation n+1 then n: roles stay at n+1. Overlap in one state: no content change, no clearing. |
 | B6 | avibe.bot withdraws a cleanup route: the waiting period ended, or the live instance is transferred to another account. | Requests of the former holder's visitors answered by a machine that should no longer answer for that name. | A name that is no longer in the cleanup list gets nothing from this instance: no cleaning, no content, the unknown-Host `503`. Its clearing list is closed (F4). | Remove a name from the state: next request on it is `503` without clearing header; the device list no longer shows it as pending. |
@@ -124,7 +124,7 @@ All three: Owner by current authorization or direct loopback (A1); JSON;
 named below.
 
 - `GET /api/instance-address` →
-  `{ok, hostname, public_url, eligible, ineligible_reason, hold_days,
+  `{ok, hostname, public_url, eligible, ineligible_reason, hold_days (from avibe.bot's `release_delay_seconds`; null until first read),
   operation, unrecognized_change, cleanup, health}`.
   `operation`: `null` or `{state:"pending"|"applying"|"failed", hostname, error}`.
   `unrecognized_change`: `null` or `{previous_hostname, hostname, noticed_at}`.
@@ -151,7 +151,7 @@ named below.
 | 409 | `operation_in_progress` | A change is already running. |
 | 409 | `rename_ineligible` | Organization instance, not paired, or refused by avibe.bot. |
 | 409 | `taken` | The name is not available. No reason is given, by design. |
-| 409 | `name_limit_reached` + `earliest_release_at` | Approved sentence ("already holds 5 names, including those still waiting") with the real date. Code and field names follow the backend contract and are passed through unchanged. |
+| 409 | `name_holding_limit_reached` + `limit`, `held_count`, `earliest_release_at` (UTC string or null) | Approved sentence ("already holds N names, including those still waiting") with the real number and date, passed through from avibe.bot unchanged. The page does not hold the number. |
 | 409 | `address_changed` | The address changed meanwhile; reload. |
 | 409 | `pairing_invalid` | avibe.bot no longer accepts this binding: bind remote access again. |
 | 429 | `rate_limited` + `retry_after_seconds` | Try later. |
@@ -200,29 +200,33 @@ device routes `401`.
 
 ## Contract points to settle
 
-With the backend writer (Session `ses6x9a627t9a`), copied to the lead:
+Settled with the backend writer (Session `ses6x9a627t9a`, November 21, 11:27):
 
-1. Item 3 (ruled 11:23: content never depends on avibe.bot; cleaning needs a
-   fresh, explicit listing): B2/B3 implement it. To confirm: 60 seconds as the
-   freshness bound, and quiet-before-return as the barrier for taking a name
-   back.
-2. A change signal so the instance learns of a name change it did not start
-   sooner than the five-minute heartbeat: the current generation on the
-   existing `runtime-status` and authorization-revision replies.
-3. `release_delay_seconds` in `hostname-state`, so the page can say the number
-   before any rename.
-4. What exactly changes locally at a commit: `public_url`, `redirect_uri`
-   (`public_url` + `/auth/callback`), `oidc_client_id`; that issuer, endpoints,
-   tunnel token and device secret do not change and the connector is not
-   restarted.
-5. Every path on a cleanup name answers `410`, `/health` included: no probe of
-   avibe.bot or the edge may depend on a cleanup name.
-6. `"cache"` beside `"storage"` (contradiction 3).
-7. On `401` from `hostname-state` (the binding is no longer current) the
-   instance stops cleaning on every cleanup name and keeps today's behaviour on
-   its active name.
+1. Content only on the locally recorded active name, never an online check.
+   Cleaning: at most 60 seconds from the start of the state read, one read at a
+   time, at most one per 5 seconds, quiet-before-return and local drain (B2,
+   B3), plus the backend's own barrier for a return from any requester.
+2. Successful `runtime-status` and authorization-revision replies carry an
+   integer `hostname_generation`. It is a hint to read `hostname-state`, never
+   a permission to clean.
+3. `hostname-state` carries `release_delay_seconds` (30 days now). The page
+   takes the number of days from it. avibe.bot keeps 48 more hours before the
+   name is actually given out; users are told 30 days.
+4. A commit changes `public_url`, `redirect_uri` (`public_url` +
+   `/auth/callback`) and the returned `oidc_client_id`. Issuer, the three
+   endpoints, the tunnel token and the device secret do not change; the
+   connector is not restarted; the cookie-signing secret is not rotated (C1).
+5. Every path on a cleanup name answers `410`, `/health` included; avibe.bot
+   probes no cleanup name. Health device routes are the exception: `401
+   device_unauthorized`, body unread (the App acts on `401`, not on `410`).
+6. `Clear-Site-Data: "storage", "cache"`; never `"cookies"` or `"*"`.
+7. On `401` from `hostname-state` every cleaning permission is dropped and no
+   late reply restores it; the active name keeps today's behaviour.
 
-With the direct lane (coordinator Session `ses8mgme5623t`): C3.
+The limit on names comes back as `409 name_holding_limit_reached` with
+`limit`, `held_count` and `earliest_release_at`.
+
+Open with the direct lane (coordinator Session `ses8mgme5623t`): C3.
 
 ## Residuals, in plain words
 
