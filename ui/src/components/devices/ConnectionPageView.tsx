@@ -28,6 +28,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { KeptTail } from '../ui/kept-tail';
 import { BackToDevices } from './DevicesPageView';
 import { DOMAIN_SUFFIX } from './rules';
 import { timeParts } from './format';
@@ -274,12 +275,12 @@ function RenameDialogs({ host, rename, actions }: { host: string; rename: Rename
           <div className="rounded-lg bg-field px-4 py-3">
             <div className="text-[12px] font-semibold text-foreground">{t('devices.rename.after')}</div>
             <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-[12px] leading-relaxed text-muted">
-              <li>{t('devices.rename.void', { host, days: rename.voidDays })}</li>
-              <li>{t('devices.rename.signedOut')}</li>
-              <li>{t('devices.rename.links')}</li>
-              <li>{t('devices.rename.homeScreen')}</li>
-              {rename.health && <li>{t('devices.rename.health')}</li>}
-              <li>{t('devices.rename.direct')}</li>
+              <li><KeptTail text={t('devices.rename.void', { host, days: rename.voidDays })} /></li>
+              <li><KeptTail text={t('devices.rename.signedOut')} /></li>
+              <li><KeptTail text={t('devices.rename.links')} /></li>
+              <li><KeptTail text={t('devices.rename.homeScreen')} /></li>
+              {rename.health && <li><KeptTail text={t('devices.rename.health')} /></li>}
+              <li><KeptTail text={t('devices.rename.direct')} /></li>
             </ul>
           </div>
           <DialogFooter>
@@ -297,7 +298,7 @@ function RenameDialogs({ host, rename, actions }: { host: string; rename: Rename
         <DialogContent className="max-w-md" closeLabel={t('common.close')}>
           <DialogHeader>
             <DialogTitle>{t('devices.rename.confirmTitle', { host: `${rename.name}${DOMAIN_SUFFIX}` })}</DialogTitle>
-            <DialogDescription>{t('devices.rename.confirmBody', { host })}</DialogDescription>
+            <DialogDescription><KeptTail text={t('devices.rename.confirmBody', { host })} /></DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="ghost" onClick={actions.onRenameCancel}>{t('common.cancel')}</Button>
@@ -338,12 +339,12 @@ export function ConnectionPageView({
       <BackToDevices onBack={actions.onBack} />
       {rename?.step === 'done' && host && (
         <div role="status" className="rounded-xl border border-mint/40 bg-mint-soft px-5 py-3 text-[12px] leading-relaxed text-foreground">
-          {t('devices.connection.renamed', { host, from: rename.from })}
+          <KeptTail text={t('devices.connection.renamed', { host, from: rename.from })} />
         </div>
       )}
       {reverted && (
         <div role="status" className="rounded-xl border border-gold/40 bg-gold/10 px-5 py-3 text-[12px] leading-relaxed text-foreground">
-          {t('devices.connection.reverted', changeParams(t, reverted))}
+          <KeptTail text={t('devices.connection.reverted', changeParams(t, reverted))} />
         </div>
       )}
 
@@ -465,7 +466,7 @@ export function ConnectionPageView({
             <DialogHeader>
               <DialogTitle>{t('devices.connection.trialTitle')}</DialogTitle>
               <DialogDescription>
-                {t('devices.connection.trialBody', { ...changeParams(t, trial.change), seconds: trial.seconds })}
+                <KeptTail text={t('devices.connection.trialBody', { ...changeParams(t, trial.change), seconds: trial.seconds })} />
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
