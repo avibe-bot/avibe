@@ -5839,6 +5839,7 @@ def _new_pairing_claim(
         "source_fingerprint": _pairing_identity_fingerprint(source_identity),
         "source_instance_id": str(source_identity.get("instance_id") or ""),
         "source_backend_url": str(source_identity.get("backend_url") or ""),
+        **({"source_registry_binding": device_binding(config)} if source_identity.get("instance_id") else {}),
         "backend_url": backend_url,
         "device_name": device_name,
         "session_secret": secrets.token_urlsafe(32),
@@ -6544,6 +6545,14 @@ def _persist_pairing_impl(
                     "pairing": {"ok": False, "recoverable": False},
                 }
             try:
+                if current_identity.get("instance_id"):
+                    from storage import device_registry
+                    predecessor = device_binding(current_config)
+                    if record.get("source_registry_binding", predecessor) != predecessor:
+                        return {"ok": False, "error": "local_binding_changed", "status": 409}
+                    # Commit the old generation's fence while it is still the only
+                    # generation that could have registered an unattested endpoint.
+                    device_registry.retire_binding(predecessor, now=int(time.time()))
                 config = api.save_config(_config_for_pairing_record(record))
             except Exception as exc:
                 logger.warning("pairing save failed after the redeem", exc_info=True)
