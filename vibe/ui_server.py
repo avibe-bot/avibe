@@ -2540,6 +2540,12 @@ def enforce_remote_access_cookie():
         if not _is_direct_loopback_connection():
             return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
     config = _load_remote_access_config()
+    if request.path == "/remote/claim/callback":
+        # Never route a credential-bearing callback through ordinary login's `next` URL.
+        from vibe.personal_claim_client import local_origin
+
+        if not local_origin(request.host_url.rstrip("/")) or not _is_local_request(config):
+            return jsonify({"state": "error", "code": "invalid_return"}), 403
     markdown_show_request = _is_private_show_page_markdown_request()
     if _remote_auth_exempt_before_host_validation():
         return None
@@ -3192,6 +3198,9 @@ def protect_mutating_ui_requests():
 
 @app.after_request
 def prevent_desktop_enrollment_caching(response: Response) -> Response:
+    if request.path == "/remote/claim/callback" or request.path.startswith("/api/remote-access/claims"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
         "/api/desktop/local-instance", "/api/desktop/local-instance/prepare",
         "/api/remote-access/vibe-cloud/pair",
@@ -8669,6 +8678,94 @@ def desktop_local_instance_prepare():
     return _desktop_local_response(lambda: desktop_local_instance.prepare(
         payload.get("account_id"), payload.get("expected_binding_revision"),
     ))
+
+
+def _claim_route(operation):
+    from vibe.desktop_local_instance import LocalInstanceError
+    from vibe.personal_claim_client import ClaimError
+    from vibe.personal_claims import redirect_claims
+
+    denied = _access_administration_forbidden()
+    if denied is not None:
+        return denied
+    try:
+        return operation(redirect_claims)
+    except LocalInstanceError as exc:
+        return jsonify({"state": "error", "code": exc.code}), exc.status
+    except ClaimError as exc:
+        status = {"invalid_request": 400, "invalid_return": 403, "claim_unavailable": 404,
+                  "rate_limited": 429, "control_plane_unreachable": 503}.get(exc.code, 409)
+        body = {"state": "error", "code": exc.code}
+        if exc.code == "claim_in_progress" and exc.claim_id:
+            body.update(claim_id=exc.claim_id, expires_at=exc.expires_at)
+        if exc.retry_after:
+            body["retry_after_seconds"] = exc.retry_after
+        response = jsonify(body)
+        if exc.retry_after:
+            response.headers["Retry-After"] = str(exc.retry_after)
+        return response, status
+
+
+@app.route("/api/remote-access/claims", methods=["POST"])
+def personal_claim_start():
+    from vibe.personal_claim_client import ClaimError
+
+    def start(service):
+        origin = request.host_url.rstrip("/")
+        if request.headers.get("Origin") != origin:
+            raise ClaimError("invalid_request")
+        if not isinstance(request.json, dict) or set(request.json) - {"locale"}:
+            raise ClaimError("invalid_request")
+        # Loopback or an admitted private setup host; any forwarding (proxy, tunnel) needs link mode.
+        admitted = _is_local_request(_load_remote_access_config()) and not _has_forwarded_metadata()
+        body, nonce = service.start(origin, request.json.get("locale", "en"), admitted_owner=admitted,
+                                    on_bound=_ensure_remote_access_monitoring)
+        response = jsonify(body)
+        response.set_cookie("avibe_claim_browser", nonce, httponly=True, samesite="lax", path="/remote/claim/callback",
+                            expires=datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")))
+        return response, 201
+
+    return _claim_route(start)
+
+
+@app.route("/api/remote-access/claims/<claim_id>", methods=["GET"])
+def personal_claim_state(claim_id):
+    return _claim_route(lambda service: jsonify(service.state(claim_id)))
+
+
+@app.route("/api/remote-access/claims/<claim_id>/cancel", methods=["POST"])
+def personal_claim_cancel(claim_id):
+    from vibe.personal_claim_client import ClaimError
+
+    def cancel(service):
+        if request.headers.get("Origin") != request.host_url.rstrip("/") or request.json != {}:
+            raise ClaimError("invalid_request")
+        return jsonify(service.cancel(claim_id))
+
+    return _claim_route(cancel)
+
+
+@app.route("/remote/claim/callback", methods=["GET"])
+def personal_claim_callback():
+    from vibe.personal_claim_client import ClaimError
+
+    def callback(service):
+        fields = request.args.multi_items()
+        cookies = [v.strip().partition("=")[2] for line in request.headers.getlist("cookie")
+                   for v in line.split(";") if v.strip().partition("=")[0] == "avibe_claim_browser"]
+        try:
+            if len(fields) != 2 or set(request.args) != {"claim_id", "state"} or len(cookies) != 1:
+                raise ClaimError("invalid_return")
+            service.callback(request.args["claim_id"], request.host_url.rstrip("/"), cookies[0], request.args["state"])
+        except ClaimError as exc:
+            # Never echo browser inputs or clear the real initiator's nonce on a bad navigation.
+            code = "claim_unavailable" if exc.code == "claim_unavailable" else "invalid_return"
+            return redirect("/settings/remote-access?claim_error=" + code, code=303)
+        response = redirect("/settings/remote-access", code=303)
+        response.delete_cookie("avibe_claim_browser", path="/remote/claim/callback")
+        return response
+
+    return _claim_route(callback)
 
 
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])
@@ -20153,6 +20250,12 @@ def run_ui_server(host: str, port: int) -> None:
                 remote_access.start_runtime_monitoring(config)
             except Exception:
                 logger.warning("Failed to start remote access status heartbeat", exc_info=True)
+        elif config_load_error is None:
+            # A fresh UI can precede its first config file. Link/Desktop may publish
+            # from another process; policy workers must notice before any UI restart.
+            from vibe import remote_access
+            remote_access.start_authorization_revision_polling()
+            remote_access.start_resource_acl_sync_polling()
         print(f"UI Server running at http://{host}:{port}")
 
         # Retry binding in case of TIME_WAIT or port still held by old server during reload
