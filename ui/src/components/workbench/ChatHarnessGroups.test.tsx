@@ -17,7 +17,8 @@ vi.mock('../../context/InstanceAuthorizationContext', () => ({
     capabilities: { can_chat: true, can_manage_instance: false, can_use_show_pages: false, can_use_vault_secrets: false },
   }),
 }));
-vi.mock('../../context/WindowManagerContext', () => ({
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()),
   useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
 }));
 vi.mock('../../lib/useIsDesktop', () => ({ isDesktopViewport: () => false, useIsDesktop: () => false }));

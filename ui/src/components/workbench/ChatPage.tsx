@@ -1,6 +1,9 @@
 import { LiveActivityEntry } from './LiveActivityEntry';
 import { HealthRequestCard } from '../health/HealthRequest';
 import { readHealthRequest } from '../../lib/healthRequests';
+import { isNativeAppWindow } from '../../lib/desktopShell';
+import { useWindowManager } from '../../context/WindowManagerContext';
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { desktopDragRegion } from '../../lib/desktopShell';
 import { createPortal } from 'react-dom';
 import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
@@ -26,7 +29,6 @@ import { VoiceMark } from '../voice/VoiceMark';
 import type { VoiceTarget } from '../voice/VoiceCard';
 import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposeTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
-import { useWindowManager } from '../../context/WindowManagerContext';
 import { composeReady } from './composeReady';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
@@ -5046,14 +5048,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const { botForSession, displayName: botDisplayName } = useBots();
   const conversationBot = botForSession(session.id);
   const navigate = useNavigate();
-  const { openApp } = useWindowManager();
+  const launchApp = useAppLaunch('chat-attachment');
   const fileViewer = useFileViewer();
   const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
     const pathLabel = recentPathLabel(target.path);
-    const desktop = isDesktopViewport();
+    const desktop = isDesktopViewport() || isNativeAppWindow();
     const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
       if (desktop) {
-        openApp('preview', { title: name, params: { path: target.path, name } });
+        void launchApp({ appId: 'preview', title: name, params: { path: target.path, name, ...(mime ? { mime } : {}) } });
       } else if (fileViewer) {
         fileViewer.open({ kind: 'local', path: target.path, name, size, mime, ext });
       } else {
@@ -5062,7 +5064,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     };
     const openEditor = (filename: string, mtime: number | null) => {
       const launch = { ...target, filename, mtime };
-      if (desktop) openApp('editor', { title: filename, params: launch });
+      if (desktop) void launchApp({ appId: 'editor', title: filename, params: launch });
       else navigate('/apps/editor', { state: launch });
     };
 
@@ -5082,7 +5084,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       else if (isEditableFile(fallback)) openEditor(pathLabel, null);
       else downloadFile(target.path);
     }
-  }, [fileViewer, navigate, openApp]);
+  }, [fileViewer, navigate, launchApp]);
   const selectionActions = transcriptSelectionActions(session, readOnly);
   const latestRetryBoundary = messages.reduce((last, message, index) =>
     message.type === 'user' || message.type === 'harness' || isRetryableFailureNotice(message)

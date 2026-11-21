@@ -92,17 +92,11 @@ function currentAppTabContext(): AppTabContext {
 }
 
 /**
- * Built-ins whose `/apps/<id>` route really renders the app STANDALONE on desktop
- * (App.tsx: `AppsFileBrowserPage` / `AppsTerminalPage` / `AppsEditorPage`).
- *
- * An allowlist, not a denylist, because the route is NOT a given: `/apps/library`
- * deliberately opens a Library WINDOW and redirects the tab to `/` on desktop (it also
- * serves the retired `/admin/show-pages` bookmark), so handing it to a new tab would
- * spawn a second whole workbench instead of the app — and `preview` has no route at
- * all. Both must fall back to a window. A new app therefore opts in HERE once its
- * standalone route exists, and until then degrades to the plain-click behavior.
+ * Built-ins with a standalone body route. The explicit standalone flag keeps
+ * Library's ordinary command route from reopening the Workbench. New built-ins
+ * opt in here only once their body route can render independently.
  */
-const STANDALONE_BUILTIN_ROUTES = new Set(['files', 'terminal', 'editor']);
+const STANDALONE_BUILTIN_ROUTES = new Set(['files', 'terminal', 'editor', 'preview', 'library']);
 
 /**
  * Marks a tab that was opened to show ONE app, so `AppShell` mounts without the
@@ -186,7 +180,7 @@ export function isStandaloneAppTab(search: string): boolean {
 export function isStandaloneAppRoutePath(pathname: string): boolean {
   const normalized = pathname.replace(/\/+$/, '').toLowerCase() || '/';
   const id = normalized.startsWith('/apps/') ? normalized.slice('/apps/'.length) : '';
-  return STANDALONE_BUILTIN_ROUTES.has(id);
+  return STANDALONE_BUILTIN_ROUTES.has(id) || /^show\/[^/]+$/.test(id);
 }
 
 /** `appTabHref` for a persisted Dock id (`files` / `show:<session_id>`). */

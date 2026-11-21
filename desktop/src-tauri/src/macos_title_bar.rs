@@ -17,12 +17,28 @@ const SUPPORT_META: &str = "avibe-shell-drag-regions";
 /// Advertise the built-in drag capability only on macOS, before React renders.
 /// Window restore still keeps a grab handle inside the sidebar's existing
 /// clearance; replacing its native overlay with a DOM region preserves that area.
-pub fn inset_script() -> String {
+pub fn inset_script(config: &tauri::Config) -> String {
+    let horizontal = configured_controls(config)
+        .map(|(x, _)| x)
+        .filter(|x| x.is_finite())
+        .map(|x| format!("document.documentElement.style.setProperty('--shell-window-controls-left', '{x}px'); "))
+        .unwrap_or_default();
     format!(
         "if (window.self === window.top) {{ \
          Object.defineProperty(window, '__AVIBE_DESKTOP_DRAG__', {{ value: true }}); \
-         document.documentElement.style.setProperty('--shell-titlebar-inset', '{TITLE_BAR_INSET}px'); }}"
+         document.documentElement.style.setProperty('--shell-titlebar-inset', '{TITLE_BAR_INSET}px'); \
+         {horizontal}}}"
     )
+}
+
+fn configured_controls(config: &tauri::Config) -> Option<(f64, f64)> {
+    config
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == crate::MAIN_WINDOW)
+        .and_then(|window| window.traffic_light_position.as_ref())
+        .map(|position| (position.x, position.y))
 }
 
 /// Applies the transparent native frame to every loaded page. The frame is a
@@ -40,14 +56,7 @@ pub fn sync_window(window: &Window) {
     if window.label() != crate::MAIN_WINDOW {
         return;
     }
-    let position = window
-        .app_handle()
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|config| config.label == crate::MAIN_WINDOW)
-        .and_then(|config| config.traffic_light_position.clone());
+    let position = configured_controls(window.app_handle().config());
     let owned = window.clone();
     let _ = window.run_on_main_thread(move || {
         let Some(mtm) = MainThreadMarker::new() else {
@@ -59,8 +68,8 @@ pub fn sync_window(window: &Window) {
             return;
         };
         set_overlay(&window, mtm);
-        if let Some(position) = position {
-            apply_controls(&window, position.x, position.y);
+        if let Some((x, y)) = position {
+            apply_controls(&window, x, y);
         }
     });
 }
@@ -115,5 +124,23 @@ mod tests {
             let html = std::fs::read_to_string(root.join(path)).unwrap();
             assert!(html.contains(&format!("<meta name=\"{SUPPORT_META}\" content=\"tauri\"")));
         }
+    }
+
+    // The configured native x coordinate owns horizontal alignment. Existing
+    // HTML-marker coverage cannot catch a hardcoded or device-pixel offset.
+    #[test]
+    fn inset_uses_configured_logical_x_without_changing_vertical_clearance() {
+        for x in [12.0, 19.5] {
+            let config: tauri::Config = serde_json::from_value(serde_json::json!({
+                "identifier":"bot.avibe.titlebar-test",
+                "app":{"windows":[{"label":"main","trafficLightPosition":{"x":x,"y":17.0}}]}
+            }))
+            .unwrap();
+            let script = inset_script(&config);
+            assert!(script.contains(&format!("'--shell-window-controls-left', '{x}px'")));
+            assert!(script.contains("'--shell-titlebar-inset', '28px'"));
+            assert_eq!(configured_controls(&config), Some((x, 17.0)));
+        }
+        assert!(!inset_script(&tauri::Config::default()).contains("--shell-window-controls-left"));
     }
 }

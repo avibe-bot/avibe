@@ -9,6 +9,33 @@ import { useWindowManager, type WindowManagerValue } from './WindowManagerContex
 import { WindowManagerProvider } from './WindowManagerProvider';
 
 describe('WindowManagerProvider focus ownership', () => {
+  // Reuse is selected before React commits. A close or metadata update queued
+  // immediately before another launch must not revive a closed body or lose state.
+  it('preserves queued body metadata and never reuses a just-closed window', () => {
+    let manager: WindowManagerValue | null = null;
+    function Probe() {
+      const value = useWindowManager();
+      useEffect(() => { manager = value; }, [value]);
+      return null;
+    }
+    const view = render(<WindowManagerProvider standalone><Probe /></WindowManagerProvider>);
+    let first = '';
+    act(() => { first = manager!.openApp('editor'); });
+    act(() => {
+      manager!.setParams(first, { bodyState: 'retained' });
+      manager!.openApp('editor', { reuse: true, params: { path: '/two.txt' } });
+    });
+    expect(manager!.windows[0]?.params).toEqual({ bodyState: 'retained', path: '/two.txt' });
+    let second = '';
+    act(() => {
+      manager!.close(first);
+      second = manager!.openApp('editor', { reuse: true });
+    });
+    expect(second).not.toBe(first);
+    expect(manager!.windows.map(window => window.id)).toEqual([second]);
+    view.unmount();
+  });
+
   it('returns focus to the canvas without hiding the active window', () => {
     let manager: WindowManagerValue | null = null;
     const Probe = () => {

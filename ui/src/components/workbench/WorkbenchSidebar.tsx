@@ -1,3 +1,4 @@
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import type { TranslationKey } from '@/i18n/types';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -33,7 +34,6 @@ import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { usePendingVaultRequestsList } from '../../context/PendingVaultRequestsContext';
 import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
-import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { SessionPinAction } from './SessionPinAction';
@@ -422,7 +422,7 @@ const ProjectRow: React.FC<{
   className,
 }) => {
   const { t } = useTranslation();
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('file-browser');
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(project.display_name);
   const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
@@ -572,7 +572,7 @@ const ProjectRow: React.FC<{
                       setMenuOpen(false);
                       // Open the Editor rooted at the project folder, no file tab open (rootDir sets
                       // the explorer root only). Desktop-only surface, so the floating window is right.
-                      wm.openApp('editor', { title: project.display_name, params: { rootDir: project.folder_path } });
+                      void launchApp({ appId: 'editor', title: project.display_name, params: { rootDir: project.folder_path } });
                     }}
                     className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-wash"
                   >

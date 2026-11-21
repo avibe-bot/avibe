@@ -220,8 +220,11 @@ describe('SettingsLayout', () => {
         const link = screen.getByRole('link', { name: 'settings.sections.computerUse' });
         expect(link.getAttribute('href')).toBe('/settings/computer-use');
         const systemRows = screen.getAllByRole('link').map((row) => row.getAttribute('href'));
-        expect(systemRows.indexOf('/settings/computer-use')).toBe(
+        expect(systemRows.indexOf('/settings/microphone')).toBe(
           systemRows.indexOf('/settings/shortcuts') + 1,
+        );
+        expect(systemRows.indexOf('/settings/computer-use')).toBe(
+          systemRows.indexOf('/settings/microphone') + 1,
         );
         shellView.unmount();
       }

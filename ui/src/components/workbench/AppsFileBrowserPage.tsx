@@ -1,5 +1,7 @@
+import { isNativeAppWindow } from '../../lib/desktopShell';
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Braces,
@@ -33,7 +35,6 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { sortProjectsByRecent } from '../../lib/projectOrder';
-import { useWindowManager } from '../../context/WindowManagerContext';
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
 import {
@@ -189,9 +190,11 @@ const LONG_PRESS_MOVE_PX = 8;
 // the search box does a recursive file/folder NAME search under the current folder. Double-clicking a
 // text/code file opens it in the Editor window. Backend contract: ui/src/lib/filesApi.ts →
 // /api/files/*. ui/design: apps/file-browser/*.
-export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string }> = ({ windowed = false }) => {
+export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string; params?: Record<string, unknown> }> = ({ windowed = false, params: launchParams }) => {
+  const location = useLocation();
+  const params = useMemo(() => launchParams ?? (!windowed && location.state && typeof location.state === 'object' ? { ...location.state, launchRequestId: location.key } : undefined), [launchParams, location.key, location.state, windowed]);
   const { t } = useTranslation();
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('file-browser');
   const routerNavigate = useNavigate();
   // A single-app browser tab (`?standalone=1`) frames the app exactly like a window body —
   // full-bleed, no page header or card border — since the shell drops its chrome there too.
@@ -271,12 +274,21 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     [showHidden, t, clearSelection],
   );
 
+  const handledLaunch = useRef<unknown>(undefined);
+  useEffect(() => {
+    const key = params?.launchRequestId;
+    const path = typeof params?.path === 'string' ? params.path : params?.rootDir;
+    if (!key || key === handledLaunch.current || typeof path !== 'string') return;
+    handledLaunch.current = key;
+    navigate(path);
+  }, [navigate, params]);
+
   useEffect(() => {
     systemFavorites().then(setSysFavs).catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (cwd) return;
+    if (cwd || typeof params?.path === 'string' || typeof params?.rootDir === 'string') return;
     if (projects === null) return;
     const initial = sortProjectsByRecent(projects)[0]?.folder_path || sysFavs.find((f) => f.key === 'home')?.path;
     if (initial) navigate(initial);
@@ -374,26 +386,26 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // routes correctly regardless of where it's called from.
   const openInEditor = useCallback(
     (path: string, filename: string, mtime: number | null) => {
-      if (isDesktopViewport()) {
-        wm.openApp('editor', { title: filename, params: { path, filename, mtime } });
+      if (isDesktopViewport() || isNativeAppWindow()) {
+        void launchApp({ appId: 'editor', title: filename, params: { path, filename, mtime, rootDir: cwd || undefined } });
       } else {
-        routerNavigate('/apps/editor', { state: { path, filename, mtime } });
+        routerNavigate('/apps/editor', { state: { path, filename, mtime, rootDir: cwd || undefined } });
       }
     },
-    [wm, routerNavigate],
+    [cwd, launchApp, routerNavigate],
   );
 
   // Preview capability is shared across breakpoints; only its presentation differs. The caller
   // supplies resolved metadata when it has already been fetched (content hits / ambiguous names).
   const openPreview = useCallback(
     (item: RowItem, entry: FsEntry = item.entry, editable = isEditableFile(entry), mtime = entry.mtime) => {
-      if (isDesktopViewport()) {
-        wm.openApp('preview', { title: entry.name, params: { path: item.full, name: entry.name } });
+      if (isDesktopViewport() || isNativeAppWindow()) {
+        void launchApp({ appId: 'preview', title: entry.name, params: { path: item.full, name: entry.name, mtime } });
       } else {
         setPreview({ path: item.full, name: entry.name, mtime, editable });
       }
     },
-    [wm],
+    [launchApp],
   );
 
   // Open a terminal rooted at a folder ("Open Terminal Here"): desktop opens a Terminal window
@@ -401,13 +413,13 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // route with the dir in router state. Mirrors openInEditor.
   const openTerminalHere = useCallback(
     (dir: string) => {
-      if (isDesktopViewport()) {
-        wm.openApp('terminal', { params: { cwd: dir } });
+      if (isDesktopViewport() || isNativeAppWindow()) {
+        void launchApp({ appId: 'terminal', params: { cwd: dir } });
       } else {
         routerNavigate('/apps/terminal', { state: { cwd: dir } });
       }
     },
-    [wm, routerNavigate],
+    [launchApp, routerNavigate],
   );
 
   // Open: dir → navigate (and leave search); image / PDF / Office / Markdown → the standalone Preview
@@ -506,12 +518,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // hidden, so fall back to the inline create row so a file can still be made.
   const onNewFile = useCallback(() => {
     if (!cwd) return;
-    if (isDesktopViewport()) {
-      wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
+    if (isDesktopViewport() || isNativeAppWindow()) {
+      void launchApp({ appId: 'editor', title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
     } else {
       startNewEntry('file');
     }
-  }, [cwd, wm, t, startNewEntry]);
+  }, [cwd, launchApp, t, startNewEntry]);
 
   // ---- Rename (inline) + Delete ----------------------------------------------------------------
   const [rename, setRename] = useState<{ full: string } | null>(null);
