@@ -8316,10 +8316,27 @@ _UI_RUNTIME_ACTIVE = False
 def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
     if not _UI_RUNTIME_ACTIVE:
         return
-    from vibe import connection_runtime, remote_access
+    _start_remote_monitors(config)
 
-    connection_runtime.start()  # also covers first config save or pairing after UI boot
-    remote_access.start_runtime_monitoring(config)
+
+def _start_remote_monitors(config, *, startup=False):
+    from vibe import connection_runtime, connection_settings, remote_access
+
+    if startup:
+        try:
+            connection_settings.adopt_host_enrollment()
+        except (OSError, ValueError, connection_settings.ConnectionError):
+            logger.warning('Could not adopt host relay enrollment; leaving relay eligibility unchanged')
+        try:
+            connection_runtime.recover_startup()
+            config = V2Config.load()  # storage may have been repaired
+        except (OSError, ValueError, connection_settings.ConnectionError):
+            logger.warning('Could not read connection recovery state during UI startup')
+    try:
+        connection_runtime.start()
+    finally:
+        # An optional settings artifact must not disable heartbeat or auth polling.
+        remote_access.start_runtime_monitoring(config)
 
 
 @app.route("/api/control", methods=["POST"])
@@ -20428,16 +20445,7 @@ def run_ui_server(host: str, port: int) -> None:
             logger.warning("Skipping UI startup reconciliation because config load failed: %s", config_load_error)
         if config is not None:
             try:
-                from vibe import connection_runtime, connection_settings, remote_access
-
-                # Restore unconfirmed fields before the tunnel monitor/reconcile or
-                # direct ingress can boot from an abandoned candidate. A busy runtime
-                # retries independently; never block the UI on a connector starting.
-                connection_settings.adopt_host_enrollment()
-                connection_runtime.recover_startup()
-                config = settings_service.load_config()
-                connection_runtime.start()
-                remote_access.start_runtime_monitoring(config)
+                _start_remote_monitors(config, startup=True)
             except Exception:
                 logger.warning("Failed to start remote access status heartbeat", exc_info=True)
         elif config_load_error is None:

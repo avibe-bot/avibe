@@ -6,6 +6,7 @@ import logging
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 
 from config import paths
 from config.v2_config import V2Config, config_file_lock
@@ -15,6 +16,7 @@ from vibe.direct_rendezvous import rendezvous
 
 log = logging.getLogger(__name__)
 _probe = None
+_probe_window = None  # pairing, connector identity, first observation time, waiting for first result
 _worker_lock = threading.Lock()
 _worker = None
 _wake = threading.Event()
@@ -63,11 +65,28 @@ def _active_id(active):
 
 
 def observe_public_path(config, active, allowed, sample, began):
-    global _probe
+    global _probe, _probe_window
+    now = cs.journal.clock()
+    identity = (cs.relay_pairing(config), _active_id(active)) if config and active.get('pid') else None
+    if not identity:
+        _probe_window = None
+    elif not allowed or _probe_window is None or _probe_window[0] != identity:
+        _probe_window = (identity, now, True)
     if not allowed or not config:
         _probe = None
-    elif sample is not None:
-        _probe = (cs.relay_pairing(config), _active_id(active), began) if any(sample.successes) else None
+    elif sample is not None and identity:
+        _probe_window = (identity, now, False)
+        _probe = (*identity, began) if any(sample.successes) else None
+
+
+def _waiting_for_connector_sample(config):
+    window = _probe_window
+    active = tunnel._state_connector('active') or {}
+    if not window or not _requested(config) or not tunnel._is_cloudflared_pid(active.get('pid')):
+        return False
+    pair = cs.relay_pairing(config)
+    return (window[0][0] == pair and 0 <= cs.journal.clock() - window[1] <= 30
+            and (window[0][1] != _active_id(active) or window[2]))
 
 
 def tunnel_healthy(config):
@@ -130,7 +149,7 @@ def _switch_gate(actor, config, key, new):
     if key == 'relay' and not cs.relay_enrolled(config):
         raise cs.ConnectionError('relay_not_enrolled', 403)
     if not actor.local and config.remote_access.vibe_cloud.direct and (key == 'relay' or (key == 'direct' and not new)):
-        if tunnel._connector_lane_reserved_locked():
+        if tunnel._connector_lane_reserved_locked() or cs.journal.owns_connector_lane() or _waiting_for_connector_sample(config):
             raise cs.ConnectionError('connection_change_busy')
         if not tunnel_healthy(config):
             raise cs.ConnectionError('tunnel_unhealthy')
@@ -138,15 +157,25 @@ def _switch_gate(actor, config, key, new):
         raise cs.ConnectionError(reason)
 
 
+@contextmanager
+def _admission_lane():
+    try:
+        with tunnel._connector_lifecycle(timeout=0):
+            yield
+    except tunnel._ConnectorLifecycleBusy as exc:
+        raise cs.ConnectionError('connection_change_busy') from exc
+
+
 def prepare(actor, key, new):
     """Reserve before replying. No switch write or connector retirement in this path."""
-    with tunnel._connector_lifecycle(), tunnel._RECOVERY_LOCK, tunnel._CONNECTOR_LOCK, config_file_lock():
+    with _admission_lane(), tunnel._RECOVERY_LOCK, tunnel._CONNECTOR_LOCK, config_file_lock():
         config = V2Config.load()
         _bound(actor, config)
         if key == 'relay' and not cs.relay_enrolled(config):
             raise cs.ConnectionError('relay_not_enrolled', 403)
+        state = cs.journal.load(config)
+        cs.journal.guard_restore_target(config, state, {cs.FIELDS[key]})
         if cs.value(config, key) == new:
-            state = cs.journal.load(config)
             old = state['operation'] or {}
             if old.get('setting') == key and old['state'] != 'restoring':
                 raise cs.ConnectionError('connection_change_busy')
@@ -238,7 +267,10 @@ def apply(actor, reservation):
             return
         result = tunnel.apply_settings({cs.FIELDS[key]: new}, operation_id=op_id, expected_binding=actor.binding)
         if not result.get('ok'):
-            raise cs.ConnectionError('verification_failed')
+            reason = ('candidate_not_ready' if result.get('detail') == 'candidate_not_ready'
+                      else 'connection_change_busy' if result.get('error') == 'remote_access_settings_unavailable'
+                      else 'settings_not_applied')
+            raise cs.ConnectionError(reason)
         if not result.get('connector_replaced'):
             return  # connector stopped before apply; saved in the writer transaction
         with config_file_lock():
@@ -263,6 +295,9 @@ def apply(actor, reservation):
                 if key in cs.SWITCHES:
                     saved = cs.value(config, key) == new
                     cs.journal.finish(state, 'applied' if saved else 'failed', 'saved' if saved else getattr(exc, 'code', 'apply_failed'))
+                elif op['state'] == 'applying' and not op.get('writeStarted') and cs.value(config, key) == op['from']:
+                    # No saved change or promotion: there is nothing to restore.
+                    cs.journal.finish(state, 'failed', getattr(exc, 'code', 'settings_not_applied'))
                 else:
                     cs.journal.restore(state, _failure(op))
     finally:

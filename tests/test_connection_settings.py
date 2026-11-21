@@ -20,6 +20,7 @@ def rig(monkeypatch, tmp_path):
     clock = [10.0]
     monkeypatch.setattr(cs, 'journal', cs.Journal(lambda: clock[0]))
     monkeypatch.setattr(cr, '_probe', None)
+    monkeypatch.setattr(cr, '_probe_window', None)
     active = {'pid': 111, 'started_at': 1, 'metrics_url': 'fixture-active'}
     monkeypatch.setattr(ra, '_state_connector', lambda key: active if key == 'active' else None)
     monkeypatch.setattr(ra, '_is_cloudflared_pid', lambda pid: pid == active['pid'])
@@ -84,6 +85,19 @@ def test_remote_switch_rechecks_health_after_allowing_response_to_drain(rig, mon
     cr.apply(rig.actor, op)
     assert cs.value(V2Config.load(), key) is True
     assert (outcome()['id'], outcome()['reason']) == (op['id'], 'tunnel_unhealthy')
+
+
+def test_replaced_connector_is_busy_until_first_window_then_reports_health(rig):
+    cr.observe_public_path(rig.cfg, rig.active, True, SimpleNamespace(successes=(True,)), rig.clock[0])
+    rig.active['started_at'] += 1
+    with pytest.raises(cs.ConnectionError, match='connection_change_busy'):
+        cr.prepare(rig.actor, 'direct', False)
+    cr.observe_public_path(rig.cfg, rig.active, True, None, rig.clock[0])
+    with pytest.raises(cs.ConnectionError, match='connection_change_busy'):
+        cr.prepare(rig.actor, 'direct', False)
+    cr.observe_public_path(rig.cfg, rig.active, True, SimpleNamespace(successes=(False,)), rig.clock[0])
+    with pytest.raises(cs.ConnectionError, match='tunnel_unhealthy'):
+        cr.prepare(rig.actor, 'direct', False)
 
 
 def test_one_fresh_success_only_for_this_connector(rig):
@@ -207,6 +221,89 @@ def test_noop_preserves_pending_runtime_repair(rig, monkeypatch, past_bound, ent
     monkeypatch.setattr(cr, '_repair_runtime', lambda *args: True)
     assert cr.recover()
     assert (outcome()['id'], outcome()['result']) == (op['id'], 'restored')
+
+
+@pytest.mark.parametrize('debt', [False, True])
+@pytest.mark.parametrize('target', ['quic', 'http2'])
+def test_change_cannot_build_on_rejected_pin_before_writeback(rig, monkeypatch, debt, target):
+    op = cs.journal.begin(rig.cfg, 'protocol', 'quic')
+    rig.cfg.remote_access.vibe_cloud.transport_protocol = 'quic'
+    rig.cfg.save()
+    state = cs.journal.load(rig.cfg)
+    cs.journal.restore(state, 'verification_failed')
+    if debt:
+        state['debt'] = state['operation']
+        cs.journal.finish(state, 'failed', 'storage_restore_failed')
+    before = cs.journal.path.read_bytes()
+    with pytest.raises(cs.ConnectionError, match='connection_change_busy'):
+        cr.prepare(rig.actor, 'protocol', target)
+    monkeypatch.setattr(ra, 'status', lambda *args: {})
+    assert ra.apply_settings({'transport_protocol': target})['error'] == 'remote_access_settings_unavailable'
+    assert cs.journal.path.read_bytes() == before
+    monkeypatch.setattr(cr, '_repair_runtime', lambda *args: True)
+    assert cr.recover() and outcome()['id'] == op['id']
+    assert cs.value(V2Config.load(), 'protocol') == 'auto'
+
+
+def test_probe_reserves_lane_for_legacy_and_precedes_switch_baseline(rig, monkeypatch):
+    op = cs.journal.begin(rig.cfg, 'protocol', 'quic')
+    cs.journal.verifying(rig.cfg, op['id'], 'test-generation')
+    monkeypatch.setattr(ra, 'status', lambda *args: {'running': True})
+    assert ra.apply_settings({'edge_ip_version': '6'})['error'] == 'remote_access_settings_unavailable'
+    with pytest.raises(cs.ConnectionError, match='connection_change_busy'):
+        cr.prepare(rig.actor, 'direct', False)
+    assert cs.value(V2Config.load(), 'ipFamily') == '4'
+    assert cs.journal.load(rig.cfg)['operation']['id'] == op['id']
+
+
+def test_lifecycle_contention_is_immediate_busy(rig, monkeypatch):
+    def held(*, timeout):
+        assert timeout == 0
+        raise ra._ConnectorLifecycleBusy()
+    monkeypatch.setattr(ra, '_connector_lifecycle', held)
+    with pytest.raises(cs.ConnectionError, match='connection_change_busy') as exc:
+        cr.prepare(rig.actor, 'direct', False)
+    assert exc.value.status == 409 and not cs.journal.path.exists()
+
+
+def test_unreadable_settings_disable_only_new_feature(rig, monkeypatch):
+    from vibe import ui_server
+    cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
+    cs.journal.path.write_text('not json')
+    with pytest.raises(cs.ConnectionError, match='connection_state_unavailable'):
+        cr.prepare(rig.actor, 'protocol', 'http2')
+    assert not cs.journal.owns_connector_lane()
+    starts = []
+    def cannot_enroll():
+        raise OSError('fixture')
+    monkeypatch.setattr(cs, 'adopt_host_enrollment', cannot_enroll)
+    monkeypatch.setattr(cr, 'start', lambda: starts.append('worker'))
+    monkeypatch.setattr(ra, 'start_runtime_monitoring', lambda config: starts.append('monitor'))
+    ui_server._start_remote_monitors(rig.cfg, startup=True)
+    assert starts == ['worker', 'monitor']
+    monkeypatch.setattr(ra, 'status', lambda *args: {'running': True})
+    monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
+    monkeypatch.setattr(ra, '_start_candidate_connector', lambda *args: (222, 'fixture-new'))
+    monkeypatch.setattr(ra, '_wait_candidate_ready', lambda *args: True)
+    monkeypatch.setattr(ra, '_promote_candidate_connector', lambda *args, **kwargs: {'pid': 111})
+    monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: old['pid'] == 111)
+    result = ra.apply_settings({'transport_protocol': 'http2'})
+    assert result['ok'] and result['previous_connector_drained']
+    assert cs.journal.path.read_text() == 'not json'
+
+
+def test_candidate_not_ready_does_not_restore_untouched_connector(rig, monkeypatch):
+    monkeypatch.setattr(ra, 'status', lambda *args: {'running': True})
+    monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
+    monkeypatch.setattr(ra, '_start_candidate_connector', lambda *args: (222, 'fixture-new'))
+    monkeypatch.setattr(ra, '_wait_candidate_ready', lambda *args: False)
+    monkeypatch.setattr(ra, '_discard_candidate_connector', lambda *args: None)
+    op = cr.prepare(rig.actor, 'protocol', 'quic')
+    cr.apply(rig.actor, op)
+    assert (outcome()['result'], outcome()['reason']) == ('failed', 'candidate_not_ready')
+    assert cs.value(V2Config.load(), 'protocol') == 'auto'
+    state = cs.journal.load(rig.cfg)
+    assert not state['operation'] and not state.get('debt')
 
 
 def test_explicit_new_intent_supersedes_recovery(rig):

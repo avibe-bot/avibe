@@ -8,6 +8,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass
@@ -155,6 +156,7 @@ class Journal:
     def __init__(self, clock: Callable[[], float] = _clock):
         self.clock = clock
         self.boot = secrets.token_hex(16)
+        self.warned_unavailable = False
 
     @property
     def path(self) -> Path:
@@ -163,13 +165,19 @@ class Journal:
     def load(self, config: V2Config) -> dict:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or data.get("version") != 1 or "operation" not in data:
-                raise ValueError("invalid journal")
-            if data["binding"] == relay_pairing(config):
+            if not isinstance(data, dict) or data.get('version') != 1 or not {'operation', 'outcome', 'binding', 'returnedToAutomatic'} <= data.keys():
+                raise ValueError('invalid journal')
+            for slot in ('operation', 'debt'):
+                op = data.get(slot)
+                if op is not None and (not isinstance(op, dict) or not {'id', 'state', 'setting', 'from', 'to', 'boot', 'until', 'baseline'} <= op.keys()
+                                       or op['setting'] not in FIELDS or op['state'] not in {'applying', 'verifying', 'restoring'}):
+                    raise ValueError('invalid operation record')
+            if data['binding'] == relay_pairing(config):
+                self.warned_unavailable = False
                 return data
         except FileNotFoundError:
             pass
-        except (OSError, UnicodeError, ValueError, KeyError) as exc:
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
             raise ConnectionError("connection_state_unavailable", 503) from exc
         return {"version": 1, "binding": relay_pairing(config), "operation": None, "outcome": None, "returnedToAutomatic": None}
 
@@ -246,13 +254,41 @@ class Journal:
         elif dirty:
             self.save(state)
 
+    @staticmethod
+    def guard_restore_target(config, state, fields):
+        for op in (state.get('operation'), state.get('debt')):
+            if (op and op['state'] == 'restoring' and FIELDS[op['setting']] in fields
+                    and value(config, op['setting']) != op['from']):
+                raise ConnectionError('connection_change_busy')
+
+    def _warn_unavailable(self):
+        if not self.warned_unavailable:
+            self.warned_unavailable = True
+            logging.getLogger(__name__).warning('Connection settings journal unavailable; leaving it untouched')
+
+    def legacy_busy(self, config, fields, *, noop=False):
+        """A damaged optional journal cannot disable ordinary tunnel supervision/settings."""
+        try:
+            state = self.load(config)
+            self.guard_restore_target(config, state, fields)
+            return not noop and bool(state.get('pinAttempt') or (state['operation'] and state['operation']['setting'] in AUTOMATIC))
+        except ConnectionError as exc:
+            if exc.code != 'connection_state_unavailable':
+                return True
+            self._warn_unavailable()
+            return False
+
+    def legacy_supersede(self, config, fields):
+        try:
+            self.supersede(config, fields)
+        except (ConnectionError, OSError):
+            self._warn_unavailable()
+
     def owns_connector_lane(self) -> bool:
         if not self.path.exists():
             return False
         with config_file_lock():
-            state = self.load(V2Config.load())
-            op = state['operation']
-            return bool(state.get('pinAttempt') or (op and op['setting'] in AUTOMATIC))
+            return self.legacy_busy(V2Config.load(), set())
 
     def inspect(self, config):
         state = self.load(config)

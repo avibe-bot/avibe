@@ -1474,8 +1474,7 @@ def connectivity_diagnostics(config: V2Config | None = None) -> dict[str, Any]:
     }
 
 
-def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, expected_binding: str | None = None,
-                   require_stopped: bool = False) -> dict[str, Any]:
+def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, expected_binding: str | None = None) -> dict[str, Any]:
     """Persist Tunnel controls, replacing a live Connector without an outage."""
 
     if not isinstance(payload, dict):
@@ -1505,17 +1504,27 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
             "error": binding_error,
         }
 
-    from vibe.connection_settings import binding, journal
+    from vibe.connection_settings import AUTOMATIC, FIELDS, binding, journal
+    network_fields = {FIELDS[key] for key in AUTOMATIC} & set(payload)
+
+    def legacy_reserved(config):
+        return operation_id is None and network_fields and journal.legacy_busy(config, network_fields)
 
     def persist(new_settings: dict[str, Any], *, staged: bool = False):
         with config_file_lock():
             live = V2Config.load()
+            if legacy_reserved(live):
+                raise RuntimeError('remote_access_settings_unavailable')
             if expected_binding is not None and binding(live) != expected_binding:
                 raise RuntimeError("connection_binding_changed")
             if operation_id is not None:
                 journal.applying(live, operation_id)
             if any(_remote_access_settings(live)[k] != previous_settings[k] for k in new_settings):
                 raise RuntimeError("remote_access_settings_changed")
+            if operation_id is not None:
+                state = journal.load(live)
+                journal.owned(state, operation_id, 'applying')['writeStarted'] = True
+                journal.save(state)
             saved = api.save_config({"remote_access": {"vibe_cloud": new_settings}})
             if not staged:
                 if operation_id is not None:
@@ -1523,15 +1532,18 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
                     journal.owned(state, operation_id, "applying")
                     journal.finish(state, "applied", "saved_without_connector")
                 else:
-                    journal.supersede(saved, set(new_settings))
+                    journal.legacy_supersede(saved, set(new_settings))
             return saved
 
     previous_settings = _remote_access_settings(current_config)
     candidate_settings = _remote_access_settings(candidate_config)
     if previous_settings == candidate_settings:
-        if operation_id is None:
+        # A no-op never cancels work. A value still awaiting rollback, however,
+        # is not safe to affirm as the current setting.
+        if operation_id is None and network_fields:
             with config_file_lock():
-                journal.supersede(V2Config.load(), set(payload))
+                if journal.legacy_busy(V2Config.load(), network_fields, noop=True):
+                    return {**status(current_config), 'ok': False, 'error': 'remote_access_settings_unavailable'}
         return {**status(current_config), "ok": True, "settings_applied": False}
     connector_fields = {
         "transport_protocol",
@@ -1544,7 +1556,12 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
     )
     current_status = status(current_config)
     if not connector_changed:
-        candidate_config = persist(payload)
+        try:
+            candidate_config = persist(payload)
+        except RuntimeError as exc:
+            if str(exc) != 'remote_access_settings_unavailable':
+                raise
+            return {**current_status, 'ok': False, 'error': 'remote_access_settings_unavailable'}
         return {
             **status(candidate_config),
             "ok": True,
@@ -1553,7 +1570,7 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
         }
 
     with _RECOVERY_LOCK:
-        if _connector_lane_reserved_locked():
+        if _connector_lane_reserved_locked() or legacy_reserved(V2Config.load()):
             return {
                 **current_status,
                 "ok": False,
@@ -1571,8 +1588,6 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
                     "ok": False,
                     "error": "remote_access_settings_unavailable",
                 }
-            if require_stopped and live_status.get("running"):
-                return {"ok": False, "error": "connection_change_busy"}
             if not live_status.get("running"):
                 candidate_config = persist(payload)
                 return {
@@ -1591,7 +1606,7 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
 
     def start_settings_candidate(protocol: str) -> tuple[int, str] | None:
         with _connector_lifecycle(), _RECOVERY_LOCK:
-            if _connector_lane_reserved_locked():
+            if _connector_lane_reserved_locked() or legacy_reserved(V2Config.load()):
                 return None
             with _CONNECTOR_LOCK:
                 return _start_candidate_connector(
@@ -1658,7 +1673,7 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
                 if operation_id is not None:
                     journal.verifying(candidate_config, operation_id, connector_generation())
                 else:
-                    journal.supersede(candidate_config, set(payload))
+                    journal.legacy_supersede(candidate_config, set(payload))
     except Exception as exc:
         if candidate_pid is not None:
             _discard_candidate_connector(candidate_pid)
