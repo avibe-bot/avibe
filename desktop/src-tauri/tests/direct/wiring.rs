@@ -428,6 +428,8 @@ fn a_listener_that_ended_takes_its_route_off_and_is_not_replaced_at_once() {
     assert_eq!(wiring.listener_ended(session, now), []);
     assert_eq!(wiring.probed(session, true), []);
     let published = shown(ONE, "main-runtime-1");
+    // Nothing in the app will change, so the shell has to keep looking.
+    assert!(wiring.awaits(Some(&published)));
     let later = |seconds: u64| now + Duration::from_secs(seconds);
     assert_eq!(wiring.reconcile(Some(&published), |_| true, later(59)), []);
     assert_eq!(
@@ -463,6 +465,10 @@ fn an_instance_the_direct_path_cannot_name_gets_no_session() {
         ("", ONE, "one"),
         (ACCOUNT, ONE, ""),
         (ACCOUNT, "http://one-app.avibe.bot", "one"),
+        // A custom domain, and a look-alike of a managed address.
+        (ACCOUNT, "https://avibe.example.com", "one"),
+        (ACCOUNT, "https://one-app.avibe.bot.example.com", "one"),
+        (ACCOUNT, "https://one-app.avibe.bot:8443", "one"),
         (ACCOUNT, "https://", "one"),
         (ACCOUNT, "", "one"),
     ] {
@@ -480,6 +486,8 @@ fn an_instance_the_direct_path_cannot_name_gets_no_session() {
             [],
             "{account:?} {origin:?} {instance:?}"
         );
+        // And nothing to keep looking for.
+        assert!(!wiring.awaits(Some(&published)), "{account:?} {origin:?} {instance:?}");
     }
 }
 
@@ -639,4 +647,38 @@ fn a_routed_window_keeps_the_arguments_wry_gives_every_window() {
         wry.contains("\nversion = \"0.57.0\"\n"),
         "wry changed: read its default browser arguments again (src/webview2/mod.rs) and update WRY_DEFAULT_ARGUMENTS"
     );
+}
+
+/// The shell looks again by itself only while a session could still start
+/// for the view on show with nothing changing in the app.
+#[test]
+fn the_shell_keeps_looking_only_while_a_session_could_still_start() {
+    let now = Instant::now();
+    let published = shown(ONE, "main-runtime-1");
+    let mut wiring = live();
+    assert!(!wiring.awaits(None));
+    // Before its session exists, and while the system's proxy settings
+    // rule it out (they can clear without the app hearing of it).
+    assert!(wiring.awaits(Some(&published)));
+    wiring.system_proxy(true);
+    assert!(wiring.awaits(Some(&published)));
+    wiring.system_proxy(false);
+    // Not once the view has its session.
+    let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+    assert!(!wiring.awaits(Some(&published)));
+    // Not while the choice forbids it: choosing again is an event of the app.
+    assert_eq!(wiring.choose(ACCOUNT, ONE, Mode::Tunnel), [retire(session, &[])]);
+    assert!(!wiring.awaits(Some(&published)));
+    // Not where nothing can ever be routed.
+    assert!(!Wiring::new(Routing::Unsupported, false, Choices::unsaved()).awaits(Some(&published)));
+    assert!(!Wiring::new(Routing::Live, true, Choices::unsaved()).awaits(Some(&published)));
+
+    // Where routes are given at creation: only until the instance has
+    // answered once. After that the next window is what starts a session.
+    let mut wiring = Wiring::new(Routing::AtCreation, false, Choices::unsaved());
+    assert!(wiring.awaits(Some(&published)));
+    let scout = wiring.open(target(ONE), material(4100), Some("main-runtime-1"), now);
+    assert!(!wiring.awaits(Some(&published)));
+    assert_eq!(wiring.probed(scout, true), [retire(scout, &[])]);
+    assert!(!wiring.awaits(Some(&published)));
 }

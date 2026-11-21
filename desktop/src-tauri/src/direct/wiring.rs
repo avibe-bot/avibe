@@ -21,7 +21,10 @@
 //!   earlier session, and a window already open is never rebuilt. Until an
 //!   instance has answered once, its session only asks (a "scout"): it
 //!   routes nothing and ends with the first answer.
-use super::choices::{Choices, Mode};
+use super::{
+    choices::{Choices, Mode},
+    connect::Authority,
+};
 use std::{net::SocketAddrV4, time::Duration};
 use tokio::time::Instant;
 
@@ -175,10 +178,16 @@ impl Wiring {
 
     /// Whether a session may exist for `target` at all.
     fn permitted(&self, target: &Target) -> bool {
+        !self.system_proxy_rules_out && self.chosen(target)
+    }
+
+    /// `permitted`, but for the system's proxy settings, which may change
+    /// without the app hearing of it.
+    fn chosen(&self, target: &Target) -> bool {
         self.routing != Routing::Unsupported
             && !self.proxy_configured
-            && !self.system_proxy_rules_out
-            && target.host().is_some()
+            // Only a managed address has a direct path: a custom domain keeps the tunnel.
+            && target.host().is_some_and(|host| Authority::managed(host).is_some())
             && !target.account.is_empty()
             && !target.instance.is_empty()
             && self.choices.mode(&target.account, &target.origin) == Mode::Automatic
@@ -339,6 +348,24 @@ impl Wiring {
             }
         }
         effects
+    }
+
+    /// Whether a session may still start for the published view with nothing
+    /// changing in the app: when the pause after a listener's end is over,
+    /// or once the system's proxy settings allow it. The shell keeps looking
+    /// while this holds, and stops when it does not.
+    pub fn awaits(&self, published: Option<&Published>) -> bool {
+        let Some(shown) = published else { return false };
+        let held = self
+            .sessions
+            .iter()
+            .any(|session| session.runtime.as_deref() == Some(shown.runtime.as_str()));
+        let wanted = match self.routing {
+            Routing::Live => true,
+            Routing::AtCreation => !self.reached(&shown.target),
+            Routing::Unsupported => false,
+        };
+        wanted && !held && self.chosen(&shown.target)
     }
 
     /// A rendezvous of the session was answered and its direct link is up

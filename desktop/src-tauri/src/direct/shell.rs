@@ -47,6 +47,10 @@ const RETRY: [Duration; 5] = [
 const GLANCE: Duration = Duration::from_secs(30);
 /// How often open windows are looked at while any session exists.
 const LOOK: Duration = Duration::from_secs(5);
+/// How often the app is looked at while another computer's instance is on
+/// show without a session that could still start by itself: after the pause
+/// that follows a listener's end, or once the system's proxy settings allow.
+const WAIT: Duration = Duration::from_secs(30);
 
 /// The 「连接方式」 submenu: this computer's choice of path for the instance
 /// on show (ui/design: desktop/connection-choice/menu-*). Its three strings
@@ -153,13 +157,25 @@ pub(crate) fn init(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            if lock(&state.wiring).busy() {
-                tokio::select! {
-                    _ = state.wake.notified() => {}
-                    _ = tokio::time::sleep(LOOK) => {}
+            // Nothing runs while no instance of another computer is on show
+            // or none could get a session: only a poke starts a look then.
+            let every = {
+                let shown = lock(&state.shown);
+                let wiring = lock(&state.wiring);
+                if wiring.busy() {
+                    Some(LOOK)
+                } else if wiring.awaits(shown.as_ref()) {
+                    Some(WAIT)
+                } else {
+                    None
                 }
-            } else {
-                state.wake.notified().await;
+            };
+            match every {
+                Some(every) => tokio::select! {
+                    _ = state.wake.notified() => {}
+                    _ = tokio::time::sleep(every) => {}
+                },
+                None => state.wake.notified().await,
             }
             look(&app, &state).await;
         }
