@@ -403,6 +403,12 @@ async def test_device_sideband_projection_is_independent_of_log_budget(caplog):
     fields = ("open", "rx_bytes", "tx_bytes", "challenge_tx", "challenge_rx", "response_tx", "response_rx")
     msg = dict(type="path_report", ordinal=1, phase="open", selected="relay", partial=False,
                families=[dict.fromkeys(fields, 0) for _ in range(4)], peer=PEER, epoch=epochs[-1], scope=None, rtt_ms=19)
+    legacy_msg = {k: v for k, v in msg.items() if k not in ("peer", "epoch", "scope", "rtt_ms")}
+    supervisor._device_reports = False
+    for phase in ("open", "change", "close"):
+        supervisor._handle_path_report({**legacy_msg, "phase": phase})
+        assert rv.is_admitted(PEER) and not rv.session_paths("binding")
+    supervisor._device_reports = True
     supervisor._handle_path_report(msg)
     for family, scope, kind in (("relay", None, "relay"), ("ipv4", "local", "lan"), ("ipv6", "global", "punched")):
         supervisor._handle_path_report({**msg, "phase": "change", "selected": family, "scope": scope})

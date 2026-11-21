@@ -108,6 +108,8 @@ def test_install_selects_exact_platform_without_execution(tmp_path, monkeypatch,
     (2, "578659184dfa38bc87261a6fa832f9b4c65a1c90", True),
     (3, "4e8d24e55583738e5bbf443d4e40e721e43b9a3f", True),
     (3, "4e8d24e55583738e5bbf443d4e40e721e43b9a30", False),
+    (4, "9d382198906d3e7ae92d02453efbdc5e0db33fea", True),
+    (4, "9d382198906d3e7ae92d02453efbdc5e0db33feb", False),
 ])
 def test_public_trial_requires_reviewed_source_and_verified_install(tmp_path, published, revision, source, compatible):
     payload, manifest, _, sources = published
