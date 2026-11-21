@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pet-frame-drawn"
+description = "Enables the pet_frame_drawn command without any pre-configured scope."
+commands.allow = ["pet_frame_drawn"]
+
+[[permission]]
+identifier = "deny-pet-frame-drawn"
+description = "Denies the pet_frame_drawn command without any pre-configured scope."
+commands.deny = ["pet_frame_drawn"]

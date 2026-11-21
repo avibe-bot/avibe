@@ -18,7 +18,7 @@ use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
     area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, upward_frame, valid_session_id,
     FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding, PetFrame, PetIntent,
-    PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
+    PetLayout, PetReady, PetStore, Reveal, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
     DEFAULT_TOGGLE_SHORTCUT,
 };
 use avibe_runtime_host::LoopbackOrigin;
@@ -31,7 +31,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use url::Url;
 
-use crate::pet_native::{follow_pointer, primary_button_down, set_frame, start_drag, Drag, PointerOffset};
+use crate::pet_native::{follow_pointer, primary_button_down, set_alpha, set_frame, start_drag, Drag, PointerOffset};
 use crate::{native_catalog_for_locales, Shell, DESKTOP_SHELL_MARKER, MAIN_WINDOW};
 
 pub const PET_WINDOW: &str = "pet";
@@ -43,6 +43,12 @@ const SUMMON_EVENT: &str = "avibe:pet-summon";
 const BOUND_EVENT: &str = "avibe:pet-bound";
 const HOVER_EVENT: &str = "avibe:pet-hover";
 const LAYOUT_EVENT: &str = "avibe:pet-layout";
+/// A resize the page answers with `pet_frame_drawn` once it has drawn at the
+/// new height (`{token, height}`).
+const FRAME_EVENT: &str = "avibe:pet-frame";
+/// How long a resized window stays hidden when its page does not answer (an
+/// older page, or one that cannot draw now).
+const REVEAL_TIMEOUT: Duration = Duration::from_millis(300);
 pub const SETTINGS_EVENT: &str = "avibe:desktop-pet-settings";
 /// A drag settles before its anchor is saved, as the main window's frame does.
 const MOVE_SETTLE: Duration = Duration::from_millis(400);
@@ -111,6 +117,7 @@ pub struct Pet {
     /// While the shell itself moves the window for a drag (macOS), the
     /// pointer's offset in it; `None` otherwise.
     drag_follow: Mutex<Option<PointerOffset>>,
+    reveal: Mutex<Reveal>,
     poll_generation: AtomicU64,
     poll_wake: Arc<tokio::sync::Notify>,
 }
@@ -132,6 +139,7 @@ impl Pet {
             drag_generation: AtomicU64::new(0),
             hit_regions: Mutex::new(Vec::new()),
             drag_follow: Mutex::new(None),
+            reveal: Mutex::new(Reveal::default()),
             poll_generation: AtomicU64::new(0),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
         }
@@ -848,7 +856,7 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
 fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
     match step {
         FrameStep::Keep => {}
-        FrameStep::Apply { frame, anchor } => set_frame(window, frame.origin(anchor, 1.0), frame.size()),
+        FrameStep::Apply { frame, anchor } => resize(app, window, frame.origin(anchor, 1.0), frame.size()),
         FrameStep::Publish { snapshot, publication } => {
             // An older page ignores the event; one still loading may already listen.
             dispatch(window, LAYOUT_EVENT, &serde_json::json!(snapshot));
@@ -868,6 +876,53 @@ fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
             });
         }
     }
+}
+
+/// Puts the window at `origin` with `size`. A change of height is made while
+/// the window is hidden (`Reveal`): it shows again once the page has drawn at
+/// the new height, or after `REVEAL_TIMEOUT`, so the last picture, pinned to
+/// the top of the new frame, never shows a second Vibey.
+fn resize(app: &AppHandle, window: &WebviewWindow, origin: (f64, f64), size: (f64, f64)) {
+    let current = window
+        .inner_size()
+        .ok()
+        .zip(window.scale_factor().ok())
+        .map(|(inner, scale)| inner.to_logical::<f64>(scale).height);
+    if current.is_none_or(|height| (height - size.1).abs() < 0.5) {
+        set_frame(window, origin, size);
+        return;
+    }
+    let token = lock(&app.state::<Pet>().reveal).hide();
+    set_alpha(window, 0.0);
+    set_frame(window, origin, size);
+    dispatch(
+        window,
+        FRAME_EVENT,
+        &serde_json::json!({ "token": token, "height": size.1 }),
+    );
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REVEAL_TIMEOUT).await;
+        let _ = on_main_thread(&app, move |app| show_drawn(app, token)).await;
+    });
+}
+
+/// Shows the window hidden for `token`'s resize, if that is still the one.
+fn show_drawn(app: &AppHandle, token: u64) {
+    if !lock(&app.state::<Pet>().reveal).drawn(token) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window(PET_WINDOW) {
+        set_alpha(&window, 1.0);
+    }
+}
+
+/// The page drew at the height of `token`'s resize (`FRAME_EVENT`).
+#[tauri::command]
+pub fn pet_frame_drawn(window: WebviewWindow, token: u64) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    show_drawn(window.app_handle(), token);
+    Ok(())
 }
 
 /// The display `pet.json` last placed the pet on.
@@ -1357,7 +1412,7 @@ fn begin_drag(app: &AppHandle, window: &WebviewWindow, press: Option<(f64, f64)>
         // layout (it drags the window natively then).
         return Err("The desktop pet cannot be dragged by the shell now.".to_owned());
     };
-    set_frame(window, strip.origin(anchor, 1.0), strip.size());
+    resize(app, window, strip.origin(anchor, 1.0), strip.size());
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
     drop(frame);
     // The press, moved with Vibey from the frame it was in to the strip.
