@@ -1,4 +1,5 @@
 import { DesktopCompose } from '../desktop/DesktopCompose';
+import { NativeAppLaunchFallback } from './apps/NativeAppLaunchFallback';
 import { DesktopAccountRow } from '../desktop/DesktopAccountRow';
 import { DesktopClientPresentation } from '../desktop/useDesktopClient';
 import { hasDesktopClient } from '../desktop/bridge';
@@ -525,6 +526,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     {!standaloneAppTab && <DesktopCompose />}
     <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
+    {canUseApps && <RouteSurfaceActivityBoundary active={!settingsOpen}><NativeAppLaunchFallback /></RouteSurfaceActivityBoundary>}
     <DesktopWindowChrome enabled={windowChrome} hidden={settingsOpen}>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}

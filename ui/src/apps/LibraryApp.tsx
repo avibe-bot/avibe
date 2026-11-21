@@ -1,13 +1,12 @@
+import { useAppLaunch } from './useAppLaunch';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { Reorder, useDragControls } from 'framer-motion';
 import { GripVertical, Minus, Pin, PinOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 
 import {
   appLaunchIntent,
-  appTabHref,
   appTabHrefForDockId,
   isAppleContextClick,
   tabModifierLabel,
@@ -17,17 +16,12 @@ import { APP_LIST, APP_REGISTRY, type AppDefinition, type AppId } from './regist
 import { deriveAppRows, partitionByDock, type AppRow } from './appLibrary';
 import { SHARED_ACTION_ZONE } from './rowLayout';
 import { ShowPageAvatarTile } from './showPageAvatarTile';
-import { showAppRoutePath } from '../components/apps/mobileDock';
 import { useDock } from '../context/DockContext';
-import { useWindowManager } from '../context/WindowManagerContext';
 import { ShowPagesView } from '../components/ShowPagesPage';
 import { useShowPages, type ShowPage } from '../components/useShowPages';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { SearchField } from '../components/settings/SettingsPrimitives';
-import { openLinkInNewContext } from '../lib/pwaNavigation';
-import { tryOpenDesktopAppWindow } from '../lib/desktopShell';
-import { isDesktopViewport } from '../lib/useIsDesktop';
 
 // The App Library: the app manager, itself a built-in app (§7.1). Two views over
 // the two-layer state (§7.1c): the INSTALLED set (Apps) and the full Show Pages
@@ -58,41 +52,11 @@ type LibraryTab = 'apps' | 'showpages';
  * with no standalone surface — the behavior above is unchanged.
  */
 function useOpenApp() {
-  const { t } = useTranslation();
-  const wm = useWindowManager();
-  const navigate = useNavigate();
+  const launchApp = useAppLaunch('library');
   return useCallback(
-    async (appId: AppId, opts?: { title?: string; sessionId?: string }, launch?: LaunchModifiers | null) => {
-      const intent = launch ? appLaunchIntent(launch) : 'activate';
-      if (intent === 'newTab') {
-        const href = appTabHref({ appId, sessionId: opts?.sessionId });
-        if (href) {
-          openLinkInNewContext(href, 'noopener,noreferrer');
-          return;
-        }
-      }
-      const desktop = isDesktopViewport();
-      if (desktop) {
-        const href = appTabHref({ appId, sessionId: opts?.sessionId });
-        if (href && await tryOpenDesktopAppWindow({
-          appId,
-          sessionId: opts?.sessionId ?? null,
-          title: opts?.title ?? (appId === 'showpage' ? undefined : t(APP_REGISTRY[appId].titleKey)),
-          newWindow: intent === 'newWindow',
-        })) return;
-        wm.openApp(appId, {
-          title: opts?.title,
-          params: opts?.sessionId ? { sessionId: opts.sessionId, title: opts.title } : undefined,
-        });
-        return;
-      }
-      if (appId === 'showpage') {
-        if (opts?.sessionId) navigate(showAppRoutePath(opts.sessionId));
-      } else {
-        navigate(`/apps/${appId}`);
-      }
-    },
-    [wm, navigate, t],
+    (appId: AppId, opts?: { title?: string; sessionId?: string }, launch?: LaunchModifiers | null) =>
+      launchApp({ appId, ...opts }, launch ? appLaunchIntent(launch) : 'activate'),
+    [launchApp],
   );
 }
 

@@ -16,7 +16,8 @@ const state = vi.hoisted(() => ({
 vi.mock('../../context/WorkbenchProjectsContext', () => ({
   useWorkbenchProjectsTree: () => ({ projects: state.projects }),
 }));
-vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => null }));
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()), useWindowManager: () => null }));
 vi.mock('../../context/StandaloneAppTabContext', () => ({ useStandaloneAppTab: () => false }));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => true, isDesktopViewport: () => true }));
 vi.mock('../../lib/routeSurfaceActivity', () => ({ useRouteSurfaceWindowEvent: () => {}, useRouteSurfaceActive: () => true }));

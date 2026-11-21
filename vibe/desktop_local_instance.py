@@ -42,6 +42,24 @@ def _installation_id() -> str | None:
         raise LocalInstanceError("local_identity_unavailable", 503) from exc
 
 
+def ensure_installation_id(*, recover_from: Mapping | None = None) -> str:
+    """Initialize once; if a claim journal still identifies this root, restore that same ID."""
+    with config_file_lock():
+        current = _installation_id()
+        if current is None:
+            if recover_from is None:
+                current = str(uuid4())
+            else:
+                current = recover_from.get("installation_id")
+                try:
+                    if str(UUID(current)) != current:
+                        raise ValueError
+                except (ValueError, TypeError, AttributeError):
+                    raise LocalInstanceError("local_identity_unavailable", 503) from None
+            write_atomic(_identity_path(), json.dumps({"schema_version": 1, "installation_id": current}))
+        return current
+
+
 def _config() -> V2Config:
     try:
         config = V2Config.load()
@@ -68,6 +86,13 @@ def _revision(config: V2Config, installation_id: str | None, pending: Mapping | 
     return hashlib.sha256(json.dumps([
         binding, installation_id, pending.get("operation_id") if pending else None,
     ], separators=(",", ":")).encode()).hexdigest()
+
+
+def claim_revision(config: V2Config, installation_id: str | None, pending: Mapping | None) -> str:
+    # A pending operation may advance from prepared to redeemed without changing its ID.
+    # A fresh claim must never supersede that sealed success or a different saved request.
+    snapshot = [_revision(config, installation_id, pending), pending]
+    return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _descriptor(config: V2Config, installation_id: str | None, pending: Mapping | None) -> dict[str, Any]:
@@ -141,10 +166,7 @@ def prepare(account_id: Any, expected_binding_revision: Any) -> dict[str, Any]:
                 raise LocalInstanceError("local_instance_conflict")
         else:
             if installation_id is None:
-                installation_id = str(uuid4())
-                write_atomic(_identity_path(), json.dumps({
-                    "schema_version": 1, "installation_id": installation_id,
-                }))
+                installation_id = ensure_installation_id()
             pending = remote_access._new_pairing_claim(config, "", socket.gethostname())
             pending["desktop_enrollment"] = {
                 "installation_id": installation_id, "account_id": account_id,

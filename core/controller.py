@@ -2440,6 +2440,13 @@ class Controller:
         # Skill privacy retention remains active when collection/tool retention
         # is disabled; both policies share this bounded maintenance worker.
         engine = get_cached_sqlite_engine()
+        from storage import device_activity, device_health_registry
+        for cleanup in (device_activity.prune, device_health_registry.maintain):
+            try:
+                cleanup(engine, int(time.time()), cancel_event)
+            except Exception:
+                # Independent maintenance: do not suppress skill or agent event retention.
+                logger.warning("Device maintenance deferred")
         agent_events_retention.run_skill_retention(engine, cancel_event=cancel_event)
         config = self._agent_events_retention_config()
         if config is None:

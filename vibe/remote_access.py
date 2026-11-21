@@ -2247,14 +2247,9 @@ def start_authorization_revision_polling(
 ) -> None:
     """Start the paired-device authorization watermark poller once."""
 
+    # The UI owns this worker even if a different process binds the data root later.
+    # sync_authorization_revision_once reloads config and makes no request while unpaired.
     global _AUTHORIZATION_REVISION_POLL_STARTED
-    if config is None:
-        try:
-            config = V2Config.load()
-        except Exception:
-            return
-    if not _authorization_revision_sync_configured(config):
-        return
 
     def loop() -> None:
         while True:
@@ -2806,14 +2801,8 @@ def start_resource_acl_sync_polling(
 ) -> None:
     """Start the paired-device ACL poller once for the UI process."""
 
+    # As with the revision poller, the per-tick check owns admission, not startup.
     global _RESOURCE_ACL_SYNC_POLL_STARTED
-    if config is None:
-        try:
-            config = V2Config.load()
-        except Exception:
-            return
-    if not _resource_acl_sync_configured(config):
-        return
 
     def loop() -> None:
         while True:
@@ -4508,18 +4497,62 @@ def start_runtime_monitoring(config: V2Config | None = None) -> None:
     start_resource_acl_sync_polling(config)
 
 
+def _record_device_access_switch(config, enabled):
+    """Activity is observational: a ledger failure cannot undo a connector transition."""
+    try:
+        _write_device_access_switch(config, enabled)
+    except Exception:
+        logger.warning("Could not record the remote access switch")
+
+
+def _write_device_access_switch(config, enabled):
+    from storage import device_activity
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import remote_device_sessions
+    from sqlalchemy import select
+    from vibe.ui_request_context import has_request_context
+
+    config = config or V2Config.load()
+    if not config.remote_access.vibe_cloud.is_runtime_paired():
+        return
+    binding = device_binding(config)
+    device, subject = 'host', None
+    ensure_sqlite_state()
+    with get_cached_sqlite_engine().begin() as conn:
+        if has_request_context():
+            from vibe.ui_compat import g
+            from vibe.ui_server import _is_direct_loopback_connection
+            identity = getattr(g, 'remote_session_identity', None)
+            if identity:
+                subject = identity['sub']
+                device = conn.scalar(select(remote_device_sessions.c.device_id).where(
+                    remote_device_sessions.c.binding==binding, remote_device_sessions.c.subject==subject,
+                    remote_device_sessions.c.session_id==identity['browser_session_id']))
+                if not device:
+                    return
+            elif not _is_direct_loopback_connection():
+                return
+        device_activity.record(conn,kind='remoteAccessOn' if enabled else 'remoteAccessOff',
+                               binding=binding,subject=subject,device=device,now=int(time.time()))
+
+
 def stop(config: V2Config | None = None) -> dict[str, Any]:
     """Stop the connector and withdraw the request that keeps one running."""
 
     try:
         with _connector_lifecycle():
+            requested = _connector_requested_path().is_file()
             try:
                 _connector_requested_path().unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("Could not withdraw the tunnel connector request", exc_info=True)
                 result = _stop_connector(config)
                 return {**result, "ok": False, "error": "remote_access_request_withdraw_failed", "detail": str(exc)}
-            return _stop_connector(config)
+            result = _stop_connector(config)
+            if requested and result.get('ok'):
+                _record_device_access_switch(config, False)
+            return result
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "stopped": False}
 
@@ -4601,7 +4634,11 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
     install_failure = _ensure_cloudflared_pin(loaded)
     try:
         with _connector_lifecycle():
-            return _start(loaded or config, record_request=True, install_failure=install_failure)
+            requested = _connector_requested_path().is_file()
+            result = _start(loaded or config, record_request=True, install_failure=install_failure)
+            if result.get('ok') and not requested and _connector_requested_path().is_file():
+                _record_device_access_switch(loaded or config, True)
+            return result
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "started": False}
 
@@ -4850,8 +4887,7 @@ def _json_request_to_validated_backend(
     if connection_target.requires_proxy and not proxy_url:
         raise RuntimeError("pairing_backend_proxy_required")
     last_network_error: Exception | None = None
-    for connect_host in connection_target.connect_hosts:
-        connection = _validated_backend_connection(connect_host, connection_target, timeout, proxy_url)
+    for connection in _validated_backend_connections(connection_target, timeout, proxy_url):
         try:
             connection.request("POST", request_path, body=body, headers=request_headers)
             response = connection.getresponse()
@@ -4887,6 +4923,12 @@ def _validated_backend_proxy_url(url: str) -> str | None:
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise RuntimeError("unsupported_https_proxy_scheme")
     return proxy_url
+
+
+def _validated_backend_connections(target: _ValidatedPairingBackend, timeout: float, proxy_url: str | None):
+    """Only validated addresses, using the approved proxy and certificate policy. Caller closes each candidate."""
+    for host in target.connect_hosts:
+        yield _validated_backend_connection(host, target, timeout, proxy_url)
 
 
 def _validated_backend_connection(
@@ -5343,14 +5385,23 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
             or not payload["session_secret"]
         ):
             return None, "pending pairing request fingerprint is invalid"
-    if "desktop_enrollment" in payload:
-        desktop = payload["desktop_enrollment"]
+    if "personal_claim" in payload or "desktop_enrollment" in payload:
+        personal = "personal_claim" in payload
+        if personal and "desktop_enrollment" in payload:
+            return None, "conflicting enrollment journals"
+        desktop = payload.get("personal_claim" if personal else "desktop_enrollment")
         if not isinstance(desktop, dict) or any(
             not isinstance(desktop.get(key), str) or not desktop[key]
             for key in ("installation_id", "account_id")
         ):
             return None, "pending Desktop enrollment is invalid"
+        if personal and any(not isinstance(desktop.get(k), str) or not desktop[k] for k in (
+            "claim_id", "instance_id", "public_url",
+        )):
+            return None, "invalid personal claim target"
         retry = payload.get("redeem_request")
+        if personal and payload["phase"] == "prepared" and not retry:
+            return None, "missing personal claim redemption"
         if retry is not None and (
             not isinstance(retry, dict)
             or any(not isinstance(retry.get(key), str) or not retry[key] for key in (
@@ -5416,7 +5467,7 @@ def _retire_pending_pairing(*, operation_id: str) -> bool:
 def _same_pairing_claim_request(record: Mapping[str, Any], claim: Mapping[str, Any]) -> bool:
     """A grant renewal keeps its operation, but never its request identity."""
     return all(record.get(key) == claim.get(key) for key in (
-        "operation_id", "request_fingerprint", "redeem_request", "desktop_enrollment",
+        "operation_id", "request_fingerprint", "redeem_request", "desktop_enrollment", "personal_claim",
     ))
 
 
@@ -5857,7 +5908,7 @@ def pair(
         record, error = _read_pending_pairing_record()
         if not error and record and record.get("redeem_request") and record["phase"] == "prepared":
             try:
-                return _retry_desktop_claim(record)
+                return _retry_installation_pairing(record)
             except desktop_local_instance.LocalInstanceError as exc:
                 return {"ok": False, "error": exc.code, "status": exc.status}
             except (OSError, _PairingLockUnavailable):
@@ -5933,6 +5984,38 @@ def pair(
     })
 
 
+def _with_redeem_request(claim, backend_url: str, device_name: str, key: str) -> dict[str, Any]:
+    return {
+        **claim, "backend_url": backend_url, "device_name": device_name,
+        "request_fingerprint": _pairing_request_fingerprint(backend_url, key, claim["session_secret"]),
+        "redeem_request": {
+            "pairing_key": key, "redeem_request_id": secrets.token_urlsafe(32), "device_name": device_name,
+            "local_version": "dev", "origin_service": origin_service_for_pairing(),
+        },
+    }
+
+
+def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: str, installation: str,
+                        subject: str, claim_id: str, instance_id: str, hostname: str) -> dict[str, Any]:
+    """Atomic handoff into the same request-bound pairing journal used by Desktop."""
+    from vibe import desktop_local_instance as local
+    from storage.importer import ensure_sqlite_state
+
+    _run_pending_deferred_context_migration()
+    ensure_sqlite_state()
+    with _pairing_persist_lock():
+        config, identity, pending = local._config(), local._installation_id(), local._pending()
+        if identity != installation or local.claim_revision(config, identity, pending) != revision:
+            return {"ok": False, "error": "local_binding_changed"}
+        if pending and (pending["phase"] != "prepared" or pending.get("desktop_enrollment")):
+            return {"ok": False, "error": "local_instance_conflict"}
+        claim = _with_redeem_request(_new_pairing_claim(config, backend_url, device), backend_url, device, key)
+        claim["personal_claim"] = {"claim_id": claim_id, "installation_id": installation, "account_id": subject,
+                                   "instance_id": instance_id, "public_url": "https://" + hostname}
+        _write_pending_pairing_record(claim)
+    return _retry_installation_pairing(claim)
+
+
 def _pair_desktop(
     pairing_key: str, backend_url: str, device_name: str, guard: Any,
 ) -> dict[str, Any]:
@@ -5966,27 +6049,15 @@ def _pair_desktop(
             else:
                 if not pairing_key or not isinstance(device_name, str) or not device_name.strip():
                     raise desktop_local_instance.LocalInstanceError("invalid_request", 400)
-                claim = {
-                    **claim, "backend_url": backend.base_url, "device_name": device_name,
-                    "request_fingerprint": _pairing_request_fingerprint(
-                        backend.base_url, pairing_key, claim["session_secret"],
-                    ),
-                    "redeem_request": {
-                        "pairing_key": pairing_key,
-                        "redeem_request_id": secrets.token_urlsafe(32),
-                        "device_name": device_name,
-                        "local_version": "dev",
-                        "origin_service": origin_service_for_pairing(),
-                    },
-                }
+                claim = _with_redeem_request(claim, backend.base_url, device_name, pairing_key)
                 claim.pop("desktop_failure", None)
                 _write_pending_pairing_record(claim)
     if claim["phase"] in {"redeemed", "applied"}:
         return _persist_pairing(None, device_name=device_name, operation_id=claim["operation_id"])
-    return _retry_desktop_claim(claim)
+    return _retry_installation_pairing(claim)
 
 
-def _retry_desktop_claim(claim: Mapping[str, Any]) -> dict[str, Any]:
+def _retry_installation_pairing(claim: Mapping[str, Any]) -> dict[str, Any]:
     from vibe import desktop_local_instance
 
     with _pairing_persist_lock():
@@ -5994,7 +6065,7 @@ def _retry_desktop_claim(claim: Mapping[str, Any]) -> dict[str, Any]:
         config = desktop_local_instance._config()
         if (
             error or current != claim or claim["phase"] != "prepared"
-            or desktop_local_instance._installation_id() != claim["desktop_enrollment"]["installation_id"]
+            or desktop_local_instance._installation_id() != (claim.get("personal_claim") or claim["desktop_enrollment"])["installation_id"]
             or _pairing_identity_fingerprint(_pairing_identity_from_cloud(
                 config.remote_access.vibe_cloud
             )) != claim["source_fingerprint"]
@@ -6018,7 +6089,15 @@ def _redeem_pairing_claim(
             connection_target=backend,
         )
     except BackendRequestError as exc:
-        failure = {"ok": False, **exc.payload, "status": exc.status}
+        if claim.get("personal_claim"):
+            # Recovery is also reachable from the existing pair route and CLI.
+            # The raw upstream body/detail may contain the one-use key or credentials.
+            reason = exc.payload.get("error")
+            if reason not in ("pairing_key_expired", "registration_indeterminate", "pairing_redeem_pending"):
+                reason = "pairing_request_failed"
+            failure = {"ok": False, "error": reason, "status": exc.status}
+        else:
+            failure = {"ok": False, **exc.payload, "status": exc.status}
         retry_after = exc.payload.get("retry_after_seconds")
         if (
             claim.get("redeem_request") and exc.status == 409
@@ -6048,7 +6127,7 @@ def _redeem_pairing_claim(
         return {
             "ok": False,
             "error": "pairing_redeem_indeterminate",
-            "detail": str(exc),
+            **({} if claim.get("personal_claim") else {"detail": str(exc)}),
             "pairing": {"ok": False, "recoverable": bool(claim.get("redeem_request")), "cause": "pairing_request_failed"},
         }
     normalized_result, response_error = _validate_pairing_response(result)
@@ -6059,12 +6138,18 @@ def _redeem_pairing_claim(
             "detail": response_error,
         })
     assert normalized_result is not None
+    personal = claim.get("personal_claim")
+    if personal and (normalized_result["instance_id"] != personal["instance_id"]
+                     or normalized_result["public_url"] != personal["public_url"]):
+        # This is an invalid response to the saved pairing request, not a new
+        # user-facing recovery state. Legacy Resume already localizes this code.
+        return _pairing_failure_after_claim(claim, {"ok": False, "error": "invalid_pairing_response"})
     instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
         return _pairing_failure_after_claim(claim, {
             "ok": False,
-            "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
+            "error": "tunnel_origin_update_failed" if personal else str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
         })
     pairing_result: dict[str, Any] = {
@@ -6147,10 +6232,11 @@ def _persist_pairing_impl(
                 }
             return {"ok": False, "error": "missing_pairing_key"}
 
-        if record.get("desktop_enrollment"):
+        enrollment = record.get("personal_claim") or record.get("desktop_enrollment")
+        if enrollment:
             from vibe import desktop_local_instance
 
-            if desktop_local_instance._installation_id() != record["desktop_enrollment"]["installation_id"]:
+            if desktop_local_instance._installation_id() != enrollment["installation_id"]:
                 return {"ok": False, "error": "local_binding_changed", "status": 409}
 
         if result is not None:
@@ -6329,6 +6415,16 @@ def _persist_pairing_impl(
                     "pairing": {"ok": False, "reconciling": True},
                 }
             record = applied_record
+        if personal := record.get("personal_claim"):
+            # Every completion path (including the old Resume route) passes here.
+            # Preserve durable attribution before retiring the only journal that links
+            # this claim to this exact credential generation. A failed write is resumable.
+            from vibe.personal_claim_client import ClaimError
+            from vibe.personal_claims import record_bound
+            try:
+                record_bound(personal["claim_id"], persisted_identity)
+            except (OSError, ClaimError):
+                return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         if not _retire_pending_pairing(operation_id=str(record["operation_id"])):
             return {
                 **status(config),
@@ -6609,6 +6705,8 @@ def make_session_cookie(
     *,
     session_claims: Mapping[str, Any],
     device_headers: Mapping[str, str] | None = None,
+    account_session_ref: str | None = None,
+    account_enroll_before: int | None = None,
 ) -> str:
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
@@ -6656,7 +6754,8 @@ def make_session_cookie(
         _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
     }
     cookie = _encode_session_cookie(cloud.session_secret, payload)
-    register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True)
+    register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True,
+                            account_session_ref=account_session_ref, account_enroll_before=account_enroll_before)
     return cookie
 
 
@@ -6667,13 +6766,16 @@ def device_binding(config: V2Config) -> str:
     return binding_key(cloud.instance_id, cloud.session_secret)
 
 
-def register_device_session(config, identity, claims, headers, *, fresh=False):
+def register_device_session(config, identity, claims, headers, *, fresh=False, account_session_ref=None, account_enroll_before=None):
+    from vibe.account_session_revoke import pairing_epoch
     from storage import device_registry
     from vibe.device_metadata import describe
 
     device_registry.record_session(
         device_binding(config), identity, claims['vibe_instance_role'], describe(headers),
         expires_at=identity['auth_time'] + SESSION_ABSOLUTE_TTL_SECONDS, now=int(time.time()), fresh=fresh,
+        epoch=pairing_epoch(config) if account_session_ref else None, reference=account_session_ref,
+        account_enroll_before=account_enroll_before,
     )
 
 
@@ -6731,7 +6833,12 @@ def _legacy_browser_session_id(secret: str, cookie_value: str) -> str:
 
 
 def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
-    """Durably sign one browser session out; return whether it was recorded.
+    recorded, _ = revoke_browser_session_with_cleanup(payload)
+    return recorded
+
+
+def revoke_browser_session_with_cleanup(payload: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Durably sign one browser session out; report revocation and deferred cleanup separately.
 
     The revocation is kept until the session's absolute cap, the latest
     ``exp`` any cookie of this browser session can carry, so a copy of an older
@@ -6742,25 +6849,25 @@ def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
 
     session_id = payload.get(_SESSION_BROWSER_ID_KEY)
     if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
-        return False
+        return False, False
     try:
         expires_at = int(payload.get("exp", 0))
     except (TypeError, ValueError):
-        return False
+        return False, False
     auth_time = _session_auth_time(payload)
     if auth_time is not None:
         expires_at = max(expires_at, auth_time + SESSION_ABSOLUTE_TTL_SECONDS)
     try:
-        remote_access_authorization_service.revoke_browser_session(
+        deferred = remote_access_authorization_service.revoke_browser_session(
             session_id,
             expires_at=expires_at,
             now=int(time.time()),
         )
     except Exception:
         logger.warning("browser session revocation persistence failed", exc_info=True)
-        return False
+        return False, False
     publish_browser_session_revoked(session_id)
-    return True
+    return True, bool(deferred)
 
 
 def publish_browser_session_revoked(session_id: str) -> None:

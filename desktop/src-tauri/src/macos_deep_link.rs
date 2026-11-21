@@ -2,7 +2,10 @@ use std::cell::RefCell;
 
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass};
-use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSObject, NSObjectProtocol};
+use objc2_app_kit::NSApplicationWillFinishLaunchingNotification;
+use objc2_foundation::{
+    NSAppleEventDescriptor, NSAppleEventManager, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol,
+};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::RunEvent;
 
@@ -22,6 +25,14 @@ define_class!(
     unsafe impl NSObjectProtocol for RawDeepLinkHandler {}
 
     impl RawDeepLinkHandler {
+        #[unsafe(method(applicationWillFinishLaunching:))]
+        fn application_will_finish_launching(&self, _notification: &NSNotification) {
+            // NSApplication installs its normalized URL receiver during startup,
+            // after plugin setup. Reclaim the literal descriptor before cold
+            // launch events are delivered; Ready is already too late.
+            register(self);
+        }
+
         #[unsafe(method(handleGetURLEvent:withReplyEvent:))]
         fn handle_get_url(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
             if let Some(raw) = raw_url(event) {
@@ -50,17 +61,31 @@ fn raw_url(event: &NSAppleEventDescriptor) -> Option<String> {
     descriptor?.stringValue().map(|text| text.to_string())
 }
 
-fn install(receive: impl Fn(String) + 'static) {
-    let handler = RawDeepLinkHandler::new(receive);
+fn register(handler: &RawDeepLinkHandler) {
     let manager = NSAppleEventManager::sharedAppleEventManager();
     unsafe {
         let _: () = msg_send![
             &*manager,
-            setEventHandler: &*handler,
+            setEventHandler: handler,
             andSelector: sel!(handleGetURLEvent:withReplyEvent:),
             forEventClass: GET_URL_EVENT,
             andEventID: GET_URL_EVENT,
         ];
+    }
+}
+
+fn install(receive: impl Fn(String) + 'static) {
+    let handler = RawDeepLinkHandler::new(receive);
+    register(&handler);
+    // The existing retained handler also owns the launch observation. The
+    // notification center does not introduce another receiver or lifetime.
+    unsafe {
+        NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            &handler,
+            sel!(applicationWillFinishLaunching:),
+            Some(NSApplicationWillFinishLaunchingNotification),
+            None,
+        );
     }
     HANDLER.with(|current| *current.borrow_mut() = Some(handler));
 }
@@ -72,6 +97,11 @@ fn remove() {
         };
         let manager = NSAppleEventManager::sharedAppleEventManager();
         unsafe {
+            NSNotificationCenter::defaultCenter().removeObserver_name_object(
+                &handler,
+                Some(NSApplicationWillFinishLaunchingNotification),
+                None,
+            );
             let _: () = msg_send![
                 &*manager,
                 removeEventHandlerForEventClass: GET_URL_EVENT,

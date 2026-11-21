@@ -788,6 +788,17 @@ pub(crate) fn runtime_document_started(app: &AppHandle, label: &str, url: &Url) 
     let Some(client) = app.try_state::<Client>() else {
         return;
     };
+    let retiring_apps = client
+        .view
+        .views
+        .lock()
+        .expect("views")
+        .runtime
+        .as_ref()
+        .is_some_and(|role| role.label == label);
+    if retiring_apps {
+        crate::app_windows::close_all(app);
+    }
     let current = {
         let mut views = client.view.views.lock().expect("views");
         if let Some(runtime) = views.runtime.as_mut().filter(|runtime| runtime.label == label) {
@@ -883,6 +894,119 @@ pub(crate) fn current_workbench(app: &AppHandle) -> Option<(Webview, Url)> {
         && actual.username().is_empty()
         && actual.password().is_none();
     same.then_some((view, origin))
+}
+
+/// App windows inherit one published Runtime document, never a URL supplied by
+/// a page. Keep the receipt private to native owners; it grants no client IPC.
+#[derive(Clone)]
+pub(crate) struct AppRuntime {
+    label: String,
+    window: u64,
+    owner: u64,
+    document: u64,
+    action: u64,
+    pub origin: Url,
+    pub disposable: bool,
+    pub epoch: Epoch,
+}
+
+impl AppRuntime {
+    pub fn current(&self, app: &AppHandle) -> bool {
+        self.receipt_current(app)
+            && app
+                .get_webview(&self.label)
+                .is_some_and(|view| view.url().is_ok_and(|url| app_origin_matches(&self.origin, &url)))
+    }
+
+    /// `current` without the WebView's URL: the epoch, the presentation owner
+    /// and the published Runtime role. It takes only atomics and std mutexes
+    /// that no holder keeps across a wait for the main thread, so it may be
+    /// called on the main thread, inside a WebView call, where a URL getter
+    /// would re-enter the event loop. The caller checks the URL itself.
+    pub fn receipt_current(&self, app: &AppHandle) -> bool {
+        let Some(client) = app.try_state::<Client>() else {
+            return false;
+        };
+        if self.epoch.check().is_err() || client.coordinator.presentation_owner() != self.action {
+            return false;
+        }
+        let views = client.view.views.lock().expect("views");
+        let role = views.account.is_none()
+            && views.runtime.as_ref().is_some_and(|role| {
+                role.label == self.label
+                    && role.window == self.window
+                    && role.owner == self.owner
+                    && role.document == self.document
+                    && role.disposable == self.disposable
+            });
+        drop(views);
+        let state = client.view.presentation.lock().expect("presentation");
+        let admitted = role && !state.account && !state.staging && state.pending_commit.is_none();
+        drop(state);
+        admitted
+    }
+
+    pub fn webview(&self, app: &AppHandle) -> Option<Webview> {
+        self.current(app).then(|| app.get_webview(&self.label)).flatten()
+    }
+
+    pub fn belongs_to(&self, label: &str, window: u64) -> bool {
+        self.label == label && self.window == window
+    }
+
+    pub fn same_document(&self, other: &Self) -> bool {
+        self.label == other.label
+            && self.window == other.window
+            && self.owner == other.owner
+            && self.document == other.document
+            && self.origin == other.origin
+            && self.epoch.value == other.epoch.value
+            && self.action == other.action
+    }
+}
+
+fn app_origin_matches(origin: &Url, url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.origin() == origin.origin()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+pub(crate) fn app_runtime(view: &Webview) -> Option<AppRuntime> {
+    let app = view.app_handle();
+    let client = app.try_state::<Client>()?;
+    let actual = view.url().ok()?;
+    let state = client.view.presentation.lock().ok()?;
+    let origin = match &state.remote {
+        Some(remote) => remote.clone(),
+        None => client.view.local_origin.lock().ok()?.as_ref()?.navigation_url(),
+    };
+    drop(state);
+    if !app_origin_matches(&origin, &actual) {
+        return None;
+    }
+    let views = client.view.views.lock().ok()?;
+    let role = views.runtime.as_ref().filter(|role| role.label == view.label())?;
+    let runtime = AppRuntime {
+        label: role.label.clone(),
+        window: role.window,
+        owner: role.owner,
+        document: role.document,
+        action: client.coordinator.presentation_owner(),
+        origin,
+        disposable: role.disposable,
+        epoch: client.coordinator.epoch(),
+    };
+    drop(views);
+    // Capture the published source even while another App owns the serializer.
+    // This receipt grants no effects: launch waits for that same lock and
+    // revalidates the exact role, document and action before using it.
+    runtime.current(app).then_some(runtime)
+}
+
+pub(crate) async fn lock_app_runtime(app: &AppHandle) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let windows = app.try_state::<Client>()?.view.windows.clone();
+    Some(windows.lock_owned().await)
 }
 pub(crate) fn is_main_view(app: &AppHandle, label: &str) -> bool {
     if label == MAIN_WINDOW {
@@ -1836,7 +1960,7 @@ impl NativeView {
                         }
                     });
                 #[cfg(target_os = "macos")]
-                let builder = builder.initialization_script(crate::macos_title_bar::inset_script());
+                let builder = builder.initialization_script(crate::macos_title_bar::inset_script(app.config()));
                 let view = window.add_child(builder, tauri::LogicalPosition::new(0., 0.), size).map_err(failure)?;
                 view.hide().map_err(failure)?;
                 #[cfg(target_os = "macos")]
@@ -1949,6 +2073,10 @@ impl NativeView {
             && self.presentation_epoch(owner).is_ok()
     }
     async fn retire_runtime(&self, mut role: RuntimeDocument) -> Result<(), ClientError> {
+        if let Err(error) = crate::app_windows::close_runtime_completed(&self.app, &role.label, role.window).await {
+            self.views.lock().expect("views").retired.push(role);
+            return Err(failure(error));
+        }
         let app = self.app.clone();
         let label = role.label.clone();
         let disposable = role.disposable;
@@ -2007,6 +2135,18 @@ impl NativeView {
         Ok(())
     }
     async fn retire_current(&self) -> Result<Option<(String, u64)>, ClientError> {
+        let parent = self
+            .views
+            .lock()
+            .expect("views")
+            .runtime
+            .as_ref()
+            .map(|role| (role.label.clone(), role.window));
+        if let Some((label, window)) = parent {
+            crate::app_windows::close_runtime_completed(&self.app, &label, window)
+                .await
+                .map_err(failure)?;
+        }
         let role = self.views.lock().expect("views").runtime.take();
         // Capture identity at the same boundary that removes its authority.
         // A candidate load may have awaited while this document navigated.

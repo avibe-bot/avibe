@@ -46,6 +46,7 @@
         "main-desktop-notifications",
         "main-instance-client",
         "main-window-focus",
+        "show-share",
         "update-popover"
       ],
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"

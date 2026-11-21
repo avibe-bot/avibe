@@ -110,6 +110,9 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("POST", "/api/remote-access/claims"),
+    ("GET", "/api/remote-access/claims/{claim_id}"),
+    ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
     ("GET", "/api/desktop/local-instance"),
     ("POST", "/api/desktop/local-instance/prepare"),
     ("POST", "/api/remote-access/direct/suspend"),
@@ -135,6 +138,9 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mobile/pairings"),
     ("GET", "/api/mobile/requests/{request_id}"),
     ("POST", "/api/mobile/device/v1/pair"),
+    ("POST", "/api/mobile/device/v1/binding-ticket"),
+    ("POST", "/api/devices/{device_id}/health/revoke"),
+    ("POST", "/api/devices/unlinked-health/{device_id}/revoke"),
     ("PUT", "/api/mobile/device/v1/manifest"),
     ("PUT", "/api/mobile/device/v1/health/days"),
     ("POST", "/api/mobile/device/v1/requests/claim"),
@@ -184,7 +190,9 @@ def test_complete_registered_api_management_inventory():
     # + 4 account-scoped registry list, self-report and sign-out routes.
     # + 4 personal Live Activity methods (Viewer; controller enforces ownership and session access).
     # + 1 Model Hub reset card use (Owner role, classified in _RETAINED_OWNER_ROUTES).
-    assert len(endpoints) == 358
+    # + 3 personal installation claim methods (Owner; browser return is not an API route).
+    # + 8 device function, activity and Health ticket methods.
+    assert len(endpoints) == 369
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),
@@ -253,6 +261,11 @@ def test_complete_registered_api_management_inventory():
         (Path(__file__).parent / "fixtures/member_management_existing_read_roles.json").read_text()
     )
     baseline_read_roles.update({
+        "GET /api/devices/activity": "viewer",
+        "GET /api/devices/example/health": "viewer",
+        "GET /api/devices/example/health/reads": "viewer",
+        "PUT /api/devices/example/notifications": "viewer",
+        "PUT /api/devices/example/schedule": "viewer",
         "GET /api/web-push/live-activities/turn": "viewer",
         "GET /api/web-push/live-activities/example": "viewer",
         "PUT /api/web-push/live-activities/example": "viewer",

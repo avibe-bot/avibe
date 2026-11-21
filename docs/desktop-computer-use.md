@@ -34,13 +34,14 @@ its action:
 
 - **Turn on** turns Computer Use on, exactly like the tray or application menu
   switch. It never turns Computer Use off.
-- Accessibility's **Open Settings** asks macOS for the Accessibility grant
-  (the system prompt lists Avibe in the pane) and opens **Privacy & Security →
-  Accessibility**.
-- Screen & System Audio Recording's **Open Settings** runs the same request the
-  tray switch does, which lists Avibe in the pane where macOS allows it, and
-  opens **Privacy & Security → Screen & System Audio Recording**. The step
-  itself shows the **+** / drag guidance.
+- Accessibility's **Open Settings** opens **Privacy & Security →
+  Accessibility** directly. If Avibe is missing, click **+**, select the
+  installed Avibe app, and enable it.
+- Screen & System Audio Recording's **Open Settings** opens **Privacy &
+  Security → Screen & System Audio Recording** directly. The step explains
+  how to click **+** or drag the installed app into the list, then enable it.
+  Neither **Open Settings** action requests permission or attempts a capture;
+  opening a pane alone does not grant access.
 
 While the page is visible it reads the status about every 1.5 seconds, so a
 step turns done within seconds of macOS reporting the grant; it stops reading
@@ -49,9 +50,10 @@ as a manual fallback. Accessibility comes first because the managed driver
 checks it before Screen Recording.
 
 If macOS asks to **Quit & Reopen** after the Screen Recording grant, choose it.
-When the request came from this page, the app quits without asking whether to
-stop the Runtime: the Runtime keeps running, so Agent turns in flight are not
-interrupted, and the relaunched app reconnects to it. It then opens the
+When Screen Recording settings were opened from this page, the app quits
+without asking whether to stop the Runtime: the Runtime keeps running, so Agent
+turns in flight are not interrupted, and the relaunched app reconnects to it.
+It then opens the
 Settings guide again by itself (within 15 minutes of the request), and the page
 picks up the new status. Outside that window, Quit asks as usual, and a later
 launch is not redirected.
@@ -62,9 +64,9 @@ with a notice to complete them in the Avibe desktop app on the Mac; the
 actions cannot run from a browser. When the host has no live desktop shell, it
 sees a short notice that the page is available in the desktop app.
 
-Avibe requests permissions only when you turn the feature on or press a
-step's **Open Settings**. It does not keep showing permission prompts in the
-background. If the menu still reports that a permission is needed, open
+Avibe requests permissions when you turn the feature on, not when you press
+**Open Settings**. That button only navigates; permission checks remain silent.
+If the menu still reports that a permission is needed, open
 **System Settings → Privacy & Security**, confirm that Avibe is enabled in both
 permission panes, then use the off/on or quit/reopen recovery above. Merely
 bringing the Avibe window to the front does not start a permission retry.

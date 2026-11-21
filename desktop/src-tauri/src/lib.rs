@@ -31,6 +31,8 @@ mod native_frame;
 mod notifications;
 mod pet;
 mod pet_native;
+mod show_share;
+mod show_window_title;
 mod update_install;
 mod update_popover;
 pub mod updater;
@@ -52,6 +54,10 @@ mod macos_deep_link;
 mod macos_new_context;
 #[cfg(target_os = "macos")]
 mod macos_services;
+#[cfg(target_os = "macos")]
+mod macos_show_share;
+#[cfg(target_os = "macos")]
+mod macos_show_titlebar;
 #[cfg(target_os = "macos")]
 mod macos_terminate;
 #[cfg(target_os = "macos")]
@@ -297,7 +303,8 @@ struct NativeUninstallCatalog {
     unverified_keep: String,
 }
 
-fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> DesktopBootstrapCatalog {
+/// The product's English or Chinese copy, whichever the locales prefer.
+fn product_catalog_source(locales: impl IntoIterator<Item = String>) -> &'static str {
     let use_chinese = locales
         .into_iter()
         .find_map(|locale| {
@@ -311,14 +318,29 @@ fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> Desk
             }
         })
         .unwrap_or(false);
-    let source = if use_chinese {
+    if use_chinese {
         ZH_PRODUCT_CATALOG
     } else {
         EN_PRODUCT_CATALOG
-    };
+    }
+}
+
+fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> DesktopBootstrapCatalog {
+    let source = product_catalog_source(locales);
     serde_json::from_str::<ProductCatalog>(source)
         .expect("the checked product locale catalog must be valid")
         .desktop_bootstrap
+}
+
+/// One string of the product's copy, at a dotted key, in the system's language.
+/// Only the macOS title bar reads one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn product_text(key: &str) -> Option<String> {
+    let catalog: serde_json::Value = serde_json::from_str(product_catalog_source(sys_locale::get_locales())).ok()?;
+    key.split('.')
+        .try_fold(&catalog, |node, part| node.get(part))?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn native_tray_catalog() -> NativeTrayCatalog {
@@ -1159,6 +1181,31 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
     if shell.dialog_pending.swap(true, Ordering::SeqCst) {
         return;
     }
+    if quit && app_windows::any_open(&app) {
+        // A quit closes every App window, so each one with unsaved page state
+        // is asked first, exactly as its own close would be. A cancel ends the
+        // quit before the Runtime question; the shell and Runtime keep going.
+        tauri::async_runtime::spawn(async move {
+            if app_windows::confirm_discard_all(&app).await {
+                continue_runtime_lifecycle(app, quit);
+            } else {
+                app.state::<Shell>().dialog_pending.store(false, Ordering::SeqCst);
+            }
+        });
+        return;
+    }
+    continue_runtime_lifecycle(app, quit);
+}
+
+/// The rest of a lifecycle request, once `dialog_pending` is claimed and any
+/// App window page state may be discarded.
+fn continue_runtime_lifecycle(app: AppHandle, quit: bool) {
+    let shell = app.state::<Shell>();
+    if !matches!(shell.activity.load(Ordering::SeqCst), ACTIVITY_IDLE | ACTIVITY_MONITOR) {
+        shell.dialog_pending.store(false, Ordering::SeqCst);
+        show_lifecycle_busy(&app);
+        return;
+    }
     if quit && !shell.host.has_owned_runtime() {
         if claim_runtime_stop(&shell.activity) {
             exit_shell(&app);
@@ -1436,30 +1483,14 @@ fn navigation_is_allowed(url: &Url, active_origin: Option<&LoopbackOrigin>) -> b
     is_shell_ui_url(url) || active_origin.is_some_and(|origin| origin.matches_url_origin(url))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenAppWindowRequest {
-    app_id: String,
-    session_id: Option<String>,
-    title: Option<String>,
-    new_window: bool,
-}
+type OpenAppWindowRequest = app_windows::Request;
 
 #[tauri::command]
-async fn open_app_window(window: Webview, app: AppHandle, request: OpenAppWindowRequest) -> Result<(), String> {
-    let _launch = app_windows::LAUNCH_LOCK.lock().await;
+async fn open_app_window(window: Webview, request: OpenAppWindowRequest) -> Result<(), String> {
     if !pet::is_workbench(&window) {
         return Err("This command is only available to the Avibe Workbench.".to_owned());
     }
-    let target = app_windows::parse_target(&request.app_id, request.session_id.as_deref())?;
-    let origin = app
-        .state::<Shell>()
-        .active_origin
-        .lock()
-        .map_err(|_| "The desktop Runtime origin is unavailable.".to_owned())?
-        .clone()
-        .ok_or_else(|| "The desktop Runtime origin is unavailable.".to_owned())?;
-    app_windows::open(&app, &origin, &target, request.title.as_deref(), request.new_window)
+    app_windows::open_legacy(&window, request).await
 }
 
 /// The Console settings page expresses a UI rebind as a navigation to a bare
@@ -1945,23 +1976,42 @@ fn build_main_window(
         config.url = tauri::WebviewUrl::External("about:blank".parse().ok()?);
         config.visible = false;
     }
+    let app_document = app_windows::document(app, MAIN_WINDOW);
+    let navigation_document = app_document.clone();
+    let navigation_app = app.clone();
     let builder = WebviewWindowBuilder::from_config(app, &config)
         .ok()?
         .incognito(disposable)
         .initialization_script(DESKTOP_SHELL_MARKER)
-        .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
+        .initialization_script(DESKTOP_APP_WINDOWS_MARKER);
+    // Only the native owner answers a launch request. A `devUrl` build runs
+    // without it, so the page keeps its immediate in-page fallback instead of
+    // waiting on a request nothing will answer.
+    let builder = if instance_client::enabled(app) {
+        builder.initialization_script(app_windows::PROTOCOL_SCRIPT)
+    } else {
+        builder
+    };
+    let builder = builder
         .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+        .initialization_script(show_share::marker())
         .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
         ))
+        .on_navigation(move |url| app_windows::navigation_for(&navigation_app, MAIN_WINDOW, &navigation_document, url))
         .on_new_window(|url, _features| handle_new_window_request(url));
     let document_window = instance_client::window_created(app);
     let generation = instance_client::epoch(app);
     let builder = builder.on_page_load(move |webview, payload| {
+        app_windows::document_load(
+            webview.as_ref(),
+            &app_document,
+            payload.event() == tauri::webview::PageLoadEvent::Started,
+        );
         if payload.event() == tauri::webview::PageLoadEvent::Started {
             // The document that opened a Vault sandbox window is gone.
             #[cfg(target_os = "macos")]
@@ -1988,7 +2038,7 @@ fn build_main_window(
     };
     // macOS draws the page under a transparent native title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
-    let builder = builder.initialization_script(macos_title_bar::inset_script());
+    let builder = builder.initialization_script(macos_title_bar::inset_script(app.config()));
     #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     let builder = builder.initialization_script(DESKTOP_COMPUTER_USE_MARKER);
     let window = builder.build().ok()?;
@@ -2021,22 +2071,36 @@ fn build_main_child(
         .windows
         .iter()
         .find(|config| config.label == MAIN_WINDOW)?;
+    let app_document = app_windows::document(app, label);
+    let navigation_document = app_document.clone();
+    let navigation_app = app.clone();
+    let navigation_label = label.to_owned();
     let mut builder =
         tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External("about:blank".parse().ok()?))
             .incognito(disposable)
             .auto_resize()
             .initialization_script(DESKTOP_SHELL_MARKER)
             .initialization_script(DESKTOP_APP_WINDOWS_MARKER)
+            .initialization_script(app_windows::PROTOCOL_SCRIPT)
             .initialization_script(pet::DESKTOP_PET_MARKER)
             .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
             .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
+            .initialization_script(show_share::marker())
             .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
             .initialization_script(format!(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
         serde_json::to_string(&app.package_info().version.to_string()).ok()?
     ))
+            .on_navigation(move |url| {
+                app_windows::navigation_for(&navigation_app, &navigation_label, &navigation_document, url)
+            })
             .on_new_window(|url, _features| handle_new_window_request(url))
             .on_page_load(move |view, payload| {
+                app_windows::document_load(
+                    &view,
+                    &app_document,
+                    payload.event() == tauri::webview::PageLoadEvent::Started,
+                );
                 if payload.event() == tauri::webview::PageLoadEvent::Started {
                     // The document that opened a Vault sandbox window is gone.
                     #[cfg(target_os = "macos")]
@@ -2057,7 +2121,7 @@ fn build_main_child(
     }
     #[cfg(target_os = "macos")]
     {
-        builder = builder.initialization_script(macos_title_bar::inset_script());
+        builder = builder.initialization_script(macos_title_bar::inset_script(app.config()));
     }
     #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
     {
@@ -2362,8 +2426,55 @@ fn apply_pending_deep_link_on_main(app: &AppHandle) {
         if shell.window_generation.load(Ordering::SeqCst) != observed_generation {
             return;
         }
-        let succeeded = window.navigate(navigation.url().clone()).is_ok();
-        commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
+        if let Some(session) = navigation.show_session().map(str::to_owned) {
+            if !app
+                .state::<Mutex<DeepLinks>>()
+                .lock()
+                .is_ok_and(|mut links| links.claim_app_launch(&navigation))
+            {
+                return;
+            }
+            // Release the A5 serializer before joining the App owner's launch
+            // serializer. The owner captures this exact Runtime document now.
+            drop(_client_navigation);
+            let Some(launch) = app_windows::prepare_show(&window, &session, navigation.clone()) else {
+                // This document cannot launch now; the next page load retries.
+                release_show_delivery(app, &navigation);
+                return;
+            };
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let current = app.state::<Mutex<DeepLinks>>().lock().is_ok_and(|links| {
+                    links.owns_app_launch(&navigation)
+                        && links.pending_for_owner(instance_client::presentation_owner(&app))
+                });
+                if !current {
+                    return;
+                }
+                if app_windows::open_show(launch).await == app_windows::Status::Stale {
+                    // The Workbench document changed under the launch (a reload
+                    // does not advance the window generation). Nothing opened
+                    // and nothing was deposited, so the link stays pending for
+                    // the replacement document instead of being consumed.
+                    release_show_delivery(&app, &navigation);
+                } else {
+                    commit_deep_link_navigation(&app, &navigation, true, observed_generation);
+                }
+                // A successor may have arrived while fallback deposit held A5.
+                // Its receipt stays pending until this delivery releases all
+                // guards and commits only its own Arc.
+                apply_pending_deep_link(&app);
+            });
+        } else {
+            let succeeded = window.navigate(navigation.url().clone()).is_ok();
+            commit_deep_link_navigation(app, &navigation, succeeded, observed_generation);
+        }
+    }
+}
+
+fn release_show_delivery(app: &AppHandle, navigation: &DeepLinkNavigation) {
+    if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+        links.release_app_launch(navigation);
     }
 }
 
@@ -2754,6 +2865,7 @@ pub fn run() {
                     }
                 })
                 .on_navigation(|webview, url| {
+                    if let Some(allowed) = app_windows::navigation(webview, url) { return allowed; }
                     if webview.label() == pet::PET_WINDOW {
                         return pet::navigation_allowed(webview.app_handle(), url);
                     }
@@ -2786,7 +2898,7 @@ pub fn run() {
                         .try_state::<Shell>()
                         .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
                     if app_windows::is_app_window(webview.label()) {
-                        return active_origin.is_some_and(|origin| origin.matches_url_origin(url));
+                        return app_windows::child_navigation(webview, url);
                     }
                     if navigation_is_allowed(url, active_origin.as_ref()) {
                         return true;
@@ -2890,6 +3002,7 @@ pub fn run() {
             pet::pet_context_menu,
             pet::pet_set_expanded,
             pet::pet_drag,
+            pet::pet_pointer,
             pet::pet_settle,
             pet::pet_hit_regions,
             pet::pet_set_dismissed,
@@ -2897,7 +3010,8 @@ pub fn run() {
             pet::pet_bind,
             pet::pet_unbind,
             pet::pet_open,
-            window_return::focus_main_window
+            window_return::focus_main_window,
+            show_share::desktop_show_share
         ])
         .setup(|app| {
             #[cfg(feature = "bundled-runtime")]
@@ -2926,6 +3040,7 @@ pub fn run() {
                 app.path().app_local_data_dir()?.join("notifications.json"),
             ));
             app.manage(pet::Pet::new(app.path().app_local_data_dir()?.join("pet.json")));
+            show_share::setup(app.handle());
             #[cfg(target_os = "macos")]
             {
                 app.manage(compose::Queue::default());

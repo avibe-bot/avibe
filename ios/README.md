@@ -1560,9 +1560,11 @@ device request (restoration and HealthKit delivery included), the list it last
 confirmed in this process must still list the paired instance at its origin.
 If it does not (the instance was renamed, or removed while no connection was
 loaded), the connection ends locally and nothing more is sent to that origin,
-not even a revoke; a later connect starts over. A removal seen while the
-connection is loaded revokes it, as before. An unknown or empty list changes
-nothing.
+not even a revoke; a later connect starts over. A removal seen in a nonempty
+list while the connection is loaded revokes it, as before. A confirmed empty
+list (the account has no instance left) ends it locally like a rename, with no
+revoke: a deleted instance's name can later belong to another account. A list
+avibe.bot has not confirmed in this process changes nothing.
 
 Both HealthKit entitlements and the localized read-purpose description belong
 only to the main app. The archive checker requires boolean grants and rejects

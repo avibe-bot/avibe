@@ -233,8 +233,8 @@ impl Controller {
         receiver.await.map_err(|_| "Computer Use is unavailable.".to_owned())?
     }
 
-    /// Asks macOS for `pane`'s grant where it allows a prompt, then opens the
-    /// pane in System Settings.
+    /// Opens the matching System Settings pane without requesting permission.
+    /// The guide explains how to add Avibe if it is not listed.
     pub(crate) fn open_permission(&self, pane: PermissionPane) -> Result<(), String> {
         self.request(Event::OpenPermission(pane))
     }
@@ -589,14 +589,10 @@ impl RuntimeState {
     }
 
     async fn open_permission(&mut self, pane: PermissionPane) {
-        match pane {
-            PermissionPane::Accessibility => request_accessibility_grant(&self.app, &self.diagnostics).await,
-            PermissionPane::ScreenRecording => {
-                // The full request also runs the one-pixel capture, which is
-                // what lists Avibe in the Screen Recording pane.
-                let _ = request_permissions(&self.app, &self.diagnostics).await;
-                self.setup_resume_armed = arm_setup_resume(&self.paths.state_dir, SystemTime::now()).is_ok();
-            }
+        // Navigation is not an authorization request. Initial enable owns the
+        // prompting/registration path; reopening Settings must not repeat it.
+        if pane == PermissionPane::ScreenRecording {
+            self.setup_resume_armed = arm_setup_resume(&self.paths.state_dir, SystemTime::now()).is_ok();
         }
         open_permission_settings(pane);
         self.activated().await;
@@ -2056,30 +2052,6 @@ async fn request_permissions(app: &AppHandle, diagnostics: &BootstrapLog) -> Gra
     .await;
     record_permission_request(diagnostics, &result);
     result.grants()
-}
-
-/// The Accessibility half of [`request_permissions`]: the system prompt lists
-/// Avibe in the pane, and Screen Recording is left alone.
-async fn request_accessibility_grant(app: &AppHandle, diagnostics: &BootstrapLog) {
-    let (sender, receiver) = oneshot::channel();
-    let dispatched = app.run_on_main_thread(move || {
-        let granted = if MainThreadMarker::new().is_some() {
-            Some(request_accessibility())
-        } else {
-            None
-        };
-        let _ = sender.send(granted);
-    });
-    let outcome = match dispatched {
-        Err(_) => "dispatch_failed".to_owned(),
-        Ok(()) => match timeout(PERMISSION_REQUEST_TIMEOUT, receiver).await {
-            Ok(Ok(Some(granted))) => granted.to_string(),
-            Ok(Ok(None)) => "non_main".to_owned(),
-            Ok(Err(_)) => "dropped".to_owned(),
-            Err(_) => "timed_out".to_owned(),
-        },
-    };
-    diagnostics.record("computer-use.accessibility-request", &[("accessibility", outcome)]);
 }
 
 fn request_accessibility() -> bool {

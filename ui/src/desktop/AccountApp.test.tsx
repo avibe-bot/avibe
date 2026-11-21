@@ -238,3 +238,14 @@ it("on this computer's own instance, or under a shell that reports no instance, 
   expect(screen.getByRole('button', { name: en.update.action.update })).toBeTruthy();
 });
 
+// The back button's edge follows the native logical origin and keeps its own inset; missing projection retains web/nonmac spacing.
+it.each(['12px', '19.5px', ''])('uses the configured back-header inset %s without changing the content column', async value => {
+  document.documentElement.style.setProperty('--shell-window-controls-left', value);
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  const { container } = render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
+  const button = screen.getByRole('button', { name: en.desktopClient.backWorkbench });
+  expect(button.closest('header')!.style.paddingLeft).toBe(value ? 'var(--shell-window-controls-left)' : '');
+  expect(button.classList.contains('pl-0')).toBe(false);
+  expect(container.querySelector('main')!.classList.contains('px-10')).toBe(true);
+  document.documentElement.style.removeProperty('--shell-window-controls-left');
+});

@@ -64,6 +64,7 @@ capability:
     - tests/test_model_hub_pricing.py
     - tests/test_models_dev_catalog.py
     - ui/src/components/settings/models/QuotaTab.test.tsx
+    - ui/src/components/settings/models/ResetCards.test.tsx
     - ui/src/components/settings/models/usageProjection.test.ts
     - ui/src/components/settings/models/format.test.ts
     - tests/test_local_deps.py
@@ -2201,6 +2202,104 @@ scenarios:
       - tests/test_model_hub_card_use.py::test_an_acknowledgement_about_another_credit_or_an_unfinished_one_is_unknown
       - tests/test_model_hub_card_use.py::test_a_chatgpt_acknowledgement_about_another_account_or_request_is_unknown
       - tests/test_model_hub_card_use.py::test_a_claude_acknowledgement_about_another_grant_or_organization_is_unknown
+  - id: MH-QUOTA-077
+    name: An account holding no reset cards, a vendor without cards, and a cards read that failed all show no reset-card block
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-077
+  - id: MH-QUOTA-078
+    name: A reset-card row names its kind and count, the vendor's own statement only where it applies, and the first expiry on its own line, in zh and en
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-078
+    related_tests:
+      - ui/e2e/model-catalog/reset-cards.spec.ts
+  - id: MH-QUOTA-079
+    name: A reset card the vendor does not let through now shows its reason instead of a use button
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-079
+  - id: MH-QUOTA-080
+    name: Pressing use only asks, with one line saying what it spends that the confirm and cancel buttons carry, and the other kinds wait
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-080
+  - id: MH-QUOTA-081
+    name: The server's reset-card lock disables every use of its account, names the card in use or unconfirmed, and leaves other accounts alone
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-081
+  - id: MH-QUOTA-082
+    name: A use's outcome is said in the vendor's words when used, with its reason when not used, and as possibly spent when unconfirmed, in zh and en
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-082
+  - id: MH-QUOTA-083
+    name: A use that spent the last card of its kind still says what happened
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-083
+  - id: MH-QUOTA-084
+    name: Only a confirmed press sends a reset-card use, exactly once, and the reading it returns is what the card shows
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-084
+  - id: MH-QUOTA-085
+    name: A reset-card lock the server holds disables use on a freshly opened page and after a remount
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-085
+  - id: MH-QUOTA-086
+    name: A use is called not used only on the server's word; a lost answer holds the account until its own refresh lands, and nothing is retried
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-086
+  - id: MH-QUOTA-087
+    name: An account's own refresh forces one read of every account and spins only on that account
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-087
+  - id: MH-QUOTA-088
+    name: A reader who may not spend reset cards sees the same list with no use action, whatever lock the server holds
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ResetCards.test.tsx::MH-QUOTA-088
+  - id: MH-QUOTA-089
+    name: Only a reader the server lets spend reset cards is offered use, and every reader keeps the list and the account's own refresh
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-089
+  - id: MH-QUOTA-090
+    name: A reset-card count that changed since it was shown is refused and redrawn from the server's reading, with no second request
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-090
+  - id: MH-QUOTA-091
+    name: A reset-card confirm step whose card a later reading no longer offers, or whose account it shows locked, is dropped for good
+    status: covered
+    kind: recovery
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-091
+  - id: MH-QUOTA-092
+    name: A reset-card press sends one POST of kind and count to the encoded Source, and each answer or failure reads as what it says
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-QUOTA-092
   - id: MH-PRICE-001
     name: A models.dev price fills a missing cache price from input and a one-hour cache write from twice input
     status: covered

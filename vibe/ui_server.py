@@ -2540,6 +2540,12 @@ def enforce_remote_access_cookie():
         if not _is_direct_loopback_connection():
             return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
     config = _load_remote_access_config()
+    if request.path == "/remote/claim/callback":
+        # Never route a credential-bearing callback through ordinary login's `next` URL.
+        from vibe.personal_claim_client import local_origin
+
+        if not local_origin(request.host_url.rstrip("/")) or not _is_local_request(config):
+            return jsonify({"state": "error", "code": "invalid_return"}), 403
     markdown_show_request = _is_private_show_page_markdown_request()
     if _remote_auth_exempt_before_host_validation():
         return None
@@ -3192,6 +3198,9 @@ def protect_mutating_ui_requests():
 
 @app.after_request
 def prevent_desktop_enrollment_caching(response: Response) -> Response:
+    if request.path == "/remote/claim/callback" or request.path.startswith("/api/remote-access/claims"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
         "/api/desktop/local-instance", "/api/desktop/local-instance/prepare",
         "/api/remote-access/vibe-cloud/pair",
@@ -7626,6 +7635,8 @@ def system_schedule_claim():
             device_id=payload.get("device_id"),
             exclude_lease_tokens=payload.get("exclude_lease_tokens"),
             allow_create=payload["allow_create"],
+            claimant=_request_authorization_context(),
+            device_viewer=_device_viewer(),
             **({"kinds": payload["kinds"]} if "kinds" in payload else {}),
         )
     except system_schedule_service.SystemScheduleServiceError as exc:
@@ -7711,6 +7722,7 @@ def web_push_status():
             else None
         )
         current_subscription_enabled = bool(current_subscription and current_subscription["enabled"])
+        paused = bool(current_subscription_enabled and not web_push_service.get_deliverable_by_endpoint(conn, endpoint=endpoint,user_key=user_key))
         current_subscription_repairable = bool(
             current_subscription
             and not current_subscription_enabled
@@ -7723,6 +7735,7 @@ def web_push_status():
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
             "current_subscription_enabled": current_subscription_enabled,
+            "device_delivery_paused": paused,
             "current_subscription_repairable": current_subscription_repairable,
             "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
@@ -7876,7 +7889,7 @@ def web_push_test():
     )
     with web_push_notifications._owner_delivery_lock(user_key):
         with engine.connect() as conn:
-            subscription = web_push_service.get_enabled_by_endpoint(
+            subscription = web_push_service.get_deliverable_by_endpoint(
                 conn,
                 endpoint=endpoint,
                 user_key=user_key,
@@ -8671,6 +8684,94 @@ def desktop_local_instance_prepare():
     ))
 
 
+def _claim_route(operation):
+    from vibe.desktop_local_instance import LocalInstanceError
+    from vibe.personal_claim_client import ClaimError
+    from vibe.personal_claims import redirect_claims
+
+    denied = _access_administration_forbidden()
+    if denied is not None:
+        return denied
+    try:
+        return operation(redirect_claims)
+    except LocalInstanceError as exc:
+        return jsonify({"state": "error", "code": exc.code}), exc.status
+    except ClaimError as exc:
+        status = {"invalid_request": 400, "invalid_return": 403, "claim_unavailable": 404,
+                  "rate_limited": 429, "control_plane_unreachable": 503}.get(exc.code, 409)
+        body = {"state": "error", "code": exc.code}
+        if exc.code == "claim_in_progress" and exc.claim_id:
+            body.update(claim_id=exc.claim_id, expires_at=exc.expires_at)
+        if exc.retry_after:
+            body["retry_after_seconds"] = exc.retry_after
+        response = jsonify(body)
+        if exc.retry_after:
+            response.headers["Retry-After"] = str(exc.retry_after)
+        return response, status
+
+
+@app.route("/api/remote-access/claims", methods=["POST"])
+def personal_claim_start():
+    from vibe.personal_claim_client import ClaimError
+
+    def start(service):
+        origin = request.host_url.rstrip("/")
+        if request.headers.get("Origin") != origin:
+            raise ClaimError("invalid_request")
+        if not isinstance(request.json, dict) or set(request.json) - {"locale"}:
+            raise ClaimError("invalid_request")
+        # Loopback or an admitted private setup host; any forwarding (proxy, tunnel) needs link mode.
+        admitted = _is_local_request(_load_remote_access_config()) and not _has_forwarded_metadata()
+        body, nonce = service.start(origin, request.json.get("locale", "en"), admitted_owner=admitted,
+                                    on_bound=_ensure_remote_access_monitoring)
+        response = jsonify(body)
+        response.set_cookie("avibe_claim_browser", nonce, httponly=True, samesite="lax", path="/remote/claim/callback",
+                            expires=datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")))
+        return response, 201
+
+    return _claim_route(start)
+
+
+@app.route("/api/remote-access/claims/<claim_id>", methods=["GET"])
+def personal_claim_state(claim_id):
+    return _claim_route(lambda service: jsonify(service.state(claim_id)))
+
+
+@app.route("/api/remote-access/claims/<claim_id>/cancel", methods=["POST"])
+def personal_claim_cancel(claim_id):
+    from vibe.personal_claim_client import ClaimError
+
+    def cancel(service):
+        if request.headers.get("Origin") != request.host_url.rstrip("/") or request.json != {}:
+            raise ClaimError("invalid_request")
+        return jsonify(service.cancel(claim_id))
+
+    return _claim_route(cancel)
+
+
+@app.route("/remote/claim/callback", methods=["GET"])
+def personal_claim_callback():
+    from vibe.personal_claim_client import ClaimError
+
+    def callback(service):
+        fields = request.args.multi_items()
+        cookies = [v.strip().partition("=")[2] for line in request.headers.getlist("cookie")
+                   for v in line.split(";") if v.strip().partition("=")[0] == "avibe_claim_browser"]
+        try:
+            if len(fields) != 2 or set(request.args) != {"claim_id", "state"} or len(cookies) != 1:
+                raise ClaimError("invalid_return")
+            service.callback(request.args["claim_id"], request.host_url.rstrip("/"), cookies[0], request.args["state"])
+        except ClaimError as exc:
+            # Never echo browser inputs or clear the real initiator's nonce on a bad navigation.
+            code = "claim_unavailable" if exc.code == "claim_unavailable" else "invalid_return"
+            return redirect("/settings/remote-access?claim_error=" + code, code=303)
+        response = redirect("/settings/remote-access", code=303)
+        response.delete_cookie("avibe_claim_browser", path="/remote/claim/callback")
+        return response
+
+    return _claim_route(callback)
+
+
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])
 def remote_access_vibe_cloud_pair():
     from vibe import remote_access
@@ -8818,8 +8919,10 @@ def remote_access_login():
 
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
+    from storage.device_account_signout import AccountSessionSignedOut
     from vibe import remote_access
 
+    callback_started = int(time.time())
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
         return jsonify({"error": "remote_access_not_enabled"}), 400
@@ -8894,6 +8997,7 @@ def remote_access_auth_callback():
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
+    from vibe.account_session_revoke import verified_reference
     try:
         session_cookie = remote_access.make_session_cookie(
             config,
@@ -8901,7 +9005,11 @@ def remote_access_auth_callback():
             str(claims.get("sub", "")),
             session_claims=session_claims,
             device_headers=request.headers,
+            account_session_ref=verified_reference(claims),
+            account_enroll_before=callback_started + remote_access.OAUTH_HANDSHAKE_TTL_SECONDS,
         )
+    except AccountSessionSignedOut:
+        return _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
     except Exception as exc:
         _log_oauth_callback_failure("session_cookie", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
@@ -8943,39 +9051,143 @@ def _device_viewer():
     return None
 
 
+def _device_issuer_scope(viewer):
+    from vibe.account_session_revoke import pairing_epoch
+    from vibe.remote_access import device_binding
+    binding, _, _, caller = viewer
+    config = _load_remote_access_config()
+    if config and (binding == device_binding(config) or (not binding and not caller)):
+        return pairing_epoch(config)
+    return None
+
+
+def _device_owner_scope(viewer):
+    config = _load_remote_access_config()
+    if not config or not viewer[0]:
+        return None,None
+    instance = config.remote_access.vibe_cloud.instance_id
+    if not viewer[2]:
+        return instance,None
+    context = _request_authorization_context()
+    if viewer[3]:
+        return instance,context.email.casefold() if context.email and context.instance_id==instance else None
+    from vibe import permissions
+    try:
+        answer = permissions.get_current_permissions(config)
+        if answer.source == 'live' and answer.projection['instance']['id']==instance:
+            return instance,(answer.projection['access']['owner'].get('email') or '').casefold() or None
+    except permissions.PermissionsError:
+        pass
+    return instance,None
+
+
 @app.route('/api/devices', methods=['GET'])
-def device_list():
-    from storage import device_registry
+async def device_list():
+    from storage import device_catalog
+    from storage.device_functions import DeviceError
     from vibe import __version__
 
     viewer = _device_viewer()
     host = {'id': 'host', 'kind': 'host', 'group': 'mine', 'display_name': socket.gethostname(), 'app_version': __version__,
             'account': None, 'system_version': None, 'signed_in_at': None, 'last_active_at': None,
             'push_only': False, 'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
+    host['functions'] = []
     if viewer is None:
         config = _load_remote_access_config()
         if config and not config.remote_access.vibe_cloud.is_runtime_paired() and _is_setup_host_request(config):
-            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None})
+            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': []})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
-    from storage.importer import ensure_sqlite_state
-    ensure_sqlite_state()
+    from storage.db import get_cached_sqlite_engine
     from vibe.direct_rendezvous import rendezvous
     from vibe.sse_broker import broker
+
     paths = rendezvous.session_paths(binding)
     for key in broker.tunnel_sessions(binding):
         paths.setdefault(key, {"kind": "tunnel", "family": None, "rtt_ms": None})
-    for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time()), paths=paths):
-        account = row['account']
-        if account is None:
-            group = 'unattributed'
-        else:
-            is_mine = account['subject'] == subject if subject else account['login_role'] == 'owner'
-            group = 'mine' if is_mine else 'others'
-        row['group'] = group
-        groups[group].append(row)
-    return jsonify({**groups, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+
+    def load():
+        from storage.importer import ensure_sqlite_state
+        ensure_sqlite_state()
+        scope = _device_owner_scope(viewer)
+        with get_cached_sqlite_engine().connect() as conn:
+            conn.exec_driver_sql('BEGIN')
+            from storage.device_account_signout import recent
+            now = int(time.time())
+            return (*device_catalog.snapshot(conn, viewer, *scope, now, paths=paths), recent(conn, _device_issuer_scope(viewer) or binding, subject, owner, now))
+    try:
+        rows, _, unlinked, history = await asyncio.to_thread(load)
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
+    for row in rows.values():
+        groups[row['group']].append(row)
+    if owner and _desktop_computer_use_supported():
+        from vibe import internal_client
+        status = await asyncio.to_thread(effective_computer_use_status)
+        effective = status.status if status.status in ('ready','off','needs_permission') else 'unavailable'
+        if effective=='ready' and await internal_client.health_identity() is None:
+            effective = 'unavailable'
+        host['functions'] = [{'kind':'computerUse','fixed':True,'can_change':False,'on':status.enabled,'status':effective}]
+    return jsonify({**groups, 'unlinked_health':unlinked, 'recent_sign_outs':history, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+
+
+@app.route('/api/devices/<device_id>/notifications', methods=['PUT'])
+@app.route('/api/devices/<device_id>/schedule', methods=['PUT'])
+@app.route('/api/devices/<device_id>/health', methods=['GET'])
+@app.route('/api/devices/<device_id>/health/revoke', methods=['POST'])
+@app.route('/api/devices/unlinked-health/<device_id>/revoke', methods=['POST'])
+def device_function(device_id):
+    from storage import device_catalog
+    from storage.db import get_cached_sqlite_engine
+    from storage.device_functions import DeviceError
+    viewer = _device_viewer()
+    if not viewer or not viewer[0]:
+        return jsonify({'error':'device_access_forbidden'}),403
+    scope = _device_owner_scope(viewer)
+    if request.method=='PUT' and (not isinstance(request.json,dict) or set(request.json)!={'on'} or type(request.json['on']) is not bool):
+        return jsonify({'error':'invalid_device_function'}),400
+    kind = 'unlinkedHealth' if request.path.startswith('/api/devices/unlinked-health/') else request.path.split('/')[4]
+    try:
+        with get_cached_sqlite_engine().begin() as conn:
+            now = int(time.time())
+            conn.exec_driver_sql('BEGIN' if request.method=='GET' else 'BEGIN IMMEDIATE')
+            if request.method=='GET':
+                rows,_,_ = device_catalog.snapshot(conn,viewer,*scope,now)
+                feature = next((x for x in rows.get(device_id,{}).get('functions',[]) if x['kind']=='health'),None)
+                if not feature:
+                    raise DeviceError('device_not_found',404)
+                result = {'function':feature}
+            else:
+                result = device_catalog.change(conn,viewer,*scope,device_id,kind,request.json['on'] if request.method=='PUT' else False,now)
+        return jsonify(result)
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
+
+
+@app.route('/api/devices/activity', methods=['GET'])
+@app.route('/api/devices/<device_id>/health/reads', methods=['GET'])
+def device_activity_list(device_id=None):
+    from storage import device_activity_feed
+    from storage.db import get_cached_sqlite_engine
+    from storage.device_functions import DeviceError
+    viewer = _device_viewer()
+    if not viewer or not viewer[0]:
+        return jsonify({'error':'device_access_forbidden'}),403
+    try:
+        limit = int(request.args.get('limit','25'))
+    except ValueError:
+        return jsonify({'error':'invalid_activity_limit'}),400
+    try:
+        with get_cached_sqlite_engine().connect() as conn:
+            conn.exec_driver_sql('BEGIN')
+            result = device_activity_feed.list_page(conn,viewer,_request_authorization_context(),*_device_owner_scope(viewer),
+                limit=limit,raw_cursor=request.args.get('cursor'),device=device_id or request.args.get('device_id'),health_only=device_id is not None)
+        response = jsonify(result)
+        response.headers['Cache-Control']='no-store'
+        return response
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
 
 
 @app.route('/api/devices/self', methods=['POST'])
@@ -8986,11 +9198,33 @@ def device_self_description():
     viewer = _device_viewer()
     if viewer is None or not viewer[3]:
         return jsonify({'error': 'remote_session_required'}), 403
+    body = request.json
+    has_ticket = isinstance(body, dict) and 'health_binding_ticket' in body
     try:
-        report = self_description(request.json)
+        report = self_description({k: v for k, v in body.items() if k != 'health_binding_ticket'} if has_ticket else body)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     binding, subject, _, caller = viewer
+    if has_ticket:
+        from core.mobile_health_contract import MobileError
+        from sqlalchemy.exc import SQLAlchemyError
+        from storage import device_health_tickets
+        from storage.mobile_store import MobileStore, mobile_store_path
+        import sqlite3
+
+        try:
+            if not mobile_store_path().exists():
+                return jsonify({'error': 'health_binding_not_accepted'}), 403
+            status, code = device_health_tickets.redeem(MobileStore(), viewer, _request_authorization_context(),
+                report, body['health_binding_ticket'], int(time.time()))
+        except (MobileError, sqlite3.Error, SQLAlchemyError, OSError):
+            return jsonify({'error': 'health_binding_unavailable'}), 503
+        if code:
+            response = jsonify({'error': code})
+            if status == 429:
+                response.headers['Retry-After'] = '60'
+            return response, status
+        return jsonify({'ok': True})
     status = device_registry.describe_self(binding, subject, caller, report, int(time.time()))
     if status != 200:
         return jsonify({'error': {404:'device_not_found', 409:'installation_mismatch', 429:'device_report_rate_limited'}[status]}), status
@@ -9013,16 +9247,25 @@ def device_sign_out(device_id=None):
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
+    issuer_scope = _device_issuer_scope(viewer)
+    host_epoch = issuer_scope if binding and not caller else None
     try:
-        ids, count, stopped = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
-                                      now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
+        context = _request_authorization_context()
+        delegate = bool(binding and owner and (not caller or context.instance_access_source == 'owner'))
+        ids, count, results, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+                                      now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
+                                      delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
-    if device_id is not None and not (ids or stopped):
+    if device_id is not None and not (ids or results):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
-    response = jsonify({'ok': True, 'revoked_sessions': count})
+    result = {'ok': True, 'revoked_sessions': count, 'sign_out_results': results}
+    if deferred or (binding and not caller and ids):
+        # Conditional local cleanup is unconfirmed; never reveal whether this scope had a Health pairing.
+        result['health_cleanup_pending'] = True
+    response = jsonify(result)
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
@@ -9227,11 +9470,12 @@ def remote_access_logout():
         else None
     )
     revocation_recorded = True
+    deferred = False
     signed_in = False
     if identity is not None:
         # Read before recording: a session already signed out keeps its Push.
         signed_in = remote_access.session_identity_is_current(identity)
-        revocation_recorded = remote_access.revoke_browser_session(identity)
+        revocation_recorded, deferred = remote_access.revoke_browser_session_with_cleanup(identity)
     if signed_in:
         body = request.json if isinstance(request.json, dict) else {}
         device_id = body.get("device_id")
@@ -9252,7 +9496,7 @@ def remote_access_logout():
     # The cookie is cleared either way; a sign-out that could not be recorded
     # says so, because a copy of the cookie would still be accepted.
     if revocation_recorded:
-        response = jsonify({"ok": True})
+        response = jsonify({"ok": True, **({"health_cleanup_pending": True} if deferred else {})})
     else:
         response = jsonify({"ok": False, "error": "remote_logout_unavailable"})
         response.status_code = 503
@@ -19884,6 +20128,29 @@ async def _stop_inbox_bridge() -> None:
             logger.debug("inbox bridge shutdown raised", exc_info=True)
 
 
+_account_signout_task: asyncio.Task | None = None
+
+
+async def _start_account_signout_worker():
+    from vibe.account_signout_worker import serve
+    global _account_signout_task
+    if _account_signout_task is None or _account_signout_task.done():
+        _account_signout_task = asyncio.create_task(serve(_load_remote_access_config), name='account-session-sign-out')
+
+
+async def _stop_account_signout_worker():
+    global _account_signout_task
+    task, _account_signout_task = _account_signout_task, None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app.add_event_handler('startup', _start_account_signout_worker)
+app.add_event_handler('shutdown', _stop_account_signout_worker)
 app.add_event_handler("startup", _start_direct_lifecycle)
 app.add_event_handler("shutdown", _stop_direct_lifecycle)
 app.add_event_handler("startup", _start_inbox_bridge)
@@ -20153,6 +20420,12 @@ def run_ui_server(host: str, port: int) -> None:
                 remote_access.start_runtime_monitoring(config)
             except Exception:
                 logger.warning("Failed to start remote access status heartbeat", exc_info=True)
+        elif config_load_error is None:
+            # A fresh UI can precede its first config file. Link/Desktop may publish
+            # from another process; policy workers must notice before any UI restart.
+            from vibe import remote_access
+            remote_access.start_authorization_revision_polling()
+            remote_access.start_resource_acl_sync_polling()
         print(f"UI Server running at http://{host}:{port}")
 
         # Retry binding in case of TIME_WAIT or port still held by old server during reload

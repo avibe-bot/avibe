@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
@@ -17,7 +17,6 @@ import { shouldShieldWindowBody } from './windowGesture';
 import { appWindowMotionClass } from './windowMotion';
 import { ErrorBoundary } from '../ui/error-boundary';
 import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
-import { ShowPageShareControl } from '../workbench/ShowPageShareControl';
 import { useShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHostContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
@@ -35,6 +34,11 @@ const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
 // The window chrome every app shares: traffic lights, the centered app icon and title, per-app
 // title-bar actions, drag and eight-way resize (ui/design: apps/desktop/windows, a focused window
 // over an inactive one; apps/desktop/maximized).
+// Only a Show window's title bar draws it, so it stays off the first screen.
+const ShowPageShareControl = lazy(() =>
+  import('../workbench/ShowPageShareControl').then((module) => ({ default: module.ShowPageShareControl })),
+);
+
 export const AppWindow: React.FC<{
   /** Whether this retained window is the active shell surface. Inactive windows
    * stay mounted so app bodies keep their in-memory state, but their chrome and
@@ -426,14 +430,16 @@ export const AppWindow: React.FC<{
               onDoubleClick={(e) => e.stopPropagation()}
               className="flex size-6 shrink-0 items-center justify-center"
             >
-              <ShowPageShareControl
-                compact
-                sessionId={showpageSid}
-                canManageInstance={capabilities.can_manage_instance}
-                canPinToDock={capabilities.can_chat}
-                onOpenChange={handleShareOpenChange}
-                ownerWindowId={win.id}
-              />
+              <Suspense fallback={null}>
+                <ShowPageShareControl
+                  compact
+                  sessionId={showpageSid}
+                  canManageInstance={capabilities.can_manage_instance}
+                  canPinToDock={capabilities.can_chat}
+                  onOpenChange={handleShareOpenChange}
+                  ownerWindowId={win.id}
+                />
+              </Suspense>
             </div>
           )}
           {safeExternalHref && (

@@ -12,6 +12,7 @@ import {
   Hash,
   Keyboard,
   Layers,
+  Mic,
   MonitorCog,
   MessageCircle,
   MessageSquare,
@@ -110,6 +111,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     labelKey: 'settings.groups.system',
     items: [
       { path: '/settings/shortcuts', labelKey: 'settings.sections.shortcuts', icon: Keyboard },
+      { path: '/settings/microphone', labelKey: 'settings.sections.microphone', icon: Mic },
       {
         path: '/settings/computer-use',
         labelKey: 'settings.sections.computerUse',

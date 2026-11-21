@@ -415,7 +415,51 @@ instance (a card from a remote HTTPS Workbench, the passkey sheet, and passkey
 PRF from the sandbox frame there); the shell's own `instance_store::retire`
 with a card up; signing out with a card up; and the account screen opened
 while a card is up.
+## Standalone App windows
 
+Files, Terminal, Editor, Preview, Show Page and Library share the native
+`app_windows` owner. Activation reuses the canonical window (or a surviving
+duplicate) and delivers new launch metadata without navigating its document.
+An explicit new-window request creates an independent window. File paths and
+working directories travel as bounded metadata, never in a native URL or shell
+command. The bodies remain the existing Workbench Apps.
+
+The version-1 `avibe-app://launch` navigation protocol is advertised only on
+supported Runtime and App documents. It gives children no shell IPC capability.
+The owner derives authority from the actual published A5 Runtime and its source
+document, and checks that receipt around deferred work. Payload origins and
+page markers cannot select a Runtime. Account, candidate and retired documents
+cannot launch Apps. Legacy `open_app_window({request})` callers retain their
+existing request shape. Concurrent requests capture their current source before
+waiting for the existing App/A5 serialization, then revalidate it after waiting;
+lock contention alone does not retire a document. App completion wakes the
+existing pending deep-link owner after releasing its locks. Show fallback
+deposit also releases its guard and commits its exact delivery before waking
+a successor.
+
+Initial scripts publish `__AVIBE_APP_LAUNCH__` before the body mounts. Repeated
+launches update the same snapshot before `avibe:app-launch`; results use
+`avibe:app-launch-result`. `opened` includes an owned window whose OS focus or
+show request was refused. `fallback` permits Workbench presentation only after
+the native result is absent; `stale` never replays into a successor document.
+Show deep links enter this same owner after normal readiness and A5 guard
+admission. They do not navigate a retained Workbench. A genuine native failure
+can deposit a terminal Show fallback snapshot into the exact surviving main
+document, with native callback confirmation of that deposit. UI consumption
+and its document-lifetime request deduplication are separate evidence.
+
+Remote Apps use individual disposable stores, projecting only the current
+Runtime's same-origin session cookies before navigation. Native completion and
+cookie erasure precede directory release. A failed close retains its cleanup
+receipt and blocks parent Runtime retirement; it never silently reuses that
+store. The finite instance-chain fixture substitutes incognito stores for the
+product's local default store, prohibits process activation before the event
+loop starts, and keeps physical main/App windows hidden from creation. Physical
+show, unminimize and focus effects are suppressed; child WebView role changes
+remain real. Parented popup construction is excluded before parent attachment.
+The fixture can verify native admission, metadata, projection and retirement,
+but does not prove production default-store isolation, installed acceptance,
+popup presentation, window visibility, minimization or OS foreground behavior.
 ## Product packages
 
 The consumer DMG/NSIS build is self-contained. It embeds target-specific

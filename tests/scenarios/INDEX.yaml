@@ -130,6 +130,7 @@ capabilities:
       - tests/test_runtime_activation.py
       - ui/src/components/settings/models/UsageTab.test.tsx
       - ui/src/components/settings/models/QuotaTab.test.tsx
+      - ui/src/components/settings/models/ResetCards.test.tsx
       - ui/src/components/settings/models/usageProjection.test.ts
       - ui/src/components/settings/models/format.test.ts
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx

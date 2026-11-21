@@ -324,16 +324,17 @@ def mark_matching_revision_checked(
     return int(result.rowcount or 0)
 
 
-def revoke_browser_session(session_id: str, *, expires_at: int, now: int) -> None:
-    """Record a browser sign-out that outlives the process, and drop lapsed ones."""
-
-    from storage import device_registry
+def revoke_browser_session(session_id: str, *, expires_at: int, now: int) -> bool:
+    """Commit the session tombstone first; return whether scoped Health cleanup is deferred."""
+    from storage import device_registry, device_health_registry
 
     _ensure_sqlite_state()
-    with get_cached_sqlite_engine().begin() as conn:
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
-        device_registry.revoke_sid(conn, session_id, expires_at, now)
+        pending = device_registry.revoke_sid(conn, session_id, expires_at, now)
         device_registry.prune(conn, now)
+    return device_health_registry.finish_pending(engine, pending)
 
 
 def browser_session_is_revoked(session_id: str, *, now: int, binding: str = "",

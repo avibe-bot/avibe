@@ -202,9 +202,55 @@ export type NativeShareResult = {
 const NATIVE_SHARE_STATUSES: readonly NativeShareStatus[] = ['completed', 'cancelled', 'failed', 'expired'];
 const NATIVE_SHARE_MAX_SESSION_ID_LENGTH = 200;
 
+type ShareShell = { call<T>(method: string, params?: Record<string, unknown>): Promise<T> };
+
+function phoneShare(): ShareShell | null {
+  const native = bridge();
+  return native && (native.capabilities[NATIVE_SHARE_CAPABILITY] ?? 0) >= 1 ? native : null;
+}
+
+/**
+ * The desktop app marks a window that can share its Show: a display capability, checked again
+ * natively. The Workbench carries the shell marker; a native Show window carries the app-window
+ * marker instead (`app_windows.rs`), never the shell's.
+ */
+function desktopShareMarked(): boolean {
+  return typeof window !== 'undefined'
+    && (window.__AVIBE_DESKTOP_SHELL__ === true || window.__AVIBE_NATIVE_APP_WINDOW__ === true)
+    && window.__AVIBE_DESKTOP_SHOW_SHARE__ === 1;
+}
+
+/**
+ * Who answers `share.capabilities` and `share.present`: the phone app's bridge, or the macOS
+ * desktop app's one share command, which takes the same requests and gives the same answers.
+ */
+function shareShell(): ShareShell | null {
+  const native = phoneShare();
+  if (native) return native;
+  if (!desktopShareMarked()) return null;
+  const internals = (window as unknown as {
+    __TAURI_INTERNALS__?: { invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+  }).__TAURI_INTERNALS__;
+  const invoke = internals?.invoke?.bind(internals);
+  if (!invoke) return null;
+  return {
+    call: async <T>(method: string, params: Record<string, unknown> = {}) =>
+      (await invoke('desktop_show_share', { request: { ...params, method } })) as T,
+  };
+}
+
 /** Whether this shell can share a Show through `share.present` (any kind). */
 export function hasNativeShare(): boolean {
-  return hasNativeCapability(NATIVE_SHARE_CAPABILITY);
+  return phoneShare() !== null || desktopShareMarked();
+}
+
+/**
+ * Whether this shell can also export the Show as a PDF or image: the phone app (which says
+ * which kinds when asked), or a desktop Show window. The desktop Workbench shares links only.
+ */
+export function hasNativeShareExport(): boolean {
+  if (phoneShare() !== null) return true;
+  return desktopShareMarked() && window.__AVIBE_DESKTOP_SHOW_EXPORT__ === 1;
 }
 
 function newShareOperationId(): string | null {
@@ -253,11 +299,9 @@ export async function nativeSharePresent(
     status: 'failed',
     error: { code },
   });
-  const native = bridge();
-  if (!native || (native.capabilities[NATIVE_SHARE_CAPABILITY] ?? 0) < 1) {
-    return failed('capability_mismatch');
-  }
-  if (!operationId) return failed('unavailable');
+  if (!hasNativeShare()) return failed('capability_mismatch');
+  const native = shareShell();
+  if (!native || !operationId) return failed('unavailable');
   if (!sessionId || sessionId.length > NATIVE_SHARE_MAX_SESSION_ID_LENGTH) {
     return failed('invalid_request');
   }

@@ -2185,7 +2185,7 @@ test('quick suggestions: updating suggestions and reconnecting retain the same r
   await expect(page.locator('.pet-mini-detail.is-open').getByRole('button', { name: '再次查看', exact: true })).toBeVisible();
 });
 
-// Reply and activity borders align while input keeps the column width.
+// Reply, activity and composer borders share one width.
 // Long content and action labels must fit in both engines.
 for (const width of [460, 280]) {
   for (const lang of ['en', 'zh']) {
@@ -2213,7 +2213,10 @@ for (const width of [460, 280]) {
       await page.locator('.pet-mini-reply-toggle').click();
       await expect(page.locator('.pet-mini-detail.is-open')).toBeVisible();
       await settleMotion(page);
-      expect((await page.locator('.pet-mini-input').boundingBox())!.width).toBeCloseTo(width * 0.94 - 36, 1);
+      const input = (await page.locator('.pet-mini-input').boundingBox())!;
+      const opened = (await bubble.boundingBox())!;
+      expect(input.width).toBeCloseTo(opened.width, 1);
+      expect(input.x).toBeCloseTo(opened.x, 1);
       const history = page.locator('.pet-mini-bubble-history');
       const metrics = await history.evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight, fullHeight: node.scrollHeight }));
       expect(metrics.scroll).toBe(metrics.client);
@@ -2229,6 +2232,86 @@ for (const width of [460, 280]) {
       await expect.poll(() => page.evaluate(() => window.petFixtureSends.length)).toBe(1);
     });
   }
+}
+
+// With nothing above it the composer keeps the width it has under a reply or
+// a card, so it does not jump when one appears.
+for (const width of [460, 280]) {
+  test(`composer keeps the card width with nothing above it (${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 600 });
+    await page.goto('/e2e/pet-mini/fixture.html?main=false&activities=0');
+    await page.locator('.pet-mini-avatar-button').click();
+    await expect(page.getByRole('textbox')).toBeVisible();
+    await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(0);
+    await settleMotion(page);
+    const input = (await page.locator('.pet-mini-input').boundingBox())!;
+    // WebKit lays a 94vw column out to 1/64px: within half a pixel.
+    expect(input.width).toBeCloseTo(Math.min(280, width * 0.94 - 36), 0);
+    expect(input.x + input.width / 2).toBeCloseTo(width / 2, 0);
+  });
+}
+
+test('composer lines up with the expanded activity cards above it', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.locator('.pet-mini-collapsed').click();
+  await page.locator('.pet-mini-card').first().locator('.pet-mini-card-reference').click();
+  await expect(page.locator('.pet-mini-reference-chip')).toHaveCount(1);
+  await settleMotion(page);
+  const input = (await page.locator('.pet-mini-input').boundingBox())!;
+  const card = (await page.locator('.pet-mini-card').first().boundingBox())!;
+  expect(input.width).toBeCloseTo(card.width, 1);
+  expect(input.x).toBeCloseTo(card.x, 1);
+});
+
+// Near a display's side the shell moves the column inward (column_offset);
+// Vibey stays put and the bubble's tail still points at it.
+const tailCentre = (page: import('@playwright/test').Page) => page.locator('.pet-mini-reply-bubble').evaluate((bubble) => {
+  const rect = bubble.getBoundingClientRect();
+  const after = getComputedStyle(bubble, '::after');
+  return rect.left + bubble.clientLeft + parseFloat(after.left) + parseFloat(after.width) / 2;
+});
+for (const offset of [89, -89]) {
+  test(`a column moved by ${offset}px keeps cards, reply and input aligned and the tail on Vibey`, async ({ page }) => {
+    // The shell's window is 500px wide (desktop/runtime-host pet.rs WINDOW_WIDTH).
+    await page.setViewportSize({ width: 500, height: 600 });
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&activities=1&running=1&offset=${offset}`);
+    const avatar = page.locator('.pet-mini-avatar-button');
+    await expect(avatar).toBeVisible();
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('Thinking');
+    await settleMotion(page);
+    const vibey = (await avatar.boundingBox())!;
+    const centre = vibey.x + vibey.width / 2;
+    expect(centre).toBeCloseTo(250, 0);
+    const column = (await page.locator('.pet-mini-column').boundingBox())!;
+    expect(column.x + column.width / 2).toBeCloseTo(250 + offset, 0);
+    // The moved column stays inside the window: nothing it draws is cut.
+    expect(column.x).toBeGreaterThanOrEqual(0);
+    expect(column.x + column.width).toBeLessThanOrEqual(500);
+    // The compact status bubble moves back toward Vibey within the column.
+    const compact = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
+    expect(compact.x).toBeGreaterThanOrEqual(column.x + 18 - 0.5);
+    expect(compact.x + compact.width).toBeLessThanOrEqual(column.x + column.width - 18 + 0.5);
+    expect(Math.abs(await tailCentre(page) - centre)).toBeLessThanOrEqual(1.5);
+    // A full reply takes the column's width; the card and input line up with it.
+    await page.evaluate(() => window.petFixtureFinishTurn({ id: 'edge_reply', author: 'agent', type: 'result', text: 'Done, all set.' }));
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('Done');
+    await settleMotion(page);
+    const bubble = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
+    const card = (await page.locator('.pet-mini-card').boundingBox())!;
+    expect(bubble.x).toBeCloseTo(column.x + 18, 0);
+    expect(bubble.width).toBeCloseTo(280, 0);
+    expect(card.x).toBeCloseTo(bubble.x, 0);
+    expect(card.width).toBeCloseTo(bubble.width, 0);
+    expect(Math.abs(await tailCentre(page) - centre)).toBeLessThanOrEqual(1.5);
+    await page.locator('.pet-mini-reply-toggle').click();
+    await expect(page.locator('.pet-mini-detail.is-open')).toBeVisible();
+    await settleMotion(page);
+    const input = (await page.locator('.pet-mini-input').boundingBox())!;
+    expect(input.x).toBeCloseTo(bubble.x, 0);
+    expect(input.width).toBeCloseTo(bubble.width, 0);
+    // Vibey never moved.
+    expect((await avatar.boundingBox())!).toEqual(vibey);
+  });
 }
 
 for (const lang of ['en', 'zh']) {
