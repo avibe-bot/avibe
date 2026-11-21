@@ -127,6 +127,8 @@ pub enum Reply {
     Ready(String),
     /// The document is not the instance's, or has no CSRF cookie yet.
     NotReady,
+    /// Native ownership was lost; never retain a lease across selections.
+    SelectionChanged,
     /// The instance answered, and not with `200`.
     Refused(u16),
     /// A service worker controls the document, or took control meanwhile.
