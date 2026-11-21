@@ -63,7 +63,9 @@ _wall = time.time
 _sleep = time.sleep
 
 _LOCK = threading.RLock()
-_DRAINED = threading.Condition(_LOCK)
+# Counts cleaning responses being written, for the drain. Its own lock, held
+# only to add or subtract, so the event loop can take it without ever waiting.
+_DRAINED = threading.Condition(threading.Lock())
 
 
 class AddressError(Exception):
@@ -539,15 +541,26 @@ def _read_too_recent() -> bool:
 
 
 def begin_cleanup_response(raw_host: str | None) -> bool:
-    """The last check, under the role lock, immediately before headers are written."""
+    """The last check, under the role lock, immediately before headers are written.
+
+    Called on the event loop, so it never waits: when the role lock is held (a
+    role is changing right now) the answer is no, and the request gets nothing.
+    """
 
     host = normalize_host(raw_host)
     binding = current_binding()
-    with _LOCK:
-        if binding is None or not _cleanup_allowed_locked(host, binding):
+    if binding is None or not _LOCK.acquire(blocking=False):
+        return False
+    try:
+        if not _cleanup_allowed_locked(host, binding):
             return False
-        _inflight[host] = _inflight.get(host, 0) + 1
+        # Counted while the role lock is held: a name turned quiet after this
+        # sees the response in its drain; one turned quiet before is refused above.
+        with _DRAINED:
+            _inflight[host] = _inflight.get(host, 0) + 1
         return True
+    finally:
+        _LOCK.release()
 
 
 def end_cleanup_response(raw_host: str | None) -> None:
@@ -639,6 +652,24 @@ class _StateRead:
     state: dict[str, Any]
     started_monotonic: float
     started_wall: float
+    epoch: int
+
+
+def _read_is_stale_locked(read: _StateRead) -> bool:
+    """Under the role lock: whether this read may no longer set roles or grant cleaning.
+
+    Stale when authority was dropped since it started (a ``401``), when the
+    pairing changed, or when a newer generation is already recorded. Checked at
+    every point a read is applied, however long ago it was taken.
+    """
+
+    if read.epoch != _authority_epoch:
+        return True
+    current = current_binding()
+    if current is None or current.pairing != read.binding.pairing:
+        return True
+    stored_generation = _load_state(read.binding.instance_id).get("generation")
+    return isinstance(stored_generation, int) and read.state["generation"] < stored_generation
 
 
 def _read_state_once(binding: Binding) -> _StateRead | None:
@@ -663,7 +694,7 @@ def _read_state_once(binding: Binding) -> _StateRead | None:
     with _LOCK:
         if state is None or epoch != _authority_epoch or current_binding() != binding:
             return None
-    return _StateRead(binding, state, started_monotonic, started_wall)
+    return _StateRead(binding, state, started_monotonic, started_wall, epoch)
 
 
 def refresh_state(*, force: bool = False, wait: bool = True) -> bool:
@@ -704,10 +735,9 @@ def _apply_state(read: _StateRead) -> bool:
     binding, state = read.binding, read.state
     prune = False
     with _LOCK:
+        if _read_is_stale_locked(read):
+            return False  # an older or disowned reply; roles stay as they are
         stored = _load_state(binding.instance_id)
-        stored_generation = stored.get("generation")
-        if isinstance(stored_generation, int) and state["generation"] < stored_generation:
-            return False  # an older reply; roles stay as they are
         # Asked of the list as it stood before this state replaces it.
         was_cleanup = any(
             isinstance(entry, dict) and entry.get("hostname") == state["active_hostname"]
@@ -1244,10 +1274,9 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             journal = {**journal, "origin": "elsewhere", "target_hostname": target}
             local = False
         committed_generation = (journal.get("receipt") or {}).get("committed_generation")
-        stored_generation = _load_state(binding.instance_id).get("generation")
-        if (isinstance(stored_generation, int) and state["generation"] < stored_generation) or (
-            local and isinstance(committed_generation, int) and state["generation"] < committed_generation
-        ):
+        with _LOCK:
+            stale = _read_is_stale_locked(read)
+        if stale or (local and isinstance(committed_generation, int) and state["generation"] < committed_generation):
             return 2.0  # an older reply than what is already known: read again
         destructive = bool(
             local
@@ -1380,46 +1409,55 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
         if client_id:
             cloud.client_id = client_id
 
+    # The config write can wait for another process's write, so it is not made
+    # under the role lock (the event loop and every request take that lock).
+    # Instead no name is cleaned while the address moves: the permission is
+    # dropped first and granted again, from this read, only afterwards.
     with _LOCK:
-        # Another read may have recorded a newer state while this one was in
-        # flight or while the name was settling. An older reply must not name
-        # the active address, nor decide what is deleted.
-        stored_generation = _load_state(binding.instance_id).get("generation")
-        if isinstance(stored_generation, int) and state["generation"] < stored_generation:
+        # Another read may have recorded a newer state, or the binding may have
+        # been refused, while this one was in flight or the name was settling.
+        # Such a reply must not name the active address nor decide what is deleted.
+        if _read_is_stale_locked(read):
             raise _StaleState()
-        if previous != target:
-            update_config_fields(mutate)
+        _authority = None
+    if previous != target:
+        update_config_fields(mutate)
+    with _LOCK:
         flipped = current_binding()
         if flipped is None or flipped.active_host != target:
             raise RuntimeError("the address switch was not recorded")
-        _authority = _Authority(
-            pairing=flipped.pairing,
-            generation=state["generation"],
-            hosts={
-                entry["hostname"]: _parse_instant(entry["release_at"])
-                for entry in state["cleanup"]
-                if entry["hostname"] != target
-            },
-            started_monotonic=read.started_monotonic,
-            started_wall=read.started_wall,
-        )
         retired = previous if previous != target else (journal.get("previous_hostname") or "")
         if retired and retired != target:
             _retired_at_flip[retired] = public_url
         _retired_at_flip.pop(target, None)
+        if _read_is_stale_locked(read):
+            # The address has moved; nothing is cleaned until a read made now says so.
+            _wake_worker(read_state=True)
+        else:
+            _authority = _Authority(
+                pairing=flipped.pairing,
+                generation=state["generation"],
+                hosts={
+                    entry["hostname"]: _parse_instant(entry["release_at"])
+                    for entry in state["cleanup"]
+                    if entry["hostname"] != target
+                },
+                started_monotonic=read.started_monotonic,
+                started_wall=read.started_wall,
+            )
 
-        def record(target_state: dict[str, Any]) -> None:
-            target_state["generation"] = state["generation"]
-            target_state["cleanup"] = [entry for entry in state["cleanup"] if entry["hostname"] != target]
-            target_state["release_delay_seconds"] = state["release_delay_seconds"]
-            target_state["active_release_at_if_renamed_now"] = state["active_release_at_if_renamed_now"]
-            target_state["state_read_at"] = int(read.started_wall)
+            def record(target_state: dict[str, Any]) -> None:
+                target_state["generation"] = state["generation"]
+                target_state["cleanup"] = [entry for entry in state["cleanup"] if entry["hostname"] != target]
+                target_state["release_delay_seconds"] = state["release_delay_seconds"]
+                target_state["active_release_at_if_renamed_now"] = state["active_release_at_if_renamed_now"]
+                target_state["state_read_at"] = int(read.started_wall)
 
-        _update_state(flipped.instance_id, record)
-        _known_cleanup = (
-            flipped.instance_id,
-            frozenset(entry["hostname"] for entry in state["cleanup"] if entry["hostname"] != target),
-        )
+            _update_state(flipped.instance_id, record)
+            _known_cleanup = (
+                flipped.instance_id,
+                frozenset(entry["hostname"] for entry in state["cleanup"] if entry["hostname"] != target),
+            )
     # A name that is active again, or no longer listed, has no list any more:
     # kept, its marks would be read as true of a later retirement. Outside the
     # role lock, which the event loop and every request take.

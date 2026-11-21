@@ -949,6 +949,76 @@ def test_b3_a_crash_while_refusing_a_return_leaves_no_name_quiet_for_ever(addres
     assert is_cleaning(get(OLD))
 
 
+def test_b2_a_read_disowned_by_a_401_cannot_grant_cleaning_or_move_the_address(address, monkeypatch):
+    import config.v2_config as v2_config
+
+    plane, clocks = address
+    rename_to("new")
+    run()
+    rename_to("old")
+    # While the returning name settles, another read is answered 401: the binding is refused.
+    settle = instance_address._sleep
+    refused = []
+
+    def settle_then_be_refused(seconds):
+        settle(seconds)
+        if not refused:
+            refused.append(instance_address._drop_authority())
+
+    monkeypatch.setattr(instance_address, "_sleep", settle_then_be_refused)
+    assert instance_address._advance_operation() > 0  # the read taken before the 401 is not applied
+    assert binding().active_host == NEW and instance_address._authority is None
+    assert get(NEW, "/health").status_code == 200 and not is_cleaning(get(OLD))
+    # And when the 401 lands during the config write itself: the address has moved, nothing is cleaned.
+    write = v2_config.update_config_fields
+
+    def write_then_be_refused(mutator, **kwargs):
+        result = write(mutator, **kwargs)
+        instance_address._drop_authority()
+        return result
+
+    monkeypatch.setattr(v2_config, "update_config_fields", write_then_be_refused)
+    run()
+    monkeypatch.setattr(v2_config, "update_config_fields", write)
+    assert binding().active_host == OLD and instance_address._authority is None
+    plane.fail = RuntimeError("resource_acl_device_unavailable")
+    assert get(NEW).status_code == 503 and not is_cleaning(get(NEW))
+    plane.fail = None
+    assert instance_address._worker_read_requested.is_set()  # the worker was asked to read again
+    assert instance_address.refresh_state(force=True)
+    assert is_cleaning(get(NEW))  # only a read made after the refusal grants it again
+
+
+def test_e7_the_last_check_before_the_headers_never_waits_for_the_role_lock(address):
+    import threading
+
+    plane, _ = address
+    rename_to("new")
+    run()
+    assert instance_address.cleanup_ready(OLD)
+    held, release = threading.Event(), threading.Event()
+
+    def hold_the_role_lock():
+        with instance_address._LOCK:
+            held.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_the_role_lock)
+    holder.start()
+    held.wait(timeout=5)
+    started = time.monotonic()
+    try:
+        assert instance_address.begin_cleanup_response(OLD) is False  # a role is changing: nothing, at once
+        assert time.monotonic() - started < 1
+        instance_address.end_cleanup_response(OLD)  # and completion never takes that lock either
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+        holder.join()
+    assert instance_address.begin_cleanup_response(OLD) is True
+    instance_address.end_cleanup_response(OLD)
+
+
 def test_b3_a_refused_return_cleans_again_only_when_a_fresh_state_lists_the_name(address):
     plane, clocks = address
     rename_to("new")
