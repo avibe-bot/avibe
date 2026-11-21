@@ -167,6 +167,17 @@ fn shows(view: &ICoreWebView2, origin: &str) -> bool {
 /// use the same ones. So the shell gives this argument to every window of a
 /// direct-eligible instance from the start, with the listener's port known
 /// before the first window; it is never applied to a window that is open.
+///
+/// Two limits the shell's wiring (D2) has to respect:
+/// - With this argument the environment uses the PAC alone. The system's
+///   proxy settings and WPAD are no longer consulted for any host, and the
+///   PAC's `DIRECT` is a direct connection, not "as before".
+/// - `; DIRECT` applies only when the listener cannot be reached. A refusal
+///   the listener answers (`502` with no backend, `403`) is final: WebView2
+///   does not go on to `DIRECT` after a failed tunnel.
+///
+/// D2 must not wire Windows until the public-fallback/system-proxy rule is
+/// settled (see D1c).
 pub fn route_argument(host: &str, proxy: SocketAddrV4) -> Option<String> {
     let plain = !host.is_empty()
         && host.len() <= 253
@@ -205,6 +216,13 @@ fn names_listener(uri: &str, listener: &str) -> bool {
 /// a URL, an argument, storage, or anything page script can read. The
 /// listener answers a request that is not a `CONNECT` with `405`, never
 /// with a challenge, so no page can make its address ask for it.
+///
+/// The PAC applies to every WebView of the environment, and this answer to
+/// one WebView. A WebView of that environment without it gets the listener's
+/// `407` on its first request to the instance, and WebView2 then shows its
+/// own sign-in prompt for the proxy. So the shell registers this on every
+/// WebView of that environment before its first navigation, and removes it
+/// before the direct client is dropped.
 pub fn answer_listener_challenge(
     view: &ICoreWebView2,
     proxy: SocketAddrV4,

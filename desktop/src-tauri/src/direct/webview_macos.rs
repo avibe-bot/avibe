@@ -122,6 +122,15 @@ fn shows(webview: &WKWebView, origin: &str) -> bool {
 ///
 /// This replaces whatever proxy configurations the store had. The shell
 /// installs no direct route for an instance that has a configured proxy.
+///
+/// `true` means the store took the configuration, not that any connection
+/// uses it. What WebKit was measured to do (`docs/plans/remote-direct-ios.md`
+/// section 2, on iOS; not measured on macOS either way):
+/// - a route written while the store has a live or pooled connection to the
+///   host is not used by that connection, nor by requests pooled on it, a
+///   reload included; only a connection opened later takes it;
+/// - so a window is routed from its first request only when the route is
+///   installed before the instance's first load.
 pub fn install_route(
     webview: &WKWebView,
     _mtm: MainThreadMarker,
@@ -163,8 +172,17 @@ pub fn install_route(
     set_proxy_configurations(webview, &NSArray::from_retained_slice(&[config]))
 }
 
-/// Takes the route away again: the store connects as it did before.
+/// Takes the route away again, for connections the store opens from now on.
 /// Called before the direct client that owns the listener is dropped.
+///
+/// `true` means the store took the empty configuration. The same
+/// measurements set its limits:
+/// - emptying the route does not stop a proxy connection that is alive: the
+///   store keeps using it until it closes, so dropping the client is what
+///   ends those connections;
+/// - after a NetworkProcess restart the emptied route came back. By then
+///   the client is dropped and its port closed, and the route allows
+///   failover, so the store connects on the tunnel.
 pub fn remove_route(webview: &WKWebView, _mtm: MainThreadMarker) -> bool {
     set_proxy_configurations(webview, &NSArray::new())
 }
