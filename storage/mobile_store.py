@@ -610,6 +610,16 @@ class MobileStore:
             conn.execute("INSERT INTO push_attempts VALUES(?,?)", (device_key, now))
             return True
 
+    def revoke_confirmed_pairing(self, device_id: str, *, instance: str, owner: str) -> None:
+        """Recheck the exact private enrollment in the same transaction that erases it."""
+        with self.transaction() as conn:
+            if not conn.execute('SELECT 1 FROM devices WHERE id=? AND instance_id=? AND owner=? AND revoked_at IS NULL',
+                                (device_id, instance, owner)).fetchone():
+                return
+            self._revoke_device(conn, device_id, _now())
+            self._audit(conn, 'health.revoke', caller='device_sign_out')
+        publish_mobile_schedule_changed()
+
     def revoke(self, *, device_id: str | None = None, caller="local", session_id=None) -> dict:
         now = _now()
         with self.transaction() as conn:

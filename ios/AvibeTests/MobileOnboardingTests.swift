@@ -1098,7 +1098,12 @@ final class MobileOnboardingTests: XCTestCase {
         )
         let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
         defer { window.isHidden = true }
-        try await WebKitReadiness.waitForDocument(in: webView)
+        // The page's own launch read (`session.bootstrap`) holds the account's one operation
+        // until Welcome shows; a sign-in sent before then is answered `busy`.
+        let welcome = try await waitForJavaScriptValue(in: webView) {
+            Self.enabledButtonScript("Continue with email")
+        }
+        XCTAssertTrue(welcome, "Welcome shows once the page's launch read has answered")
         let refused = try await webView.callAsyncJavaScript(
             """
             try {
@@ -1116,8 +1121,13 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(authenticator.requests.isEmpty)
         let status = try await webView.callAsyncJavaScript(
             """
-            const state = await window.avibeMobile.call('auth.signInWithPasskey');
-            return state.status;
+            try {
+              const state = await window.avibeMobile.call('auth.signInWithPasskey');
+              return state.status;
+            } catch (error) {
+              // A refusal names its code in the assertion below.
+              return `error:${error.code}`;
+            }
             """,
             arguments: [:],
             in: nil,

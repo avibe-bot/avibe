@@ -1516,6 +1516,80 @@ remote_device_sessions = Table(
     Index("ix_rds_expiry", "expires_at"),
 )
 
+# Runtime-private authority; never attach these values to cookies or public device rows.
+remote_account_refs = Table(
+    "remote_account_refs", metadata,
+    Column("sid", String, primary_key=True),
+    Column("cookie_binding", String, nullable=False, index=True),
+    Column("epoch", String, nullable=False, index=True),
+    Column("expires_at", Integer, nullable=False, index=True),
+    Column("digest", String, nullable=False, index=True),
+    Column("reference", String),  # A live sibling needs only the known terminal outcome.
+    Column("status", String),
+    Column("reason", String),
+)
+
+remote_account_revocations = Table(
+    "remote_account_revocations", metadata,
+    Column("digest", String, primary_key=True),
+    Column("epoch", String, nullable=False, index=True),
+    Column("status", String, nullable=False),
+    Column("reason", String),
+    Column("reference", String),  # Null as soon as dispatch terminates.
+    Column("attempts", Integer, nullable=False),  # Lease serial/backoff, not proof the issuer answered.
+    Column("answers", Integer, nullable=False),
+    Column("created_at", Integer, nullable=False),
+    Column("next_at", Integer),  # Also the lease expiration, null for completed fences.
+    Column("forget_at", Integer),
+    Index("ix_rar_next", "epoch", "next_at"),
+    Index("ix_rar_forget", "forget_at"),
+)
+
+device_health_owner_checks = Table(
+    "device_health_owner_checks", metadata,
+    Column("mobile_id", String, primary_key=True),
+    Column("operation", String, nullable=False),
+    Column("epoch", String, nullable=False),
+    Column("binding", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Column("owner_email", String, nullable=False),
+    Column("linked_at", String, nullable=False),
+    Column("next_at", Integer, nullable=False, index=True),
+    Column("expires_at", Integer, nullable=False),
+)
+
+remote_account_pairings = Table(
+    "remote_account_pairings", metadata,
+    Column("epoch", String, primary_key=True),
+    Column("blocked_until", Integer, nullable=False),
+    Column("refused", Integer, nullable=False),
+)
+
+remote_signout_receipts = Table(
+    "remote_signout_receipts", metadata,
+    Column("id", String, primary_key=True),
+    Column("binding", String, nullable=False),
+    Column("subject", String),  # Null for unattributed push; owner-only.
+    Column("device_id", String, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("display_name", String),
+    Column("created_at", Integer, nullable=False),
+    Column("expires_at", Integer),  # Pending receipts survive downtime; TTL starts at last settlement.
+    Index("ix_rsr_binding", "binding", "created_at", "id"),
+    Index("ix_rsr_subject", "binding", "subject", "created_at", "id"),
+    Index("ix_rsr_expiry", "expires_at"),
+)
+remote_signout_items = Table(
+    "remote_signout_items", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("receipt", String, nullable=False, index=True),
+    Column("job", String, index=True),  # Detached when complete; not a replayable credential.
+    Column("status", String, nullable=False),
+    Column("reason", String),
+    Column("count", Integer, nullable=False),
+)
+
 # Per-install browser Push API subscriptions for PWA Web Push. These are
 # runtime/device endpoints, not user-authored config: one user may install the
 # app on multiple devices, and endpoints can rotate or expire independently.

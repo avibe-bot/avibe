@@ -10,6 +10,7 @@ from sqlalchemy.dialects.sqlite import insert
 
 from storage.db import get_cached_sqlite_engine
 from storage.models import remote_device_deadlines as deadlines
+from storage.models import remote_account_refs as account_refs
 from storage.models import remote_device_sessions as sessions
 from storage import device_activity, device_functions, device_health_registry
 from storage import device_push_registry as device_push
@@ -102,11 +103,13 @@ def prune(conn, now):
     from storage.models import device_session_extensions as ext
     expired_sessions = select(sessions.c.session_id).where(sessions.c.expires_at <= now).order_by(
         sessions.c.expires_at, sessions.c.session_id).limit(32)
+    conn.execute(account_refs.delete().where(account_refs.c.sid.in_(expired_sessions)))
     conn.execute(ext.delete().where(ext.c.session_id.in_(expired_sessions)))
     conn.execute(sessions.delete().where(sessions.c.session_id.in_(expired_sessions)))
 
 
-def record_session(binding, identity, role, metadata, *, expires_at, now, fresh):
+def record_session(binding, identity, role, metadata, *, expires_at, now, fresh, epoch=None, reference=None,
+                   account_enroll_before=None):
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
     sid, subject = identity["browser_session_id"], identity["sub"]
@@ -146,6 +149,12 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh)
             )
             .on_conflict_do_nothing(index_elements=["session_id"])
         )
+        if fresh and reference:
+            from storage.device_account_signout import AccountSessionSignedOut, enroll
+            import time
+            if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
+                raise AccountSessionSignedOut('account_session_signed_out')
+            enroll(conn, sid=sid, subject=subject, binding=binding, epoch=epoch, reference=reference, expires_at=expires_at)
         if fresh and written.rowcount:
             device_activity.record(conn,kind='signedIn',binding=binding,subject=subject,device=key,now=now)
 
@@ -298,10 +307,10 @@ def list_devices(binding, subject, *, owner, caller, now, paths=None, conn=None)
     return list(grouped.values())
 
 
-def _end_functions(conn,binding,subject,device,now,sids,keep,actor,actor_subject,*,visible):
+def _end_functions(conn,binding,subject,device,now,sids,keep,actor,actor_subject,*,visible, codes_only=False):
     from storage.models import device_function_settings as settings
     pending = device_health_registry.queue_disconnect(conn, binding, subject, device, sids=sids,
-                                                      remove_pairing=visible and not keep)
+                                                      remove_pairing=visible and not keep, codes_only=codes_only)
     if not keep:
         conn.execute(settings.delete().where(settings.c.binding==binding,settings.c.subject==subject,settings.c.device_id==device))
     device_activity.record(conn,kind='signedOut',binding=binding,subject=subject,device=device,now=now,
@@ -335,12 +344,13 @@ def revoke_sid(conn, sid, expiry, now):
         pending = _end_functions(conn,row['binding'],row['subject'],row['device_id'],now,[sid],bool(sibling),row['device_id'],row['subject'],
                                  visible=row['cookie_exp'] > now and row['expires_at'] > now)
     from storage.models import device_session_extensions as ext
+    conn.execute(account_refs.delete().where(account_refs.c.sid == sid))
     conn.execute(ext.delete().where(ext.c.session_id == sid))
     conn.execute(sessions.delete().where(sessions.c.session_id == sid))
     return pending
 
 
-def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, local_owner_email=None):
+def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False, receipt_scope=None):
     """One atomic selection + revocation; None device means the caller's bulk scope."""
     stmt = select(sessions.c.session_id, sessions.c.expires_at).where(
         sessions.c.binding == binding,
@@ -383,6 +393,10 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, local
             keeper.push_id if keeper else None,
             now,
         )
+        from storage.device_account_signout import stage
+        results = stage(conn, binding=binding, actor=subject, delegate=delegate, caller=caller,
+                        keeper_device=keeper.device_id if keeper else None, target=device_id,
+                        selection=stmt.whereclause, push_devices=stopped, now=now, receipt_scope=receipt_scope)
         keys = {(r.device_id, r.subject) for r in rows}
         from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
         # Match list_devices' live-session predicate, excluding push-only and revoked rows.
@@ -395,13 +409,16 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, local
         device_accounts = {}
         for target, account, email in conn.execute(visible_rows.order_by(sessions.c.last_active_at.desc(), sessions.c.session_id)):
             device_accounts.setdefault(target, (account, email))
-        visible = {(target, account) for target, (account, email) in device_accounts.items()
-                   if caller or (local_owner_email and local_owner_email == email.casefold())}
+        visible = {(target, account) for target, (account, _) in device_accounts.items() if caller}
+        if host_epoch and not caller:
+            from storage.device_health_owner_checks import queue
+            for target, (account, email) in device_accounts.items():
+                queue(conn, binding=binding, epoch=host_epoch, subject=account, device=target, email=email, now=now)
         pending = []
         for target, account in keys:
             keep = device_id is None and keeper is not None and target == keeper.device_id
             pending.extend(_end_functions(conn, binding, account, target, now, ids, keep,
-                           keeper.device_id if keeper else 'host', subject, visible=(target, account) in visible))
+                           keeper.device_id if keeper else 'host', subject, visible=(target, account) in visible, codes_only=not caller))
         if ids:
             from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
@@ -423,8 +440,10 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, local
                 )
             )
             from storage.models import device_session_extensions as ext
-            conn.execute(ext.delete().where(ext.c.session_id.in_(stmt.with_only_columns(sessions.c.session_id))))
+            selected_ids = stmt.with_only_columns(sessions.c.session_id)
+            conn.execute(account_refs.delete().where(account_refs.c.sid.in_(selected_ids)))
+            conn.execute(ext.delete().where(ext.c.session_id.in_(selected_ids)))
             conn.execute(sessions.delete().where(stmt.whereclause))
         prune(conn, now)
     deferred = device_health_registry.finish_pending(get_cached_sqlite_engine(), pending)
-    return ids, visible_count, stopped, deferred
+    return ids, visible_count, results, deferred

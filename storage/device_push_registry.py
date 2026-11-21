@@ -115,16 +115,19 @@ def stop_legacy(conn, binding, public_id):
         stmt.with_only_columns(push.c.endpoint, push.c.user_key).where(bucket)
     ).all():
         web_push_service.disable_subscription(conn, endpoint=endpoint, user_key=user_key)
-    return True
+    meta = describe({"User-Agent": row.user_agent or ""})
+    return {(public_id, None): (meta['kind'], row.device_label or meta['display_name'])}
 
 
 def stop_targets(conn, binding, subject, owner, caller, device_id, keep_device, keep_push_id, now):
     if device_id is not None and device_id.startswith("p."):
-        return owner and stop_legacy(conn, binding, device_id)
+        return (stop_legacy(conn, binding, device_id) or {}) if owner else {}
     stmt = _rows(binding, subject, owner).with_only_columns(
         push.c.endpoint,
         push.c.user_key,
         push.c.id,
+        push.c.user_agent,
+        push.c.device_label,
         push.c.device_id,
         links.c.subject,
         links.c.device_id.label("logical_id"),
@@ -137,8 +140,19 @@ def stop_targets(conn, binding, subject, owner, caller, device_id, keep_device, 
         # Direct loopback's bulk scope is remote; local subscriptions have
         # their own explicit one-device stop action and are not remote sessions.
         stmt = stmt.where(push.c.user_key.like("remote:%"))
+    # Match listing's representative for each unattributed bucket before disabling push.
+    legacy = {}
+    stopped = {}
     rows = conn.execute(stmt).all()
     for row in rows:
+        meta = describe({'User-Agent': row.user_agent or ''})
+        label = (meta['kind'], row.device_label or meta['display_name'])
+        if row.logical_id:
+            stopped[(row.logical_id, row.subject)] = label
+        else:
+            group = _legacy_key(binding, row)
+            if group not in legacy or row.id < legacy[group][0]:
+                legacy[group] = row.id, label
         survivor = None
         if device_id is not None and row.device_id:
             survivor = conn.execute(
@@ -166,4 +180,5 @@ def stop_targets(conn, binding, subject, owner, caller, device_id, keep_device, 
             )
         else:
             web_push_service.disable_subscription(conn, endpoint=row.endpoint, user_key=row.user_key)
-    return bool(rows)
+    stopped.update({('p.' + rep + '.' + group, None): label for group, (rep, label) in legacy.items()})
+    return stopped
