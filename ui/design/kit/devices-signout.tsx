@@ -65,7 +65,7 @@ export function FunctionsDialog({ name, app, functions, note }: { name: string; 
   const d = useDraft();
   return (
     <Dialog open onOpenChange={() => undefined}>
-      <DialogContent className="max-w-[480px] gap-0 p-0 max-md:p-0" closeLabel={d('关闭', 'Close')}>
+      <DialogContent className="max-w-md gap-0 p-0 max-md:p-0" closeLabel={d('关闭', 'Close')}>
         <DialogHeader className="px-6 pb-4 pt-6 max-md:px-5 max-md:pt-3">
           <div className="flex items-center gap-3.5">
             <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-field text-muted"><Smartphone size={18} /></span>

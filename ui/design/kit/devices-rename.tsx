@@ -217,7 +217,7 @@ export function RenameDialog({ step, host, name, releaseOn, devices, health, hel
     const allCleared = devices.every((each) => each.cleanup === 'cleared');
     return (
       <Dialog open onOpenChange={() => undefined}>
-        <DialogContent className="max-w-[520px]" mobileSheetHeight="tall" closeLabel={d('关闭', 'Close')}>
+        <DialogContent className="max-w-lg" mobileSheetHeight="tall" closeLabel={d('关闭', 'Close')}>
           <DialogHeader>
             <DialogTitle className="text-balance">{d(`域名已改为 ${newHost}`, `The domain is now ${newHost}`)}</DialogTitle>
             <DialogDescription>
@@ -237,7 +237,7 @@ export function RenameDialog({ step, host, name, releaseOn, devices, health, hel
   }
   return (
     <Dialog open onOpenChange={() => undefined}>
-      <DialogContent className="max-w-[560px]" mobileSheetHeight="tall" closeLabel={d('关闭', 'Close')}>
+      <DialogContent className="max-w-xl" mobileSheetHeight="tall" closeLabel={d('关闭', 'Close')}>
         <DialogHeader>
           <DialogTitle>{d('更改域名', 'Change the domain')}</DialogTitle>
           <DialogDescription>{d(`现在是 ${host}。`, `It is ${host} now.`)}</DialogDescription>
