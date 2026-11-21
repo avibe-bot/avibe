@@ -78,6 +78,8 @@ const designFrames = frames([
         </SettingsPanel>
       </SettingsPageShell>
     )) },
+  frame('state-unavailable', '状态读不准（503 connection_state_unavailable）：整页一句说明加重试', { width: 1440, height: 700 }, { ...base, unavailable: true }),
+  frame('state-unavailable-phone', '状态读不准 · 375 宽', { width: 375, height: 700 }, { ...base, unavailable: true }),
   frame('verifying-phone', '验证中 · 375 宽', PHONE, { ...base, protocol: 'http2', change: { setting: 'protocol', state: 'verifying' } }),
   frame('relay-phone', '有中继这一行 · 375 宽', PHONE, { ...base, tunnel: 'down', via: 'direct', relay: { enabled: true, connected: false }, refused: { row: 'direct', reason: 'tunnel_unhealthy' } }),
 ]);

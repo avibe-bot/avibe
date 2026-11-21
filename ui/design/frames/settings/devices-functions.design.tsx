@@ -89,11 +89,10 @@ const designFrames = frames([
     afterDevices: <RecentSignOutsPanel rows={signOuts} />,
   })),
   f('sign-out-just-now', '刚退出时的结果提示：健康清理「尚未确认」只在这里说（坐在电脑前退出、这一行显示过健康）', WIDE, page({
-    afterReach: <SignOutNotice device="iPhone 14" health="cleanup_pending" />,
+    afterReach: <SignOutNotice device="iPhone 14" account="requesting" health="cleanup_pending" />,
   })),
-  f('sign-out-just-now-skipped', '刚退出时：没能确认是所有者在电脑前，健康连接没有断开，指向单独断开的那一行', { width: 1440, height: 1200 }, page({
-    afterReach: <SignOutNotice device="iPhone 14" health="skipped_unverified" />,
-    afterDevices: <UnlinkedHealthPanel items={[{ device: 'iPhone 14', data: t('步数、睡眠', 'Steps, sleep'), lastSeen: t('今天 07:40', 'Today 07:40') }]} />,
+  f('sign-out-just-now-local-only', '刚退出时，账号结果是「不适用」：直接说这次没有结束它的账号登录', WIDE, page({
+    afterReach: <SignOutNotice device="Safari · iPad" account="not_applicable" />,
   })),
   f('sign-out-results-phone', '退出的结果 · 375 宽', PHONE, page({ afterDevices: <RecentSignOutsPanel rows={signOuts} /> })),
   f('sign-in-not-finished', '被请出去的设备在撤销完成前回来：「这台设备已被退出」', { width: 1440, height: 800 }, () => <SignInNotFinishedPage />),

@@ -62,6 +62,8 @@ export type ConnectionV2Props = {
   protocol: 'auto' | 'quic' | 'http2';
   /** The owner's domain at the bottom, with 「更改域名」 and the quiet 「重新绑定」 row (at the computer). */
   host?: string;
+  /** The state cannot be trusted right now (`503 connection_state_unavailable`): no settings, one line. */
+  unavailable?: boolean;
 };
 
 const settingName = (d: D): Record<Setting, string> => ({
@@ -94,7 +96,7 @@ export function ChangeLine({ change }: { change: TunnelChange }) {
           case 'settings_not_applied': return [Undo2, 'text-gold-ink', d(`没有改：设置没能应用，仍是「${pick(change.from)}」。`, `Not changed: the setting could not be applied; it is still ${pick(change.from)}.`)];
         }
         break;
-      case 'unknown': return [CircleHelp, 'text-muted', d('没收到结果：连接刚断过。重新连上后会自动读取结果，不会重复这次更改。', 'No result received: the connection dropped. Once reconnected, Avibe reads the result again and does not repeat the change.')];
+      case 'unknown': return [CircleHelp, 'text-muted', d('没收到结果。重新连上后会自动读取结果，不会重复这次更改。', 'No result received. Once reconnected, Avibe reads the result again and does not repeat the change.')];
     }
     return [CircleHelp, 'text-muted', ''];
   })();
@@ -153,8 +155,27 @@ const directWhy = (d: D, state: DirectState) => ({
   'not-running': d('直连组件没有运行。重启 Avibe 后再看。', 'The direct component is not running. Restart Avibe and look again.'),
 })[state];
 
-export function ConnectionV2({ viewer, direct, relay, change, refused, returnedToAutomatic, protocol, tunnel = 'up', via = 'tunnel', host }: ConnectionV2Props) {
+export function ConnectionV2({ viewer, direct, relay, change, refused, returnedToAutomatic, protocol, tunnel = 'up', via = 'tunnel', host, unavailable }: ConnectionV2Props) {
   const d = useDraft();
+  if (unavailable) {
+    return (
+      <SettingsPageShell
+        title={d('连接方式', 'Connection')}
+        subtitle={d('Avibe 会自动走最快的那条路，断了自动换。这里一般不用动。', 'Avibe uses the fastest path by itself and switches when one fails. You rarely need to change anything here.')}
+        activeTab="remote-access"
+      >
+        <BackToDevices />
+        <SettingsPanel>
+          <div role="alert" className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
+            <p className="text-[13px] leading-relaxed text-foreground">
+              <Para text={d('现在读不准连接方式的状态，先不显示这些设置。稍后再试。', 'The connection state cannot be read reliably right now, so these settings are not shown. Try again shortly.')} />
+            </p>
+            <Button variant="secondary" size="sm" className="shrink-0">{d('重试', 'Retry')}</Button>
+          </div>
+        </SettingsPanel>
+      </SettingsPageShell>
+    );
+  }
   const pick = (value: Value) => d(value.zh, value.en);
   const statusFor = (setting: Setting) => (change?.setting === setting ? <ChangeLine change={change} /> : null);
   const pending = change && ['applying', 'verifying', 'restoring'].includes(change.state);

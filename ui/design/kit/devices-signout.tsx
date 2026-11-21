@@ -149,25 +149,18 @@ export function RecentSignOutsPanel({ rows }: { rows: SignOutRow[] }) {
   );
 }
 
-/** Right after signing a device out (the response): the outcome, and Health only here, because only
- *  this response says what happened to it, once for the whole sign-out. */
-export function SignOutNotice({ device, health }: { device: string; health?: 'cleanup_pending' | 'skipped_unverified' }) {
+/** Right after signing a device out (the response): what avibe.bot was asked or not asked, and Health
+ *  only here, because only this response says anything about it (`health_cleanup_pending`). A pairing
+ *  that stays connected shows later under Health connections not matched to a device. */
+export function SignOutNotice({ device, account, health }: { device: string; account: SignOutAccount; health?: 'cleanup_pending' }) {
   const d = useDraft();
   return (
     <div role="status" className="flex gap-3 rounded-xl border border-edge bg-surface px-5 py-3 shadow-elevation-0">
       <LoaderCircle className="mt-0.5 size-4 shrink-0 text-muted" />
       <div className="min-w-0 text-[12px] leading-relaxed text-foreground">
         <div className="font-medium">{d(`已在这个 Avibe 上退出 ${device}`, `${device} is signed out of this Avibe`)}</div>
-        <div><Para text={accountLine(d, 'requesting')} /></div>
+        <div><Para text={accountLine(d, account)} /></div>
         {health === 'cleanup_pending' && <div className="text-muted"><Para text={d('它同步过的健康数据，清理尚未确认。', 'Clearing the Health data it synced is not confirmed yet.')} /></div>}
-        {health === 'skipped_unverified' && (
-          <div className="text-muted">
-            <Para text={d(
-              '它的健康连接没有断开：没能确认是所有者在这台电脑前操作。可以在「未对应到设备的健康连接」里单独断开。',
-              'Its Health connection was not disconnected: it could not be confirmed that the owner is at this computer. You can disconnect it on its own under Health connections not matched to a device.',
-            )} />
-          </div>
-        )}
       </div>
     </div>
   );
