@@ -3467,7 +3467,7 @@ export const ChatPage: React.FC = () => {
     ? botDisplayName(conversationBot)
     : botConversation ? session?.title?.trim() || t('bots.mainDefaultName') : null;
   const observationAgentName = conversationBotName ?? agentDisplayName;
-  useLiveActivityObservation(observationAgentName && session && session.id === sessionId && viewState !== 'loading' && viewState !== 'failed' ? {
+  useLiveActivityObservation(routeSurfaceActive && observationAgentName && session && session.id === sessionId && viewState !== 'loading' && viewState !== 'failed' ? {
     sessionId: session.id,
     agentName: observationAgentName,
     sessionTitle: botConversation ? null : session.title || t('chat.untitled'),

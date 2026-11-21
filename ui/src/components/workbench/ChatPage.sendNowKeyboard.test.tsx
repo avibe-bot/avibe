@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import type { ComposerProps } from './Composer';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
 
@@ -368,4 +369,29 @@ it.each([
   });
   view.unmount();
   if (version >= 2) expect(call).toHaveBeenLastCalledWith('liveActivity.observe', { sessionId: null });
+});
+
+// Settings keeps the chat mounted underneath its route surface. Leaving that
+// conversation must clear the native observation even without an unmount.
+it('clears the observation while Settings covers the retained chat and restores it on return', async () => {
+  const call = vi.fn(async (_method: string, _params?: Record<string, unknown>) => ({ ok: true }));
+  vi.stubGlobal('avibeNative', {
+    contract: 1, platform: 'ios', shellVersion: 'test',
+    capabilities: { liveActivities: 2 }, call, on: () => () => {},
+  });
+  const page = (active: boolean) => <MemoryRouter initialEntries={[`/chat/${SESSION}`]}>
+    <RouteSurfaceActiveContext.Provider value={active}>
+      <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+    </RouteSurfaceActiveContext.Provider>
+  </MemoryRouter>;
+  const view = render(page(true));
+  await screen.findByText('next step');
+  expect(call).toHaveBeenLastCalledWith('liveActivity.observe', expect.objectContaining({ sessionId: SESSION, running: true }));
+  view.rerender(page(false));
+  expect(call).toHaveBeenLastCalledWith('liveActivity.observe', { sessionId: null });
+  const count = call.mock.calls.length;
+  view.rerender(page(false));
+  expect(call).toHaveBeenCalledTimes(count);
+  view.rerender(page(true));
+  expect(call).toHaveBeenLastCalledWith('liveActivity.observe', expect.objectContaining({ sessionId: SESSION, running: true }));
 });
