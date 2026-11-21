@@ -627,10 +627,15 @@ export function onNativeVoiceCapture(handler: (event: NativeVoiceCaptureEvent) =
   });
 }
 
+/** The first `voiceHold` the page names surfaces for. The one build that announced 1
+ *  (TestFlight 50.1) could take a tap on the composer for a hold and give it the cue, when it
+ *  learnt late that the finger had lifted; from 2 on the App asks the touch itself first. */
+export const NATIVE_VOICE_HOLD_VERSION = 2;
+
 /** The App recognises a hold on the surfaces the page names (ios/Avibe/NativeHoldCapture.swift):
  *  it gives the cue at the threshold and has the microphone open from touch-down. */
 export function hasNativeVoiceHold(): boolean {
-  return hasNativeCapability('voiceHold') && hasNativeVoiceCapture();
+  return hasNativeCapability('voiceHold', NATIVE_VOICE_HOLD_VERSION) && hasNativeVoiceCapture();
 }
 
 /** A place where a hold may record now, in the WebView's own points. */
