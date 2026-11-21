@@ -1777,6 +1777,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 reply(replyHandler, error: .invalidArgument("voice.holdSurfaces requires surfaces, and takes holdMs."))
                 return
             }
+            // The page's calls take effect in the order it made them: a
+            // list whose consent answer comes back after a later call, or
+            // after its document went, is not applied.
+            let request = capture.surfacesRequested(by: sourceWebView)
             guard !surfaces.isEmpty else {
                 capture.setSurfaces([], for: sourceWebView)
                 reply(replyHandler, result: NSNull())
@@ -1790,6 +1794,10 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                       WebOrigin(url: url, requiresHTTPS: false) == origin
                 else {
                     replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                guard capture.isLatestSurfacesRequest(request, of: sourceWebView) else {
+                    self.reply(replyHandler, error: .failed("superseded"))
                     return
                 }
                 guard error == nil, VoiceConsentMarker(result: result) == .marked else {

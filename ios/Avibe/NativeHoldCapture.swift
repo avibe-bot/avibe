@@ -162,6 +162,10 @@ final class NativeHoldCapture {
         weak var webView: WKWebView?
         let origin: CGPoint
         let downAt: Int
+        /// The touch's own time at touch-down (`UITouch.timestamp`).
+        var downStamp: TimeInterval?
+        /// How long the touch lasted by its own times, when that made it a tap.
+        var tapMs: Int?
         var recognised = false
         /// The input was asked to start (at touch-down for `early`).
         var begun = false
@@ -259,6 +263,10 @@ final class NativeHoldCapture {
     private weak var surfacesWebView: WKWebView?
     /// The WebViews whose touches reach `touchDown` (their recogniser).
     private let watched = NSHashTable<WKWebView>.weakObjects()
+    /// Each WebView's `voice.holdSurfaces` calls, counted: a list whose
+    /// consent answer comes back after a later call, or after its document
+    /// went, is not applied.
+    private let surfaceRequests = NSMapTable<WKWebView, NSNumber>.weakToStrongObjects()
     /// The page's hold threshold, as it named it with its surfaces.
     private var holdSeconds = NativeHoldCapture.defaultHoldSeconds
     /// The press being followed, until its take is adopted or it ends.
@@ -479,6 +487,19 @@ final class NativeHoldCapture {
         watched.add(webView)
     }
 
+    /// A `voice.holdSurfaces` call from `webView` arrived: its number.
+    func surfacesRequested(by webView: WKWebView) -> Int {
+        let number = (surfaceRequests.object(forKey: webView)?.intValue ?? 0) + 1
+        surfaceRequests.setObject(NSNumber(value: number), forKey: webView)
+        return number
+    }
+
+    /// Whether `request` is still `webView`'s last call, in the document
+    /// that made it: the page's calls take effect in the order it made them.
+    func isLatestSurfacesRequest(_ request: Int, of webView: WKWebView) -> Bool {
+        surfaceRequests.object(forKey: webView)?.intValue == request
+    }
+
     /// The page's hold surfaces where a hold may record now (none: the App
     /// follows no press), and its hold threshold. One WebView's list at a
     /// time: a new one replaces the last, and only its own WebView can
@@ -493,7 +514,8 @@ final class NativeHoldCapture {
         }
         self.surfaces = surfaces
         surfacesWebView = surfaces.isEmpty ? nil : webView
-        if let holdMs { holdSeconds = TimeInterval(holdMs) / 1000 }
+        // The threshold is this list's: without one, the default.
+        holdSeconds = holdMs.map { TimeInterval($0) / 1000 } ?? Self.defaultHoldSeconds
         // A press still waiting to be a hold, on a surface that is no
         // longer one: it is not followed any more.
         if let hold, !hold.recognised,
@@ -508,7 +530,7 @@ final class NativeHoldCapture {
     /// A finger came down in `webView` at `point` (its own points). On one
     /// of the page's surfaces the App prepares the microphone, without
     /// starting it, and times the hold itself.
-    func touchDown(at point: CGPoint, in webView: WKWebView) {
+    func touchDown(at point: CGPoint, in webView: WKWebView, timestamp: TimeInterval? = nil) {
         guard hold == nil, running == nil, surfacesWebView === webView,
               let surface = surfaces.first(where: { $0.rect.contains(point) }),
               !VoiceCaptureAudioState.active, !isInBackground(), audio.permissionGranted
@@ -518,6 +540,7 @@ final class NativeHoldCapture {
             surface: surface.id, webView: webView, origin: point, downAt: uptimeMs()
         )
         self.hold = hold
+        hold.downStamp = timestamp
         hold.timings.route = audio.route
         hold.timings.holdMs = Int((holdSeconds * 1000).rounded())
         hold.timings.variant = "quiet"
@@ -580,13 +603,24 @@ final class NativeHoldCapture {
     /// The finger went up (or the system took the touch). Before the hold
     /// was recognised it was a tap: whatever was prepared is taken down and
     /// nothing was recorded. After, the page ends the take as it does today.
-    func touchEnded(in webView: WKWebView) {
+    /// `timestamp` is the touch's own time (`UITouch.timestamp`).
+    func touchEnded(in webView: WKWebView, timestamp: TimeInterval? = nil) {
         guard let hold, hold.webView === webView else { return }
-        if hold.recognised {
-            hold.timings.releasedAt = since(hold)
-        } else {
+        guard hold.recognised else {
             cancelHold(hold, why: "tap")
+            return
         }
+        // A finger lifted just before the threshold on a busy main thread:
+        // the timer's block can run before this one. By the touch's own
+        // times it was a tap, and its audio is dropped as a tap's. The page
+        // cannot have taken it yet: its answer comes after this block.
+        if let down = hold.downStamp, let up = timestamp, (up - down) * 1000 < Double(hold.timings.holdMs),
+           let take = running, take.hold === hold, !take.adopted {
+            hold.tapMs = max(0, Int(((up - down) * 1000).rounded()))
+            discard(take, why: "tap")
+            return
+        }
+        hold.timings.releasedAt = since(hold)
     }
 
     private func since(_ hold: Hold) -> Int {
@@ -640,8 +674,18 @@ final class NativeHoldCapture {
                 case .busy: step = "busy"
                 case .failed(let failed): step = failed
                 }
-                // An adopted take's page hears the end; another's is dropped.
-                if take.adopted { self.end(reason: step) } else { self.discard(take, why: step) }
+                // An adopted take's page hears the end. Another's is
+                // dropped, and its page is told: started at touch-down, the
+                // press would otherwise end with no cue and no event, and
+                // the page could not tell it from a tap.
+                guard !take.adopted else {
+                    self.end(reason: step)
+                    return
+                }
+                self.discard(take, why: step)
+                self.sendHoldEvent(
+                    hold.webView, ["phase": "failed", "take": hold.take, "surface": hold.surface, "step": step]
+                )
             }
         }
     }
@@ -687,7 +731,7 @@ final class NativeHoldCapture {
     /// by how long it lasted: they are many, and would push the holds out.
     private func note(_ hold: Hold) {
         switch hold.timings.end {
-        case "tap": noteTap(since(hold), false)
+        case "tap": noteTap(hold.tapMs ?? since(hold), false)
         case "moved": noteTap(since(hold), true)
         default: noteTimings(hold.timings.line)
         }
@@ -724,6 +768,8 @@ final class NativeHoldCapture {
 
     /// Stops whatever runs for `webView` (it is going away).
     func stop(webView gone: WKWebView) {
+        // A list its last document asked for is not applied to the next.
+        _ = surfacesRequested(by: gone)
         setSurfaces([], for: gone)
         if let hold, hold.webView === gone, !hold.begun { cancelHold(hold, why: "gone") }
         // Its document is not the one that asked: it hears nothing more,
@@ -1070,6 +1116,27 @@ final class NativeHoldPCMConverter {
     }
 }
 
+/// Where one engine's audio goes. Each engine has its own, emptied when it
+/// is taken down: a callback of an engine that is gone can never hand its
+/// buffer to the next press's take.
+private final class NativeHoldSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var onPCM: ((Data) -> Void)?
+
+    func set(_ onPCM: ((Data) -> Void)?) {
+        lock.lock()
+        self.onPCM = onPCM
+        lock.unlock()
+    }
+
+    func send(_ data: Data) {
+        lock.lock()
+        let onPCM = self.onPCM
+        lock.unlock()
+        onPCM?(data)
+    }
+}
+
 /// The input of a hold the App recognises itself: made, started and taken
 /// down on one serial queue, so activating the session never holds up the
 /// touch that asked for it.
@@ -1078,7 +1145,7 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     private var observers: [NSObjectProtocol] = []
     private var armed: NativeHoldCapture.ArmTimings?
     private let lock = NSLock()
-    private var onPCM: ((Data) -> Void)?
+    private var sink: NativeHoldSink?
     /// Counts the takedowns asked for: work asked before one is not done
     /// once that takedown has been asked (a press that ended before its
     /// preparing even began, so quick taps do not queue up work).
@@ -1133,16 +1200,15 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             return .failure(.failed("format:\(Int(format.sampleRate))"))
         }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self, let data = converter.convert(buffer) else { return }
-            self.lock.lock()
-            let onPCM = self.onPCM
-            self.lock.unlock()
-            onPCM?(data)
+        let sink = NativeHoldSink()
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            guard let data = converter.convert(buffer) else { return }
+            sink.send(data)
         }
         // Allocates what the start needs; the hardware starts with `start()`.
         engine.prepare()
         self.engine = engine
+        self.sink = sink
         let timings = NativeHoldCapture.ArmTimings(
             categoryMs: categoryMs, activateMs: activateMs,
             prepareMs: SystemNativeHoldCaptureAudio.ms(since: prepareStart)
@@ -1164,10 +1230,8 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
             case .failure(let error): return .failure(error)
             }
         }
-        guard let engine else { return .failure(.failed("engine:0")) }
-        lock.lock()
-        self.onPCM = onPCM
-        lock.unlock()
+        guard let engine, let sink else { return .failure(.failed("engine:0")) }
+        sink.set(onPCM)
         let start = DispatchTime.now()
         do {
             try engine.start()
@@ -1198,9 +1262,8 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     func takeDown(deactivate: Bool) {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
-        lock.lock()
-        onPCM = nil
-        lock.unlock()
+        sink?.set(nil)
+        sink = nil
         armed = nil
         guard let engine else { return }
         engine.inputNode.removeTap(onBus: 0)

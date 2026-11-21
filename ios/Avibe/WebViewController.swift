@@ -20,7 +20,7 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         guard tracked == nil, let touch = touches.first, let webView = view as? WKWebView else { return }
         tracked = touch
-        NativeHoldCapture.shared.touchDown(at: touch.location(in: webView), in: webView)
+        NativeHoldCapture.shared.touchDown(at: touch.location(in: webView), in: webView, timestamp: touch.timestamp)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -39,7 +39,9 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
     private func finish(_ touches: Set<UITouch>) {
         guard let tracked, touches.contains(tracked) else { return }
         self.tracked = nil
-        if let webView = view as? WKWebView { NativeHoldCapture.shared.touchEnded(in: webView) }
+        if let webView = view as? WKWebView {
+            NativeHoldCapture.shared.touchEnded(in: webView, timestamp: tracked.timestamp)
+        }
         // Never a gesture of its own: the next touch starts it afresh.
         state = .failed
     }
