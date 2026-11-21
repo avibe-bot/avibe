@@ -1,6 +1,7 @@
 // I5 · one long Turn on the Lock Screen and in the Dynamic Island (iOS Live Activity), proposed
-// 2026-11-20. The person starts it in the App on a Turn that is running; it follows that one Turn and
-// ends with it. A card shows the Avibe mark, the session title, the Agent's display name, one of five
+// 2026-11-20. It follows the one running Turn of the conversation the person was viewing, and
+// ends with it (Amendment 1: it starts by itself when the person leaves the App, behind the setting in
+// ui/design: settings/live-activity/*; the conversation page has no entry). A card shows the Avibe mark, the session title, the Agent's display name, one of five
 // states, and times; never message text, tools, files, or the instance. Title and name are written on the
 // phone when tracking starts and never travel through the relay. Updates come from the instance
 // through the push relay (state only); the elapsed timer counts on the phone. A card past its stale
@@ -9,23 +10,16 @@
 // Kit: ui/design/kit/live-activity.tsx.
 import { frames } from '../../frame';
 import { IOS_APP_CAPABILITIES, IPHONE_17_PRO } from '../../shell/fixtures';
-import {
-  LockScreen,
-  Specimen,
-  SpecimenSheet,
-  StartRefusalToast,
-  TrackChip,
-  type TrackChipState,
-} from '../../kit/live-activity';
+import { LockScreen, Specimen, SpecimenSheet } from '../../kit/live-activity';
 import { Card, Compact, Expanded, Minimal, type StateName } from './fixtures';
-import { chatFixtures, chatPhone, chatRoute, chatSession, runningTurn, userSays } from '../chat/fixtures';
+import { chatFixtures, chatSession, runningTurn, userSays } from '../chat/fixtures';
 
 const bot = chatSession({ id: 'ses_cso', project_id: null, scope_id: null, title: '首席安全官', agent_name: 'cso' });
 const runningChat = chatFixtures({
   session: bot,
   messages: [userSays('看一下这周新增依赖有没有高危漏洞，有问题直接开修复 PR。', 42)],
   turnState: runningTurn,
-  extra: { nativeShell: { ...IOS_APP_CAPABILITIES, liveActivities: 1 } },
+  extra: { nativeShell: { ...IOS_APP_CAPABILITIES, liveActivities: 2 } },
 });
 const lock = (name: string, title: string, state: StateName, time?: string) => ({
   name,
@@ -38,23 +32,6 @@ const lock = (name: string, title: string, state: StateName, time?: string) => (
     <LockScreen time={time}>
       <Card state={state} />
     </LockScreen>
-  ),
-});
-
-const entry = (name: string, title: string, state: TrackChipState) => ({
-  name,
-  title,
-  ...IPHONE_17_PRO,
-  status: 'proposed' as const,
-  route: chatRoute(bot.id),
-  fixtures: runningChat,
-  render: () => (
-    <div className="relative h-full">
-      {chatPhone()}
-      <div className="absolute inset-x-4 bottom-36 z-50">
-        <TrackChip state={state} />
-      </div>
-    </div>
   ),
 });
 
@@ -99,39 +76,6 @@ const designFrames = frames([
       </SpecimenSheet>
     ),
   },
-  {
-    name: 'app-chips',
-    title: 'App 内入口 · 三种状态对照（独立于会话页，便于看中英文案）',
-    width: 420,
-    height: 340,
-    status: 'proposed',
-    fixtures: runningChat,
-    render: () => (
-      <SpecimenSheet>
-        <Specimen label="offer · a Turn is running"><TrackChip state="offer" /></Specimen>
-        <Specimen label="tracking"><TrackChip state="tracking" /></Specimen>
-        <Specimen label="systemOff · areActivitiesEnabled = false"><TrackChip state="systemOff" /></Specimen>
-      </SpecimenSheet>
-    ),
-  },
-  {
-    name: 'app-start-refused',
-    title: 'App 内入口 · 开始失败时的提示条：这一轮已结束 / 没开通知 / 没能更新（系统关闭实时活动走「去设置」，不弹提示条）',
-    width: 460,
-    height: 300,
-    status: 'proposed',
-    fixtures: runningChat,
-    render: () => (
-      <SpecimenSheet>
-        <Specimen label="no_active_turn · warning"><StartRefusalToast code="no_active_turn" /></Specimen>
-        <Specimen label="push_unavailable · warning"><StartRefusalToast code="push_unavailable" /></Specimen>
-        <Specimen label="failed · error"><StartRefusalToast code="failed" /></Specimen>
-      </SpecimenSheet>
-    ),
-  },
-  entry('app-offer', 'App 内入口 · Turn 运行中时出现在输入框上方：在锁屏上显示进度', 'offer'),
-  entry('app-tracking', 'App 内入口 · 已在锁屏显示；可停止显示（只结束实时活动，不影响 Agent）', 'tracking'),
-  entry('app-system-off', 'App 内入口 · 用户在系统设置关了实时活动：说明原因并给去设置的入口，不再弹系统请求', 'systemOff'),
 ]);
 
 export default designFrames;

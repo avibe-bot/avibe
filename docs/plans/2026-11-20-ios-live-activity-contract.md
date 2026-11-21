@@ -73,7 +73,7 @@ Examples are the `bridge_v2` vectors. The `bridge` vectors are version 1 and are
 - Description: 「离开 Avibe 时，如果正在看的会话还在处理，就在锁屏和灵动岛上显示进度。」 / "When you leave Avibe while the conversation you are viewing is still working, its progress appears on the Lock Screen and in the Dynamic Island."
 - System off (reused): 「实时活动在系统设置里关着」 / "Live Activities are off in Settings", and 「去设置」 / "Settings"
 
-The version-1 toasts and the in-conversation frames (`app-offer`, `app-tracking`, `app-system-off`, `app-chips`, `app-start-refused`) are removed. The setting row is drawn as a `proposed` frame.
+The version-1 toasts and the in-conversation frames (`app-offer`, `app-tracking`, `app-system-off`, `app-chips`, `app-start-refused`) are removed in this amendment. The setting row is drawn as `proposed` frames `ui/design: settings/live-activity/*` (off by default, on, and system off).
 
 ### 2.3 Lifecycle owned by the App
 
@@ -85,14 +85,12 @@ The version-1 toasts and the in-conversation frames (`app-offer`, `app-tracking`
   3. a prefetched Turn for that session exists, and its `turn_id` is not in the ledger;
   4. `NativePushCoordinator` has an active relay registration for this instance.
 - Then, synchronously inside the notification callback, while the App is still active (nothing here awaits):
-  - mark any other `TurnActivityAttributes` activity as displaced. Its token and state observers stop at once, and it is never registered or updated again;
-  - call `Activity.request(attributes, content: (state from the prefetched Turn, staleDate: confirmedAt + 2400), pushType: .token)`;
-  - on success, record its `turn_id` in the ledger at once, and begin a background task.
+  - call `Activity.request(attributes, content: (state from the prefetched Turn, staleDate: confirmedAt + 2400), pushType: .token)`. If it throws, stop here: nothing is recorded, any other activity is left exactly as it was, and the next departure may try again;
+  - on success, mark every other `TurnActivityAttributes` activity as displaced (its token and state observers stop at once, and it is never registered or updated again), record the new activity's `turn_id` in the ledger, and begin a background task.
 - Inside that background task, after the callback has returned:
   - end each displaced activity and DELETE it with `replaced` (row "a new start displaces it"). The old card may stay visible next to the new one for a moment, but it is never restored;
   - wait for the first value of `pushTokenUpdates` (none within 10 s: end `.immediate`);
   - PUT, and handle the answer by R(PUT) below.
-  If `Activity.request` throws, nothing is recorded, and the next departure may try again.
 
 After `start`, each local activity is in exactly one state, persisted on the device across launches together with its `requested_at` (the Unix second of its `Activity.request`, sent on every PUT):
 - **registered:** the instance holds its current token, because the last PUT was answered `200`;
