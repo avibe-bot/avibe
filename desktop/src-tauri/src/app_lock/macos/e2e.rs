@@ -456,10 +456,16 @@ fn handle(app: &AppHandle, request: Value) {
                     .build()
                     .map_err(|e| e.to_string())?;
                 if label == "app-show-lock-fixture" {
+                    // The title-bar accessory (#4108: four labelled buttons
+                    // bound to the window's destination); the peer only
+                    // exercises covering, so the buttons do nothing here.
                     crate::macos_show_titlebar::install(
                         &window,
-                        "Share".into(),
-                        "/e2e/desktop-client/app-lock-window.html".into(),
+                        ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
+                        "http://127.0.0.1:5267/e2e/desktop-client/app-lock-window.html"
+                            .parse()
+                            .unwrap(),
+                        |_| {},
                     );
                 }
                 window.show().map_err(|e| e.to_string())?;
