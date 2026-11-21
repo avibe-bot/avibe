@@ -233,6 +233,36 @@ struct NativeSink {
     registry: Arc<Mutex<NotificationRegistry>>,
 }
 
+impl NativeSink {
+    /// Rechecked when the OS lets a deferred post out (the first post waits on
+    /// the permission question): the receipt not retired, the same
+    /// presentation, and the same focus and switch gate.
+    fn still_wanted(
+        &self,
+        receipt: &Arc<NotificationReceipt>,
+        presentation_generation: u64,
+    ) -> Box<dyn Fn() -> bool + Send + Sync> {
+        let (sink, receipt) = (self.clone(), receipt.clone());
+        Box::new(move || {
+            !receipt.retired() && sink.presentation_generation() == presentation_generation && sink.gate().allows()
+        })
+    }
+
+    fn post(&self, posted: Result<native::Posted, String>, receipt: &Arc<NotificationReceipt>) {
+        match posted {
+            Ok(native::Posted::Now) => receipt.posted(),
+            Ok(native::Posted::Later) => {}
+            Err(_) => {
+                self.registry
+                    .lock()
+                    .expect("notification registry lock")
+                    .forget(receipt.id());
+                eprintln!("The desktop notification could not be submitted to the operating system.");
+            }
+        }
+    }
+}
+
 impl NotificationSink for NativeSink {
     fn registry(&self) -> &Mutex<NotificationRegistry> {
         &self.registry
@@ -278,15 +308,11 @@ impl NotificationSink for NativeSink {
             let copy = native_catalog_for_locales(sys_locale::get_locales())
                 .notifications
                 .render(intent, source);
-            if native::show(&sink.app, &receipt, copy, sink.registry.clone()).is_err() {
-                sink.registry
-                    .lock()
-                    .expect("notification registry lock")
-                    .forget(receipt.id());
-                eprintln!("The desktop notification could not be submitted to the operating system.");
-            } else {
-                receipt.posted();
-            }
+            let wanted = sink.still_wanted(&receipt, presentation_generation);
+            sink.post(
+                native::show(&sink.app, &receipt, copy, sink.registry.clone(), wanted),
+                &receipt,
+            );
         });
         if queued.is_err() {
             self.registry
@@ -337,6 +363,7 @@ impl NotificationSink for NativeSink {
             }
             let catalog = native_catalog_for_locales(sys_locale::get_locales()).notifications;
             let copy = catalog.render_question(source.clone(), request.preview.clone());
+            let wanted = sink.still_wanted(&receipt, presentation_generation);
             #[cfg(target_os = "macos")]
             if macos::available() {
                 macos::show_question(
@@ -344,23 +371,17 @@ impl NotificationSink for NativeSink {
                     copy,
                     &request,
                     source,
-                    presentation_generation,
                     &catalog.answer,
                     sink.registry.clone(),
+                    wanted,
                 );
-                receipt.posted();
                 return;
             }
             let _ = (&request, source);
-            if native::show(&sink.app, &receipt, copy, sink.registry.clone()).is_err() {
-                sink.registry
-                    .lock()
-                    .expect("notification registry lock")
-                    .forget(receipt.id());
-                eprintln!("The desktop notification could not be submitted to the operating system.");
-            } else {
-                receipt.posted();
-            }
+            sink.post(
+                native::show(&sink.app, &receipt, copy, sink.registry.clone(), wanted),
+                &receipt,
+            );
         });
         if queued.is_err() {
             self.registry

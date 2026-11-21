@@ -133,8 +133,9 @@ pub(super) fn settings_url(identifier: &str) -> String {
 }
 
 /// What an answer from a notification needs to reach the Runtime: the
-/// question, the options it offered with their revision, and the presentation
-/// epoch it was posted in, so an answer never reaches another instance.
+/// question and the options it offered with their revision. It is answered
+/// only through the local Workbench, and the Runtime refuses a question it
+/// does not hold, so a retained notification stays answerable after a relaunch.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Question {
@@ -142,7 +143,6 @@ pub(super) struct Question {
     pub message_id: String,
     pub revision: String,
     pub options: Vec<String>,
-    pub epoch: u64,
     pub source: Option<String>,
 }
 
@@ -189,14 +189,33 @@ fn content(copy: &NotificationCopy, extra: &Extra) -> Retained<UNMutableNotifica
     content
 }
 
-/// Posts one notification once macOS allows it. `refused` runs when it is not
-/// posted (permission refused or the center rejected it), so the caller can
-/// forget the receipt it reserved. The legacy center posted silently; so does this.
-fn post(identifier: String, copy: NotificationCopy, extra: Extra, refused: impl Fn() + 'static) {
-    let refused = Arc::new(refused);
+/// What a post waits on while macOS decides: whether it is still wanted once
+/// permission is known (the first post may wait on the user's answer), and
+/// what to do when it was posted or was not.
+pub(super) struct Outcome {
+    pub still_wanted: Box<dyn Fn() -> bool + Send + Sync>,
+    pub posted: Box<dyn Fn() + Send + Sync>,
+    pub refused: Box<dyn Fn() + Send + Sync>,
+}
+
+impl Outcome {
+    /// A one-off notice: wanted whenever macOS allows it, tracked by nothing.
+    fn notice() -> Self {
+        Self {
+            still_wanted: Box::new(|| true),
+            posted: Box::new(|| {}),
+            refused: Box::new(|| {}),
+        }
+    }
+}
+
+/// Posts one notification once macOS allows it and it is still wanted. The
+/// legacy center posted silently; so does this.
+fn post(identifier: String, copy: NotificationCopy, extra: Extra, outcome: Outcome) {
+    let outcome = Arc::new(outcome);
     authorized(move |granted| {
-        if !granted {
-            refused();
+        if !granted || !(outcome.still_wanted)() {
+            (outcome.refused)();
             return;
         }
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
@@ -204,15 +223,34 @@ fn post(identifier: String, copy: NotificationCopy, extra: Extra, refused: impl 
             &content(&copy, &extra),
             None,
         );
-        let refused = refused.clone();
+        let outcome = outcome.clone();
         let added = RcBlock::new(move |error: *mut NSError| {
-            if !error.is_null() {
+            if error.is_null() {
+                (outcome.posted)();
+            } else {
                 eprintln!("The desktop notification could not be submitted to the operating system.");
-                refused();
+                (outcome.refused)();
             }
         });
         center().addNotificationRequest_withCompletionHandler(&request, Some(&added));
     });
+}
+
+/// A receipt's outcome: posted marks it, anything else forgets it. Marking
+/// it only once macOS accepted the post keeps the delivery grace honest.
+fn tracked(
+    receipt: &Arc<NotificationReceipt>,
+    registry: Arc<Mutex<NotificationRegistry>>,
+    still_wanted: Box<dyn Fn() -> bool + Send + Sync>,
+) -> Outcome {
+    let (posted, id) = (receipt.clone(), receipt.id());
+    Outcome {
+        still_wanted,
+        posted: Box::new(move || posted.posted()),
+        refused: Box::new(move || {
+            registry.lock().expect("notification registry lock").forget(id);
+        }),
+    }
 }
 
 /// Posts a receipt's notification under its exact delivery key.
@@ -220,16 +258,19 @@ pub(super) fn show(
     receipt: &Arc<NotificationReceipt>,
     copy: NotificationCopy,
     registry: Arc<Mutex<NotificationRegistry>>,
+    still_wanted: Box<dyn Fn() -> bool + Send + Sync>,
 ) {
-    let id = receipt.id();
     let extra = Extra {
         thread: receipt.session_id().map(str::to_owned),
         opens: receipt.opens(),
         ..Extra::default()
     };
-    post(identifier(receipt), copy, extra, move || {
-        registry.lock().expect("notification registry lock").forget(id);
-    });
+    post(
+        identifier(receipt),
+        copy,
+        extra,
+        tracked(receipt, registry, still_wanted),
+    );
 }
 
 fn action_title(option: &str) -> String {
@@ -317,9 +358,9 @@ pub(super) fn show_question(
     copy: NotificationCopy,
     request: &AnswerRequest,
     source: Option<String>,
-    epoch: u64,
     labels: &AnswerCatalog,
     registry: Arc<Mutex<NotificationRegistry>>,
+    still_wanted: Box<dyn Fn() -> bool + Send + Sync>,
 ) {
     let mut extra = Extra {
         thread: Some(request.session_id.clone()),
@@ -339,15 +380,16 @@ pub(super) fn show_question(
             message_id: request.message_id.clone(),
             revision: revision.clone(),
             options: shown,
-            epoch,
             source,
         };
         extra.question = serde_json::to_string(&question).ok();
     }
-    let id = receipt.id();
-    post(identifier(receipt), copy, extra, move || {
-        registry.lock().expect("notification registry lock").forget(id);
-    });
+    post(
+        identifier(receipt),
+        copy,
+        extra,
+        tracked(receipt, registry, still_wanted),
+    );
 }
 
 /// Posts a one-off notice that no unread reconciliation tracks; a click opens `opens`.
@@ -363,7 +405,12 @@ pub(super) fn notice(copy: NotificationCopy, opens: Option<String>) {
         opens,
         ..Extra::default()
     };
-    post(format!("avibe:notice:{started}:{sequence}"), copy, extra, || {});
+    post(
+        format!("avibe:notice:{started}:{sequence}"),
+        copy,
+        extra,
+        Outcome::notice(),
+    );
 }
 
 /// Reconciles the snapshot with what macOS still shows: retired posts are
@@ -544,7 +591,6 @@ pub(super) mod tests {
             message_id: "m1".into(),
             revision: "0".repeat(64),
             options: vec!["✅ Merge".into(), "Not yet".into()],
-            epoch: 3,
             source: Some("avibe-app · Dock fix".into()),
         }
     }

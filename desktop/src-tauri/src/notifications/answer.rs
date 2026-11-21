@@ -47,10 +47,11 @@ pub(super) fn told(settled: Option<&Settled>, labels: &AnswerCatalog) -> Told {
     let Some(settled) = settled else {
         return Told::NotDelivered(labels.unavailable.clone());
     };
-    // A replay reports what the original attempt became; a pending original
-    // is still on its way and says nothing new.
+    // A replay reports what the original attempt became. Without an original
+    // outcome (still pending, or retired without one) nothing proves it went
+    // through, so it is not reported as sent.
     let outcome = match (settled.outcome.as_str(), settled.original_outcome.as_deref()) {
-        ("duplicate", None) => "accepted",
+        ("duplicate", None) => "unavailable",
         ("duplicate", Some(original)) => original,
         (outcome, _) => outcome,
     };
@@ -64,6 +65,12 @@ pub(super) fn told(settled: Option<&Settled>, labels: &AnswerCatalog) -> Told {
         "forbidden" | "not_found" => Told::NotSent(labels.gone.clone()),
         _ => Told::NotDelivered(labels.unavailable.clone()),
     }
+}
+
+/// An answer whose fate is not known yet: asked again, with the same
+/// operation ID, until the deadline.
+fn uncertain(settled: &Settled) -> bool {
+    settled.outcome == "unavailable" || (settled.outcome == "duplicate" && settled.original_outcome.is_none())
 }
 
 /// The receiver request for one pick, as the document validates it.
@@ -117,10 +124,11 @@ return String({call});}})()"
     )
 }
 
-/// The current Workbench document of the local instance the question was
-/// posted in; none once the shown instance or its presentation changed.
-fn current(app: &AppHandle, epoch: u64) -> Option<(Webview, String)> {
-    if crate::instance_client::epoch(app).unwrap_or(0) != epoch || !crate::instance_client::local_selected(app) {
+/// The current Workbench document of the local instance. A remote instance's
+/// document never receives an answer; the local Runtime refuses a question it
+/// does not hold.
+fn current(app: &AppHandle) -> Option<(Webview, String)> {
+    if !crate::instance_client::local_selected(app) {
         return None;
     }
     let (view, origin) = crate::compose::current(app)?;
@@ -128,14 +136,12 @@ fn current(app: &AppHandle, epoch: u64) -> Option<(Webview, String)> {
     (local == origin).then_some((view, origin))
 }
 
-async fn deliver(app: &AppHandle, question: &Question, id: &str, request: &str) -> Option<Settled> {
+async fn deliver(app: &AppHandle, id: &str, request: &str) -> Option<Settled> {
     let deadline = Instant::now() + DEADLINE;
     let status = format!("c.status({})", serde_json::to_string(id).expect("id"));
+    let mut last = None;
     while Instant::now() < deadline {
-        if crate::instance_client::epoch(app).unwrap_or(0) != question.epoch {
-            return None;
-        }
-        if let Some((view, origin)) = current(app, question.epoch) {
+        if let Some((view, origin)) = current(app) {
             let document = crate::compose::eval(&view, identify(&origin)).await.unwrap_or_default();
             if !document.is_empty() {
                 let begun =
@@ -151,7 +157,16 @@ async fn deliver(app: &AppHandle, question: &Question, id: &str, request: &str) 
                                 Some("pending") => tokio::time::sleep(POLL).await,
                                 // A replaced or reloaded document is asked again with the same ID.
                                 None | Some("stale" | "missing" | "unknown") => break,
-                                Some(settled) => return serde_json::from_str(settled).ok(),
+                                Some(settled) => {
+                                    let Ok(settled) = serde_json::from_str::<Settled>(settled) else {
+                                        return None;
+                                    };
+                                    if !uncertain(&settled) {
+                                        return Some(settled);
+                                    }
+                                    last = Some(settled);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -161,7 +176,7 @@ async fn deliver(app: &AppHandle, question: &Question, id: &str, request: &str) 
         }
         tokio::time::sleep(WAIT).await;
     }
-    None
+    last
 }
 
 /// Delivers one pick and tells the user only when it did not go through.
@@ -169,7 +184,7 @@ pub(super) fn submit(app: &AppHandle, question: Question, picked: Picked, opens:
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let id = operation_id();
-        let settled = deliver(&app, &question, &id, &request(&id, &question, &picked)).await;
+        let settled = deliver(&app, &id, &request(&id, &question, &picked)).await;
         let catalog = crate::native_catalog_for_locales(sys_locale::get_locales()).notifications;
         let (subtitle, body) = match told(settled.as_ref(), &catalog.answer) {
             Told::Nothing => return,
@@ -223,7 +238,13 @@ mod tests {
     fn only_an_answer_that_went_through_is_silent() {
         let labels = labels();
         assert_eq!(told(Some(&settled("accepted")), &labels), Told::Nothing);
-        assert_eq!(told(Some(&settled("duplicate")), &labels), Told::Nothing);
+        // A replay whose original has no outcome proves nothing was sent.
+        assert_eq!(
+            told(Some(&settled("duplicate")), &labels),
+            Told::NotDelivered("unavailable".into())
+        );
+        assert!(uncertain(&settled("duplicate")) && uncertain(&settled("unavailable")));
+        assert!(!uncertain(&settled("accepted")) && !uncertain(&settled("stale")));
         let replayed = |original: &str| Settled {
             original_outcome: Some(original.into()),
             ..settled("duplicate")

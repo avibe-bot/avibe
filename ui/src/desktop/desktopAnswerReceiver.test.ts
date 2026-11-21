@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import vectors from '../../../tests/fixtures/message_answer_contract_vectors.json';
 import { answerBody, createAnswerReceiver, parseAnswer, settle, type AnswerRequest } from './desktopAnswerReceiver';
 
+// From tests/fixtures/message_answer_contract_vectors.json (contract 1). The UI
+// build copies nothing from outside ui/, so the vectors this test needs are kept here.
+const vectors = {
+  questions: [{ options: ['Yes', 'No'], revision: '591e4424a227942cfaa898ff551771f8d762d17663e9e4b77d74c8d983582885' }],
+  outcomes: { accepted: 201, duplicate: 200, already_handled: 409, stale: 409, forbidden: 403, not_found: 404 },
+};
 const revision = vectors.questions[0].revision;
 const choice: AnswerRequest = { id: 'op-1', sessionId: 'ses a', messageId: 'msg_1', revision, kind: 'choice', text: 'Yes' };
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -65,6 +70,24 @@ describe('desktop answer receiver', () => {
     expect(post).toHaveBeenCalledWith('/api/sessions/ses%20a/messages', answerBody(choice));
     expect(JSON.parse(receiver.status('op-1'))).toEqual({ outcome: 'accepted' });
     expect(receiver.begin({ ...choice, revision: 'bad' })).toBe('invalid');
+  });
+
+  it('posts again for the same click only while its fate is unknown', async () => {
+    const post = vi.fn()
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce(json(200, { answer: { outcome: 'duplicate', original_outcome: null } }))
+      .mockResolvedValueOnce(json(200, { answer: { outcome: 'duplicate', original_outcome: 'accepted' } }));
+    const receiver = createAnswerReceiver(post, 'doc-1');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      receiver.begin(choice);
+      await flush();
+      await flush();
+    }
+    expect(post).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(receiver.status('op-1'))).toEqual({ outcome: 'duplicate', originalOutcome: 'accepted' });
+    receiver.begin(choice);
+    await flush();
+    expect(post).toHaveBeenCalledTimes(3);
   });
 
   it('settles a failed request as not delivered without retrying', async () => {

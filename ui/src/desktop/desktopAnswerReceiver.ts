@@ -2,7 +2,8 @@
 // from this document, with the user's own authority. Native drives this
 // receiver through fenced eval (desktop/src-tauri/src/notifications/answer.rs,
 // contract version 1, docs/plans/2026-11-21-desktop-d2a-notification-actions.md).
-// It posts once and never retries; the Runtime owns idempotency
+// It posts once per begin; native asks again with the same operation ID only
+// while the fate is unknown, and the Runtime owns idempotency
 // (docs/plans/desktop-d2-runtime-contract.md).
 
 export const ANSWER_RECEIVER = '__AVIBE_DESKTOP_ANSWER__';
@@ -107,6 +108,10 @@ export async function settle(response: Response | null): Promise<AnswerResult> {
   return { outcome: 'unavailable' };
 }
 
+/** A settled result that proves nothing either way: asked again with the same operation ID. */
+export const uncertain = (result: AnswerResult) =>
+  result.outcome === 'unavailable' || (result.outcome === 'duplicate' && !result.originalOutcome);
+
 export function createAnswerReceiver(post: Post, document = crypto.randomUUID()): AnswerReceiver {
   const results = new Map<string, AnswerResult | 'pending'>();
   const remember = (id: string, result: AnswerResult | 'pending') => {
@@ -120,8 +125,10 @@ export function createAnswerReceiver(post: Post, document = crypto.randomUUID())
     begin: (value) => {
       const request = parseAnswer(value);
       if (!request) return 'invalid';
-      // A repeated begin for the same click must not post twice.
-      if (results.has(request.id)) return 'started';
+      // A repeated begin for the same click posts again only when the last
+      // attempt's fate is unknown; the Runtime answers that replay by operation ID.
+      const previous = results.get(request.id);
+      if (previous !== undefined && (previous === 'pending' || !uncertain(previous))) return 'started';
       remember(request.id, 'pending');
       void post(`/api/sessions/${encodeURIComponent(request.sessionId)}/messages`, answerBody(request))
         .then((response) => settle(response), () => settle(null))

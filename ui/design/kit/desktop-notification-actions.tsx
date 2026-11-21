@@ -38,30 +38,30 @@ export type MacNotificationProps = {
 export function MacNotification({ title, subtitle, body, time, actions = [], open = false, reply }: MacNotificationProps) {
   const t = pick(useLang());
   return (
-    <div className="relative w-[372px]">
+    <div className="relative w-96">
       <div className="flex gap-3 rounded-2xl border border-edge bg-popover p-3 text-popover-foreground shadow-elevation-3">
-        <img src={logo} alt="" className="size-9 shrink-0 rounded-[9px]" />
+        <img src={logo} alt="" className="size-9 shrink-0 rounded-md" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <div className="flex items-baseline justify-between gap-2">
-            <span className="truncate text-[13px] font-semibold text-foreground">{title}</span>
-            {time && <span className="shrink-0 text-[11px] text-muted">{time}</span>}
+            <span className="truncate text-sm font-semibold text-foreground">{title}</span>
+            {time && <span className="shrink-0 text-xs text-muted">{time}</span>}
           </div>
-          {subtitle && <span className="truncate text-[12px] font-medium text-foreground">{subtitle}</span>}
+          {subtitle && <span className="truncate text-xs font-medium text-foreground">{subtitle}</span>}
           {reply ? (
             <div className="mt-1.5 flex items-center gap-2">
-              <div className="flex h-7 min-w-0 flex-1 items-center rounded-md border border-field-edge bg-field px-2 text-[12px] text-foreground">
+              <div className="flex h-7 min-w-0 flex-1 items-center rounded-md border border-field-edge bg-field px-2 text-xs text-foreground">
                 <span className="truncate">{reply.text}</span>
                 <span aria-hidden className="ml-px h-3.5 w-px bg-foreground" />
               </div>
-              <Button size="sm" className="h-7 px-3 text-[12px]">{t('发送', 'Send')}</Button>
+              <Button size="sm" className="h-7 px-3 text-xs">{t('发送', 'Send')}</Button>
             </div>
           ) : (
-            <p className="line-clamp-3 text-[12px] leading-[1.45] text-foreground/90">{body}</p>
+            <p className="line-clamp-3 text-xs leading-snug text-foreground/90">{body}</p>
           )}
         </div>
         {actions.length > 0 && !reply && (
           <div className="flex shrink-0 items-start">
-            <span className="inline-flex h-6 items-center gap-0.5 rounded-md border border-edge bg-surface-2 px-2 text-[11px] font-medium text-foreground">
+            <span className="inline-flex h-6 items-center gap-0.5 rounded-md border border-edge bg-surface-2 px-2 text-xs font-medium text-foreground">
               {t('选项', 'Options')}
               <ChevronDown aria-hidden className="size-3" />
             </span>
@@ -69,11 +69,11 @@ export function MacNotification({ title, subtitle, body, time, actions = [], ope
         )}
       </div>
       {open && actions.length > 0 && (
-        <div className="absolute right-3 top-[calc(100%+4px)] z-10 w-[200px] overflow-hidden rounded-lg border border-edge bg-popover py-1 shadow-elevation-3">
+        <div className="absolute right-3 top-full mt-1 z-10 w-52 overflow-hidden rounded-lg border border-edge bg-popover py-1 shadow-elevation-3">
           {actions.map((action, index) => (
             <div
               key={action}
-              className={`px-3 py-1.5 text-[12.5px] ${index === 0 ? 'bg-primary text-primary-foreground' : 'text-foreground'}`}
+              className={`px-3 py-1.5 text-sm ${index === 0 ? 'bg-primary text-primary-foreground' : 'text-foreground'}`}
             >
               {action}
             </div>
@@ -89,13 +89,13 @@ export function MacScreenCorner({ children, note }: { children: ReactNode; note?
   const t = pick(useLang());
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
-      <div className="flex h-7 shrink-0 items-center justify-end gap-4 border-b border-edge bg-surface px-4 text-[11px] text-muted">
+      <div className="flex h-7 shrink-0 items-center justify-end gap-4 border-b border-edge bg-surface px-4 text-xs text-muted">
         <span>{t('11月20日 周五 10:24', 'Fri Nov 20 10:24')}</span>
       </div>
       <div className="relative flex-1 bg-surface-2">
-        <div className="absolute left-5 top-4 flex max-w-[380px] flex-col gap-1.5">
+        <div className="absolute left-5 top-4 flex max-w-sm flex-col gap-1.5">
           <Badge variant="secondary">{t('示意 · 系统通知由 macOS 绘制', 'Illustration · macOS draws the notification')}</Badge>
-          {note && <p className="text-[11.5px] leading-relaxed text-muted">{note}</p>}
+          {note && <p className="text-xs leading-relaxed text-muted">{note}</p>}
         </div>
         <div className="absolute right-4 top-4 flex flex-col items-end gap-3">{children}</div>
       </div>

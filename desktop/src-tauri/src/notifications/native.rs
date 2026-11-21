@@ -32,19 +32,29 @@ pub(crate) fn notice(app: &AppHandle, copy: NotificationCopy, opens: Option<Stri
     plugin_notice(app, copy)
 }
 
+/// Whether the post was made now, or is left to the OS's answer (macOS,
+/// whose owner marks or forgets the receipt itself).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Posted {
+    Now,
+    Later,
+}
+
 pub(super) fn show(
     app: &AppHandle,
     receipt: &Arc<NotificationReceipt>,
     copy: NotificationCopy,
     registry: Arc<Mutex<NotificationRegistry>>,
-) -> Result<(), String> {
+    still_wanted: Box<dyn Fn() -> bool + Send + Sync>,
+) -> Result<Posted, String> {
     #[cfg(target_os = "macos")]
     if super::macos::available() {
-        super::macos::show(receipt, copy, registry);
-        return Ok(());
+        super::macos::show(receipt, copy, registry, still_wanted);
+        return Ok(Posted::Later);
     }
+    let _ = still_wanted;
     if receipt.session_id().is_none() {
-        return plugin_notice(app, copy);
+        return plugin_notice(app, copy).map(|()| Posted::Now);
     }
     #[cfg(target_os = "macos")]
     {
@@ -79,7 +89,7 @@ pub(super) fn show(
             .show()
             .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(Posted::Now)
 }
 
 /// Fresh native/plugin posts are retried by the existing unread refresh using

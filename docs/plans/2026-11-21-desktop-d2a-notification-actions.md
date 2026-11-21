@@ -21,7 +21,7 @@ Owner decision: Max, 2026-11-20 10:15 (all D2 recommendations). Runtime authorit
 5. **Outcomes.**
    - `accepted` / `duplicate` of an accepted answer: nothing more is shown.
    - `already_handled`, `stale`, `forbidden`, `not_found`, or no current document within 30 s (`unavailable`): one follow-up notice states why nothing was sent, and a click opens the Session.
-   - Nothing is retried automatically.
+   - Nothing is retried automatically. An answer whose fate is unknown is asked again, within the deadline, under the same operation ID; the Runtime answers that replay without answering twice.
 
 ## Native ↔ document contract (`__AVIBE_DESKTOP_ANSWER__`, version 1)
 
@@ -37,7 +37,9 @@ The local Workbench defines, at load, `window.__AVIBE_DESKTOP_ANSWER__ = { versi
 
 - `begin` returns `"started"`, or `"invalid"` for a malformed request.
 - `status(id)` returns `"pending"` until the POST settles, then a JSON string `{outcome, answerKind, choice}`. `outcome` is one of the Runtime outcomes, or `unavailable` for a transport failure or an uncertain dispatch.
-- The document never retries. An HTTP 401/403/404 without an `answer` body becomes `forbidden` / `not_found`.
+- An HTTP 401/403/404 without an `answer` body becomes `forbidden` / `not_found`.
+- `begin` posts again for an ID only when that ID's last result proved nothing: `unavailable`, or a `duplicate` without an original outcome. Native asks again, with the same operation ID, only in that case and only within its 30 s deadline. The Runtime answers such a replay by operation ID, so it is never a second answer. Whatever is still unproven at the deadline is reported as not delivered.
+- **Process boundary.** A question carries no process-local generation, so a notification left from an earlier launch can still be answered. Answers go only to the local Workbench document. The local Runtime refuses a question it does not hold (`not_found`) or one that has moved on (`stale`).
 
 ## Validation
 
