@@ -132,7 +132,7 @@ def _descriptor(config: V2Config, installation_id: str | None, pending: Mapping 
 
 
 def describe() -> dict[str, Any]:
-    """Read a coherent, nonsecret snapshot without initializing an identity."""
+    """Read the protected Desktop descriptor without initializing an identity."""
     with config_file_lock():
         return _descriptor(_config(), _installation_id(), _pending())
 
