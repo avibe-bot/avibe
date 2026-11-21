@@ -10,6 +10,26 @@ from tests.test_pairing_recovery import _fail_config_publication_once, pairing_h
 from vibe import remote_access
 
 
+@pytest.mark.parametrize('damaged', [False, True])
+def test_reset_marker_excludes_both_writers_before_network(pairing_host, damaged):
+    from vibe import binding_admission as admission, desktop_local_instance as local
+
+    marker = admission.reset_intent_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    if damaged:
+        marker.symlink_to(marker.with_name('nonexistent-reset-target'))
+    else:
+        marker.write_text('{}')
+    with pytest.raises(admission.OperationBusy):
+        with admission.admitted('address'):
+            pytest.fail('rename acquired admission during reset')
+    with pytest.raises(local.LocalInstanceError, match='operation_in_progress'):
+        local.prepare('fixture-account', 'old-revision')
+    assert remote_access.pair('key_A', 'https://backend.test')['error'] == 'operation_in_progress'
+    assert remote_access._drive_pending_pairing() == (True, 60)
+    assert not pairing_host[1] and not local._identity_path().exists()
+
+
 def test_same_id_publication_crash_cannot_resurrect_old_or_retire_new(pairing_host, monkeypatch):
     base = 'https://backend.test'
     assert remote_access.pair('key_A', base)['ok']

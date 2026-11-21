@@ -33,9 +33,19 @@ def pairing_operation(operation):
     return run
 
 
+def reset_intent_path():
+    return paths.get_state_dir() / 'remote-binding-reset.json'
+
+
+def reset_in_progress():
+    # A malformed marker, including a dangling link, is never permission to
+    # start another writer. Recovery must validate its contents separately.
+    return os.path.lexists(reset_intent_path())
+
+
 @contextmanager
 def admitted(kind):
-    if kind not in ('address', 'pairing'):
+    if kind not in ('address', 'pairing', 'reset'):
         raise ValueError('invalid operation kind')
     root = paths.get_state_dir()
     key = (os.path.realpath(root), kind)
@@ -51,12 +61,14 @@ def admitted(kind):
     except MigrationLockTimeout:
         raise OperationBusy() from None
     try:
+        if kind != 'reset' and reset_in_progress():
+            raise OperationBusy()
         if kind == 'address':
             from vibe.remote_access import _read_pending_pairing_record
             record, error = _read_pending_pairing_record()
             if record is not None or error is not None:
                 raise OperationBusy()
-        else:
+        elif kind == 'pairing':
             from vibe import instance_address
             path = instance_address._state_path()
             if path.is_symlink():

@@ -2314,6 +2314,9 @@ def _drive_pending_pairing() -> tuple[bool, int]:
     inputs here. The two replay entry points acquire admission and recheck the
     observed operation against protected storage before they do any work.
     """
+    from vibe.binding_admission import reset_in_progress
+    if reset_in_progress():
+        return True, 60  # Reset recovery owns this generation; never replay its pairing or probe its key.
     record, error = _read_pending_pairing_record()
     if error:
         return True, 60
