@@ -186,15 +186,27 @@ final class HoldTouchUITests: XCTestCase {
     /// A finger that comes down on the input, moves away and stays down past
     /// the threshold: a drag, which the page gave back. The App is told of
     /// no move there, and gives no cue all the same.
+    ///
+    /// With the microphone starting at recognition as well: there the press
+    /// is still waiting for its cue when the threshold comes whatever the
+    /// microphone did, so only the App's asking the touch where it is keeps
+    /// the cue from it.
     func testADragOnTheInputHeldPastTheThresholdGetsNoCue() {
-        launch()
-        let start = input.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
-        start.press(
-            forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 60, dy: 0)),
-            withVelocity: .default, thenHoldForDuration: 0.8
-        )
-        XCTAssertTrue(waitFor("state=idle"), facts())
-        requireFollowedWithNoCue("A drag on the input")
+        for startsAtRecognition in [true, false] {
+            app = XCUIApplication()
+            app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+            app.launchEnvironment["AVIBE_FIXTURE_HOLD"] = "1"
+            launch(startsAtRecognition: startsAtRecognition)
+            let start = input.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
+            start.press(
+                forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 60, dy: 0)),
+                withVelocity: .default, thenHoldForDuration: 0.8
+            )
+            XCTAssertTrue(waitFor("state=idle"), facts())
+            print("[hold smoke] drag on the input, startsAtRecognition=\(startsAtRecognition): \(facts())")
+            requireFollowedWithNoCue("A drag on the input")
+            app.terminate()
+        }
     }
 
     /// The variant behind the App's switch: prepared at touch-down, started
