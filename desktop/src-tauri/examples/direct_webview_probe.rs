@@ -390,14 +390,22 @@ self.addEventListener('fetch', (event) => {
         notification: 'Notification' in window, permission: 'Notification' in window ? Notification.permission : 'absent' })";
     pub const PUSH_ASKED: &str = "String(window.__asked)";
 
+    /// One of the three APIs, as `PUSH_OFFER` read it: `None` when the
+    /// reading itself is missing or is not what `PUSH_OFFER` answers.
+    pub fn offers(offered: Option<&str>, api: &str) -> Option<bool> {
+        offered
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())?
+            .get(api)?
+            .as_bool()
+    }
+
     /// Whether a page that read `offered` (`PUSH_OFFER`) and was answered
     /// `asked` (`PUSH_ASKED`) gets as far as registering its push worker.
     pub fn registers_push_worker(offered: Option<&str>, asked: Option<&str>) -> bool {
-        let offered: serde_json::Value = offered
-            .and_then(|text| serde_json::from_str(text).ok())
-            .unwrap_or_default();
-        let has = |name: &str| offered.get(name).and_then(serde_json::Value::as_bool) == Some(true);
-        has("serviceWorker") && has("pushManager") && has("notification") && asked == Some("granted")
+        ["serviceWorker", "pushManager", "notification"]
+            .iter()
+            .all(|api| offers(offered, api) == Some(true))
+            && asked == Some("granted")
     }
 
     pub struct Report {
@@ -566,15 +574,17 @@ mod macos_probe {
         // What this WebView offers a page that wants web push. WKWebView has
         // no `PushManager`, so the page never registers its push worker, and
         // an instance window is never controlled by it: the rendezvous is
-        // not refused for that reason. Fails if a later WebKit changes that.
+        // not refused for that reason. The case is the missing API alone,
+        // read successfully: it fails if a later WebKit adds it, whatever an
+        // unattended permission request answers (shown only for the record).
         let offered = page_eval(&webview, PUSH_OFFER);
         pump_until(Duration::from_secs(3), || false);
         let asked = page_eval(&webview, PUSH_ASKED);
-        let registers = registers_push_worker(offered.as_deref(), asked.as_deref());
         report.case(
             "a-page-cannot-register-its-push-worker",
-            !registers,
-            json!({ "offered": offered, "asked": asked, "registers": registers }),
+            offers(offered.as_deref(), "serviceWorker").is_some()
+                && offers(offered.as_deref(), "pushManager") == Some(false),
+            json!({ "offered": offered, "asked": asked }),
         );
 
         // 2. A page that replaced everything the script calls: the script
