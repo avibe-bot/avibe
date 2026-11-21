@@ -1690,7 +1690,7 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
 
     candidate_pid: int | None = None
     try:
-        page_auto = operation_id is not None and payload.get('transport_protocol') == 'auto'
+        page_auto = operation_id is not None and _configured_protocol(candidate_config) == 'auto'
         requested_protocol = _explicit_candidate_protocol(candidate_config) if page_auto else _initial_connector_protocol(candidate_config)
         started_candidate = start_settings_candidate(requested_protocol)
         if started_candidate is None:

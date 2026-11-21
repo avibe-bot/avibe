@@ -313,11 +313,20 @@ def apply(actor, reservation):
             state = cs.journal.load(config)
             op = cs.journal.owned(state, op_id, 'verifying')
             if ok and _sole_generation(op) and cs.value(config, key) == new and cs.journal.clock() < op['until']:
+                # Only the explicit transport of the sole, publicly verified
+                # generation is evidence. Persist the intent with the outcome
+                # before touching the separate quality-history file.
+                active = tunnel._state_connector('active') or {}
+                protocol = active.get('requested_protocol')
+                if cs.value(config, 'protocol') == 'auto' and protocol in ('quic', 'http2'):
+                    state['verifiedPreference'] = dict(protocol=protocol, generation=op['generation'], request=_request_identity())
                 cs.journal.finish(state, 'applied', 'verified')
+                _flush_verified_preference(config, state)
             else:
                 cs.journal.restore(state, _failure(op))
     except Exception as exc:
-        with tunnel._connector_lifecycle(), config_file_lock():
+        resume = False
+        with config_file_lock():
             config = V2Config.load()
             state = cs.journal.load(config)
             op = state['operation']
@@ -326,32 +335,73 @@ def apply(actor, reservation):
                     saved = cs.value(config, key) == new
                     cs.journal.finish(state, 'applied' if saved else 'failed', 'saved' if saved else getattr(exc, 'code', 'apply_failed'))
                 elif op['state'] == 'applying' and not op.get('writeStarted') and cs.value(config, key) == op['from']:
-                    # No saved change or promotion. Finish the page operation
-                    # and re-arm eligible attribution in one journal replacement.
-                    _resume_preempted_route(config, state, op)
+                    # The outcome does not need a connector lock. If another
+                    # process holds it, leave revalidation to the worker.
+                    route = _preempted_route(state, op)
+                    if route:
+                        route['resumeAfterFailure'] = True
+                        resume = True
                     cs.journal.finish(state, 'failed', getattr(exc, 'code', 'settings_not_applied'))
                 else:
                     cs.journal.restore(state, _failure(op))
+        if resume:
+            try:
+                with tunnel._connector_lifecycle(timeout=0), config_file_lock():
+                    config = V2Config.load()
+                    _resume_pending_route(config, cs.journal.load(config))
+            except tunnel._ConnectorLifecycleBusy:
+                pass  # recover() consumes the durable intent after the holder leaves
     finally:
         _wake.set()
 
 
-def _resume_preempted_route(config, state, op):
-    """The cancelled writer stays revoked. Only a new round may compare this live route."""
-    if not op.get('retiringPin') or state.get('pinAttempt'):
-        return
+def _flush_verified_preference(config, state):
+    pending = state.get('verifiedPreference')
+    if not pending:
+        return True
+    if (_requested(config) and cs.value(config, 'protocol') == 'auto' and _request_identity() == pending['request']
+            and tunnel.connector_generation() == pending['generation']):
+        try:
+            tunnel._set_preferred_protocol(pending['protocol'])
+        except OSError:
+            return False  # never roll back a verified change because history is unwritable
+    state.pop('verifiedPreference')
+    cs.journal.save(state)
+    return True
+
+
+def _preempted_route(state, op):
     route = state.get('pinRoute') or {}
-    old = route.get('attempt') or {}
-    if old.get('id') != op['retiringPin'] or route.get('phase') != 'owner_edit':
-        return
-    route['phase'] = 'comparison_unavailable'
-    if (old.get('boot') != cs.journal.boot or _active_pin_route(config, state) is not route
-            or not _pin_anchor(route['generation'])):
-        return
-    attempt = dict(old, id=secrets.token_hex(16))
+    if (op.get('retiringPin') and not state.get('pinAttempt') and route.get('phase') == 'owner_edit'
+            and (route.get('attempt') or {}).get('id') == op['retiringPin']):
+        return route
+    return None
+
+
+def _registered_preemption(config, state, route):
+    return (route['attempt']['boot'] == cs.journal.boot and _active_pin_route(config, state) is route
+            and _pin_anchor(route['generation']))
+
+
+def _rearm_route(state, route):
+    # The cancelled writer stays revoked. Only a new round may compare this live route.
+    attempt = dict(route['attempt'], id=secrets.token_hex(16))
     state['pinAttempt'] = attempt
     route.update(attempt=attempt, phase='comparing')
     route.pop('previous', None)
+
+
+def _resume_pending_route(config, state):
+    route = state.get('pinRoute') or {}
+    if not route.get('resumeAfterFailure') or state['operation'] or state.get('debt'):
+        return
+    route.pop('resumeAfterFailure')
+    if not state.get('pinAttempt') and route['phase'] == 'owner_edit':
+        if _registered_preemption(config, state, route):
+            _rearm_route(state, route)
+        else:
+            route['phase'] = 'comparison_unavailable'
+    cs.journal.save(state)
 
 
 def _failure(op):
@@ -433,6 +483,8 @@ def recover(*, startup=False):
                         and _match_pins(config, {k: v for k, v in attempt['pins'].items() if k not in record['relaxed']})):
                     state['returnedToAutomatic'] = _pin_receipt(record)
                 cs.journal.save(state)
+            preference_flushed = _flush_verified_preference(config, state)
+            _resume_pending_route(config, state)
             op = state['operation']
             if op and op['state'] != 'restoring':
                 if op['boot'] == cs.journal.boot and cs.journal.clock() < op['until']:
@@ -445,7 +497,7 @@ def recover(*, startup=False):
             debt = not op
             op = op or state.get('debt')
             if not op:
-                return True
+                return preference_flushed and not state.get('pinAttempt')
             at_bound = debt or op['boot'] != cs.journal.boot or cs.journal.clock() >= op['until']
             try:
                 saved = _repair_storage(config, op)
@@ -457,6 +509,19 @@ def recover(*, startup=False):
             if not saved:
                 cs.journal.supersede(config, {cs.FIELDS[op['setting']]})
                 return True
+            route = _preempted_route(state, op)
+            if not startup and route and _registered_preemption(config, state, route):
+                # The failed candidate never displaced this known temporary
+                # generation. Its signature differs from the saved pins by design.
+                _rearm_route(state, route)
+                if debt:
+                    state.pop('debt')
+                    if (state['outcome'] or {}).get('id') == op['id']:
+                        state['outcome'].update(result='restored', reason=op['reason'], at=cs.now())
+                    cs.journal.save(state)
+                else:
+                    cs.journal.finish(state, 'restored', op['reason'])
+                return False  # worker has a new round to consume
         if startup:
             return False  # no network I/O before startup reconciliation
         try:
@@ -693,7 +758,12 @@ def keep_temporary_connector(config, binary, running_signature):
         if not route:
             return False
         trial = _pin_trial(config, route['relaxed'], route['protocol'])
-        return running_signature == tunnel._runtime_signature(trial, binary) and _pin_anchor(route['generation'])
+        if running_signature != tunnel._runtime_signature(trial, binary):
+            return False
+        # Identity and request already matched under the lifecycle lock. A
+        # missing sample is not evidence to dismantle this working route.
+        active = tunnel._state_connector('active') or {}
+        return _registered(active.get('metrics_url')) != 0
 
 
 def _pin_receipt(record):

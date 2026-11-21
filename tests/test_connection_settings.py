@@ -687,6 +687,117 @@ def test_owner_edit_preempts_attribution_without_retiring_active(rig, monkeypatc
     assert {c['setting'] for c in changes} == ({'protocol', 'outbound'} if field == 'outbound' else {'protocol'})
 
 
+@pytest.mark.parametrize('field,target', [('protocol', 'auto'), ('ipFamily', 'auto'), ('outbound', '192.0.2.10')])
+@pytest.mark.parametrize('public_ok', [False, True])
+def test_page_auto_verifies_explicit_opposite_and_remembers_winner(rig, monkeypatch, pin_fleet, field, target, public_ok):
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.transport_protocol = 'quic' if field == 'protocol' else 'auto'
+    rig.cfg.save()
+    monkeypatch.setattr(ra, 'network_interfaces', lambda: {'interfaces': [{'address': '192.0.2.10'}]})
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
+    monkeypatch.setattr(ra, 'tunnel_quality_snapshot', lambda: {'protocol': 'quic'})
+    monkeypatch.setattr(ra, 'status', lambda *a, **kw: {'running': True, 'pid_state': 'cloudflared'})
+    monkeypatch.setattr(ra, '_connector_ready_now', lambda *args: pin_fleet.slots['candidate']['requested_protocol'] == 'http2')
+    monkeypatch.setattr(cr, '_public_check', lambda url: public_ok)
+    op = cr.prepare(rig.actor, field, target)
+    cr.apply(rig.actor, op)
+    assert [row['requested_protocol'] for row in pin_fleet.starts] == ['quic', 'http2']
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)  # cold start reads history, not memory
+    state = cs.journal.load(V2Config.load())
+    if public_ok:
+        assert state['outcome']['reason'] == 'verified' and not state['operation']
+        assert ra._initial_connector_protocol(V2Config.load()) == 'http2'
+    else:
+        assert state['operation']['state'] == 'restoring' and not ra._stored_preferred_protocol()
+
+
+@pytest.mark.parametrize('same_generation', [True, False])
+def test_verified_preference_write_failure_does_not_undo_owner_change(rig, monkeypatch, pin_fleet, same_generation):
+    rig.cfg.remote_access.vibe_cloud.transport_protocol = 'quic'
+    rig.cfg.save()
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
+    monkeypatch.setattr(ra, 'tunnel_quality_snapshot', lambda: {'protocol': 'http2'})
+    monkeypatch.setattr(ra, 'status', lambda *a, **kw: {'running': True, 'pid_state': 'cloudflared'})
+    monkeypatch.setattr(ra, '_connector_ready_now', lambda *args: True)
+    monkeypatch.setattr(cr, '_public_check', lambda url: True)
+    op = cr.prepare(rig.actor, 'protocol', 'auto')
+    def unavailable(protocol):
+        raise OSError('fixture: history unwritable')
+    with monkeypatch.context() as fail:
+        fail.setattr(ra, '_set_preferred_protocol', unavailable)
+        cr.apply(rig.actor, op)
+        assert not cr.recover()
+        live = V2Config.load()
+        state = cs.journal.load(live)
+        assert state['outcome']['reason'] == 'verified' and not state['operation'] and not state.get('debt')
+        assert cs.value(live, 'protocol') == 'auto' and not ra._stored_preferred_protocol()
+    if not same_generation:
+        pin_fleet.slots['active']['started_at'] += 1
+    assert cr.recover()
+    assert not cs.journal.load(V2Config.load()).get('verifiedPreference')
+    assert ra._stored_preferred_protocol() == ('http2' if same_generation else None)
+
+
+@pytest.mark.parametrize('ending', ['lock_busy', 'promotion_rolled_back'])
+@pytest.mark.parametrize('fence', ['same', 'stop', 'rebind', 'generation'])
+def test_ineffective_owner_handover_finishes_and_rearms_only_its_route(rig, monkeypatch, transport_outage, ending, fence):
+    fleet = transport_outage
+    sample, owner = fleet.sample, []
+    def counts(record, age):
+        if not owner and record is fleet.slots.get('candidate') and len(fleet.starts) == 3:
+            owner.append(cr.prepare(rig.actor, 'protocol', 'auto'))
+        return sample(record, age)
+    fleet.sample = counts
+    with pytest.raises(cs.ConnectionError, match='superseded'):
+        cr._consume_pin_attempt()
+    reservation, = owner
+    old = cs.journal.load(V2Config.load())['pinRoute']['attempt']
+    assert old['id'] == reservation['retiringPin']
+    active = fleet.slots['active']
+    monkeypatch.setattr(ra, 'status', lambda *a, **kw: {'running': True, 'pid_state': 'cloudflared'})
+    monkeypatch.setattr(ra, '_connector_ready_now', lambda *args: True)
+    def reject_promotion(*args, **kw):
+        assert cs.value(V2Config.load(), 'protocol') == 'auto'  # after the real persist
+        raise RuntimeError('candidate_not_ready')
+    def busy(*args, **kw):
+        raise ra._ConnectorLifecycleBusy()
+    with monkeypatch.context() as fail:
+        if ending == 'lock_busy':
+            fail.setattr(ra, '_connector_lifecycle', busy)
+        else:
+            fail.setattr(ra, '_promote_candidate_connector', reject_promotion)
+        cr.apply(rig.actor, reservation)
+    live = V2Config.load()
+    state = cs.journal.load(live)
+    assert cs.value(live, 'protocol') == 'quic' and fleet.slots['active'] is active
+    assert not state.get('pinAttempt') and not ra._stored_preferred_protocol()
+    if ending == 'lock_busy':
+        assert not state['operation'] and state['outcome']['result'] == 'failed'
+        assert state['pinRoute']['resumeAfterFailure']
+    else:
+        assert state['operation']['writeStarted'] and state['operation']['state'] == 'restoring'
+    if fence == 'stop':
+        rig.request.unlink()
+    elif fence == 'rebind':
+        live.remote_access.vibe_cloud.instance_secret = 'replacement-pair'
+        live.save()
+    elif fence == 'generation':
+        active['started_at'] += 1  # same PID and address, not the same generation
+    monkeypatch.setattr(ra, '_running_signature', lambda pid: ra._runtime_signature(cr._pin_trial(live, ['protocol'], 'http2'), 'fixture-binary'))
+    cr.recover()
+    state = cs.journal.load(V2Config.load())
+    with pytest.raises(cs.ConnectionError, match='superseded'):
+        cr._pin_live(old)
+    if fence == 'same':
+        assert not state['operation'] and not state.get('debt')
+        assert state['outcome']['result'] == ('failed' if ending == 'lock_busy' else 'restored')
+        assert state['pinAttempt']['id'] != old['id'] and state['pinRoute']['phase'] == 'comparing'
+        cr._consume_pin_attempt()
+        assert cs.value(V2Config.load(), 'protocol') == 'auto'
+    else:
+        assert not state.get('pinAttempt') and cs.value(V2Config.load(), 'protocol') == 'quic'
+
+
 @pytest.mark.parametrize('retire_after,allowed', [(74.75, True), (75.25, False)])
 def test_preempting_owner_waits_only_for_its_replica(rig, monkeypatch, connector_clock, transport_outage, retire_after, allowed):
     fleet = transport_outage
@@ -732,7 +843,7 @@ def test_preempting_owner_waits_only_for_its_replica(rig, monkeypatch, connector
         assert cs.value(V2Config.load(), 'protocol') == 'auto'
 
 
-@pytest.mark.parametrize('entry', ['api', 'config', 'cli', 'ui_restart', 'lost_registration'])
+@pytest.mark.parametrize('entry', ['api', 'config', 'cli', 'ui_restart', 'lost_registration', 'metrics_unreadable'])
 def test_start_entries_respect_registered_route_and_ui_restart(rig, monkeypatch, transport_outage, entry):
     from tests.ui_server_test_helpers import csrf_headers
     from vibe import cli, ui_server as ui
@@ -776,6 +887,11 @@ def test_start_entries_respect_registered_route_and_ui_restart(rig, monkeypatch,
         cr.recover_startup()
         assert 'pinRoute' not in cs.journal.load(live)
         ui._reconcile_remote_access_for_ui_start(live)
+    elif entry == 'metrics_unreadable':
+        with monkeypatch.context() as scrape:
+            scrape.setattr(cr, '_registered', lambda url: None)
+            assert not cr._pin_anchor(ra.connector_generation())  # still no attribution evidence
+            assert not ra.start(live)['started']
     elif entry == 'lost_registration':
         fleet.sample = lambda record, age: 0
         assert ra.start(live)['started']
