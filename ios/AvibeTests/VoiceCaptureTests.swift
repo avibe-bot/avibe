@@ -1,6 +1,7 @@
 import ActivityKit
 import AppIntents
 import AVFAudio
+import SwiftUI
 import XCTest
 @testable import Avibe
 
@@ -162,6 +163,14 @@ final class VoiceCaptureTests: XCTestCase {
         signedOut.target = nil
         let first = await signedOut.controller().toggle()
         XCTAssertEqual(first, .needsApp(.signIn))
+
+        // Signed in, but avibe.bot has not confirmed the session lately.
+        let unconfirmed = World()
+        unconfirmed.target = nil
+        unconfirmed.waitsForConfirmation = true
+        let pending = await unconfirmed.controller().toggle()
+        XCTAssertEqual(pending, .needsApp(.confirmPending))
+        XCTAssertNil(unconfirmed.audio)
 
         let noMicrophone = World()
         noMicrophone.microphone = false
@@ -2560,13 +2569,83 @@ final class VoiceCaptureTests: XCTestCase {
 
     /// Notifications off: the alert Avibe shows on coming forward carries
     /// the same step and code.
-    func testTheForegroundAlertCarriesTheStepAndCodeToo() async {
+    /// A press past the session's confirmation lifetime: every surface says
+    /// only 打开 Avibe 继续, never the sign-in sentence.
+    func testAnUnconfirmedSessionShowsOnlyThePhaseLine() async throws {
+        let phase = String(localized: VoiceCaptureCopy.text("voiceCapture.phase.needsApp"))
+        let signInLine = String(localized: VoiceCaptureCopy.text("voiceCapture.reason.signIn"))
+        let world = World()
+        world.target = nil
+        world.waitsForConfirmation = true
+        let controller = world.controller()
+        let outcome = await controller.toggle()
+        guard case .needsApp(let reason) = outcome else {
+            return XCTFail("\(outcome)")
+        }
+        // In the background: the island's notice.
+        controller.showNeedsApp(reason)
+        let notice = try XCTUnwrap(world.activities.last?.states.first)
+        XCTAssertEqual(notice.phase, .needsApp)
+        XCTAssertEqual(notice.reason, .confirmPending)
+        XCTAssertEqual(String(localized: VoiceCaptureCopy.title(notice)), phase)
+        XCTAssertFalse(VoiceCaptureCopy.showsReasonLine(notice))
+        var withoutReason = notice
+        withoutReason.reason = nil
+        var signIn = notice
+        signIn.reason = .signIn
+        XCTAssertEqual(rendered(VoiceCaptureDetail(state: notice)), rendered(VoiceCaptureDetail(state: withoutReason)))
+        XCTAssertNotNil(rendered(VoiceCaptureDetail(state: signIn)))
+        XCTAssertNotEqual(rendered(VoiceCaptureDetail(state: notice)), rendered(VoiceCaptureDetail(state: signIn)))
+        // A notification for it.
+        let content = VoiceCaptureFailureNotification.content(for: notice)
+        XCTAssertEqual(content.title, phase)
+        XCTAssertEqual(content.body, "")
+        XCTAssertEqual(VoiceCaptureFailureNotification.content(for: signIn).body, signInLine)
+        // In front: the alert's title alone.
+        XCTAssertNil(VoiceCaptureAlert.message(.confirmPending, failure: nil))
+        XCTAssertEqual(VoiceCaptureAlert.message(.signIn, failure: nil), signInLine)
+    }
+
+    private func rendered(_ view: some View) -> Data? {
+        let renderer = ImageRenderer(content: view.frame(width: 320))
+        renderer.scale = 1
+        return renderer.uiImage?.pngData()
+    }
+
+    /// A stored target past avibe.bot's confirmation is withheld, and said
+    /// to be waiting for it; without a stored target nothing waits.
+    func testATargetPastItsConfirmationWaitsForIt() throws {
+        let suite = "VoiceCaptureTarget.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(
+            Data(#"{"accountID":"account-1","instanceID":"instance-1","url":"https://instance-one.example"}"#.utf8),
+            forKey: VoiceCaptureTarget.selectionKey
+        )
+        defaults.set(UUID().uuidString, forKey: VoiceCaptureTarget.storeIdentifierKey)
+
+        defaults.set(Date().timeIntervalSince1970, forKey: MobileSessionConfirmation.key)
+        XCTAssertNotNil(VoiceCaptureTarget.current(defaults: defaults))
+        XCTAssertFalse(VoiceCaptureTarget.waitsForConfirmation(defaults: defaults))
+
+        defaults.set(Date().addingTimeInterval(-15 * 24 * 60 * 60).timeIntervalSince1970, forKey: MobileSessionConfirmation.key)
+        XCTAssertNil(VoiceCaptureTarget.current(defaults: defaults))
+        XCTAssertTrue(VoiceCaptureTarget.waitsForConfirmation(defaults: defaults))
+
+        defaults.removeObject(forKey: MobileSessionConfirmation.key)
+        XCTAssertTrue(VoiceCaptureTarget.waitsForConfirmation(defaults: defaults))
+
+        defaults.removeObject(forKey: VoiceCaptureTarget.selectionKey)
+        XCTAssertFalse(VoiceCaptureTarget.waitsForConfirmation(defaults: defaults))
+    }
+
+    func testTheForegroundAlertCarriesTheStepAndCodeToo() async throws {
         let world = World()
         world.activityRequestFails = true
         let controller = world.controller()
         _ = await controller.toggle()
         XCTAssertEqual(controller.lastFailure?.failedStep, .liveActivity)
-        let message = VoiceCaptureAlert.message(.activityFailed, failure: controller.lastFailure)
+        let message = try XCTUnwrap(VoiceCaptureAlert.message(.activityFailed, failure: controller.lastFailure))
         XCTAssertTrue(message.contains("7"), message)
         XCTAssertNotEqual(message, VoiceCaptureAlert.message(.activityFailed, failure: nil))
     }
@@ -2674,6 +2753,7 @@ private final class World {
     )
     var microphone = true
     var activitiesEnabled = true
+    var waitsForConfirmation = false
     let instance = FakeInstance()
     var audio: FakeAudio?
     var activities: [FakeActivity] = []
@@ -2863,7 +2943,8 @@ private final class World {
                 }
                 self.retryWaits -= 1
                 if !Task.isCancelled { self.retryWoken += 1 }
-            }
+            },
+            waitsForConfirmation: { self.waitsForConfirmation }
         ))
     }
 }
