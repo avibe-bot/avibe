@@ -68,10 +68,20 @@ const box = (left: number, top: number, width: number, height: number): HTMLElem
 const surface = (element: Element | null, overrides: Partial<HoldSurface> = {}): HoldSurface => ({
   holdMs: 200,
   element: () => element,
+  live: () => false,
   recognised: vi.fn(() => true),
   failed: vi.fn(),
   ...overrides,
 });
+
+/** What a touch at a point reaches: the last of the body's children whose box holds it (a
+ *  later child lies over an earlier one), or the page behind them. */
+const topAt = (x: number, y: number): Element => (
+  [...document.body.children].reverse().find((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }) ?? document.body
+);
 
 /** What the tests registered: taken back after each, as a surface is when its element goes. */
 const registered: (() => void)[] = [];
@@ -100,6 +110,7 @@ beforeEach(() => {
   answers = [];
   install();
   viewport('width=device-width, initial-scale=1.0, viewport-fit=cover');
+  document.elementFromPoint = topAt;
 });
 afterEach(async () => {
   // Every surface taken back, and the App told: the next test starts from nothing named.
@@ -157,6 +168,95 @@ describe('the hold surfaces the iOS App follows', () => {
     expect(named().at(-1)).toEqual({ surfaces: [] });
     expect(named()).toHaveLength(3);
     expect(holdFollowed('composer', 100, 420)).toBe(false);
+  });
+
+  // The App acts on a touch before the page sees it: a surface under a sheet would open the
+  // microphone for a tap on the sheet.
+  it('names no surface that something covers, and names it again when it is uncovered', async () => {
+    const composer = box(0, 700, 390, 60);
+    registerHoldSurface('composer', surface(composer));
+    registerHoldSurface('bot', surface(box(150, 780, 90, 60)));
+    await settle();
+    expect((named().at(-1) as { surfaces: { id: string }[] }).surfaces.map(({ id }) => id)).toEqual(['composer', 'bot']);
+
+    // A sheet rises over the composer (put on the page as a child of the body).
+    const sheet = box(0, 300, 390, 470);
+    await settle();
+    expect((named().at(-1) as { surfaces: { id: string }[] }).surfaces.map(({ id }) => id)).toEqual(['bot']);
+    expect(holdFollowed('composer', 100, 720)).toBe(false);
+
+    sheet.remove();
+    await settle();
+    expect((named().at(-1) as { surfaces: { id: string }[] }).surfaces.map(({ id }) => id)).toEqual(['composer', 'bot']);
+
+    // Made inert by a modal elsewhere: no touch reaches it.
+    const inert = document.createElement('div');
+    inert.setAttribute('inert', '');
+    document.body.append(inert);
+    inert.append(composer);
+    inert.getBoundingClientRect = () => new DOMRect(0, 700, 390, 60);
+    await settle();
+    expect((named().at(-1) as { surfaces: { id: string }[] }).surfaces.map(({ id }) => id)).toEqual(['bot']);
+  });
+
+  it('measures once more when what was put on the page has come to rest', async () => {
+    const composer = box(0, 700, 390, 60);
+    registerHoldSurface('composer', surface(composer));
+    await settle();
+    // A sheet that starts below the screen and rises: not over the composer when it is added.
+    let top = 900;
+    const sheet = box(0, 0, 390, 470);
+    sheet.getBoundingClientRect = () => new DOMRect(0, top, 390, 470);
+    await settle();
+    expect(named()).toHaveLength(1);
+    top = 300;
+    await vi.advanceTimersByTimeAsync(400);
+    expect(named().at(-1)).toEqual({ surfaces: [] });
+  });
+
+  it('keeps a surface as the App has it while a press is live there, whatever lies over it', async () => {
+    let live = false;
+    const composer = box(0, 700, 390, 60);
+    registerHoldSurface('composer', surface(composer, { live: () => live }));
+    await settle();
+    // The press's own card covers the box, and the box may no longer be one for a new press.
+    live = true;
+    box(0, 600, 390, 200);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(named()).toHaveLength(1);
+    expect(holdFollowed('composer', 100, 720)).toBe(true);
+    live = false;
+    refreshHoldSurfaces();
+    await settle();
+    expect(named().at(-1)).toEqual({ surfaces: [] });
+  });
+
+  it('measures again after any touch, after a scroll has stopped, and after refusing a hold', async () => {
+    let top = 700;
+    const composer = box(0, 0, 390, 60);
+    composer.getBoundingClientRect = () => new DOMRect(0, top, 390, 60);
+    registerHoldSurface('composer', surface(composer, { recognised: vi.fn(() => false) }));
+    await settle();
+    const tops = () => named().map((params) => (params as { surfaces: { y: number }[] }).surfaces[0]?.y);
+
+    top = 650;
+    window.dispatchEvent(new Event('pointerdown'));
+    await settle();
+    expect(tops()).toEqual([700, 650]);
+
+    // Scrolling with its page: measured where it stops, not at every step.
+    for (top = 640; top > 600; top -= 10) {
+      window.dispatchEvent(new Event('scroll'));
+      await settle();
+    }
+    expect(tops()).toEqual([700, 650]);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(tops()).toEqual([700, 650, 600]);
+
+    top = 500;
+    emit({ phase: 'recognised', take: 'n1', surface: 'composer' });
+    await settle();
+    expect(tops()).toEqual([700, 650, 600, 500]);
   });
 
   it('names nothing in a document that does not cover the viewport: its inset is unknown', async () => {
@@ -245,5 +345,17 @@ describe('the hold surfaces the iOS App follows', () => {
     expect(listeners).toHaveLength(0);
     expect(holdFollowed('composer', 100, 720)).toBe(false);
     unregister();
+  });
+
+  it('goes on hearing the App until it has been told the last surface went', async () => {
+    const unregister = registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
+    await settle();
+    unregister();
+    // A word already on its way is still refused, not left to the App's own wait.
+    emit({ phase: 'recognised', take: 'n1', surface: 'composer' });
+    expect(call).toHaveBeenCalledWith('voice.holdReject', { take: 'n1' });
+    await settle();
+    expect(named().at(-1)).toEqual({ surfaces: [] });
+    expect(listeners).toHaveLength(0);
   });
 });

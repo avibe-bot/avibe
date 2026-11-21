@@ -6,10 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NATIVE_HOLD_GONE } from '../../lib/nativeVoiceCapture';
 import { NATIVE_HOLD_GRACE_MS } from '../../lib/nativeVoiceHold';
-import { answerVoiceConsent, closeVoiceConsent, voiceConsentAsking } from '../../lib/voiceConsent';
+import { answerVoiceConsent, closeVoiceConsent, noteVoiceStatus, voiceConsentAsking } from '../../lib/voiceConsent';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 import { MobileBotCenter } from '../MobileChrome';
-import { useHoldToTalk, type HoldToTalkOptions } from './useHoldToTalk';
+import { MOUSE_HOLD_GESTURE, useHoldToTalk, type HoldToTalkOptions } from './useHoldToTalk';
 
 // The hold's whole path (ui/design: mobile/main-bot-voice/*) against a stand-in for the
 // dictation pipeline: what a press becomes, what is sent, and what is kept when a take
@@ -1175,6 +1175,8 @@ describe('a hold the iOS App recognises', () => {
     native.permission.mockResolvedValue('granted');
     const el = await mount(options);
     el.getBoundingClientRect = () => new DOMRect(0, 470, 300, 60);
+    // Nothing lies over the button: a touch in its box reaches it.
+    document.elementFromPoint = () => el;
     // The microphone's answer, a frame, and the App's answer to the list.
     await flush();
     await elapse(20);
@@ -1218,6 +1220,7 @@ describe('a hold the iOS App recognises', () => {
     native.permission.mockResolvedValue('prompt');
     const asking = await mount();
     asking.getBoundingClientRect = () => new DOMRect(0, 470, 300, 60);
+    document.elementFromPoint = () => asking;
     await flush();
     await elapse(20);
     expect(native.surfaces.mock.calls.every(([surfaces]) => surfaces.length === 0)).toBe(true);
@@ -1306,6 +1309,60 @@ describe('a hold the iOS App recognises', () => {
     await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
     expect(pipeline.takes).toHaveLength(1);
     expect(native.reject).toHaveBeenCalledWith('n1');
+  });
+
+  it('takes the App\'s take while its own checks are still being read: nothing of its own has started', async () => {
+    const el = await mountFollowed();
+    // A busy page: its timer runs before the App's word arrives, and its microphone read is slow.
+    let answer!: (state: PermissionState) => void;
+    native.permission.mockReturnValue(new Promise<PermissionState>((resolve) => { answer = resolve; }));
+    down(el);
+    await elapse(200 + NATIVE_HOLD_GRACE_MS);
+    await flush();
+    expect(pipeline.takes).toHaveLength(0);
+
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toEqual({ adopt: 'n1' });
+    expect(native.reject).not.toHaveBeenCalled();
+
+    // The read's answer starts nothing more.
+    await act(async () => answer('granted'));
+    await flush();
+    await elapse(0);
+    expect(pipeline.takes).toHaveLength(1);
+    expect(hold.phase).toBe('listening');
+  });
+
+  it('does not take the App\'s word for a mouse press, which holds longer than a finger', async () => {
+    const el = await mountFollowed({ gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}) });
+    down(el, 500, 'mouse');
+    await elapse(200);
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    expect(pipeline.takes).toHaveLength(0);
+    expect(native.reject).toHaveBeenCalledWith('n1');
+    expect(hold.phase).toBe('pressing');
+  });
+
+  it('refuses the App\'s take when voice may no longer record: consent taken back since the surface was named', async () => {
+    const el = await mountFollowed();
+    down(el);
+    await elapse(150);
+    act(() => { noteVoiceStatus({ available: true, consent: 'declined' }); });
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    expect(pipeline.takes).toHaveLength(0);
+    expect(native.reject).toHaveBeenCalledWith('n1');
+  });
+
+  it('has the App drop a take the surface went away before the page had', async () => {
+    pipeline.startMs = 300;
+    const el = await mountFollowed();
+    down(el);
+    await elapse(200);
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    cleanup();
+    expect(native.reject).toHaveBeenCalledWith('n1');
+    expect(pipeline.takes[0].abort).toHaveBeenCalled();
   });
 
   it('does not wait for the App on a press it does not follow', async () => {

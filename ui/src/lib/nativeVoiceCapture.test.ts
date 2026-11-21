@@ -174,6 +174,22 @@ describe('NativePcmCapture', () => {
     );
   });
 
+  it('hands on what was recorded before the take was taken 100 ms at a time, in order', async () => {
+    const on = handlers();
+    const capture = new NativePcmCapture(on, 5_000, undefined, 'n0123456789abcdef');
+    await capture.start();
+    // 1.2 s since touch-down, in the one event the App sends first: live recognition takes
+    // frames, not one of any size.
+    const since = Array.from({ length: 19_200 }, (_, index) => index % 30_000);
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', pcm: pcm(since) });
+    expect(on.onSamples).toHaveBeenCalledTimes(12);
+    const handed = on.onSamples.mock.calls.flatMap(([samples]) => Array.from(samples as Int16Array));
+    expect(on.onSamples.mock.calls.every(([samples]) => (samples as Int16Array).length === 1_600)).toBe(true);
+    expect(handed).toEqual(since);
+    capture.stop();
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', ended: true });
+  });
+
   it('says so when the App no longer has the take it was to take', async () => {
     const trace = new VoiceCaptureTrace('hold');
     const on = handlers();
