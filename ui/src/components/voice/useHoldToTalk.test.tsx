@@ -5,7 +5,7 @@ import { useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NATIVE_HOLD_GONE } from '../../lib/nativeVoiceCapture';
-import { NATIVE_HOLD_GRACE_MS, resetHoldSurfacesForTest } from '../../lib/nativeVoiceHold';
+import { NATIVE_HOLD_GRACE_MS } from '../../lib/nativeVoiceHold';
 import { answerVoiceConsent, closeVoiceConsent, voiceConsentAsking } from '../../lib/voiceConsent';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 import { MobileBotCenter } from '../MobileChrome';
@@ -226,7 +226,6 @@ beforeEach(() => {
   native.surfaces.mockReset().mockResolvedValue('ok');
   native.reject.mockReset().mockResolvedValue(undefined);
   native.holdListeners = [];
-  resetHoldSurfacesForTest();
   Object.defineProperty(navigator, 'permissions', {
     configurable: true,
     value: { query: vi.fn(async () => ({ state: pipeline.permission })) },
@@ -236,9 +235,11 @@ beforeEach(() => {
     value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [] })) },
   });
 });
-afterEach(() => {
+afterEach(async () => {
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   cleanup();
+  // A frame, and the App's answer: an unmounted surface is taken back from the App (lib/nativeVoiceHold).
+  await vi.advanceTimersByTimeAsync(20);
   vi.useRealTimers();
 });
 
@@ -1199,19 +1200,19 @@ describe('a hold the iOS App recognises', () => {
     await mountFollowed();
     expect(native.surfaces.mock.calls.every(([surfaces]) => surfaces.length === 0)).toBe(true);
     cleanup();
+    await elapse(20);
 
     pipeline.asr.consent = 'granted';
     native.surfaces.mockClear();
-    resetHoldSurfacesForTest();
     const el = await mountFollowed({ canHold: () => false });
     expect(native.surfaces.mock.calls.every(([surfaces]) => surfaces.length === 0)).toBe(true);
     // And the press is the system's, as before.
     await holdFor(el);
     expect(pipeline.takes).toHaveLength(0);
     cleanup();
+    await elapse(20);
 
     native.surfaces.mockClear();
-    resetHoldSurfacesForTest();
     native.hold.mockReturnValue(true);
     native.capture.mockReturnValue(true);
     native.permission.mockResolvedValue('prompt');

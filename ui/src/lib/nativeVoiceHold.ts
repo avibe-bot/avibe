@@ -164,14 +164,3 @@ export const holdFollowed = (id: string, clientX: number, clientY: number): bool
   const point = toWebView(clientX, clientY, 0, 0);
   return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
 };
-
-/** For tests: forgets every surface and what the App was told. */
-export const resetHoldSurfacesForTest = (): void => {
-  surfaces.clear();
-  followed = new Map();
-  sent = NOTHING;
-  request = 0;
-  scheduled = false;
-  unlisten?.();
-  unlisten = null;
-};

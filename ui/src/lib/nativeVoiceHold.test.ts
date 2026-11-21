@@ -5,8 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   holdFollowed,
   refreshHoldSurfaces,
-  registerHoldSurface,
-  resetHoldSurfacesForTest,
+  registerHoldSurface as registerSurface,
   type HoldSurface,
 } from './nativeVoiceHold';
 
@@ -74,6 +73,18 @@ const surface = (element: Element | null, overrides: Partial<HoldSurface> = {}):
   ...overrides,
 });
 
+/** What the tests registered: taken back after each, as a surface is when its element goes. */
+const registered: (() => void)[] = [];
+const registerHoldSurface = (id: string, held: HoldSurface): (() => void) => {
+  const unregister = registerSurface(id, held);
+  registered.push(unregister);
+  return unregister;
+};
+const unregisterAll = async () => {
+  for (const unregister of registered.splice(0)) unregister();
+  await settle();
+};
+
 /** One frame, and the App's answer. */
 const settle = async () => {
   await vi.advanceTimersByTimeAsync(20);
@@ -89,10 +100,10 @@ beforeEach(() => {
   answers = [];
   install();
   viewport('width=device-width, initial-scale=1.0, viewport-fit=cover');
-  resetHoldSurfacesForTest();
 });
-afterEach(() => {
-  resetHoldSurfacesForTest();
+afterEach(async () => {
+  // Every surface taken back, and the App told: the next test starts from nothing named.
+  await unregisterAll();
   document.body.replaceChildren();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -164,7 +175,7 @@ describe('the hold surfaces the iOS App follows', () => {
 
   it('does not count on a press being followed unless the App said so', async () => {
     for (const refusal of ['consent', 'unwatched', 'invalid']) {
-      resetHoldSurfacesForTest();
+      await unregisterAll();
       answers = [refusal];
       registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
       await settle();
