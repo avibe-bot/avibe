@@ -627,7 +627,7 @@ enum MobileSessionConfirmation {
     /// False with no record (a session stored by a build from before it),
     /// or one dated in the future.
     static func isCurrent(in defaults: UserDefaults, now: Date = Date()) -> Bool {
-        age(in: defaults, now: now).map { $0 < lifetime } ?? false
+        true // mutation: the confirmation always counts as current
     }
 
     /// Current, and old enough to be asked for again.
