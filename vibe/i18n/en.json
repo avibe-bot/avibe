@@ -1246,6 +1246,9 @@
     }
   },
   "remote_access": {
+    "address_retired": {
+      "line": "This Avibe has a new address. People who can access it can open it after signing in at avibe.bot."
+    },
     "oauth_error": {
       "sign_in_again": "Sign in again",
       "diagnostics_summary": "Technical details",

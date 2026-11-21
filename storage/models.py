@@ -1475,6 +1475,32 @@ remote_device_push_links = Table(
     Index("ix_rdpl_session", "session_id"),
 )
 
+# Devices that held data under a retired instance address, snapshotted at the
+# switch. "Cleared" is set only by a receipt the clearing browser posts back
+# (docs/plans/instance-address-change.md F1-F4).
+instance_address_clearings = Table(
+    "instance_address_clearings", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("instance_id", String, nullable=False),
+    Column("hostname", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("display_name", String),
+    Column("email", String),
+    Column("last_active_at", Integer),
+    Column("push_only", Integer, nullable=False),
+    Column("retired_at", Integer, nullable=False),
+    Column("cleared_at", Integer),
+    UniqueConstraint("instance_id", "hostname", "device_id", name="uq_instance_address_clearings_device"),
+)
+
+instance_address_clearing_receipts = Table(
+    "instance_address_clearing_receipts", metadata,
+    Column("receipt_hash", String, primary_key=True),
+    Column("clearing_id", Integer, nullable=False),
+    Index("ix_instance_address_clearing_receipts_clearing", "clearing_id"),
+)
+
 remote_device_deadlines = Table(
     "remote_device_deadlines", metadata,
     Column("key", String, primary_key=True),

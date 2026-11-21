@@ -105,7 +105,7 @@ from vibe.service_logging import (
     configure_service_logging,
     shutdown_service_logging,
 )
-from vibe import ui_asset_archive
+from vibe import instance_address, instance_address_responses, ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
 if TYPE_CHECKING:
@@ -1566,14 +1566,7 @@ def _resolved_remote_session_payload(config: V2Config) -> dict[str, Any] | None:
 
 
 def _normalized_host(value: str | None) -> str:
-    raw_host = (value or "").lower().strip()
-    if raw_host.startswith("[") and "]" in raw_host:
-        host = raw_host[1 : raw_host.index("]")]
-    elif raw_host.count(":") > 1:
-        host = raw_host
-    else:
-        host = raw_host.split(":", 1)[0]
-    return host.rstrip(".")
+    return instance_address.normalize_host(value)
 
 
 def _is_remote_access_request(config: V2Config) -> bool:
@@ -3350,6 +3343,212 @@ def _is_valid_host_header(value: str) -> bool:
 
     port = port.lstrip("0")
     return len(port) <= 5 and int(port or "0") <= 65535
+
+
+_address_connections: dict[str, set[Any]] = {}
+_address_connections_loop: Any = None
+
+
+def _close_address_connections(hosts: set[str]) -> None:
+    """End every request, stream and socket still open on these Hosts (any thread)."""
+
+    loop = _address_connections_loop
+    if loop is None:
+        return
+
+    def cancel() -> None:
+        for host in hosts:
+            for task in list(_address_connections.get(host, ())):
+                task.cancel()
+
+    loop.call_soon_threadsafe(cancel)
+
+
+def _wake_address_streams() -> None:
+    from vibe.sse_broker import broker
+
+    broker.publish(instance_address.ADDRESS_CHANGED_EVENT, {})
+
+
+def _start_instance_address() -> None:
+    try:
+        instance_address.start(wake_pages=_wake_address_streams, close_connections=_close_address_connections)
+    except Exception:
+        logger.warning("Failed to start the instance address worker", exc_info=True)
+
+
+class _InstanceAddressRoleMiddleware:
+    """Give every request's Host its role before anything else sees the request.
+
+    ``docs/plans/instance-address-change.md``: content only on the managed name
+    this computer recorded as active; cleaning only on a former name that a
+    fresh state from avibe.bot lists; one empty answer for every other managed
+    name, on every path. It sits outside routing, authentication and the paths
+    that skip host validation, and inside the invalid-Host and direct-ingress
+    guards (the direct listener already answers only for the active name).
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        global _address_connections_loop
+
+        if scope["type"] not in {"http", "websocket"} or scope.get(DIRECT_INGRESS_SCOPE_KEY) is not None:
+            await self.app(scope, receive, send)
+            return
+        host = forwarded = ""
+        for key, value in scope.get("headers") or ():
+            if key == b"host" and not host:
+                host = value.decode("latin-1")
+            elif key == b"x-forwarded-host" and not forwarded:
+                forwarded = value.decode("latin-1").split(",")[0].strip()
+        normalized = instance_address.normalize_host(host)
+        if not instance_address.is_managed_name(normalized) and not instance_address.is_managed_name(
+            instance_address.normalize_host(forwarded)
+        ):
+            await self.app(scope, receive, send)
+            return
+        decision = await asyncio.to_thread(instance_address.decide, host, forwarded)
+        if decision == "pass":
+            if _address_connections_loop is None:
+                _address_connections_loop = asyncio.get_running_loop()
+            task = asyncio.current_task()
+            open_here = _address_connections.setdefault(normalized, set())
+            open_here.add(task)
+            try:
+                await self.app(scope, receive, send)
+            except asyncio.CancelledError:
+                # The address moved while this was open: nothing more is sent on the old Host.
+                if task is None or not task.cancelling() or instance_address.decide(host, forwarded) == "pass":
+                    raise
+                task.uncancel()
+                if scope["type"] == "websocket":
+                    try:
+                        await send({"type": "websocket.close", "code": 1001})
+                    except Exception:
+                        pass
+            finally:
+                open_here.discard(task)
+            return
+        if decision == "cleanup" and await asyncio.to_thread(instance_address.confirm_cleanup, host):
+            if await self._clean(scope, receive, send, host):
+                return
+        await self._refuse(scope, send)
+
+    @staticmethod
+    async def _refuse(scope: Any, send: Any) -> None:
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await send({
+            "type": "http.response.start",
+            "status": 503,
+            "headers": [(b"content-type", b"application/json"), (b"cache-control", b"no-store")],
+        })
+        await send({"type": "http.response.body", "body": b"" if scope["method"] == "HEAD" else instance_address_responses.REFUSAL_BODY})
+
+    async def _clean(self, scope: Any, receive: Any, send: Any, host: str) -> bool:
+        """Answer a cleanup Host. ``False`` when the permission lapsed before the headers."""
+
+        if scope["type"] == "websocket":
+            if not instance_address.begin_cleanup_response(host):
+                return False
+            try:
+                await send({"type": "websocket.close", "code": 1008})
+            finally:
+                instance_address.end_cleanup_response(host)
+            return True
+        from vibe.ui_mobile_routes import DEVICE_PREFIX
+
+        path = scope.get("path") or "/"
+        method = scope["method"]
+        raw_path = (scope.get("raw_path") or path.encode("utf-8", "ignore")).decode("latin-1")
+        request_headers = {key: value.decode("latin-1") for key, value in scope.get("headers") or ()}
+        cookie_header = "; ".join(
+            value.decode("latin-1") for key, value in scope.get("headers") or () if key == b"cookie"
+        )
+        status, content_type, body = 410, "text/html; charset=utf-8", b""
+        if path == DEVICE_PREFIX or path.startswith(f"{DEVICE_PREFIX}/"):
+            # The phone stops and clears locally on 401. Its body is never read.
+            if not instance_address.begin_cleanup_response(host):
+                return False
+            try:
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"application/json"), (b"cache-control", b"no-store")],
+                })
+                await send({"type": "http.response.body", "body": instance_address_responses.DEVICE_REFUSAL_BODY})
+            finally:
+                instance_address.end_cleanup_response(host)
+            return True
+        if method == "POST" and path == instance_address.CLEARED_REPORT_PATH:
+            receipt = await _bounded_request_text(receive, 256)
+            if receipt:
+                await asyncio.to_thread(instance_address.record_cleared, instance_address.normalize_host(host), receipt.strip())
+            status, content_type = 204, None
+        elif method in {"GET", "HEAD"} and path == "/push-sw.js":
+            status, content_type = 200, "text/javascript; charset=utf-8"
+            body = instance_address_responses.REPLACEMENT_WORKER.encode("utf-8")
+        else:
+            from http.cookies import SimpleCookie
+
+            session_cookie = None
+            try:
+                jar = SimpleCookie()
+                jar.load(cookie_header)
+                morsel = jar.get(remote_access_session_cookie_name())
+                session_cookie = morsel.value if morsel is not None else None
+            except Exception:
+                session_cookie = None
+            receipt = await asyncio.to_thread(
+                instance_address.receipt_for_cleanup_request, instance_address.normalize_host(host), session_cookie
+            ) if session_cookie else None
+            binding = await asyncio.to_thread(instance_address.current_binding)
+            body = instance_address_responses.cleaning_document(
+                language=instance_address_responses.response_language(request_headers.get(b"accept-language", "")),
+                control_plane_origin=binding.backend_origin if binding is not None else "",
+                receipt=receipt,
+            )
+        headers = instance_address_responses.cleanup_headers(raw_path, cookie_header, content_type=content_type)
+        # The role is checked again, under its lock, immediately before the headers.
+        if not instance_address.begin_cleanup_response(host):
+            return False
+        try:
+            await send({"type": "http.response.start", "status": status, "headers": headers})
+            await send({"type": "http.response.body", "body": b"" if method == "HEAD" or status == 204 else body})
+        finally:
+            instance_address.end_cleanup_response(host)
+        return True
+
+
+def remote_access_session_cookie_name() -> str:
+    from vibe import remote_access
+
+    return remote_access.SESSION_COOKIE_NAME
+
+
+async def _bounded_request_text(receive: Any, limit: int) -> str:
+    """Read at most ``limit`` bytes of a request body; a longer body yields nothing."""
+
+    received = bytearray()
+    while True:
+        message = await receive()
+        if message["type"] != "http.request":
+            return ""
+        received.extend(message.get("body") or b"")
+        if len(received) > limit:
+            return ""
+        if not message.get("more_body"):
+            break
+    try:
+        return received.decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+
+
+app.add_middleware(_InstanceAddressRoleMiddleware)
 
 
 class _RejectInvalidHostMiddleware:
@@ -8313,6 +8512,7 @@ def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
     from vibe import remote_access
 
     remote_access.start_runtime_monitoring(config)
+    _start_instance_address()
 
 
 @app.route("/api/control", methods=["POST"])
@@ -9269,6 +9469,67 @@ def device_sign_out(device_id=None):
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
+
+
+def _instance_address_actor() -> tuple[str, ...] | None:
+    """Who may change this Avibe's address: its current Owner, or this computer itself.
+
+    The Owner by current authorization, not the role at sign-in; or a direct
+    loopback connection. Never the LAN setup host, a forwarding proxy or the
+    Docker probe (docs/plans/instance-address-change.md A1).
+    """
+
+    viewer = _device_viewer()
+    if viewer is None or not viewer[2]:
+        return None
+    return ("remote", viewer[3]) if viewer[3] else ("loopback",)
+
+
+def _instance_address_response(payload: dict, status: int = 200):
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
+def _instance_address_error(error: instance_address.AddressError):
+    return _instance_address_response({"ok": False, "error": error.code, **error.extra}, error.status)
+
+
+@app.route("/api/instance-address", methods=["GET"])
+def instance_address_get():
+    if _instance_address_actor() is None:
+        return _instance_address_response({"ok": False, "error": "owner_required"}, 403)
+    return _instance_address_response(instance_address.describe())
+
+
+@app.route("/api/instance-address/preview", methods=["POST"])
+def instance_address_preview():
+    actor = _instance_address_actor()
+    if actor is None:
+        return _instance_address_response({"ok": False, "error": "owner_required"}, 403)
+    payload = request.json
+    try:
+        return _instance_address_response(
+            instance_address.preview(payload.get("prefix") if isinstance(payload, dict) else None, actor)
+        )
+    except instance_address.AddressError as error:
+        return _instance_address_error(error)
+
+
+@app.route("/api/instance-address/change", methods=["POST"])
+def instance_address_change():
+    actor = _instance_address_actor()
+    if actor is None:
+        return _instance_address_response({"ok": False, "error": "owner_required"}, 403)
+    _start_instance_address()
+    payload = request.json
+    try:
+        status, body = instance_address.change(
+            payload.get("confirmation_id") if isinstance(payload, dict) else None, actor
+        )
+    except instance_address.AddressError as error:
+        return _instance_address_error(error)
+    return _instance_address_response(body, status)
 
 
 @app.route("/api/session", methods=["GET"])
@@ -15233,7 +15494,7 @@ def _workbench_event_heartbeat_interval_ms() -> int:
     return int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
 
 
-def _workbench_event_connected_frame(sub_id: int, *, via: str = "other") -> str:
+def _workbench_event_connected_frame(sub_id: int, *, via: str = "other", address_receipt: str | None = None) -> str:
     """The handshake: this subscription's id, and the cadence it is owed.
 
     Carrying the cadence here is what lets a client hold a brand-new stream to a
@@ -15252,7 +15513,25 @@ def _workbench_event_connected_frame(sub_id: int, *, via: str = "other") -> str:
     that; it holds for this stream alone and is reported again on reconnect.
     """
     interval_ms = _workbench_event_heartbeat_interval_ms()
-    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms},"via":"{via}"}}\n\n'
+    data: dict[str, Any] = {"sub_id": sub_id, "interval_ms": interval_ms, "via": via}
+    if address_receipt:
+        # What this session posts back after clearing a retired address; held in
+        # page memory so a tab that sleeps through the change can still report.
+        data["address_receipt"] = address_receipt
+    return f"event: connected\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+def _address_retired_frame(destination: str, receipt: str | None) -> str:
+    """The last frame of a stream whose Host stopped being this Avibe's address.
+
+    Produced by the stream itself for its own connection, never published: only
+    a page that held an authorized session at the switch learns the new origin.
+    """
+
+    data: dict[str, Any] = {"moved_to": destination}
+    if receipt:
+        data["receipt"] = receipt
+    return f"event: {instance_address.ADDRESS_RETIRED_EVENT}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
 
 def _workbench_event_heartbeat_frame() -> str:
@@ -15519,11 +15798,22 @@ async def workbench_events():
     remote_config = _load_remote_access_config() if remote_session_payload is not None else None
     remote_session_cookie = None
     remote_request_host = None
+    stream_host = _normalized_host(request.host)
+    address_receipt = None
     if remote_session_payload is not None:
         from vibe import remote_access
 
         remote_session_cookie = request.cookies.get(remote_access.SESSION_COOKIE_NAME)
         remote_request_host = _effective_normalized_host()
+        browser_session_id = (remote_session_identity or {}).get("browser_session_id")
+        if isinstance(browser_session_id, str) and instance_address.is_managed_name(stream_host):
+            address_receipt = await asyncio.to_thread(instance_address.receipt_for_session, browser_session_id)
+
+    def address_retired_frame() -> str | None:
+        # Checked before the session: at an address change the page must be told
+        # where this Avibe went before it is told that it was signed out.
+        destination = instance_address.retired_destination(stream_host)
+        return _address_retired_frame(destination, address_receipt) if destination else None
 
     async def authorization_state() -> str:
         if remote_session_payload is None:
@@ -15549,6 +15839,10 @@ async def workbench_events():
         # would then become the baseline and never be reported.
         last_dropped = broker.dropped_count(sub_id)
         try:
+            retired = address_retired_frame()
+            if retired is not None:
+                yield retired
+                return
             state = await authorization_state()
             if state != "current":
                 yield _remote_authorization_sse_frame(state)
@@ -15561,7 +15855,7 @@ async def workbench_events():
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
-            yield _workbench_event_connected_frame(sub_id, via=stream_via)
+            yield _workbench_event_connected_frame(sub_id, via=stream_via, address_receipt=address_receipt)
             payload = json.dumps(
                 {
                     "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,
@@ -15573,6 +15867,10 @@ async def workbench_events():
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
             last_heartbeat_at = time.monotonic()
             while True:
+                retired = address_retired_frame()
+                if retired is not None:
+                    yield retired
+                    return
                 state = await authorization_state()
                 if state != "current":
                     yield _remote_authorization_sse_frame(state)
@@ -15616,6 +15914,10 @@ async def workbench_events():
                         timeout=max(0.25, WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S - since_heartbeat),
                     )
                     if event_type == SSE_BROKER_CLOSED_EVENT:
+                        return
+                    retired = address_retired_frame()
+                    if retired is not None:
+                        yield retired
                         return
                     state = await authorization_state()
                     if state != "current":
@@ -20420,6 +20722,7 @@ def run_ui_server(host: str, port: int) -> None:
                 remote_access.start_runtime_monitoring(config)
             except Exception:
                 logger.warning("Failed to start remote access status heartbeat", exc_info=True)
+            _start_instance_address()
         elif config_load_error is None:
             # A fresh UI can precede its first config file. Link/Desktop may publish
             # from another process; policy workers must notice before any UI restart.
