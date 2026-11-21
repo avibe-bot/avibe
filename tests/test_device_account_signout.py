@@ -9,7 +9,7 @@ from sqlalchemy import select
 from storage import device_registry
 from storage.db import get_cached_sqlite_engine
 from storage.device_account_signout import recent
-from storage.models import metadata
+from storage.importer import ensure_sqlite_state
 from storage.models import remote_account_revocations as jobs, remote_account_refs as refs, remote_device_sessions as sessions
 from tests.test_remote_access_vibe_cloud import _config
 from vibe import account_session_revoke as cloud, account_signout_worker as worker, remote_access
@@ -20,7 +20,7 @@ B = 'asr1_' + 'B' * 43
 
 @pytest.fixture
 def paired(monkeypatch):
-    metadata.create_all(get_cached_sqlite_engine())
+    ensure_sqlite_state()
     cfg = _config()
     cfg.remote_access.vibe_cloud.backend_url = 'https://issuer.invalid'
     cfg.remote_access.vibe_cloud.instance_secret = 'test-device-secret'
@@ -71,7 +71,7 @@ def test_local_commit_then_exact_request_and_durable_result(paired, monkeypatch,
     target = enroll('A', A)
     enroll('B', B)
     calls = fake_issuer(monkeypatch, code)
-    ids, count, [result] = stop(None)
+    ids, count, [result], _ = stop(None)
     assert ids == ['A'] and count == 1 and result['device_id'] == target and calls == []
     assert result['account_results'] == [{'status': 'pending', 'reason': 'queued', 'count': 1}]
     assert read() == [result]
@@ -102,7 +102,7 @@ def test_bulk_never_submits_a_possible_keeper(paired, monkeypatch, keeper, targe
     cfg, _, enroll, stop, _ = paired
     enroll('B', keeper)
     enroll('A', target)
-    _, count, [result] = stop(None)
+    _, count, [result], _ = stop(None)
     assert count == 1 and result['account_results'] == [{'status': 'not_applicable', 'reason': reason, 'count': 1}]
     calls = fake_issuer(monkeypatch, 204)
     assert not worker.run_once(lambda: cfg) and not calls
