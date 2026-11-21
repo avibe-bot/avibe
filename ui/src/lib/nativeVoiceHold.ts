@@ -56,8 +56,9 @@ let unlisten: (() => void) | null = null;
 
 /** How long after a scroll, or after something was put over the page or taken off it (a sheet
  *  rising, a dialog closing, the slide to another page), the surfaces are measured once more:
- *  where they came to rest. */
-const SETTLE_MS = 300;
+ *  where they came to rest. Longer than the longest of those motions, the 260 ms slide to
+ *  another page (`--motion-nav-push-duration`), with room to spare. */
+const SETTLE_MS = 400;
 
 /** The WebView's own points for a box of the layout viewport: the App compares them with the
  *  touch's place in the WebView. Only a `viewport-fit=cover` document starts at the WebView's
@@ -97,9 +98,12 @@ const reachable = (element: Element, box: DOMRect): boolean => {
 };
 
 /** The element's box, and those of its children that stick out of it (the main Bot's face is
- *  lifted above its button): a touch on any of them is the element's. */
+ *  lifted above its button): a touch on any of them is the element's. Not where the element
+ *  clips what leaves its box (a scrolling input): nothing of a child is to be touched there. */
 const boxesOf = (element: Element, box: DOMRect): DOMRect[] => {
   const boxes = [box];
+  const { overflowX, overflowY } = getComputedStyle(element);
+  if (overflowX !== 'visible' || overflowY !== 'visible') return boxes;
   for (const child of element.children) {
     if (boxes.length > MAX_PARTS) break;
     const part = child.getBoundingClientRect();
