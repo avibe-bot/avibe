@@ -312,6 +312,34 @@ def test_an_attempt_avibe_bot_refused_for_good_is_said_once_and_is_not_called_un
     assert len(bound_terminal.prompts) == 1 and len(sends) == 1 and _instance() == "inst_A"
 
 
+@pytest.mark.parametrize("identity", ["missing", "replaced"])
+def test_a_saved_binding_this_computer_can_no_longer_finish_still_reaches_the_reset_question(
+        bound_terminal, monkeypatch, capsys, identity):
+    from tests.test_pairing_recovery import _fail_config_publication_once, _response
+
+    # avibe.bot accepted, the answer was sealed, and saving it on this computer failed.
+    _fail_config_publication_once(monkeypatch)
+    sends = _unfinished_attempt(monkeypatch, lambda _n: {**_response(), "binding_disposition": "existing"})
+    assert remote_access._read_pending_pairing_record()[0]["phase"] == "redeemed"
+    local._identity_path().unlink()
+    if identity == "replaced":
+        local.ensure_installation_id()
+
+    with monkeypatch.context() as patch:
+        _no_link(patch)
+        assert _walk(bound_terminal, [""]) == 0
+    out = capsys.readouterr().out
+    assert "Binding: an earlier attempt is unfinished" in out
+    assert "cannot be used on this computer" in out and "will not guess whether it completed" in out
+    # Not a dead end: the one way out is offered, with everything a reset says, default no.
+    assert out.index("Binding as a new computer clears that record.") < out.index("You lose:") < out.index("Type yes")
+    assert len(sends) == 1 and _instance() == "inst_A" and remote_access._pending_pairing_path().exists()
+
+    assert _walk(bound_terminal, ["yes", "y"]) == 0
+    assert "Bound. This computer's Avibe is at" in capsys.readouterr().out
+    assert not remote_access._pending_pairing_path().exists() and bound_terminal.peer.decisions == ["owner-id"]
+
+
 def test_completing_an_earlier_binding_is_its_own_question_never_the_reset_question(bound_terminal, monkeypatch, capsys):
     from tests.test_pairing_recovery import _response
 
