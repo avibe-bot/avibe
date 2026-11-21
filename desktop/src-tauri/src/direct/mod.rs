@@ -14,8 +14,16 @@ mod offer;
 #[path = "../../tests/direct/offer.rs"]
 mod offer_tests;
 mod public;
+pub mod rendezvous;
+#[cfg(test)]
+#[path = "../../tests/direct/rendezvous.rs"]
+mod rendezvous_tests;
 mod selection;
 mod transport;
+#[cfg(target_os = "macos")]
+pub mod webview_macos;
+#[cfg(windows)]
+pub mod webview_windows;
 
 use connect::Authority;
 use futures_util::StreamExt;
