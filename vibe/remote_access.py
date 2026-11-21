@@ -2241,17 +2241,26 @@ def _device_json_request(
 
 
 def sync_authorization_revision_once(
-    config: V2Config | None = None,
+    config: V2Config | None = None, *, monitor=None,
 ) -> dict[str, Any]:
     """Refresh the current paired-instance authorization watermark."""
 
     if not _AUTHORIZATION_REVISION_SYNC_LOCK.acquire(blocking=False):
         return {"ok": False, "error": "authorization_revision_sync_in_progress"}
+    observation = "unknown"
+    observe = False
     try:
         config = config or V2Config.load()
+        if monitor is not None and not monitor.due(config, time.monotonic()):
+            return {"ok": False, "error": "authorization_revision_deferred"}
         if not _authorization_revision_sync_configured(config):
             return {"ok": False, "error": "authorization_revision_sync_not_configured"}
-        result = _device_json_request(config, "GET", "authorization-revision")
+        if monitor is None:
+            result = _device_json_request(config, "GET", "authorization-revision")
+        else:
+            from vibe.binding_health import read_revision
+            observe = True
+            result = read_revision(config)
         instance_address.note_generation_hint(result.get("hostname_generation"))
         revision = _replace_authorization_revision(
             config,
@@ -2267,14 +2276,19 @@ def sync_authorization_revision_once(
             )
         except Exception:
             logger.warning("Authorization revision context update failed", exc_info=True)
+        observation = "accepted"
         return {"ok": True, "authorization_revision": revision}
     except BackendRequestError as exc:
         error = exc.payload.get("error")
+        if exc.status == 401 and exc.payload == {"error": "invalid_device_secret"}:
+            observation = "rejected"
         return {
             "ok": False,
             "error": error if isinstance(error, str) and error else "authorization_revision_sync_failed",
         }
     except Exception as exc:
+        if monitor is not None and config is None:
+            monitor.reset()
         error = str(exc)
         if error not in {
             "authorization_revision_regressed",
@@ -2283,7 +2297,13 @@ def sync_authorization_revision_once(
             error = "authorization_revision_sync_failed"
         return {"ok": False, "error": error}
     finally:
-        _AUTHORIZATION_REVISION_SYNC_LOCK.release()
+        try:
+            if observe:
+                monitor.observe(config, observation, time.monotonic())
+        except Exception:
+            logger.warning("Binding health observation could not be recorded")
+        finally:
+            _AUTHORIZATION_REVISION_SYNC_LOCK.release()
 
 
 def start_authorization_revision_polling(
@@ -2298,9 +2318,12 @@ def start_authorization_revision_polling(
     global _AUTHORIZATION_REVISION_POLL_STARTED
 
     def loop() -> None:
+        from vibe.binding_health import RevisionMonitor
+        monitor = RevisionMonitor()
         while True:
-            result = sync_authorization_revision_once()
+            result = sync_authorization_revision_once(monitor=monitor)
             if not result.get("ok") and result.get("error") not in {
+                "authorization_revision_deferred",
                 "authorization_revision_sync_not_configured",
                 "authorization_revision_sync_in_progress",
             }:
@@ -3427,6 +3450,9 @@ def _start_candidate_connector(
     binary: str,
     requested_protocol: str,
 ) -> tuple[int, str]:
+    from vibe.binding_health import rejected_at
+    if rejected_at(config) is not None:
+        raise RuntimeError("binding_rejected")
     metrics_url = _allocate_metrics_url()
     candidate_pid = runtime.spawn_background(
         _connector_command(binary, metrics_url),
@@ -3471,6 +3497,9 @@ def _promote_candidate_connector(
     runtime_signature: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     with _connector_lifecycle(), _CONNECTOR_LOCK:
+        from vibe.binding_health import rejected_at
+        if rejected_at(V2Config.load()) is not None:
+            raise RuntimeError("binding_rejected")
         state = _read_state() or {}
         active = state.get("active") if isinstance(state.get("active"), dict) else {"pid": _read_pid()}
         candidate = state.get("candidate")
@@ -4016,6 +4045,9 @@ def _exited_connector_requested(config: V2Config | None) -> bool:
     cloud = config.remote_access.vibe_cloud
     # A path that is not a regular file (one a stop could not remove) is no request.
     if not cloud.enabled or not cloud.tunnel_token or not _connector_requested_path().is_file():
+        return False
+    from vibe.binding_health import rejected_at
+    if rejected_at(config) is not None:
         return False
     return (
         _cloudflared_pid_state(_read_pid()) in {"dead", "other"}
@@ -4697,8 +4729,12 @@ def _ensure_cloudflared_pin(config: V2Config | None) -> dict[str, Any] | None:
     _resolve_binary() finds, so a running tunnel keeps its binary.
     """
 
+    from vibe.binding_health import rejected_at
+
     cloud = config.remote_access.vibe_cloud if config is not None else None
-    if cloud is None or not cloud.enabled or not cloud.tunnel_token or not _cloudflared_pin_needed(config):
+    if cloud is None or not cloud.enabled or not cloud.tunnel_token or rejected_at(config) is not None:
+        return None
+    if not _cloudflared_pin_needed(config):
         return None
     # The installer writes one fixed temporary path, so concurrent starts share one download.
     with _CLOUDFLARED_DOWNLOAD_LOCK:
@@ -4747,6 +4783,9 @@ def _start(
                 # The connector still starts; without the request the monitor
                 # just does not restart it if it exits.
                 logger.warning("Could not record the tunnel connector request", exc_info=True)
+        from vibe.binding_health import rejected_at
+        if rejected_at(config) is not None:
+            return {"ok": False, "error": "binding_rejected", "started": False}
         binary = _resolve_binary(config)
         if not binary:
             # Callers download before taking the lifecycle lock; a request recorded
@@ -6481,6 +6520,11 @@ def _persist_pairing_impl(
                 record_bound(personal["claim_id"], persisted_identity)
             except (OSError, ClaimError):
                 return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
+        from vibe.binding_health import clear_after_publication
+        try:
+            clear_after_publication()
+        except OSError:
+            return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         if not _retire_pending_pairing(operation_id=str(record["operation_id"])):
             return {
                 **status(config),
