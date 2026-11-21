@@ -2289,7 +2289,7 @@ final class AppModel: ObservableObject {
 
     /// Whether opens of `runtime` may use the direct path.
     private func allowsDirect(_ runtime: MobileRuntimeContext) -> Bool {
-        directPathPreference(for: runtime).mode == .automatic
+        true // mutation: the gate ignores the choice
     }
 
     /// The runtime on screen, if it is `origin`'s and still selected.
