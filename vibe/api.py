@@ -1284,12 +1284,12 @@ def save_config(
             # The address has one writer: the journaled change in
             # ``vibe.instance_address`` (and pairing). A stale client or a script
             # writing a former name back here would have this Avibe serve content
-            # on a name in its waiting period. Clearing the fields (turning the
-            # pairing off) stays possible.
+            # on a name in its waiting period. Nothing sets them here from empty
+            # either; clearing them (turning the pairing off) stays possible.
             for field in ("public_url", "redirect_uri", "client_id"):
                 before = str(getattr(base_config.remote_access.vibe_cloud, field) or "")
                 after = str(getattr(config.remote_access.vibe_cloud, field) or "")
-                if before and after and before != after:
+                if after and before != after:
                     raise ValueError(
                         f"Config 'remote_access.vibe_cloud.{field}' is changed by pairing "
                         "or through '/api/instance-address', not by a settings save"

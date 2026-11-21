@@ -143,6 +143,7 @@ def address(monkeypatch):
         ("_authority", None), ("_quiet", set()), ("_quiet_loaded_for", None), ("_inflight", {}),
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
         ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
+        ("_last_read_failed", None), ("_known_cleanup", None),
     ):
         monkeypatch.setattr(instance_address, name, value)
     monkeypatch.setattr(ui_server, "_start_instance_address", lambda: None)
@@ -258,6 +259,88 @@ def test_b2_state_reads_are_one_per_five_seconds_under_a_burst(address):
     for _ in range(20):
         assert get(OLD).status_code == 503
     assert len([call for call in plane.calls if call[1] == "hostname-state"]) == 1
+
+
+def test_e7_a_slow_control_plane_cannot_stall_requests_on_the_active_name(address):
+    """Concurrent requests on an old name share one read; none of them holds up the active name."""
+
+    import asyncio
+    import threading
+
+    plane, clocks = address
+    rename_to("new")
+    run()
+    clocks.advance(61)
+    plane.calls.clear()
+    release = threading.Event()
+    original = plane.state
+
+    def slow_state():
+        release.wait(timeout=5)
+        return original()
+
+    plane.state = slow_state
+
+    async def scenario():
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"served"})
+
+        middleware = ui_server._InstanceAddressRoleMiddleware(app)
+
+        async def request(host):
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            scope = {"type": "http", "method": "GET", "path": "/", "raw_path": b"/", "headers": [(b"host", host.encode())]}
+            await middleware(scope, None, send)
+            return sent[0]["status"], dict(sent[0]["headers"]).get(b"clear-site-data")
+
+        old = [asyncio.create_task(request(OLD)) for _ in range(40)]
+        await asyncio.sleep(0.2)  # the read is in flight and every old-name request is waiting on it
+        for _ in range(20):
+            assert await asyncio.wait_for(request(NEW), timeout=2) == (200, None)
+        # A bounded number wait for the one read; the rest were answered at once with nothing.
+        assert sum(not task.done() for task in old) == ui_server._ADDRESS_STATE_WAITERS_MAX
+        release.set()
+        answers = await asyncio.wait_for(asyncio.gather(*old), timeout=5)
+        cleaned = [answer for answer in answers if answer == (410, b'"cache", "storage"')]
+        refused = [answer for answer in answers if answer == (503, None)]
+        assert len(cleaned) == ui_server._ADDRESS_STATE_WAITERS_MAX and len(cleaned) + len(refused) == 40
+
+    asyncio.run(scenario())
+    assert len([call for call in plane.calls if call[1] == "hostname-state"]) == 1
+
+
+def test_b2_a_failed_read_is_not_repeated_until_five_seconds_after_it_ended(address):
+    plane, clocks = address
+    rename_to("new")
+    run()
+    clocks.advance(61)
+    plane.calls.clear()
+
+    def slow_failure():
+        clocks.advance(9)  # the read itself took longer than the interval
+        raise RuntimeError("resource_acl_device_unavailable")
+
+    plane.state = slow_failure
+    assert get(OLD).status_code == 503
+    assert get(OLD).status_code == 503
+    assert len(plane.calls) == 1
+    clocks.advance(6)
+    assert get(OLD).status_code == 503 and len(plane.calls) == 2
+
+
+def test_e2_a_deep_link_cannot_grow_the_headers_past_what_an_edge_delivers():
+    path = "/" + "/".join("s" * 300 for _ in range(8))
+    cookies = "; ".join(f"cookie{i}=1" for i in range(30))
+    values = instance_address_responses.expiring_cookies(path, cookies)
+    assert sum(len(value) for value in values) <= 16 * 1024
+    assert "cookie0=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure" in values
+    headers = instance_address_responses.cleanup_headers(path, cookies, content_type="text/html; charset=utf-8")
+    assert sum(len(key) + len(value) for key, value in headers) < 20 * 1024
 
 
 def test_b2_a_401_drops_every_permission_and_a_listing_past_its_date_is_not_cleaned(address):
@@ -574,7 +657,7 @@ def test_b1_a_crash_at_any_step_resumes_to_the_same_end_without_a_second_operati
     if crash_after == "health":
         later_phone = health_pairing()  # paired after the deletion ran: a repeat must not touch it
     # A restart: memory is gone, the journal is not.
-    for name, value in (("_authority", None), ("_retired_at_flip", {}), ("_BINDING_CACHE", None), ("_last_read_started", None)):
+    for name, value in (("_authority", None), ("_retired_at_flip", {}), ("_BINDING_CACHE", None), ("_last_read_started", None), ("_last_read_failed", None)):
         monkeypatch.setattr(instance_address, name, value)
     run()
     assert binding().active_host == NEW and instance_address._journal(binding()) is None
@@ -664,6 +747,97 @@ def test_f2_a_page_that_reports_the_moment_it_is_woken_is_marked(address):
     assert [device["state"] for device in old["devices"]] == ["cleared"]
 
 
+def test_b5_an_older_reply_cannot_name_the_address_or_decide_what_is_deleted(address, monkeypatch):
+    plane, _ = address
+    phone = health_pairing()
+    rename_to("new")
+    original = instance_address._read_state_once
+    overtaken = []
+
+    def read_then_be_overtaken(bound):
+        read = original(bound)
+        if read is not None and plane.active == NEW and not overtaken:
+            # While this reply was on its way another change followed, and another read recorded it.
+            overtaken.append(plane.move(THIRD, "someone-elses-operation"))
+            instance_address._update_state(
+                bound.instance_id, lambda state: state.__setitem__("generation", plane.generation))
+        return read
+
+    monkeypatch.setattr(instance_address, "_read_state_once", read_then_be_overtaken)
+    assert instance_address._advance_operation() > 0  # the older reply is not applied
+    assert binding().active_host == OLD and active_health_devices() == [phone]
+    run()
+    assert binding().active_host == THIRD and active_health_devices() == [phone]
+    assert instance_address.describe()["unrecognized_change"]["hostname"] == THIRD
+
+
+def test_c4_a_health_store_that_cannot_be_read_is_not_taken_for_no_pairings(address, monkeypatch):
+    from storage import mobile_store
+
+    plane, _ = address
+    phone = health_pairing()
+    rename_to("new")
+    real = mobile_store.MobileStore
+
+    class Locked(real):
+        def __init__(self, *args, **kwargs):
+            raise mobile_store.MobileError("private_storage_unavailable", 503)
+
+    monkeypatch.setattr(mobile_store, "MobileStore", Locked)
+    with pytest.raises(mobile_store.MobileError):
+        run()
+    # The address moved; the Health step did not, and the state says so rather than "none".
+    assert binding().active_host == NEW and instance_address._journal(binding()) is not None
+    monkeypatch.setattr(mobile_store, "MobileStore", real)
+    assert active_health_devices() == [phone]
+    assert instance_address.describe()["health"]["cleanup"] == "pending"
+    run()
+    assert active_health_devices() == [] and instance_address.describe()["health"]["cleanup"] == "none"
+
+
+def test_a5_a_return_made_elsewhere_is_drained_and_settled_like_our_own(address, monkeypatch):
+    plane, clocks = address
+    rename_to("new")
+    run()
+    assert instance_address.begin_cleanup_response(OLD)  # a cleaning response on the old name is still being written
+    monkeypatch.setattr(instance_address._DRAINED, "wait", lambda timeout=None: clocks.advance(timeout or 1))
+    plane.move(OLD, "an-operation-this-computer-never-wrote")
+    clocks.advance(6)
+    assert instance_address.refresh_state(force=True)
+    with pytest.raises(RuntimeError, match="did not drain"):
+        run()
+    assert binding().active_host == NEW  # not served while that response is open
+    instance_address.end_cleanup_response(OLD)
+    before = clocks.monotonic
+    run()
+    assert binding().active_host == OLD
+    assert clocks.monotonic - before >= instance_address.REACTIVATION_SETTLE_SECONDS
+
+
+def test_b1_a_refused_request_reads_the_state_and_adopts_what_changed_meanwhile(address):
+    plane, _ = address
+    rename_to("new")
+    # A change made elsewhere lands while ours is unanswered: ours is refused as stale.
+    plane.move(THIRD, "someone-elses-operation")
+    run()  # refused, and the state read at once: the change made elsewhere is journaled
+    assert instance_address._journal(binding())["target_hostname"] == THIRD
+    run()
+    assert binding().active_host == THIRD  # seen at the refusal, not at some later hint
+    assert instance_address.describe()["unrecognized_change"]["hostname"] == THIRD
+
+
+def test_b1_a_journal_is_not_left_idle_while_the_pairing_is_unreadable(address):
+    from config.v2_config import update_config_fields
+
+    plane, _ = address
+    rename_to("new")
+    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "enabled", False))
+    assert instance_address._advance_operation() > 0  # looked at again; nothing else would wake it
+    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "enabled", True))
+    run()
+    assert binding().active_host == NEW
+
+
 def test_a5_a_change_made_elsewhere_is_adopted_without_deleting_anything(address):
     plane, _ = address
     sign_in()
@@ -740,13 +914,39 @@ def test_b3_a_slow_cleaning_response_holds_the_switch_back(address, monkeypatch)
     plane, clocks = address
     rename_to("new")
     run()
-    assert instance_address.begin_cleanup_response(OLD)
+    assert instance_address.begin_cleanup_response(OLD)  # a cleaning response is still being written
     monkeypatch.setattr(instance_address._DRAINED, "wait", lambda timeout=None: clocks.advance(timeout or 1))
+    rename_to("old")
     with pytest.raises(RuntimeError, match="did not drain"):
-        instance_address._quiet_and_drain(binding(), OLD)
+        run()
+    assert not [call for call in plane.calls if call[1] == "hostname-renames" and call[2]["new_prefix"] == "old"]
     assert instance_address.begin_cleanup_response(OLD) is False  # quiet: no new cleaning response starts
     instance_address.end_cleanup_response(OLD)
-    instance_address._quiet_and_drain(binding(), OLD)
+    run()
+    assert binding().active_host == OLD
+
+
+def test_b3_a_crash_while_refusing_a_return_leaves_no_name_quiet_for_ever(address, monkeypatch):
+    plane, clocks = address
+    rename_to("new")
+    run()
+    plane.refuse = (409, {"error": "taken"})
+    rename_to("old")
+    original = instance_address.refresh_state
+
+    def killed_after_the_journal_write(**kwargs):
+        raise KeyboardInterrupt("process killed")
+
+    monkeypatch.setattr(instance_address, "refresh_state", killed_after_the_journal_write)
+    with pytest.raises(KeyboardInterrupt):
+        run()
+    monkeypatch.setattr(instance_address, "refresh_state", original)
+    # A restart: the journal and the quiet state ended in the same write.
+    for name, value in (("_authority", None), ("_quiet", set()), ("_quiet_loaded_for", None), ("_last_read_started", None)):
+        monkeypatch.setattr(instance_address, name, value)
+    stored = json.loads(instance_address._state_path().read_text(encoding="utf-8"))
+    assert stored["journal"] is None and stored["quiet"] == []
+    assert is_cleaning(get(OLD))
 
 
 def test_b3_a_refused_return_cleans_again_only_when_a_fresh_state_lists_the_name(address):
@@ -777,6 +977,12 @@ def test_b8_a_settings_save_cannot_write_the_address_and_a_new_pairing_inherits_
         with pytest.raises(ValueError, match="not by a settings save"):
             api.save_config({"remote_access": {"vibe_cloud": {field: value}}}, generic_remote_access=True)
     assert binding().active_host == NEW
+    # Clearing a field and then setting it in a second save is the same write in two steps.
+    api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": ""}}}, generic_remote_access=True)
+    with pytest.raises(ValueError, match="not by a settings save"):
+        api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": f"https://{OLD}/auth/callback"}}},
+                        generic_remote_access=True)
+    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "redirect_uri", f"https://{NEW}/auth/callback"))
     # Turning remote access off through the same save still works.
     api.save_config({"remote_access": {"vibe_cloud": {"enabled": False}}}, generic_remote_access=True)
     assert settings_service.load_config().remote_access.vibe_cloud.enabled is False
@@ -850,9 +1056,9 @@ def test_c1_requests_open_on_the_old_name_are_ended_at_the_switch(address):
         await asyncio.sleep(0.05)
         instance_address._hooks.update(wake_pages=lambda: None, close_connections=ui_server._close_address_connections)
         await asyncio.to_thread(lambda: (rename_to("new"), run()))
-        await asyncio.wait_for(asyncio.gather(old_stream, forwarded_stream, return_exceptions=True), timeout=5)
+        # Ended, not failed: no exception leaves the handler (also on Python 3.10, which has no ``uncancel``).
+        assert await asyncio.wait_for(asyncio.gather(old_stream, forwarded_stream), timeout=5) == [None, None]
         assert sorted(cancelled) == ["/show/x/events", "/show/y/events"]
-        assert old_stream.done() and not old_stream.cancelled() and forwarded_stream.done()
         assert not local_stream.done()  # a page on this computer's own address is untouched
         local_stream.cancel()
         await asyncio.gather(local_stream, return_exceptions=True)

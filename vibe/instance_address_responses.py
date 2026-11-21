@@ -98,7 +98,10 @@ _COOKIE_NAME = re.compile(r"\A[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}\Z")
 _COOKIE_PATH = re.compile(r"\A/[!-+\--:<-~]*\Z")  # visible ASCII without ';' and ','
 _MAX_REQUEST_COOKIES = 32
 _MAX_PATHS = 12
+_MAX_PATH_BYTES = 256
 _MAX_COOKIE_HEADERS = 160
+# Edges cap a response's headers in total (Cloudflare: 128 KB); stay far below.
+_MAX_COOKIE_HEADER_BYTES = 16 * 1024
 _EXPIRED = "Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure"
 
 
@@ -127,6 +130,8 @@ def _path_prefixes(raw_path: str) -> list[str]:
     current = ""
     for segment in [part for part in path.split("/") if part]:
         current = f"{current}/{segment}"
+        if len(current) >= _MAX_PATH_BYTES:
+            break  # a cookie this deep is left to its own expiry; the response must stay deliverable
         for candidate in (current, f"{current}/"):
             if _COOKIE_PATH.fullmatch(candidate) and candidate not in prefixes:
                 prefixes.append(candidate)
@@ -145,6 +150,7 @@ def expiring_cookies(raw_path: str, cookie_header: str) -> list[str]:
 
     values = [f"{name}=; Path={path}; {_EXPIRED}" for name, path in _FIXED_COOKIES]
     seen = set(_FIXED_COOKIES)
+    size = sum(len(value) for value in values)
     names = _request_cookie_names(cookie_header)
     for path in _path_prefixes(raw_path):
         for name in names:
@@ -152,9 +158,11 @@ def expiring_cookies(raw_path: str, cookie_header: str) -> list[str]:
             if (name, path) in seen or (name.startswith("__Host-") and path != "/"):
                 continue
             seen.add((name, path))
-            values.append(f"{name}=; Path={path}; {_EXPIRED}")
-            if len(values) >= _MAX_COOKIE_HEADERS:
+            value = f"{name}=; Path={path}; {_EXPIRED}"
+            size += len(value)
+            if len(values) >= _MAX_COOKIE_HEADERS or size > _MAX_COOKIE_HEADER_BYTES:
                 return values
+            values.append(value)
     return values
 
 

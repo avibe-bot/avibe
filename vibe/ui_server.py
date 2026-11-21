@@ -1,5 +1,6 @@
 import base64
 import asyncio
+import functools
 import gzip
 import hashlib
 import hmac
@@ -19,6 +20,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
@@ -3346,6 +3348,15 @@ def _is_valid_host_header(value: str) -> bool:
 
 
 _address_connections: dict[str, set[Any]] = {}
+# Requests this module itself ended because their Host stopped being the address.
+_address_closed: set[Any] = set()
+# Reading the state from avibe.bot for a cleanup name has a thread of its own, so
+# a slow control plane can never use up the threads ordinary requests share.
+_ADDRESS_STATE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="instance-address-state")
+_ADDRESS_STATE_WAITERS_MAX = 32
+_ADDRESS_STATE_WAIT_SECONDS = 10.0
+_address_state_reads: dict[Any, Any] = {}
+_address_state_waiters = 0
 
 
 def _close_address_connections(hosts: set[str]) -> None:
@@ -3353,10 +3364,39 @@ def _close_address_connections(hosts: set[str]) -> None:
 
     for host in hosts:
         for task in list(_address_connections.get(host, ())):
+            _address_closed.add(task)
             try:
                 task.get_loop().call_soon_threadsafe(task.cancel)
             except RuntimeError:
-                pass  # its loop is already closed, and the request with it
+                _address_closed.discard(task)  # its loop is already closed, and the request with it
+
+
+async def _await_address_state_read() -> None:
+    """Let one state read finish before answering a cleanup name, without parking a thread.
+
+    Every waiter shares the one read in flight on this loop. Beyond a bound, or
+    when a read would not help, the request is answered at once with nothing.
+    """
+
+    global _address_state_waiters
+
+    if _address_state_waiters >= _ADDRESS_STATE_WAITERS_MAX:
+        return
+    loop = asyncio.get_running_loop()
+    read = _address_state_reads.get(loop)
+    if read is None or read.done():
+        read = loop.run_in_executor(
+            _ADDRESS_STATE_EXECUTOR, functools.partial(instance_address.refresh_state, wait=False)
+        )
+        _address_state_reads[loop] = read
+        read.add_done_callback(lambda done, loop=loop: _address_state_reads.pop(loop, None) if _address_state_reads.get(loop) is done else None)
+    _address_state_waiters += 1
+    try:
+        await asyncio.wait_for(asyncio.shield(read), timeout=_ADDRESS_STATE_WAIT_SECONDS)
+    except Exception:
+        pass  # no state, no cleaning
+    finally:
+        _address_state_waiters -= 1
 
 
 def _wake_address_streams() -> None:
@@ -3414,21 +3454,29 @@ class _InstanceAddressRoleMiddleware:
             try:
                 await self.app(scope, receive, send)
             except asyncio.CancelledError:
-                # The address moved while this was open: nothing more is sent on the old Host.
-                if task is None or not task.cancelling() or instance_address.decide(host, forwarded) == "pass":
+                # Ended by the address change: nothing more is sent on the old Host.
+                # Any other cancellation (a client that left, shutdown) is not ours.
+                if task not in _address_closed:
                     raise
-                task.uncancel()
+                uncancel = getattr(task, "uncancel", None)  # Python 3.11+
+                if uncancel is not None:
+                    uncancel()
                 if scope["type"] == "websocket":
                     try:
                         await send({"type": "websocket.close", "code": 1001})
                     except Exception:
                         pass
             finally:
+                _address_closed.discard(task)
                 for name in managed:
                     _address_connections.get(name, set()).discard(task)
             return
-        if decision == "cleanup" and await asyncio.to_thread(instance_address.confirm_cleanup, host):
-            if await self._clean(scope, receive, send, host):
+        if decision == "cleanup":
+            ready = await asyncio.to_thread(instance_address.cleanup_ready, host)
+            if not ready and await asyncio.to_thread(instance_address.cleanup_read_worthwhile, host):
+                await _await_address_state_read()
+                ready = await asyncio.to_thread(instance_address.cleanup_ready, host)
+            if ready and await self._clean(scope, receive, send, host):
                 return
         await self._refuse(scope, send)
 
@@ -3490,16 +3538,15 @@ class _InstanceAddressRoleMiddleware:
             status, content_type = 200, "text/javascript; charset=utf-8"
             body = instance_address_responses.REPLACEMENT_WORKER.encode("utf-8")
         else:
-            from http.cookies import SimpleCookie
-
+            # Split by hand: a parser that stops at the first cookie it dislikes
+            # (a share guest's JSON one, say) would cost this visit its receipt.
             session_cookie = None
-            try:
-                jar = SimpleCookie()
-                jar.load(cookie_header)
-                morsel = jar.get(remote_access_session_cookie_name())
-                session_cookie = morsel.value if morsel is not None else None
-            except Exception:
-                session_cookie = None
+            wanted = remote_access_session_cookie_name()
+            for part in cookie_header.split(";"):
+                name, separator, value = part.strip().partition("=")
+                if separator and name == wanted:
+                    session_cookie = value.strip().strip('"')
+                    break
             receipt = await asyncio.to_thread(
                 instance_address.receipt_for_cleanup_request, instance_address.normalize_host(host), session_cookie
             ) if session_cookie else None
@@ -15917,6 +15964,10 @@ async def workbench_events():
                     )
                     if event_type == SSE_BROKER_CLOSED_EVENT:
                         return
+                    if event_type == instance_address.ADDRESS_RETIRED_EVENT:
+                        # Only this stream itself may say so, for its own Host; a
+                        # published event of this name is never delivered.
+                        continue
                     retired = address_retired_frame()
                     if retired is not None:
                         yield retired

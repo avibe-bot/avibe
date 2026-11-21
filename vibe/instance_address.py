@@ -180,8 +180,10 @@ def current_binding() -> Binding | None:
 
             binding = _binding_from_config(settings_service.load_config())
         except Exception:
+            # Not cached: one transient read error must not refuse every managed
+            # Host until the file next changes.
             logger.warning("instance address: configuration unreadable", exc_info=True)
-            binding = None
+            return None
     _BINDING_CACHE = (signature, binding)
     return binding
 
@@ -263,10 +265,11 @@ _receipt_key_cache: tuple[str, bytes] | None = None
 def _receipt_key() -> bytes:
     global _receipt_key_cache
 
+    path = str(_state_path())
+    cached = _receipt_key_cache
+    if cached is not None and cached[0] == path:
+        return cached[1]
     with _LOCK:
-        cached = _receipt_key_cache
-        if cached is not None and cached[0] == str(_state_path()):
-            return cached[1]
         key = _stored_receipt_key()
         _receipt_key_cache = (str(_state_path()), key)
         return key
@@ -397,6 +400,8 @@ _quiet: set[str] = set()
 _quiet_loaded_for: str | None = None
 _inflight: dict[str, int] = {}
 _last_read_started: float | None = None
+_last_read_failed: float | None = None
+_known_cleanup: tuple[str, frozenset[str]] | None = None
 _read_lock = threading.Lock()
 _retired_at_flip: dict[str, str] = {}  # old host -> new origin, for streams open at the switch
 
@@ -413,12 +418,22 @@ def _parse_instant(value: Any) -> float | None:
     return parsed.timestamp()
 
 
+def _quiet_for(journal: Any) -> set[str]:
+    """The quiet set is a function of the journal: the name an unfinished change
+    is taking back, and nothing else. It is written only together with the
+    journal, so no crash can leave a name quiet with nothing left to end it."""
+
+    if isinstance(journal, dict) and journal.get("quieted") and is_managed_name(journal.get("target_hostname")):
+        return {journal["target_hostname"]}
+    return set()
+
+
 def _load_quiet(binding: Binding) -> None:
     global _quiet, _quiet_loaded_for
 
     if _quiet_loaded_for == binding.instance_id:
         return
-    _quiet = {host for host in _load_state(binding.instance_id).get("quiet", []) if is_managed_name(host)}
+    _quiet = _quiet_for(_load_state(binding.instance_id).get("journal"))
     _quiet_loaded_for = binding.instance_id
 
 
@@ -474,34 +489,53 @@ def decide(raw_host: str | None, forwarded_host: str | None = None) -> str:
     return "cleanup"
 
 
-def confirm_cleanup(raw_host: str | None) -> bool:
-    """Whether a cleaning response may be produced for this Host now.
-
-    Reads the state from avibe.bot when the held permission does not cover the
-    Host and the Host could be one of ours. Blocking; call from a thread.
-    """
+def cleanup_ready(raw_host: str | None) -> bool:
+    """Whether the permission held right now covers this Host. No file or network read."""
 
     host = normalize_host(raw_host)
     binding = current_binding()
     if binding is None or not binding.paired or not is_managed_name(host) or host == binding.active_host:
         return False
     with _LOCK:
-        if _cleanup_allowed_locked(host, binding):
-            return True
+        return _cleanup_allowed_locked(host, binding)
+
+
+def cleanup_read_worthwhile(raw_host: str | None) -> bool:
+    """Whether reading the state now could let this Host be cleaned.
+
+    Only for a name avibe.bot last listed for this instance (or before any read
+    in this process), and not for a quiet one. How often a read really happens
+    is ``refresh_state``'s business.
+    """
+
+    global _known_cleanup
+
+    host = normalize_host(raw_host)
+    binding = current_binding()
+    if binding is None or not binding.paired or not is_managed_name(host) or host == binding.active_host:
+        return False
+    with _LOCK:
         _load_quiet(binding)
         if host in _quiet:
             return False
-        known = {
-            entry.get("hostname")
-            for entry in _load_state(binding.instance_id).get("cleanup", [])
-            if isinstance(entry, dict)
-        }
-        never_read = _last_read_started is None
-    if host not in known and not never_read:
-        return False
-    refresh_state()
-    with _LOCK:
-        return _cleanup_allowed_locked(host, binding)
+        if _known_cleanup is None or _known_cleanup[0] != binding.instance_id:
+            _known_cleanup = (
+                binding.instance_id,
+                frozenset(
+                    entry.get("hostname")
+                    for entry in _load_state(binding.instance_id).get("cleanup", [])
+                    if isinstance(entry, dict)
+                ),
+            )
+        # A name never listed is worth a read only before any read in this process.
+        return host in _known_cleanup[1] or _last_read_started is None
+
+
+def _read_too_recent() -> bool:
+    last = _last_read_started
+    if _last_read_failed is not None and (last is None or _last_read_failed > last):
+        last = _last_read_failed  # after a failure the wait runs from its end
+    return last is not None and _monotonic() - last < STATE_READ_MIN_INTERVAL_SECONDS
 
 
 def begin_cleanup_response(raw_host: str | None) -> bool:
@@ -527,34 +561,31 @@ def end_cleanup_response(raw_host: str | None) -> None:
         _DRAINED.notify_all()
 
 
-def _quiet_and_drain(binding: Binding, host: str) -> None:
-    """Stop cleaning ``host`` and wait for cleaning responses already started on it."""
+def _quiet_and_drain(binding: Binding, journal: dict[str, Any]) -> dict[str, Any]:
+    """Stop cleaning the journal's target and wait for cleaning responses already started on it."""
 
+    host = journal["target_hostname"]
+    if not journal.get("quieted"):
+        journal = {**journal, "quieted": True}
+        _set_journal(binding, journal)
     with _DRAINED:
-        _load_quiet(binding)
-        _quiet.add(host)
-        _persist_quiet(binding)
         deadline = _monotonic() + _DRAIN_TIMEOUT_SECONDS
         while _inflight.get(host, 0) > 0:
             remaining = deadline - _monotonic()
             if remaining <= 0:
                 raise RuntimeError("cleanup responses did not drain")
             _DRAINED.wait(timeout=min(remaining, 0.5))
-
-
-def _persist_quiet(binding: Binding) -> None:
-    quiet = sorted(_quiet)
-    _update_state(binding.instance_id, lambda state: state.__setitem__("quiet", quiet))
+    return journal
 
 
 def retired_destination(stream_host: str | None) -> str | None:
     """For a stream admitted on a Host that was active until the switch: the new origin."""
 
-    host = normalize_host(stream_host)
-    with _LOCK:
-        destination = _retired_at_flip.get(host)
+    destination = _retired_at_flip.get(normalize_host(stream_host))
+    if destination is None:
+        return None  # the common case, answered without a lock or a config read
     binding = current_binding()
-    if destination is None or binding is None or host == binding.active_host:
+    if binding is None or normalize_host(stream_host) == binding.active_host:
         return None
     return destination
 
@@ -635,39 +666,54 @@ def _read_state_once(binding: Binding) -> _StateRead | None:
     return _StateRead(binding, state, started_monotonic, started_wall)
 
 
-def refresh_state(*, force: bool = False) -> bool:
-    """Read the state unless one was started in the last few seconds; apply it.
+def refresh_state(*, force: bool = False, wait: bool = True) -> bool:
+    """Read the state unless one was read in the last few seconds; apply it.
 
-    One read at a time: a caller that finds a read in flight waits for it and
-    uses its result.
+    One read at a time. ``wait=False`` returns at once when a read is in flight
+    instead of queueing behind it. After a failed read the interval runs from
+    the failure's end, so slow failures are not retried back to back.
     """
 
-    global _last_read_started
+    global _last_read_started, _last_read_failed
 
     binding = current_binding()
     if binding is None or not binding.paired or not is_managed_name(binding.active_host):
         return False
-    with _read_lock:
+    if not _read_lock.acquire(blocking=wait):
+        return False
+    try:
         with _LOCK:
-            last = _last_read_started
-            if not force and last is not None and _monotonic() - last < STATE_READ_MIN_INTERVAL_SECONDS:
+            if not force and _read_too_recent():
                 return False
             _last_read_started = _monotonic()
         read = _read_state_once(binding)
         if read is None:
+            with _LOCK:
+                _last_read_failed = _monotonic()
             return False
         return _apply_state(read)
+    finally:
+        _read_lock.release()
 
 
 def _apply_state(read: _StateRead) -> bool:
     global _authority
 
+    global _known_cleanup
+
     binding, state = read.binding, read.state
+    prune = False
     with _LOCK:
         stored = _load_state(binding.instance_id)
         stored_generation = stored.get("generation")
         if isinstance(stored_generation, int) and state["generation"] < stored_generation:
             return False  # an older reply; roles stay as they are
+        # Asked of the list as it stood before this state replaces it.
+        was_cleanup = any(
+            isinstance(entry, dict) and entry.get("hostname") == state["active_hostname"]
+            for entry in stored.get("cleanup", [])
+        )
+        _known_cleanup = (binding.instance_id, frozenset(entry["hostname"] for entry in state["cleanup"]))
 
         def record(target: dict[str, Any]) -> None:
             target["generation"] = state["generation"]
@@ -686,33 +732,46 @@ def _apply_state(read: _StateRead) -> bool:
                 started_monotonic=read.started_monotonic,
                 started_wall=read.started_wall,
             )
-            _forget_closed_lists(binding, state)
-            return True
-        # avibe.bot names another active name than this computer does.
-        _authority = None
-        journal = stored.get("journal")
-        if isinstance(journal, dict) and journal.get("origin") == "local" and journal.get("phase") == "intent":
-            # Our own request is still unanswered here; its replay settles it.
-            _wake_worker()
-            return True
-        if not isinstance(journal, dict):
-            _update_state(
-                binding.instance_id,
-                lambda target: target.__setitem__(
-                    "journal",
-                    {
-                        "origin": "elsewhere",
-                        "phase": "committed",
-                        "operation_id": state["last_rename_operation_id"],
-                        "previous_hostname": binding.active_host,
-                        "target_hostname": state["active_hostname"],
-                        "created_at": int(_wall()),
-                        "steps": {},
-                    },
-                ),
-            )
+            prune = True
+        else:
+            # avibe.bot names another active name than this computer does.
+            _authority = None
+            _note_other_active_name(binding, stored, state, was_cleanup)
+    if prune:
+        # Outside the role lock: the event loop and every request take that lock.
+        _forget_closed_lists(binding, state)
+    return True
+
+
+def _note_other_active_name(
+    binding: Binding, stored: Mapping[str, Any], state: Mapping[str, Any], was_cleanup: bool
+) -> None:
+    """Under the role lock: journal a change made elsewhere, or let our own request settle it."""
+
+    journal = stored.get("journal")
+    if isinstance(journal, dict) and journal.get("origin") == "local" and journal.get("phase") == "intent":
+        # Our own request is still unanswered here; its replay settles it.
         _wake_worker()
-        return True
+        return
+    if not isinstance(journal, dict):
+        _update_state(
+            binding.instance_id,
+            lambda target: target.__setitem__(
+                "journal",
+                {
+                    "origin": "elsewhere",
+                    "phase": "committed",
+                    "operation_id": state["last_rename_operation_id"],
+                    "previous_hostname": binding.active_host,
+                    "target_hostname": state["active_hostname"],
+                    # A name coming back goes through quiet, drain and settle (rule B3).
+                    "is_return": was_cleanup,
+                    "created_at": int(_wall()),
+                    "steps": {},
+                },
+            ),
+        )
+    _wake_worker()
 
 
 def _forget_closed_lists(binding: Binding, state: Mapping[str, Any]) -> None:
@@ -1023,19 +1082,31 @@ def _worker_loop() -> None:
             delay = 15.0
 
 
+def _any_journal_stored() -> bool:
+    try:
+        payload = json.loads(_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("journal"), dict)
+
+
 def _journal(binding: Binding) -> dict[str, Any] | None:
     journal = _load_state(binding.instance_id).get("journal")
     return journal if isinstance(journal, dict) else None
 
 
 def _set_journal(binding: Binding, journal: dict[str, Any] | None, *, last: dict[str, Any] | None = None) -> None:
+    global _quiet, _quiet_loaded_for
+
     def mutate(state: dict[str, Any]) -> None:
         state["journal"] = journal
+        state["quiet"] = sorted(_quiet_for(journal))
         if last is not None:
             state["last_operation"] = last
 
     with _first_answer:
         _update_state(binding.instance_id, mutate)
+        _quiet, _quiet_loaded_for = _quiet_for(journal), binding.instance_id
         _first_answer.notify_all()
 
 
@@ -1044,7 +1115,8 @@ def _advance_operation() -> float:
 
     binding = current_binding()
     if binding is None or not binding.paired:
-        return 0.0
+        # An unfinished journal is looked at again; nothing else would wake it.
+        return 30.0 if _any_journal_stored() else 0.0
     journal = _journal(binding)
     if journal is None:
         return 0.0
@@ -1073,9 +1145,7 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
     if journal.get("is_return") and not journal.get("quieted"):
         # Before asking for one of our own old names back: stop cleaning it and
         # let responses already started finish (rule B3).
-        _quiet_and_drain(binding, target)
-        journal = {**journal, "quieted": True}
-        _set_journal(binding, journal)
+        journal = _quiet_and_drain(binding, journal)
     body = {
         "operation_id": journal["operation_id"],
         "expected_generation": journal["expected_generation"],
@@ -1131,15 +1201,15 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
 
 
 def _refuse_operation(binding: Binding, journal: dict[str, Any], failure: dict[str, Any]) -> None:
+    # One write ends the journal and the quiet state together.
     _set_journal(binding, None, last=failure)
     if journal.get("quieted"):
         # The name cleans again only if a fresh state still lists it.
-        with _LOCK:
-            _load_quiet(binding)
-            _quiet.discard(journal["target_hostname"])
-            _persist_quiet(binding)
-            _drop_authority()
-        refresh_state(force=True)
+        _drop_authority()
+    # "Read current state" after any refusal: a change made elsewhere while our
+    # request was unanswered, or an earlier attempt of ours that did commit, is
+    # then seen now and not at some later hint.
+    refresh_state(force=True)
 
 
 def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
@@ -1173,10 +1243,16 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             target = state["active_hostname"]
             journal = {**journal, "origin": "elsewhere", "target_hostname": target}
             local = False
+        committed_generation = (journal.get("receipt") or {}).get("committed_generation")
+        stored_generation = _load_state(binding.instance_id).get("generation")
+        if (isinstance(stored_generation, int) and state["generation"] < stored_generation) or (
+            local and isinstance(committed_generation, int) and state["generation"] < committed_generation
+        ):
+            return 2.0  # an older reply than what is already known: read again
         destructive = bool(
             local
             and state.get("last_rename_operation_id") == journal.get("operation_id")
-            and state["generation"] == (journal.get("receipt") or {}).get("committed_generation")
+            and state["generation"] == committed_generation
         )
         previous = journal.get("previous_hostname") or ""
         if binding.active_host != target:
@@ -1186,13 +1262,17 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             # or a page that reports at once would be reporting to nothing. The
             # sign-out transaction snapshots again for a session that began since.
             _snapshot_devices(binding, binding.active_host)
-        if destructive and not isinstance(journal.get("health_targets"), list):
-            # Fixed before the new address can be reached: a phone paired there
-            # afterwards is not this change's to delete, however late the Health
-            # step runs.
-            journal = {**journal, "health_targets": _active_health_devices()}
+        if destructive and not journal.get("health_cutoff"):
+            # Fixed before the new address can be reached, and without opening
+            # the Health store: a phone paired there afterwards is not this
+            # change's to delete, however late the Health step runs. The store's
+            # own clock is the real one.
+            journal = {**journal, "health_cutoff": datetime.now(timezone.utc).isoformat()}
             _set_journal(binding, journal)
-        _flip(binding, journal, read, target)
+        try:
+            journal = _flip(binding, journal, read, target)
+        except _StaleState:
+            return 2.0
         done("flip", previous_hostname=previous, destructive=destructive, origin=journal["origin"])
         binding = current_binding() or binding
         wake = _hooks.get("wake_pages")
@@ -1216,8 +1296,9 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
         done("closed")
     if "health" not in steps:
         if journal.get("destructive") and journal.get("origin") == "local":
-            targets = journal.get("health_targets")
-            _revoke_health(targets if isinstance(targets, list) else [])
+            # A store that cannot be opened raises: the step is retried and the
+            # state route keeps saying "pending", never "none".
+            _revoke_health(journal.get("health_cutoff"))
         done("health")
     final_binding = current_binding() or binding
     summary = {
@@ -1229,6 +1310,7 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
 
     def finish(state: dict[str, Any]) -> None:
         state["journal"] = None
+        state["quiet"] = []
         state["last_operation"] = summary
         if journal.get("origin") == "local":
             state["unrecognized_change"] = None
@@ -1239,8 +1321,11 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
                 "noticed_at": steps.get("flip"),
             }
 
+    global _quiet, _quiet_loaded_for
+
     with _first_answer:
         _update_state(final_binding.instance_id, finish)
+        _quiet, _quiet_loaded_for = set(), final_binding.instance_id
         _first_answer.notify_all()
     if _hooks.get("wake_pages") is not None:
         try:
@@ -1250,10 +1335,14 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
     return 0.0
 
 
-def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: str) -> None:
+class _StaleState(Exception):
+    """The state in hand is older than one already recorded; read again."""
+
+
+def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: str) -> dict[str, Any]:
     """The role flip (rule B1 step 1): one config write, then roles from the state just read."""
 
-    global _authority
+    global _authority, _known_cleanup
 
     from config.v2_config import update_config_fields
     from vibe import remote_access
@@ -1265,13 +1354,16 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
     }
     with _LOCK:
         _load_quiet(binding)
-        was_cleanup = target in known_cleanup or target in _quiet or (
-            _authority is not None and target in _authority.hosts
+        was_cleanup = (
+            bool(journal.get("is_return"))
+            or target in known_cleanup
+            or target in _quiet
+            or (_authority is not None and target in _authority.hosts)
         )
     if was_cleanup:
         # Any change from cleanup to active: quiet, drain, settle (rule B3). The
         # settle is no proof that a browser finished with an earlier response.
-        _quiet_and_drain(binding, target)
+        journal = _quiet_and_drain(binding, {**journal, "target_hostname": target})
         _sleep(REACTIVATION_SETTLE_SECONDS)
     public_url = f"https://{target}"
     receipt = journal.get("receipt") or {}
@@ -1289,13 +1381,17 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
             cloud.client_id = client_id
 
     with _LOCK:
+        # Another read may have recorded a newer state while this one was in
+        # flight or while the name was settling. An older reply must not name
+        # the active address, nor decide what is deleted.
+        stored_generation = _load_state(binding.instance_id).get("generation")
+        if isinstance(stored_generation, int) and state["generation"] < stored_generation:
+            raise _StaleState()
         if previous != target:
             update_config_fields(mutate)
         flipped = current_binding()
         if flipped is None or flipped.active_host != target:
             raise RuntimeError("the address switch was not recorded")
-        _quiet.discard(target)
-        _persist_quiet(flipped)
         _authority = _Authority(
             pairing=flipped.pairing,
             generation=state["generation"],
@@ -1320,13 +1416,17 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
             target_state["state_read_at"] = int(read.started_wall)
 
         _update_state(flipped.instance_id, record)
-        # A name that is active again, or no longer listed, has no list any more:
-        # kept, its marks would be read as true of a later retirement.
-        _forget_closed_lists(
-            flipped, {"cleanup": [entry for entry in state["cleanup"] if entry["hostname"] != target]}
+        _known_cleanup = (
+            flipped.instance_id,
+            frozenset(entry["hostname"] for entry in state["cleanup"] if entry["hostname"] != target),
         )
+    # A name that is active again, or no longer listed, has no list any more:
+    # kept, its marks would be read as true of a later retirement. Outside the
+    # role lock, which the event loop and every request take.
+    _forget_closed_lists(flipped, {"cleanup": [entry for entry in state["cleanup"] if entry["hostname"] != target]})
     remote_access.discard_managed_active_hostnames()
     remote_access.record_connector_public_url(public_url)
+    return journal
 
 
 def _snapshot_devices(binding: Binding, hostname: str) -> None:
@@ -1337,6 +1437,7 @@ def _snapshot_devices(binding: Binding, hostname: str) -> None:
 
     ensure_sqlite_state()
     registry_binding = remote_access.device_binding(_load_config())
+    _receipt_key()  # before the write transaction: the key's first read takes the role lock
     with get_cached_sqlite_engine().begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         instance_address_clearing.snapshot(
@@ -1364,6 +1465,7 @@ def _end_sessions(binding: Binding, previous: str) -> None:
     registry_binding = remote_access.device_binding(config)
     now = int(_wall())
     ensure_sqlite_state()
+    _receipt_key()  # before the write transaction: the key's first read takes the role lock
 
     def snapshot(conn: Any) -> None:
         if previous:
@@ -1395,24 +1497,33 @@ def _end_sessions(binding: Binding, previous: str) -> None:
         remote_access.publish_browser_session_revoked(session_id)
 
 
-def _active_health_devices() -> list[str]:
-    try:
-        from storage.mobile_store import MobileStore
+def _health_store() -> Any:
+    """The private Health store, or ``None`` when this computer never had one.
 
-        store = MobileStore(existing_only=True)
-    except Exception:
-        return []
-    with store.transaction() as conn:
-        return [row["id"] for row in conn.execute("SELECT id FROM devices WHERE revoked_at IS NULL")]
+    A store that exists but cannot be opened or read raises: "could not look"
+    must never be recorded as "nothing to end".
+    """
+
+    from storage.mobile_store import MobileStore, mobile_store_path
+
+    if not mobile_store_path().exists():
+        return None
+    return MobileStore(existing_only=True)
 
 
-def _revoke_health(device_ids: list[str]) -> None:
-    """End these Health pairings with the existing revoke and delete their synced days."""
+def _revoke_health(cutoff: Any) -> None:
+    """End the Health pairings made before ``cutoff`` with the existing revoke; delete their synced days."""
 
-    if not device_ids:
+    before = datetime.fromisoformat(cutoff) if isinstance(cutoff, str) and cutoff else None
+    store = _health_store()
+    if store is None or before is None:
         return
-    from storage.mobile_store import MobileStore
-
-    store = MobileStore(existing_only=True)
-    for device_id in device_ids:
-        store.revoke(device_id=device_id, caller="address_change")
+    with store.transaction() as conn:
+        rows = conn.execute("SELECT id, created_at FROM devices WHERE revoked_at IS NULL").fetchall()
+    for row in rows:
+        try:
+            paired_at = datetime.fromisoformat(row["created_at"])
+        except (TypeError, ValueError):
+            paired_at = None
+        if paired_at is None or paired_at < before:
+            store.revoke(device_id=row["id"], caller="address_change")
