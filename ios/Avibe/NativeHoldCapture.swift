@@ -47,6 +47,10 @@ final class NativeHoldCapture {
     struct Surface: Equatable {
         let id: String
         let rect: CGRect
+        /// The page asked that a touch here open no microphone: the input
+        /// is only prepared at touch-down and starts when the hold is
+        /// recognised (`start: "recognition"`), whatever the App's default.
+        var startsAtRecognition = false
     }
 
     /// What preparing a hold took (`NativeHoldCaptureAudio.arm`), in ms.
@@ -304,7 +308,9 @@ final class NativeHoldCapture {
     static let adoptionWait: TimeInterval = 1
     /// The most audio kept for a page that has not taken its take: 2 s,
     /// more than the longest threshold and the wait together can give.
-    static let unadoptedBytes = 2 * 16_000 * 2
+    /// The input itself keeps to it (`NativeHoldSink`), on the thread its
+    /// audio arrives on, so it holds while the main thread is stalled.
+    nonisolated static let unadoptedBytes = 2 * 16_000 * 2
 
     /// `afterQueued` runs its work once what the input already sent to the
     /// main queue has arrived (by default, the main queue's next turn);
@@ -406,7 +412,9 @@ final class NativeHoldCapture {
     }
 
     /// The page's `surfaces` argument: at most eight, each an id and a
-    /// rectangle of finite, positive size. Nil when it is not that.
+    /// rectangle of finite, positive size, and optionally when its input
+    /// starts (`start`: `touch`, the default, or `recognition`). Nil when
+    /// it is not that.
     static func surfaces(from value: Any?) -> [Surface]? {
         guard let items = value as? [[String: Any]], items.count <= 8 else { return nil }
         var surfaces: [Surface] = []
@@ -417,12 +425,18 @@ final class NativeHoldCapture {
                 else { return nil }
                 return CGFloat(value.doubleValue)
             }
-            guard item.count == 5, let id = isValidTake(item["id"]),
+            let start = item["start"] as? String
+            guard item.count == (item["start"] == nil ? 5 : 6),
+                  item["start"] == nil || start == "touch" || start == "recognition",
+                  let id = isValidTake(item["id"]),
                   let x = number("x"), let y = number("y"),
                   let width = number("width"), let height = number("height"),
                   width > 0, height > 0
             else { return nil }
-            surfaces.append(Surface(id: id, rect: CGRect(x: x, y: y, width: width, height: height)))
+            surfaces.append(Surface(
+                id: id, rect: CGRect(x: x, y: y, width: width, height: height),
+                startsAtRecognition: start == "recognition"
+            ))
         }
         return surfaces
     }
@@ -490,6 +504,8 @@ final class NativeHoldCapture {
                     hold.timings.firstBufferBytes = data.count
                 }
                 take.receive(data)
+                // The input keeps this bound itself, where its audio arrives
+                // (`NativeHoldSink`); here it holds of any input.
                 if !take.adopted, take.pending.count > Self.unadoptedBytes {
                     self.discard(take, why: "unadopted")
                 }
@@ -584,7 +600,7 @@ final class NativeHoldCapture {
             // Activating can switch a headset to its call mode.
             hold.timings.variant = "late"
             hold.timings.why = "bluetooth"
-        } else if startsAtTouchDown() {
+        } else if startsAtTouchDown(), !surface.startsAtRecognition {
             hold.timings.variant = "early"
             begin(hold)
         } else {
@@ -747,6 +763,7 @@ final class NativeHoldCapture {
         hold.cancelTimer = nil
         hold.timings.adoptedAt = since(hold)
         take.adopt()
+        audio.taken()
         return .success(hold.timings.fields)
     }
 
@@ -1093,6 +1110,11 @@ protocol NativeHoldCaptureAudio: AnyObject {
     )
     /// Takes down what `arm` prepared; nothing was captured.
     func disarm()
+    /// The page took the take `begin` started. Until then the input passes
+    /// on no more than `NativeHoldCapture.unadoptedBytes`, and past that
+    /// stops itself and ends the take (`onEnd("unadopted")`), without
+    /// waiting for the main thread.
+    func taken()
     /// Returns once everything asked of the input so far (a preparing, a
     /// start, a taking down) has finished: the session is free for its next
     /// owner, and nothing will set or deactivate it afterwards.
@@ -1171,21 +1193,63 @@ final class NativeHoldPCMConverter {
 /// Where one engine's audio goes. Each engine has its own, emptied when it
 /// is taken down: a callback of an engine that is gone can never hand its
 /// buffer to the next press's take.
-private final class NativeHoldSink: @unchecked Sendable {
+///
+/// It also holds the bound on a take no page has taken. That audio waits for
+/// the page in the App's memory, and reaches it by way of the main thread:
+/// if the bound were kept only there, a main thread stalled for ten seconds
+/// would let ten seconds pile up before anything dropped them. Here, on the
+/// thread the audio arrives on, no more than `limit` bytes ever pass before
+/// the page has taken the take; past that nothing is passed on, and
+/// `overflow` is called once, to stop the input.
+final class NativeHoldSink: @unchecked Sendable {
     private let lock = NSLock()
     private var onPCM: ((Data) -> Void)?
+    private var overflow: (() -> Void)?
+    /// How much may still pass before the page takes the take; nil once it has.
+    private var left: Int?
 
-    func set(_ onPCM: ((Data) -> Void)?) {
+    /// Passes audio on from here, at most `limit` bytes of it until `unlimit()`.
+    func open(limit: Int, onPCM: @escaping (Data) -> Void, overflow: @escaping () -> Void) {
         lock.lock()
         self.onPCM = onPCM
+        self.overflow = overflow
+        left = limit
+        lock.unlock()
+    }
+
+    /// The page took the take: its audio is the page's, however long it is.
+    func unlimit() {
+        lock.lock()
+        left = nil
+        lock.unlock()
+    }
+
+    /// Nothing more passes.
+    func close() {
+        lock.lock()
+        onPCM = nil
+        overflow = nil
         lock.unlock()
     }
 
     func send(_ data: Data) {
         lock.lock()
-        let onPCM = self.onPCM
+        var pass = onPCM
+        var over: (() -> Void)?
+        if let left, pass != nil {
+            if data.count > left {
+                // Past the bound: this and all that follows is dropped here.
+                pass = nil
+                over = overflow
+                onPCM = nil
+                overflow = nil
+            } else {
+                self.left = left - data.count
+            }
+        }
         lock.unlock()
-        onPCM?(data)
+        pass?(data)
+        over?()
     }
 }
 
@@ -1193,6 +1257,13 @@ private final class NativeHoldSink: @unchecked Sendable {
 /// down on one serial queue, so activating the session never holds up the
 /// touch that asked for it.
 private final class NativeHoldHeldInput: @unchecked Sendable {
+    /// The queue all of this runs on, for what the input must do by itself.
+    private let queue: DispatchQueue
+
+    init(queue: DispatchQueue) {
+        self.queue = queue
+    }
+
     private var engine: AVAudioEngine?
     private var observers: [NSObjectProtocol] = []
     private var armed: NativeHoldCapture.ArmTimings?
@@ -1283,7 +1354,16 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
             }
         }
         guard let engine, let sink else { return .failure(.failed("engine:0")) }
-        sink.set(onPCM)
+        // Until the page takes the take, no more than the bound passes, and
+        // the input stops itself there, on this queue: neither waits for the
+        // main thread, which may be stalled.
+        sink.open(limit: NativeHoldCapture.unadoptedBytes, onPCM: onPCM) { [weak self, weak engine, queue] in
+            queue.async {
+                // An input already taken down ended its take another way.
+                guard let self, let engine, self.stopAtTheBound(engine) else { return }
+                onEnd("unadopted")
+            }
+        }
         let start = DispatchTime.now()
         do {
             try engine.start()
@@ -1311,6 +1391,22 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
         return .success(.init(armed: armedNow, startMs: startMs))
     }
 
+    /// The page took the take: its audio is no longer bounded.
+    func unlimit() {
+        sink?.unlimit()
+    }
+
+    /// The input reached the bound of a take no page has taken: it stops
+    /// here. The take's end, and the session's, follow from the main thread
+    /// when it can (`takeDown`). False when `stopping` is no longer the
+    /// input.
+    private func stopAtTheBound(_ stopping: AVAudioEngine) -> Bool {
+        guard engine === stopping else { return false }
+        stopping.inputNode.removeTap(onBus: 0)
+        stopping.stop()
+        return true
+    }
+
     /// `stopped` runs once the input can send no more audio, before the
     /// session is deactivated (which can take a while).
     func takeDown(deactivate: Bool, stopped: (() -> Void)? = nil) {
@@ -1323,7 +1419,7 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
         }
         // After the engine has stopped: what it sent until then is the
         // take's, and nothing reaches this sink again.
-        sink?.set(nil)
+        sink?.close()
         sink = nil
         stopped?()
         guard engine != nil else { return }
@@ -1337,10 +1433,16 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
 final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
     private var engine: AVAudioEngine?
     private var observers: [NSObjectProtocol] = []
-    private let queue = DispatchQueue(label: "bot.avibe.ios.hold-capture", qos: .userInteractive)
-    private let held = NativeHoldHeldInput()
+    private let queue: DispatchQueue
+    private let held: NativeHoldHeldInput
     /// Whether `held` may hold an input (asked for on `queue`, not yet taken down).
     private var heldInUse = false
+
+    init() {
+        let queue = DispatchQueue(label: "bot.avibe.ios.hold-capture", qos: .userInteractive)
+        self.queue = queue
+        held = NativeHoldHeldInput(queue: queue)
+    }
 
     var permissionGranted: Bool {
         AVAudioApplication.shared.recordPermission == .granted
@@ -1387,6 +1489,10 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
 
     func disarm() {
         takeDownHeld(stopped: nil)
+    }
+
+    func taken() {
+        queue.async { [held] in held.unlimit() }
     }
 
     func settle() {

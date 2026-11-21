@@ -447,8 +447,11 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(timings["liveQuiet"] as? Int, 200)
         XCTAssertEqual(timings["liveEarly"] as? Int, 27)
         XCTAssertEqual(timings["holdMs"] as? Int, 200)
+        // The input is told, so its bound on an untaken take is lifted.
+        XCTAssertEqual(audio.takens, 1)
         // Taken once.
         assertGone(capture.adopt(take: take, webView: webView))
+        XCTAssertEqual(audio.takens, 1)
         // No longer waited for.
         XCTAssertFalse(fire(NativeHoldCapture.adoptionWait))
 
@@ -515,6 +518,100 @@ final class NativeHoldCaptureTests: XCTestCase {
         drain()
         XCTAssertNil(second.currentTake)
         XCTAssertTrue(heard.isEmpty)
+        XCTAssertEqual(audio.takens, 0)
+    }
+
+    /// The input reached its bound by itself (the main thread was stalled,
+    /// so nothing here could count): the take ends unheard, and the page
+    /// can no longer take it.
+    func testATakeItsInputEndedAtTheBoundIsDroppedUnheard() throws {
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        let take = try hold(capture, in: webView)
+        audio.onPCM?(Data([1, 0]))
+        audio.onEnd?("unadopted")
+        drain()
+        XCTAssertNil(capture.currentTake)
+        XCTAssertFalse(capture.followsPress)
+        XCTAssertEqual(audio.calls, ["arm", "begin", "stop"])
+        XCTAssertTrue(heard.isEmpty)
+        XCTAssertEqual(audio.takens, 0)
+        XCTAssertTrue(try XCTUnwrap(notes.last).hasSuffix("end=unadopted"), notes.last ?? "")
+        assertGone(capture.adopt(take: take, webView: webView))
+        XCTAssertTrue(heard.isEmpty)
+    }
+
+    // MARK: The bound, where the audio arrives
+
+    /// What the input passes on before the page has taken the take: never
+    /// more than the bound, then nothing, and one call to stop the input.
+    func testTheInputPassesOnNoMoreThanItsBoundUntilThePageTakesTheTake() {
+        let sink = NativeHoldSink()
+        var passed = 0
+        var overflows = 0
+        sink.open(limit: 10, onPCM: { passed += $0.count }, overflow: { overflows += 1 })
+        sink.send(Data(count: 6))
+        sink.send(Data(count: 4))
+        XCTAssertEqual(passed, 10)
+        XCTAssertEqual(overflows, 0)
+        // The buffer that would pass the bound is dropped whole.
+        sink.send(Data(count: 1))
+        XCTAssertEqual(passed, 10)
+        XCTAssertEqual(overflows, 1)
+        sink.send(Data(count: 6))
+        sink.unlimit()
+        sink.send(Data(count: 6))
+        XCTAssertEqual(passed, 10)
+        XCTAssertEqual(overflows, 1)
+    }
+
+    func testATakenTakesAudioIsNotBounded() {
+        let sink = NativeHoldSink()
+        var passed = 0
+        var overflows = 0
+        sink.open(limit: 10, onPCM: { passed += $0.count }, overflow: { overflows += 1 })
+        sink.send(Data(count: 10))
+        sink.unlimit()
+        sink.send(Data(count: 1_000))
+        XCTAssertEqual(passed, 1_010)
+        XCTAssertEqual(overflows, 0)
+        sink.close()
+        sink.send(Data(count: 4))
+        XCTAssertEqual(passed, 1_010)
+        XCTAssertEqual(overflows, 0)
+    }
+
+    /// The invariant itself: ten seconds of audio arrive on the input's own
+    /// thread while the main thread does nothing (it waits here, as it
+    /// would in a stall). No more than the App's bound of 2 s was passed on,
+    /// and the input was told to stop once.
+    func testTheBoundHoldsWhileTheMainThreadIsStalled() {
+        let sink = NativeHoldSink()
+        let counted = NSLock()
+        var passed = 0
+        var overflows = 0
+        sink.open(
+            limit: NativeHoldCapture.unadoptedBytes,
+            onPCM: { data in
+                counted.lock()
+                passed += data.count
+                counted.unlock()
+            },
+            overflow: {
+                counted.lock()
+                overflows += 1
+                counted.unlock()
+            }
+        )
+        let tenSeconds = 10 * 16_000 * 2
+        DispatchQueue(label: "bot.avibe.ios.tests.hold-input").sync {
+            for _ in 0..<(tenSeconds / nativeHoldBatchBytes) {
+                sink.send(Data(count: nativeHoldBatchBytes))
+            }
+        }
+        XCTAssertEqual(NativeHoldCapture.unadoptedBytes, 64_000)
+        XCTAssertEqual(passed, 64_000)
+        XCTAssertEqual(overflows, 1)
     }
 
     /// Activating would pause the music, or switch a headset to its call
@@ -598,6 +695,60 @@ final class NativeHoldCaptureTests: XCTestCase {
             drain()
             XCTAssertTrue(heard.isEmpty, "\(scroll)")
         }
+    }
+
+    /// A surface the page marked "at recognition" opens no microphone on a
+    /// touch, though the App's default is to start at touch-down: a tap
+    /// there only prepares the input, and a hold starts it with the cue.
+    /// A surface without the mark, in the same list, starts at touch-down.
+    func testASurfaceMarkedAtRecognitionStartsItsInputOnlyWithTheCue() throws {
+        startsAtTouchDown = true
+        let button = NativeHoldCapture.Surface(
+            id: "main", rect: CGRect(x: 150, y: 780, width: 90, height: 50), startsAtRecognition: true
+        )
+        let onButton = CGPoint(x: 190, y: 800)
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        let webView = WKWebView(frame: .zero)
+        capture.watch(webView)
+        XCTAssertTrue(capture.setSurfaces([Self.composer, button], for: webView))
+
+        // A tap on the marked surface: prepared, never started.
+        capture.touchDown(at: onButton, in: webView)
+        XCTAssertEqual(audio.calls, ["arm"])
+        clock = 80
+        capture.touchEnded(in: webView)
+        XCTAssertEqual(audio.calls, ["arm", "disarm"])
+        XCTAssertFalse(capture.followsPress)
+        XCTAssertNil(audio.onPCM)
+
+        // A hold on it: the input starts when the hold is recognised.
+        audio.calls = []
+        clock = 1_000
+        capture.touchDown(at: onButton, in: webView)
+        XCTAssertEqual(audio.calls, ["arm"])
+        clock = 1_200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
+        XCTAssertEqual(holdEvents.last?["phase"] as? String, "recognised")
+        XCTAssertEqual(holdEvents.last?["surface"] as? String, "main")
+        let take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        let timings = try capture.adopt(take: take, webView: webView).get()
+        XCTAssertEqual(timings["variant"] as? String, "quiet")
+        capture.touchEnded(in: webView)
+        capture.stop(take: take)
+        drain()
+        XCTAssertNil(capture.currentTake)
+
+        // The unmarked surface beside it keeps the App's default.
+        audio.calls = []
+        clock = 3_000
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertEqual(audio.calls, ["begin"])
+        clock = 3_200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        let second = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        XCTAssertEqual(try capture.adopt(take: second, webView: webView).get()["variant"] as? String, "early")
     }
 
     /// Started at touch-down too, the cue does not wait for the microphone.
@@ -1367,7 +1518,23 @@ final class NativeHoldCaptureTests: XCTestCase {
             [.init(id: "composer", rect: CGRect(x: 0, y: 700.5, width: 390, height: 60))]
         )
         XCTAssertEqual(NativeHoldCapture.surfaces(from: [[String: Any]]()), [])
+        // When a surface's input starts: at touch-down unless the page says
+        // at recognition.
+        let rect = CGRect(x: 0, y: 700.5, width: 390, height: 60)
+        XCTAssertEqual(
+            NativeHoldCapture.surfaces(from: [surface.merging(["start": "recognition"]) { _, new in new }]),
+            [.init(id: "composer", rect: rect, startsAtRecognition: true)]
+        )
+        XCTAssertEqual(
+            NativeHoldCapture.surfaces(from: [surface.merging(["start": "touch"]) { _, new in new }]),
+            [.init(id: "composer", rect: rect, startsAtRecognition: false)]
+        )
+        XCTAssertEqual(NativeHoldCapture.surfaces(from: [surface])?.first?.startsAtRecognition, false)
         let invalid: [Any?] = [
+            [surface.merging(["start": "later"]) { _, new in new }],
+            [surface.merging(["start": true]) { _, new in new }],
+            [surface.merging(["start": 1]) { _, new in new }],
+            [surface.merging(["start": "recognition", "extra": 1]) { _, new in new }],
             nil,
             "x",
             Array(repeating: surface, count: 9),
@@ -1685,6 +1852,13 @@ private final class FakeAudio: NativeHoldCaptureAudio {
 
     func disarm() {
         calls.append("disarm")
+    }
+
+    /// How often the input was told that the page took its take.
+    private(set) var takens = 0
+
+    func taken() {
+        takens += 1
     }
 
     func settle() {
