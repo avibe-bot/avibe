@@ -305,7 +305,8 @@ TEXT = {
         "  - The earlier binding is completed, to the account and the domain that were\n"
         "    approved for it. The domain is shown when it has finished.\n"
         "  - The unfinished reset is withdrawn and goes no further. What it had\n"
-        "    already done is not undone.\n"
+        "    already done is not undone: remote access may still be off afterwards,\n"
+        "    and the command to start it is then shown.\n"
         "\n"
         "If you answer anything else, both stay exactly as they are, and remote access\n"
         "on this computer stays off."
@@ -795,6 +796,8 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
         return 1
     if state in ("bound", "binding_rejected"):
         _say("continue_finished", url=_context().url)
+        if not read_state()[1]:  # Completing a binding does not turn remote access back on.
+            _say("tunnel_not_running")
         return 0
     if state == "unpaired":
         if started_as == "pairing_recovery_required":

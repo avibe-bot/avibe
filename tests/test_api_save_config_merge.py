@@ -423,7 +423,7 @@ def test_generic_settings_cannot_replace_or_clear_pairing(tmp_path, monkeypatch,
         "session_secret": "test-session-secret", "tunnel_token": "test-tunnel",
     }}
     V2Config.from_payload(payload).save()
-    with pytest.raises(ValueError, match="Pairing identity"):
+    with pytest.raises(ValueError, match="binding is not changed by saving settings"):
         api.save_config({"remote_access": {"vibe_cloud": update}}, generic_remote_access=True)
     saved = V2Config.load().remote_access.vibe_cloud
     assert (saved.instance_id, saved.instance_secret, saved.enabled) == ("original", "test-secret", False)

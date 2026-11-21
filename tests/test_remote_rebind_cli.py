@@ -261,7 +261,7 @@ UNFINISHED = [
 @pytest.mark.parametrize("start,resumed,reread,sentence,code,binds", UNFINISHED)
 def test_unfinished_work_is_continued_not_restarted(terminal, monkeypatch, capsys, start, resumed, reread, sentence, code, binds):
     states = iter([start, reread])
-    monkeypatch.setattr(remote_rebind, "read_state", lambda: (next(states), False))
+    monkeypatch.setattr(remote_rebind, "read_state", lambda: (next(states, "bound"), True))
     monkeypatch.setattr(remote_rebind, "_resume", lambda **_: resumed)
     monkeypatch.setattr(binding_reset, "reset_interactively", lambda **_: pytest.fail("a reset was offered"))
     linked = []
@@ -337,6 +337,8 @@ def test_completing_an_earlier_binding_is_its_own_question_never_the_reset_quest
     assert _walk(bound_terminal, ["y"]) == 0
     out = capsys.readouterr().out
     assert "The unfinished reset was withdrawn." in out and "Finished. This computer is bound: https://fixture.avibe.bot" in out
+    # Completing the binding does not claim remote access is back: it names the command that starts it.
+    assert out.rstrip().endswith("vibe remote start") and "restored" not in out
     assert len(sends) == 2 and sends[0] == sends[1] and not gate.reset_in_progress() and _instance() == "inst_A"
 
 

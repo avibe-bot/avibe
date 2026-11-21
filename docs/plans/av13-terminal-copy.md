@@ -705,16 +705,19 @@ Continuing that same attempt now; no new one is started.
 之前的一次绑定可能已经在 avibe.bot 上完成。现在继续那一次，不会开始新的绑定。
 ```
 
-**H2** · the step returned `bound`
+**H2** · the step returned `bound`. The last two lines only when the tunnel is not running: completing a binding does not turn remote access back on.
 
 ```
 Finished. This computer is bound: {url}
+The tunnel is not running yet. Start it with:
+  vibe remote start
 ```
 
 中文说明：
 
 ```
 已完成。这台电脑已绑定：{url}
+隧道还没有运行。启动它：vibe remote start
 ```
 
 **H3** · nothing was left to continue (`idle`) and the computer is not bound; the link (E) follows
@@ -877,7 +880,8 @@ If you answer yes:
   - The earlier binding is completed, to the account and the domain that were
     approved for it. The domain is shown when it has finished.
   - The unfinished reset is withdrawn and goes no further. What it had
-    already done is not undone.
+    already done is not undone: remote access may still be off afterwards,
+    and the command to start it is then shown.
 
 If you answer anything else, both stay exactly as they are, and remote access
 on this computer stays off.
@@ -892,7 +896,7 @@ Complete the earlier binding and withdraw the reset? [y/N]
 这个问题问的是要不要完成那次绑定，它不会重置任何东西。
 如果回答 y：
   - 完成之前那次绑定，绑定到当时确认的账号和域名；完成后会显示域名。
-  - 撤回没做完的重置，它不会再往下进行；它已经做过的部分不会恢复。
+  - 撤回没做完的重置，它不会再往下进行；它已经做过的部分不会恢复：之后远程访问可能仍然是关着的，那时会显示打开它的命令。
 其他任何回答：两件事都保持原样，这台电脑的远程访问保持关闭。
 完成之前那次绑定，并撤回重置？[y/N]
 ```
