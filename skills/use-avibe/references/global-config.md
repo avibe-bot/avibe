@@ -257,6 +257,25 @@ is needed: it takes effect the next time the user opens a conversation or the Ap
 `"app_hold": true` to turn it on again. Voice input itself stays on either way; this is not
 `audio_asr.enabled`.
 
+### Make a tap on the main Bot open no microphone in the iPhone App
+
+In the iPhone App, a touch on the main Bot's button in the tab bar opens the microphone at
+once, as a touch on the composer does, so a hold there loses no first word. A plain tap on that
+button therefore opens the microphone for a moment (nothing of it is kept or sent). To have that
+one button open the microphone only when the hold is recognised, use `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold_main_at_touch": false
+  }
+}
+```
+
+No restart and no new App build are needed: it takes effect the next time the user opens a
+conversation or the App. The composer is not changed by it. Send `"app_hold_main_at_touch": true`
+to go back. It needs the iPhone App from TestFlight 51.1 on.
+
 ### Switch primary platform
 
 Use `POST /api/config` and keep `platforms.enabled` complete:

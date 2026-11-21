@@ -14709,6 +14709,10 @@ def asr_status():
                 # Whether, in the iOS App, the App recognises holds and records
                 # every take (``audio_asr.app_hold``); false is the off switch.
                 "app_hold": getattr(audio_asr_config, "app_hold", True) is not False,
+                # Whether a touch on the main Bot's button opens the microphone
+                # there at once (``audio_asr.app_hold_main_at_touch``); false
+                # makes that button open it when the hold is recognised.
+                "app_hold_main_at_touch": getattr(audio_asr_config, "app_hold_main_at_touch", True) is not False,
             }
         )
     except Exception:

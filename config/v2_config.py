@@ -1939,6 +1939,12 @@ class AudioAsrConfig:
     # no new build; read per request by ``/api/asr/status``, so it takes effect
     # without a restart. There is no Settings row for it.
     app_hold: bool = True
+    # In the iOS App, a touch on the main Bot's button in the tab bar opens the
+    # microphone at once, as one on the composer does, so a hold loses no first
+    # word. False makes that one button open it only when the hold is recognised
+    # (a tap there then opens no microphone). Read and applied as ``app_hold``
+    # is; it needs an App that knows the per-surface start (TestFlight 51.1 on).
+    app_hold_main_at_touch: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a value that is not the kind this class declares.

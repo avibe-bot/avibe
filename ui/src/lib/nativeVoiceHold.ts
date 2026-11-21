@@ -20,6 +20,9 @@ export type HoldSurface = {
   /** The element a hold may start on now: every touch in its box is this surface's. Null when
    *  none may record now (the App then follows no press here). */
   element: () => Element | null;
+  /** Whether a touch here is to open no microphone: the App then starts recording when it
+   *  recognises the hold. Asked at each measure; unsaid, the App's default (at touch-down). */
+  startsAtRecognition?: () => boolean;
   /** A press or a take is live here: the surface stays as the App last had it, to its end
    *  (taking it back under a finger would end the press the App follows). */
   live: () => boolean;
@@ -138,9 +141,11 @@ const measure = (): { list: NativeVoiceHoldSurface[]; holdMs: number; covered: b
         covered = true;
         continue;
       }
+      const start = surface.startsAtRecognition?.() ? { start: 'recognition' as const } : {};
       boxes = boxesOf(element, box).map((part, index) => ({
         id: partId(id, index),
         ...toWebView(part.left, part.top, part.width, part.height),
+        ...start,
       }));
     }
     if (!boxes || boxes.length === 0 || list.length + boxes.length > MAX_BOXES) continue;

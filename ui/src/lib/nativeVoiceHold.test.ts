@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { noteAppVoice } from './appVoice';
+import { mainBotStartsAtRecognition, noteAppVoice } from './appVoice';
 import {
   holdFollowed,
   refreshHoldSurfaces,
@@ -114,7 +114,7 @@ beforeEach(() => {
   document.elementFromPoint = topAt;
 });
 afterEach(async () => {
-  noteAppVoice({ app_hold: true });
+  noteAppVoice({ app_hold: true, app_hold_main_at_touch: true });
   // Every surface taken back, and the App told: the next test starts from nothing named.
   await unregisterAll();
   document.body.replaceChildren();
@@ -418,6 +418,66 @@ describe('the hold surfaces the iOS App follows', () => {
     // A take's timings at its end are its capture's to keep (lib/nativeVoiceCapture).
     emit({ phase: 'timings', take: 'n1' });
     expect(taking.recognised).toHaveBeenCalledTimes(1);
+  });
+
+  // A surface may ask that a touch on it open no microphone: the App then starts its input when
+  // it recognises the hold. Said for each of the surface's boxes; unsaid, the App's default.
+  it('names a surface that starts at recognition with every one of its boxes, and the others without', async () => {
+    let atRecognition = true;
+    const button = box(150, 780, 90, 60);
+    const face = document.createElement('span');
+    face.getBoundingClientRect = () => new DOMRect(168, 760, 54, 54);
+    button.append(face);
+    registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
+    registerHoldSurface('bot', surface(button, { startsAtRecognition: () => atRecognition }));
+    await settle();
+    expect(named()).toEqual([{
+      surfaces: [
+        { id: 'composer', x: 0, y: 700, width: 390, height: 60 },
+        { id: 'bot', x: 150, y: 780, width: 90, height: 60, start: 'recognition' },
+        { id: 'bot_1', x: 168, y: 760, width: 54, height: 54, start: 'recognition' },
+      ],
+      holdMs: 200,
+    }]);
+
+    // Asked again at each measure: the App is told when the answer changes.
+    atRecognition = false;
+    refreshHoldSurfaces();
+    await settle();
+    expect(named().at(-1)).toEqual({
+      surfaces: [
+        { id: 'composer', x: 0, y: 700, width: 390, height: 60 },
+        { id: 'bot', x: 150, y: 780, width: 90, height: 60 },
+        { id: 'bot_1', x: 168, y: 760, width: 54, height: 54 },
+      ],
+      holdMs: 200,
+    });
+  });
+
+  // The instance's setting for the main Bot's button (`audio_asr.app_hold_main_at_touch`, said
+  // by `/api/asr/status`): the list is measured again when it changes, with no reload.
+  it('says where the main Bot\'s button starts from the instance\'s setting, and tells the App when it changes', async () => {
+    expect(mainBotStartsAtRecognition()).toBe(false);
+    registerHoldSurface('bot', surface(box(150, 780, 90, 60), { startsAtRecognition: mainBotStartsAtRecognition }));
+    await settle();
+    expect(named().at(-1)).toEqual({ surfaces: [{ id: 'bot', x: 150, y: 780, width: 90, height: 60 }], holdMs: 200 });
+
+    noteAppVoice({ app_hold: true, app_hold_main_at_touch: false });
+    expect(mainBotStartsAtRecognition()).toBe(true);
+    await settle();
+    expect(named().at(-1)).toEqual({
+      surfaces: [{ id: 'bot', x: 150, y: 780, width: 90, height: 60, start: 'recognition' }],
+      holdMs: 200,
+    });
+
+    // A status body without the field (an instance with no such setting) changes nothing.
+    noteAppVoice({ app_hold: true });
+    expect(mainBotStartsAtRecognition()).toBe(true);
+    // Only `false` turns it; anything else is the default, at touch-down.
+    noteAppVoice({ app_hold_main_at_touch: 'no' });
+    expect(mainBotStartsAtRecognition()).toBe(false);
+    await settle();
+    expect(named().at(-1)).toEqual({ surfaces: [{ id: 'bot', x: 150, y: 780, width: 90, height: 60 }], holdMs: 200 });
   });
 
   // The off switch (`audio_asr.app_hold`, said by `/api/asr/status`): no new build needed.

@@ -639,7 +639,16 @@ export function hasNativeVoiceHold(): boolean {
 }
 
 /** A place where a hold may record now, in the WebView's own points. */
-export type NativeVoiceHoldSurface = { id: string; x: number; y: number; width: number; height: number };
+export type NativeVoiceHoldSurface = {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** A touch here opens no microphone: the App starts its input when it recognises the hold.
+   *  Unsaid, the App's default (at touch-down). */
+  start?: 'recognition';
+};
 
 /** The App's answer to a list of surfaces: `ok` (it follows presses there), or why it does not.
  *  `superseded` is a list overtaken by a later one, which stands instead. */

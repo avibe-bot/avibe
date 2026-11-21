@@ -112,6 +112,9 @@ export type HoldToTalkOptions = {
    *  inside it is this hold's, so the surface's own controls are left out. Without it (and
    *  without `attachSurface` on an element) the page recognises the hold itself, as elsewhere. */
   surface?: () => Element | null;
+  /** Whether, in the iOS App, a touch on this surface is to open no microphone: the App then
+   *  starts recording when it recognises the hold. Unsaid, the App's default (at touch-down). */
+  startsAtRecognition?: () => boolean;
 };
 
 const HOLD_STYLE: CSSProperties = {
@@ -744,6 +747,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         if (latest.current.canHold && !latest.current.canHold('touch')) return null;
         return latest.current.surface?.() ?? surfaceElement.current;
       },
+      startsAtRecognition: () => latest.current.startsAtRecognition?.() === true,
       // A press already down keeps its surface to its end, whatever a new press would be told.
       live: () => {
         const at = phaseRef.current;

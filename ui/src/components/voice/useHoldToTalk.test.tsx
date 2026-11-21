@@ -1201,6 +1201,18 @@ describe('a hold the iOS App recognises', () => {
     expect(native.surfaces).toHaveBeenLastCalledWith([{ id: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/), x: 0, y: 470, width: 300, height: 60 }], 200);
   });
 
+  // A surface whose owner asks that a touch open no microphone (the main Bot's button, when the
+  // instance says so): the App is told with the surface.
+  it('names its surface as starting at recognition when its owner asks for that', async () => {
+    await mountFollowed({ startsAtRecognition: () => true });
+    expect(native.surfaces).toHaveBeenLastCalledWith([{ id: expect.any(String), x: 0, y: 470, width: 300, height: 60, start: 'recognition' }], 200);
+    cleanup();
+    await elapse(20);
+    native.surfaces.mockClear();
+    await mountFollowed({ startsAtRecognition: () => false });
+    expect(native.surfaces).toHaveBeenLastCalledWith([{ id: expect.any(String), x: 0, y: 470, width: 300, height: 60 }], 200);
+  });
+
   it('names none while voice may not record there: no consent, no microphone answer, or a press it would not take', async () => {
     pipeline.asr.consent = null;
     await mountFollowed();
