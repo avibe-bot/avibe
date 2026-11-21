@@ -2164,11 +2164,20 @@ async def serve(
         )
         server = _create_controller_loop_server(config)
         bound = host.bind()
+        watchdog = getattr(controller, "_loop_watchdog", None)
         try:
             host.publish(bound)
             _write_internal_server_status("ready")
+            # Freeze the warmed controller heap once, by default. Armed only once this
+            # listener is published, so the unfreeze command is reachable for as long
+            # as the freeze can last. It fires at the first natural full collection
+            # after two hours of uptime with no model stream open.
+            if watchdog is not None:
+                watchdog.arm_warm_freeze()
             await server.serve(sockets=[bound.listener])
         finally:
+            if watchdog is not None:
+                watchdog.rollback_warm_freeze()  # listener gone: never stay frozen unreachable
             host.cleanup(bound)
     finally:
         await skill_recorder.close()
