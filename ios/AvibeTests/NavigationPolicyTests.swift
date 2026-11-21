@@ -4687,14 +4687,22 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
     func loadHTML(
         _ html: String,
         baseURL: URL,
-        in webView: WKWebView
+        in webView: WKWebView,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            navigation = webView.loadHTMLString(html, baseURL: baseURL)
-            if navigation == nil {
-                finish(with: .failure(TestWaitError.navigationNotCreated))
+        do {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                navigation = webView.loadHTMLString(html, baseURL: baseURL)
+                if navigation == nil {
+                    finish(with: .failure(TestWaitError.navigationNotCreated))
+                }
             }
+        } catch {
+            throw recordThrown(
+                "The fixture document did not load", error, file: file, line: line
+            )
         }
     }
 

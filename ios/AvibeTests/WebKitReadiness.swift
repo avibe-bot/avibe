@@ -107,17 +107,23 @@ enum WebKitReadiness {
         accountID: String,
         instanceIDs: Set<String>,
         requests: FixtureRequestLog,
-        budget: Duration = standardTransportOperation
+        budget: Duration = standardTransportOperation,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
         let clock = ContinuousClock()
         let started = clock.now
         let deadline = started.advanced(by: budget)
         while case .loading = app.route {
             guard clock.now < deadline else {
-                throw FixtureReadinessError(description: fixtureEvidence(
-                    app, stage: "bootstrap did not settle", started: started,
-                    requests: requests
-                ))
+                throw recordThrown(
+                    "The signed-in fixture did not settle",
+                    FixtureReadinessError(description: fixtureEvidence(
+                        app, stage: "bootstrap did not settle", started: started,
+                        requests: requests
+                    )),
+                    file: file, line: line
+                )
             }
             try await Task.sleep(for: .milliseconds(50))
         }
@@ -129,8 +135,12 @@ enum WebKitReadiness {
               app.mobileSessionCoordinator.currentAccount?.id == accountID,
               Set(app.mobileSessionCoordinator.currentInstances.map(\.id)) == instanceIDs
         else {
-            throw FixtureReadinessError(description:
-                "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())"
+            throw recordThrown(
+                "The signed-in fixture settled on another state",
+                FixtureReadinessError(description:
+                    "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())"
+                ),
+                file: file, line: line
             )
         }
     }
@@ -178,6 +188,23 @@ final class FixtureRequestLog: @unchecked Sendable {
         attachment.lifetime = .keepAlways
         test.add(attachment)
     }
+}
+
+/// Records the error a shared test helper is about to throw, and returns it.
+///
+/// On the CI simulator XCTest reports a test that owns a window and throws as
+/// `caught error: "InvalidTransition { phase: idle targetPhase: failed(deinit) }"`,
+/// whatever it threw: a private error of Apple's Gestures framework, printed
+/// in place of the test's own. The failure recorded here is what names the
+/// real one in the log. Only for a throw no caller expects.
+func recordThrown(
+    _ what: String,
+    _ error: Error,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) -> Error {
+    XCTFail("\(what): \(String(reflecting: error))", file: file, line: line)
+    return error
 }
 
 struct FixtureReadinessError: Error, CustomStringConvertible {
