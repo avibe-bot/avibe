@@ -179,6 +179,10 @@ class Journal:
                 if op is not None and (not isinstance(op, dict) or not {'id', 'state', 'setting', 'from', 'to', 'boot', 'until', 'baseline'} <= op.keys()
                                        or op['setting'] not in FIELDS or op['state'] not in {'applying', 'verifying', 'restoring'}):
                     raise ValueError('invalid operation record')
+            attempt = data.get('pinAttempt')
+            if attempt is not None and (not isinstance(attempt, dict) or not all(
+                    isinstance(attempt.get(k), str) and attempt[k] for k in ('id', 'boot'))):
+                raise ValueError('invalid pin attempt ownership')
             prior = data.get('priorRepair')
             if prior is not None:
                 current = data['operation']
@@ -313,6 +317,19 @@ class Journal:
             if (op and op['state'] == 'restoring' and FIELDS[op['setting']] in fields
                     and value(config, op['setting']) != op['from']):
                 raise ConnectionError('connection_change_busy')
+
+    def owns_pin_replica(self, config, attempt_id: str) -> bool | None:
+        """None means ownership is unknown: retry without touching either connector."""
+        try:
+            attempt = self.load(config).get('pinAttempt')
+        except ConnectionError as exc:
+            if exc.code != 'connection_state_unavailable':
+                raise
+            self._warn_unavailable()
+            return None
+        if attempt is None:
+            return False
+        return attempt['id'] == attempt_id and attempt['boot'] == self.boot
 
     def _warn_unavailable(self):
         if not self.warned_unavailable:

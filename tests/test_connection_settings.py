@@ -345,6 +345,47 @@ def test_host_cli_reports_applied_even_with_unreadable_journal(rig, monkeypatch,
     assert cs.journal.path.read_text() == 'broken optional journal'
 
 
+def test_unknown_pin_replica_owner_defers_cleanup_not_runtime_monitoring(rig, monkeypatch, caplog):
+    from vibe import project_access_sync
+
+    candidate = dict(pid=222, metrics_url='fixture-replica', pin_attempt='fixture-attempt')
+    slots = {'candidate': candidate, 'active': rig.active}
+    workers = []
+    pending = []
+    monkeypatch.setattr(ra, '_state_connector', slots.get)
+    monkeypatch.setattr(ra, '_RECOVERY_THREAD', None)
+    monkeypatch.setattr(ra, '_QUALITY_MONITOR_STARTED', False)
+    monkeypatch.setattr(ra, '_RECOVERY_STATE', {})
+    monkeypatch.setattr(ra, '_QUALITY_CONTEXT', None)
+    monkeypatch.setattr(ra, '_QUALITY_EVALUATOR', None)
+    def quality_thread(*, target, args, kwargs, **unused):
+        assert target is ra._quality_monitor_loop
+        pending.append(kwargs['orphan_candidate_pending'])
+        return SimpleNamespace(start=lambda: workers.append('quality'))
+    monkeypatch.setattr(ra, 'threading', SimpleNamespace(Thread=quality_thread, local=__import__('threading').local,
+                                                        get_ident=__import__('threading').get_ident))
+    for module, name in ((ra, 'start_status_heartbeat'), (ra, 'start_authorization_revision_polling'),
+                         (project_access_sync, 'start_project_access_sync'), (ra, 'start_resource_acl_sync_polling')):
+        monkeypatch.setattr(module, name, lambda cfg, name=name: workers.append(name))
+    monkeypatch.setattr(ra, '_discard_candidate_connector', lambda *a, **kw: pytest.fail('ownership unknown'))
+    monkeypatch.setattr(ra.runtime, 'stop_pid', lambda *a, **kw: pytest.fail('ownership unknown'))
+    monkeypatch.setattr(ra, '_promote_candidate_connector', lambda *a, **kw: pytest.fail('ownership unknown'))
+    cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
+    cs.journal.path.write_text('unreadable fixture')
+    ra.start_runtime_monitoring(rig.cfg)
+    assert workers == ['quality', 'start_status_heartbeat', 'start_authorization_revision_polling',
+                       'start_project_access_sync', 'start_resource_acl_sync_polling']
+    assert pending == [True] and not ra._reconcile_orphan_candidate_when_free()
+    assert caplog.text.count('Connection settings journal unavailable') == 1
+    assert cs.journal.path.read_text() == 'unreadable fixture' and slots['active'] == rig.active
+    # A subsequent tick can distinguish a previous worker from one still running.
+    cs.journal.path.unlink()
+    retired = []
+    monkeypatch.setattr(ra, '_discard_candidate_connector', lambda pid, **kw: retired.append((pid, kw)))
+    assert ra._reconcile_orphan_candidate_when_free()
+    assert retired == [(222, {'grace_seconds': ra.RECOVERY_DRAIN_SECONDS, 'expected_url': 'fixture-replica'})]
+
+
 def test_unreadable_settings_disable_only_new_feature(rig, monkeypatch):
     from vibe import ui_server
     cs.journal.path.parent.mkdir(exist_ok=True, parents=True)

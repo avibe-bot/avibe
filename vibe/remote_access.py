@@ -4495,15 +4495,15 @@ def _finish_reconciled_recovery(
     )
 
 
-def _reconcile_orphan_candidate() -> None:
-    """Resolve a candidate left by a previous service process without risking the active route."""
+def _reconcile_orphan_candidate() -> bool:
+    """Return False to retry when optional settings cannot establish ownership."""
 
     with _connector_lifecycle(timeout=0):
         candidate = _state_connector("candidate")
         if not candidate or not isinstance(candidate.get("pid"), int):
             candidate_pid = _read_pid_file(_candidate_pid_path())
             if candidate_pid is None:
-                return
+                return True
             candidate = {"pid": candidate_pid}
         else:
             candidate_pid = int(candidate["pid"])
@@ -4518,11 +4518,12 @@ def _reconcile_orphan_candidate() -> None:
             # the orphan, using the same platform stop policy as handovers.
             from vibe.connection_settings import journal
             with config_file_lock():
-                attempt = journal.load(V2Config.load()).get('pinAttempt') or {}
-                if attempt.get('id') == candidate['pin_attempt'] and attempt.get('boot') == journal.boot:
-                    return
-            _discard_candidate_connector(candidate_pid, grace_seconds=RECOVERY_DRAIN_SECONDS, expected_url=candidate['metrics_url'])
-            return
+                owned = journal.owns_pin_replica(V2Config.load(), candidate['pin_attempt'])
+            if owned is None:
+                return False  # preserve both slots; ordinary monitoring starts and retries next tick
+            if not owned:
+                _discard_candidate_connector(candidate_pid, grace_seconds=RECOVERY_DRAIN_SECONDS, expected_url=candidate['metrics_url'])
+            return True
 
         if candidate_pid == active_pid:
             with _CONNECTOR_LOCK:
@@ -4534,12 +4535,12 @@ def _reconcile_orphan_candidate() -> None:
                 _pid_path().write_text(str(candidate_pid), encoding="utf-8")
                 _candidate_pid_path().unlink(missing_ok=True)
             _finish_reconciled_recovery("improved")
-            return
+            return True
 
         if candidate_state == "cloudflared" and active_state != "cloudflared":
             if active_state == "unknown":
                 logger.warning("Preserving orphan Tunnel candidate because active process identity is unknown")
-                return
+                return True
             metrics_url = candidate.get("metrics_url")
             try:
                 ready = isinstance(metrics_url, str) and requests.get(
@@ -4558,24 +4559,25 @@ def _reconcile_orphan_candidate() -> None:
                     _pid_path().write_text(str(candidate_pid), encoding="utf-8")
                     _candidate_pid_path().unlink(missing_ok=True)
                 _finish_reconciled_recovery("improved")
-                return
+                return True
             if not runtime.stop_pid(candidate_pid, timeout=8):
                 logger.warning("Could not stop unready orphan Tunnel candidate pid=%s", candidate_pid)
-                return
+                return True
 
         if candidate_state == "cloudflared" and active_state == "cloudflared":
             if not runtime.stop_pid(candidate_pid, timeout=8):
                 logger.warning("Could not stop orphan Tunnel candidate pid=%s", candidate_pid)
-                return
+                return True
         elif candidate_state == "unknown":
             logger.warning("Preserving orphan Tunnel candidate with unknown process identity pid=%s", candidate_pid)
-            return
+            return True
 
         with _CONNECTOR_LOCK:
             if _state_path().exists():
                 _replace_state_connector("candidate", None)
             _candidate_pid_path().unlink(missing_ok=True)
         _finish_reconciled_recovery("failed")
+        return True
 
 
 def _reconcile_orphan_candidate_when_free() -> bool:
@@ -4592,10 +4594,9 @@ def _reconcile_orphan_candidate_when_free() -> bool:
                 recovery_running = _RECOVERY_THREAD is not None
             if recovery_running:
                 return False
-            _reconcile_orphan_candidate()
+            return _reconcile_orphan_candidate()
     except _ConnectorLifecycleBusy:
         return False
-    return True
 
 
 def _normalize_orphaned_recovery_state() -> None:
