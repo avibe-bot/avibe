@@ -127,7 +127,7 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --color-traffic-minimize: #febc2e;
   --color-traffic-zoom: #28c840;
   --spacing-titlebar-inset: 9px;
-  --spacing-titlebar-symbol: 15px;
+  --spacing-titlebar-symbol: 14px;
   --text-titlebar: 13px;
 }
 

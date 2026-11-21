@@ -10,6 +10,7 @@ import en from '../../i18n/en.json';
 import { showDockId } from '../../context/dockDoc';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { ShowPageShareControl } from './ShowPageShareControl';
+import { ShowPageAnnotationHost } from './ShowPageAnnotationHost';
 import { NATIVE_SHOW_SHARE_OPEN_EVENT, NativeShowShareEntry } from '../apps/NativeShowShareEntry';
 
 const permissionsApi = vi.hoisted(() => ({
@@ -28,7 +29,8 @@ vi.mock('../../lib/native', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/native')>()),
   isNativeShell: () => native.shell,
 }));
-vi.mock('../../lib/platform', () => ({
+vi.mock('../../lib/platform', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/platform')>()),
   isIosDevice: () => platform.ios,
   isRealMobileSafari: () => platform.safari,
   isStandalonePwa: () => platform.standalone,
@@ -1167,7 +1169,7 @@ describe('the native Show window share entry', () => {
     api.getShowPageAccess.mockResolvedValue(showPageAccess());
     return render(
       <I18nextProvider i18n={i18n}>
-        <div className="relative"><NativeShowShareEntry sessionId="ses-1" /></div>
+        <ShowPageAnnotationHost src={null}><div className="relative"><NativeShowShareEntry sessionId="ses-1" /></div></ShowPageAnnotationHost>
       </I18nextProvider>,
     );
   };
