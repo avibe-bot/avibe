@@ -54,6 +54,13 @@ def _set(config: V2Config, *, rejected: bool) -> None:
             _path().unlink(missing_ok=True)
 
 
+def connector_start_denial(config: V2Config | None) -> str | None:
+    from vibe.binding_admission import reset_in_progress
+    if reset_in_progress():
+        return 'reset_in_progress'
+    return 'binding_rejected' if rejected_at(config) is not None else None
+
+
 def clear_after_publication() -> None:
     """Called under the same config lock that has just installed a new pairing."""
     _path().unlink(missing_ok=True)

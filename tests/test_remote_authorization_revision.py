@@ -1342,14 +1342,30 @@ def test_remote_login_forces_revoked_authorization_revalidation(monkeypatch, tmp
     assert refresh_flags.count(True) == 1
 
 
-def test_browser_logout_invalidates_http_sse_and_websocket(monkeypatch, tmp_path):
+@pytest.mark.parametrize('boundary', ['logout', 'retire-binding', 'reset-fence'])
+def test_browser_logout_invalidates_http_sse_and_websocket(monkeypatch, tmp_path, boundary):
     config = _paired_config(tmp_path)
     cookie = _organization_cookie(config)
     identity = remote_access.parse_session_identity(config, cookie)
     payload = remote_access.parse_session_cookie(config, cookie)
     assert identity is not None
     assert payload is not None
-    assert remote_access.revoke_browser_session(identity) is True
+    if boundary == 'logout':
+        assert remote_access.revoke_browser_session(identity) is True
+    elif boundary == 'retire-binding':
+        # A valid pre-registry cookie and an already accepted stream. Simulate
+        # the interval after predecessor retirement but before config publication.
+        from storage import device_registry
+        from storage.db import get_cached_sqlite_engine
+        from storage.models import remote_device_sessions
+        with get_cached_sqlite_engine().begin() as conn:
+            conn.execute(remote_device_sessions.delete().where(remote_device_sessions.c.session_id == identity['browser_session_id']))
+        assert remote_access.session_identity_is_current(identity)
+        device_registry.retire_binding(remote_access.device_binding(config), now=int(time.time()))
+    else:
+        from vibe.binding_admission import reset_intent_path
+        reset_intent_path().write_text('{')  # even a damaged marker keeps old consumers out
+    assert not remote_access.session_identity_is_current(identity)
 
     client = app.test_client()
     client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")

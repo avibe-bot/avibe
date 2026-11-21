@@ -623,11 +623,21 @@ class RebindClaims(RedirectClaims):
             raise ClaimError('operation_in_progress') from None
 
     def overview(self):
-        from vibe import binding_health, instance_address
+        from vibe import binding_health, binding_reset, instance_address
+        from vibe.binding_admission import reset_in_progress
 
         # Read only: no credential probe, identity initialization, reconciliation,
         # connector status cleanup or grant observation on a page refresh.
         with config_file_lock():
+            if reset_in_progress():
+                try:
+                    binding_reset._verify_stage(binding_reset._read(), local._config())
+                    state = 'resetting'
+                except (ClaimError, OSError, ValueError):
+                    state = 'reset_repair_required'
+                return {'binding_state': state, 'can_start': False, 'unavailable_reason': state,
+                        'next_action': None, 'reason_code': None, 'attempt': None,
+                        'connector_still_running': remote_access._is_cloudflared_pid(remote_access._read_pid())}
             cfg, pending = local._config(), local._pending()
             cloud = cfg.remote_access.vibe_cloud
             bound = bool(cloud.instance_id and cloud.instance_secret and cloud.backend_url)

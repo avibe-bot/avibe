@@ -3499,9 +3499,9 @@ def _start_candidate_connector(
     binary: str,
     requested_protocol: str,
 ) -> tuple[int, str]:
-    from vibe.binding_health import rejected_at
-    if rejected_at(config) is not None:
-        raise RuntimeError("binding_rejected")
+    from vibe.binding_health import connector_start_denial
+    if reason := connector_start_denial(config):
+        raise RuntimeError(reason)
     metrics_url = _allocate_metrics_url()
     candidate_pid = runtime.spawn_background(
         _connector_command(binary, metrics_url),
@@ -3546,9 +3546,9 @@ def _promote_candidate_connector(
     runtime_signature: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     with _connector_lifecycle(), _CONNECTOR_LOCK:
-        from vibe.binding_health import rejected_at
-        if rejected_at(V2Config.load()) is not None:
-            raise RuntimeError("binding_rejected")
+        from vibe.binding_health import connector_start_denial
+        if reason := connector_start_denial(V2Config.load()):
+            raise RuntimeError(reason)
         state = _read_state() or {}
         active = state.get("active") if isinstance(state.get("active"), dict) else {"pid": _read_pid()}
         candidate = state.get("candidate")
@@ -4095,8 +4095,8 @@ def _exited_connector_requested(config: V2Config | None) -> bool:
     # A path that is not a regular file (one a stop could not remove) is no request.
     if not cloud.enabled or not cloud.tunnel_token or not _connector_requested_path().is_file():
         return False
-    from vibe.binding_health import rejected_at
-    if rejected_at(config) is not None:
+    from vibe.binding_health import connector_start_denial
+    if connector_start_denial(config):
         return False
     return (
         _cloudflared_pid_state(_read_pid()) in {"dead", "other"}
@@ -4778,10 +4778,10 @@ def _ensure_cloudflared_pin(config: V2Config | None) -> dict[str, Any] | None:
     _resolve_binary() finds, so a running tunnel keeps its binary.
     """
 
-    from vibe.binding_health import rejected_at
+    from vibe.binding_health import connector_start_denial
 
     cloud = config.remote_access.vibe_cloud if config is not None else None
-    if cloud is None or not cloud.enabled or not cloud.tunnel_token or rejected_at(config) is not None:
+    if cloud is None or not cloud.enabled or not cloud.tunnel_token or connector_start_denial(config):
         return None
     if not _cloudflared_pin_needed(config):
         return None
@@ -4824,6 +4824,9 @@ def _start(
             # Unreachable from the restart, whose request check requires a token.
             stop_result = halt(config)
             return {**stop_result, "ok": False, "error": "missing_tunnel_token"}
+        from vibe.binding_admission import reset_in_progress
+        if reset_in_progress():
+            return {'ok': False, 'error': 'reset_in_progress', 'started': False}
         if record_request:
             try:
                 _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
@@ -7114,6 +7117,9 @@ def publish_browser_session_revoked(session_id: str) -> None:
 
 
 def _browser_session_is_revoked(payload: Mapping[str, Any], *, now: int) -> bool:
+    from vibe.binding_admission import reset_in_progress
+    if reset_in_progress():
+        return True
     session_id = payload.get(_SESSION_BROWSER_ID_KEY)
     if session_id is None:
         return False

@@ -234,6 +234,27 @@ def test_same_id_publication_waits_for_other_process_cleanup(cli_host, monkeypat
             process.join(5)
 
 
+@pytest.mark.parametrize('damaged', [False, True])
+def test_reset_overview_and_ingress_stay_fenced(cli_host, monkeypatch, damaged):
+    from vibe import direct_lifecycle, personal_claims
+    cfg = V2Config.load()
+    assert direct_lifecycle._is_paired(cfg)
+    with gate.admitted('reset'), config_file_lock():
+        reset._seal(cfg)
+    if damaged:
+        gate.reset_intent_path().write_text('{')
+    monkeypatch.setattr(remote, '_read_pid', lambda: None)
+    view = personal_claims.rebind_claims.overview()
+    assert view['binding_state'] == ('reset_repair_required' if damaged else 'resetting')
+    assert not view['can_start'] and view['attempt'] is None and view['next_action'] is None
+    assert not direct_lifecycle._is_paired(cfg)
+    monkeypatch.setattr(remote, '_resolve_binary', lambda *_: pytest.fail('must not spawn a connector'))
+    assert remote._start(cfg, record_request=True)['error'] == 'reset_in_progress'
+    with pytest.raises(RuntimeError, match='reset_in_progress'):
+        remote._start_candidate_connector(cfg, 'not-spawned', 'auto')
+    assert gate.reset_in_progress() and len(cli_host[1]) == 1
+
+
 def test_stale_reset_cannot_clear_other_generation(reset_host):
     _, workspace, _ = reset_host
     cfg = V2Config.load()

@@ -112,7 +112,8 @@ def _config_signature(config: V2Config) -> tuple[Any, ...]:
 
 
 def _is_paired(config: V2Config | None) -> bool:
-    return config is not None and config.remote_access.vibe_cloud.runtime_credentials() is not None
+    from vibe.binding_admission import reset_in_progress
+    return config is not None and not reset_in_progress() and config.remote_access.vibe_cloud.runtime_credentials() is not None
 
 
 def _default_ingress_factory(app: Any, **kwargs: Any) -> Any:
