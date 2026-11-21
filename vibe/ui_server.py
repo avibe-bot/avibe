@@ -15870,8 +15870,10 @@ async def workbench_events():
             address_receipt = await asyncio.to_thread(instance_address.receipt_for_session, browser_session_id)
 
     def address_retired_frame() -> str | None:
-        # Checked before the session: at an address change the page must be told
-        # where this Avibe went before it is told that it was signed out.
+        # Checked before the session, and again after every wait for the
+        # session's authorization (the address can change during that wait, and
+        # the session then fails for that very reason): at an address change the
+        # page must be told where this Avibe went, not that it was signed out.
         destination = instance_address.retired_destination(stream_host)
         return _address_retired_frame(destination, address_receipt) if destination else None
 
@@ -15905,7 +15907,7 @@ async def workbench_events():
                 return
             state = await authorization_state()
             if state != "current":
-                yield _remote_authorization_sse_frame(state)
+                yield address_retired_frame() or _remote_authorization_sse_frame(state)
                 return
             if (stream_via == "other" and remote_session_payload and remote_session_identity
                     and remote_session_identity.get("sub") == remote_session_payload.get("sub")
@@ -15933,7 +15935,7 @@ async def workbench_events():
                     return
                 state = await authorization_state()
                 if state != "current":
-                    yield _remote_authorization_sse_frame(state)
+                    yield address_retired_frame() or _remote_authorization_sse_frame(state)
                     return
                 # A subscriber that lost an event is not a subscriber any more,
                 # so end its stream and let it reconnect: the fresh subscription
@@ -15985,7 +15987,7 @@ async def workbench_events():
                         return
                     state = await authorization_state()
                     if state != "current":
-                        yield _remote_authorization_sse_frame(state)
+                        yield address_retired_frame() or _remote_authorization_sse_frame(state)
                         return
                     if not can_receive_workbench_event(authorization_context, event_type):
                         continue

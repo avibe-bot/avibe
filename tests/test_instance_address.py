@@ -1323,6 +1323,21 @@ def test_f2_only_a_sessions_own_receipt_marks_its_own_device_once(address):
     assert instance_address.record_cleared(NEW, instance_address.receipt_for_session(member_sid)) is False
 
 
+def test_b2_a_401_on_the_request_itself_ends_cleaning_at_once(address):
+    plane, _ = address
+    rename_to("new")
+    run()
+    assert instance_address.cleanup_ready(OLD)
+    rename_to("third")
+    plane.refuse = (401, {"error": "invalid_device_secret"})
+    original = plane.state
+    plane.state = lambda: (_ for _ in ()).throw(RuntimeError("resource_acl_device_unavailable"))
+    run()  # refused, and the read after the refusal fails too
+    plane.state = original
+    assert instance_address.describe()["operation"]["error"] == "pairing_invalid"
+    assert not instance_address.cleanup_ready(OLD) and instance_address._authority is None
+
+
 def test_d1_only_streams_open_at_the_switch_are_told_the_new_origin(address):
     plane, _ = address
     _cookie, sid = sign_in()

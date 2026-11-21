@@ -127,6 +127,8 @@ export async function clearThisOrigin(): Promise<boolean> {
   await step(clearCaches);
   await step(removeWorkers);
   await step(async () => {
+    // Sealed first, so nothing this document still does lands after the clear.
+    sealThisDocument();
     window.localStorage.clear();
     window.sessionStorage.clear();
     // Clearing also removed the counters that fence other tabs' writes, and a
@@ -139,6 +141,40 @@ export async function clearThisOrigin(): Promise<boolean> {
 
 function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
+}
+
+let sealed = false;
+
+/** After the clearing, this document writes nothing more under this origin.
+ *
+ *  The counters and the marker stop other tabs. They do not stop this one: a
+ *  save on `pagehide` (the workbench's window layout), a debounced timer, a
+ *  component unmounting as the page leaves, all run after the clearing was
+ *  reported and would put private data back, and the page it goes to is another
+ *  origin that cannot remove it. So the document's own ways of writing are
+ *  closed here, for whatever code in it still runs. */
+function sealThisDocument(): void {
+  if (sealed) return;
+  sealed = true;
+  const allowed = new Set([...WRITE_FENCE_KEYS, RETIRED_MARKER_KEY]);
+  const setItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = function sealedSetItem(this: Storage, key: string, value: string): void {
+    if (this === window.localStorage && allowed.has(key)) setItem.call(this, key, value);
+  };
+  const refuse = () => Promise.reject(new DOMException('This address is retired', 'InvalidStateError'));
+  try {
+    if (typeof indexedDB !== 'undefined') {
+      indexedDB.open = () => {
+        throw new DOMException('This address is retired', 'InvalidStateError');
+      };
+    }
+    if (typeof caches !== 'undefined') caches.open = refuse;
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.register = refuse;
+    }
+  } catch {
+    // A browser that will not let these be replaced still has the storage seal above.
+  }
 }
 
 function leaveWriteFence(): void {

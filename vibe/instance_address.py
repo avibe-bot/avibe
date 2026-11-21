@@ -1229,6 +1229,10 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
         code = payload.get("error") if isinstance(payload.get("error"), str) else ""
         page_status, page_code = _PAGE_ERRORS.get(code, (503, "unavailable"))
         if status == 401:
+            # The binding is refused: no cleaning anywhere from this moment, and
+            # no state read still on its way may bring it back, whatever the
+            # read after this refusal manages to learn.
+            _drop_authority()
             page_status, page_code = 409, "pairing_invalid"
         failure = {"operation_id": journal["operation_id"], "state": "failed", "hostname": target,
                    "error": page_code, "status": page_status}

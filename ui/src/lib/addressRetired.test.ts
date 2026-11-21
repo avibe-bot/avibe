@@ -89,7 +89,15 @@ beforeEach(async () => {
   }));
 });
 
+// A cleared document seals its own writers; each test starts from an unsealed one.
+const unsealed = {
+  setItem: Storage.prototype.setItem,
+  openDatabase: indexedDB.open,
+};
+
 afterEach(() => {
+  Storage.prototype.setItem = unsealed.setItem;
+  indexedDB.open = unsealed.openDatabase;
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -149,6 +157,19 @@ describe('a page on a retired address', () => {
     // must not record the signed-in reader, email included, after the clearing.
     expect(Number(window.localStorage.getItem(BOOT_GENERATION_KEY))).toBeGreaterThan(1_000_000_000_000);
     expect(Object.keys(window.localStorage).sort()).toEqual([...FENCE_KEYS].sort());
+  });
+
+  it('writes nothing more under the origin once it is cleared, whatever still runs in the document', async () => {
+    const address = await load();
+    await address.leaveRetiredAddress(NEW_ORIGIN);
+    // What the workbench does on pagehide as the page leaves, and a late timer.
+    window.localStorage.setItem('avibe.workbench.windows.v1', '{"windows":[{"path":"/private/file"}]}');
+    window.sessionStorage.setItem('scroll', '10');
+    expect(heldKeys()).toEqual([]);
+    expect(window.sessionStorage.length).toBe(0);
+    expect(() => indexedDB.open('avibe-local-store')).toThrow();
+    await expect(caches.open('avibe-web-push-endpoints')).rejects.toBeInstanceOf(DOMException);
+    expect(await databaseNames()).toEqual([]);
   });
 
   it('another tab that sees the marker asks the instance, then clears itself and leaves', async () => {
