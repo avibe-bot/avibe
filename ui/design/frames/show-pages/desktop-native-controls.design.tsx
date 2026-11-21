@@ -3,20 +3,25 @@
 // own Show window carries three more — annotate with its mode picker, open the session's chat, and
 // open in the browser (apps/show-page-window/window). These frames place those three.
 //
-// A, recommended (`group-*`): one group in the title bar's accessory, in the Workbench window's own
-// order — 标注 · 打开聊天 · 分享 · 在浏览器打开 — 28 pt buttons 4 pt apart, the group 9 pt from the
-// window's right edge. Each popover opens under its own button. Nothing collapses: the window
-// cannot be narrower than 720 pt, where the group leaves the title about 490 pt (`group-min`).
+// A, which Max chose on 2026-11-21 09:36 (`group-*`): one group in the title bar's accessory, in the
+// Workbench window's own order — 标注 · 打开聊天 · 分享 · 在浏览器打开 — pressed anywhere in a 28 pt
+// square, 4 pt apart, the group 9 pt from the window's right edge. Each popover opens under its own
+// button. Nothing collapses: the window cannot be narrower than 720 pt, where the group leaves the
+// title about 490 pt (`group-min`).
 //
-// B, the alternative (`overflow-*`): the share button keeps the title bar to itself and the other
-// three move behind `•••`. One native button instead of three, at the cost of a second click, a
-// second level for the annotation mode, and an annotation that is on with nothing in the title bar
-// saying so.
+// Its symbol is 14 pt and its hover wash a 20 pt square inside the 28 pt press target, so the wash
+// keeps 4 pt clear of the title bar's top and bottom (Max, 09:36 and 09:47, from `group-hover`).
+// The shipped share button's 15 pt symbol joins this group and drops to 14 with the rest.
+//
+// B, the alternative Max did not take (`overflow-*`): the share button keeps the title bar to itself
+// and the other three move behind `•••`. One native button instead of three, at the cost of a second
+// click and a second level for the annotation mode.
 //
 // Proposed, and not shipped: the native title bar and its buttons are a stand-in
 // (`kit/desktop-native-show-controls.tsx`) for AppKit's title bar and `macos_show_titlebar.rs`,
 // which no web component renders. The annotate popover, the share popover and the Show below them
-// are the shipped components. No new copy: every label is one the Workbench window already reads.
+// are the shipped components. One new string, `apps.window.openInBrowser`, which a native window
+// needs because it has no tabs; every other label is one the Workbench window already reads.
 import type { ReactNode } from 'react';
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
@@ -85,29 +90,18 @@ interface State {
 const states: State[] = [
   {
     name: 'group-idle',
-    title: 'A 推荐 · 标题栏一组四个控件（标注 · 打开聊天 · 分享 · 在浏览器打开）',
+    title: 'A · 标题栏一组四个控件（标注 · 打开聊天 · 分享 · 在浏览器打开）',
     render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} />,
   },
   {
     name: 'group-hover',
-    title: 'A 推荐 · 鼠标移到「打开聊天」上：悬停底色',
+    title: 'A · 鼠标移到「打开聊天」上：悬停底色',
     render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} />,
     hover: '[data-titlebar-control="chat"]',
   },
   {
-    name: 'group14-idle',
-    title: 'A 推荐 · 符号 14pt：一组四个控件',
-    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} symbol={14} />,
-  },
-  {
-    name: 'group14-hover',
-    title: 'A 推荐 · 符号 14pt：鼠标移到「打开聊天」上',
-    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} symbol={14} />,
-    hover: '[data-titlebar-control="chat"]',
-  },
-  {
     name: 'group-annotate',
-    title: 'A 推荐 · 点开标注：同一个模式选择弹层，在自己的按钮下方（标注已开，所以有「关闭标注」）',
+    title: 'A · 点开标注：同一个模式选择弹层，在自己的按钮下方（标注已开，所以有「关闭标注」）',
     render: (lang) => (
       <NativeShowControlsWindow
         title={title}
@@ -120,25 +114,25 @@ const states: State[] = [
   },
   {
     name: 'group-share',
-    title: 'A 推荐 · 分享弹层在分享按钮下方（与今天同一个弹层）',
+    title: 'A · 分享弹层在分享按钮下方（与今天同一个弹层）',
     render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} />,
     click: ['role=button[name="{t:chat.showPage.share}"]'],
   },
   {
     name: 'group-min',
-    title: 'A 推荐 · 最窄窗口 720pt，长标题：控件不收起，标题在控件组前截断',
+    title: 'A · 最窄窗口 720pt，长标题：控件不收起，标题在控件组前截断',
     render: (lang) => <NativeShowControlsWindow title={longTitle} sessionId={sid} browserLabel={browserLabel(lang)} titleDraw="drawn" />,
     width: MIN_WIDTH,
     height: MIN_HEIGHT,
   },
   {
     name: 'overflow-idle',
-    title: 'B 备选 · 标题栏只留分享，其余三个收进「更多」',
+    title: 'B（未采用）· 标题栏只留分享，其余三个收进「更多」',
     render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} variant="overflow" />,
   },
   {
     name: 'overflow-menu',
-    title: 'B 备选 · 「更多」菜单展开：标注（需二级选模式）· 打开聊天 · 在浏览器打开',
+    title: 'B（未采用）· 「更多」菜单展开：标注（需二级选模式）· 打开聊天 · 在浏览器打开',
     render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} variant="overflow" />,
     click: ['role=button[name="{t:nav.more}"]'],
   },
