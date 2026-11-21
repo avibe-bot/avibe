@@ -354,6 +354,42 @@ fn a_configured_proxy_means_no_session_and_no_route() {
 }
 
 #[test]
+fn system_proxy_settings_that_rule_the_route_out_mean_no_session_and_no_route() {
+    let now = Instant::now();
+    let published = shown(ONE, "main-runtime-1");
+    let mut wiring = live();
+    wiring.system_proxy(true);
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now), []);
+    // They are read again at every look: once they allow it, a session starts.
+    wiring.system_proxy(false);
+    let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+    wiring.window_created(session, "show-1");
+    wiring.probed(session, true);
+    // A proxy configured while a session runs ends it, route first.
+    wiring.system_proxy(true);
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, now),
+        [retire(session, &["main-runtime-1", "show-1"])]
+    );
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now), []);
+
+    // Where routes are given at creation: no route for an instance that
+    // answered before, and no asking for one that never did.
+    let mut choices = Choices::unsaved();
+    choices.remember(ACCOUNT, ONE);
+    let mut wiring = Wiring::new(Routing::AtCreation, false, choices);
+    assert!(wiring.starts_at_creation(&target(ONE)));
+    wiring.system_proxy(true);
+    assert!(!wiring.starts_at_creation(&target(ONE)));
+    assert_eq!(wiring.reconcile(Some(&shown(TWO, "main-runtime-1")), |_| true, now), []);
+    wiring.system_proxy(false);
+    assert_eq!(
+        wiring.reconcile(Some(&shown(TWO, "main-runtime-1")), |_| true, now),
+        [open("main-runtime-1")]
+    );
+}
+
+#[test]
 fn before_macos_14_there_is_no_session_and_no_route() {
     assert_eq!(Routing::on_macos(13), Routing::Unsupported);
     assert_eq!(Routing::on_macos(14), Routing::Live);

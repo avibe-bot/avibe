@@ -260,3 +260,13 @@ pub fn answer_listener_challenge(
     }
     Ok(token)
 }
+
+/// Stops answering on `view`: undoes `answer_listener_challenge`, whose
+/// result `registration` is. Called before the direct client is dropped.
+pub fn stop_answering_listener_challenge(view: &ICoreWebView2, registration: i64) -> windows::core::Result<()> {
+    // SAFETY: The WebView2 apartment.
+    unsafe {
+        view.cast::<ICoreWebView2_10>()?
+            .remove_BasicAuthenticationRequested(registration)
+    }
+}

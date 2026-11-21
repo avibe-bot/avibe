@@ -11,6 +11,8 @@
 //! The rules it keeps:
 //! - an instance whose choice is "Cloudflare tunnel only", or any instance
 //!   while the app has a configured proxy, has no session and no route;
+//! - while the system's own proxy settings rule the direct route out (see
+//!   `system_proxy`), the same;
 //! - where the system cannot route one host of one window (macOS before 14),
 //!   there is no session at all;
 //! - where a route can only be given when a window is created (Windows), a
@@ -115,6 +117,7 @@ const COOLING: Duration = Duration::from_secs(60);
 pub struct Wiring {
     routing: Routing,
     proxy_configured: bool,
+    system_proxy_rules_out: bool,
     choices: Choices,
     sessions: Vec<Session>,
     next: u64,
@@ -126,6 +129,7 @@ impl Wiring {
         Self {
             routing,
             proxy_configured,
+            system_proxy_rules_out: false,
             choices,
             sessions: Vec::new(),
             next: 0,
@@ -148,10 +152,22 @@ impl Wiring {
         self.retire_where(|session| session.target.account == account && session.target.origin == origin)
     }
 
+    /// What the system's own proxy settings say now. They rule the direct
+    /// route out where it would change how other hosts are reached or could
+    /// not reach the instance at all: on Windows any system proxy (explicit,
+    /// PAC or auto-detect), because the route replaces it for the whole
+    /// window; on macOS automatic configuration (PAC or auto-detect) or a
+    /// TLS-to-proxy endpoint. While they do, sessions end at the next
+    /// `reconcile` and none starts.
+    pub fn system_proxy(&mut self, rules_out: bool) {
+        self.system_proxy_rules_out = rules_out;
+    }
+
     /// Whether a session may exist for `target` at all.
     fn permitted(&self, target: &Target) -> bool {
         self.routing != Routing::Unsupported
             && !self.proxy_configured
+            && !self.system_proxy_rules_out
             && target.host().is_some()
             && !target.account.is_empty()
             && !target.instance.is_empty()

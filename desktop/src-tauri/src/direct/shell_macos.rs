@@ -55,6 +55,9 @@ pub fn arguments(_: &str, _: &Material) -> Option<String> {
     None
 }
 
+/// Takes the route off the window's browsing data, for connections opened
+/// from now on. A connection that is alive keeps its proxy until the
+/// session's client is dropped, which the caller does next.
 pub async fn detach(app: &AppHandle, window: String) {
     let (done, detached) = oneshot::channel();
     let handle = app.clone();

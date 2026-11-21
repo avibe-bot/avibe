@@ -201,10 +201,21 @@ fn published(app: &AppHandle) -> Option<Published> {
     })
 }
 
+/// Whether the system's own proxy settings rule the direct route out now
+/// (`Wiring::system_proxy` has the rule).
+///
+/// The reading of those settings belongs to the direct core, which needs the
+/// same facts for its public leg (D1c). Until that is merged this answers
+/// "ruled out" on every system, so no session starts and nothing is routed.
+fn system_proxy_rules_out() -> bool {
+    true
+}
+
 /// One look at the app, off the main thread: reads a window's URL.
 async fn look(app: &AppHandle, state: &Arc<Direct>) {
     let shown = published(app);
     *lock(&state.shown) = shown.clone();
+    lock(&state.wiring).system_proxy(system_proxy_rules_out());
     let effects = lock(&state.wiring).reconcile(
         shown.as_ref(),
         |window| app.get_webview(window).is_some(),
@@ -245,7 +256,11 @@ async fn perform(app: &AppHandle, state: &Arc<Direct>, effect: Effect) {
         Effect::Install { .. } | Effect::Answer { .. } => {}
         Effect::Retire { session, detach } => {
             // The route comes off every window before the client that owns
-            // its listener is dropped.
+            // its listener is dropped. Taking it off is not what ends the
+            // session's connections: a connection that is alive keeps its
+            // proxy, and a store may hold on to an emptied route. Dropping
+            // the client is: it closes the listener and everything through
+            // it, and both routes then fail over to the tunnel.
             for window in detach {
                 native::detach(app, window).await;
             }
@@ -419,8 +434,12 @@ pub(crate) struct AtCreation {
 pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Option<AtCreation> {
     let state = direct(app)?;
     let target = target_at(app, destination)?;
-    if !lock(&state.wiring).starts_at_creation(&target) {
-        return None;
+    {
+        let mut wiring = lock(&state.wiring);
+        wiring.system_proxy(system_proxy_rules_out());
+        if !wiring.starts_at_creation(&target) {
+            return None;
+        }
     }
     // The listener is bound here and now, so its port is in the arguments.
     // Never from a thread that is running the async runtime.
