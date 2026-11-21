@@ -209,6 +209,9 @@ struct VoiceCaptureEnvironment {
     var sayInFront: (VoiceCaptureAttributes.Reason) -> Void
     var now: () -> Date
     var sleep: (Duration) async -> Void
+    /// Whether `target` is nil only because avibe.bot has not confirmed the
+    /// stored session within its lifetime (`VoiceCaptureTarget`).
+    var waitsForConfirmation: () -> Bool = { false }
 
     static let live = VoiceCaptureEnvironment(
         target: { VoiceCaptureTarget.current() },
@@ -278,7 +281,8 @@ struct VoiceCaptureEnvironment {
         unsentAlertIsShown: { VoiceCaptureAlert.unsentIsShown },
         sayInFront: { VoiceCaptureBanner.show(String(localized: VoiceCaptureCopy.reason($0))) },
         now: Date.init,
-        sleep: { try? await Task.sleep(for: $0) }
+        sleep: { try? await Task.sleep(for: $0) },
+        waitsForConfirmation: { VoiceCaptureTarget.waitsForConfirmation() }
     )
 
     /// A background task assertion; the returned closure ends it.
@@ -895,9 +899,12 @@ final class VoiceCaptureController {
         let startGeneration = generation
         guard let target = environment.target() else {
             state = .idle
-            record("start: no selected instance")
-            note("needsApp:signIn", press: true)
-            return .needsApp(.signIn)
+            // Signed in, but the session is not confirmed lately: opening
+            // Avibe confirms it, with no sign-in to ask for.
+            let reason: VoiceCaptureAttributes.Reason = environment.waitsForConfirmation() ? .confirmPending : .signIn
+            record("start: no selected instance (\(reason.rawValue))")
+            note("needsApp:\(reason.rawValue)", press: true)
+            return .needsApp(reason)
         }
         guard environment.microphoneAllowed() else {
             state = .idle

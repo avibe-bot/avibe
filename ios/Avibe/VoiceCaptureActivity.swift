@@ -37,6 +37,10 @@ struct VoiceCaptureAttributes: ActivityAttributes {
         /// response, or the App ended while sending): it may have arrived.
         case sendUnknown
         case signIn
+        /// avibe.bot has not confirmed the stored session lately, so the
+        /// take has no address it may use; opening Avibe confirms it again,
+        /// with no sign-in. Shown with the phase line alone.
+        case confirmPending
         case microphone
         case consent
         case updateAvibe
