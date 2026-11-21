@@ -74,10 +74,7 @@ final class NativeHoldCaptureTests: XCTestCase {
             uptimeMs: { [unowned self] in clock },
             haptic: NativeHoldHaptic(
                 prepare: { [unowned self] in haptics.append("prepare") },
-                fire: { [unowned self] in haptics.append("fire") },
-                prepareSlide: { [unowned self] in haptics.append("prepareSlide") },
-                intoCancel: { [unowned self] in haptics.append("intoCancel") },
-                back: { [unowned self] in haptics.append("back") }
+                fire: { [unowned self] in haptics.append("fire") }
             ),
             startsAtTouchDown: { [unowned self] in startsAtTouchDown },
             noteTimings: { [unowned self] in notes.append($0) },
@@ -404,7 +401,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         clock = 200
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
 
-        XCTAssertEqual(haptics, ["prepare", "fire", "prepareSlide"])
+        XCTAssertEqual(haptics, ["prepare", "fire"])
         XCTAssertEqual(holdEvents.count, 1)
         XCTAssertEqual(holdEvents.first?["phase"] as? String, "recognised")
         XCTAssertEqual(holdEvents.first?["surface"] as? String, "composer")
@@ -416,7 +413,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(audio.pendingAnswers, 2)
 
         audio.answer()
-        XCTAssertEqual(haptics, ["prepare", "fire", "prepareSlide"])
+        XCTAssertEqual(haptics, ["prepare", "fire"])
         XCTAssertEqual(holdEvents.count, 1)
     }
 
@@ -476,7 +473,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         let audio = FakeAudio()
         let (capture, webView) = makeHoldCapture(audio)
         let take = try hold(capture, in: webView)
-        XCTAssertEqual(haptics, ["prepare", "fire", "prepareSlide"])
+        XCTAssertEqual(haptics, ["prepare", "fire"])
         audio.onPCM?(Data([1, 0]))
 
         capture.reject(take: "other", webView: webView)
@@ -541,7 +538,7 @@ final class NativeHoldCaptureTests: XCTestCase {
             XCTAssertEqual(audio.calls, [], why)
 
             let take = try hold(capture, in: webView)
-            XCTAssertEqual(haptics, ["prepare", "prepare", "fire", "prepareSlide"], why)
+            XCTAssertEqual(haptics, ["prepare", "prepare", "fire"], why)
             XCTAssertEqual(audio.calls, ["begin"], why)
             clock += 150
             audio.answer()
@@ -614,7 +611,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(audio.calls, ["begin"])
         clock = 200
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
-        XCTAssertEqual(haptics, ["prepare", "fire", "prepareSlide"])
+        XCTAssertEqual(haptics, ["prepare", "fire"])
         XCTAssertEqual(holdEvents.first?["phase"] as? String, "recognised")
         XCTAssertEqual(audio.pendingAnswers, 1)
         XCTAssertEqual(audio.calls, ["begin"])
@@ -960,40 +957,21 @@ final class NativeHoldCaptureTests: XCTestCase {
         drain()
     }
 
-    /// Sliding up into the cancel position and back, each felt once per
-    /// crossing: 80 pt up arms, back within 60 pt disarms, and a finger
-    /// between the two lines changes nothing.
-    func testSlidingIntoCancelAndBackIsFeltOncePerCrossing() throws {
+    /// After the cue a finger's slides are the page's: it sees them on every
+    /// surface and gives their haptics. The App gives none, and a slide
+    /// does not end the take.
+    func testAfterTheCueTheFingersSlidesAreThePages() throws {
         let audio = FakeAudio()
         let (capture, webView) = makeHoldCapture(audio)
-        func slide(up: CGFloat) {
-            capture.touchMoved(to: CGPoint(x: Self.onComposer.x, y: Self.onComposer.y - up), in: webView)
-        }
         let take = try hold(capture, in: webView)
         haptics = []
-
-        slide(up: 80)
+        for up: CGFloat in [81, 60, 120, 0] {
+            capture.touchMoved(to: CGPoint(x: Self.onComposer.x, y: Self.onComposer.y - up), in: webView)
+        }
         XCTAssertEqual(haptics, [])
-        slide(up: 81)
-        XCTAssertEqual(haptics, ["intoCancel"])
-        // Resting and jittering between the two lines.
-        for up: CGFloat in [95, 79, 61, 70, 120, 61] { slide(up: up) }
-        XCTAssertEqual(haptics, ["intoCancel"])
-        slide(up: 60)
-        XCTAssertEqual(haptics, ["intoCancel", "back"])
-        for up: CGFloat in [10, 79, 80, 61] { slide(up: up) }
-        XCTAssertEqual(haptics, ["intoCancel", "back"])
-        slide(up: 81)
-        XCTAssertEqual(haptics, ["intoCancel", "back", "intoCancel"])
-
-        // A release there is the page's to cancel, as today: the App only
-        // notes when the finger went up.
-        capture.touchEnded(in: webView)
         XCTAssertEqual(capture.currentTake, take)
-        capture.reject(take: take, webView: webView)
-        // Nothing after the take is over.
-        slide(up: 0)
-        XCTAssertEqual(haptics, ["intoCancel", "back", "intoCancel"])
+        capture.stop(take: take)
+        drain()
     }
 
     /// The page's hold threshold is the App's: one number, named with the
@@ -1120,7 +1098,10 @@ final class NativeHoldCaptureTests: XCTestCase {
             clock = 0
             var lifted: TimeInterval?
 
-            capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50, liftedAt: { lifted })
+            capture.touchDown(
+                at: Self.onComposer, in: webView, timestamp: 50,
+                touch: { .init(liftedAt: lifted, point: Self.onComposer) }
+            )
             audio.onPCM?(Data([1, 0]))
             // The finger lifts after 70 ms; nothing tells the App.
             lifted = 50.07
@@ -1143,27 +1124,60 @@ final class NativeHoldCaptureTests: XCTestCase {
         }
     }
 
+    /// Nor is the App told of the finger's moves there. A finger still down
+    /// at the threshold but away from where it came down is a drag, which
+    /// the page has already given back: no cue.
+    func testADragTheAppWasNeverToldOfGetsNoCue() {
+        for early in [true, false] {
+            startsAtTouchDown = early
+            let audio = FakeAudio()
+            let (capture, webView) = makeHoldCapture(audio)
+            haptics = []
+            holdEvents = []
+            taps = []
+            clock = 0
+            var point = Self.onComposer
+
+            capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50, touch: { .init(liftedAt: nil, point: point) })
+            // The finger moves 40 pt, past the slop, with no word of a move to the App.
+            point = CGPoint(x: Self.onComposer.x + 40, y: Self.onComposer.y)
+            clock = 200
+            XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds), "\(early)")
+            XCTAssertFalse(capture.followsPress, "\(early)")
+            XCTAssertNil(capture.currentTake, "\(early)")
+            XCTAssertEqual(haptics, ["prepare"], "\(early)")
+            XCTAssertTrue(holdEvents.isEmpty, "\(early)")
+            XCTAssertEqual(audio.calls, early ? ["begin", "stop"] : ["arm", "disarm"], "\(early)")
+            XCTAssertEqual(taps, ["200 moved"], "\(early)")
+            capture.stop(webView: webView)
+            drain()
+        }
+    }
+
     /// The same wait gives a finger still down its cue: at once on an idle
     /// main thread, and as soon as a busy one has caught up.
     func testAHoldGetsItsCueOnceTheTouchesThatArrivedAreHandled() throws {
         let audio = FakeAudio()
         let (capture, webView) = makeHoldCapture(audio)
-        // Its touch, asked, says the finger is down.
-        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50, liftedAt: { nil })
+        // Its touch, asked, says the finger is down, within the slop of where it came down.
+        capture.touchDown(
+            at: Self.onComposer, in: webView, timestamp: 50,
+            touch: { .init(liftedAt: nil, point: CGPoint(x: Self.onComposer.x + 4, y: Self.onComposer.y)) }
+        )
         clock = 450
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds, touchesHeard: false))
         XCTAssertEqual(haptics, ["prepare"])
         // A move that had been waiting, within the slop: still a press.
         capture.touchMoved(to: CGPoint(x: 100, y: 724), in: webView)
         hearTouches()
-        XCTAssertEqual(haptics, ["prepare", "fire", "prepareSlide"])
+        XCTAssertEqual(haptics, ["prepare", "fire"])
         let take = try XCTUnwrap(holdEvents.last?["take"] as? String)
         XCTAssertEqual(holdEvents.last?["phase"] as? String, "recognised")
         // When the cue was given, by the App's clock: the main thread's lateness shows.
         XCTAssertEqual(try capture.adopt(take: take, webView: webView).get()["recognisedAt"] as? Int, 450)
         // Asked once: catching up again gives nothing more.
         hearTouches()
-        XCTAssertEqual(haptics, ["prepare", "fire", "prepareSlide"])
+        XCTAssertEqual(haptics, ["prepare", "fire"])
         capture.stop(take: take)
         drain()
     }
