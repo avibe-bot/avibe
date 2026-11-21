@@ -52,6 +52,49 @@ def test_restart_after_effect_before_phase_write(reset_host, phase, monkeypatch)
     assert workspace.read_text() == 'keep' and len(calls) == 1
 
 
+@pytest.mark.parametrize('damage', ['truncated', 'invalid-stage', 'replaced-identity', 'new-pairing'])
+def test_worker_keeps_damaged_or_stale_intent_fenced(reset_host, damage):
+    record, workspace, calls = reset_host
+    if damage == 'truncated':
+        gate.reset_intent_path().write_text('{')
+    elif damage == 'invalid-stage':
+        reset._save({**record, 'phase': 'unknown'})
+    elif damage == 'replaced-identity':
+        local._identity_path().unlink()
+        local.ensure_installation_id()
+    else:
+        remote._pending_pairing_path().write_text('new pending record')
+    before = local._identity_path().read_bytes()
+    assert remote._drive_pending_pairing() == (True, 60)
+    assert gate.reset_in_progress() and local._identity_path().read_bytes() == before
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    assert workspace.read_text() == 'keep' and len(calls) == 1
+
+
+def test_worker_finishes_authorized_reset_including_private_health_store(reset_host, monkeypatch):
+    from storage import mobile_store
+    _, workspace, calls = reset_host
+    # Prove the separate mobile database is in the fixture home before writing any values.
+    assert mobile_store.mobile_store_path().is_relative_to(workspace.parent)
+    monkeypatch.setattr(mobile_store, 'publish_mobile_schedule_changed', lambda: None)
+    store = mobile_store.MobileStore()
+    with store.transaction() as conn:
+        for device in ('fixture-phone', 'fixture-tablet'):
+            conn.execute('INSERT INTO devices(id, credential_hash, instance_id, owner, name, app_version, metrics,'
+                         ' created_at,last_seen) VALUES(?,?,?,?,?,?,?,?,?)',
+                         (device, device, 'inst_A', 'owner', device, '1', '[]', '2026-11-01', '2026-11-02'))
+            conn.execute('INSERT INTO health_days VALUES(?,?,?,?,?)', (device, 'fixture', '2026-11-01', '{}', 'now'))
+        conn.execute('INSERT INTO pairings VALUES(?,?,?,?,?)', ('code', 'request', 'inst_A', 'owner', 'later'))
+    assert remote._drive_pending_pairing() == (True, 1)
+    assert not gate.reset_in_progress() and local._installation_id() is None
+    assert not V2Config.load().remote_access.vibe_cloud.instance_id
+    with store.transaction() as conn:
+        assert conn.execute('SELECT count(*) FROM devices WHERE revoked_at IS NOT NULL').fetchone()[0] == 2
+        for table in ('health_days', 'pairings'):
+            assert conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
+    assert workspace.read_text() == 'keep' and len(calls) == 1
+
+
 def test_stale_reset_cannot_clear_other_generation(reset_host):
     _, workspace, _ = reset_host
     cfg = V2Config.load()

@@ -2316,7 +2316,14 @@ def _drive_pending_pairing() -> tuple[bool, int]:
     """
     from vibe.binding_admission import reset_in_progress
     if reset_in_progress():
-        return True, 60  # Reset recovery owns this generation; never replay its pairing or probe its key.
+        from vibe import binding_reset
+        try:
+            binding_reset.resume()
+        except Exception:
+            # Leave unreadable, stale or interrupted intents fenced. Do not log
+            # journal contents or interpret a recovery error as a credential verdict.
+            return True, 60
+        return True, 1
     record, error = _read_pending_pairing_record()
     if error:
         return True, 60
