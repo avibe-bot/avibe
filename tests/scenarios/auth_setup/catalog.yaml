@@ -1496,5 +1496,5 @@ scenarios:
     layer: scenario
     backend: personal-claims
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_claim_redirect_through_pairing_journal
-    reason: Actual owner routes, browser cookie, return gate, guarded redemption, credentials publication and connector start. Only the control plane and connector are peers.
+    reason: Owner browser on loopback or an admitted private-network origin. Actual owner routes, browser cookie, return gate, guarded redemption, credentials publication and connector start. Only the control plane and connector are peers.
 next_priority: []
