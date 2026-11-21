@@ -899,8 +899,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (next === armed.current) return;
     armed.current = next;
     // Into the cancel position and back out of it feel different (owner decision, 2026-11-21).
-    // The App gives both itself for a hold it recognised, at the same two lines.
-    if (!take.current.adopt) impactFeedback(next ? 'rigid' : 'soft', next);
+    // The page gives both for every hold, the App's own too: on a surface that takes the press
+    // for itself (it prevents the default on touchstart, as a composer does), the App is not
+    // told of the finger's moves.
+    impactFeedback(next ? 'rigid' : 'soft', next);
     const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
     // Before the microphone is capturing, an unarmed press stays a press (no listening card yet);
     // a take the App began has had its cue, and shows its card.
