@@ -296,6 +296,8 @@ const designFrames = frames([
   // 9. Activity.
   frame('activity', '活动：登录、退出和功能使用，新的在上；已不在列表里的设备照实说', at(960),
     { reach: on, devices: all('host'), activity: fullActivity, view: 'activity' }),
+  frame('activity-more', '活动 · 实例里还有更早的：一页一页往前读', at(1000),
+    { reach: on, devices: all('host'), activity: fullActivity, view: 'activity', moreActivity: 'available' }),
   frame('activity-phone', '活动 · 375 宽', { width: 375, height: 1100 }, { reach: on, devices: all('host'), activity: fullActivity, view: 'activity' }),
   frame('activity-empty', '活动：还没有', at(500), { reach: on, devices: all('host'), activity: [], view: 'activity' }),
 

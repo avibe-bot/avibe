@@ -120,10 +120,14 @@ export const devicesApi = {
   stop: () => post<RemoteAccessStatus>('/api/remote-access/stop'),
 
   devices: async (): Promise<DevicesSnapshot> => devicesFromWire(await get('/api/devices')),
-  activity: async (nameOf: (id: string | undefined) => string | null, limit = 50): Promise<DeviceActivity[]> => {
-    const body = await get(`/api/devices/activity?limit=${limit}`);
-    return (Array.isArray(body.items) ? body.items : []).map((each) => activityFromWire(each, nameOf))
-      .filter((each): each is DeviceActivity => each !== null);
+  /** One page of the activity, newest first; `nextCursor` asks for the page of older entries. */
+  activity: async (nameOf: (id: string | undefined) => string | null, cursor?: string, limit = 50): Promise<{ items: DeviceActivity[]; nextCursor: string | null }> => {
+    const body = await get(`/api/devices/activity?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    return {
+      items: (Array.isArray(body.items) ? body.items : []).map((each) => activityFromWire(each, nameOf))
+        .filter((each): each is DeviceActivity => each !== null),
+      nextCursor: typeof body.next_cursor === 'string' && body.next_cursor ? body.next_cursor : null,
+    };
   },
   signOut: async (id: string) => signOutAnswer(await post(`/api/devices/${encodeURIComponent(id)}/sign-out`)),
   signOutOthers: async () => signOutAnswer(await post('/api/devices/sign-out-others')),

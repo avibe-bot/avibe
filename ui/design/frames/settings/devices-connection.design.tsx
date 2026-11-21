@@ -123,8 +123,14 @@ const designFrames = frames([
 
   // 优化线路, 连接诊断与网络路径.
   frame('optimize-started', '优化线路 · 已开始', WIDE, { optimize: { started: true } }),
-  frame('diagnostics', '连接诊断与网络路径 · 诊断跑完', WIDE,
+  frame('diagnostics', '连接诊断与网络路径 · 诊断跑完；直连关着，没有直连那两行', WIDE,
     { diagnostics: { status, now: DESIGN_NOW, diagnostics: { ok: true, sampled_at: ago(0), effective_protocol: 'quic', dns: { status: 'available' }, quic: { status: 'available', source: 'probe' }, http2: { status: 'unknown', source: 'probe' }, cloudflared_version: '2026.10.1' } } }),
+  frame('diagnostics-direct', '连接诊断与网络路径 · 直连开着：多两行，证书到期日和最近一次连接两条路各用了多久（App 里才有记录）', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z'), lastConnection: { direct: 38, public: 212 } } } }),
+  frame('diagnostics-direct-browser', '连接诊断与网络路径 · 直连开着，在浏览器里看：证书照常，最近一次连接没有记录', WIDE,
+    { diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z'), lastConnection: null } } }),
+  frame('diagnostics-direct-phone', '直连的两行 · 375 宽', { width: 375, height: 900 },
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: null, lastConnection: { direct: 'timeout', public: 180 } } } }),
   frame('diagnostics-phone', '连接诊断与网络路径 · 375 宽', { width: 375, height: 900 }, { diagnostics: { status, now: DESIGN_NOW, diagnostics: null } }),
 ]);
 

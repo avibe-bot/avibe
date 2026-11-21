@@ -78,7 +78,14 @@ export function DevicesPage() {
   const [statusAt, setStatusAt] = useState(() => Date.now());
   const [statusRead, setStatusRead] = useState<'loading' | 'known' | 'unknown'>('loading');
   const [snapshot, setSnapshot] = useState<DevicesSnapshot>(EMPTY);
-  const [activity, setActivity] = useState<DeviceActivity[]>([]);
+  // The newest page is read again with every refresh; pages of older entries, asked for one at a
+  // time from the activity list, are kept beside it so a refresh does not drop them.
+  const [recent, setRecent] = useState<DeviceActivity[]>([]);
+  const [older, setOlder] = useState<DeviceActivity[]>([]);
+  const [recentCursor, setRecentCursor] = useState<string | null>(null);
+  const [olderCursor, setOlderCursor] = useState<string | null | undefined>();
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const names = useRef<(id: string | undefined) => string | null>(() => null);
   const [unrecognizedChange, setUnrecognizedChange] = useState<{ hostname: string } | undefined>();
   const [detail, setDetail] = useState<string | undefined>();
   const [confirm, setConfirm] = useState<DevicesConfirm | undefined>();
@@ -109,11 +116,15 @@ export function DevicesPage() {
       }
     }
     if (!owner || devices.status !== 'fulfilled') return;
-    const names = new Map(devices.value.devices.map((each) => [each.id, deviceName(t, each)]));
-    const nameOf = (id: string | undefined) => (id ? names.get(id) ?? null : null);
+    const byId = new Map(devices.value.devices.map((each) => [each.id, deviceName(t, each)]));
+    const nameOf = (id: string | undefined) => (id ? byId.get(id) ?? null : null);
+    names.current = nameOf;
     const [events, address] = await Promise.allSettled([api.activity(nameOf), api.address()]);
     if (!current()) return;
-    if (events.status === 'fulfilled') setActivity(events.value);
+    if (events.status === 'fulfilled') {
+      setRecent(events.value.items);
+      setRecentCursor(events.value.nextCursor);
+    }
     // The notice must be seen; a failed read leaves the last answer as it was.
     if (address.status === 'fulfilled') {
       setUnrecognizedChange(address.value?.unrecognizedChange ? { hostname: address.value.unrecognizedChange.hostname } : undefined);
@@ -173,6 +184,27 @@ export function DevicesPage() {
     const timer = window.setInterval(() => { void load(); }, FOLLOW_MS);
     return () => window.clearInterval(timer);
   }, [load, operate, recovering]);
+
+  const activity = useMemo(() => {
+    const seen = new Set(recent.map((each) => each.id));
+    return [...recent, ...older.filter((each) => !seen.has(each.id))];
+  }, [older, recent]);
+  // Until an older page was read, the next one follows the newest page.
+  const nextCursor = olderCursor === undefined ? recentCursor : olderCursor;
+  const loadOlder = useCallback(async () => {
+    if (!nextCursor || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await api.activity(names.current, nextCursor);
+      if (!alive.current) return;
+      setOlder((current) => [...current, ...page.items]);
+      setOlderCursor(page.nextCursor);
+    } catch {
+      // The list stays as it is; the button is still there to ask again.
+    } finally {
+      if (alive.current) setLoadingOlder(false);
+    }
+  }, [loadingOlder, nextCursor]);
 
   const devices = useMemo<Device[]>(() => snapshot.devices.map((each) => ({
     ...each,
@@ -352,6 +384,8 @@ export function DevicesPage() {
       onCancelConfirm={() => setConfirm(undefined)}
       onDismissNotice={() => { setNotice(undefined); setProblem(undefined); }}
       onShowActivity={() => go(DEVICES_ACTIVITY_PATH)}
+      moreActivity={nextCursor ? (loadingOlder ? 'loading' : 'available') : undefined}
+      onMoreActivity={() => { void loadOlder(); }}
       onAddDevice={() => setAdd('iphone')}
       onAddKindChange={setAdd}
       onCloseAdd={() => setAdd(undefined)}

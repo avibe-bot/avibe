@@ -3249,7 +3249,11 @@
       "familyIpv4": "IPv4",
       "familyIpv6": "IPv6",
       "withDetail": "{{path}} · {{detail}}",
-      "legMs": "{{ms}} ms"
+      "legMs": "{{ms}} ms",
+      "legNone": "—",
+      "legFailed": "失败",
+      "legCancelled": "未用上",
+      "legTimeout": "超时"
     },
     "interfaceOption": "{{name}} · {{address}}",
     "manualRetryAt": "可在 {{time}} 再次优化。",
@@ -8224,7 +8228,8 @@
       "alarmLabelled": "创建闹钟「{{label}}」",
       "reminderLabelled": "创建提醒「{{label}}」",
       "confirmedOn": "{{what}}，已在 {{device}} 上确认",
-      "remoteAccessOff": "远程访问已关闭"
+      "remoteAccessOff": "远程访问已关闭",
+      "earlier": "更早的活动"
     },
     "time": {
       "today": "今天 {{time}}",
@@ -8310,7 +8315,13 @@
       "edgePlace": "{{place}} ({{colo}})",
       "edgeNode": "{{id}} · {{place}}",
       "provider": "{{name}} AS{{asn}}",
-      "optimizeFailed": "没有开始优化：{{reason}}"
+      "optimizeFailed": "没有开始优化：{{reason}}",
+      "directCertificate": "直连证书",
+      "validUntil": "有效期至 {{date}}",
+      "noCertificate": "没有有效的证书",
+      "lastConnection": "最近一次连接",
+      "lastConnectionLegs": "直连 {{direct}} / Cloudflare {{public}}",
+      "lastConnectionNone": "这台设备没有记录"
     },
     "rename": {
       "title": "更改域名",

@@ -188,6 +188,34 @@ describe('ConnectionPage · 优化线路', () => {
   );
 });
 
+describe('ConnectionPage · 连接诊断与网络路径', () => {
+  const open = async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '连接诊断与网络路径' }));
+    return screen.findByRole('dialog');
+  };
+
+  it('carries the direct certificate\'s expiry and the last connection\'s timing while direct is on', async () => {
+    vi.spyOn(devicesApi, 'status').mockResolvedValue({ ...status, direct: { enabled: true, state: 'running', reason: '', certificate_not_after: '2099-02-14T00:00:00Z' } } as never);
+    const dialog = await open();
+    const rows = await within(dialog).findByTestId('direct-details');
+    expect(rows.textContent).toContain('直连证书');
+    expect(rows.textContent).toContain('有效期至 2099年2月14日');
+    // Only the Avibe App on this device records the race; a browser says so instead of a number.
+    expect(rows.textContent).toContain('最近一次连接');
+    expect(rows.textContent).toContain('这台设备没有记录');
+  });
+
+  it('direct off: rows absent', async () => {
+    vi.spyOn(devicesApi, 'status').mockResolvedValue({ ...status, direct: { enabled: false, state: 'off', reason: '', certificate_not_after: '2099-02-14T00:00:00Z' } } as never);
+    const dialog = await open();
+    expect(within(dialog).getByText('连接诊断')).toBeTruthy();
+    expect(within(dialog).queryByTestId('direct-details')).toBeNull();
+    expect(dialog.textContent).not.toContain('直连证书');
+    expect(dialog.textContent).not.toContain('最近一次连接');
+  });
+});
+
 describe('ConnectionPage · the domain', () => {
   it('goes back to the form with the one sentence when the name cannot be taken', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -298,6 +326,13 @@ describe('ConnectionPageView', () => {
     view({ connection: connection({ change: { setting: 'protocol', state: 'verifying' } }) });
     expect(screen.queryByRole('button', { name: /保留/ })).toBeNull();
     expect(screen.getByRole('radio', { name: 'QUIC' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('says how the last connection\'s two paths raced where the App recorded it, and an expired certificate has no date', () => {
+    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), direct: { certificate: null, lastConnection: { direct: 'timeout', public: 212 } } } });
+    const rows = screen.getByTestId('direct-details');
+    expect(rows.textContent).toContain('直连 超时 / Cloudflare 212 ms');
+    expect(rows.textContent).toContain('没有有效的证书');
   });
 
   it('shows the relay only on an instance enrolled in the trial', () => {

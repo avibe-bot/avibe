@@ -16,7 +16,7 @@ import {
 } from '@/lib/native';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
-import { deviceUsing } from '@/lib/remoteAccessDirect';
+import { deviceUsing, directCertificateDate, lastConnectionLegs } from '@/lib/remoteAccessDirect';
 import { useNativeDirectPath } from '../remoteAccess/useNativeDirectPath';
 import { DevicesApiError, LostAnswer, devicesApi as api, type RenamePreview } from './api';
 import { clearClaimMarker } from './claimFlow';
@@ -499,7 +499,13 @@ export function ConnectionPage() {
       refused={refused}
       sending={sending}
       optimize={optimize}
-      diagnostics={diagnosticsOpen ? { status, diagnostics, running: diagnosing, error: diagnosticsError, now: statusAt } : undefined}
+      diagnostics={diagnosticsOpen ? {
+        status, diagnostics, running: diagnosing, error: diagnosticsError, now: statusAt,
+        // Direct's own details only while direct is on.
+        direct: status?.direct?.enabled
+          ? { certificate: directCertificateDate(status.direct.certificate_not_after, statusAt), lastConnection: lastConnectionLegs(nativePath) }
+          : undefined,
+      } : undefined}
       host={owner ? host : undefined}
       address={owner ? address : undefined}
       renameDevices={renameDevices(devices)}

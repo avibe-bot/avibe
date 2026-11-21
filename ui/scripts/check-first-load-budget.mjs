@@ -36,8 +36,17 @@ const KiB = 1024;
 // receiver is fetched only in a desktop shell (-1.0 KiB), and the new-project
 // dialog with its folder browser loads on first open (-7.9 KiB). The 3.1 KiB
 // named above for #4036 and #4037 fit under 600 with room left.
+//
+// home 600 -> 604 KiB (2026-11-22). Measured 600.1 KiB with the Devices pages
+// (Settings · 设备 in place of Settings · Remote access). No code was added to
+// the first screen: the pages load with Settings, and the one screen the entry
+// guard can show loads on demand. The growth is copy: the locale chunk, which
+// every first load takes whole, is 3.9 KiB larger (the sentences for claims,
+// sign-out results, renaming and binding again, in place of the old page's).
+// The candidate to win it back is the locale itself: one chunk per surface
+// instead of one per language, so Settings' copy stops riding with the home.
 const BUDGETS = {
-  home: 600 * KiB,
+  home: 604 * KiB,
   chat: 900 * KiB,
 };
 

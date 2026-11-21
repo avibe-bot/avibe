@@ -76,7 +76,7 @@ beforeEach(async () => {
   });
   vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook]));
   vi.spyOn(devicesApi, 'status').mockResolvedValue(unpaired as never);
-  vi.spyOn(devicesApi, 'activity').mockResolvedValue([]);
+  vi.spyOn(devicesApi, 'activity').mockResolvedValue({ items: [], nextCursor: null });
   vi.spyOn(devicesApi, 'address').mockResolvedValue(null);
 });
 afterEach(() => {
@@ -319,6 +319,22 @@ describe('DevicesPage · devices', () => {
     expect(api.status).not.toHaveBeenCalled();
     expect(api.activity).not.toHaveBeenCalled();
     expect(api.address).not.toHaveBeenCalled();
+  });
+
+  it('reads older activity a page at a time, as far as the instance keeps it', async () => {
+    const entry = (id: string, minutes: number) => ({ id, deviceId: 'host', at: new Date(Date.now() - minutes * 60_000).toISOString(), device: 'MacBook', event: { kind: 'remoteAccessOn' as const } });
+    const read = vi.spyOn(devicesApi, 'activity').mockImplementation(async (_names, cursor) => (
+      cursor === 'page-2' ? { items: [entry('e3', 30), entry('e2', 20)], nextCursor: null } : { items: [entry('e1', 10), entry('e2', 20)], nextCursor: 'page-2' }
+    ));
+    mount('/settings/remote-access/activity');
+
+    const more = await screen.findByRole('button', { name: '更早的活动' });
+    expect(screen.getAllByText('远程访问已开启')).toHaveLength(2);
+    fireEvent.click(more);
+    // The entry both pages carry is listed once; with no cursor left, nothing more is offered.
+    await waitFor(() => expect(screen.getAllByText('远程访问已开启')).toHaveLength(3));
+    expect(read).toHaveBeenLastCalledWith(expect.any(Function), 'page-2');
+    expect(screen.queryByRole('button', { name: '更早的活动' })).toBeNull();
   });
 
   it('shows the notice that the address was changed somewhere else, with the way to bind again', async () => {

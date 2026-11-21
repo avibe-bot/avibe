@@ -140,6 +140,54 @@ function NetworkPath({ status, now }: { status: RemoteAccessStatus; now: number 
   );
 }
 
+type Leg = number | 'none' | 'failed' | 'timeout' | 'cancelled';
+const legKeys = {
+  none: 'remoteAccess.direct.legNone',
+  failed: 'remoteAccess.direct.legFailed',
+  timeout: 'remoteAccess.direct.legTimeout',
+  cancelled: 'remoteAccess.direct.legCancelled',
+} as const satisfies Record<Exclude<Leg, number>, TranslationKey>;
+
+/** Direct, for advanced users and debugging: its certificate, and how the last new connection's two
+ *  paths raced (only the Avibe App on this device records that). */
+export type DirectDetails = {
+  /** The certificate's expiry while it is valid; null without a valid one. */
+  certificate: Date | null;
+  lastConnection: { direct: Leg; public: Leg } | null;
+};
+
+function DirectRows({ direct }: { direct: DirectDetails }) {
+  const { t, i18n } = useTranslation();
+  const leg = (value: Leg) => (typeof value === 'number' ? t('remoteAccess.direct.legMs', { ms: value }) : t(legKeys[value]));
+  const rows: Array<[string, string]> = [
+    [
+      t('devices.connection.directCertificate'),
+      direct.certificate
+        ? t('devices.connection.validUntil', { date: new Intl.DateTimeFormat(i18n.language, { year: 'numeric', month: 'long', day: 'numeric' }).format(direct.certificate) })
+        : t('devices.connection.noCertificate'),
+    ],
+    [
+      t('devices.connection.lastConnection'),
+      direct.lastConnection
+        ? t('devices.connection.lastConnectionLegs', { direct: leg(direct.lastConnection.direct), public: leg(direct.lastConnection.public) })
+        : t('devices.connection.lastConnectionNone'),
+    ],
+  ];
+  return (
+    <div className="border-t border-border/70 pt-4" data-testid="direct-details">
+      <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.direct.label')}</h3>
+      <dl className="mt-2 grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-6 gap-y-1.5 text-[12px]">
+        {rows.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-muted">{label}</dt>
+            <dd className="tabular-nums text-foreground">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 export type TunnelDetailsProps = {
   status: RemoteAccessStatus | null;
   diagnostics: TunnelConnectivityDiagnostics | null;
@@ -148,16 +196,19 @@ export type TunnelDetailsProps = {
   error?: string;
   /** When the page read the status, for the freshness of what it shows. */
   now: number;
+  /** Present only while this Avibe has direct turned on. */
+  direct?: DirectDetails;
   onRun?: () => void;
 };
 
-export function TunnelDetails({ status, diagnostics, running, error, now, onRun }: TunnelDetailsProps) {
+export function TunnelDetails({ status, diagnostics, running, error, now, direct, onRun }: TunnelDetailsProps) {
   const { t } = useTranslation();
   const rows: DiagnosticKey[] = diagnostics ? ['dns', 'quic', 'http2'] : [];
   const inactiveQuic = (key: DiagnosticKey) => key === 'quic' && diagnostics?.quic.status === 'unknown' && diagnostics.effective_protocol === 'http2';
   return (
     <div className="flex flex-col gap-5">
       {status ? <NetworkPath status={status} now={now} /> : <p className="text-[12px] text-muted">{t('devices.connection.noNetworkPath')}</p>}
+      {direct && <DirectRows direct={direct} />}
       <div className="border-t border-border/70 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">

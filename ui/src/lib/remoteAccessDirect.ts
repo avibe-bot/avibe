@@ -2,7 +2,7 @@ import type { TFunction } from 'i18next';
 
 import type { TranslationKey } from '../i18n/types';
 import type { LiveStreamVia } from './liveStreamVia';
-import type { NativeDirectPathKind, NativeDirectPathSnapshot } from './native';
+import type { NativeDirectConnection, NativeDirectPathKind, NativeDirectPathSnapshot } from './native';
 
 /** What this device's page is using, in the four agreed names. */
 export type DeviceUsing =
@@ -81,4 +81,22 @@ export function directTagKind(
   if (!appReportsPath || pageVia !== 'direct') return null;
   if (appPath === 'ipv4' || appPath === 'ipv6') return 'direct';
   return appPath === 'relay' ? 'relay' : null;
+}
+
+/**
+ * The last new connection's race, for the connection details: each side's time
+ * to be ready in ms, `none` when it was not part of the race, or what became
+ * of it. Null when the App recorded none.
+ */
+export function lastConnectionLegs(
+  snapshot: NativeDirectPathSnapshot | null,
+): { direct: NativeDirectConnection['direct']; public: NativeDirectConnection['public'] } | null {
+  const last = snapshot?.lastConnection;
+  return last ? { direct: last.direct, public: last.public } : null;
+}
+
+/** The direct certificate's expiry, while it is still valid: an expired one has no date worth showing. */
+export function directCertificateDate(notAfter: string | null | undefined, now: number): Date | null {
+  const date = notAfter ? new Date(notAfter) : null;
+  return date && Number.isFinite(date.getTime()) && date.getTime() > now ? date : null;
 }

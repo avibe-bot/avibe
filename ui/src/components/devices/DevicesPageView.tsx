@@ -68,6 +68,8 @@ export type DevicesPageActions = {
   onCancelConfirm?: () => void;
   onDismissNotice?: () => void;
   onShowActivity?: () => void;
+  /** Read the next page of older activity. */
+  onMoreActivity?: () => void;
   onAddDevice?: () => void;
   onAddKindChange?: (kind: AddKind) => void;
   onCloseAdd?: () => void;
@@ -82,6 +84,8 @@ export type DevicesPageViewProps = DevicesPageActions & {
   reach: Reach;
   devices: Device[];
   activity?: DeviceActivity[];
+  /** The activity list has older entries the instance still keeps: offered, or being read. */
+  moreActivity?: 'available' | 'loading';
   /** A member of a shared instance sees only their own devices and nothing of the owner's. */
   viewer?: 'owner' | 'member';
   /** The viewer is a member who may operate the instance: they keep the remote-access switch and
@@ -618,7 +622,7 @@ function SignOutNoticeCard({ notice, onDismiss }: { notice: SignOutNotice; onDis
 }
 
 export function DevicesPageView({
-  reach, devices, activity = [], viewer = 'owner', operate = false, optimize, ownerEmail, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
+  reach, devices, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, ownerEmail, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
   signOutNotice, unrecognizedChange, problem, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
@@ -642,6 +646,14 @@ export function DevicesPageView({
           {latest.length > 0
             ? latest.map((item) => <ActivityRow key={item.id} item={item} wide />)
             : <p className="px-5 py-3 text-[12px] text-muted">{t('devices.activity.empty')}</p>}
+          {moreActivity && (
+            <div className="flex justify-center border-t border-border px-5 py-2.5">
+              <Button variant="ghost" size="compact" disabled={moreActivity === 'loading'} onClick={actions.onMoreActivity}>
+                {moreActivity === 'loading' && <LoaderCircle className="motion-safe:animate-spin" />}
+                {t('devices.activity.earlier')}
+              </Button>
+            </div>
+          )}
         </SettingsPanel>
       </SettingsPageShell>
     );

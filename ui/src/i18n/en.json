@@ -3249,7 +3249,11 @@
       "familyIpv4": "IPv4",
       "familyIpv6": "IPv6",
       "withDetail": "{{path}} · {{detail}}",
-      "legMs": "{{ms}} ms"
+      "legMs": "{{ms}} ms",
+      "legNone": "—",
+      "legFailed": "failed",
+      "legCancelled": "not used",
+      "legTimeout": "timed out"
     },
     "interfaceOption": "{{name}} · {{address}}",
     "manualRetryAt": "You can optimize again at {{time}}.",
@@ -8224,7 +8228,8 @@
       "alarmLabelled": "Alarm “{{label}}” created",
       "reminderLabelled": "Reminder “{{label}}” created",
       "confirmedOn": "{{what}}, confirmed on {{device}}",
-      "remoteAccessOff": "Remote access turned off"
+      "remoteAccessOff": "Remote access turned off",
+      "earlier": "Earlier activity"
     },
     "time": {
       "today": "Today {{time}}",
@@ -8310,7 +8315,13 @@
       "edgePlace": "{{place}} ({{colo}})",
       "edgeNode": "{{id}} · {{place}}",
       "provider": "{{name}} AS{{asn}}",
-      "optimizeFailed": "Optimization did not start: {{reason}}"
+      "optimizeFailed": "Optimization did not start: {{reason}}",
+      "directCertificate": "Direct certificate",
+      "validUntil": "valid until {{date}}",
+      "noCertificate": "no valid certificate",
+      "lastConnection": "Last connection",
+      "lastConnectionLegs": "direct {{direct}} / Cloudflare {{public}}",
+      "lastConnectionNone": "none recorded on this device"
     },
     "rename": {
       "title": "Change the domain",
