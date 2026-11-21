@@ -2486,18 +2486,13 @@ final class AppModel: ObservableObject {
             self.sessionRenewalIsReading = true
             _ = try? await self.sessionCoordinator.refresh()
             self.sessionRenewalIsReading = false
+            // Push work the read held off (the account was busy).
+            self.nativePushCoordinator.resumeAfterAccountActivation()
             // A tap or shortcut that arrived during the read.
             self.deliverPendingInstanceOpen()
         }
     }
 
-    /// avibe.bot's last confirmation of the session is past its lifetime
-    /// (`MobileSessionConfirmation.lifetime`), and an
-    /// instance is to open or is open: whatever is open is closed, avibe.bot
-    /// is asked, and then the account's selected instance opens, if it still
-    /// lists it. With no answer (offline, a failed read) the App stops at
-    /// the instance list; a signed-out or changed account, or an instance
-    /// that left the list, is handled as after any session read.
     /// Whether work that reaches an instance without its page (a Live
     /// Activity's requests) may go to `origin` for `accountID`: the session
     /// lists that address for that account, and avibe.bot confirmed the
@@ -2510,6 +2505,13 @@ final class AppModel: ObservableObject {
             }
     }
 
+    /// avibe.bot's last confirmation of the session is past its lifetime
+    /// (`MobileSessionConfirmation.lifetime`), and an
+    /// instance is to open or is open: whatever is open is closed, avibe.bot
+    /// is asked, and then the account's selected instance opens, if it still
+    /// lists it. With no answer (offline, a failed read) the App stops at
+    /// the instance list; a signed-out or changed account, or an instance
+    /// that left the list, is handled as after any session read.
     /// `atTheReturn`: nothing asked for an open (the App came back to the
     /// foreground); under the account page only the runtime goes then.
     private func confirmSessionThenOpen(atTheReturn: Bool = false) {

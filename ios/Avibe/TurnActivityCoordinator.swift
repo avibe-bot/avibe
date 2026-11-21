@@ -111,7 +111,7 @@ final class TurnActivityCoordinator {
              SystemTurnActivity(try Activity.request(attributes: attributes,
                  content: ActivityContent(state: state, staleDate: state.staleDate), pushType: .token))
          }, request: Request? = nil,
-         mayRequest: @escaping @MainActor (Target) -> Bool = { _ in true }) {
+         mayRequest: @escaping @MainActor (Target) -> Bool) {
         self.defaults = defaults
         self.mayRequest = mayRequest
         self.now = now
