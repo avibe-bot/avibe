@@ -1241,10 +1241,14 @@ def save_config(
         # This settings writer does not change relay consent. Ordinary host file
         # and shell access can still modify local config, including via Web Terminal.
         # Compare against the locked base, not a prior read or the request's role.
+        if generic_remote_access and config.remote_access.vibe_cloud.direct != bool(
+            base_config and base_config.remote_access.vibe_cloud.direct
+        ):
+            raise ValueError("Direct consent must be changed through connection settings")
         if config.remote_access.vibe_cloud.public_relay_trial != bool(
             base_config and base_config.remote_access.vibe_cloud.public_relay_trial
         ):
-            raise ValueError("Public relay trial consent must be changed from the instance host shell")
+            raise ValueError("Public relay trial consent must be changed from the instance host shell or connection settings")
         if base_config is not None:
             # A recovered base section must reach the file as stored, never as
             # the defaults merged in above. Refuse before any side effect below.

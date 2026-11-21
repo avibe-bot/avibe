@@ -90,6 +90,7 @@ from modules.agents.catalog import (
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
 from vibe.http_request_diagnostics import RequestCounterMiddleware, RequestCounters
 from vibe.ui_mobile_routes import register_mobile_routes
+from vibe.ui_connection_routes import register_connection_routes
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -179,6 +180,7 @@ mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
 register_mobile_routes(app)
+register_connection_routes(app)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -5009,7 +5011,11 @@ def _config_payload_for_context(config: Any, authorization_context: Any) -> dict
     from vibe import api
 
     if authorization_context is None or authorization_context.can_manage_instance:
-        return api.client_config_payload(config)
+        result = api.client_config_payload(config)
+        if authorization_context is None or not authorization_context.is_instance_owner:
+            for key in ("direct", "public_relay_trial"):
+                result["remote_access"]["vibe_cloud"].pop(key, None)
+        return result
     return api.non_owner_config_payload(config)
 
 
@@ -8529,7 +8535,7 @@ async def config_post():
     authorization_context = getattr(g, "authorization_context", None)
     response_payload = _config_api_payload_for_context(config, authorization_context)
     if remote_access_runtime is not None:
-        response_payload["remote_access_runtime"] = remote_access_runtime
+        response_payload["remote_access_runtime"] = _remote_status_for_viewer(remote_access_runtime)
     if platform_runtime is not None:
         response_payload["platform_runtime"] = platform_runtime
     if activity_streaming_runtime is not None:
@@ -8550,6 +8556,12 @@ def remote_access_direct_suspend():
     if direct_lifecycle.stop_for_pairing_change(timeout_seconds=10.0):
         return jsonify({"ok": True, "stopped": True})
     return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
+
+
+def _remote_status_for_viewer(payload: dict) -> dict:
+    """Only the Owner sees the instance opt-in; rendezvous and stream path are separate."""
+    context = _request_authorization_context()
+    return payload if context and context.is_instance_owner else {k: v for k, v in payload.items() if k != "direct"}
 
 
 @app.route("/api/remote-access/status", methods=["GET"])
@@ -8589,7 +8601,7 @@ def remote_access_status():
     authorization_context = getattr(g, "authorization_context", None)
     if authorization_context is not None and authorization_context.can_manage_access_members:
         status_payload["pending_pairing"] = remote_access.pending_pairing_status(config)
-    return jsonify(status_payload)
+    return jsonify(_remote_status_for_viewer(status_payload))
 
 
 @app.route("/api/direct/rendezvous", methods=["POST"])
@@ -8817,7 +8829,7 @@ def remote_access_start():
     result = remote_access.start()
     if result.get("ok"):
         _ensure_remote_access_monitoring()
-    return jsonify(result), 200 if result.get("ok") else 400
+    return jsonify(_remote_status_for_viewer(result)), 200 if result.get("ok") else 400
 
 
 @app.route("/api/remote-access/stop", methods=["POST"])
@@ -8825,7 +8837,7 @@ def remote_access_stop():
     from vibe import remote_access
 
     result = remote_access.stop()
-    return jsonify(result), 200 if result.get("ok") else 400
+    return jsonify(_remote_status_for_viewer(result)), 200 if result.get("ok") else 400
 
 
 @app.route("/api/remote-access/optimize-route", methods=["POST"])
@@ -8833,7 +8845,7 @@ def remote_access_optimize_route():
     from vibe import remote_access
 
     result = remote_access.optimize_route()
-    return jsonify(result), 202 if result.get("ok") else 409
+    return jsonify(_remote_status_for_viewer(result)), 202 if result.get("ok") else 409
 
 
 @app.route("/api/remote-access/network-interfaces", methods=["GET"])
@@ -8848,7 +8860,7 @@ async def remote_access_settings():
     from vibe import remote_access
 
     payload = request.json or {}
-    result = await asyncio.to_thread(remote_access.apply_settings, payload)
+    result = _remote_status_for_viewer(await asyncio.to_thread(remote_access.apply_settings, payload))
     if result.get("ok"):
         await asyncio.to_thread(_ensure_remote_access_monitoring)
         return jsonify(result)
@@ -20415,8 +20427,15 @@ def run_ui_server(host: str, port: int) -> None:
             logger.warning("Skipping UI startup reconciliation because config load failed: %s", config_load_error)
         if config is not None:
             try:
-                from vibe import remote_access
+                from vibe import connection_runtime, connection_settings, remote_access
 
+                # Restore unconfirmed fields before the tunnel monitor/reconcile or
+                # direct ingress can boot from an abandoned candidate. A busy runtime
+                # retries independently; never block the UI on a connector starting.
+                connection_settings.adopt_host_enrollment()
+                connection_runtime.recover_startup()
+                config = settings_service.load_config()
+                connection_runtime.start()
                 remote_access.start_runtime_monitoring(config)
             except Exception:
                 logger.warning("Failed to start remote access status heartbeat", exc_info=True)
