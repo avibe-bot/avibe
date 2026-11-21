@@ -10,7 +10,7 @@ type Snapshot = {
   awaySince: number | null; candidateLeave: number | null; blocked: number; shouldPrompt: boolean;
   status: AppLockStatus; locked: boolean; verifying: boolean; authCalls: number;
   persistedPolicy: string | null; pending: boolean; executed: string[]; mainTitle: string; floatingVisible: boolean[]; quitAlertVisible: boolean;
-  windows: { title: string; covered: boolean; hidden: boolean; contentCount: number; compact: boolean; firstResponderIsCover: boolean; button: string; pendingLabel: string; buttonTop: number; pendingBottom: number }[];
+  windows: { label: string | null; title: string; covered: boolean; hidden: boolean; contentCount: number; compact: boolean; firstResponderIsCover: boolean; button: string; pendingLabel: string; buttonTop: number; pendingBottom: number }[];
 };
 class NativePeer {
   process: ChildProcessWithoutNullStreams;
@@ -170,11 +170,22 @@ test('W1 physical App/Show windows inherit covers before and after locking, incl
   const before = await peer.send('snapshot');
   const added = await peer.send('appWindow', { label: 'app-show-lock-fixture' });
   expect(added.windows.length).toBeGreaterThan(before.windows.length);
-  expect(added.windows.every((window) => window.covered && window.hidden && window.contentCount > 0 && !window.title.includes('PRIVATE'))).toBe(true);
+  for (const window of added.windows) {
+    expect(window).toMatchObject({ covered: true, hidden: true });
+    expect(window.title).not.toContain('PRIVATE');
+  }
   // Wait for WKWebView's title callback while locked, then consume the stored
   // title on unlock. The actual follower must not reveal the document title.
   await expect.poll(() => peer.send('appWindowLoads')).toEqual(['app-editor-lock-fixture', 'app-show-lock-fixture']);
   expect(await peer.send<string[]>('appWindowTitles')).toEqual(['Avibe is locked', 'Avibe is locked']);
+  // The cover exists before WKWebView attaches its content; once both pages
+  // load, assert the two real content trees are present and hidden as well.
+  const loaded = (await peer.send('snapshot')).windows.filter((window) => window.label?.startsWith('app-'));
+  expect(loaded).toHaveLength(2);
+  for (const window of loaded) {
+    expect(window).toMatchObject({ covered: true, hidden: true });
+    expect(window.contentCount, JSON.stringify(window)).toBeGreaterThan(0);
+  }
   await peer.send('unlock');
   await expect.poll(() => peer.send('appWindowTitles')).toEqual(['PRIVATE DOCUMENT TITLE', 'PRIVATE DOCUMENT TITLE']);
   await peer.send('closeAppWindows');
@@ -183,33 +194,40 @@ test('W1 physical App/Show windows inherit covers before and after locking, incl
 test('W1 unsaved close/quit guard stays answerable while locked without revealing the page confirmation', async () => {
   await peer.send('appWindow', { label: 'app-editor-lock-fixture' });
   await expect.poll(() => peer.send('appWindowLoads')).toEqual(['app-editor-lock-fixture']);
-  await peer.send('reset', { policy: 'immediately' });
-  for (const [response, confirmed] of [[1001, false], [1000, true]] as const) {
+  // Run the minimized case last: deminiaturize is animated by AppKit, so an
+  // immediate hide would race that animation rather than test sheet ownership.
+  for (const [policy, presentation, response, confirmed] of [
+    ['immediately', 'hidden', 1001, false],
+    ['oneMinute', 'hidden', 1001, false],
+    ['immediately', 'minimized', 1000, true],
+  ] as const) {
+    await peer.send('reset', { policy });
+    const locked = policy === 'immediately';
+    if (!locked) await peer.send('unlock');
+    await peer.send('mainPresentation', { value: presentation });
+    const mainState = { visible: false, minimized: presentation === 'minimized' };
+    await expect.poll(() => peer.send('mainPresentation')).toEqual(mainState);
     const answer = peer.send<{ confirmed: boolean; after: Snapshot }>('closeGuard');
     await expect.poll(() => peer.send('sheetRead')).toEqual({
+      parent: 'app-editor-lock-fixture',
       title: 'Avibe', message: 'Discard unsaved changes and close this window?',
       buttons: ['Discard and Close', 'Cancel'],
     });
+    expect(await peer.send('mainPresentation')).toEqual(mainState);
     const waiting = await peer.send('snapshot');
     expect(waiting.quitAlertVisible).toBe(true);
-    expect(waiting.locked).toBe(true);
-    expect(waiting.windows.every((window) => window.hidden && window.covered)).toBe(true);
+    expect(waiting.locked).toBe(locked);
+    if (locked) expect(waiting.windows.every((window) => window.hidden && window.covered)).toBe(true);
     await peer.send('sheetAnswer', { response });
     const result = await answer;
     expect(result.confirmed).toBe(confirmed);
-    expect(result.after.locked).toBe(true);
-    expect(result.after.authCalls).toBe(0);
+    expect(result.after.locked).toBe(locked);
+    expect(result.after.authCalls).toBe(locked ? 0 : 1);
     expect(result.after.quitAlertVisible).toBe(false);
+    // Cancelling an unlocked internal sheet cannot create an absence deadline.
+    if (!locked) expect((await peer.send('tick', { time: 1000 })).locked).toBe(false);
   }
-  // The same production close guard while unlocked is still an internal
-  // sheet: cancelling it cannot create an absence deadline.
-  await peer.send('reset', { policy: 'oneMinute' });
-  await peer.send('unlock');
-  const cancelled = peer.send<{ confirmed: boolean }>('closeGuard');
-  await expect.poll(() => peer.send('sheetRead')).not.toBeNull();
-  await peer.send('sheetAnswer', { response: 1001 });
-  expect((await cancelled).confirmed).toBe(false);
-  expect((await peer.send('tick', { time: 1000 })).locked).toBe(false);
+  await peer.send('mainPresentation', { value: 'shown' });
   await peer.send('closeAppWindows');
 });
 

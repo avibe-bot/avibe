@@ -244,3 +244,12 @@ a real WebviewWindow's private close guard, answers Cancel and Discard while
 locked, checks that underlying content stays covered and no LA is requested,
 and verifies that unlocked Cancel does not manufacture absence. No modal loop
 or new lifecycle exemption registry was introduced.
+
+The W1 discard sheet retains the actual closing window as its parent and uses
+W1's existing restore/focus path for that window. Quit/busy keep their main
+parent. A same-head review found that using main for every sheet could reopen
+a hidden Workbench or put the question behind a minimized main window. The
+consuming test now asserts the actual NSAlert parent and preserved main-window
+visibility/minimization, with both Cancel and Discard, and repeats unlocked
+Cancel with main hidden. This does not change the effective-policy boundary,
+generic copy, exact sheet exemption, or Machine timing rules.

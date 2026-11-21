@@ -585,7 +585,11 @@ pub(crate) fn show_quit_question(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn show_discard_question(_app: &tauri::AppHandle, _callback: impl FnOnce(bool) + Send + 'static) -> bool {
+pub(crate) fn show_discard_question(
+    _app: &tauri::AppHandle,
+    _parent: &tauri::WebviewWindow,
+    _callback: impl FnOnce(bool) + Send + 'static,
+) -> bool {
     false
 }
 

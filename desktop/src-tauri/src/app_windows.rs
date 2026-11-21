@@ -1174,12 +1174,12 @@ pub(crate) async fn confirm_discard(app: &AppHandle, window: &WebviewWindow) -> 
         return true;
     };
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if crate::app_lock::show_discard_question(app, move |confirmed| {
+    activate(window);
+    if crate::app_lock::show_discard_question(app, window, move |confirmed| {
         let _ = tx.send(confirmed);
     }) {
         return rx.await.unwrap_or(false);
     }
-    activate(window);
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .message(confirmation.message)

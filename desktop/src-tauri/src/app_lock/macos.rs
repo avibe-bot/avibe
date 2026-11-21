@@ -753,6 +753,7 @@ pub(crate) fn show_quit_question(
 ) -> bool {
     show_lifecycle_alert(
         app,
+        app.get_window(crate::MAIN_WINDOW),
         catalog.quit_title.clone(),
         catalog.quit_message.clone(),
         vec![
@@ -766,6 +767,7 @@ pub(crate) fn show_quit_question(
 pub(crate) fn show_lifecycle_busy(app: &AppHandle, catalog: &crate::NativeTrayCatalog) -> bool {
     show_lifecycle_alert(
         app,
+        app.get_window(crate::MAIN_WINDOW),
         catalog.busy_title.clone(),
         catalog.busy_message.clone(),
         vec![catalog.cancel.clone()],
@@ -774,10 +776,15 @@ pub(crate) fn show_lifecycle_busy(app: &AppHandle, catalog: &crate::NativeTrayCa
 }
 /// W1 close/quit guards still ask before discarding unsaved work. Use native
 /// catalog copy rather than exposing the covered page's title or message.
-pub(crate) fn show_discard_question(app: &AppHandle, callback: impl FnOnce(bool) + Send + 'static) -> bool {
+pub(crate) fn show_discard_question(
+    app: &AppHandle,
+    parent: &tauri::WebviewWindow,
+    callback: impl FnOnce(bool) + Send + 'static,
+) -> bool {
     let text = |key: &str| crate::product_text(key).unwrap_or_else(|| key.to_owned());
     show_lifecycle_alert(
         app,
+        Some(parent.as_ref().window()),
         "Avibe".into(),
         text("apps.editor.confirmDiscardClose"),
         vec![text("apps.editor.discardAndClose"), text("common.cancel")],
@@ -786,6 +793,7 @@ pub(crate) fn show_discard_question(app: &AppHandle, callback: impl FnOnce(bool)
 }
 fn show_lifecycle_alert(
     app: &AppHandle,
+    parent: Option<tauri::Window>,
     title: String,
     message: String,
     buttons: Vec<String>,
@@ -830,8 +838,7 @@ fn show_lifecycle_alert(
         let window = alert.window();
         PRESENTATION.with_borrow_mut(|p| p.quit_window = Some(Weak::from_retained(&window)));
         sync_windows(&handle);
-        let parent = handle
-            .get_window(crate::MAIN_WINDOW)
+        let parent = parent
             .and_then(|window| window.ns_window().ok())
             .and_then(|window| unsafe { Retained::retain(window.cast::<NSWindow>()) });
         let Some(parent) = parent else {

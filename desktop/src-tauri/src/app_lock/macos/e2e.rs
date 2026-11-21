@@ -132,7 +132,10 @@ fn snapshot(app: &AppHandle) -> Value {
     });
     let windows = PRESENTATION.with_borrow(|p| p.covers.iter().filter_map(|cover| {
         let window = cover.window.load()?;
-        Some(json!({"covered": unsafe { cover.view.superview() }.is_some(), "title": window.title().to_string(),
+        let label = app.windows().into_iter().find_map(|(label, candidate)| {
+            candidate.ns_window().ok().filter(|native| std::ptr::eq(native.cast::<NSWindow>(), &*window)).map(|_| label)
+        });
+        Some(json!({"label": label, "covered": unsafe { cover.view.superview() }.is_some(), "title": window.title().to_string(),
             "hidden":cover.hidden.iter().filter_map(Weak::load).all(|view| view.isHidden()),
             "contentCount":cover.hidden.len(), "compact":cover.view.ivars().compact.get(),
             "firstResponderIsCover":window.firstResponder().is_some_and(|r| std::ptr::eq(&*r, &*cover.view as &NSResponder)),
@@ -489,9 +492,34 @@ fn handle(app: &AppHandle, request: Value) {
                 });
                 Ok(Value::Null)
             }
+            "mainPresentation" => {
+                let window = app.get_window(crate::MAIN_WINDOW).unwrap();
+                match request["value"].as_str() {
+                    Some("hidden") => window.hide().map_err(|e| e.to_string())?,
+                    Some("minimized") => {
+                        window.show().map_err(|e| e.to_string())?;
+                        window.minimize().map_err(|e| e.to_string())?;
+                    }
+                    Some("shown") => {
+                        window.unminimize().map_err(|e| e.to_string())?;
+                        window.show().map_err(|e| e.to_string())?;
+                    }
+                    _ => {}
+                }
+                Ok(json!({"visible": window.is_visible().map_err(|e| e.to_string())?,
+                    "minimized": window.is_minimized().map_err(|e| e.to_string())?}))
+            }
             "sheetRead" => Ok(PRESENTATION.with_borrow(|p| {
                 p.quit_alert.as_ref().map_or(Value::Null, |alert| {
-                    json!({"message": alert.informativeText().to_string(),
+                    let parent = alert.window().sheetParent();
+                    let parent_label = app.windows().into_iter().find_map(|(label, window)| {
+                        let native = window.ns_window().ok()?;
+                        parent
+                            .as_ref()
+                            .filter(|parent| std::ptr::eq(parent.as_ref(), native.cast::<NSWindow>()))?;
+                        Some(label)
+                    });
+                    json!({"parent": parent_label, "message": alert.informativeText().to_string(),
                         "title": alert.messageText().to_string(),
                         "buttons": alert.buttons().iter().map(|button| button.title().to_string()).collect::<Vec<_>>()})
                 })
