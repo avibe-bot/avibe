@@ -9002,6 +9002,11 @@ def personal_claim_start():
     return _start_redirect_claim(constrained=False)
 
 
+@app.route("/api/remote-access/rebind", methods=["GET"])
+def rebind_status():
+    return _claim_route(lambda service: jsonify(service.overview()), constrained=True)
+
+
 @app.route("/api/remote-access/rebind/claims", methods=["POST"])
 def rebind_claim_start():
     return _start_redirect_claim(constrained=True)

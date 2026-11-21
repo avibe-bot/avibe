@@ -45,6 +45,12 @@ def test_admission_is_prior_to_issuer(machine):
     peer, redeemed = machine
     browser = ui_server.app.test_client()
     hdr = csrf_headers(browser)
+    status = browser.get('/api/remote-access/rebind', base_url=ORIGIN)
+    assert status.status_code == 200
+    assert status.get_json() == {'binding_state': 'bound', 'connector_still_running': False, 'can_start': True,
+                                 'unavailable_reason': None, 'attempt': None, 'next_action': 'rebind', 'reason_code': None}
+    from vibe import desktop_local_instance as local
+    assert not local._identity_path().exists() and not peer.calls
     for extra in ({'X-Avibe-Delegated-Caller': '1'}, {'Origin': 'null'}, {'X-Forwarded-For': '127.0.0.1'},
                   {'X-Vibe-CSRF-Token': 'wrong'}):
         resp = browser.post(ROOT, base_url=ORIGIN, headers={**hdr, **extra}, json={})
@@ -67,6 +73,7 @@ def test_rebind_through_shared_callback(machine, reason):
     assert browser.post('/api/remote-access/claims/' + ident + '/cancel', json={}, headers=hdr).status_code == 404
     url = '/remote/claim/callback?claim_id=' + ident + '&state=' + callback_proof(body)
     assert browser.get(url, base_url=ORIGIN).headers['Location'].endswith('claim_error=invalid_return')
+    assert browser.get('/api/remote-access/rebind', base_url=ORIGIN).get_json()['can_start'] is False
     assert len(peer.calls) == 1
     if reason:
         refusal = {'error': 'installation_unverified', 'reason': reason}
@@ -88,6 +95,11 @@ def test_rebind_through_shared_callback(machine, reason):
         assert view['code'] == 'installation_unverified'
         assert view.get('reason_code') == (None if reason == 'malformed' else reason)
         assert not redeemed and cloud.instance_secret == 'fixture-secret-inst_A'
+        if reason != 'malformed':
+            cfg = V2Config.load()
+            cfg.remote_access.vibe_cloud.instance_secret = 'fixture-replaced'
+            cfg.save()
+            assert browser.get(ROOT + '/' + ident).get_json() == {'state': 'error', 'code': 'local_binding_changed'}
     else:
         assert view['state'] == 'bound' and view['binding_disposition'] == 'existing', view
         assert len(redeemed) == 1 and redeemed[0]['redeem_request_id']

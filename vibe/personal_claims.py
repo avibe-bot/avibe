@@ -69,6 +69,8 @@ class _BoundSource(_Source):
             if pending is not None:
                 raise ClaimError("pairing_recovery_required")
             cloud = config.remote_access.vibe_cloud
+            if not cloud.instance_id and not any((cloud.instance_secret, cloud.client_id, cloud.tunnel_token, cloud.session_secret)):
+                raise ClaimError("not_bound")
             if not all((cloud.backend_url, cloud.instance_id, cloud.instance_secret)):
                 raise ClaimError("local_binding_unavailable")
             installation = local.ensure_installation_id()
@@ -547,6 +549,44 @@ class RedirectClaims:
 
 class RebindClaims(RedirectClaims):
     flow_type = _RebindFlow
+
+    def state(self, claim_id):
+        view = super().state(claim_id)
+        if view.get("reason_code"):
+            flow = self._get(claim_id)
+            with config_file_lock():
+                revision = local.claim_revision(local._config(), local._installation_id(), local._pending())
+            if flow.refused_revision != revision:
+                return {"state": "error", "code": "local_binding_changed"}
+            if time.time() >= flow.ticket.deadline:
+                return {"state": "error", "code": "expired"}
+        return view
+
+    def overview(self):
+        from vibe import binding_health, instance_address
+
+        # Read only: no credential probe, identity initialization, reconciliation,
+        # connector status cleanup or grant observation on a page refresh.
+        with config_file_lock():
+            cfg, pending = local._config(), local._pending()
+            cloud = cfg.remote_access.vibe_cloud
+            bound = bool(cloud.instance_id and cloud.instance_secret and cloud.backend_url)
+            state = ("pairing_recovery_required" if pending else
+                     "binding_rejected" if bound and binding_health.rejected_at(cfg) is not None else
+                     "bound" if bound else "unpaired")
+            if not bound and any((cloud.instance_id, cloud.instance_secret, cloud.client_id, cloud.tunnel_token, cloud.session_secret)):
+                raise ClaimError("local_binding_unavailable")
+            local._installation_id()  # A damaged correlation file is not an unpaired computer.
+        with self._lock:
+            flow = self._flow
+            claim_id = flow.ticket.id if flow and flow.ticket else None
+        attempt = self.state(claim_id) if claim_id else None
+        active = flow and (not attempt or attempt["state"] not in ("error", "bound", "declined"))
+        unavailable = ("pairing_recovery_required" if pending else "not_bound" if not bound else
+                       "operation_in_progress" if active or instance_address._any_journal_stored() else None)
+        return {"binding_state": state, "connector_still_running": remote_access._is_cloudflared_pid(remote_access._read_pid()),
+                "can_start": unavailable is None, "unavailable_reason": unavailable, "attempt": attempt,
+                "next_action": "rebind" if unavailable is None else None, "reason_code": (attempt or {}).get("reason_code")}
 
 
 redirect_claims = RedirectClaims()
