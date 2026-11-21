@@ -469,7 +469,20 @@ def _drop_authority() -> None:
         _authority_epoch += 1
 
 
+def drain_for_reset() -> None:
+    """Called after sealing reset. No new cleaning headers may pass the fence."""
+    from vibe.binding_admission import reset_in_progress
+    if not reset_in_progress():
+        raise RuntimeError('reset intent required')
+    with _DRAINED:
+        if not _DRAINED.wait_for(lambda: not any(_inflight.values()), timeout=_DRAIN_TIMEOUT_SECONDS):
+            raise RuntimeError('cleanup responses did not drain')
+
+
 def _cleanup_allowed_locked(host: str, binding: Binding) -> bool:
+    from vibe.binding_admission import reset_in_progress
+    if reset_in_progress():
+        return False
     authority = _authority
     if authority is None or not binding.paired or authority.pairing != binding.pairing:
         return False
