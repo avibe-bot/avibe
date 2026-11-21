@@ -956,3 +956,59 @@ def test_vibe_stop_leaves_the_jobs_of_a_service_that_holds_the_lock(tmp_path: Pa
 
     assert host.status(job_id).state == "running"
     asyncio.run(host.kill(job_id))
+
+
+def test_a_job_watch_polls_and_a_hand_over_do_their_file_and_database_work_off_the_loop(tmp_path: Path, monkeypatch) -> None:
+    """On the owner's controller the lease stat, the job host's path resolution and
+    the hand-over's full store load each stalled the shared loop for ~2 s. They run
+    on workers now, and the finished job is still reported within a poll or two."""
+    import threading
+
+    release = tmp_path / "release"
+    threads: dict[str, set[int]] = {"lease": set(), "host": set(), "load": set()}
+    original_host, original_load = watches_module._job_host, ManagedWatchStore.load
+
+    def lease() -> bool:
+        threads["lease"].add(threading.get_ident())
+        return True
+
+    def job_host(target):
+        threads["host"].add(threading.get_ident())
+        return original_host(target)
+
+    def load(self):
+        threads["load"].add(threading.get_ident())
+        return original_load(self)
+
+    monkeypatch.setattr(watches_module.runtime, "current_process_owns_service_instance", lease)
+    monkeypatch.setattr(watches_module, "_job_host", job_host)
+
+    async def run() -> tuple[int, float]:
+        loop_thread = threading.get_ident()
+        store = ManagedWatchStore()
+        host = LocalJobHost(_jobs_dir(tmp_path), on_hand_over=hand_over_job)  # its default store
+        job_id = await _start_job(host, tmp_path, f"while [ ! -e {release} ]; do sleep 0.02; done; exit 0")
+        monkeypatch.setattr(ManagedWatchStore, "load", load)
+        watch_id = await host.hand_over(job_id)
+        monkeypatch.setattr(ManagedWatchStore, "load", original_load)
+        store.load()
+        service = _service(store)
+        service._requires_service_lease = True
+        await _start_service(service)
+        await _until(lambda: threads["host"], "the job Watch never polled")
+        released_at = time.monotonic()
+        release.touch()
+        await _until(lambda: not store.get_watch(watch_id).enabled, "the finished job was never reported")
+        noticed = time.monotonic() - released_at
+        await service.stop()
+        return loop_thread, noticed
+
+    loop_thread, noticed = asyncio.run(run())
+
+    assert all(threads.values()), threads
+    # The job host and the hand-over's store load never run on the loop; the poll
+    # cycle's lease check runs on a worker (other, rarer lease checks are not in scope).
+    assert loop_thread not in threads["host"] and loop_thread not in threads["load"]
+    assert threads["lease"] - {loop_thread}
+    # Polled every 0.05 s here (1 s in production): noticed within a few polls.
+    assert noticed < 2.0
