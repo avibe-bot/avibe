@@ -83,9 +83,20 @@ export function submitClaimForm(form: ClaimForm): void {
   element.submit();
 }
 
-/** The states of a claim read in which it is still on its way. */
-export const CLAIM_OPEN = new Set(['starting', 'pending', 'waiting']);
+/** A claim's states, as far as this page knows them: approved and binding, and over. Any other
+ *  state, one a newer instance may add included, is a claim that is still open. */
 export const CLAIM_BINDING = new Set(['accepting', 'pairing']);
+export const CLAIM_OVER = new Set(['error', 'declined', 'cancelling']);
+/** Open, and the instance is trying avibe.bot again after it could not reach it or was told to wait. */
+export const CLAIM_RETRYING = 'waiting';
+
+/** Why the return from avibe.bot was refused: the one allowlisted word the callback adds to the
+ *  address. Nothing else is ever read from the address bar. */
+export type ReturnRefusal = 'invalid_return' | 'claim_unavailable';
+export function returnRefusal(search: string): ReturnRefusal | null {
+  const word = new URLSearchParams(search).get('claim_error');
+  return word === 'invalid_return' || word === 'claim_unavailable' ? word : null;
+}
 
 /** The claim speaks `en` and `zh` only: a regional or other language resolves as the page's copy does. */
 export const claimLocale = (language: string): 'en' | 'zh' => (language.toLowerCase().startsWith('zh') ? 'zh' : 'en');

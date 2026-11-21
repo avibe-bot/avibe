@@ -19,17 +19,18 @@ import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { deviceUsing, directCertificateDate, lastConnectionLegs } from '@/lib/remoteAccessDirect';
 import { useNativeDirectPath } from '../remoteAccess/useNativeDirectPath';
 import { DevicesApiError, LostAnswer, devicesApi as api, type RenamePreview } from './api';
-import { clearClaimMarker } from './claimFlow';
+import { clearClaimMarker, returnRefusal } from './claimFlow';
 import { ConnectionPageView } from './ConnectionPageView';
 import { CONNECTION_ADDRESS_PATH, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_PATH } from './paths';
 import { renameDevices } from './rules';
 import type {
   AddressState, ConnectionSetting, ConnectionState, Device, DirectPreference, RebindDialog, RebindRefusal, RebindState,
-  RenameRefusal, RenameStep, RetiredName, SwitchRefusal, TunnelChange, TunnelSetting,
+  RenameDevice, RenameRefusal, RenameStep, RetiredName, SwitchRefusal, TunnelChange, TunnelSetting,
 } from './types';
 import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
+import { useNow } from './useNow';
 import { useOptimizeRoute } from './useOptimizeRoute';
-import { rebindRefusal, renameRefusal, tunnelFromStatus } from './wire';
+import { rebindRefusal, rebindUnavailable, renameRefusal, tunnelFromStatus } from './wire';
 
 const REFRESH_MS = 30_000;
 const FOLLOW_MS = 2_000;
@@ -67,7 +68,11 @@ export function ConnectionPage() {
   const [load, setLoad] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const [connection, setConnection] = useState<ConnectionState | null>(null);
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
-  const [statusAt, setStatusAt] = useState(() => Date.now());
+  // Freshness is judged against a clock that moves: a status that can no longer be read again
+  // must grow too old to speak for now.
+  const now = useNow();
+  /** Reads still owed after a switch whose answer was lost: the state says what became of it. */
+  const [settling, setSettling] = useState(0);
   const [localChange, setLocalChange] = useState<TunnelChange | undefined>();
   const [refused, setRefused] = useState<SwitchRefusal | undefined>();
   const [sending, setSending] = useState<ConnectionSetting | undefined>();
@@ -87,6 +92,7 @@ export function ConnectionPage() {
       if (next) {
         setConnection(next);
         setLoad('ready');
+        setSettling((left) => Math.max(0, left - 1));
         const lost = lostSetting.current;
         if (!lost) {
           // The instance's own word replaces what this page assumed while it waited.
@@ -120,10 +126,7 @@ export function ConnectionPage() {
   const readStatus = useCallback(async () => {
     try {
       const next = await api.status();
-      if (alive.current && typeof next.paired === 'boolean') {
-        setStatus(next);
-        setStatusAt(Date.now());
-      }
+      if (alive.current && typeof next.paired === 'boolean') setStatus(next);
     } catch {
       // The last status stays; its age is what the page shows it by.
     }
@@ -139,7 +142,17 @@ export function ConnectionPage() {
   /** The dialog of a running change was closed: its end is not brought back as a dialog. */
   const renameDismissed = useRef(false);
   const [rebind, setRebind] = useState<RebindState | undefined>();
-  const [rebindRefused, setRebindRefused] = useState<RebindRefusal | undefined>();
+  // A bind-again whose return from avibe.bot was refused lands here with the callback's one
+  // allowlisted word (the Devices page hands it on): read once, said, and removed.
+  const [returned] = useState(() => returnRefusal(location.search));
+  const [rebindRefused, setRebindRefused] = useState<RebindRefusal | undefined>(() => (returned ? rebindRefusal(returned) : undefined));
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has('claim_error')) return;
+    params.delete('claim_error');
+    const search = params.toString();
+    navigate({ pathname: location.pathname, search: search ? `?${search}` : '', hash: location.hash }, { replace: true, state: location.state });
+  }, [location.hash, location.pathname, location.search, location.state, navigate]);
   const [rebindDialog, setRebindDialog] = useState<RebindDialog | undefined>();
   const [rebindBusy, setRebindBusy] = useState(false);
   const resetConfirmation = useRef<string | null>(null);
@@ -161,8 +174,7 @@ export function ConnectionPage() {
       try {
         next = await api.rebind();
       } catch (error) {
-        const code = error instanceof DevicesApiError ? error.code : '';
-        next = code === 'direct_loopback_required' || code === 'local_operator_required' ? { state: 'remote' } : { state: 'unknown' };
+        next = rebindUnavailable(error instanceof DevicesApiError ? error.code : '');
       }
     }
     if (alive.current) setRebind(next);
@@ -186,7 +198,7 @@ export function ConnectionPage() {
       else setRebindRefused(rebindRefusal(end.code === 'no_answer' ? undefined : end.code, end.seconds));
     })();
   }, [readAddress, readRebind, readStatus]);
-  const flow = useClaimFlow({ kind: 'rebind', locale: i18n.language, onEnd: onRebindEnd });
+  const flow = useClaimFlow({ kind: 'rebind', locale: i18n.language, onEnd: onRebindEnd, returned });
 
   // ── the Avibe App's own path and choice ──
   const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
@@ -232,15 +244,12 @@ export function ConnectionPage() {
     };
   }, [owner, readAddress, readConnection, readRebind, readStatus]);
 
-  const onStatus = useCallback((next: RemoteAccessStatus) => {
-    setStatus(next);
-    setStatusAt(Date.now());
-  }, []);
-  const { optimize, recovering, run: optimizeRoute } = useOptimizeRoute({ status, statusAt, onStatus, refresh: readStatus });
+  const onStatus = useCallback((next: RemoteAccessStatus) => setStatus(next), []);
+  const { optimize, recovering, run: optimizeRoute } = useOptimizeRoute({ status, now, onStatus, refresh: readStatus });
 
   // While a change is running (or its answer was lost), only reads: the state says how it ended.
   const change = localChange ?? connection?.change;
-  const following = Boolean(change && RUNNING.has(change.state)) || recovering;
+  const following = Boolean(change && RUNNING.has(change.state)) || recovering || settling > 0;
   useEffect(() => {
     if (!following) return undefined;
     const timer = window.setInterval(() => { void readConnection(); void readStatus(); }, FOLLOW_MS);
@@ -323,11 +332,15 @@ export function ConnectionPage() {
           if (tunnelSetting) {
             lostSetting.current = { setting: tunnelSetting, to: String(to), reads: 0 };
             setLocalChange({ setting: tunnelSetting, state: 'unknown' });
+          } else {
+            // A switch can drop the very connection its answer came over: read at once, and again
+            // until the state has been read over whatever path is left.
+            setSettling(LOST_CHANGE_READS);
           }
         } else if (tunnelSetting) {
           const busy = error instanceof DevicesApiError && error.code === 'connection_change_busy';
           setLocalChange({ setting: tunnelSetting, state: 'failed', from, reason: busy ? 'connection_change_busy' : 'unknown' });
-        } else if (setting === 'direct' || setting === 'relay') {
+        } else if (!isTunnelSetting(setting)) {
           const code = error instanceof DevicesApiError ? error.code : '';
           // Why the relay cannot be turned on is the state's own line after the next read.
           if (code !== 'direct_permission_required' && code !== 'relay_transport_unavailable' && code !== 'relay_not_enrolled') {
@@ -492,7 +505,22 @@ export function ConnectionPage() {
     })();
   };
 
-  const tunnel = tunnelFromStatus(status, statusAt);
+  const tunnel = tunnelFromStatus(status, now);
+  // Whose a device in a rename's list is, where the page can tell without guessing: against the
+  // owner's own account when this session carries one or the list read before names it; else,
+  // when the list holds more than one account, each row says its own.
+  const ownAccount = devices.find((each) => each.self)?.account ?? devices.find((each) => each.group === 'mine' && each.account)?.account;
+  const withPeople = (list: RenameDevice[]): RenameDevice[] => {
+    const accounts = new Set(list.map((each) => each.account).filter(Boolean));
+    return list.map((each) => ({
+      ...each,
+      person: each.account && (ownAccount ? each.account !== ownAccount : accounts.size > 1) ? each.account : undefined,
+    }));
+  };
+  const peopled = (retired: RetiredName): RetiredName => ({ ...retired, devices: withPeople(retired.devices) });
+  const renameShown: RenameStep | undefined = rename?.step === 'cleanup'
+    ? { ...rename, retired: peopled(rename.retired) }
+    : rename?.step === 'done' && rename.retired ? { ...rename, retired: peopled(rename.retired) } : rename;
   const shown = connection ? { ...connection, change } : null;
   const host = address?.hostname ?? (() => {
     try {
@@ -515,16 +543,16 @@ export function ConnectionPage() {
       sending={sending}
       optimize={optimize}
       diagnostics={diagnosticsOpen ? {
-        status, diagnostics, running: diagnosing, error: diagnosticsError, now: statusAt,
+        status, diagnostics, running: diagnosing, error: diagnosticsError, now,
         // Direct's own details only while direct is on.
         direct: status?.direct?.enabled
-          ? { certificate: directCertificateDate(status.direct.certificate_not_after, statusAt), lastConnection: lastConnectionLegs(nativePath) }
+          ? { certificate: directCertificateDate(status.direct.certificate_not_after, now), lastConnection: lastConnectionLegs(nativePath) }
           : undefined,
       } : undefined}
       host={owner ? host : undefined}
       address={owner ? address : undefined}
       renameDevices={renameDevices(devices)}
-      rename={rename}
+      rename={renameShown}
       rebind={owner ? rebindState : undefined}
       rebindDialog={rebindDialog}
       canReset={Boolean(flow.claimId)}

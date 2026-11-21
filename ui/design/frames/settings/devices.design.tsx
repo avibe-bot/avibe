@@ -10,6 +10,8 @@ import { DESIGN_NOW } from '../../shell/clock';
 import { frames, type FrameSpec } from '../../frame';
 import { DevicesPageView, type DevicesPageViewProps } from '@/components/devices/DevicesPageView';
 import type { AccountResult, Device, DeviceActivity, DeviceFunction, Reach, SignedOutDevice } from '@/components/devices/types';
+import { tunnelFromStatus } from '@/components/devices/wire';
+import type { RemoteAccessStatus } from '@/context/ApiContext';
 import { MovedPage, SignInNotFinishedPage } from '../../kit/devices-pages';
 import { settingsFixtures, settingsPage } from './fixtures';
 
@@ -101,9 +103,37 @@ const fullActivity: DeviceActivity[] = [
   { id: 'a10', deviceId: 'host', at: ago(30 * DAY + 204), device: 'Max 的 MacBook Pro', event: { kind: 'remoteAccessOn' } },
 ];
 
-const on: Reach = { state: 'on', host, account, tunnel: 'good', ms: 120, direct: true };
+type On = Extract<Reach, { state: 'on' }>;
+/** At the computer that runs Avibe: its session carries no account, so none is shown. */
+const on: On = { state: 'on', host, tunnel: 'up', ms: 120, direct: true };
+/** From another device of the owner's: the account is the one that device is signed in as. */
+const onRemote: On = { ...on, account };
+const remote = { reach: onRemote, viewerAccount: account };
+
+/** The tunnel exactly as `/api/remote-access/status` can report it, read by the page's own mapping. */
+const quality = (extra: Record<string, unknown>) => ({
+  schema_version: 2, state: 'healthy', grade: 'good', sampled_at: new Date(DESIGN_NOW - 20_000).toISOString(), protocol: 'quic',
+  connector_count: 1, ha_connections: 4, rtt_ms: { min: 90, median: 120, max: 160 }, baseline_median_rtt_ms: 100,
+  edge_locations: [], window_seconds: 60, request_errors_per_minute: 0, packet_loss_per_minute: 0,
+  recovery: { state: 'idle', last_attempt_at: null, next_attempt_at: null },
+  ...extra,
+});
+const reported = (status: Record<string, unknown>): On => {
+  const tunnel = tunnelFromStatus({ ok: true, enabled: true, paired: true, running: true, public_url: `https://${host}`, ...status } as unknown as RemoteAccessStatus, DESIGN_NOW);
+  return { ...on, tunnel: tunnel.state, ms: tunnel.ms };
+};
+/** The connector registered no connection: there is in fact no tunnel. */
+const down = reported({ tunnel_quality: quality({ state: 'degraded', grade: 'critical', ha_connections: 0, rtt_ms: null }) });
+/** Connected, with a round trip over the "very slow" line: slow, not unreachable. */
+const slow = reported({ tunnel_quality: quality({ grade: 'critical', rtt_ms: { min: 380, median: 420, max: 520 } }) });
+/** Connected, short of its four connections: unsteady, not unreachable. */
+const unsteady = reported({ tunnel_quality: quality({ state: 'degraded', grade: 'fair', ha_connections: 2 }) });
+/** The connector's process cannot be read: unknown, said as unknown. */
+const unreadable = reported({ running: false, pid_state: 'unknown' });
 const all = (self: string): Device[] => [macbook(), iphone(), macMini, safari, chrome].map((each) => (each.id === self ? { ...each, self: true } : each));
 const onlyHost = [macbook({ self: true })];
+/** The list as last read, after remote access was closed from afar: no path is said any more. */
+const afterOff = all('mini').map((each) => ({ ...each, online: undefined }));
 
 const memberDevices: Device[] = [
   { ...sara, group: 'mine', person: undefined, self: true },
@@ -150,7 +180,7 @@ function frame(
     themes: ['light'],
     route,
     fixtures: fixtures(app ? { nativeShell: IOS_APP_CAPABILITIES } : {}),
-    render: settingsPage('remote-access', <DevicesPageView ownerEmail={account} viewerAccount={account} {...props} />),
+    render: settingsPage('remote-access', <DevicesPageView {...props} />),
     ...spec,
   };
 }
@@ -178,6 +208,9 @@ const designFrames = frames([
     { reach: { state: 'off', surface: 'desktop', account: null, name: '' }, devices: onlyHost }),
   frame('waiting', '请求已发出，avibe.bot 上还没有确认：可以取消', at(640),
     { reach: { state: 'starting', waiting: true }, devices: onlyHost }),
+  frame('retrying', '请求还开着，实例暂时连不上 avibe.bot、在重试：不说「等待确认」', at(640),
+    { reach: { state: 'starting', retrying: true }, devices: onlyHost }),
+  frame('list-unknown', '设备列表读不到：说读不到，不说「还没有设备」', at(640), { reach: on, devices: [], list: 'unknown' }),
   frame('starting', '从 avibe.bot 自动回来：正在开启', at(640), { reach: { state: 'starting' }, devices: onlyHost }),
   frame('loading', '第一次读状态', at(600), { reach: { state: 'loading' }, devices: onlyHost }),
   frame('unknown', '读不到远程访问的状态：照实说，可以重试', at(640), { reach: { state: 'unknown' }, devices: onlyHost }),
@@ -193,39 +226,42 @@ const designFrames = frames([
   frame('on', '已开启 · 在运行 Avibe 的电脑上看：主机、iPhone（打洞直连）、另一台电脑（Cloudflare 隧道）、两个浏览器', TALL,
     { reach: on, devices: all('host'), activity, bulk: 'all_remote' }, { themes: ['light', 'dark'] }),
   frame('on-phone', '已开启 · 在 iPhone App 里看', { ...IPHONE_17_PRO, height: 1240 },
-    { reach: on, devices: all('iphone'), activity, bulk: 'other_sessions' }, { app: true }),
+    { ...remote, devices: all('iphone'), activity, bulk: 'other_sessions' }, { app: true }),
   frame('on-remote', '已开启 · 从另一台电脑远程看：可以退出我的其他设备', TALL,
-    { reach: on, devices: all('mini'), activity, bulk: 'other_sessions' }),
+    { ...remote, devices: all('mini'), activity, bulk: 'other_sessions' }),
   frame('on-shared', '已开启 · 有别人的设备、认不出主人的通知设备、只接收通知的设备：各在自己的一组', at(1500),
     { reach: on, devices: [...all('host'), pushOnly, unnamed, sara, saraPhone, orphan], activity, bulk: 'all_remote' }),
   frame('on-shared-phone', '三组设备 · 375 宽', { width: 375, height: 1900 },
     { reach: on, devices: [...all('host'), pushOnly, unnamed, sara, saraPhone, orphan], activity, bulk: 'all_remote' }),
   frame('member-operate', '能管理这个 Avibe 的成员：自己的设备，加上远程访问的开关和「优化线路」；绑定、域名、连接方式、别人的设备都没有', at(760),
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', ownerEmail: undefined, bulk: 'other_sessions', devices: memberDevices }),
+    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
   frame('member-operate-phone', '能管理的成员 · 375 宽', PHONE,
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', ownerEmail: undefined, bulk: 'other_sessions', devices: memberDevices }),
+    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
   frame('member-operate-waiting', '能管理的成员 · 「优化线路」下面一行：自动优化什么时候重试', at(760),
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', ownerEmail: undefined, devices: memberDevices, optimize: { wait: { kind: 'automatic', time: '10:42:00' } } }),
+    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices, optimize: { wait: { kind: 'automatic', time: '10:42:00' } } }),
   frame('member-operate-turn-off', '能管理的成员从远处关闭远程访问：同样先确认', at(860),
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', ownerEmail: undefined, devices: memberDevices, confirm: 'turn-off' }),
+    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices, confirm: 'turn-off' }),
   frame('member-operate-paused', '能管理的成员 · 远程访问关着（在本机网络里看）：可以再打开', at(700),
-    { reach: { state: 'paused', host }, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', ownerEmail: undefined, devices: memberDevices }),
+    { reach: { state: 'paused', host }, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices }),
   frame('member', '不能管理的成员：只看到自己的设备，没有实例的控制项', at(640),
-    { reach: on, viewer: 'member', viewerAccount: 'sara@example.test', ownerEmail: undefined, bulk: 'other_sessions',
+    { reach: on, viewer: 'member', viewerAccount: 'sara@example.test', bulk: 'other_sessions',
       devices: memberDevices }),
-  frame('checking', '已开启 · 隧道状态还没有量到', at(700), { reach: { ...on, tunnel: 'unknown', ms: undefined }, devices: all('host') }),
-  frame('tunnel-down', '已开启，但连不上 Cloudflare', at(760),
-    { reach: { ...on, tunnel: 'down' }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
-  frame('tunnel-down-phone', '已开启但连不上 Cloudflare · 375 宽：域名完整显示，按钮和开关换到下一行', PHONE,
-    { reach: { ...on, tunnel: 'down' }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
+  frame('tunnel-unknown', '已开启 · 连接器的进程读不出来：说读不到，不说连不上', at(700), { reach: unreadable, devices: all('host') }),
+  frame('tunnel-slow', '已开启 · 隧道连着但很慢（延迟过了「很慢」那条线）：说慢，不说连不上', at(760), { reach: slow, devices: all('host') }),
+  frame('tunnel-slow-phone', '隧道慢 · 375 宽', PHONE, { reach: slow, devices: all('host') }),
+  frame('tunnel-unsteady', '已开启 · 隧道连着但四条连接没连满：说不太稳定', at(760), { reach: unsteady, devices: all('host') }),
+  frame('tunnel-down', '已开启 · 连接器一条连接都没有登记上：这才是连不上 Cloudflare', at(760),
+    { reach: down, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
+  frame('tunnel-down-phone', '连不上 Cloudflare · 375 宽：域名完整显示，按钮和开关换到下一行', PHONE,
+    { reach: down, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
   frame('paused', '关闭后：域名保留，一个开关就能再开', at(700),
-    { reach: { state: 'paused', host, account }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(120) })] }),
+    { reach: { state: 'paused', host }, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(120) })] }),
 
   // 4. A device's detail.
   frame('detail-iphone', '设备详情 · iPhone：连接、三项功能各一个开关、最近、退出这台设备', TALL,
     { reach: on, devices: all('host'), activity, detail: 'iphone' }),
   frame('detail-iphone-phone', '设备详情 · 手机宽度（底部面板）', { ...IPHONE_17_PRO, height: 900 },
-    { reach: on, devices: all('safari'), activity, detail: 'iphone' }),
+    { ...remote, devices: all('safari'), activity, detail: 'iphone' }),
   frame('detail-health-off', '设备详情 · 健康没有连接：只说状态和去哪连，没有开关', TALL,
     { reach: on, activity, detail: 'iphone', devices: [macbook({ self: true }), iphone({ functions: [iphoneFunctions[0], { kind: 'health', on: false, canChange: false, data: [] }, iphoneFunctions[2]] })] }),
   frame('detail-browser', '设备详情 · 浏览器：没有会丢的东西，退出不需要确认', at(860),
@@ -233,7 +269,7 @@ const designFrames = frames([
   frame('detail-host', '设备详情 · 运行 Avibe 的电脑：没有「退出」；电脑操作只读', at(860),
     { reach: on, devices: all('host'), activity, detail: 'host' }),
   frame('detail-host-needs-permission', '设备详情 · 从别的设备看主机：电脑操作需要授权', at(860),
-    { reach: on, activity, detail: 'host', devices: all('mini').map((each) => (each.id === 'host'
+    { ...remote, activity, detail: 'host', devices: all('mini').map((each) => (each.id === 'host'
       ? macbook({ functions: [{ kind: 'computerUse', status: 'needs_permission' }, { kind: 'notifications', on: true, canChange: false }] })
       : each)) }),
   frame('detail-other-person', '设备详情 · 别人的设备：功能只读，只结束这次访问', at(1080),
@@ -248,9 +284,9 @@ const designFrames = frames([
     { reach: on, devices: all('host'), activity, detail: 'iphone', confirm: 'health-off' }),
   frame('confirm-health-off-phone', '关闭健康 · 375 宽', PHONE, { reach: on, devices: all('host'), activity, detail: 'iphone', confirm: 'health-off' }),
   frame('confirm-turn-off-remote', '远程关闭远程访问：会把自己关在外面，所以先确认', at(860),
-    { reach: on, devices: all('mini'), activity, confirm: 'turn-off' }),
+    { ...remote, devices: all('mini'), activity, confirm: 'turn-off' }),
   frame('confirm-sign-out-others', '退出其他所有设备：不包括发出请求的这一台', at(860),
-    { reach: on, devices: all('mini'), activity, bulk: 'other_sessions', confirm: 'remove-others' }),
+    { ...remote, devices: all('mini'), activity, bulk: 'other_sessions', confirm: 'remove-others' }),
   frame('confirm-sign-out-all-remote', '在运行 Avibe 的电脑上退出所有远程设备：包括别人的', at(860),
     { reach: on, devices: [...all('host'), sara], activity, bulk: 'all_remote', confirm: 'remove-all-remote' }),
 
@@ -280,6 +316,13 @@ const designFrames = frames([
   frame('problem-function', '开关没有改成：要先在那台设备上打开这一项', TALL,
     { reach: on, devices: all('host'), activity, problem: 'functionNeedsDevice' }),
   frame('problem-gone', '要操作的设备已经不在列表里', TALL, { reach: on, devices: all('host'), activity, problem: 'gone' }),
+  frame('problem-lost', '退出或断开的应答丢了：结果不知道，重新读过了，不说失败', TALL, { ...remote, devices: all('mini'), activity, problem: 'lost' }),
+  frame('off-from-afar', '从远处关闭远程访问之后：收不到回答正是关成功的样子，照实这样说', at(760),
+    { reach: { state: 'unknown' }, viewerAccount: account, devices: afterOff, problem: 'offFromAfar' }),
+  frame('off-from-afar-phone', '从远处关闭之后 · 375 宽', PHONE,
+    { reach: { state: 'unknown' }, viewerAccount: account, devices: afterOff, problem: 'offFromAfar' }),
+  frame('unknown-kind', '一种这一页还不认识的设备：照样列出来，叫「设备」', at(760),
+    { reach: on, devices: [...all('host'), { id: 'watch', group: 'mine', kind: 'other', name: null, client: { kind: 'other' }, lastActiveAt: ago(90), functions: [] }] }),
   frame('outside-change', '地址在这台 Avibe 之外被改了：醒目提示，先重新绑定再拿回名字', at(1100),
     { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' } }),
   frame('outside-change-phone', '地址在别处被改了 · 375 宽', { width: 375, height: 1500 },

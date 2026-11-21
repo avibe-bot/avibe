@@ -6,7 +6,7 @@
 import type { ReactNode } from 'react';
 import {
   AlarmClock, Bell, Check, ChevronRight, Clock, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LoaderCircle,
-  LogOut, Monitor, MonitorCog, Plus, RefreshCw, Smartphone, X,
+  LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone, X,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { useTranslation } from 'react-i18next';
@@ -42,7 +42,7 @@ const functionKeys = {
   computerUse: 'devices.capability.computerUse',
 } as const satisfies Record<FunctionKind, TranslationKey>;
 const functionIcon = { notifications: Bell, health: HeartPulse, schedule: AlarmClock, computerUse: MonitorCog } as const;
-const deviceIcon = { host: Laptop, iphone: Smartphone, desktop: Monitor, browser: Globe } as const;
+const deviceIcon = { host: Laptop, iphone: Smartphone, desktop: Monitor, browser: Globe, other: MonitorSmartphone } as const;
 
 export type DevicesPageActions = {
   onTurnOn?: () => void;
@@ -86,6 +86,8 @@ export type DevicesPageViewProps = DevicesPageActions & {
   activity?: DeviceActivity[];
   /** The activity list has older entries the instance still keeps: offered, or being read. */
   moreActivity?: 'available' | 'loading';
+  /** The device list as read: being read for the first time, or not readable. Absent once read. */
+  list?: 'loading' | 'unknown';
   /** A member of a shared instance sees only their own devices and nothing of the owner's. */
   viewer?: 'owner' | 'member';
   /** The viewer is a member who may operate the instance: they keep the remote-access switch and
@@ -93,8 +95,6 @@ export type DevicesPageViewProps = DevicesPageActions & {
    *  owner's. */
   operate?: boolean;
   optimize?: OptimizeState;
-  /** The account this Avibe belongs to, when this viewer knows it. */
-  ownerEmail?: string;
   /** The account the person looking is signed in as, when the page knows it. */
   viewerAccount?: string;
   /** What signing out in bulk covers here: the viewer's other devices, or, at the computer itself,
@@ -107,8 +107,10 @@ export type DevicesPageViewProps = DevicesPageActions & {
   signOutNotice?: SignOutNotice;
   /** The address was changed somewhere else, with this computer's device key. */
   unrecognizedChange?: { hostname: string };
-  /** Something this page asked for did not happen. */
-  problem?: 'functionNeedsDevice' | 'failed' | 'gone';
+  /** Something this page asked for did not happen, or its answer never arrived. `offFromAfar`:
+   *  remote access was turned off from this remote device and no answer came back, which is what
+   *  turning it off does. */
+  problem?: 'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar';
   /** The device whose detail is open. */
   detail?: string;
   /** A way out was pressed and something would be lost: the confirmation. */
@@ -122,6 +124,14 @@ export type DevicesPageViewProps = DevicesPageActions & {
 };
 
 const noop = () => undefined;
+
+const problemKeys = {
+  functionNeedsDevice: 'devices.problem.functionNeedsDevice',
+  failed: 'devices.problem.failed',
+  gone: 'devices.problem.gone',
+  lost: 'devices.problem.lost',
+  offFromAfar: 'devices.problem.offFromAfar',
+} as const satisfies Record<NonNullable<DevicesPageViewProps['problem']>, TranslationKey>;
 
 const healthSyncedKeys = {
   today: 'devices.capability.healthSyncedToday',
@@ -166,9 +176,9 @@ function ReachCard({ reach, operate = false, optimize, actions }: {
         <div className="flex items-center gap-3 px-5 py-4">
           <div role="status" className="flex min-w-0 flex-1 items-center gap-2.5 text-[13px] text-foreground">
             <LoaderCircle className="size-4 shrink-0 text-muted motion-safe:animate-spin" />
-            {t(reach.waiting ? 'devices.reach.waiting' : 'devices.reach.starting')}
+            {t(reach.retrying ? 'devices.reach.retrying' : reach.waiting ? 'devices.reach.waiting' : 'devices.reach.starting')}
           </div>
-          {reach.waiting && <Button variant="ghost" size="xs" disabled={reach.busy} onClick={() => actions.onCancelClaim?.()}>{t('common.cancel')}</Button>}
+          {(reach.waiting || reach.retrying) && <Button variant="ghost" size="xs" disabled={reach.busy} onClick={() => actions.onCancelClaim?.()}>{t('common.cancel')}</Button>}
         </div>
       </SettingsPanel>
     );
@@ -233,9 +243,9 @@ function ReachCard({ reach, operate = false, optimize, actions }: {
     : down
       ? t('devices.reach.down')
       : reach.tunnel === 'unknown'
-        ? t('devices.reach.checking')
+        ? t('devices.reach.tunnelUnknown')
         : joinParts(t, [
-            t('devices.reach.good'),
+            t(reach.tunnel === 'slow' ? 'devices.reach.slow' : reach.tunnel === 'unsteady' ? 'devices.reach.unsteady' : 'devices.reach.good'),
             reach.ms ? t('remoteAccess.direct.legMs', { ms: reach.ms }) : null,
             reach.direct ? t('devices.reach.directOn') : null,
           ]);
@@ -250,7 +260,7 @@ function ReachCard({ reach, operate = false, optimize, actions }: {
             <div className="mt-0.5 flex min-w-0 flex-col gap-x-1.5 text-[11px] leading-relaxed text-muted md:flex-row md:items-center">
               {reach.account && <span className="truncate">{reach.account}</span>}
               {reach.account && <span aria-hidden className="max-md:hidden">{t('devices.dot')}</span>}
-              <span className={down ? 'text-gold-ink' : undefined}>{status}</span>
+              <span className={down || (on && (reach.tunnel === 'slow' || reach.tunnel === 'unsteady')) ? 'text-gold-ink' : undefined}>{status}</span>
             </div>
           </div>
         </div>
@@ -622,7 +632,7 @@ function SignOutNoticeCard({ notice, onDismiss }: { notice: SignOutNotice; onDis
 }
 
 export function DevicesPageView({
-  reach, devices, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, ownerEmail, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
+  reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
   signOutNotice, unrecognizedChange, problem, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
@@ -632,7 +642,7 @@ export function DevicesPageView({
   const unattributed = devices.filter((each) => each.group === 'unattributed');
   const opened = devices.find((each) => each.id === detail);
   const owner = viewer === 'owner';
-  const account = viewerAccount ?? (owner ? ownerEmail : undefined);
+  const account = viewerAccount;
   const on = reach.state === 'on';
   const signedIn = othersSignedIn(devices);
   const remote = remoteDevices(devices);
@@ -698,7 +708,7 @@ export function DevicesPageView({
   return (
     <SettingsPageShell
       title={t('devices.title')}
-      subtitle={owner ? t('devices.subtitle') : ownerEmail ? t('devices.subtitleMember', { owner: ownerEmail }) : t('devices.subtitleMemberPlain')}
+      subtitle={owner ? t('devices.subtitle') : t('devices.subtitleMemberPlain')}
       activeTab="remote-access"
     >
       {owner && unrecognizedChange && (
@@ -708,12 +718,14 @@ export function DevicesPageView({
           <p className="mt-1"><KeptTail text={t('devices.rebind.copiedData')} /></p>
         </Notice>
       )}
-      {owner && <ReachCard reach={reach} actions={actions} />}
+      {/* After turning remote access off from afar, not reading its state is the expected result:
+          the notice below says so, and the card does not add "cannot be read" to it. */}
+      {owner && !(problem === 'offFromAfar' && reach.state === 'unknown') && <ReachCard reach={reach} actions={actions} />}
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
       {signOutNotice && <SignOutNoticeCard notice={signOutNotice} onDismiss={actions.onDismissNotice} />}
       {problem && (
         <Notice action={<Button variant="ghost" size="xs" onClick={actions.onDismissNotice}>{t('common.close')}</Button>}>
-          {t(problem === 'functionNeedsDevice' ? 'devices.problem.functionNeedsDevice' : problem === 'gone' ? 'devices.problem.gone' : 'devices.problem.failed')}
+          <KeptTail text={t(problemKeys[problem])} />
         </Notice>
       )}
 
@@ -724,7 +736,14 @@ export function DevicesPageView({
           : undefined}
       >
         {mine.map((each) => <DeviceRow key={each.id} device={each} onOpen={actions.onOpenDevice} />)}
-        {mine.length === 0 && <p className="px-5 py-3 text-[12px] text-muted">{t('devices.list.empty')}</p>}
+        {mine.length === 0 && (list === 'unknown' ? (
+          <div role="alert" className="flex flex-col gap-3 px-5 py-3 md:flex-row md:items-center md:justify-between">
+            <p className="text-[12px] leading-relaxed text-foreground">{t('devices.list.unknown')}</p>
+            <Button variant="secondary" size="xs" onClick={actions.onRetry}><RefreshCw />{t('common.retry')}</Button>
+          </div>
+        ) : (
+          <p className="px-5 py-3 text-[12px] text-muted">{t(list === 'loading' ? 'common.loading' : 'devices.list.empty')}</p>
+        ))}
         {owner && (reach.state === 'off' || reach.state === 'paused') && mine.length === 1 && onlyHost && (
           <p className="px-5 py-3 text-[12px] text-muted">{t('devices.list.emptyOff')}</p>
         )}

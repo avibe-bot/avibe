@@ -8031,7 +8031,6 @@
   "devices": {
     "title": "设备",
     "subtitle": "哪些设备能打开这个 Avibe，它们各自能做什么。",
-    "subtitleMember": "你登录了这个 Avibe 的设备。这个 Avibe 由 {{owner}} 管理。",
     "listSeparator": "、",
     "partSeparator": " · ",
     "dot": "·",
@@ -8053,8 +8052,11 @@
       "openAddress": "打开",
       "connection": "连接方式",
       "unknown": "现在读不到远程访问的状态。",
-      "checking": "正在检查连接",
-      "waiting": "正在等待 avibe.bot 上的确认…"
+      "waiting": "正在等待 avibe.bot 上的确认…",
+      "retrying": "暂时连不上 avibe.bot，这次请求还开着，Avibe 在重试…",
+      "slow": "已连接，但比较慢",
+      "unsteady": "已连接，但不太稳定",
+      "tunnelUnknown": "现在读不到连接的状态"
     },
     "claim": {
       "account": "账号",
@@ -8101,7 +8103,8 @@
       "unattributed": "认不出主人的通知设备",
       "unattributedHint": "这些设备还在接收通知，但认不出属于哪个账号。可以逐台停止。",
       "signOutAllRemote": "退出所有远程设备",
-      "online": "在线"
+      "online": "在线",
+      "unknown": "现在读不到设备列表。"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8395,7 +8398,8 @@
         "limitPlainDated": "这个账号持有的名字（包括冷却中的）已到上限。最早的一个在 {{date}}释放，之后可以再改。",
         "limitPlain": "这个账号持有的名字（包括冷却中的）已到上限。",
         "unknown": "这次更改没有完成。（代码：{{code}}）"
-      }
+      },
+      "howOther": "在那台设备上退出登录。"
     },
     "setup": {
       "title": "在手机和其他电脑上打开它",
@@ -8419,7 +8423,8 @@
       "app": "iPhone",
       "desktop": "Avibe Desktop",
       "browser": "浏览器",
-      "homeScreen": "主屏幕 App"
+      "homeScreen": "主屏幕 App",
+      "other": "设备"
     },
     "unlinkedHealth": {
       "title": "未对应到设备的健康连接",
@@ -8451,7 +8456,9 @@
     "problem": {
       "functionNeedsDevice": "要先在那台设备上打开这一项。",
       "failed": "没有完成，请再试一次。",
-      "gone": "这台设备已经不在列表里了。"
+      "gone": "这台设备已经不在列表里了。",
+      "lost": "没有收到结果，不确定有没有完成。下面是重新读取到的状态。",
+      "offFromAfar": "没有收到回答，这正是关闭成功时的样子：远程访问一关，这台设备就收不到回答了。要再用，回到运行 Avibe 的电脑上重新开启。"
     },
     "outsideChange": {
       "title": "这个 Avibe 的地址在别处被改了",
@@ -8515,7 +8522,9 @@
       "boundNew": "已绑定为一个新的 Avibe：{{host}}。所有远程设备都要用新地址重新登录。",
       "boundPlain": "已绑定。所有远程设备都要重新登录。",
       "inBrowser": "重新绑定会在这台电脑的浏览器里继续。",
-      "openInBrowser": "在浏览器里打开"
+      "openInBrowser": "在浏览器里打开",
+      "invalidReturn": "没有重新绑定：从 avibe.bot 回来的这一步没有通过验证，什么都没有改变。请再试一次。",
+      "refusedUnknown": "这次没有完成。（代码：{{code}}）"
     }
   }
 }

@@ -6,7 +6,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { DevicesApiError, LostAnswer, devicesApi, type ClaimForm, type ClaimState } from './api';
 import {
-  CLAIM_BINDING, CLAIM_OPEN, claimLocale, clearClaimMarker, readClaimMarker, submitClaimForm, writeClaimMarker, type ClaimKind,
+  CLAIM_BINDING, CLAIM_OVER, CLAIM_RETRYING, claimLocale, clearClaimMarker, readClaimMarker, submitClaimForm, writeClaimMarker,
+  type ClaimKind, type ReturnRefusal,
 } from './claimFlow';
 
 const POLL_MS = 1500;
@@ -19,9 +20,10 @@ export type ClaimEnd =
   | { state: 'refused'; code: string; claim?: ClaimState; claimId?: string; seconds?: number };
 
 export type ClaimFlow = {
-  /** `sending`: the start is on its way. `waiting`: open, not approved at avibe.bot yet.
-   *  `binding`: approved, this computer is binding. */
-  phase: 'idle' | 'sending' | 'waiting' | 'binding';
+  /** `sending`: the start is on its way. `waiting`: open, not approved at avibe.bot yet (a state
+   *  this page does not know is read as still open, never as over). `retrying`: open, and the
+   *  instance is trying avibe.bot again. `binding`: approved, this computer is binding. */
+  phase: 'idle' | 'sending' | 'waiting' | 'retrying' | 'binding';
   /** The claim this tab follows, kept for what only its starter may do. */
   claimId: string | null;
   /** Binding succeeded and this browser lost its admission with it. */
@@ -43,19 +45,26 @@ const routes = {
   },
 } as const satisfies Record<ClaimKind, { start: (locale: string) => Promise<ClaimForm>; read: (id: string) => Promise<ClaimState>; cancel: (id: string) => Promise<void> }>;
 
-export function useClaimFlow({ kind, locale, onEnd, submit = submitClaimForm }: {
+export function useClaimFlow({ kind, locale, onEnd, returned = null, submit = submitClaimForm }: {
   kind: ClaimKind;
   locale: string;
   onEnd: (end: ClaimEnd) => void;
+  /** The page was opened by a return from avibe.bot that was refused: the claim this tab kept
+   *  cannot finish any more. It is withdrawn and not followed; the caller says why. */
+  returned?: ReturnRefusal | null;
   /** Leaves the page for avibe.bot; replaced in tests. */
   submit?: (form: ClaimForm) => void;
 }): ClaimFlow {
   const [phase, setPhase] = useState<ClaimFlow['phase']>('idle');
-  const [claimId, setClaimId] = useState<string | null>(() => {
-    const marker = readClaimMarker();
+  const [refusedReturn] = useState(() => {
+    const marker = returned ? readClaimMarker() : null;
     return marker?.kind === kind ? marker.id : null;
   });
-  const [following, setFollowing] = useState<boolean>(() => readClaimMarker()?.kind === kind);
+  const [claimId, setClaimId] = useState<string | null>(() => {
+    const marker = returned ? null : readClaimMarker();
+    return marker?.kind === kind ? marker.id : null;
+  });
+  const [following, setFollowing] = useState<boolean>(() => !returned && readClaimMarker()?.kind === kind);
   const [lost, setLost] = useState<ClaimFlow['lost']>(null);
   const ended = useRef(onEnd);
   useEffect(() => { ended.current = onEnd; }, [onEnd]);
@@ -65,6 +74,12 @@ export function useClaimFlow({ kind, locale, onEnd, submit = submitClaimForm }: 
     return () => { mounted.current = false; };
   }, []);
   const { start: startRoute, read, cancel: cancelRoute } = routes[kind];
+
+  useEffect(() => {
+    if (!refusedReturn) return;
+    clearClaimMarker();
+    void cancelRoute(refusedReturn).catch(() => undefined);
+  }, [cancelRoute, refusedReturn]);
 
   useEffect(() => {
     if (!following || !claimId) return undefined;
@@ -89,10 +104,9 @@ export function useClaimFlow({ kind, locale, onEnd, submit = submitClaimForm }: 
           finish({ state: 'bound', claim });
           return;
         }
-        if (CLAIM_OPEN.has(claim.state)) setPhase('waiting');
-        else if (CLAIM_BINDING.has(claim.state)) setPhase('binding');
+        if (CLAIM_BINDING.has(claim.state)) setPhase('binding');
+        else if (!CLAIM_OVER.has(claim.state)) setPhase(claim.state === CLAIM_RETRYING ? 'retrying' : 'waiting');
         else {
-          // `error`, `declined`, `cancelling`, or a state this page does not know: it is over here.
           if (kind === 'claim') clearClaimMarker();
           finish({
             state: 'refused',

@@ -2,7 +2,7 @@
 // The old name stops working at once and is kept for this account until the day avibe.bot gives;
 // afterwards anyone may claim it. Renaming clears what it can by itself and says plainly what it
 // cannot reach: the list never claims that everything is clean. A view: props only.
-import { Check, Globe, Laptop, LoaderCircle, Monitor, RotateCcw, Smartphone, TriangleAlert } from 'lucide-react';
+import { Check, Globe, Laptop, LoaderCircle, Monitor, MonitorSmartphone, RotateCcw, Smartphone, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { TranslationKey } from '@/i18n/types';
@@ -25,13 +25,14 @@ export type RenameActions = {
 };
 
 const RETRYABLE = new Set(['unavailable', 'confirmation_expired', 'operation_in_progress', 'address_changed', 'unknown']);
-const deviceIcon = { host: Laptop, iphone: Smartphone, desktop: Monitor, browser: Globe, homeScreen: Globe } as const;
+const deviceIcon = { host: Laptop, iphone: Smartphone, desktop: Monitor, browser: Globe, homeScreen: Globe, other: MonitorSmartphone } as const;
 const kindNameKeys = {
   host: 'devices.kindName.runtime',
   iphone: 'devices.kindName.app',
   desktop: 'devices.kindName.desktop',
   browser: 'devices.kindName.browser',
   homeScreen: 'devices.kindName.homeScreen',
+  other: 'devices.kindName.other',
 } as const satisfies Record<RenameDeviceKind, TranslationKey>;
 const signOutKeys = {
   host: 'devices.rename.howHost',
@@ -39,6 +40,7 @@ const signOutKeys = {
   desktop: 'devices.rename.howDesktop',
   homeScreen: 'devices.rename.howHomeScreen',
   browser: 'devices.rename.howBrowser',
+  other: 'devices.rename.howOther',
 } as const satisfies Record<RenameDeviceKind, TranslationKey>;
 
 /** The one thing renaming cannot reach. Never small print. */

@@ -54,6 +54,7 @@ const clientKeys = {
   desktop: 'devices.client.desktop',
   browser: 'devices.client.browser',
   homeScreen: 'devices.client.homeScreen',
+  other: 'devices.kindName.other',
 } as const satisfies Record<ClientKind, TranslationKey>;
 
 /** 「Avibe App 3.2.8 · iOS 26.1」, 「浏览器」. */
@@ -123,6 +124,7 @@ const kindNameKeys = {
   desktop: 'devices.kindName.desktop',
   browser: 'devices.kindName.browser',
   homeScreen: 'devices.kindName.homeScreen',
+  other: 'devices.kindName.other',
 } as const satisfies Record<ClientKind, TranslationKey>;
 
 /** A device's name: its own when it reported one, else what kind of device it is. */

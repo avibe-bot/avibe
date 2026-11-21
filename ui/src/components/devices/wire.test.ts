@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import type { RemoteAccessStatus } from '@/context/ApiContext';
 import {
-  activityFromWire, addressFromWire, claimProblem, connectionFromWire, devicesFromWire, rebindFromWire, renameRefusal, signedOutFromWire,
+  activityFromWire, addressFromWire, claimProblem, connectionFromWire, devicesFromWire, rebindFromWire, rebindRefusal, rebindUnavailable,
+  renameRefusal, signedOutFromWire, tunnelFromStatus,
 } from './wire';
 
 // Contracts: docs/plans/instance-device-registry.md, device-functions-activity.md,
@@ -68,8 +70,18 @@ describe('devicesFromWire', () => {
     ]);
   });
 
-  it('drops a row without an id, a known kind or a known list rather than guessing', () => {
-    expect(devicesFromWire({ mine: [row({ id: '' }), row({ kind: 'watch' }), row({ group: 'elsewhere' })] }).devices).toEqual([]);
+  it('never drops a device for a kind or a group it does not know: it is listed as a plain device', () => {
+    // This list answers "which devices can open my Avibe": a row is left out only without an id.
+    const { devices } = devicesFromWire({
+      mine: [row({ id: '' }), row({ id: 'watch', kind: 'watch' }), row({ id: 'odd', group: 'elsewhere' })],
+      others: [row({ id: 'theirs', group: undefined })],
+    });
+    expect(devices.map((each) => [each.id, each.kind, each.client.kind, each.group])).toEqual([
+      ['watch', 'other', 'other', 'mine'],
+      // A group the row does not name in words this page knows is the list it came in.
+      ['odd', 'browser', 'browser', 'mine'],
+      ['theirs', 'browser', 'browser', 'others'],
+    ]);
     expect(devicesFromWire(null)).toEqual({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
   });
 
@@ -115,6 +127,43 @@ describe('activityFromWire', () => {
       .toEqual({ kind: 'reminderCreated', confirmed: false, label: undefined });
     expect(activityFromWire({ id: 'e4', at: '2026-11-21T01:00:00Z', kind: 'teleported' }, nameOf)).toBeNull();
     expect(activityFromWire({ id: 'e5', at: 'not a time', kind: 'signedIn' }, nameOf)).toBeNull();
+  });
+});
+
+describe('tunnelFromStatus', () => {
+  const NOW = Date.parse('2026-11-22T00:00:00Z');
+  const sample = (extra: Record<string, unknown> = {}) => ({
+    schema_version: 2, state: 'healthy', grade: 'good', sampled_at: new Date(NOW - 20_000).toISOString(), protocol: 'quic',
+    connector_count: 1, ha_connections: 4, rtt_ms: { min: 90, median: 120, max: 160 }, ...extra,
+  });
+  const read = (status: Record<string, unknown>, now = NOW) => (
+    tunnelFromStatus({ ok: true, enabled: true, paired: true, running: true, ...status } as unknown as RemoteAccessStatus, now)
+  );
+
+  it('says "not connected" only on evidence that there is no connection', () => {
+    expect(read({ running: false }).state).toBe('down');
+    expect(read({ tunnel_quality: sample({ ha_connections: 0, state: 'degraded', grade: 'critical' }) }).state).toBe('down');
+    expect(read({ tunnel_quality: sample({ request_path: { status: 'unavailable', confidence: 'high', success_count: 0, sample_count: 12 } }) }).state).toBe('down');
+  });
+
+  it('reads a slow or unsteady tunnel as connected, never as unreachable', () => {
+    // Latency alone makes `critical` and `poor`; `degraded` and `recovering` are a tunnel that is up.
+    expect(read({ tunnel_quality: sample({ grade: 'critical', rtt_ms: { min: 380, median: 420, max: 520 } }) })).toEqual({ state: 'slow', ms: 420, active: 'quic' });
+    expect(read({ tunnel_quality: sample({ grade: 'poor' }) }).state).toBe('slow');
+    expect(read({ tunnel_quality: sample({ state: 'degraded', grade: 'fair', ha_connections: 2 }) }).state).toBe('unsteady');
+    expect(read({ tunnel_quality: sample({ state: 'degraded', grade: 'critical' }) }).state).toBe('unsteady');
+    expect(read({ tunnel_quality: sample({ state: 'recovering' }) }).state).toBe('unsteady');
+    expect(read({ tunnel_quality: sample() })).toEqual({ state: 'up', ms: 120, active: 'quic' });
+    expect(read({ tunnel_quality: sample({ grade: 'fair' }) }).state).toBe('up');
+  });
+
+  it('says unknown where the state cannot be read, and lets an old sample stop speaking for now', () => {
+    expect(read({ running: false, pid_state: 'unknown' }).state).toBe('unknown');
+    expect(read({}).state).toBe('unknown');
+    expect(read({ tunnel_quality: sample({ grade: 'unknown' }) }).state).toBe('unknown');
+    expect(read({ tunnel_quality: sample() }, NOW + 200_000).state).toBe('unknown');
+    expect(read({ paired: false, running: false }).state).toBe('unknown');
+    expect(tunnelFromStatus(null).state).toBe('unknown');
   });
 });
 
@@ -187,6 +236,9 @@ describe('addressFromWire', () => {
     expect(state?.unrecognizedChange).toEqual({ previousHostname: 'max-app.avibe.bot', hostname: 'sam-app.avibe.bot' });
     expect(state?.retired[0]).toMatchObject({ hostname: 'studio-app.avibe.bot', releaseAt: '2026-12-21T00:00:00.000Z' });
     expect(state?.retired[0].devices.map((each) => [each.kind, each.cleanup])).toEqual([['homeScreen', 'cleared'], ['browser', 'unconfirmed']]);
+    // Whose a listed device was is the instance's to say.
+    expect(addressFromWire({ hostname: 'a-app.avibe.bot', cleanup: [{ hostname: 'b-app.avibe.bot', devices: [{ id: 'd3', kind: 'browser', account: { email: 'sara@example.test' }, state: 'cleared' }, { id: 'd4', kind: 'watch', account: null }] }] })?.retired[0].devices)
+      .toMatchObject([{ id: 'd3', account: 'sara@example.test' }, { id: 'd4', kind: 'other', account: undefined }]);
     expect(state?.healthConnected).toBe(true);
   });
 
@@ -229,6 +281,18 @@ describe('rebindFromWire', () => {
     expect(rebindFromWire({ binding_state: 'resetting' })).toEqual({ state: 'resetting' });
     expect(rebindFromWire({ binding_state: 'reset_repair_required' })).toEqual({ state: 'needsTerminal' });
     expect(rebindFromWire({ binding_state: 'unpaired' })).toEqual({ state: 'unpaired' });
+    // A damaged record is not a state the overview answers with: it refuses, and that refusal is
+    // the terminal command's to handle, not "try again later".
+    expect(rebindUnavailable('local_binding_unavailable')).toEqual({ state: 'needsTerminal' });
+    expect(rebindUnavailable('local_identity_unavailable')).toEqual({ state: 'needsTerminal' });
+    expect(rebindUnavailable('direct_loopback_required')).toEqual({ state: 'remote' });
+    expect(rebindUnavailable('local_operator_required')).toEqual({ state: 'remote' });
+    expect(rebindUnavailable('http_500')).toEqual({ state: 'unknown' });
+    expect(rebindFromWire({ binding_state: 'damaged' })).toEqual({ state: 'unknown' });
+    // The computer's own refusals keep their code and are not said as avibe.bot's.
+    expect(rebindRefusal('reset_not_eligible')).toEqual({ code: 'unknown', raw: 'reset_not_eligible' });
+    expect(rebindRefusal('claim_unavailable')).toEqual({ code: 'expired' });
+    expect(rebindRefusal('invalid_return')).toEqual({ code: 'invalid_return' });
     expect(rebindFromWire({ binding_state: 'a_new_state' })).toEqual({ state: 'unknown' });
     expect(rebindFromWire(null)).toEqual({ state: 'unknown' });
   });

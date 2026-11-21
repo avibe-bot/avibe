@@ -78,8 +78,12 @@ export function rebindRefusalText(t: TFunction, refusal: RebindRefusal): string 
       return t('devices.rename.refused.confirmationExpired');
     case 'rate_limited':
       return claimProblemText(t, { code: 'rate_limited', seconds: refusal.seconds });
+    case 'invalid_return':
+      return t('devices.rebind.invalidReturn');
     case 'unknown':
-      return claimProblemText(t, { code: 'unknown', raw: refusal.raw });
+      // A code this page does not know, the computer's own refusals among them: it says only what
+      // it knows, not that avibe.bot refused or that nothing was bound.
+      return t('devices.rebind.refusedUnknown', { code: refusal.raw });
     default:
       return claimProblemText(t, { code: refusal.code });
   }

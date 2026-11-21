@@ -178,9 +178,11 @@ function Row({ title, hint, status, control, tone }: { title: string; hint?: Rea
 
 function Refused({ refusal }: { refusal: SwitchRefusal }) {
   const { t } = useTranslation();
-  const text = refusal.reason === 'tunnel_unhealthy'
-    ? t(refusal.row === 'direct' ? 'devices.connection.refusedDirect' : 'devices.connection.refusedRelay')
-    : refusal.reason === 'connection_change_busy' ? t('devices.connection.refusedBusy') : t('devices.connection.refusedUnknown');
+  const text = refusal.reason === 'tunnel_unhealthy' && refusal.row === 'direct'
+    ? t('devices.connection.refusedDirect')
+    : refusal.reason === 'tunnel_unhealthy' && refusal.row === 'relay'
+      ? t('devices.connection.refusedRelay')
+      : refusal.reason === 'connection_change_busy' ? t('devices.connection.refusedBusy') : t('devices.connection.refusedUnknown');
   return (
     <div role="alert" className="mt-1 flex items-start gap-1.5 text-[11px] leading-relaxed text-gold-ink">
       <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
@@ -357,7 +359,8 @@ export function ConnectionPageView({
   const pending = Boolean(change && (change.state === 'applying' || change.state === 'verifying' || change.state === 'restoring' || change.state === 'unknown'));
   const statusFor = (setting: TunnelSetting) => (change?.setting === setting ? <ChangeLine change={change} /> : null);
   const set = actions.onSettingChange;
-  const tunnelInUse = remote && via === 'tunnel' && tunnel.state === 'up';
+  const connected = tunnel.state === 'up' || tunnel.state === 'slow' || tunnel.state === 'unsteady';
+  const tunnelInUse = remote && via === 'tunnel' && connected;
   const directBadge: { label: string; variant: BadgeVariant } = {
     label: t(directStateKeys[direct]),
     variant: direct === 'ready' ? 'success' : direct === 'off' || direct === 'unknown' ? 'secondary' : 'warning',
@@ -403,6 +406,11 @@ export function ConnectionPageView({
           title={t('remoteAccess.direct.usingTunnel')}
           hint={t('devices.connection.tunnelDetail')}
           tone={tunnelInUse ? 'info' : undefined}
+          status={tunnel.state === 'slow' || tunnel.state === 'unsteady' ? (
+            <div role="status" className="mt-1 text-[11px] leading-relaxed text-gold-ink">
+              {t(tunnel.state === 'slow' ? 'devices.reach.slow' : 'devices.reach.unsteady')}
+            </div>
+          ) : null}
           control={tunnel.state === 'down'
             ? <Badge variant="warning">{t('devices.connection.notConnected')}</Badge>
             : tunnel.state === 'unknown'
@@ -486,10 +494,12 @@ export function ConnectionPageView({
         />
         <Row
           title={t('remoteAccess.autoRecovery')}
+          status={refused?.row === 'autoRecovery' ? <Refused refusal={refused} /> : null}
           control={<TunnelAutoRecoverySwitch value={settings.auto_recovery} onChange={(value) => set?.('autoRecovery', value)} disabled={sending === 'autoRecovery'} />}
         />
         <Row
           title={t('remoteAccess.optimizationProfile')}
+          status={refused?.row === 'profile' ? <Refused refusal={refused} /> : null}
           control={<TunnelProfileControl value={settings.optimization_profile} onChange={(value) => set?.('profile', value)} disabled={sending === 'profile'} />}
         />
       </SettingsPanel>

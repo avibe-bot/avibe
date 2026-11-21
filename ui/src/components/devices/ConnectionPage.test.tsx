@@ -8,7 +8,7 @@ import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationCon
 import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import i18n from '../../i18n';
 import { DevicesApiError, LostAnswer, devicesApi } from './api';
-import { writeClaimMarker } from './claimFlow';
+import { readClaimMarker, writeClaimMarker } from './claimFlow';
 import { ConnectionPage } from './ConnectionPage';
 import { ConnectionPageView, type ConnectionPageViewProps } from './ConnectionPageView';
 import { said } from './testText';
@@ -96,6 +96,41 @@ describe('ConnectionPage · settings', () => {
 
     expect(await screen.findByText(said('没有改：现在确认不了 Cloudflare 隧道是通的，关掉可能让你断开。稍后再试。'))).toBeTruthy();
     expect(screen.getByRole('switch', { name: '直连' }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('reads at once after a switch whose answer was lost, and says why a refused setting did not change', async () => {
+    const change = vi.spyOn(devicesApi, 'changeConnection').mockRejectedValueOnce(new LostAnswer());
+    mount();
+    fireEvent.click(await screen.findByRole('switch', { name: '直连' }));
+    await waitFor(() => expect(change).toHaveBeenCalledWith('direct', false));
+    const reads = read.mock.calls.length;
+    // The state, read again over whatever path is left, says what became of it.
+    read.mockResolvedValue(connection({ direct: 'off' }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: '直连' }).getAttribute('aria-checked')).toBe('false'), { timeout: 4000 });
+    expect(read.mock.calls.length).toBeGreaterThan(reads);
+    expect(change).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    change.mockRejectedValue(new DevicesApiError(409, 'connection_change_busy', {}));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: '优化策略' })).getByRole('radio', { name: '低延迟' }));
+    expect(await screen.findByText(said('没有改：另一项更改还在进行，稍后再试。'))).toBeTruthy();
+  });
+
+  it('lets a status it can no longer read again grow too old to call the tunnel available', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const sampled = new Date().toISOString();
+    const quality = { state: 'healthy', grade: 'good', sampled_at: sampled, protocol: 'quic', ha_connections: 4, rtt_ms: { min: 90, median: 120, max: 160 }, recovery: { state: 'idle', last_attempt_at: null, next_attempt_at: null } };
+    const statusRead = vi.spyOn(devicesApi, 'status').mockResolvedValueOnce({ ...status, tunnel_quality: quality } as never);
+    mount();
+    const row = (await screen.findByText('Cloudflare 隧道')).closest<HTMLElement>('div[class*="justify-between"]')!;
+    await waitFor(() => expect(within(row).getByText('可用')).toBeTruthy());
+    // Every later read fails; the sample stays on the page and the clock moves on.
+    statusRead.mockRejectedValue(new LostAnswer());
+    for (let step = 0; step < 12; step += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    }
+    expect(within(row).queryByText('可用')).toBeNull();
+    expect(within(row).getByText('未知')).toBeTruthy();
   });
 
   it('says the state is not readable instead of showing settings it cannot trust', async () => {
@@ -302,6 +337,27 @@ describe('ConnectionPage · binding again', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '作为一台新电脑重新绑定' }));
     await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-1'));
     expect(await screen.findByText(said('完成。这台电脑不再绑定任何 Avibe，电脑上的内容原样保留。'))).toBeTruthy();
+  });
+
+  it('points to the terminal command for a binding record this page cannot handle', async () => {
+    vi.spyOn(devicesApi, 'rebind').mockRejectedValue(new DevicesApiError(409, 'local_binding_unavailable', {}));
+    mount();
+    expect(await screen.findByText(said('这台电脑的绑定记录有问题，这一页处理不了。请在这台电脑的终端运行 vibe remote rebind。'))).toBeTruthy();
+    expect(screen.queryByText(said('现在读不到这台电脑的绑定状态。'))).toBeNull();
+    expect(screen.queryByRole('button', { name: '重新绑定' })).toBeNull();
+  });
+
+  it('says why a bind-again that came back refused did not happen, and lets it be tried again', async () => {
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    const follow = vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'pending' });
+    const cancel = vi.spyOn(devicesApi, 'cancelRebind').mockResolvedValue();
+    mount('/settings/remote-access/connection?claim_error=invalid_return');
+
+    expect(await screen.findByText(said('没有重新绑定：从 avibe.bot 回来的这一步没有通过验证，什么都没有改变。请再试一次。'))).toBeTruthy();
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('rebind-1'));
+    expect(follow).not.toHaveBeenCalled();
+    expect(readClaimMarker()).toBeNull();
+    expect((screen.getByRole('button', { name: '重新绑定' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('offers nothing after an unexplained refusal, and continues an unfinished attempt instead of starting one', async () => {

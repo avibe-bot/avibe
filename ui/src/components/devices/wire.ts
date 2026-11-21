@@ -4,7 +4,7 @@
 // personal-installation-claims-runtime.md, devices-connection-settings.md,
 // local-remote-access-rebind.md. An unknown field is ignored; an unknown value becomes `unknown`.
 import type { RemoteAccessSettings, RemoteAccessStatus } from '@/context/ApiContext';
-import { getTunnelQualityDisplayState } from '@/lib/tunnelQuality';
+import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '@/lib/tunnelQuality';
 import type {
   AccountResult, AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
   DirectState, HealthData, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
@@ -54,12 +54,16 @@ function deviceFunction(raw: unknown): DeviceFunction | null {
   }
 }
 
-export function deviceFromWire(raw: unknown): Device | null {
+/** A kind this page does not know is still a device that can open this Avibe: it is listed plainly. */
+const OTHER_KIND = { kind: 'other', client: 'other' } as const;
+
+/** `listed`: the list of the answer the row came in, which names its group where the row does not. */
+export function deviceFromWire(raw: unknown, listed?: Device['group']): Device | null {
   const row = record(raw);
   const id = text(row.id);
-  const kind = KINDS[String(row.kind)];
-  const group = row.group === 'mine' || row.group === 'others' || row.group === 'unattributed' ? row.group : null;
-  if (!id || !kind || !group) return null;
+  const kind = KINDS[String(row.kind)] ?? OTHER_KIND;
+  const group = row.group === 'mine' || row.group === 'others' || row.group === 'unattributed' ? row.group : listed ?? null;
+  if (!id || !group) return null;
   const path = record(row.current_path);
   const pathKind = path.kind === 'tunnel' || path.kind === 'lan' || path.kind === 'punched' || path.kind === 'relay' ? path.kind : null;
   return {
@@ -120,8 +124,7 @@ export type DevicesSnapshot = {
 export function devicesFromWire(raw: unknown): DevicesSnapshot {
   const body = record(raw);
   const devices = (['mine', 'others', 'unattributed'] as const)
-    .flatMap((group) => list(body[group]))
-    .map(deviceFromWire)
+    .flatMap((group) => list(body[group]).map((each) => deviceFromWire(each, group)))
     .filter((each): each is Device => each !== null);
   return {
     devices,
@@ -171,17 +174,28 @@ export function activityFromWire(raw: unknown, nameOf: (deviceId: string | undef
 
 // ── /api/remote-access/status ───────────────────────────────────────────────────────────────────
 
+/**
+ * The tunnel, said only as strongly as the status supports. "Not connected" needs evidence that
+ * there is no connection: the connector is not running, it registered none, or requests through
+ * it are failing. Slow, short of its connections or still settling is a connected tunnel. A
+ * connector whose process cannot be read, or a sample too old to speak for now, is unknown.
+ */
 export function tunnelFromStatus(status: RemoteAccessStatus | null, now: number = Date.now()): TunnelStatus {
-  const quality = status?.tunnel_quality;
-  if (!status?.running || !quality) return { state: status && status.paired && !status.running ? 'down' : 'unknown' };
-  const fresh = now - Date.parse(quality.sampled_at) <= 150_000;
-  const grade = getTunnelQualityDisplayState(quality, fresh);
+  if (!status || !status.paired || status.pid_state === 'unknown') return { state: 'unknown' };
+  if (!status.running) return { state: 'down' };
+  const quality = status.tunnel_quality;
+  if (!quality || !(now - Date.parse(quality.sampled_at) <= 150_000)) return { state: 'unknown' };
   const effective = quality.transport?.effective || quality.protocol;
+  const active = effective === 'quic' || effective === 'http2' ? effective : null;
+  if (quality.ha_connections === 0 || getTunnelRequestPathDisplayState(quality.request_path) === 'unavailable') return { state: 'down', active };
+  const grade = getTunnelQualityDisplayState(quality, true);
   const latency = quality.request_path?.latency_ms?.p95 ?? quality.rtt_ms?.median;
   return {
-    state: grade === 'unknown' ? 'unknown' : grade === 'critical' || grade === 'degraded' ? 'down' : 'up',
-    ms: fresh && typeof latency === 'number' ? Math.round(latency) : undefined,
-    active: effective === 'quic' || effective === 'http2' ? effective : null,
+    state: grade === 'good' || grade === 'fair' ? 'up'
+      : grade === 'poor' || grade === 'critical' ? 'slow'
+        : grade === 'degraded' || grade === 'recovering' ? 'unsteady' : 'unknown',
+    ms: typeof latency === 'number' ? Math.round(latency) : undefined,
+    active,
   };
 }
 
@@ -309,9 +323,10 @@ export function renameDeviceFromWire(raw: unknown, selfId?: string): RenameDevic
   return {
     id,
     name: text(row.display_name) ?? null,
-    kind: row.kind === 'home_screen_app' ? 'homeScreen' : kind?.kind ?? 'browser',
+    kind: row.kind === 'home_screen_app' ? 'homeScreen' : kind?.kind ?? 'other',
     self: id === selfId || undefined,
     pushOnly: row.push_only === true || undefined,
+    account: text(record(row.account).email),
     cleanup: row.state === 'cleared' ? 'cleared' : row.state === 'unconfirmed' ? 'unconfirmed' : undefined,
     lastActiveAt: instant(row.last_active_at),
   };
@@ -357,13 +372,14 @@ export function addressFromWire(raw: unknown): AddressState | null {
 
 const REBIND_CODES = new Set([
   'active_pairing_recent', 'binding_unavailable', 'issuer_replay_refused', 'expired', 'declined',
-  'local_binding_changed', 'operation_in_progress', 'claim_in_progress', 'confirmation_expired',
+  'local_binding_changed', 'operation_in_progress', 'claim_in_progress', 'confirmation_expired', 'invalid_return',
 ]);
 
 export function rebindRefusal(code: string | undefined, seconds?: number): RebindRefusal {
   if (code === 'rate_limited') return { code, seconds };
   if (code === 'control_plane_unreachable') return { code: 'unreachable' };
   if (code === 'cancelled') return { code: 'declined' };
+  if (code === 'claim_unavailable') return { code: 'expired' };
   if (code && REBIND_CODES.has(code)) return { code } as RebindRefusal;
   return { code: 'unknown', raw: code ?? 'unknown' };
 }
@@ -382,7 +398,6 @@ export function rebindFromWire(raw: unknown): RebindState {
     case 'resetting':
       return { state: 'resetting' };
     case 'reset_repair_required':
-    case 'damaged':
       return { state: 'needsTerminal' };
     case 'bound':
     case 'binding_rejected': {
@@ -408,4 +423,12 @@ export function rebindFromWire(raw: unknown): RebindState {
     default:
       return { state: 'unknown' };
   }
+}
+
+/** The overview's own refusals that mean "this page cannot do it": a damaged or unreadable binding
+ *  record is the terminal command's to handle, and anywhere but this computer it is said as such. */
+export function rebindUnavailable(code: string): RebindState {
+  if (code === 'direct_loopback_required' || code === 'local_operator_required') return { state: 'remote' };
+  if (code === 'local_binding_unavailable' || code === 'local_identity_unavailable') return { state: 'needsTerminal' };
+  return { state: 'unknown' };
 }

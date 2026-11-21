@@ -105,7 +105,11 @@ const designFrames = frames([
     { connection: pinned('quic', { temporaryRoute: { protocol: 'http2', differences: ['protocol', 'ipFamily'] } }) }),
 
   // What this Avibe offers.
-  frame('tunnel-down', '隧道没连上', WIDE, { tunnel: { state: 'down' } }),
+  frame('tunnel-down', '隧道没连上（没在运行，或一条连接都没有）', WIDE, { tunnel: { state: 'down' } }),
+  frame('tunnel-slow', '隧道连着但很慢：仍然可用，下面一行说慢', WIDE, { tunnel: { state: 'slow', ms: 420, active: 'quic' } }),
+  frame('tunnel-unsteady', '隧道连着但不太稳定', WIDE, { ...remote, tunnel: { state: 'unsteady', ms: 150, active: 'quic' } }),
+  frame('tunnel-unknown', '隧道的状态读不到', WIDE, { tunnel: { state: 'unknown' } }),
+  frame('setting-refused', '改「优化策略」被拒：另一项更改还在进行，下面说一句', WIDE, { refused: { row: 'profile', reason: 'connection_change_busy' } }),
   frame('direct-off', '直连关着：局域网和打洞两行不出现', WIDE, { connection: connection({ direct: 'off' }) }),
   frame('direct-awaiting-permission', '直连 · 正在申请许可', WIDE, { connection: connection({ direct: 'awaiting-permission' }) }),
   frame('direct-denied', '直连 · 还没有对这个 Avibe 开放', WIDE, { connection: connection({ direct: 'denied' }) }),

@@ -39,7 +39,7 @@ const mixed: RenameDevice[] = devices.filter((each) => each.kind !== 'host').map
     ? { cleanup: 'unconfirmed' as const, lastActiveAt: ago(1125) }
     : each.kind === 'browser' ? { cleanup: 'unconfirmed' as const, lastActiveAt: ago(3 * 24 * 60) } : { cleanup: 'cleared' as const }),
 }));
-const withGuest: RenameDevice[] = [...mixed, { id: 'sara', name: 'Chrome · macOS', kind: 'browser', person: 'sara@example.test', cleanup: 'cleared' }];
+const withGuest: RenameDevice[] = [...mixed, { id: 'sara', name: 'Chrome · macOS', kind: 'browser', account: 'sara@example.test', person: 'sara@example.test', cleanup: 'cleared' }];
 const retiredMax: RetiredName = { hostname: host, releaseAt: RELEASE, devices: mixed };
 const studio: RetiredName = { hostname: 'studio-app.avibe.bot', releaseAt: '2026-12-21T00:00:00.000Z', devices: [] };
 
@@ -128,6 +128,9 @@ const designFrames = frames([
   rebind('rebind-replay-refused', '重新绑定 · 之前的一次绑定被彻底拒绝了', WIDE, { state: 'ready', replayRefused: true }),
   rebind('rebind-active-elsewhere', '重新绑定 · 被拒：那个 Avibe 15 分钟内还在另一台电脑上活跃', WIDE, { state: 'ready', refusal: { code: 'active_pairing_recent' } }),
   rebind('rebind-unexplained', '重新绑定 · 被拒，没有给原因：什么也不提供', WIDE, { state: 'ready', refusal: { code: 'binding_unavailable' } }),
+  rebind('rebind-invalid-return', '重新绑定 · 从 avibe.bot 回来的这一步没通过验证：说清楚什么都没变，可以再试', WIDE, { state: 'ready', refusal: { code: 'invalid_return' } }),
+  rebind('rebind-local-refusal', '重新绑定 · 这台电脑自己拒绝的、这一页不认识的代码：只说没有完成，带代码', WIDE,
+    { state: 'asNewOffered', reason: 'predecessor_unrecoverable', refusal: { code: 'unknown', raw: 'reset_not_eligible' } }, { canReset: true }),
   rebind('rebind-recovering', '重新绑定 · 上一次没做完：继续那一次，不开始第二次', WIDE, { state: 'recovering' }),
   rebind('rebind-busy', '重新绑定 · 绑定或域名正在进行另一项更改', WIDE, { state: 'busy' }),
   rebind('rebind-resetting', '重新绑定 · 重置开始了但没做完', WIDE, { state: 'resetting' }),

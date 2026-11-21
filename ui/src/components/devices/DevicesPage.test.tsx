@@ -1,13 +1,13 @@
 /** @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, RouterProvider, Routes, createMemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import i18n from '../../i18n';
-import { DevicesApiError, devicesApi, type ClaimForm } from './api';
+import { DevicesApiError, LostAnswer, devicesApi, type ClaimForm } from './api';
 import { readClaimMarker, writeClaimMarker } from './claimFlow';
 import { DevicesPage } from './DevicesPage';
 import { DevicesPageView } from './DevicesPageView';
@@ -43,12 +43,12 @@ function Where() {
   return <div data-testid="where">{`${location.pathname}${location.search}`}</div>;
 }
 
-function mount(path = '/settings/remote-access', who: 'owner' | 'member' | 'guest' = 'owner') {
+function mount(path = '/settings/remote-access', who: 'owner' | 'member' | 'guest' = 'owner', away?: boolean) {
   const owner = who === 'owner';
   // A Member may operate the instance (`can_manage_instance`) without being its owner.
   const capabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: who !== 'guest', is_instance_owner: owner };
   return render(
-    <InstanceAuthorizationContext.Provider value={{ remote: !owner, instanceKind: 'personal', instanceRole: owner ? 'owner' : 'member', capabilities }}>
+    <InstanceAuthorizationContext.Provider value={{ remote: away ?? !owner, instanceKind: 'personal', instanceRole: owner ? 'owner' : 'member', capabilities }}>
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/settings/remote-access" element={<><DevicesPage /><Where /></>} />
@@ -167,6 +167,54 @@ describe('DevicesPage · turning remote access on', () => {
     mount();
     expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
   });
+
+  // With the product's own router (a data router), where two navigations in one tick do not both
+  // happen: the later one wins. One navigation carries the bind-again on, with the callback's word.
+  it('hands a refused bind-again return on in one navigation, and is never left loading', async () => {
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    const capabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true, is_instance_owner: true };
+    const router = createMemoryRouter([
+      { path: '/settings/remote-access', element: <DevicesPage /> },
+      { path: '/settings/remote-access/connection', element: <Where /> },
+    ], { initialEntries: ['/settings/remote-access?claim_error=claim_unavailable'] });
+    render(
+      <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: 'personal', instanceRole: 'owner', capabilities }}>
+        <RouterProvider router={router} />
+      </InstanceAuthorizationContext.Provider>,
+    );
+    expect((await screen.findByTestId('where')).textContent).toBe('/settings/remote-access/connection?claim_error=claim_unavailable');
+    expect(router.state.location.pathname).toBe('/settings/remote-access/connection');
+    // The marker is the connection page's to settle: it is still there for it.
+    expect(readClaimMarker()).toMatchObject({ kind: 'rebind', id: 'rebind-1' });
+  });
+
+  it('does not hide a refused return behind "waiting": the request this tab kept is withdrawn', async () => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    const claim = vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'pending' });
+    const cancel = vi.spyOn(devicesApi, 'cancelClaim').mockResolvedValue();
+    mount('/settings/remote-access?claim_error=invalid_return');
+
+    expect(await screen.findByText(said('没有开启：从 avibe.bot 回来的这一步没有通过验证，什么都没有绑定。请再开启一次。'))).toBeTruthy();
+    expect(screen.getByRole('button', { name: '开启远程访问' })).toBeTruthy();
+    expect(screen.queryByText(said('正在等待 avibe.bot 上的确认…'))).toBeNull();
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('claim-1'));
+    expect(claim).not.toHaveBeenCalled();
+    expect(readClaimMarker()).toBeNull();
+  });
+
+  it('keeps following a request whose state it does not know, and says a retry as a retry', async () => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    const claim = vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'approving_elsewhere' });
+    mount();
+
+    // Unknown is not "nothing was bound": the request is still followed, and still cancellable.
+    expect(await screen.findByText(said('正在等待 avibe.bot 上的确认…'))).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(readClaimMarker()).toMatchObject({ id: 'claim-1' });
+    claim.mockResolvedValue({ state: 'waiting', code: 'control_plane_unreachable', retryAfterSeconds: 5 });
+    expect(await screen.findByText(said('暂时连不上 avibe.bot，这次请求还开着，Avibe 在重试…'), {}, { timeout: 4000 })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '取消' })).toBeTruthy();
+  });
 });
 
 describe('DevicesPage · devices', () => {
@@ -228,6 +276,47 @@ describe('DevicesPage · devices', () => {
     fireEvent.click(await screen.findByRole('button', { name: '断开' }));
     fireEvent.click(await screen.findByRole('button', { name: '关闭健康' }));
     await waitFor(() => expect(revokeUnlinked).toHaveBeenCalledWith('pairing-9'));
+  });
+
+  it('says an answer that never arrived as unknown and reads again, never as a failure', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
+    vi.spyOn(devicesApi, 'signOut').mockRejectedValue(new LostAnswer());
+    mount();
+
+    fireEvent.click(await screen.findByText('Chrome'));
+    const reads = api.devices.mock.calls.length;
+    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+    expect(await screen.findByText(said('没有收到结果，不确定有没有完成。下面是重新读取到的状态。'))).toBeTruthy();
+    expect(screen.queryByText(said('没有完成，请再试一次。'))).toBeNull();
+    expect(api.devices.mock.calls.length).toBeGreaterThan(reads);
+  });
+
+  it('says turning remote access off from afar as what it is: no answer comes back when it worked', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([{ ...macbook, self: undefined }, { ...chrome, self: true }]));
+    const status = vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    vi.spyOn(devicesApi, 'stop').mockImplementation(async () => {
+      // The tunnel is gone before the answer leaves, and nothing can be read through it after.
+      status.mockRejectedValue(new LostAnswer());
+      vi.spyOn(devicesApi, 'devices').mockRejectedValue(new LostAnswer());
+      throw new LostAnswer();
+    });
+    mount('/settings/remote-access', 'owner', true);
+
+    fireEvent.click(await screen.findByRole('switch', { name: '远程访问' }));
+    fireEvent.click(await screen.findByRole('button', { name: '关闭远程访问' }));
+    expect(await screen.findByText(said('没有收到回答，这正是关闭成功时的样子'))).toBeTruthy();
+    expect(screen.queryByText(said('没有完成，请再试一次。'))).toBeNull();
+    expect(screen.queryByText(said('现在读不到远程访问的状态。'))).toBeNull();
+  });
+
+  it('does not call a device list it could not read empty', async () => {
+    vi.spyOn(devicesApi, 'devices').mockRejectedValue(new DevicesApiError(500, 'http_500', {}));
+    mount();
+    expect(await screen.findByText('现在读不到设备列表。')).toBeTruthy();
+    expect(screen.queryByText('还没有设备。')).toBeNull();
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook]));
+    fireEvent.click(screen.getAllByRole('button', { name: '重试' })[0]);
+    expect(await screen.findByText('MacBook')).toBeTruthy();
   });
 
   it('says so when a switch needs the device itself, and changes nothing on the page', async () => {

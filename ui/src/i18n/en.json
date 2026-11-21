@@ -8031,7 +8031,6 @@
   "devices": {
     "title": "Devices",
     "subtitle": "Which devices can open this Avibe, and what each can do.",
-    "subtitleMember": "The devices you are signed in to this Avibe on. {{owner}} manages this Avibe.",
     "listSeparator": ", ",
     "partSeparator": " · ",
     "dot": "·",
@@ -8053,8 +8052,11 @@
       "openAddress": "Open",
       "connection": "Connection",
       "unknown": "The state of remote access cannot be read right now.",
-      "checking": "Checking the connection",
-      "waiting": "Waiting for it to be approved on avibe.bot…"
+      "waiting": "Waiting for it to be approved on avibe.bot…",
+      "retrying": "avibe.bot cannot be reached right now. The request is still open and Avibe keeps trying…",
+      "slow": "Connected, but slow",
+      "unsteady": "Connected, but unsteady",
+      "tunnelUnknown": "The connection's state cannot be read right now"
     },
     "claim": {
       "account": "Account",
@@ -8101,7 +8103,8 @@
       "unattributed": "Notification devices with no known owner",
       "unattributedHint": "These devices still receive notifications, but the account they belong to cannot be told. You can stop each one.",
       "signOutAllRemote": "Sign out all remote devices",
-      "online": "Online"
+      "online": "Online",
+      "unknown": "The device list cannot be read right now."
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8395,7 +8398,8 @@
         "limitPlainDated": "This account already holds as many names as it may, including those still waiting. The earliest is released on {{date}}; you can rename after that.",
         "limitPlain": "This account already holds as many names as it may, including those still waiting.",
         "unknown": "This change did not complete. (code: {{code}})"
-      }
+      },
+      "howOther": "Sign out on that device."
     },
     "setup": {
       "title": "Open it from your phone and other computers",
@@ -8419,7 +8423,8 @@
       "app": "iPhone",
       "desktop": "Avibe Desktop",
       "browser": "Browser",
-      "homeScreen": "Home-screen app"
+      "homeScreen": "Home-screen app",
+      "other": "Device"
     },
     "unlinkedHealth": {
       "title": "Health connections not matched to a device",
@@ -8451,7 +8456,9 @@
     "problem": {
       "functionNeedsDevice": "Turn this on on that device first.",
       "failed": "That did not go through. Try again.",
-      "gone": "That device is no longer in the list."
+      "gone": "That device is no longer in the list.",
+      "lost": "No answer came back, so it is not known whether it went through. What is shown below was read again.",
+      "offFromAfar": "No answer came back, which is what turning it off looks like from here: once remote access is off, this device cannot be answered. To use it again, turn it back on at the computer running Avibe."
     },
     "outsideChange": {
       "title": "This Avibe's address was changed somewhere else",
@@ -8515,7 +8522,9 @@
       "boundNew": "Bound as a new Avibe: {{host}}. Every remote device signs in again at the new address.",
       "boundPlain": "Bound. Every remote device has to sign in again.",
       "inBrowser": "Binding again continues in this computer's browser.",
-      "openInBrowser": "Open in the browser"
+      "openInBrowser": "Open in the browser",
+      "invalidReturn": "Not bound again: the return from avibe.bot did not pass verification, so nothing changed. Try again.",
+      "refusedUnknown": "This did not complete. (code: {{code}})"
     }
   }
 }

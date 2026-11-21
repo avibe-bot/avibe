@@ -13,8 +13,8 @@ import { useToast } from '@/context/ToastContext';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { copyTextToClipboard } from '@/lib/utils';
-import { DevicesApiError, devicesApi as api, type SignOutAnswer } from './api';
-import { clearClaimMarker, readClaimMarker } from './claimFlow';
+import { DevicesApiError, LostAnswer, devicesApi as api, type SignOutAnswer } from './api';
+import { readClaimMarker, returnRefusal } from './claimFlow';
 import { DevicesPageView } from './DevicesPageView';
 import { deviceName } from './format';
 import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, instanceUrl } from './paths';
@@ -23,6 +23,7 @@ import type {
   AccountResult, AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach, SignOutNotice,
 } from './types';
 import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
+import { useNow } from './useNow';
 import { useOptimizeRoute } from './useOptimizeRoute';
 import { claimProblem, tunnelFromStatus, type DevicesSnapshot } from './wire';
 
@@ -38,12 +39,6 @@ const hostOf = (status: RemoteAccessStatus | null): string | null => {
     return null;
   }
 };
-
-/** Why the return from avibe.bot was refused, from the one allowlisted word the callback adds. */
-function returnProblem(search: string): ClaimProblem | undefined {
-  const error = new URLSearchParams(search).get('claim_error');
-  return error === 'invalid_return' || error === 'claim_unavailable' ? claimProblem(error) : undefined;
-}
 
 type ActivityFeed = { items: DeviceActivity[]; cursor: string | null; extended: boolean };
 
@@ -82,7 +77,7 @@ export function DevicesPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { showToast } = useToast();
-  const { capabilities } = useInstanceAuthorization();
+  const { remote, capabilities } = useInstanceAuthorization();
   // The instance's owner, not everyone who may operate it: only the owner is answered on what
   // this page shows about the instance itself.
   const owner = capabilities.is_instance_owner;
@@ -92,9 +87,10 @@ export function DevicesPage() {
   const reads = owner || operate;
 
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
-  const [statusAt, setStatusAt] = useState(() => Date.now());
   const [statusRead, setStatusRead] = useState<'loading' | 'known' | 'unknown'>('loading');
   const [snapshot, setSnapshot] = useState<DevicesSnapshot>(EMPTY);
+  const [listRead, setListRead] = useState<'loading' | 'known' | 'unknown'>('loading');
+  const now = useNow();
   // Everything read so far, newest first, with the cursor that continues it. A refresh reads the
   // newest page again and joins it to what is already listed, so no entry between them is lost.
   const [feed, setFeed] = useState<{ items: DeviceActivity[]; cursor: string | null; extended: boolean }>({ items: [], cursor: null, extended: false });
@@ -106,8 +102,13 @@ export function DevicesPage() {
   const [add, setAdd] = useState<AddKind | undefined>();
   const [busy, setBusy] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | undefined>();
-  const [claimIssue, setClaimIssue] = useState<ClaimProblem | undefined>(() => returnProblem(location.search));
+  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | undefined>();
+  // The callback's own refusal arrives as one allowlisted word in the address, read once here.
+  const [returned] = useState(() => returnRefusal(location.search));
+  // A bind-again started from the connection page comes back here (the claim's return is one
+  // fixed address): it is followed there, with the callback's word if there is one.
+  const [rebindReturn] = useState(() => readClaimMarker()?.kind === 'rebind');
+  const [claimIssue, setClaimIssue] = useState<ClaimProblem | undefined>(() => (returned && !rebindReturn ? claimProblem(returned) : undefined));
   const [notice, setNotice] = useState<SignOutNotice | undefined>();
   const alive = useRef(true);
   const readCount = useRef(0);
@@ -119,11 +120,16 @@ export function DevicesPage() {
     const current = () => alive.current && mine === readCount.current;
     const [devices, remote] = await Promise.allSettled([api.devices(), reads ? api.status() : Promise.resolve(null)]);
     if (!current()) return;
-    if (devices.status === 'fulfilled') setSnapshot(devices.value);
+    if (devices.status === 'fulfilled') {
+      setSnapshot(devices.value);
+      setListRead('known');
+    } else {
+      // A list that could not be read is not an empty list; one read before stays as it was.
+      setListRead((current) => (current === 'known' ? current : 'unknown'));
+    }
     if (reads) {
       if (remote.status === 'fulfilled' && remote.value && typeof remote.value.paired === 'boolean') {
         setStatus(remote.value);
-        setStatusAt(Date.now());
         setStatusRead('known');
       } else {
         setStatusRead('unknown');
@@ -153,14 +159,21 @@ export function DevicesPage() {
     }
     void load();
   }, [load]);
-  const flow = useClaimFlow({ kind: 'claim', locale: i18n.language, onEnd });
+  const flow = useClaimFlow({ kind: 'claim', locale: i18n.language, onEnd, returned });
 
-  // A bind-again started from the connection page comes back here (the claim's return is one
-  // fixed address): it is followed there.
-  const [rebindReturn] = useState(() => readClaimMarker()?.kind === 'rebind');
+  // One navigation settles the address this page was opened at: on to the connection page for a
+  // bind-again, else the callback's word is removed. Never both, or the second undoes the first.
   useEffect(() => {
-    if (rebindReturn) go(CONNECTION_PATH, true);
-  }, [go, rebindReturn]);
+    const params = new URLSearchParams(location.search);
+    if (rebindReturn) {
+      navigate({ pathname: CONNECTION_PATH, search: returned ? `?claim_error=${returned}` : '' }, { replace: true, state: location.state });
+      return;
+    }
+    if (!params.has('claim_error')) return;
+    params.delete('claim_error');
+    const search = params.toString();
+    navigate({ pathname: location.pathname, search: search ? `?${search}` : '' }, { replace: true, state: location.state });
+  }, [location.pathname, location.search, location.state, navigate, rebindReturn, returned]);
 
   useEffect(() => {
     alive.current = true;
@@ -176,22 +189,10 @@ export function DevicesPage() {
     };
   }, [load, rebindReturn]);
 
-  // The callback's own refusal arrives as one allowlisted word in the address; it was read once
-  // (above) and is removed here. Nothing else is ever taken from the address bar.
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    if (!params.has('claim_error')) return;
-    if (returnProblem(location.search)) clearClaimMarker();
-    params.delete('claim_error');
-    const search = params.toString();
-    navigate({ pathname: location.pathname, search: search ? `?${search}` : '' }, { replace: true, state: location.state });
-  }, [location.pathname, location.search, location.state, navigate]);
-
   const onStatus = useCallback((next: RemoteAccessStatus) => {
     setStatus(next);
-    setStatusAt(Date.now());
   }, []);
-  const { optimize, recovering, run: optimizeRoute } = useOptimizeRoute({ status, statusAt, onStatus, refresh: load });
+  const { optimize, recovering, run: optimizeRoute } = useOptimizeRoute({ status, now, onStatus, refresh: load });
   // An evaluation that is running is followed until it ends.
   useEffect(() => {
     if (!operate || !recovering) return undefined;
@@ -220,16 +221,22 @@ export function DevicesPage() {
     }
   }, [loadingOlder, nextCursor]);
 
+  // Once remote access was turned off from afar, the list on the page is the last one read: the
+  // connections it names are the ones that were just closed, so no path is said for them.
+  const closed = problem === 'offFromAfar';
   const devices = useMemo<Device[]>(() => snapshot.devices.map((each) => ({
     ...each,
+    online: closed && each.kind !== 'host' ? undefined : each.online,
     recent: activity.filter((item) => item.deviceId === each.id).slice(0, 3),
-  })), [activity, snapshot.devices]);
+  })), [activity, closed, snapshot.devices]);
   const opened = devices.find((each) => each.id === detail);
+  const selfAccount = devices.find((each) => each.self)?.account;
   const host = hostOf(status);
 
   let reach: Reach;
   if (flow.lost) reach = { state: 'moved', host: flow.lost.host };
   else if (flow.phase === 'waiting') reach = { state: 'starting', waiting: true };
+  else if (flow.phase === 'retrying') reach = { state: 'starting', retrying: true };
   else if (flow.phase === 'binding') reach = { state: 'starting' };
   else if (statusRead !== 'known' || !status) reach = { state: statusRead === 'loading' ? 'loading' : 'unknown' };
   // Inside Avibe Desktop this computer is bound by the App's own account sign-in, not by a claim
@@ -239,19 +246,24 @@ export function DevicesPage() {
   else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', account: null, name: '' };
   else if (!status.paired || !host) reach = { state: 'off', surface: 'browser', busy: flow.phase === 'sending', problem: claimIssue };
   else if (status.running || status.pid_state === 'unknown') {
-    const tunnel = tunnelFromStatus(status);
+    const tunnel = tunnelFromStatus(status, now);
     reach = {
       state: 'on',
       host,
-      tunnel: tunnel.state === 'up' ? 'good' : tunnel.state,
+      // The owner's own account, where this session carries one (at the computer itself it does not).
+      account: owner ? selfAccount : undefined,
+      tunnel: tunnel.state,
       ms: tunnel.ms,
       direct: status.direct?.enabled === true && status.direct.state === 'running',
       busy: switching,
     };
-  } else reach = { state: 'paused', host, busy: switching };
+  } else reach = { state: 'paused', host, account: owner ? selfAccount : undefined, busy: switching };
 
+  // An answer that never arrived says nothing about what happened: the page reads again and says
+  // that it does not know, never that it failed.
   const failed = useCallback((error: unknown) => {
-    if (error instanceof DevicesApiError && error.status === 404) setProblem('gone');
+    if (error instanceof LostAnswer) setProblem('lost');
+    else if (error instanceof DevicesApiError && error.status === 404) setProblem('gone');
     else setProblem('failed');
   }, []);
 
@@ -278,7 +290,10 @@ export function DevicesPage() {
       const answer = on ? await api.start() : await api.stop();
       if (answer.ok === false) setProblem('failed');
     } catch (error) {
-      failed(error);
+      // Turning it off stops the tunnel before the answer leaves: from a remote device, hearing
+      // nothing back is what success looks like.
+      if (!on && remote && error instanceof LostAnswer) setProblem('offFromAfar');
+      else failed(error);
     } finally {
       if (alive.current) {
         setSwitching(false);
@@ -286,7 +301,7 @@ export function DevicesPage() {
       }
       await load();
     }
-  }, [failed, load]);
+  }, [failed, load, remote]);
 
   const signOut = useCallback((device: Device) => act(async () => {
     const answer = await api.signOut(device.id);
@@ -353,12 +368,13 @@ export function DevicesPage() {
     <DevicesPageView
       reach={reach}
       devices={devices}
+      list={listRead === 'known' ? undefined : listRead}
       activity={activity}
       viewer={owner ? 'owner' : 'member'}
       operate={operate}
       optimize={operate ? optimize : undefined}
       onOptimizeRoute={optimizeRoute}
-      viewerAccount={devices.find((each) => each.self)?.account}
+      viewerAccount={selfAccount}
       bulk={snapshot.bulk}
       unlinkedHealth={snapshot.unlinkedHealth}
       signedOut={snapshot.signedOut}
@@ -377,7 +393,11 @@ export function DevicesPage() {
         if (!on && turnOffNeedsConfirm(devices)) setConfirm('turn-off');
         else void switchRemoteAccess(on);
       }}
-      onRetry={() => { setStatusRead('loading'); void load(); }}
+      onRetry={() => {
+        if (reads && statusRead !== 'known') setStatusRead('loading');
+        if (listRead !== 'known') setListRead('loading');
+        void load();
+      }}
       onCopyAddress={() => { if (host) copy(instanceUrl(host)); }}
       onOpenAddress={() => { if (host) openLinkInNewContext(instanceUrl(host), 'noopener,noreferrer'); }}
       onOpenConnection={() => go(CONNECTION_PATH)}

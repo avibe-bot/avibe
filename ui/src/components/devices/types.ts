@@ -11,10 +11,11 @@ import type { DeviceUsing } from '@/lib/remoteAccessDirect';
 export type PathKind = 'tunnel' | 'lan' | 'punched' | 'relay';
 export type IpFamily = 'ipv4' | 'ipv6';
 
-export type DeviceKind = 'host' | 'iphone' | 'desktop' | 'browser';
+/** `other`: a kind this page does not know yet. It is still a device that can open this Avibe. */
+export type DeviceKind = 'host' | 'iphone' | 'desktop' | 'browser' | 'other';
 /** What runs on the device: the Avibe runtime itself, the Avibe App, Avibe Desktop, a browser tab,
  *  or a browser page added to the home screen. */
-export type ClientKind = 'runtime' | 'app' | 'desktop' | 'browser' | 'homeScreen';
+export type ClientKind = 'runtime' | 'app' | 'desktop' | 'browser' | 'homeScreen' | 'other';
 export type DeviceClient = { kind: ClientKind; version?: string; platform?: string };
 
 export type HealthData = 'steps' | 'activity' | 'workouts' | 'sleep';
@@ -126,12 +127,13 @@ export type Reach =
   /** The Desktop App on this computer: its own account sign-in is the sign-in. */
   | { state: 'off'; surface: 'desktop'; account: string | null; name: string; nameState?: NameState }
   /** Turning on. `waiting`: the request is open and not approved at avibe.bot yet; it can be
-   *  cancelled. Otherwise avibe.bot approved and this computer is binding. */
-  | { state: 'starting'; waiting?: boolean; busy?: boolean }
+   *  cancelled. `retrying`: open, and the instance is trying avibe.bot again after it could not be
+   *  reached or asked to wait. Otherwise avibe.bot approved and this computer is binding. */
+  | { state: 'starting'; waiting?: boolean; retrying?: boolean; busy?: boolean }
   /** Bound, and this browser stopped being this computer the moment it was: it opened Avibe at a
    *  private-network address, which now needs a sign-in. `host` only when the local API said it. */
   | { state: 'moved'; host?: string }
-  | { state: 'on'; host: string; account?: string; tunnel: 'good' | 'down' | 'unknown'; ms?: number; direct?: boolean; busy?: boolean }
+  | { state: 'on'; host: string; account?: string; tunnel: TunnelStatus['state']; ms?: number; direct?: boolean; busy?: boolean }
   /** Bound, switched off: the domain is kept. */
   | { state: 'paused'; host: string; account?: string; busy?: boolean }
   /** The state is being read for the first time. */
@@ -205,11 +207,16 @@ export type OptimizeState = {
   wait?: { kind: 'manual' | 'automatic'; time: string } | { kind: 'due' };
 };
 
-/** A switch (direct, relay) refused before anything changed. */
-export type SwitchRefusal = { row: 'direct' | 'relay'; reason: 'tunnel_unhealthy' | 'connection_change_busy' | 'unknown' };
+/** A switch refused before anything changed. */
+export type SwitchRefusal = { row: 'direct' | 'relay' | 'autoRecovery' | 'profile'; reason: 'tunnel_unhealthy' | 'connection_change_busy' | 'unknown' };
 
-/** The tunnel as the status reports it: its round trip, and the protocol in use. */
-export type TunnelStatus = { state: 'up' | 'down' | 'unknown'; ms?: number; active?: 'quic' | 'http2' | null };
+/**
+ * The tunnel as the status reports it: its round trip, and the protocol in use. `down` only when
+ * there is in fact no connection (not running, no connection registered, or requests through it
+ * failing). A connected tunnel that is slow is `slow`; one short of its connections, with errors,
+ * or still settling after a recovery is `unsteady`. What cannot be read is `unknown`.
+ */
+export type TunnelStatus = { state: 'up' | 'slow' | 'unsteady' | 'down' | 'unknown'; ms?: number; active?: 'quic' | 'http2' | null };
 
 // ── Changing the domain (docs/plans/instance-address-change.md) ────────────────────────────────
 
@@ -224,7 +231,9 @@ export type RenameDevice = {
   /** After the rename only. */
   cleanup?: 'cleared' | 'unconfirmed';
   lastActiveAt?: string;
-  /** Someone else's device: their account. */
+  /** The account it was signed in as, when the instance says. */
+  account?: string;
+  /** Someone else's device: their account, where the page can tell without guessing. */
   person?: string;
 };
 
@@ -275,7 +284,8 @@ export type AddressState = {
 
 export type RebindRefusal =
   | { code: 'active_pairing_recent' | 'binding_unavailable' | 'issuer_replay_refused' | 'expired' | 'declined'
-      | 'unreachable' | 'local_binding_changed' | 'operation_in_progress' | 'claim_in_progress' | 'confirmation_expired' }
+      | 'unreachable' | 'local_binding_changed' | 'operation_in_progress' | 'claim_in_progress' | 'confirmation_expired'
+      | 'invalid_return' }
   | { code: 'rate_limited'; seconds?: number }
   | { code: 'unknown'; raw: string };
 

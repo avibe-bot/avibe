@@ -30,10 +30,10 @@ function problemText(t: TFunction, answer: RemoteAccessStatus): string {
   return code in problemKeys ? t(problemKeys[code as keyof typeof problemKeys]) : t('errors.remote_access_unknown');
 }
 
-export function useOptimizeRoute({ status, statusAt, onStatus, refresh }: {
+export function useOptimizeRoute({ status, now, onStatus, refresh }: {
   status: RemoteAccessStatus | null;
-  /** When `status` was read. */
-  statusAt: number;
+  /** The time now, advancing: a sample that is no longer read again grows old. */
+  now: number;
   /** The answer to a press carries the status as it is now. */
   onStatus: (status: RemoteAccessStatus) => void;
   refresh: () => Promise<unknown> | void;
@@ -58,7 +58,7 @@ export function useOptimizeRoute({ status, statusAt, onStatus, refresh }: {
   const clock = Math.max(manualClock, automaticClock);
   const clockTime = (value: string) => new Date(value).toLocaleTimeString(i18n.language);
   const manualWait = Boolean(manualRetryAt && Date.parse(manualRetryAt) > clock);
-  const fresh = quality ? statusAt - Date.parse(quality.sampled_at) <= QUALITY_FRESH_MS : false;
+  const fresh = quality ? now - Date.parse(quality.sampled_at) <= QUALITY_FRESH_MS : false;
   const wait: OptimizeState['wait'] = !status?.running || !fresh || recovering ? undefined
     : manualWait && manualRetryAt ? { kind: 'manual', time: clockTime(manualRetryAt) }
       : status.settings?.auto_recovery && autoRetryAt
