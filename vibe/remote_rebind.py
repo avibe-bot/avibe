@@ -573,7 +573,10 @@ def _offer_reset(ctx: _Context, *, intro: str | None = None, bound: bool = True,
         result = binding_reset.reset_interactively(confirm=confirm, **({"repair": True} if repair else {}))
     except KeyboardInterrupt:
         print()
-        if asked and reset_in_progress() and not repair:
+        # Ctrl+C at the question is a decline and never arrives here. Once asked,
+        # the answer was yes: a reset is sealed (or, for a new reset in place of an
+        # old one, being sealed) and the same command continues it.
+        if asked and (repair or reset_in_progress()):
             _say("reset_unfinished")
             return "stopped"
         _say("repair_declined" if repair else "reset_declined")

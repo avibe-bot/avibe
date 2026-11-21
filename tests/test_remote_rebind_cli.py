@@ -484,6 +484,33 @@ def test_a_reset_that_cannot_continue_is_replaced_only_by_asking_for_a_new_reset
     assert not gate.reset_in_progress() and bound_terminal.peer.decisions == ["owner-id"]
 
 
+def test_stopping_after_yes_to_a_new_reset_does_not_say_nothing_changed(bound_terminal, monkeypatch, capsys):
+    from config.v2_config import config_file_lock
+    from vibe import binding_recovery
+
+    with gate.admitted("reset"), config_file_lock():
+        binding_reset._seal(V2Config.load())
+    gate.reset_intent_path().write_text("{")
+    resume_reset = binding_recovery._resume_reset
+    calls = []
+
+    def interrupted_after_sealing():
+        calls.append(1)
+        if len(calls) == 2:  # The first call only reports why the old reset cannot continue.
+            raise KeyboardInterrupt
+        return resume_reset()
+
+    monkeypatch.setattr(binding_recovery, "_resume_reset", interrupted_after_sealing)
+    _no_link(monkeypatch)
+
+    assert _walk(bound_terminal, ["yes"]) == 1
+
+    out = capsys.readouterr().out
+    assert binding_reset._read()["phase"] == "retire"  # The new reset is sealed and has not run.
+    assert "Nothing changed" not in out and "The reset started and did not finish." in out
+    assert out.rstrip().endswith("vibe remote rebind")
+
+
 @pytest.mark.parametrize("verifiable", [True, False])
 def test_a_reset_is_replaced_only_where_its_scope_can_be_verified(bound_terminal, monkeypatch, capsys, verifiable):
     from config.v2_config import config_file_lock
