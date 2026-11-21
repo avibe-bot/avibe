@@ -4924,16 +4924,95 @@ final class DirectPathAppTests: XCTestCase {
         releaseAgain.signal()
         _ = try await waitForBrowser("instance-2", in: app)
 
-        // No answer: the instance list.
+        // A shortcut (or a notification tap) that arrives while avibe.bot
+        // is being asked waits for the answer, then opens what it names:
+        // its page is told the path.
+        confirmSession(in: defaults, daysAgo: 15)
+        let startedForAPath = FixtureEvent(description: "session read with a shortcut waiting")
+        let releaseForAPath = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: startedForAPath, release: releaseForAPath)
+        returnToTheForeground()
+        await fulfillment(
+            of: [startedForAPath.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        app.openSelectedInstance(path: "/chat/waited")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        releaseForAPath.signal()
+        let reopened = try await waitForBrowser("instance-2", in: app)
+        let controller = try makeRuntimeController(app, reopened)
+        app.registerRuntimeController(controller, for: reopened)
+        let page = try RuntimePage(controller: controller)
+        defer { page.close() }
+        try await page.load(
+            """
+            <!doctype html><script>
+            window.changes = [];
+            window.addEventListener("avibe:native:push.opened", (event) => {
+              if (!window.changes.includes(event.detail.url)) {
+                window.changes.push(event.detail.url);
+              }
+            });
+            </script>
+            """,
+            baseURL: reopened.instance.url
+        )
+        app.didFinishRuntimeLoading()
+        try await eventually { try await page.changes() == #"["/chat/waited"]"# }
+
+        // No answer: the instance list, and what waited goes with it.
         confirmSession(in: defaults, daysAgo: 15)
         session.replace(with: .status(500))
         returnToTheForeground()
         XCTAssertEqual(app.route, .loading)
+        app.openSelectedInstance(path: "/chat/dropped")
         try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
             app.route == .onboarding(.instances)
         }
         XCTAssertNil(app.runtimeOpenAttempt)
         XCTAssertFalse(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
+        withExtendedLifetime(controller) {}
+    }
+
+    /// With a direct transport an open waits for its route before its
+    /// WebView exists. The confirmation's lifetime ending in that wait holds
+    /// the open too: no browser before avibe.bot has answered.
+    @MainActor
+    func testAnOpenWhoseRouteWasPreparedAcrossTheLifetimesEndAsksFirst() async throws {
+        let session = SessionAnswerOverride()
+        let app = try await makeApp(
+            directTransport: StandInDirectTransport(),
+            sessionResponse: { session.response }
+        )
+        let defaults = try XCTUnwrap(appDefaults)
+        var browsers: [String] = []
+        let opened = app.$route.sink { route in
+            if case .browser(let runtime) = route {
+                browsers.append(runtime.instance.id)
+            }
+        }
+        defer { opened.cancel() }
+        let started = FixtureEvent(description: "session read before the prepared open")
+        let release = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: started, release: release)
+
+        // The open starts on a current confirmation and waits for its
+        // route; the lifetime ends before that wait does.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNotNil(app.runtimeOpenAttempt)
+        confirmSession(in: defaults, daysAgo: 15)
+
+        await fulfillment(
+            of: [started.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(browsers, [])
+        XCTAssertEqual(app.route, .loading)
+        release.signal()
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(browsers, ["instance-1"])
     }
 
     /// Dates avibe.bot's last confirmation of the stored session.

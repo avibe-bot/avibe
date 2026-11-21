@@ -602,6 +602,36 @@ enum HealthAccountEvent {
     case authenticated(accountID: String, instanceIDs: [String])
 }
 
+/// avibe.bot's last signed-in answer for the session stored on this device,
+/// and how long it lets an instance be loaded before avibe.bot is asked
+/// again.
+///
+/// An instance address that leaves an account cannot become another
+/// account's for 30 days. So within `lifetime` of a confirmation the stored
+/// address still leads to the instance avibe.bot listed; past it nothing of
+/// an instance is loaded (not by a cold start, an open, or the Action
+/// Button's background take) until avibe.bot has answered. `lifetime` must
+/// stay clearly shorter than that wait. It trusts this device's clock: a
+/// clock set back makes an old confirmation look recent; one dated in the
+/// future counts as none.
+enum MobileSessionConfirmation {
+    /// Seconds since 1970, written by the account coordinator only. It goes
+    /// with the stored session.
+    static let key = "avibe.mobile.lastGoodSessionConfirmedAt"
+    static let lifetime: TimeInterval = 14 * 24 * 60 * 60
+
+    /// False with no record (a session stored by a build from before it),
+    /// or one dated in the future.
+    static func isCurrent(in defaults: UserDefaults, now: Date = Date()) -> Bool {
+        let confirmedAt = defaults.double(forKey: key)
+        guard confirmedAt > 0 else {
+            return false
+        }
+        let age = now.timeIntervalSince1970 - confirmedAt
+        return age >= 0 && age < lifetime
+    }
+}
+
 @MainActor
 final class MobileSessionCoordinator {
     typealias TransportFactory = @MainActor (
@@ -620,17 +650,6 @@ final class MobileSessionCoordinator {
     /// no credentials), so a cold start can open the selected instance before
     /// checking again. It follows `snapshot`: gone whenever that is.
     private static let lastGoodSessionKey = "avibe.mobile.lastGoodSession"
-    /// When avibe.bot last answered, signed in, for the account of that
-    /// session (seconds since 1970). It goes with the session.
-    private static let lastGoodSessionConfirmedAtKey = "avibe.mobile.lastGoodSessionConfirmedAt"
-    /// How long after avibe.bot last confirmed the session an instance may
-    /// be opened before asking again. An instance address that leaves an
-    /// account cannot go to another account for 30 days, so within this
-    /// time the address still leads to the instance avibe.bot listed; past
-    /// it nothing of an instance is loaded until avibe.bot has answered.
-    /// It must stay clearly shorter than that wait. It trusts this device's
-    /// clock (a confirmation dated in the future counts as none).
-    static let sessionConfirmationLifetime: TimeInterval = 14 * 24 * 60 * 60
     /// When each instance was last opened as the selected runtime, per
     /// account: `[accountID: [instanceID: seconds since 1970]]`.
     private static let instanceUseKey = "avibe.mobile.instanceUse"
@@ -2059,7 +2078,7 @@ final class MobileSessionCoordinator {
             ))
         else {
             defaults.removeObject(forKey: Self.lastGoodSessionKey)
-            defaults.removeObject(forKey: Self.lastGoodSessionConfirmedAtKey)
+            defaults.removeObject(forKey: MobileSessionConfirmation.key)
             return
         }
         defaults.set(data, forKey: Self.lastGoodSessionKey)
@@ -2067,23 +2086,16 @@ final class MobileSessionCoordinator {
 
     /// avibe.bot answered, signed in, for this account: the session is
     /// confirmed as of now. Nothing else dates it: not reading it back from
-    /// the device, not a check that failed.
+    /// the device, not a read that failed.
     private func sessionWasConfirmed() {
         snapshotIsUnconfirmed = false
-        defaults.set(now().timeIntervalSince1970, forKey: Self.lastGoodSessionConfirmedAtKey)
+        defaults.set(now().timeIntervalSince1970, forKey: MobileSessionConfirmation.key)
     }
 
-    /// Whether avibe.bot confirmed the session within
-    /// `sessionConfirmationLifetime`. False with no record of it (a session
-    /// stored by a build from before the record), or one dated in the
-    /// future.
+    /// Whether avibe.bot confirmed the stored session within its lifetime
+    /// (`MobileSessionConfirmation`).
     var sessionConfirmationIsCurrent: Bool {
-        let confirmedAt = defaults.double(forKey: Self.lastGoodSessionConfirmedAtKey)
-        guard confirmedAt > 0 else {
-            return false
-        }
-        let age = now().timeIntervalSince1970 - confirmedAt
-        return age >= 0 && age < Self.sessionConfirmationLifetime
+        MobileSessionConfirmation.isCurrent(in: defaults, now: now())
     }
 
     /// The selected instance to open from `state`: listed available, or

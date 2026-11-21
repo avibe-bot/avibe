@@ -54,8 +54,9 @@ and Web resizing cannot both run.
   answer for that session is at most 14 days old. Past that, with no record of
   one, or with one dated in the future, nothing of an instance is loaded until
   avibe.bot has answered: the App asks first and then opens, and with no answer
-  it stops at the instance list. The same holds for any open, and for a page
-  still open when the App returns to the foreground. Reason: an instance address
+  it stops at the instance list. The same holds for any open, for a page still
+  open when the App returns to the foreground, and for the Action Button's
+  background take (past the limit it asks for the App instead). Reason: an instance address
   that leaves an account cannot become another account's for 30 days, so within
   14 days of a confirmation the address still leads to the instance avibe.bot
   listed. The limit trusts the phone's clock.

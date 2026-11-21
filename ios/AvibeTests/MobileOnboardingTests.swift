@@ -5336,11 +5336,11 @@ final class MobileOnboardingTests: XCTestCase {
     /// that. Past it, with no record of a confirmation (a session stored by
     /// an earlier build), or with one dated in the future, nothing is
     /// restored and the launch asks avibe.bot first. Only a signed-in answer
-    /// from avibe.bot dates the session: reading it back does not, a failed
-    /// read does not, and an owed second factor does not.
+    /// from avibe.bot dates the session: reading it back does not, and a
+    /// failed read does not.
     func testTheLastGoodSessionOpensFirstOnlyWithinItsConfirmationsLifetime() async throws {
         let confirmedAtKey = "avibe.mobile.lastGoodSessionConfirmedAt"
-        let lifetime = MobileSessionCoordinator.sessionConfirmationLifetime
+        let lifetime = MobileSessionConfirmation.lifetime
         XCTAssertEqual(lifetime, 14 * 24 * 60 * 60)
         let defaults = makeDefaults()
         let signedInAt = Date(timeIntervalSince1970: 1_800_000_000)
@@ -5381,7 +5381,7 @@ final class MobileOnboardingTests: XCTestCase {
             XCTAssertEqual(defaults.double(forKey: confirmedAtKey), signedInAt.timeIntervalSince1970, row.name)
         }
 
-        // A read that fails, and an owed second factor, do not date it.
+        // A read that fails does not date it.
         let stale = signedInAt.addingTimeInterval(lifetime + 60)
         let failing = FakeMobileAuthTransport()
         failing.fetchSessionError = URLError(.notConnectedToInternet)
