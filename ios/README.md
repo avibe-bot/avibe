@@ -1187,8 +1187,8 @@ cleanup.
 
 This inventory is organized by the finite WebKit API surface instead of by
 individual Web UI call sites. It includes the iOS methods present through the
-local iOS 27 SDK; iOS 27-only methods are documentation-only while CI remains
-pinned to Xcode 26.6.
+local iOS 27 SDK; iOS 27-only methods are still documentation-only (CI now
+builds with Xcode 27.2; adopting them is separate work).
 
 ### `WKNavigationDelegate`
 
@@ -1335,7 +1335,7 @@ bridge and do not run these Web UI branches.
 
 | Environment | Coverage |
 | --- | --- |
-| CI: Xcode 26.6, pinned iOS 26.5 / iPhone 17 Pro simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
+| CI: Xcode 27.2 (GitHub's `xcode-27` image), pinned iOS 27.2 / iPhone 17 Pro simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
 | Local: Xcode 27.2, iOS 26.4.1 simulator | Focused Debug XCTest for notification-driven viewport geometry and bundled onboarding, plus real-WebKit Home quick-task, conversation composer, background/foreground, and bundled OTP explicit-dismissal checks. Each path returned to its safe-area baseline. Interactive pull-down dismissal remains an owner device retest. |
 | Local: Xcode 27.2, iOS 27.2 simulator | Focused Home quick-task check with the software keyboard; explicit dismissal returned the tab bar to its safe-area baseline. |
 

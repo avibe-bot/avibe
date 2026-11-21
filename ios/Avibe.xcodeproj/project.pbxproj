@@ -29,6 +29,7 @@
 		1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F6 /* DirectPublicBackend.swift */; };
 		1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F7 /* DirectPublicBackendTests.swift */; };
 		1000000000000000000000FA /* DeviceDescriptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000FA /* DeviceDescriptionTests.swift */; };
+		1000000000000000000001F1 /* NativeScreenCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000001F1 /* NativeScreenCaptureTests.swift */; };
 		100000000000000000000003 /* NavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		100000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* RootView.swift */; };
 		100000000000000000000005 /* WebOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
@@ -227,6 +228,7 @@
 		2000000000000000000000F6 /* DirectPublicBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackend.swift; sourceTree = "<group>"; };
 		2000000000000000000000F7 /* DirectPublicBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackendTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000FA /* DeviceDescriptionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDescriptionTests.swift; sourceTree = "<group>"; };
+		2000000000000000000001F1 /* NativeScreenCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeScreenCaptureTests.swift; sourceTree = "<group>"; };
 		200000000000000000000003 /* NavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicy.swift; sourceTree = "<group>"; };
 		200000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		200000000000000000000005 /* WebOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebOrigin.swift; sourceTree = "<group>"; };
@@ -509,6 +511,7 @@
 				2000000000000000000000F4 /* DirectPathControllerTests.swift */,
 				2000000000000000000000F7 /* DirectPublicBackendTests.swift */,
 				2000000000000000000000FA /* DeviceDescriptionTests.swift */,
+				2000000000000000000001F1 /* NativeScreenCaptureTests.swift */,
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
@@ -1080,6 +1083,7 @@
 				1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */,
 				1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */,
 				1000000000000000000000FA /* DeviceDescriptionTests.swift in Sources */,
+				1000000000000000000001F1 /* NativeScreenCaptureTests.swift in Sources */,
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
