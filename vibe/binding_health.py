@@ -22,7 +22,10 @@ def _path():
 
 
 def rejected_at(config: V2Config | None) -> float | None:
-    epoch = pairing_epoch(config)
+    return rejected_at_epoch(pairing_epoch(config))
+
+
+def rejected_at_epoch(epoch: str | None) -> float | None:
     if not epoch:
         return None
     try:

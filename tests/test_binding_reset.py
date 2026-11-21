@@ -150,6 +150,90 @@ def test_cli_confirmation_binds_even_damaged_files(cli_host, answer):
     assert V2Config.load().remote_access.vibe_cloud.instance_id == ('' if answer is True else 'inst_A')
 
 
+def _hold_old_response(pipe):
+    from vibe import instance_address as addr
+
+    host = 'old-app.avibe.bot'
+    binding = addr.current_binding()
+    addr._authority = addr._Authority(binding.pairing, 1, {host: None}, addr._monotonic(), addr._wall())
+    pipe.send(addr.begin_cleanup_response(host))
+    try:
+        action = pipe.recv()
+        if action in ('finish', 'wait-for-publication'):
+            addr.end_cleanup_response(host)
+            if action == 'wait-for-publication':
+                pipe.send('released')
+                pipe.recv()
+            pipe.send(addr.begin_cleanup_response(host))
+    finally:
+        pipe.close()
+
+
+@pytest.mark.parametrize('crash', [False, True])
+def test_reset_waits_for_other_process_cleanup(cli_host, monkeypatch, crash):
+    import multiprocessing
+    from vibe import instance_address as addr
+
+    context = multiprocessing.get_context('spawn')
+    parent, child = context.Pipe()
+    process = context.Process(target=_hold_old_response, args=(child,))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(10) and parent.recv() is True
+        with gate.admitted('reset'), config_file_lock():
+            record = reset._seal(V2Config.load())
+        monkeypatch.setattr(addr, '_DRAIN_TIMEOUT_SECONDS', 0.05)
+        assert remote._drive_pending_pairing() == (True, 60)
+        assert reset._read() == record and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+        if crash:
+            process.terminate()
+        else:
+            parent.send('finish')
+            assert parent.poll(5) and parent.recv() is False
+        process.join(5)
+        assert not process.is_alive()
+        assert remote._drive_pending_pairing() == (True, 1)
+        assert not gate.reset_in_progress() and not V2Config.load().remote_access.vibe_cloud.instance_id
+        assert len(cli_host[1]) == 1
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(5)
+        parent.close()
+
+
+def test_same_id_publication_waits_for_other_process_cleanup(cli_host, monkeypatch):
+    import multiprocessing
+    from vibe import instance_address as addr
+
+    context = multiprocessing.get_context('spawn')
+    parent, child = context.Pipe()
+    process = context.Process(target=_hold_old_response, args=(child,))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(10) and parent.recv() is True
+        before = addr.current_binding()
+        monkeypatch.setattr(addr, '_DRAIN_TIMEOUT_SECONDS', 0.05)
+        assert remote.pair('rotate-in-place', 'https://backend.test')['error'] == 'pairing_save_failed_after_redeem'
+        assert addr.current_binding() == before
+        assert remote._read_pending_pairing_record()[0]['phase'] == 'redeemed'
+        parent.send('wait-for-publication')
+        assert parent.poll(5) and parent.recv() == 'released'
+        assert remote._drive_pending_pairing() == (True, 1)
+        after = addr.current_binding()
+        assert after.instance_id == before.instance_id and after.pairing != before.pairing
+        parent.send('check')
+        assert parent.poll(5) and parent.recv() is False and len(cli_host[1]) == 2
+    finally:
+        parent.close()
+        process.join(2)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+
+
 def test_stale_reset_cannot_clear_other_generation(reset_host):
     _, workspace, _ = reset_host
     cfg = V2Config.load()

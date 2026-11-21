@@ -259,6 +259,28 @@ def _acquire_file_lock(
         raise
 
 
+def try_shared_file_lease(lock_path: Path) -> IO[str] | None:
+    """Try the shared side of MigrationFileLock. Close the handle to release it.
+
+    Each lease belongs to an open file, not a thread; an async sender may
+    finish on a different thread. Do not unlink the underlying lock path.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, 'a+', encoding='utf-8')
+    try:
+        handle.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBRLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def _release_file_lock(handle) -> None:
     try:
         _unlock(handle)
