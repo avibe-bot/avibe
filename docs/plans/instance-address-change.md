@@ -32,6 +32,8 @@ For every request the instance gives the request's Host one **role**:
 
 - **active**: the Host of `remote_access.vibe_cloud.public_url` (or a custom
   hostname from the existing active-hostname snapshot). Content is served.
+  An instance paired before this change starts with the name in its pairing
+  record as its active name; it does not need a state read before serving.
 - **cleanup**: a former managed name of this instance that avibe.bot currently
   lists as a cleanup hostname of this instance, until avibe.bot stops listing
   it (at its `release_at`).
