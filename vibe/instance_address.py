@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from config import paths
+from vibe.binding_admission import OperationBusy, admitted
 from config.atomic_io import write_atomic
 
 logger = logging.getLogger(__name__)
@@ -759,6 +760,14 @@ def refresh_state(*, force: bool = False, wait: bool = True) -> bool:
 
 
 def _apply_state(read: _StateRead) -> bool:
+    try:
+        with admitted('address'):
+            return _apply_admitted_state(read)
+    except OperationBusy:
+        return False
+
+
+def _apply_admitted_state(read: _StateRead) -> bool:
     global _authority
 
     global _known_cleanup
@@ -989,9 +998,7 @@ def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
-def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str, Any]]:
-    """Second request: write the intent, start the operation, wait briefly for avibe.bot."""
-
+def _admit_change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[Binding, str]:
     binding = current_binding()
     reason = _eligibility(binding)
     if reason is not None or binding is None:
@@ -1029,6 +1036,17 @@ def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str,
         state["journal"] = journal
         state["last_operation"] = None
         _save_state(state)
+    return binding, operation_id
+
+
+def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str, Any]]:
+    try:
+        with admitted('address'):
+            binding, operation_id = _admit_change(confirmation_id, actor)
+    except OperationBusy:
+        raise AddressError(409, 'operation_in_progress') from None
+    # The durable journal now owns admission. Release the OS lock before waking
+    # the worker or waiting for it: the worker needs that same lock to proceed.
     _wake_worker()
     deadline = _monotonic() + _FIRST_ANSWER_WAIT_SECONDS
     with _first_answer:
@@ -1221,6 +1239,14 @@ def _set_journal(binding: Binding, journal: dict[str, Any] | None, *, last: dict
 
 
 def _advance_operation() -> float:
+    try:
+        with admitted('address'):
+            return _advance_admitted_operation()
+    except OperationBusy:
+        return 15.0 if _any_journal_stored() else 0.0
+
+
+def _advance_admitted_operation() -> float:
     """Run the journal as far as it can go now; return seconds until the next try (0 = idle)."""
 
     binding = current_binding()

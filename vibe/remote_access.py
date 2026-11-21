@@ -38,6 +38,7 @@ from config.atomic_io import write_atomic
 from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock, config_recovery_refusal
 from vibe import api, cloudflare_network, runtime
 from vibe import instance_address, tunnel_quality
+from vibe.binding_admission import pairing_operation
 from vibe.shutdown_diagnostics import register_shutdown_hook
 
 logger = logging.getLogger(__name__)
@@ -6007,6 +6008,7 @@ def _bound_http_pair_forbidden(config: V2Config, pending=None) -> bool:
                 or (pending and pending.get("source_instance_id")))
 
 
+@pairing_operation
 def pair(
     pairing_key: str, backend_url: str, device_name: str = "avibe", *,
     desktop_enrollment: Any = None, unbound_only: bool = False,
@@ -6128,6 +6130,7 @@ def _with_redeem_request(claim, backend_url: str, device_name: str, key: str) ->
     }
 
 
+@pairing_operation
 def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: str, installation: str,
                         subject: str, claim_id: str, instance_id: str, hostname: str,
                         binding_disposition: str | None = None) -> dict[str, Any]:
@@ -6200,6 +6203,7 @@ def _pair_desktop(
     return _retry_installation_pairing(claim)
 
 
+@pairing_operation
 def _retry_installation_pairing(claim: Mapping[str, Any]) -> dict[str, Any]:
     from vibe import desktop_local_instance
 
@@ -6609,6 +6613,7 @@ def _persist_pairing_impl(
     return result
 
 
+@pairing_operation
 def _persist_pairing(
     result: Mapping[str, Any] | None,
     *,

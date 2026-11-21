@@ -1162,6 +1162,34 @@ def test_b2_a_read_disowned_by_a_401_cannot_grant_cleaning_or_move_the_address(a
     assert is_cleaning(get(NEW))  # only a read made after the refusal grants it again
 
 
+def test_rename_intent_blocks_pairing_before_redeem_and_releases_after_apply(address, monkeypatch):
+    rename_to("new")
+    calls = []
+    monkeypatch.setattr(remote_access, "_normalize_pairing_backend_url", lambda value: calls.append(value) or (None, "test_boundary"))
+    assert remote_access.pair("fixture-key", "https://issuer.invalid")["error"] == "operation_in_progress"
+    assert not calls
+    run()
+    assert binding().active_host == NEW
+    assert remote_access.pair("fixture-key", "https://issuer.invalid")["error"] == "test_boundary"
+    assert calls == ["https://issuer.invalid"]
+
+
+def test_prepared_pairing_blocks_rename_without_consuming_confirmation(address):
+    from config.v2_config import V2Config
+
+    plane, _ = address
+    confirmation = instance_address.preview("new", ("loopback",))["confirmation_id"]
+    record = remote_access._new_pairing_claim(V2Config.load(), "https://issuer.invalid", "fixture", pairing_key="fixture-key")
+    remote_access._write_pending_pairing_record(record)
+    before = list(plane.calls)
+    with pytest.raises(instance_address.AddressError) as caught:
+        instance_address.change(confirmation, ("loopback",))
+    assert caught.value.code == "operation_in_progress" and plane.calls == before
+    assert remote_access._read_pending_pairing_record() == (record, None)
+    assert remote_access._retire_pending_pairing(operation_id=record["operation_id"])
+    assert instance_address.change(confirmation, ("loopback",))[0] == 202
+
+
 def test_rename_worker_retries_unreadable_binding_without_another_hint(address, monkeypatch):
     plane, _ = address
     rename_to("new")

@@ -926,7 +926,9 @@ def test_duplicate_key_preserves_the_inflight_owner_across_processes(pairing_hos
         journal = root / "state/pending-pairing.json"
         claimed = journal.read_bytes()
         duplicate = remote_access.pair(" key_A ", "https://backend.test", device_name="another tab")
-        assert duplicate["error"] == "pairing_recovery_not_ready"
+        assert duplicate == {"ok": False, "error": "operation_in_progress", "status": 409}
+        # Another key cannot displace this operation while its redeem is in flight either.
+        assert remote_access.pair("key_B", "https://backend.test") == duplicate
         assert journal.read_bytes() == claimed
         assert "key_A" not in claimed.decode()
     finally:
@@ -1473,7 +1475,7 @@ def test_unrelated_save_during_redeem_does_not_revoke_claim(pairing_host, monkey
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
 
 
-def test_late_response_cannot_override_new_claim(pairing_host, monkeypatch):
+def test_inflight_pairing_excludes_new_key_before_redeem(pairing_host, monkeypatch):
     _, calls = pairing_host
     gate = _ThreadRedeemGate()
 
@@ -1492,14 +1494,15 @@ def test_late_response_cannot_override_new_claim(pairing_host, monkeypatch):
         result_b = remote_access.pair("key_B", "https://other-backend.test")
     finally:
         result_a = gate.finish()
-    assert result_b["ok"]
-    assert result_a["error"] == "pairing_superseded_after_redeem"
+    assert result_b == {"ok": False, "error": "operation_in_progress", "status": 409}
+    assert result_a["ok"]
+    assert [key for _, key in calls] == ["key_A"]
     saved = V2Config.load().remote_access.vibe_cloud
-    assert saved.instance_id == "inst_B"
-    assert saved.backend_url == "https://other-backend.test"
+    assert saved.instance_id == "inst_A"
+    assert saved.backend_url == "https://backend.test"
 
 
-def test_definitive_failure_cannot_retire_superseding_claim(pairing_host, monkeypatch):
+def test_definitive_failure_releases_admission_for_a_fresh_request(pairing_host, monkeypatch):
     _, calls = pairing_host
     gate = _ThreadRedeemGate()
 
@@ -1521,8 +1524,12 @@ def test_definitive_failure_cannot_retire_superseding_claim(pairing_host, monkey
     finally:
         result_a = gate.finish()
 
-    assert result_b["ok"]
+    assert result_b == {"ok": False, "error": "operation_in_progress", "status": 409}
     assert result_a["error"] == "invalid_pairing_key"
+    assert [key for _, key in calls] == ["key_A"]
+    assert not V2Config.load().remote_access.vibe_cloud.instance_id
+    assert remote_access.pair("key_B", "https://other-backend.test")["ok"]
+    assert [key for _, key in calls] == ["key_A", "key_B"]
     saved = V2Config.load().remote_access.vibe_cloud
     assert saved.instance_id == "inst_B"
     assert saved.backend_url == "https://other-backend.test"
@@ -1545,7 +1552,8 @@ def test_concurrent_resume_has_one_owner(pairing_host, monkeypatch):
     barrier.wait(hang_guard.HANG_GUARD_SECONDS)
     hang_guard.join_all(workers, "the concurrent resumes to finish")
     assert sum(bool(result.get("ok")) for result in results) == 1
-    assert sum(result.get("error") == "missing_pairing_key" for result in results) == 1
+    # The loser either contended with publication or arrived after journal retirement.
+    assert sum(result.get("error") in {"operation_in_progress", "missing_pairing_key"} for result in results) == 1
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
 
 
@@ -1584,7 +1592,8 @@ def test_concurrent_resume_has_one_owner_across_processes(pairing_host, monkeypa
     ]
     assert all("child_exception" not in result for result in results)
     assert sum(bool(result.get("ok")) for result in results) == 1
-    assert sum(result.get("error") == "missing_pairing_key" for result in results) == 1
+    # The loser either contended with publication or arrived after journal retirement.
+    assert sum(result.get("error") in {"operation_in_progress", "missing_pairing_key"} for result in results) == 1
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
 
 
@@ -1611,11 +1620,11 @@ def test_old_response_in_process_cannot_override_new_claim(pairing_host, monkeyp
         worker = gate.finish()
     assert worker.exitcode == 0
     result_a = json.loads(result_path.read_text(encoding="utf-8"))
-    assert result_b["ok"]
-    assert result_a["error"] == "pairing_superseded_after_redeem"
+    assert result_b == {"ok": False, "error": "operation_in_progress", "status": 409}
+    assert result_a["ok"]
     saved = V2Config.load().remote_access.vibe_cloud
-    assert saved.instance_id == "inst_B"
-    assert saved.backend_url == "https://other-backend.test"
+    assert saved.instance_id == "inst_A"
+    assert saved.backend_url == "https://backend.test"
 
 
 def test_clear_during_redeem_fences_old_response_across_processes(pairing_host, monkeypatch):

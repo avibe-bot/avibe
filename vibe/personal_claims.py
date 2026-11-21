@@ -14,6 +14,7 @@ from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import config_file_lock
 from storage.lock import MigrationFileLock, MigrationLockTimeout
+from vibe.binding_admission import OperationBusy, admitted
 from vibe import desktop_local_instance as local, remote_access
 from vibe.personal_claim_client import ClaimError, ClaimsClient, Grant, Pending, Ticket, local_origin, return_proof, text
 
@@ -332,7 +333,7 @@ class _Flow:
 
     def run(self):
         try:
-            with MigrationFileLock(paths.get_state_dir() / "personal-claim.lock", timeout_seconds=0):
+            with MigrationFileLock(paths.get_state_dir() / "personal-claim.lock", timeout_seconds=0), admitted('pairing'):
                 try:
                     self._execute()
                 finally:
@@ -346,6 +347,8 @@ class _Flow:
                     self._cleanup_client = None
         except (ClaimError, local.LocalInstanceError) as exc:
             self.update("error", code=exc.code, **({"retry_after_seconds": exc.retry_after} if getattr(exc, "retry_after", 0) else {}))
+        except OperationBusy:
+            self.update("error", code="operation_in_progress")
         except MigrationLockTimeout:
             self.update("error", code="claim_in_progress")
         except Exception:

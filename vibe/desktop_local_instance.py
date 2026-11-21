@@ -138,6 +138,16 @@ def describe() -> dict[str, Any]:
 
 
 def prepare(account_id: Any, expected_binding_revision: Any) -> dict[str, Any]:
+    from vibe.binding_admission import OperationBusy, admitted
+
+    try:
+        with admitted("pairing"):
+            return _prepare_admitted(account_id, expected_binding_revision)
+    except OperationBusy:
+        raise LocalInstanceError("operation_in_progress") from None
+
+
+def _prepare_admitted(account_id: Any, expected_binding_revision: Any) -> dict[str, Any]:
     if (
         not isinstance(account_id, str) or not account_id.strip() or len(account_id) > 200
         or not isinstance(expected_binding_revision, str)
