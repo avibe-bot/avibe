@@ -437,7 +437,7 @@ def _request_identity():
         return None
 
 
-def observe_pins(window, config, *, active, pid_state, sample, max_gap):
+def observe_pins(window, config, *, active, pid_state, sample, interval_seconds):
     pins = {k: cs.value(config, k) for k, auto in cs.AUTOMATIC.items() if cs.value(config, k) != auto} if config and _requested(config) else {}
     request = _request_identity() if pins else None
     identity = (cs.relay_pairing(config), tuple(pins.items()), request) if request else None
@@ -453,7 +453,9 @@ def observe_pins(window, config, *, active, pid_state, sample, max_gap):
                     and (_registered(connector.get('metrics_url')) or 0) > 0):
                 down = False
                 break
-    if not window.observe(identity, disconnected=down, max_gap=max_gap):
+    # One missed scrape spans two ticks plus normal scheduling jitter. A third
+    # unobserved interval is a genuine gap, not evidence of continuous loss.
+    if not window.observe(identity, disconnected=down, max_gap=2.5 * interval_seconds):
         return
     with tunnel._connector_lifecycle(timeout=0), tunnel._RECOVERY_LOCK, config_file_lock():
         live = V2Config.load()

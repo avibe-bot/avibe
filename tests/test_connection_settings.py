@@ -334,13 +334,33 @@ def test_candidate_not_ready_does_not_restore_untouched_connector(rig, monkeypat
     assert not state['operation'] and not state.get('debt')
 
 
-def test_explicit_new_intent_supersedes_recovery(rig):
-    op = cs.journal.begin(rig.cfg, 'protocol', 'quic')
+@pytest.mark.parametrize('past_bound', [False, True])
+def test_rejected_replacement_resumes_previous_connector_repair(rig, monkeypatch, past_bound):
+    old = cs.journal.begin(rig.cfg, 'protocol', 'quic')
+    rig.cfg.remote_access.vibe_cloud.transport_protocol = 'quic'
+    rig.cfg.save()
+    cs.journal.verifying(rig.cfg, old['id'], 'rejected-generation')
     cs.journal.restore(cs.journal.load(rig.cfg), 'verification_failed')
+    monkeypatch.setattr(cr, '_repair_runtime', lambda *args: False)
+    if past_bound:
+        rig.clock[0] += cs.RESTORE_SECONDS + 1
+    assert not cr.recover()
+    assert cs.value(V2Config.load(), 'protocol') == 'auto'
     new = cr.prepare(rig.actor, 'protocol', 'http2')
-    assert new['id'] != op['id']
     with pytest.raises(cs.ConnectionError, match='superseded'):
-        cs.journal.applying(rig.cfg, op['id'])
+        cs.journal.applying(rig.cfg, old['id'])
+    monkeypatch.setattr(ra, 'apply_settings', lambda *a, **kw: {'ok': False, 'detail': 'candidate_not_ready'})
+    cr.apply(rig.actor, new)
+    latest = outcome()
+    assert (latest['id'], latest['result'], latest['reason']) == (new['id'], 'failed', 'candidate_not_ready')
+    repairs = []
+    def repair(cfg, op, at_bound):
+        repairs.append((cs.value(cfg, 'protocol'), op.get('generation')))
+        return True
+    monkeypatch.setattr(cr, '_repair_runtime', repair)
+    assert cr.recover()
+    assert repairs == [('auto', 'rejected-generation')]
+    assert outcome() == latest
 
 
 @pytest.mark.parametrize('restored_by', ['active', 'candidate', 'draining'])
@@ -358,10 +378,10 @@ def test_pin_outage_survives_ordinary_candidates_without_stealing_the_lane(rig, 
     rig.cfg.save()
 
     def tick(at, *, busy=False, count=0, pid_state='cloudflared', sampled=True):
-        rig.clock[0] = at
+        rig.clock[0] = at * 1.0004  # Ordinary 4 ms of jitter per 10 s monitor tick.
         records['candidate'] = candidate if busy else None
         cr.observe_pins(window, rig.cfg, active=rig.active, pid_state=pid_state,
-                        sample=SimpleNamespace(registered_connections=count) if sampled else None, max_gap=22)
+                        sample=SimpleNamespace(registered_connections=count) if sampled else None, interval_seconds=10)
         return cs.journal.load(rig.cfg).get('pinAttempt')
 
     for at in range(0, 170, 10):
@@ -393,7 +413,7 @@ def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monke
     def tick(n, count=0):
         rig.clock[0] += n
         cr.observe_pins(window, rig.cfg, active=rig.active, pid_state='cloudflared',
-                        sample=SimpleNamespace(registered_connections=count), max_gap=20)
+                        sample=SimpleNamespace(registered_connections=count), interval_seconds=15)
     tick(0)
     for _ in range(11):
         tick(15)

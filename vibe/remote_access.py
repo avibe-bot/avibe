@@ -4135,7 +4135,7 @@ def _quality_monitor_loop(
             try:
                 connection_runtime.observe_pins(
                     pin_window, loaded, active=active, pid_state=_cloudflared_pid_state(active_pid), sample=sample,
-                    max_gap=2 * interval_seconds,
+                    interval_seconds=interval_seconds,
                 )
             except _ConnectorLifecycleBusy:
                 pass

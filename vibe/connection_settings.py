@@ -174,11 +174,18 @@ class Journal:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or data.get('version') != 1 or not {'operation', 'outcome', 'binding', 'returnedToAutomatic'} <= data.keys():
                 raise ValueError('invalid journal')
-            for slot in ('operation', 'debt'):
+            for slot in ('operation', 'debt', 'priorRepair'):
                 op = data.get(slot)
                 if op is not None and (not isinstance(op, dict) or not {'id', 'state', 'setting', 'from', 'to', 'boot', 'until', 'baseline'} <= op.keys()
                                        or op['setting'] not in FIELDS or op['state'] not in {'applying', 'verifying', 'restoring'}):
                     raise ValueError('invalid operation record')
+            prior = data.get('priorRepair')
+            if prior is not None:
+                current = data['operation']
+                if (not current or current['state'] != 'applying' or prior['state'] != 'restoring'
+                        or prior['setting'] not in AUTOMATIC or prior['setting'] != current['setting']
+                        or prior['from'] != current['from']):
+                    raise ValueError('invalid suspended repair')
             if data['binding'] == relay_pairing(config):
                 self.warned_unavailable = False
                 return data
@@ -198,10 +205,15 @@ class Journal:
             raise ConnectionError("connection_change_busy")
         if state.get("pinAttempt"):
             raise ConnectionError("connection_change_busy")
-        if state.get("debt", {}).get("setting") == key:
-            state.pop("debt")
         op = {"id": secrets.token_hex(16), "setting": key, "from": value(config, key), "to": new,
               "state": "applying", "baseline": baseline, "boot": self.boot, "until": self.clock() + STALE_OPERATION_SECONDS}
+        # Reserving a candidate is not a connector handover. Suspend the old
+        # foreground repair; any already-backgrounded debt stays in its slot.
+        if old:
+            state['priorRepair'] = old
+        prior = old or state.get('debt')
+        if prior and prior['setting'] == key and prior.get('generation'):
+            op['generation'] = prior['generation']  # rollback before promotion still owns only the old rejected generation
         state["operation"] = op
         self.save(state)
         return op
@@ -223,18 +235,35 @@ class Journal:
         state = self.load(config)
         op = self.owned(state, op_id, "applying")
         op.update(state="verifying", generation=generation)
+        self._retire_previous_repair(state, op)
         self.save(state)
+
+    @staticmethod
+    def _retire_previous_repair(state, op):
+        state.pop('priorRepair', None)
+        if (state.get('debt') or {}).get('setting') == op['setting']:
+            state.pop('debt')
 
     def finish(self, state, result, reason):
         op = state["operation"]
-        state["outcome"] = {k: op[k] for k in ("id", "setting", "from", "to")} | {"result": result, "reason": reason, "at": now()}
-        state["operation"] = None
+        if not op.get('preserveOutcome'):
+            state["outcome"] = {k: op[k] for k in ("id", "setting", "from", "to")} | {"result": result, "reason": reason, "at": now()}
+        if result == 'applied' and op['setting'] in AUTOMATIC:
+            self._retire_previous_repair(state, op)  # includes an actual save with no connector
+        prior = state.pop('priorRepair', None)
+        if prior and result == 'failed':
+            prior['preserveOutcome'] = True  # repair silently; the new request really failed
+            state['operation'] = prior
+        else:
+            state['operation'] = None
         self.save(state)
 
     def restore(self, state, reason):
         op = state["operation"]
         if op["setting"] not in AUTOMATIC:
             raise ValueError("only tunnel pins are reversible")
+        # The rollback now owns the same saved target and fenced generation.
+        self._retire_previous_repair(state, op)
         op.update(state="restoring", reason=reason, until=self.clock() + RESTORE_SECONDS, boot=self.boot)
         self.save(state)
 
