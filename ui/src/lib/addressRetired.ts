@@ -9,6 +9,7 @@
 // the instance answers with a response that clears.
 import { blockBootSessionRecording } from './bootSession';
 import { forgetLocalSnapshots } from './localSnapshots';
+import { SIGN_OUT_GENERATION_KEY } from './signOutGeneration';
 
 export const ADDRESS_RETIRED_EVENT = 'instance.address-retired';
 const RETIRED_HEADER = 'X-Avibe-Address';
@@ -20,6 +21,9 @@ const REPORT_TIMEOUT_MS = 2_000;
  *  frame, which alone names the new address. */
 const FRAME_WAIT_MS = 3_000;
 const LOCAL_DATABASES = ['avibe-local-store', 'avibe-local-snapshots'];
+/** The two counters by which another tab of this origin knows that what it
+ *  captured is void (``signOutGeneration.ts``, the local store's epoch). */
+const WRITE_FENCE_KEYS = [SIGN_OUT_GENERATION_KEY, 'avibe.local-store.epoch.v1'];
 const RECEIPT_SHAPE = /^[A-Za-z0-9_-]{43}$/;
 /** The only shape a new address can have. The frame comes over this page's own
  *  authenticated stream; this is a second lock on where the page may be sent. */
@@ -114,6 +118,12 @@ export async function clearThisOrigin(): Promise<boolean> {
   await step(async () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
+    // Clearing also removed the counters that fence other tabs' writes, and a
+    // tab that captured the starting value would pass again and put its data
+    // back. Leave both at a value no tab can hold: the time of this clearing,
+    // which is all that stays behind under this address.
+    const fence = String(Date.now());
+    for (const key of WRITE_FENCE_KEYS) window.localStorage.setItem(key, fence);
   });
   return complete;
 }

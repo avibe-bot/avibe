@@ -3396,17 +3396,21 @@ class _InstanceAddressRoleMiddleware:
                 host = value.decode("latin-1")
             elif key == b"x-forwarded-host" and not forwarded:
                 forwarded = value.decode("latin-1").split(",")[0].strip()
-        normalized = instance_address.normalize_host(host)
-        if not instance_address.is_managed_name(normalized) and not instance_address.is_managed_name(
-            instance_address.normalize_host(forwarded)
-        ):
+        # A request can be admitted under either name: its own Host, or the public
+        # name a trusted proxy forwards while it rewrites Host to a local address.
+        managed = {
+            name
+            for name in (instance_address.normalize_host(host), instance_address.normalize_host(forwarded))
+            if instance_address.is_managed_name(name)
+        }
+        if not managed:
             await self.app(scope, receive, send)
             return
         decision = await asyncio.to_thread(instance_address.decide, host, forwarded)
         if decision == "pass":
             task = asyncio.current_task()
-            open_here = _address_connections.setdefault(normalized, set())
-            open_here.add(task)
+            for name in managed:
+                _address_connections.setdefault(name, set()).add(task)
             try:
                 await self.app(scope, receive, send)
             except asyncio.CancelledError:
@@ -3420,7 +3424,8 @@ class _InstanceAddressRoleMiddleware:
                     except Exception:
                         pass
             finally:
-                open_here.discard(task)
+                for name in managed:
+                    _address_connections.get(name, set()).discard(task)
             return
         if decision == "cleanup" and await asyncio.to_thread(instance_address.confirm_cleanup, host):
             if await self._clean(scope, receive, send, host):

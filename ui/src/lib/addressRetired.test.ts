@@ -29,6 +29,14 @@ async function databaseNames(): Promise<string[]> {
   return (await indexedDB.databases()).map((entry) => entry.name ?? '').sort();
 }
 
+const EPOCH_KEY = 'avibe.local-store.epoch.v1';
+const FENCE_KEYS = new Set([EPOCH_KEY, 'avibe.sign-out-generation.v1']);
+
+/** Everything localStorage holds apart from the write fence. */
+function heldKeys(): string[] {
+  return Object.keys(window.localStorage).filter((key) => !FENCE_KEYS.has(key));
+}
+
 async function load() {
   vi.resetModules();
   return import('./addressRetired');
@@ -46,6 +54,7 @@ beforeEach(async () => {
   unsubscribed = 0;
   cacheKeys = ['avibe-web-push-endpoints', 'other'];
   fetchCalls = [];
+  window.localStorage.clear();
   window.localStorage.setItem('avibe.session-drafts.v1', 'unsent text');
   window.localStorage.setItem('avibe.recent-files', '["secret.pdf"]');
   window.sessionStorage.setItem('scroll', '10');
@@ -90,7 +99,7 @@ describe('a page on a retired address', () => {
     address.handleAddressRetiredFrame(JSON.stringify({ moved_to: NEW_ORIGIN }));
     await address.leaveRetiredAddress(null);
 
-    expect(window.localStorage.length).toBe(0);
+    expect(heldKeys()).toEqual([]);
     expect(window.sessionStorage.length).toBe(0);
     expect(await databaseNames()).toEqual([]);
     expect(cacheKeys).toEqual([]);
@@ -107,9 +116,22 @@ describe('a page on a retired address', () => {
     address.rememberAddressReceipt(RECEIPT);
     await address.leaveRetiredAddress(NEW_ORIGIN);
 
-    expect(window.localStorage.length).toBe(0);
+    expect(heldKeys()).toEqual([]);
     expect(await databaseNames()).toEqual([]);
     expect(replaced).toEqual([`${NEW_ORIGIN}/sessions/abc`]);
+  });
+
+  it('leaves a write fence no other tab can pass, where clearing alone would reset it', async () => {
+    // Another tab learned its reader when the shared counters stood at these values.
+    const { readSignOutGeneration } = await import('./signOutGeneration');
+    const captured = { signOut: readSignOutGeneration(), epoch: window.localStorage.getItem(EPOCH_KEY) };
+    const address = await load();
+    await address.leaveRetiredAddress(NEW_ORIGIN);
+
+    expect(readSignOutGeneration()).not.toBe(captured.signOut);
+    expect(readSignOutGeneration()).toBeGreaterThan(1_000_000_000_000);
+    expect(window.localStorage.getItem(EPOCH_KEY)).not.toBe(captured.epoch);
+    expect(Object.keys(window.localStorage).sort()).toEqual([EPOCH_KEY, 'avibe.sign-out-generation.v1'].sort());
   });
 
   it('goes to the old root and reports nothing when a store cannot be deleted', async () => {
@@ -127,7 +149,7 @@ describe('a page on a retired address', () => {
 
     expect(fetchCalls).toEqual([]);
     expect(replaced).toEqual(['/']);
-    expect(window.localStorage.length).toBe(0); // what could be removed still was
+    expect(heldKeys()).toEqual([]); // what could be removed still was
   });
 
   it('is sent only to a managed origin, whatever a frame says', async () => {
@@ -161,7 +183,7 @@ describe('a page on a retired address', () => {
     address.setAddressStreamProbe(() => false);
     address.noteRetiredAddressResponse();
     await address.leaveRetiredAddress(null);
-    expect(window.localStorage.length).toBe(0);
+    expect(heldKeys()).toEqual([]);
     expect(fetchCalls[0].init.body).toBe(RECEIPT);
     expect(replaced).toEqual(['/']);
   });

@@ -355,6 +355,17 @@ def test_e2_cookie_names_and_counts_are_bounded_and_well_formed():
     assert "c0=; Path=/a/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure" in values
 
 
+def test_e3_the_cleaning_script_leaves_the_write_fence_the_app_reads():
+    from pathlib import Path
+
+    ui = Path(__file__).resolve().parents[1] / "ui" / "src" / "lib"
+    sign_out, epoch = instance_address_responses.WRITE_FENCE_KEYS
+    assert f"SIGN_OUT_GENERATION_KEY = '{sign_out}'" in (ui / "signOutGeneration.ts").read_text(encoding="utf-8")
+    assert f"STORE_EPOCH_KEY = '{epoch}'" in (ui / "localStore" / "index.ts").read_text(encoding="utf-8")
+    assert f"'{epoch}'" in (ui / "addressRetired.ts").read_text(encoding="utf-8")
+    assert json.dumps([sign_out, epoch]) in instance_address_responses.CLEANING_SCRIPT
+
+
 def test_e3_the_replacement_worker_and_the_inline_script_match_the_policy(address):
     rename_to("new")
     run()
@@ -618,6 +629,21 @@ def test_refusals_reach_the_page_as_stable_codes(address, monkeypatch, reply, co
     assert binding().active_host == OLD and instance_address._journal(binding()) is None
 
 
+def test_c4_a_phone_paired_on_the_new_address_before_the_health_step_is_kept(address):
+    plane, _ = address
+    old_phone = health_pairing()
+    paired_after = []
+    # Pages are woken as soon as the new address is live; a phone can pair there from then on.
+    instance_address._hooks.update(
+        wake_pages=lambda: paired_after or paired_after.append(health_pairing()),
+        close_connections=lambda hosts: None,
+    )
+    rename_to("new")
+    run()
+    assert binding().active_host == NEW
+    assert active_health_devices() == paired_after and old_phone not in paired_after
+
+
 def test_a5_a_change_made_elsewhere_is_adopted_without_deleting_anything(address):
     plane, _ = address
     sign_in()
@@ -791,12 +817,17 @@ def test_c1_requests_open_on_the_old_name_are_ended_at_the_switch(address):
             return asyncio.create_task(middleware(scope, None, send))
 
         old_stream, local_stream = request(OLD), request("localhost:5123")
+        # Behind a trusted proxy the public name arrives as a forwarded Host.
+        forwarded_scope = {"type": "http", "method": "GET", "path": "/show/y/events",
+                           "headers": [(b"host", b"127.0.0.1:5123"), (b"x-forwarded-host", OLD.encode())]}
+        forwarded_stream = asyncio.create_task(middleware(forwarded_scope, None, send))
         await started.wait()
         await asyncio.sleep(0.05)
         instance_address._hooks.update(wake_pages=lambda: None, close_connections=ui_server._close_address_connections)
         await asyncio.to_thread(lambda: (rename_to("new"), run()))
-        await asyncio.wait_for(asyncio.gather(old_stream, return_exceptions=True), timeout=5)
-        assert cancelled == ["/show/x/events"] and old_stream.done() and not old_stream.cancelled()
+        await asyncio.wait_for(asyncio.gather(old_stream, forwarded_stream, return_exceptions=True), timeout=5)
+        assert sorted(cancelled) == ["/show/x/events", "/show/y/events"]
+        assert old_stream.done() and not old_stream.cancelled() and forwarded_stream.done()
         assert not local_stream.done()  # a page on this computer's own address is untouched
         local_stream.cancel()
         await asyncio.gather(local_stream, return_exceptions=True)

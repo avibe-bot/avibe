@@ -23,12 +23,18 @@ from vibe.instance_address import CLEARED_REPORT_PATH, RETIRED_HEADER, RETIRED_H
 CLEAR_SITE_DATA = '"cache", "storage"'
 
 _LOCAL_DATABASES = ("avibe-local-store", "avibe-local-snapshots")
+# The counters by which a tab of the old app knows that what it captured is void
+# (``ui/src/lib/signOutGeneration.ts`` and the local store's epoch). Clearing
+# resets them; a tab still open would then write its data back. They are left
+# at the time of the clearing, a value no tab can hold.
+WRITE_FENCE_KEYS = ("avibe.sign-out-generation.v1", "avibe.local-store.epoch.v1")
 
 # The fallback for a browser that ignores the header. It reports only when
 # every step succeeded and the page was given a receipt.
 CLEANING_SCRIPT = (
     "(async function(){var ok=true,m=document.querySelector('meta[name=\"avibe-address-receipt\"]'),r=m&&m.content;"
-    "try{localStorage.clear()}catch(e){ok=false}"
+    "try{localStorage.clear();var f=String(Date.now());"
+    + json.dumps(list(WRITE_FENCE_KEYS)) + ".forEach(function(k){localStorage.setItem(k,f)})}catch(e){ok=false}"
     "try{sessionStorage.clear()}catch(e){ok=false}"
     "try{var names=" + json.dumps(list(_LOCAL_DATABASES)) + ";"
     "if(indexedDB.databases){(await indexedDB.databases()).forEach(function(d){"

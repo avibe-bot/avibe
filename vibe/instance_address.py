@@ -1181,6 +1181,12 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
         previous = journal.get("previous_hostname") or ""
         if binding.active_host != target:
             previous = binding.active_host
+        if destructive and not isinstance(journal.get("health_targets"), list):
+            # Fixed before the new address can be reached: a phone paired there
+            # afterwards is not this change's to delete, however late the Health
+            # step runs.
+            journal = {**journal, "health_targets": _active_health_devices()}
+            _set_journal(binding, journal)
         _flip(binding, journal, read, target)
         done("flip", previous_hostname=previous, destructive=destructive, origin=journal["origin"])
         binding = current_binding() or binding
@@ -1206,11 +1212,7 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
     if "health" not in steps:
         if journal.get("destructive") and journal.get("origin") == "local":
             targets = journal.get("health_targets")
-            if not isinstance(targets, list):
-                targets = _active_health_devices()
-                journal = {**journal, "health_targets": targets}
-                _set_journal(binding, journal)  # recorded before any deletion: a repeat touches only these
-            _revoke_health(targets)
+            _revoke_health(targets if isinstance(targets, list) else [])
         done("health")
     final_binding = current_binding() or binding
     summary = {

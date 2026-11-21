@@ -123,7 +123,7 @@ test.beforeEach(async ({ context, page }) => {
 
 async function held(page: Page) {
   return page.evaluate(async () => ({
-    local: localStorage.length,
+    local: Object.keys(localStorage).sort(),
     databases: (await indexedDB.databases()).map((entry) => entry.name ?? '').sort(),
     caches: await caches.keys(),
     workers: (await navigator.serviceWorker.getRegistrations()).length,
@@ -143,7 +143,19 @@ async function probe(page: Page) {
   }
 }
 
-const EMPTY = { local: 0, databases: [], caches: [], workers: 0 };
+const EMPTY = { databases: [], caches: [], workers: 0 };
+// A cleaning page's script leaves only the two counters that stop a tab of the
+// old app, still open elsewhere, from writing its data back.
+const FENCE = ['avibe.local-store.epoch.v1', 'avibe.sign-out-generation.v1'];
+
+function expectOnlyTheFence(local: string[], browserName: string): void {
+  expect(local).not.toContain('avibe.session-drafts.v1');
+  expect(local.filter((key) => !FENCE.includes(key))).toEqual([]);
+  // Playwright's WebKit ends the cleaning page as soon as its script has run
+  // (the report, the script's last step, still arrives), and what that page
+  // wrote last is not always seen by the next one. Chromium shows the fence.
+  if (browserName === 'chromium') expect(local).toEqual(FENCE);
+}
 
 test('one visit to the retired address empties the origin and reports the receipt', async ({ page, browserName }) => {
   mode = 'retired';
@@ -151,18 +163,20 @@ test('one visit to the retired address empties the origin and reports the receip
   expect(response?.status()).toBe(410);
   await expect.poll(() => reports).toEqual([fixture.receipt]);
   const after = await probe(page);
-  expect(after).toMatchObject({ local: 0, databases: [], caches: [] });
-  // Playwright's WebKit ends the page once it has processed the header, and a
-  // registration that page controlled can still be listed afterwards. The
-  // script-only and worker cases below show WebKit removing it.
+  expect(after).toMatchObject({ databases: [], caches: [] });
+  expectOnlyTheFence(after.local, browserName);
+  // With the header, a registration the page controlled can still be listed in
+  // WebKit afterwards. The script-only and worker cases below show it removed.
   if (browserName === 'chromium') expect(after).toMatchObject({ workers: 0, cookie: '' });
 });
 
-test('without the header, the page script alone empties the origin', async ({ page }) => {
+test('without the header, the page script alone empties the origin', async ({ page, browserName }) => {
   mode = 'script-only';
   await page.goto(`${origin}/`);
   await expect.poll(() => reports).toEqual([fixture.receipt]);
-  expect(await probe(page)).toMatchObject({ ...EMPTY, cookie: '' });
+  const after = await probe(page);
+  expect(after).toMatchObject({ ...EMPTY, cookie: '' });
+  expectOnlyTheFence(after.local, browserName);
 });
 
 test('without the script, the header alone empties storage and leaves cookies alone', async ({ page, browserName }) => {
@@ -171,7 +185,7 @@ test('without the script, the header alone empties storage and leaves cookies al
   await page.goto(`${origin}/`);
   await expect.poll(async () => (await probe(page)).databases).toEqual([]);
   // The directive list never names cookies: a script-readable cookie survives the header.
-  expect(await probe(page)).toMatchObject({ ...EMPTY, cookie: 'script_cookie=1' });
+  expect(await probe(page)).toMatchObject({ ...EMPTY, local: [], cookie: 'script_cookie=1' });
   expect(reports).toEqual([]);
 });
 
