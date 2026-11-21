@@ -946,7 +946,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         crate::macos_show_titlebar::install(
             &window,
             labels,
-            target_url(&source.runtime.origin, &target).path().to_owned(),
+            target_url(&source.runtime.origin, &target),
             move |action| {
                 use crate::macos_show_titlebar::Action;
                 let app = control_window.app_handle();

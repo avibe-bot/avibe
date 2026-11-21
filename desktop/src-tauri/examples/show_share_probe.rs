@@ -118,30 +118,49 @@ document.getElementById('show').addEventListener('load', () => {
                 api.prevent_exit();
             }
             let tauri::RunEvent::Ready = event else { return };
-            let window = WebviewWindowBuilder::new(
-                app,
-                "probe",
-                WebviewUrl::External(format!("{origin}/workbench").parse().unwrap()),
-            )
-            .inner_size(800.0, 600.0)
-            .position(if focus { 120.0 } else { -4000.0 }, if focus { 120.0 } else { -4000.0 })
-            .visible(true)
-            .focused(false)
-            .incognito(true)
-            .build()
-            .unwrap();
+            let window = WebviewWindowBuilder::new(app, "probe", WebviewUrl::External("about:blank".parse().unwrap()))
+                .inner_size(800.0, 600.0)
+                .position(if focus { 120.0 } else { -4000.0 }, if focus { 120.0 } else { -4000.0 })
+                .visible(true)
+                .focused(false)
+                .incognito(true)
+                .build()
+                .unwrap();
 
             let ready = ready_rx.take().unwrap();
             let origin = origin.clone();
             let handle = app.clone();
             std::thread::spawn(move || {
+                let (action_tx, action_rx) = mpsc::channel();
+                let destination: tauri::Url = format!("{origin}/workbench").parse().unwrap();
+                crate::macos_show_titlebar::install(
+                    &window,
+                    ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
+                    destination.clone(),
+                    move |action| {
+                        let _ = action_tx.send(action);
+                    },
+                );
+                // Match production: install while blank, then navigate after setup.
+                let (initial_url, installed) = on_main(&window, |webview, _, tx| {
+                    let _ = tx.send((
+                        native::document_url(webview),
+                        title_bar::controls(&webview.window().unwrap()),
+                    ));
+                });
+                check(
+                    "controls-installed-before-runtime-navigation",
+                    initial_url.as_deref().is_none_or(|url| url == "about:blank") && installed,
+                    json!({ "url": initial_url, "installed": installed }),
+                );
+                window.navigate(destination).unwrap();
                 assert_eq!(
                     ready.recv_timeout(Duration::from_secs(20)).expect("workbench loaded"),
                     "ready"
                 );
                 std::thread::sleep(Duration::from_millis(500));
                 steps(&window, &origin, focus);
-                title_bar(&window, &ready);
+                title_bar(&window, &ready, action_rx);
                 released(&handle, &origin);
                 named(&handle, &origin);
                 println!("{}", json!({ "done": true }));
@@ -330,17 +349,11 @@ document.getElementById('show').addEventListener('load', () => {
     /// click would, and the page hears the open event, but only on the route the
     /// window was opened at (review of 45533723): `pushState` away silences it,
     /// and coming back restores it.
-    fn title_bar(window: &tauri::WebviewWindow, reports: &mpsc::Receiver<String>) {
-        let (action_tx, action_rx) = mpsc::channel();
-        crate::macos_show_titlebar::install(
-            window,
-            ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
-            "/workbench".to_owned(),
-            move |action| {
-                let _ = action_tx.send(action);
-            },
-        );
-        std::thread::sleep(Duration::from_millis(300));
+    fn title_bar(
+        window: &tauri::WebviewWindow,
+        reports: &mpsc::Receiver<String>,
+        action_rx: mpsc::Receiver<crate::macos_show_titlebar::Action>,
+    ) {
         let geometry = on_main(window, |webview, _, tx| {
             let window = webview.window().expect("window");
             let _ = tx.send(title_bar::controls(&window));
@@ -507,7 +520,7 @@ document.getElementById('show').addEventListener('load', () => {
             crate::macos_show_titlebar::install(
                 &window,
                 ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
-                "/workbench".to_owned(),
+                format!("{origin}/workbench").parse().unwrap(),
                 |_| {},
             );
         }
@@ -586,7 +599,7 @@ document.getElementById('show').addEventListener('load', () => {
         crate::macos_show_titlebar::install(
             &window,
             ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
-            "/workbench".to_owned(),
+            format!("{origin}/workbench").parse().unwrap(),
             |_| {},
         );
         // Runs `body` in the page, then reads the window's title and drawn title.
