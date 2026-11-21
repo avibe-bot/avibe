@@ -194,8 +194,8 @@ merely to cancel verification.
 
 | ID | Native source | Required input and side effect | A / P / lock rule |
 | --- | --- | --- | --- |
-| E20 | New Quit/busy sheet, locked or unlocked; duplicate busy | E19 only if an evaluation/return needs cancellation, then nonblocking native sheet with exact exemption; duplicate preserves sheet | Preserve A; no new visit; no implicit lock/unlock |
-| E21 | Quit/busy Cancel or dismissal | Resolve lifecycle callback; any existing W keeps classifying C independently | No new A/P transition; advance past thresholds to prove no new absence |
+| E20 | New Quit/busy/W1 unsaved-discard sheet, locked or unlocked; duplicate busy | E19 only if an evaluation/return needs cancellation, then nonblocking native sheet with exact exemption; duplicate preserves sheet | Preserve A; no new visit; no implicit lock/unlock |
+| E21 | Quit/busy/W1 unsaved-discard Cancel or dismissal | Resolve lifecycle callback; any existing W keeps classifying C independently | No new A/P transition; advance past thresholds to prove no new absence |
 | E22 | Quit Keep/Stop, unasked quit, termination | Cancel verification through E19 if needed; never demand unlock; discard memory-only state on exit | No unlock; an independently existing absence survives until exit |
 | E28 | Dock/tray/menu/deep link/cold launch pending link | Passive E27; if locked queue intent (foreground-only Action fills empty slot; Content/Navigation/explicit commands replace), request foreground then E07 when eligible; a request is not Arrive | Preserve A; actual OS activation determines new visit |
 | E29 | Mini/global shortcut press/release | Passive E27; locked press queues one explicit command, release alone does not deliver; paired replay after unlock | Preserve A/P until real begin/return; Mini hidden |

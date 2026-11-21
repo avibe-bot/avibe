@@ -33,6 +33,7 @@ struct Peer {
     pending: Option<(u64, Authentication)>,
     calls: usize,
     compose_loaded: bool,
+    app_pages_loaded: Vec<String>,
     executed: Vec<String>,
     centers: [Retained<NSNotificationCenter>; 3],
     native_windows: Vec<Retained<NSWindow>>,
@@ -419,6 +420,92 @@ fn handle(app: &AppHandle, request: Value) {
                 Ok(Value::Null)
             }
             "composeQueue" => Ok(crate::compose::e2e_queue_state(app)),
+            "appWindow" => {
+                // Exercise the physical W1 boundary (real WebviewWindow,
+                // native marker, Show document-title follower and accessory)
+                // without inventing a Runtime receipt or launching a Runtime.
+                let label = request["label"].as_str().ok_or("label required")?;
+                if !matches!(label, "app-editor-lock-fixture" | "app-show-lock-fixture") {
+                    return Err("fixture window label required".into());
+                }
+                let builder = tauri::WebviewWindowBuilder::new(
+                    app,
+                    label,
+                    tauri::WebviewUrl::External(
+                        "http://127.0.0.1:5267/e2e/desktop-client/app-lock-window.html"
+                            .parse()
+                            .unwrap(),
+                    ),
+                )
+                .title("PRIVATE APP TITLE")
+                .inner_size(600.0, 400.0)
+                .visible(false)
+                .focused(false)
+                .incognito(true)
+                .data_directory(machine(app).path.parent().unwrap().join(label))
+                .on_page_load(|view, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        PEER.with_borrow_mut(|p| p.as_mut().unwrap().app_pages_loaded.push(view.label().into()));
+                    }
+                })
+                .initialization_script(crate::app_windows::NATIVE_APP_WINDOW_MARKER);
+                let window = crate::show_window_title::follow(builder)
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                if label == "app-show-lock-fixture" {
+                    crate::macos_show_titlebar::install(
+                        &window,
+                        "Share".into(),
+                        "/e2e/desktop-client/app-lock-window.html".into(),
+                    );
+                }
+                window.show().map_err(|e| e.to_string())?;
+                Ok(snapshot(app))
+            }
+            "appWindowTitles" => Ok(json!(["app-editor-lock-fixture", "app-show-lock-fixture"]
+                .map(|label| { app.get_webview_window(label).map(|window| window.title().unwrap()) }))),
+            "appWindowLoads" => Ok(PEER.with_borrow(|p| json!(p.as_ref().unwrap().app_pages_loaded))),
+            "closeAppWindows" => {
+                for label in ["app-editor-lock-fixture", "app-show-lock-fixture"] {
+                    if let Some(window) = app.get_webview_window(label) {
+                        window.destroy().map_err(|e| e.to_string())?;
+                    }
+                }
+                PEER.with_borrow_mut(|p| p.as_mut().unwrap().app_pages_loaded.clear());
+                Ok(snapshot(app))
+            }
+            "closeGuard" => {
+                let window = app
+                    .get_webview_window("app-editor-lock-fixture")
+                    .ok_or("fixture window required")?;
+                let handle = app.clone();
+                let id = id.clone();
+                tauri::async_runtime::spawn(async move {
+                    let confirmed = crate::app_windows::confirm_discard(&handle, &window).await;
+                    let reply_app = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        output(id, Ok(json!({"confirmed": confirmed, "after": snapshot(&reply_app)})))
+                    });
+                });
+                Ok(Value::Null)
+            }
+            "sheetRead" => Ok(PRESENTATION.with_borrow(|p| {
+                p.quit_alert.as_ref().map_or(Value::Null, |alert| {
+                    json!({"message": alert.informativeText().to_string(),
+                        "title": alert.messageText().to_string(),
+                        "buttons": alert.buttons().iter().map(|button| button.title().to_string()).collect::<Vec<_>>()})
+                })
+            })),
+            "sheetAnswer" => {
+                let sheet = PRESENTATION
+                    .with_borrow(|p| p.quit_window.as_ref().and_then(Weak::load))
+                    .ok_or("no sheet")?;
+                sheet.sheetParent().ok_or("no sheet parent")?.endSheet_returnCode(
+                    &sheet,
+                    request["response"].as_i64().ok_or("response required")? as isize,
+                );
+                Ok(snapshot(app))
+            }
             "ask" => {
                 use avibe_runtime_host::selection::Input;
                 let input = match request["kind"].as_str() {
@@ -621,7 +708,7 @@ fn handle(app: &AppHandle, request: Value) {
             _ => Err(format!("unknown fixture operation: {op}")),
         }
     })();
-    if !matches!(op, "setPolicy" | "quitAlert" | "chrome" | "composeRead") || result.is_err() {
+    if !matches!(op, "setPolicy" | "quitAlert" | "chrome" | "composeRead" | "closeGuard") || result.is_err() {
         output(id, result);
     }
 }
@@ -643,6 +730,7 @@ pub(crate) fn run() {
             pending: None,
             calls: 0,
             compose_loaded: false,
+            app_pages_loaded: Vec::new(),
             executed: Vec::new(),
             centers: std::array::from_fn(|_| NSNotificationCenter::new()),
             native_windows: Vec::new(),

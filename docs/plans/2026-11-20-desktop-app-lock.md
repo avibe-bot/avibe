@@ -2,8 +2,9 @@
 
 ## Contract
 
-Based on origin/master `1da3fb05d7` (including #4031, Ask Vibey #4035 at
-`c553f1004e`, and the shared/iOS App Lock #4040 at `1df64a3d7a`). The approved product
+Based on origin/master `ca534deea6004823c9985347ecdd7cedfcfd91e3`
+(2026-11-21 snapshot, including W1 #4036, Show share #4037, sign-in #4034,
+Mini #4104, lazy Ask Vibey receiver #4077, and shared/iOS App Lock #4040). The approved product
 specification is the orchestrator's `app-lock-plan.md` and `app-lock-design/`.
 All seven recommendations were accepted on 2026-11-20.
 
@@ -35,8 +36,8 @@ Web unlock API. Background Runtime and Agent operations continue.
 - Vault's existing view-retirement checks must distinguish a temporary lock
   cover from actual replacement; locked content must never accept input.
 - Ask Vibey uses the common native Content entry gate before enqueue or file
-  inspection; its raw intent remains memory-only until unlock. W1 remains an
-  independent lane and must preserve the common gate when integrated.
+  inspection; its raw intent remains memory-only until unlock. W1, Show share,
+  sign-in and Mini now come from master and retain the common native cover owner.
 
 ## Validation and delivery
 
@@ -117,7 +118,11 @@ receipt `5b87cb526e7c`). Rebasing onto the merged shared/Ask changes produces
 Ask Vibey's crate-visible main-focus entry together with the existing lock gate.
 The integrated Ask head `123caf2c53` passed independent review (CLEAN, receipt
 `25721b1b9508`). Main then approved preserving pending work against pure Action
-requests; the revised candidate requires another exact-head review.
+requests. The revised head `f26d0f28cd` passed independent review (CLEAN,
+receipt `afd5d35ecfdf`). The 2026-11-21 master rebase requires a new exact-head
+review. Its Machine timing/authentication rules and compose entry gate are
+unchanged from that frozen head. The native lifecycle sheet owner additionally
+serves W1 unsaved-close confirmations, as approved by main on 2026-11-21.
 
 Shared updates are copied without independent edits from `50c57df6` (availability
 contract docs/type comment) and `3431474f` (theme-token lock-frame sizes). The
@@ -125,18 +130,16 @@ AppKit sizes follow that kit; shared copy remains the embedded en/zh catalogs.
 
 ## Current local evidence
 
-The integrated implementation passes 238 Desktop library tests (15 App Lock
+The integrated implementation passes 284 Desktop library tests (15 App Lock
 scenario groups, including the core event matrix across all three policies),
-252 runtime-host tests (three pre-existing ignored), 27 desktop-client e2e cases,
-and 41 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
+264 runtime-host tests (three pre-existing ignored), 29 desktop-client e2e cases,
+and 43 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
 warnings denied. Rust formatting, desktop-client TypeScript, and UI build pass.
 Design typecheck passed for the native baseline; the integration does not change
 design files. The release guard compiles the normal release and proves that a
 release containing authentication substitutes is rejected. Updated native
-light/dark captures were inspected. The Action-priority revision reruns Desktop
-tests, native e2e, clippy, formatting, desktop-client typecheck and the release
-guard; runtime-host, Vitest and UI build evidence is retained from the previous
-CLEAN integration because their implementation and dependencies did not change.
+light/dark captures were inspected for the original native owner. The master
+rebase reruns all listed automated gates against the merged dependencies.
 
 The native peer installs the production observer map on test-owned notification
 centers, so it exercises the actual event routing without broadcasting system
@@ -185,7 +188,8 @@ a signed TEST RC:
 
 Ask Vibey #4035 is integrated at the start of `compose::enqueue`, before file
 validation or share allocation. Its consumer test E30 uses the production queue,
-WKWebView transport, and shipped composer receiver. It proves latest-intent
+WKWebView transport, and the shipped lazy `DesktopCompose` component, which
+imports `DesktopComposeMount` and installs the actual receiver. It proves latest-intent
 replacement, cancellation followed by Dock/tray Open without losing content,
 retained navigation, deferred file opening (a selected file is
 created only after the request), Off behavior, and a previously admitted share
@@ -197,8 +201,13 @@ The eventual PR must describe this semantic integration.
 For acceptance, select text, a URL, and files through the actual Ask Vibey Service
 while locked: no selected content appears on the lock screen; cancel retains it;
 success places the newest selection in the input without sending. Also verify
-an already queued selection waits through a subsequent lock. W1 #4036 needs the
-corresponding window/menu acceptance checks after integration.
+an already queued selection waits through a subsequent lock. The native E31
+fixture builds physical App/Show WebviewWindows with W1's native marker, the
+production Show document-title follower and title-bar accessory. It checks an
+existing window and one created while locked, covering content and titles and
+restoring document titles after unlock. This is evidence for the physical cover
+boundary, not W1 Runtime-receipt authorization or real sign-in. The integrated
+package still needs the corresponding launch/menu/sign-in acceptance checks.
 
 ## Revised freeze and package schedule
 
@@ -209,8 +218,29 @@ composer flow after cancelled authentication. Specific menu/shortcut commands
 remain distinct from foreground-only Action, with no change to their behavior.
 No timing/authentication Machine rules changed.
 
-Packaging is on hold until #4034/#4036/#4037 merge. Main will then request one
-package from master + App Lock + `fix/mini-input-card-width`, preserving the
-features in the installed w1.x line. The [smoke checklist](app-lock-desktop-smoke.md)
-separates Agent-runnable evidence from Max's real authentication and hardware
-checks. Do not build or install the standalone App Lock branch meanwhile.
+On 2026-11-21 main requested rebasing after #4034/#4036/#4037 and Mini #4104
+merged. The integration snapshot is `ca534deea6`; Mini no longer requires a
+separate branch. The first fixed-signature acceptance package belongs to main
+and packager session `sestwvy8p84ue`. This lane does not build/install packages.
+The [smoke checklist](app-lock-desktop-smoke.md) separates Agent-runnable evidence
+from Max's real authentication and hardware checks.
+
+Rebase conflicts combined both lanes' AppKit features and main Workbench
+initialization markers. Duplicate AppKit features were removed. Main's explicit
+launch link retains precedence over a Computer Use setup-resume link; the
+locked launch retains the same ordering. The W1 native marker is crate-visible
+solely so the physical-window peer can consume the production constant. No
+new test bypass is exposed to a release build.
+
+W1 now asks before quitting with unsaved page state. Its ordinary dialog would
+be concealed by App Lock, preventing an answer. When App Lock is effective,
+`confirm_discard` therefore uses the existing asynchronous native lifecycle
+sheet and its exact window exemption. The body/buttons use shared generic
+`apps.editor.confirmDiscardClose`, `apps.editor.discardAndClose`, and
+`common.cancel` copy; neither the page-supplied message nor its title is exposed.
+Cancel retains state; only Discard permits the existing close/quit chain to
+continue. Off retains W1's ordinary dialog. The consuming native test queries
+a real WebviewWindow's private close guard, answers Cancel and Discard while
+locked, checks that underlying content stays covered and no LA is requested,
+and verifies that unlocked Cancel does not manufacture absence. No modal loop
+or new lifecycle exemption registry was introduced.

@@ -772,6 +772,18 @@ pub(crate) fn show_lifecycle_busy(app: &AppHandle, catalog: &crate::NativeTrayCa
         |_| {},
     )
 }
+/// W1 close/quit guards still ask before discarding unsaved work. Use native
+/// catalog copy rather than exposing the covered page's title or message.
+pub(crate) fn show_discard_question(app: &AppHandle, callback: impl FnOnce(bool) + Send + 'static) -> bool {
+    let text = |key: &str| crate::product_text(key).unwrap_or_else(|| key.to_owned());
+    show_lifecycle_alert(
+        app,
+        "Avibe".into(),
+        text("apps.editor.confirmDiscardClose"),
+        vec![text("apps.editor.discardAndClose"), text("common.cancel")],
+        move |answer| callback(matches!(answer, tauri_plugin_dialog::MessageDialogResult::Yes)),
+    )
+}
 fn show_lifecycle_alert(
     app: &AppHandle,
     title: String,

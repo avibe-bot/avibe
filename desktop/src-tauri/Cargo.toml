@@ -149,8 +149,6 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSViewController",
   "NSAlert",
   "NSAppearance",
-  "NSBitmapImageRep",
-  "NSImageRep",
   "NSWorkspace",
   "NSRunningApplication",
   "libc",

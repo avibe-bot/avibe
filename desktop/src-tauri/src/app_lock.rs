@@ -10,8 +10,8 @@ compile_error!("app-lock-e2e authentication substitutes must never ship in relea
 mod macos;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
-    defer, defer_kind, init, is_locked, protects_view, queue_if_locked, ready, show_lifecycle_busy, show_quit_question,
-    sync_windows,
+    defer, defer_kind, init, is_locked, protects_view, queue_if_locked, ready, show_discard_question,
+    show_lifecycle_busy, show_quit_question, sync_windows,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -581,6 +581,11 @@ pub(crate) fn show_quit_question(
     _catalog: &crate::NativeTrayCatalog,
     _callback: impl FnOnce(tauri_plugin_dialog::MessageDialogResult) + Send + 'static,
 ) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn show_discard_question(_app: &tauri::AppHandle, _callback: impl FnOnce(bool) + Send + 'static) -> bool {
     false
 }
 

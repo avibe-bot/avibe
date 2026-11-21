@@ -2,10 +2,11 @@
 
 ## Package boundary
 
-Do not build or install yet. Main will request one acceptance package after
-#4034, #4036 and #4037 merge: master + the frozen App Lock branch +
-`fix/mini-input-card-width`. The installed w1.x line contains additional unmerged
-work; replacing it with the standalone App Lock branch would remove features.
+As of 2026-11-21, #4034, #4036, #4037 and Mini #4104 are merged. The App Lock
+branch rebases onto master snapshot `ca534deea6`, which also contains the lazy
+Ask Vibey receiver #4077. Main and packager session `sestwvy8p84ue` own the first
+fixed-signature acceptance package. This implementation lane does not package
+or install. The previously separate Mini branch is already included by master.
 Record the integrated SHA and package identity before running this checklist.
 Run the two hardware groups below with both the ad-hoc local package and the
 signed TEST RC. A mock-authentication peer does not satisfy real-device checks.
@@ -20,16 +21,19 @@ a package without main's packaging instruction.
 | --- | --- |
 | Build and substitute boundary | Desktop/runtime-host unit tests, normal/e2e clippy, fmt, focused Vitest, UI build and desktop-client typecheck pass. Normal release check passes; release with `app-lock-e2e` fails at the explicit compile gate. |
 | Native peer scenarios | Exercise the real AppKit owner with substituted LA/time/system facts: cold launch, all three enabled thresholds, cancellation, two-second return ordering/expiry, lifecycle sheets, capability recovery and native entry routing. |
-| Real Ask consumer | Production enqueue, WKWebView transport and shipped composer receiver: locked requests do not allocate shares or open files; latest Content/Navigation wins; cancellation followed by Dock/tray Open retains the payload and pending hint; unlock stages without sending. Previously admitted shares wait while locked. |
+| Real Ask consumer | Production enqueue, WKWebView transport and shipped lazy DesktopCompose/ DesktopComposeMount: locked requests do not allocate shares or open files; latest Content/Navigation wins; cancellation followed by Dock/tray Open retains the payload and pending hint; unlock stages without sending. Previously admitted shares wait while locked. |
 | Queue priority | Action fills only an empty slot. It cannot replace another pending intent or clear an older Workbench navigation/update. Explicit commands retain their existing deferred execution behavior. |
 | Default Off and settings | Settings is under General. Off preserves existing window/entry behavior. Setting changes commit only after successful system verification; cancellation preserves the previous value. Automated evidence uses the peer; coordinate with Max for a real verification. |
 | Windows and privacy | On the designated package/profile, inspect main, independent App/Show, new windows and an assigned Vault fixture. Content and document titles are covered; input cannot reach content; Mini/update popovers hide. Inspect light/dark, resize, Mission Control and screen-sharing captures with test content. System tray/menu controls stay usable. |
 | Foreground entries | With a test profile already locked, exercise deep links, Dock, tray, shortcuts and Services selections. Observe generic hints only; after Max unlocks, confirm the requested destination/input. Test new Content versus Navigation replacement in both directions. |
-| Lifecycle | With Max available if verification is needed, test Quit/busy sheets from main, minimized main and background/Dock. Sheets remain visible and responsive; cancellation releases the lifecycle request and does not create an absence deadline. Quit never requires unlocking. |
-| Integrated regressions | After the three prerequisite PRs and Mini branch are combined, verify W1/P3/sign-in windows inherit covers and Mini sizing still works. Confirm background Runtime/Agent work continues. |
+| Lifecycle | With Max available if verification is needed, test Quit/busy sheets from main, minimized main and background/Dock. Sheets remain visible and responsive; cancellation releases the lifecycle request and does not create an absence deadline. Quit never requires unlocking. With unsaved Editor state, the generic Discard/Cancel confirmation stays visible without revealing the page title or message; Cancel keeps state and Discard permits the existing close/quit chain. |
+| Integrated regressions | On the combined master-based package, verify W1/P3/sign-in windows inherit covers and Mini sizing still works. Confirm background Runtime/Agent work continues. |
 
 The current native peer is test-only, with a nonpersistent WebView store,
-temporary files/preferences and inert Runtime dependencies. Do not infer real
+temporary files/preferences and inert Runtime dependencies. Its W1 physical
+window case uses real WebviewWindows and the production Show title follower
+and accessory; Runtime-receipt authorization and actual account sign-in remain
+package checks. Do not infer real
 LA focus timing, real session recovery or Vault approval from these substitutes.
 
 ## B. Needs Max

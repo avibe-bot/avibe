@@ -163,6 +163,56 @@ test('closed-lid biometry keeps its Touch ID type but the native button offers t
   expect((await peer.send('unlock')).locked).toBe(false);
 });
 
+test('W1 physical App/Show windows inherit covers before and after locking, including followed document titles', async () => {
+  await peer.send('appWindow', { label: 'app-editor-lock-fixture' });
+  await expect.poll(() => peer.send('appWindowTitles')).toEqual(['PRIVATE DOCUMENT TITLE', null]);
+  await peer.send('reset', { policy: 'immediately' });
+  const before = await peer.send('snapshot');
+  const added = await peer.send('appWindow', { label: 'app-show-lock-fixture' });
+  expect(added.windows.length).toBeGreaterThan(before.windows.length);
+  expect(added.windows.every((window) => window.covered && window.hidden && window.contentCount > 0 && !window.title.includes('PRIVATE'))).toBe(true);
+  // Wait for WKWebView's title callback while locked, then consume the stored
+  // title on unlock. The actual follower must not reveal the document title.
+  await expect.poll(() => peer.send('appWindowLoads')).toEqual(['app-editor-lock-fixture', 'app-show-lock-fixture']);
+  expect(await peer.send<string[]>('appWindowTitles')).toEqual(['Avibe is locked', 'Avibe is locked']);
+  await peer.send('unlock');
+  await expect.poll(() => peer.send('appWindowTitles')).toEqual(['PRIVATE DOCUMENT TITLE', 'PRIVATE DOCUMENT TITLE']);
+  await peer.send('closeAppWindows');
+});
+
+test('W1 unsaved close/quit guard stays answerable while locked without revealing the page confirmation', async () => {
+  await peer.send('appWindow', { label: 'app-editor-lock-fixture' });
+  await expect.poll(() => peer.send('appWindowLoads')).toEqual(['app-editor-lock-fixture']);
+  await peer.send('reset', { policy: 'immediately' });
+  for (const [response, confirmed] of [[1001, false], [1000, true]] as const) {
+    const answer = peer.send<{ confirmed: boolean; after: Snapshot }>('closeGuard');
+    await expect.poll(() => peer.send('sheetRead')).toEqual({
+      title: 'Avibe', message: 'Discard unsaved changes and close this window?',
+      buttons: ['Discard and Close', 'Cancel'],
+    });
+    const waiting = await peer.send('snapshot');
+    expect(waiting.quitAlertVisible).toBe(true);
+    expect(waiting.locked).toBe(true);
+    expect(waiting.windows.every((window) => window.hidden && window.covered)).toBe(true);
+    await peer.send('sheetAnswer', { response });
+    const result = await answer;
+    expect(result.confirmed).toBe(confirmed);
+    expect(result.after.locked).toBe(true);
+    expect(result.after.authCalls).toBe(0);
+    expect(result.after.quitAlertVisible).toBe(false);
+  }
+  // The same production close guard while unlocked is still an internal
+  // sheet: cancelling it cannot create an absence deadline.
+  await peer.send('reset', { policy: 'oneMinute' });
+  await peer.send('unlock');
+  const cancelled = peer.send<{ confirmed: boolean }>('closeGuard');
+  await expect.poll(() => peer.send('sheetRead')).not.toBeNull();
+  await peer.send('sheetAnswer', { response: 1001 });
+  expect((await cancelled).confirmed).toBe(false);
+  expect((await peer.send('tick', { time: 1000 })).locked).toBe(false);
+  await peer.send('closeAppWindows');
+});
+
 test('one memory-only pending entry survives cancellation and only the latest executes', async () => {
   await peer.send('reset', { policy: 'immediately' });
   await peer.send('entry', { kind: 'navigation', value: 'avibe://session/old-fixture' });
@@ -470,8 +520,8 @@ test('E22 Quit Keep and Stop choices do not request an unlock', async () => {
 
 test('E30 Ask Vibey defers its real queue and file reads, then delivers through WKWebView to the shipped composer receiver', async () => {
   await peer.send('composePage');
-  type Observed = { lines: string[]; files: { name: string; text: string }[]; notices: string[]; opened: number };
-  await expect.poll(() => peer.send<Observed | null>('composeRead')).toMatchObject({ lines: [], files: [] });
+  type Observed = { lines: string[]; files: { name: string; text: string }[]; notices: string[]; mounted: boolean; route: string };
+  await expect.poll(() => peer.send<Observed | null>('composeRead')).toMatchObject({ lines: [], files: [], mounted: true });
   const baseline = await peer.send<{ admitted: number }>('composeQueue');
   await peer.send('reset', { policy: 'immediately' });
   await peer.send('outcome', { value: null });
@@ -515,7 +565,7 @@ test('E30 Ask Vibey defers its real queue and file reads, then delivers through 
   const observed = await peer.send<Observed>('composeRead');
   expect(observed.notices).toEqual([]);
   expect(observed.lines).toEqual(['"The selected contract clause."']);
-  expect(observed.opened).toBe(2);
+  expect(observed.route).toBe('/chat/ses_main');
   // With App Lock Off the same consumer still inserts without any LA call.
   await peer.send('reset');
   await peer.send('ask', { kind: 'url', value: 'https://example.com/contract' });

@@ -2066,7 +2066,7 @@ fn build_main_window(
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
         .initialization_script(show_share::marker())
-            .initialization_script(app_lock::MARKER)
+        .initialization_script(app_lock::MARKER)
         .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
@@ -3197,7 +3197,8 @@ pub fn run() {
             macos_terminate::install(app.handle());
             let mut launch_arguments: Vec<String> = std::env::args_os().skip(1).filter_map(|a| a.into_string().ok()).collect();
             #[cfg(target_os = "macos")]
-            if computer_use::take_setup_resume(app.handle()) { launch_arguments.push(COMPUTER_USE_SETUP_DEEP_LINK.to_owned()); }
+            // Keep master's ordering: an explicit launch link wins over setup resume.
+            if computer_use::take_setup_resume(app.handle()) { launch_arguments.insert(0, COMPUTER_USE_SETUP_DEEP_LINK.to_owned()); }
             let pending_launch = launch_arguments.clone();
             let has_link = launch_arguments.iter().any(|a| a == updater::OPEN_URL || avibe_runtime_host::deep_link::parse_deep_link(a).is_some());
             if !has_link || !app_lock::queue_if_locked(app.handle(), move |app| receive_native_deep_link(app, pending_launch)) {
