@@ -28,6 +28,9 @@ base64 = "0.23"
 avibe-runtime-host = { path = "../runtime-host" }
 cookie = "0.18"
 flate2 = "1"
+getrandom = "0.4"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
