@@ -21,6 +21,10 @@ struct NativeShellMetadata: Equatable {
     static let platform = "ios"
     /// Every shell's capabilities. `direct` is added only when the App has a
     /// direct transport registered (`withDirect(_:)`).
+    /// The Turn Live Activity entry (`liveActivity.*`, #4045/#4046) is
+    /// withdrawn: the owner never asked for it. Its code stays, unreachable.
+    static let liveActivitiesAvailable = false
+
     static let capabilities = [
         "accountPresentation": 2,
         "app": 1,
@@ -33,7 +37,8 @@ struct NativeShellMetadata: Equatable {
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
-        "liveActivities": 1,
+        // `liveActivities` is withdrawn (owner, 11-21): not announced, and
+        // its bridge methods refuse (`liveActivitiesAvailable`).
         "push": 1,
         "systemSchedule": 1,
         "viewport": 1,
@@ -1207,6 +1212,11 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     ) {
         switch request.method {
         case .liveActivityStatus, .liveActivityStart, .liveActivityStop, .liveActivityOpenSettings:
+            // Withdrawn: an older page that still calls these gets nothing.
+            guard NativeShellMetadata.liveActivitiesAvailable else {
+                reply(replyHandler, error: .unsupported)
+                return
+            }
             let origin = policy.instanceOrigin
             Task { @MainActor [weak self, weak sourceWebView] in
                 guard let self, let url = sourceWebView?.url,

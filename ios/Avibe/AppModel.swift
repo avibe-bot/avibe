@@ -1585,9 +1585,15 @@ final class AppModel: ObservableObject {
         // Navigation requested before bootstrap is delivered before Health
         // restoration, which may wait on the network and HealthKit.
         deliverPendingInstanceOpen()
-        if !AvibeAppDelegate.isRunningTests { turnActivities.observeAuthorization() }
-        turnActivities.selectTarget(liveActivityTarget)
-        await turnActivities.reconcile(target: liveActivityTarget)
+        // The Turn Live Activity entry is withdrawn (11-21): end any card an
+        // earlier build left, with no instance request, and start nothing.
+        if NativeShellMetadata.liveActivitiesAvailable {
+            if !AvibeAppDelegate.isRunningTests { turnActivities.observeAuthorization() }
+            turnActivities.selectTarget(liveActivityTarget)
+            await turnActivities.reconcile(target: liveActivityTarget)
+        } else {
+            await turnActivities.endAllLocally()
+        }
         await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
     }
 
@@ -2420,8 +2426,10 @@ final class AppModel: ObservableObject {
     /// interval was reported) ends its attempt here.
     private func runtimeOpenWillEnterForeground() {
         if hasCompletedBootstrap {
-            turnActivities.selectTarget(liveActivityTarget)
-            Task { await turnActivities.reconcile(target: liveActivityTarget) }
+            if NativeShellMetadata.liveActivitiesAvailable {
+                turnActivities.selectTarget(liveActivityTarget)
+                Task { await turnActivities.reconcile(target: liveActivityTarget) }
+            }
         }
         Task { await healthSync?.resume(foreground: true) }
         Task { [weak self] in
@@ -2613,9 +2621,11 @@ final class AppModel: ObservableObject {
             confirmSessionThenOpen()
             return true
         }
-        let turnTarget = liveActivityTarget
-        turnActivities.selectTarget(turnTarget)
-        Task { await turnActivities.reconcile(target: turnTarget) }
+        if NativeShellMetadata.liveActivitiesAvailable {
+            let turnTarget = liveActivityTarget
+            turnActivities.selectTarget(turnTarget)
+            Task { await turnActivities.reconcile(target: turnTarget) }
+        }
         nativePushCoordinator.resumeAfterAccountActivation()
         if let previous = runtimeOpenAttempt {
             lastRuntimeOpenTermination = RuntimeOpenTermination(
