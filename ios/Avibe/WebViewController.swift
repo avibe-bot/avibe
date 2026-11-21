@@ -46,6 +46,8 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
 
     override func reset() {
         super.reset()
+        // UIKit took the gesture back without ending the touch for us.
+        if tracked != nil, let webView = view as? WKWebView { NativeHoldCapture.shared.touchEnded(in: webView) }
         tracked = nil
     }
 
@@ -921,6 +923,7 @@ final class WebViewController: UIViewController {
         retainedWebView = created
         observePrimaryNavigationState(created)
         created.addGestureRecognizer(NativeHoldTouchObserver())
+        NativeHoldCapture.shared.watch(created)
         return created
     }
 

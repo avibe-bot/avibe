@@ -66,9 +66,12 @@ final class NativeHoldCapture {
 
     /// One press's timings, in ms from its touch-down unless a duration.
     struct HoldTimings: Equatable {
-        /// `quiet`: prepared at touch-down, started at recognition.
-        /// `early`: started at touch-down. `late`: all of it at recognition.
-        var variant = "quiet"
+        /// `early`: started at touch-down (the default). `quiet`: prepared
+        /// at touch-down, started at recognition. `late`: all of it at
+        /// recognition (other audio playing, or a Bluetooth route).
+        var variant = "early"
+        /// The hold threshold this press was timed with, in ms.
+        var holdMs = 200
         /// Why nothing was prepared at touch-down (`other`, `bluetooth`).
         var why: String?
         var route = ""
@@ -97,12 +100,36 @@ final class NativeHoldCapture {
             return liveAt - hapticAt
         }
 
+        /// Setting up the session and the input, start excluded.
+        private var setUpMs: Int? {
+            guard let categoryMs, let activateMs, let prepareMs else { return nil }
+            return categoryMs + activateMs + prepareMs
+        }
+
+        /// Touch-down to the first captured audio had the input started at
+        /// touch-down: measured when it did (`early`), else from this
+        /// press's own set-up and start times.
+        var liveEarly: Int? {
+            if variant == "early" { return liveAt }
+            guard let setUpMs, let startMs else { return nil }
+            return setUpMs + startMs
+        }
+
+        /// The same had it been prepared at touch-down and started at
+        /// recognition: measured for `quiet`, else computed.
+        var liveQuiet: Int? {
+            if variant == "quiet" { return liveAt }
+            guard let setUpMs, let startMs else { return nil }
+            return max(holdMs, setUpMs) + startMs
+        }
+
         var fields: [String: Any] {
             var fields: [String: Any] = ["variant": variant, "route": route]
             let numbers: [(String, Int?)] = [
                 ("categoryMs", categoryMs), ("activateMs", activateMs), ("prepareMs", prepareMs),
                 ("armedAt", armedAt), ("recognisedAt", recognisedAt), ("hapticAt", hapticAt),
                 ("startMs", startMs), ("liveAt", liveAt), ("cueToLive", cueToLive),
+                ("liveEarly", liveEarly), ("liveQuiet", liveQuiet), ("holdMs", holdMs),
                 ("firstBufferAt", firstBufferAt), ("firstBufferBytes", firstBufferBytes),
                 ("adoptedAt", adoptedAt), ("releasedAt", releasedAt),
             ]
@@ -119,6 +146,7 @@ final class NativeHoldCapture {
                 + part("cat", categoryMs) + part("act", activateMs) + part("prep", prepareMs)
                 + part("armed", armedAt) + part("rec", recognisedAt) + part("hap", hapticAt)
                 + part("start", startMs) + part("live", liveAt) + part("gap", cueToLive)
+                + part("e", liveEarly) + part("q", liveQuiet)
                 + part("buf", firstBufferAt) + part("bytes", firstBufferBytes)
                 + part("adopt", adoptedAt) + part("up", releasedAt)
                 + (end.map { " end=" + $0 } ?? "")
@@ -139,6 +167,8 @@ final class NativeHoldCapture {
         var begun = false
         /// The input was prepared at touch-down (`quiet`).
         var prepared = false
+        /// A recognised hold's finger is in the cancel position.
+        var inCancel = false
         var timings = HoldTimings()
         var cancelTimer: (() -> Void)?
 
@@ -208,7 +238,8 @@ final class NativeHoldCapture {
         /// one event, then the rest as it comes.
         func adopt() {
             adopted = true
-            deliveredFirst = true
+            // Nothing recorded yet: the first audio still goes at once.
+            deliveredFirst = !pending.isEmpty
             flush()
         }
     }
@@ -219,12 +250,17 @@ final class NativeHoldCapture {
     private var closing: [String: Take] = [:]
     private let afterQueued: (@escaping () -> Void) -> Void
     private var backgroundObserver: NSObjectProtocol?
+    private var inactiveObserver: NSObjectProtocol?
 
     private let isInBackground: () -> Bool
 
     // The App's own hold recognition (`voice.holdSurfaces`).
     private var surfaces: [Surface] = []
     private weak var surfacesWebView: WKWebView?
+    /// The WebViews whose touches reach `touchDown` (their recogniser).
+    private let watched = NSHashTable<WKWebView>.weakObjects()
+    /// The page's hold threshold, as it named it with its surfaces.
+    private var holdSeconds = NativeHoldCapture.defaultHoldSeconds
     /// The press being followed, until its take is adopted or it ends.
     private var hold: Hold?
     private let after: @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> (() -> Void)
@@ -232,13 +268,18 @@ final class NativeHoldCapture {
     private let haptic: NativeHoldHaptic
     private let startsAtTouchDown: () -> Bool
     private let noteTimings: (String) -> Void
+    private let noteTap: (_ ms: Int, _ moved: Bool) -> Void
     private let sendHoldEvent: @MainActor (WKWebView?, [String: Any]) -> Void
     private let sendCaptureEvent: @MainActor (WKWebView?, String, Event) -> Void
 
     /// How long a press is held before it is a hold, and how far it may
     /// move first: the page's own numbers for a finger (`HOLD_GESTURE`).
-    static let holdSeconds: TimeInterval = 0.2
+    static let defaultHoldSeconds: TimeInterval = 0.2
     static let slop: CGFloat = 10
+    /// A recognised hold slides up this far to arm its cancel, and comes
+    /// back within this to disarm it: the page's own lines (`HOLD_GESTURE`).
+    static let cancelDistance: CGFloat = 80
+    static let uncancelDistance: CGFloat = 60
     /// How long a recognised hold's take waits for its page.
     static let adoptionWait: TimeInterval = 3
     /// The most audio kept for a page that has not taken its take: 15 s.
@@ -254,8 +295,9 @@ final class NativeHoldCapture {
         after: (@MainActor (TimeInterval, @escaping @MainActor () -> Void) -> (() -> Void))? = nil,
         uptimeMs: @escaping () -> Int = { Int(DispatchTime.now().uptimeNanoseconds / 1_000_000) },
         haptic: NativeHoldHaptic? = nil,
-        startsAtTouchDown: @escaping () -> Bool = { NativeHoldEarlySwitch.isOn },
+        startsAtTouchDown: @escaping () -> Bool = { !NativeHoldQuietSwitch.isOn },
         noteTimings: @escaping (String) -> Void = { NativeHoldTimings.add($0) },
+        noteTap: @escaping (_ ms: Int, _ moved: Bool) -> Void = { NativeHoldTaps.note(ms: $0, moved: $1) },
         sendHoldEvent: (@MainActor (WKWebView?, [String: Any]) -> Void)? = nil,
         sendCaptureEvent: (@MainActor (WKWebView?, String, Event) -> Void)? = nil
     ) {
@@ -267,6 +309,7 @@ final class NativeHoldCapture {
         self.haptic = haptic ?? .system()
         self.startsAtTouchDown = startsAtTouchDown
         self.noteTimings = noteTimings
+        self.noteTap = noteTap
         self.sendHoldEvent = sendHoldEvent ?? { webView, detail in NativeHoldCapture.dispatchHoldEvent(webView, detail) }
         self.sendCaptureEvent = sendCaptureEvent ?? { webView, take, event in
             webView?.evaluateJavaScript(NativeHoldCapture.eventScript(take: take, event: event))
@@ -285,6 +328,22 @@ final class NativeHoldCapture {
                 self.end(reason: "background")
             }
         }
+        inactiveObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.appWillResignActive() }
+        }
+    }
+
+    /// App Lock, Control Center, a call: the App is no longer in front. A
+    /// press that is not yet its page's take ends, and what it recorded is
+    /// dropped. A take its page has is the page's to end, as today.
+    func appWillResignActive() {
+        if let take = running, take.hold != nil, !take.adopted {
+            discard(take, why: "inactive")
+        } else if let hold, !hold.begun {
+            cancelHold(hold, why: "inactive")
+        }
     }
 
     var currentTake: String? { running?.id }
@@ -302,6 +361,14 @@ final class NativeHoldCapture {
     func prepare() {
         guard running == nil, hold == nil, !VoiceCaptureAudioState.active else { return }
         audio.prepare()
+    }
+
+    /// The page's `holdMs` argument: a whole number of ms from 100 to 1000.
+    static func holdMs(from value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue == number.doubleValue.rounded(), (100...1000).contains(number.intValue)
+        else { return nil }
+        return number.intValue
     }
 
     /// The page's `surfaces` argument: at most eight, each an id and a
@@ -354,6 +421,9 @@ final class NativeHoldCapture {
         )
         // A press of the App's own that never became this page's take.
         if let hold, !hold.begun { cancelHold(hold, why: "replaced") }
+        // What that press (or the take just replaced) asked of the input
+        // has finished before this start sets the session.
+        audio.settle()
         running = take
         do {
             let other = audio.otherAudioPlaying
@@ -404,11 +474,33 @@ final class NativeHoldCapture {
 
     // MARK: A hold the App recognises itself
 
+    /// `webView`'s touches reach this capture (its recogniser is attached).
+    func watch(_ webView: WKWebView) {
+        watched.add(webView)
+    }
+
     /// The page's hold surfaces where a hold may record now (none: the App
-    /// follows no press). Kept per WebView; a new list replaces the last.
-    func setSurfaces(_ surfaces: [Surface], for webView: WKWebView) {
+    /// follows no press), and its hold threshold. One WebView's list at a
+    /// time: a new one replaces the last, and only its own WebView can
+    /// take it back. False for a WebView whose touches the App does not see
+    /// (a popup): its page goes on recognising its holds itself.
+    @discardableResult
+    func setSurfaces(_ surfaces: [Surface], holdMs: Int? = nil, for webView: WKWebView) -> Bool {
+        if surfaces.isEmpty {
+            guard surfacesWebView === webView else { return true }
+        } else {
+            guard watched.contains(webView) else { return false }
+        }
         self.surfaces = surfaces
         surfacesWebView = surfaces.isEmpty ? nil : webView
+        if let holdMs { holdSeconds = TimeInterval(holdMs) / 1000 }
+        // A press still waiting to be a hold, on a surface that is no
+        // longer one: it is not followed any more.
+        if let hold, !hold.recognised,
+           !(hold.webView === webView && surfaces.contains { $0.id == hold.surface && $0.rect.contains(hold.origin) }) {
+            cancelHold(hold, why: "withdrawn")
+        }
+        return true
     }
 
     var followsPress: Bool { hold != nil }
@@ -427,6 +519,8 @@ final class NativeHoldCapture {
         )
         self.hold = hold
         hold.timings.route = audio.route
+        hold.timings.holdMs = Int((holdSeconds * 1000).rounded())
+        hold.timings.variant = "quiet"
         haptic.prepare()
         if audio.otherAudioPlaying {
             // Activating would pause it: a touch that is not a hold must not.
@@ -455,16 +549,31 @@ final class NativeHoldCapture {
                 }
             }
         }
-        hold.cancelTimer = after(Self.holdSeconds) { [weak self, weak hold] in
+        hold.cancelTimer = after(holdSeconds) { [weak self, weak hold] in
             guard let self, let hold, self.hold === hold, !hold.recognised else { return }
             self.recognise(hold)
         }
     }
 
     func touchMoved(to point: CGPoint, in webView: WKWebView) {
-        guard let hold, hold.webView === webView, !hold.recognised else { return }
-        if hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
-            cancelHold(hold, why: "moved")
+        guard let hold, hold.webView === webView else { return }
+        guard hold.recognised else {
+            if hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
+                cancelHold(hold, why: "moved")
+            }
+            return
+        }
+        // Sliding up arms the cancel and coming back disarms it, each felt
+        // once per crossing: the two lines are 20 pt apart, so a finger
+        // resting at either does not repeat it.
+        guard let take = running, take.hold === hold else { return }
+        let up = hold.origin.y - point.y
+        if !hold.inCancel, up > Self.cancelDistance {
+            hold.inCancel = true
+            haptic.intoCancel()
+        } else if hold.inCancel, up <= Self.uncancelDistance {
+            hold.inCancel = false
+            haptic.back()
         }
     }
 
@@ -491,6 +600,7 @@ final class NativeHoldCapture {
         hold.timings.recognisedAt = since(hold)
         haptic.fire()
         hold.timings.hapticAt = since(hold)
+        haptic.prepareSlide()
         if !hold.begun { begin(hold) }
         sendHoldEvent(hold.webView, ["phase": "recognised", "take": hold.take, "surface": hold.surface])
         hold.cancelTimer = after(Self.adoptionWait) { [weak self, weak hold] in
@@ -570,7 +680,17 @@ final class NativeHoldCapture {
         self.hold = nil
         if hold.prepared { audio.disarm() }
         hold.timings.end = why
-        noteTimings(hold.timings.line)
+        note(hold)
+    }
+
+    /// Keeps a finished press's timings. A tap or a scroll is only counted,
+    /// by how long it lasted: they are many, and would push the holds out.
+    private func note(_ hold: Hold) {
+        switch hold.timings.end {
+        case "tap": noteTap(since(hold), false)
+        case "moved": noteTap(since(hold), true)
+        default: noteTimings(hold.timings.line)
+        }
     }
 
     /// Ends a hold's take that no page took: its audio never leaves memory.
@@ -604,7 +724,7 @@ final class NativeHoldCapture {
 
     /// Stops whatever runs for `webView` (it is going away).
     func stop(webView gone: WKWebView) {
-        if surfacesWebView === gone { setSurfaces([], for: gone) }
+        setSurfaces([], for: gone)
         if let hold, hold.webView === gone, !hold.begun { cancelHold(hold, why: "gone") }
         // Its document is not the one that asked: it hears nothing more,
         // a take still flushing included.
@@ -621,6 +741,9 @@ final class NativeHoldCapture {
     func yieldToActionButton() {
         if let hold, !hold.begun { cancelHold(hold, why: "action_button") }
         end(reason: "action_button")
+        // The session is the Action Button's from here: nothing a press
+        // asked of the input is still on its way.
+        audio.settle()
     }
 
     private func end(reason: String?) {
@@ -639,7 +762,7 @@ final class NativeHoldCapture {
             hold.cancelTimer = nil
             if self.hold === hold { self.hold = nil }
             hold.timings.end = reason ?? "stopped"
-            noteTimings(hold.timings.line)
+            note(hold)
             if take.adopted, !take.detached {
                 // For the page's own trace of this take.
                 sendHoldEvent(take.webView, ["phase": "timings", "take": take.id, "timings": hold.timings.fields])
@@ -679,20 +802,45 @@ let nativeHoldBatchBytes = 3_200
 struct NativeHoldHaptic {
     var prepare: @MainActor () -> Void
     var fire: @MainActor () -> Void
+    /// The two slide haptics, made ready at recognition: into the cancel
+    /// position, and back onto the composer.
+    var prepareSlide: @MainActor () -> Void
+    var intoCancel: @MainActor () -> Void
+    var back: @MainActor () -> Void
 
     @MainActor
     static func system() -> NativeHoldHaptic {
-        // The page's own cue for a hold (`impactFeedback('medium')`).
-        let generator = UIImpactFeedbackGenerator(style: .medium)
-        return NativeHoldHaptic(prepare: { generator.prepare() }, fire: { generator.impactOccurred() })
+        // The page's own cue for a hold (`impactFeedback('medium')`); rigid
+        // and soft differ from it and from the release's light.
+        let start = UIImpactFeedbackGenerator(style: .medium)
+        let cancel = UIImpactFeedbackGenerator(style: .rigid)
+        let back = UIImpactFeedbackGenerator(style: .soft)
+        return NativeHoldHaptic(
+            prepare: { start.prepare() },
+            fire: { start.impactOccurred() },
+            prepareSlide: {
+                cancel.prepare()
+                back.prepare()
+            },
+            intoCancel: {
+                cancel.impactOccurred()
+                back.prepare()
+            },
+            back: {
+                back.impactOccurred()
+                cancel.prepare()
+            }
+        )
     }
 }
 
-/// The hidden switch for the variant that starts the microphone at
-/// touch-down (`avibe-diagnostics://voice/hold-early?on=1`): off unless a
-/// TestFlight or development build was told otherwise.
-enum NativeHoldEarlySwitch {
-    static let key = "avibe.voiceHold.startsAtTouchDown"
+/// The hidden switch for the variant that only prepares the microphone at
+/// touch-down and starts it at recognition
+/// (`avibe-diagnostics://voice/hold-quiet?on=1`): off unless a TestFlight or
+/// development build was told otherwise. Off, the input starts at
+/// touch-down (owner decision, 2026-11-21).
+enum NativeHoldQuietSwitch {
+    static let key = "avibe.voiceHold.startsAtRecognition"
 
     static var isOn: Bool { isOn(in: .standard, internalBuild: isInternalBuild) }
 
@@ -703,7 +851,7 @@ enum NativeHoldEarlySwitch {
     /// Handles the switch's URL; returns whether it was one.
     @discardableResult
     static func handle(_ url: URL, allowed: Bool = isInternalBuild, defaults: UserDefaults = .standard) -> Bool {
-        guard allowed, url.scheme == "avibe-diagnostics", url.host == "voice", url.path == "/hold-early",
+        guard allowed, url.scheme == "avibe-diagnostics", url.host == "voice", url.path == "/hold-quiet",
               let on = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "on" })?.value
         else { return false }
@@ -732,12 +880,14 @@ enum NativeHoldTimings {
         Array((lines + [String(line.prefix(maximumLength))]).suffix(maximumLines))
     }
 
+    /// The kept holds, then the taps' counts (`NativeHoldTaps`) if any.
     static var lines: [String] {
-        UserDefaults.standard.stringArray(forKey: key) ?? []
+        (UserDefaults.standard.stringArray(forKey: key) ?? []) + [NativeHoldTaps.line()].compactMap { $0 }
     }
 
     static func add(_ line: String) {
-        UserDefaults.standard.set(adding(line, to: lines), forKey: key)
+        let kept = UserDefaults.standard.stringArray(forKey: key) ?? []
+        UserDefaults.standard.set(adding(line, to: kept), forKey: key)
     }
 
     /// `lines` without the ones in `sent` (each once).
@@ -751,7 +901,80 @@ enum NativeHoldTimings {
     }
 
     static func drop(_ sent: [String]) {
-        UserDefaults.standard.set(removing(sent, from: lines), forKey: key)
+        let kept = UserDefaults.standard.stringArray(forKey: key) ?? []
+        UserDefaults.standard.set(removing(sent, from: kept), forKey: key)
+        sent.forEach { NativeHoldTaps.drop(line: $0) }
+    }
+}
+
+/// How long the touches on a hold surface that were not holds lasted: counts
+/// per 25 ms, and those that moved away counted apart. Counts only, to judge
+/// the hold threshold; sent with the holds' timings and then taken off.
+enum NativeHoldTaps {
+    static let key = "avibe.voiceHold.taps"
+    static let bucketMs = 25
+    static let moved = "moved"
+    private static let prefix = "hold taps"
+
+    /// The bucket a touch of `ms` falls in: its lower edge, capped at 975.
+    static func bucket(ms: Int) -> String {
+        String(min(max(0, ms), 975) / bucketMs * bucketMs)
+    }
+
+    static func adding(ms: Int, moved: Bool, to counts: [String: Int]) -> [String: Int] {
+        var counts = counts
+        counts[moved ? Self.moved : bucket(ms: ms), default: 0] += 1
+        return counts
+    }
+
+    /// `hold taps 50:3 75:12 100:4 moved=2`, or nil with nothing counted.
+    static func line(for counts: [String: Int]) -> String? {
+        let buckets = counts.filter { $0.key != moved && $0.value > 0 }
+            .sorted { (Int($0.key) ?? 0) < (Int($1.key) ?? 0) }
+            .map { " \($0.key):\($0.value)" }
+            .joined()
+        let movedCount = counts[moved] ?? 0
+        guard !buckets.isEmpty || movedCount > 0 else { return nil }
+        return prefix + buckets + (movedCount > 0 ? " \(moved)=\(movedCount)" : "")
+    }
+
+    /// The counts in a line `line(for:)` made (nil for any other line).
+    static func counts(in line: String) -> [String: Int]? {
+        guard line.hasPrefix(prefix) else { return nil }
+        var counts: [String: Int] = [:]
+        for part in line.dropFirst(prefix.count).split(separator: " ") {
+            let pair = part.split(whereSeparator: { $0 == ":" || $0 == "=" })
+            guard pair.count == 2, let value = Int(pair[1]) else { return nil }
+            counts[String(pair[0])] = value
+        }
+        return counts
+    }
+
+    /// `counts` less what `sent` carried (touches counted since stay).
+    static func removing(_ sent: [String: Int], from counts: [String: Int]) -> [String: Int] {
+        var counts = counts
+        for (name, value) in sent {
+            let left = (counts[name] ?? 0) - value
+            counts[name] = left > 0 ? left : nil
+        }
+        return counts
+    }
+
+    private static var stored: [String: Int] {
+        UserDefaults.standard.dictionary(forKey: key) as? [String: Int] ?? [:]
+    }
+
+    static func note(ms: Int, moved: Bool) {
+        UserDefaults.standard.set(adding(ms: ms, moved: moved, to: stored), forKey: key)
+    }
+
+    static func line() -> String? {
+        line(for: stored)
+    }
+
+    static func drop(line: String) {
+        guard let sent = counts(in: line) else { return }
+        UserDefaults.standard.set(removing(sent, from: stored), forKey: key)
     }
 }
 
@@ -775,6 +998,10 @@ protocol NativeHoldCaptureAudio: AnyObject {
     )
     /// Takes down what `arm` prepared; nothing was captured.
     func disarm()
+    /// Returns once everything asked of the input so far (a preparing, a
+    /// start, a taking down) has finished: the session is free for its next
+    /// owner, and nothing will set or deactivate it afterwards.
+    func settle()
     func prepare()
     /// Activates the session and starts the input. `onPCM` gets 16 kHz mono
     /// little-endian Int16 audio and `onEnd` the system's reason for ending
@@ -852,10 +1079,36 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     private var armed: NativeHoldCapture.ArmTimings?
     private let lock = NSLock()
     private var onPCM: ((Data) -> Void)?
+    /// Counts the takedowns asked for: work asked before one is not done
+    /// once that takedown has been asked (a press that ended before its
+    /// preparing even began, so quick taps do not queue up work).
+    private var takedowns = 0
 
-    var isArmed: Bool { engine != nil }
+    /// A ticket for work asked now; `isCurrent` once it runs.
+    func ticket() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return takedowns
+    }
 
-    func arm() -> Result<NativeHoldCapture.ArmTimings, NativeHoldCapture.StartError> {
+    func askTakedown() {
+        lock.lock()
+        takedowns += 1
+        lock.unlock()
+    }
+
+    private func isCurrent(_ ticket: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ticket == takedowns
+    }
+
+    func arm(_ ticket: Int) -> Result<NativeHoldCapture.ArmTimings, NativeHoldCapture.StartError> {
+        guard isCurrent(ticket) else { return .failure(.failed("cancelled")) }
+        return arm()
+    }
+
+    private func arm() -> Result<NativeHoldCapture.ArmTimings, NativeHoldCapture.StartError> {
         if engine != nil, let armed { return .success(armed) }
         let session = AVAudioSession.sharedInstance()
         let categoryStart = DispatchTime.now()
@@ -899,9 +1152,11 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
     }
 
     func begin(
+        _ ticket: Int,
         onPCM: @escaping (Data) -> Void,
         onEnd: @escaping (String) -> Void
     ) -> Result<NativeHoldCapture.BeginTimings, NativeHoldCapture.StartError> {
+        guard isCurrent(ticket) else { return .failure(.failed("cancelled")) }
         var armedNow: NativeHoldCapture.ArmTimings?
         if engine == nil {
             switch arm() {
@@ -984,8 +1239,9 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
 
     func arm(completion: @escaping @MainActor (Result<NativeHoldCapture.ArmTimings, NativeHoldCapture.StartError>) -> Void) {
         heldInUse = true
+        let ticket = held.ticket()
         queue.async { [held] in
-            let result = held.arm()
+            let result = held.arm(ticket)
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(result) } }
         }
     }
@@ -996,8 +1252,10 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
         completion: @escaping @MainActor (Result<NativeHoldCapture.BeginTimings, NativeHoldCapture.StartError>) -> Void
     ) {
         heldInUse = true
+        let ticket = held.ticket()
         queue.async { [held] in
             let result = held.begin(
+                ticket,
                 onPCM: { data in DispatchQueue.main.async { MainActor.assumeIsolated { onPCM(data) } } },
                 onEnd: { reason in DispatchQueue.main.async { MainActor.assumeIsolated { onEnd(reason) } } }
             )
@@ -1009,9 +1267,15 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
         takeDownHeld()
     }
 
+    func settle() {
+        // Nothing on this queue ever waits for the main thread.
+        queue.sync {}
+    }
+
     private func takeDownHeld() {
         guard heldInUse else { return }
         heldInUse = false
+        held.askTakedown()
         // An Action Button take that has the session now keeps it.
         let deactivate = !VoiceCaptureAudioState.active
         queue.async { [held] in held.takeDown(deactivate: deactivate) }
@@ -1020,11 +1284,16 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
     nonisolated static func configure() throws {
         // As WebKit's own capture: speech in, the page's sounds still from
         // the speaker; nothing else's audio is interrupted until a take.
-        try AVAudioSession.sharedInstance().setCategory(
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(
             .playAndRecord,
             mode: .default,
             options: [.defaultToSpeaker, .allowBluetooth]
         )
+        // The cue is a haptic felt while the microphone runs: the system
+        // mutes haptics during recording unless the session allows them
+        // (set after the category, which resets it).
+        try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
     }
 
     func prepare() {
@@ -1035,12 +1304,6 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
         onPCM: @escaping @MainActor (Data) -> Void,
         onEnd: @escaping @MainActor (String) -> Void
     ) throws -> NativeHoldCapture.Timings {
-        if heldInUse {
-            // A press of the App's own was prepared and is being taken down:
-            // that finishes before this start sets the session.
-            heldInUse = false
-            queue.sync { held.takeDown(deactivate: false) }
-        }
         let session = AVAudioSession.sharedInstance()
         let categoryStart = DispatchTime.now()
         do {
