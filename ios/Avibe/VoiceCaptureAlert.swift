@@ -7,11 +7,13 @@ import UIKit
 enum VoiceCaptureAlert {
     /// The alert's text: for a Live Activity that would not start, the
     /// failure line with its step and code (the notification's line, which
-    /// may not show if notifications are off).
+    /// may not show if notifications are off). None where the title says it
+    /// all (`confirmPending`).
     static func message(
         _ reason: VoiceCaptureAttributes.Reason,
         failure: VoiceCaptureAttributes.ContentState?
-    ) -> String {
+    ) -> String? {
+        guard VoiceCaptureCopy.showsLine(for: reason) else { return nil }
         if reason == .activityFailed || reason == .recordingFailed, let failure, failure.failedStep != nil {
             return String(localized: VoiceCaptureCopy.failureLine(failure))
         }
