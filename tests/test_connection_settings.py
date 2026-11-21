@@ -386,6 +386,24 @@ def test_unknown_pin_replica_owner_defers_cleanup_not_runtime_monitoring(rig, mo
     assert retired == [(222, {'grace_seconds': ra.RECOVERY_DRAIN_SECONDS, 'expected_url': 'fixture-replica'})]
 
 
+def test_orphaned_pin_replica_grace_does_not_hold_up_startup(rig, monkeypatch, connector_clock):
+    candidate = dict(pid=222, metrics_url='fixture-orphan', pin_attempt='previous-worker')
+    slots = {'candidate': candidate, 'active': rig.active}
+    monkeypatch.setattr(ra, '_state_connector', slots.get)
+    monkeypatch.setattr(ra, '_RECOVERY_THREAD', None)
+    def retire(pid, *, grace_seconds, expected_url):
+        assert pid == candidate['pid'] and expected_url == candidate['metrics_url']
+        assert grace_seconds == ra.RECOVERY_DRAIN_SECONDS
+        connector_clock.sleep(2 * grace_seconds)  # slow stop and post-escalation wait
+        slots.pop('candidate')
+    monkeypatch.setattr(ra, '_discard_candidate_connector', retire)
+    start = connector_clock.monotonic()
+    assert not ra._reconcile_orphan_candidate_when_free(before_listen=True)
+    assert connector_clock.monotonic() == start and slots['candidate'] is candidate
+    assert ra._reconcile_orphan_candidate_when_free()  # deferred monitor tick, same lifecycle guard
+    assert connector_clock.monotonic() - start == 70 and slots == {'active': rig.active}
+
+
 def test_unreadable_settings_disable_only_new_feature(rig, monkeypatch):
     from vibe import ui_server
     cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
@@ -505,7 +523,7 @@ def pin_fleet(rig, monkeypatch, connector_clock):
     slots = {'active': dict(rig.active)}
     starts = []
     fleet = SimpleNamespace(slots=slots, starts=starts, sample=None)
-    def spawn(cfg, binary, protocol, *, pin_attempt):
+    def spawn(cfg, binary, protocol, *, pin_attempt=None):
         assert not slots.get('candidate') and not slots.get('draining')
         pid = 300 + len(starts)
         record = dict(pid=pid, started_at=connector_clock.monotonic(), metrics_url=f'fixture-{pid}',
@@ -518,14 +536,16 @@ def pin_fleet(rig, monkeypatch, connector_clock):
             return 0
         record = next(r for r in slots.values() if r['metrics_url'] == url)
         return fleet.sample(record, connector_clock.monotonic() - record['started_at'])
-    def discard(pid, *, grace_seconds, expected_url):
-        assert grace_seconds == ra.RECOVERY_DRAIN_SECONDS
-        assert (pid, expected_url) == (slots['candidate']['pid'], slots['candidate']['metrics_url'])
-        assert slots['active']['pid'] != pid
+    def discard(pid, *, grace_seconds=8, expected_url=None):
+        candidate = slots['candidate']
+        assert pid == candidate['pid'] and slots['active']['pid'] != pid
+        if candidate['pin_attempt'] is not None:
+            assert grace_seconds == ra.RECOVERY_DRAIN_SECONDS and expected_url == candidate['metrics_url']
         del slots['candidate']
     def promote(pid, **kwargs):
         candidate = slots.pop('candidate')
-        assert candidate['pid'] == pid and kwargs['registered_only']
+        assert candidate['pid'] == pid
+        assert bool(kwargs.get('registered_only')) == (candidate['pin_attempt'] is not None)
         slots['draining'], slots['active'] = slots['active'], candidate
         return slots['draining']
     monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
@@ -607,39 +627,113 @@ def test_superseded_generation_cannot_finish_pending_pin_write(rig, monkeypatch,
     assert not state.get('pinAttempt') and not state['returnedToAutomatic'] and not ra._stored_preferred_protocol()
 
 
-@pytest.mark.parametrize('phase', ['comparing', 'confirming'])
-def test_owner_edit_preempts_attribution_without_retiring_active(rig, monkeypatch, transport_outage, phase):
-    fleet = transport_outage
-    base_sample = fleet.sample
+@pytest.mark.parametrize('field,phase,page_ready,expected_seconds', [
+    ('protocol', 'comparing', False, 60),   # both explicit transports time out on full HA
+    ('outbound', 'confirming', False, 30),  # releasing just the address still leaves QUIC pinned
+    ('protocol', 'comparing', True, 6),     # observed HTTP/2 can also let the Owner finish the repair
+])
+def test_owner_edit_preempts_attribution_without_retiring_active(rig, monkeypatch, connector_clock, pin_fleet,
+                                                                 field, phase, page_ready, expected_seconds):
+    fleet = pin_fleet
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.transport_protocol = 'quic'
+    cloud.edge_bind_address = '192.0.2.1' if field == 'outbound' else ''
+    rig.cfg.save()
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', None)
+    monkeypatch.setattr(ra, 'tunnel_quality_snapshot', lambda: {'protocol': 'http2'})
+    queue_outage(rig, connector_clock)
     owner = []
     def sample(record, age):
-        candidate = fleet.slots.get('candidate')
-        if candidate == record and not owner:
+        if record == fleet.slots.get('candidate') and not owner:
             state = cs.journal.load(V2Config.load())
             if (state.get('pinRoute') or {}).get('phase') == phase:
-                assert cr.prepare(rig.actor, 'protocol', 'quic') is None  # no-op must not cancel
+                assert cr.prepare(rig.actor, field, cs.value(rig.cfg, field)) is None
                 with pytest.raises(cs.ConnectionError, match='binding_changed'):
-                    cr.prepare(cs.Actor('wrong-pair'), 'protocol', 'http2')
-                monkeypatch.setattr(ra, '_connector_lane_reserved_locked', lambda: bool(fleet.slots.get('candidate')))
-                owner.append(cr.prepare(rig.actor, 'protocol', 'http2'))
-        return base_sample(record, age)
+                    cr.prepare(cs.Actor('wrong-pair'), field, cs.AUTOMATIC[field])
+                monkeypatch.setattr(ra, '_connector_lane_reserved_locked', lambda: bool(fleet.slots.get('candidate') or fleet.slots.get('draining')))
+                owner.append(cr.prepare(rig.actor, field, cs.AUTOMATIC[field]))
+        return int(record['requested_protocol'] == 'http2' and not record['outbound'] and age >= 5)
     fleet.sample = sample
     with pytest.raises(cs.ConnectionError, match='superseded'):
         cr._consume_pin_attempt()
-    assert owner[0]['retiringPin'] and 'candidate' not in fleet.slots
-    live = V2Config.load()
-    assert not cs.journal.load(live).get('pinAttempt') and not cs.journal.inspect(live)['returnedToAutomatic']
-    assert cs.value(live, 'protocol') == 'quic' and fleet.slots['active']['requested_protocol'] == 'http2'
-    assert not ra._stored_preferred_protocol()
-    # Owner reservation is valid, and apply proceeds into the ordinary verification path.
-    called = []
-    monkeypatch.setattr(ra, 'apply_settings', lambda payload, **kwargs: called.append((payload, kwargs)) or {'ok': False})
+    old_id = owner[0]['retiringPin']
+    assert old_id and 'candidate' not in fleet.slots
+    original = fleet.slots['active']
+    assert original['requested_protocol'] == 'http2' and not original['outbound']
+    assert not cs.journal.load(V2Config.load()).get('pinAttempt') and not ra._stored_preferred_protocol()
+    # Use the actual page writer and its bounded full-HA poll. Only process
+    # state, readiness and the independent public request are substituted.
+    monkeypatch.setattr(ra, 'status', lambda *a, **kw: {'running': True, 'pid_state': 'cloudflared', 'pid': fleet.slots['active']['pid']})
+    monkeypatch.setattr(ra, '_connector_ready_now', lambda pid, url: page_ready and
+                        connector_clock.monotonic() - fleet.slots['candidate']['started_at'] >= 6)
+    monkeypatch.setattr(cr, '_public_check', lambda url: True)
+    before, started = len(fleet.starts), connector_clock.monotonic()
     cr.apply(rig.actor, owner[0])
-    assert called == [({'transport_protocol': 'http2'}, {'operation_id': owner[0]['id'], 'expected_binding': rig.actor.binding})]
+    assert connector_clock.monotonic() - started == expected_seconds
+    assert [r['requested_protocol'] for r in fleet.starts[before:]] == (
+        ['http2'] if page_ready else ['http2', 'quic'] if field == 'protocol' else ['quic'])
+    live = V2Config.load()
+    state = cs.journal.load(live)
+    assert not state['operation'] and not state['returnedToAutomatic']
+    if page_ready:
+        assert state['outcome']['result'] == 'applied' and cs.value(live, field) == cs.AUTOMATIC[field]
+        assert not state.get('pinAttempt') and fleet.slots['active'] != original
+        return
+    assert state['outcome']['reason'] == 'candidate_not_ready' and cs.value(live, field) == cs.value(rig.cfg, field)
+    assert state['pinRoute']['phase'] == 'comparing' and state['pinAttempt']['id'] != old_id
+    assert state['pinAttempt'] == state['pinRoute']['attempt'] and fleet.slots['active'] == original
+    cr._consume_pin_attempt()
+    changes = cs.journal.inspect(V2Config.load())['returnedToAutomatic']['changes']
+    assert {c['setting'] for c in changes} == ({'protocol', 'outbound'} if field == 'outbound' else {'protocol'})
 
 
-@pytest.mark.parametrize('entry', ['api', 'config', 'ui_start', 'cli'])
-def test_start_entries_keep_registered_temporary_connector(rig, monkeypatch, transport_outage, entry):
+@pytest.mark.parametrize('retire_after,allowed', [(74.75, True), (75.25, False)])
+def test_preempting_owner_waits_only_for_its_replica(rig, monkeypatch, connector_clock, transport_outage, retire_after, allowed):
+    fleet = transport_outage
+    sample, discard = fleet.sample, ra._discard_candidate_connector
+    owner = []
+    def counts(record, age):
+        if not owner and record == fleet.slots.get('candidate') and len(fleet.starts) == 3:
+            owner.append(cr.prepare(rig.actor, 'protocol', 'auto'))
+        return sample(record, age)
+    def held(pid, **kwargs):
+        if not owner:
+            discard(pid, **kwargs)
+    fleet.sample = counts
+    monkeypatch.setattr(ra, '_discard_candidate_connector', held)
+    with pytest.raises(cs.ConnectionError, match='superseded'):
+        cr._consume_pin_attempt()
+    stopped = fleet.slots['candidate']
+    assert stopped['pin_attempt'] == owner[0]['retiringPin']
+    began = connector_clock.monotonic()
+    def advance(seconds):
+        rig.clock[0] += seconds
+        if connector_clock.monotonic() - began >= retire_after and fleet.slots.get('candidate') is stopped:
+            fleet.slots.pop('candidate')
+    monkeypatch.setattr(connector_clock, 'sleep', advance)
+    monkeypatch.setattr(ra, '_discard_candidate_connector', discard)
+    monkeypatch.setattr(ra, 'status', lambda *a, **kw: {'running': True, 'pid_state': 'cloudflared', 'pid': fleet.slots['active']['pid']})
+    monkeypatch.setattr(ra, '_connector_ready_now', lambda pid, url: True)
+    monkeypatch.setattr(cr, '_public_check', lambda url: True)
+    n = len(fleet.starts)
+    cr.apply(rig.actor, owner[0])
+    assert connector_clock.monotonic() - began == (retire_after if allowed else 75)
+    live = V2Config.load()
+    state = cs.journal.load(live)
+    if allowed:
+        assert len(fleet.starts) == n + 1 and state['outcome']['result'] == 'applied'
+        assert cs.value(live, 'protocol') == 'auto' and not state.get('pinAttempt')
+    else:
+        assert len(fleet.starts) == n and fleet.slots['candidate'] is stopped
+        assert state['outcome']['reason'] == 'candidate_cleanup_unavailable' and cs.value(live, 'protocol') == 'quic'
+        assert state['pinAttempt']['id'] != owner[0]['retiringPin']
+        advance(.25)
+        cr._consume_pin_attempt()
+        assert cs.value(V2Config.load(), 'protocol') == 'auto'
+
+
+@pytest.mark.parametrize('entry', ['api', 'config', 'cli', 'ui_restart', 'lost_registration'])
+def test_start_entries_respect_registered_route_and_ui_restart(rig, monkeypatch, transport_outage, entry):
     from tests.ui_server_test_helpers import csrf_headers
     from vibe import cli, ui_server as ui
     # Force an unknown online comparison. The active HTTP/2 path must survive
@@ -655,8 +749,20 @@ def test_start_entries_keep_registered_temporary_connector(rig, monkeypatch, tra
     monkeypatch.setattr(ra, '_running_signature', lambda pid: ra._runtime_signature(tmp, 'fixture-binary'))
     monkeypatch.setattr(ra, '_running_connector_has_metrics', lambda pid: pid == active['pid'])
     monkeypatch.setattr(ra, '_ensure_cloudflared_pin', lambda config: None)
-    monkeypatch.setattr(ra, 'status', lambda cfg=None: {'running': True, 'pid_state': 'cloudflared', 'pid': active['pid']})
-    monkeypatch.setattr(ra, '_stop_connector', lambda *args: pytest.fail('unrelated start displaced temporary route'))
+    monkeypatch.setattr(ra, 'status', lambda cfg=None: {'running': 'active' in fleet.slots, 'pid_state': 'cloudflared',
+                                                       'pid': (fleet.slots.get('active') or {}).get('pid')})
+    stopped = []
+    def stop(cfg):
+        assert entry in ('ui_restart', 'lost_registration')
+        stopped.append(fleet.slots.pop('active')['pid'])
+        return {'ok': True, 'running': False}
+    monkeypatch.setattr(ra, '_stop_connector', stop)
+    monkeypatch.setattr(ra, '_allocate_metrics_url', lambda: 'http://127.0.0.1:12345')
+    monkeypatch.setattr(ra, '_clear_cloudflared_logs', lambda: None)
+    monkeypatch.setattr(ra.runtime, 'spawn_background', lambda *a, **kw: 707)
+    def publish(pid, cfg, binary, metrics_url, *, requested_protocol):
+        fleet.slots['active'] = dict(pid=pid, metrics_url=metrics_url, started_at=rig.clock[0], requested_protocol=requested_protocol)
+    monkeypatch.setattr(ra, '_write_state', publish)
     monkeypatch.setattr(ra, '_retire_legacy_cloudflared', lambda *args: None)
     started = []
     monkeypatch.setattr(ra, '_report_runtime_status_async', lambda cfg, **kwargs: started.append(kwargs['event']))
@@ -665,8 +771,14 @@ def test_start_entries_keep_registered_temporary_connector(rig, monkeypatch, tra
     if entry == 'cli':
         monkeypatch.setattr(cs, 'journal', cs.Journal())  # foreign process, same state files
         assert cli.cmd_remote_start(SimpleNamespace(json=False)) == 0
-    elif entry == 'ui_start':
+    elif entry == 'ui_restart':
+        monkeypatch.setattr(cs, 'journal', cs.Journal(lambda: rig.clock[0]))
+        cr.recover_startup()
+        assert 'pinRoute' not in cs.journal.load(live)
         ui._reconcile_remote_access_for_ui_start(live)
+    elif entry == 'lost_registration':
+        fleet.sample = lambda record, age: 0
+        assert ra.start(live)['started']
     else:
         client = ui.app.test_client()
         if entry == 'config':
@@ -675,8 +787,13 @@ def test_start_entries_keep_registered_temporary_connector(rig, monkeypatch, tra
         response = client.post('/api/config' if entry == 'config' else '/api/remote-access/start',
                                json={'remote_access': {}} if entry == 'config' else {}, headers=csrf_headers(client))
         assert response.status_code == 200
-    assert started == ['start'] and fleet.slots['active'] == active
+    assert started == ['start']
     assert cs.value(V2Config.load(), 'protocol') == 'quic'
+    if entry in ('ui_restart', 'lost_registration'):
+        assert stopped == [active['pid']] and fleet.slots['active']['pid'] == 707
+        assert fleet.slots['active']['requested_protocol'] == 'quic'
+    else:
+        assert not stopped and fleet.slots['active'] == active
     assert not cr.keep_temporary_connector(live, 'different-binary', ra._runtime_signature(tmp, 'fixture-binary'))
     active['started_at'] += 1
     assert cr.view(rig.actor)['temporaryRoute'] is None

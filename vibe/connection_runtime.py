@@ -317,7 +317,7 @@ def apply(actor, reservation):
             else:
                 cs.journal.restore(state, _failure(op))
     except Exception as exc:
-        with config_file_lock():
+        with tunnel._connector_lifecycle(), config_file_lock():
             config = V2Config.load()
             state = cs.journal.load(config)
             op = state['operation']
@@ -326,12 +326,32 @@ def apply(actor, reservation):
                     saved = cs.value(config, key) == new
                     cs.journal.finish(state, 'applied' if saved else 'failed', 'saved' if saved else getattr(exc, 'code', 'apply_failed'))
                 elif op['state'] == 'applying' and not op.get('writeStarted') and cs.value(config, key) == op['from']:
-                    # No saved change or promotion: there is nothing to restore.
+                    # No saved change or promotion. Finish the page operation
+                    # and re-arm eligible attribution in one journal replacement.
+                    _resume_preempted_route(config, state, op)
                     cs.journal.finish(state, 'failed', getattr(exc, 'code', 'settings_not_applied'))
                 else:
                     cs.journal.restore(state, _failure(op))
     finally:
         _wake.set()
+
+
+def _resume_preempted_route(config, state, op):
+    """The cancelled writer stays revoked. Only a new round may compare this live route."""
+    if not op.get('retiringPin') or state.get('pinAttempt'):
+        return
+    route = state.get('pinRoute') or {}
+    old = route.get('attempt') or {}
+    if old.get('id') != op['retiringPin'] or route.get('phase') != 'owner_edit':
+        return
+    route['phase'] = 'comparison_unavailable'
+    if (old.get('boot') != cs.journal.boot or _active_pin_route(config, state) is not route
+            or not _pin_anchor(route['generation'])):
+        return
+    attempt = dict(old, id=secrets.token_hex(16))
+    state['pinAttempt'] = attempt
+    route.update(attempt=attempt, phase='comparing')
+    route.pop('previous', None)
 
 
 def _failure(op):
@@ -546,11 +566,7 @@ def _wait_registered(pid, url, *, while_owned=None):
 
 def _pin_candidate_plan(config, pins):
     """Try both transports at each distinct egress tier, preserving the family before releasing it."""
-    first = tunnel._initial_connector_protocol(config)
-    if first == 'auto':
-        first = tunnel._effective_protocol(None, None)
-    if first not in ('quic', 'http2'):
-        first = 'http2'
+    first = tunnel._explicit_candidate_protocol(config)
     transports = (first, tunnel._other_transport(first))
     tiers = [()]
     for field in ('outbound', 'ipFamily'):
@@ -677,7 +693,7 @@ def keep_temporary_connector(config, binary, running_signature):
         if not route:
             return False
         trial = _pin_trial(config, route['relaxed'], route['protocol'])
-        return running_signature == tunnel._runtime_signature(trial, binary)
+        return running_signature == tunnel._runtime_signature(trial, binary) and _pin_anchor(route['generation'])
 
 
 def _pin_receipt(record):

@@ -572,6 +572,14 @@ def _initial_connector_protocol(config: V2Config) -> str:
     return _PREFERRED_PROTOCOL or _stored_preferred_protocol() or "auto"
 
 
+def _explicit_candidate_protocol(config: V2Config) -> str:
+    """Bounded trials cannot wait for cloudflared's literal auto to switch transports."""
+    first = _initial_connector_protocol(config)
+    if first not in ('quic', 'http2'):
+        first = _effective_protocol(None, None)
+    return first if first in ('quic', 'http2') else 'http2'
+
+
 def _connector_environment(config: V2Config, protocol: str) -> dict[str, str]:
     cloud = config.remote_access.vibe_cloud
     environment = {
@@ -1682,7 +1690,8 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
 
     candidate_pid: int | None = None
     try:
-        requested_protocol = _initial_connector_protocol(candidate_config)
+        page_auto = operation_id is not None and payload.get('transport_protocol') == 'auto'
+        requested_protocol = _explicit_candidate_protocol(candidate_config) if page_auto else _initial_connector_protocol(candidate_config)
         started_candidate = start_settings_candidate(requested_protocol)
         if started_candidate is None:
             return {
@@ -1700,7 +1709,8 @@ def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, 
             candidate_pid = None
             if not fallback_to_auto:
                 raise RuntimeError("candidate_not_ready")
-            started_candidate = start_settings_candidate("auto")
+            fallback = _other_transport(requested_protocol) if page_auto else 'auto'
+            started_candidate = start_settings_candidate(fallback)
             if started_candidate is None:
                 return {
                     **current_status,
@@ -4580,7 +4590,7 @@ def _reconcile_orphan_candidate() -> bool:
         return True
 
 
-def _reconcile_orphan_candidate_when_free() -> bool:
+def _reconcile_orphan_candidate_when_free(*, before_listen: bool = False) -> bool:
     """Run the startup orphan-candidate reconciliation; False to retry on a later tick.
 
     A candidate is spawned only under the lifecycle lock after recovery reserves
@@ -4593,6 +4603,11 @@ def _reconcile_orphan_candidate_when_free() -> bool:
             with _RECOVERY_LOCK:
                 recovery_running = _RECOVERY_THREAD is not None
             if recovery_running:
+                return False
+            if before_listen and (_state_connector('candidate') or {}).get('pin_attempt'):
+                # A registered comparison may carry streams. Preserve the full
+                # stop grace, but run it on a quality-monitor tick, never inline
+                # on the UI startup thread.
                 return False
             return _reconcile_orphan_candidate()
     except _ConnectorLifecycleBusy:
@@ -4645,7 +4660,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                 legacy=persisted.get("retry_policy_version") != RECOVERY_RETRY_POLICY_VERSION,
                 now=time.time(),
             )
-        orphan_candidate_pending = not _reconcile_orphan_candidate_when_free()
+        orphan_candidate_pending = not _reconcile_orphan_candidate_when_free(before_listen=True)
         _reconcile_connector_lifecycle()
         _normalize_orphaned_recovery_state()
         quality_path = _quality_state_path()
