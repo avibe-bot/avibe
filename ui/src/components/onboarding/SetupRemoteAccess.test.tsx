@@ -5,7 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '../../i18n';
-import { DevicesApiError, devicesApi } from '../devices/api';
+import { DevicesApiError, devicesApi, type ClaimForm } from '../devices/api';
 import { readClaimMarker } from '../devices/claimFlow';
 import { said } from '../devices/testText';
 import { SetupRemoteAccess } from './SetupRemoteAccess';
@@ -56,6 +56,23 @@ describe('Setup · remote access', () => {
     fireEvent.click(screen.getByRole('button', { name: '开启远程访问' }));
     await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
     expect(readClaimMarker()).toMatchObject({ kind: 'claim', id: 'claim-1' });
+  });
+
+  it('cannot be skipped past a request that is on its way, and a request left behind never leaves for avibe.bot', async () => {
+    const submit = vi.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(() => undefined);
+    let answer!: (form: ClaimForm) => void;
+    vi.spyOn(devicesApi, 'startClaim').mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const cancel = vi.spyOn(devicesApi, 'cancelClaim').mockResolvedValue();
+    const { unmount } = mount();
+
+    fireEvent.click(screen.getByRole('button', { name: /开启远程访问/ }));
+    await waitFor(() => expect((screen.getByRole('button', { name: '以后再说，进入工作台' }) as HTMLButtonElement).disabled).toBe(true));
+    // The page goes away some other way (the back button) before the answer arrives.
+    unmount();
+    answer({ claimId: 'claim-late', action: 'https://avibe.bot/api/v1/claims/redirect-entry', method: 'POST', fields: { user_code: 'CODE' }, referrerPolicy: 'strict-origin' });
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('claim-late'));
+    expect(submit).not.toHaveBeenCalled();
+    expect(readClaimMarker()).toBeNull();
   });
 
   it('skips to the workbench', async () => {

@@ -86,3 +86,6 @@ export function submitClaimForm(form: ClaimForm): void {
 /** The states of a claim read in which it is still on its way. */
 export const CLAIM_OPEN = new Set(['starting', 'pending', 'waiting']);
 export const CLAIM_BINDING = new Set(['accepting', 'pairing']);
+
+/** The claim speaks `en` and `zh` only: a regional or other language resolves as the page's copy does. */
+export const claimLocale = (language: string): 'en' | 'zh' => (language.toLowerCase().startsWith('zh') ? 'zh' : 'en');

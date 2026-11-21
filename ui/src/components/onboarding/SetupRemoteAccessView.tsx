@@ -72,7 +72,8 @@ export function SetupRemoteAccessView(props: SetupRemoteAccessViewProps) {
                 {browser?.busy ? <LoaderCircle size={16} className="motion-safe:animate-spin" /> : <ArrowRight size={16} />}
               </Button>
             )}
-            <Button type="button" variant="link" className="onboarding-action-w" onClick={props.onSkip}>
+            {/* While the request is on its way the page is about to leave for avibe.bot: no skipping past it. */}
+            <Button type="button" variant="link" className="onboarding-action-w" disabled={browser?.busy} onClick={props.onSkip}>
               {t(noAction ? 'devices.setup.goOn' : 'devices.setup.skip')}
             </Button>
           </div>

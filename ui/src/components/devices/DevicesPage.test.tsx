@@ -108,6 +108,17 @@ describe('DevicesPage · turning remote access on', () => {
     expect(JSON.stringify(window.sessionStorage)).not.toContain('EVIL');
   });
 
+  it('asks for the claim in a language the instance speaks, whatever region the browser detected', async () => {
+    const start = vi.spyOn(devicesApi, 'startClaim').mockRejectedValue(new DevicesApiError(503, 'control_plane_unreachable', {}));
+    for (const [detected, sent] of [['zh-CN', 'zh'], ['en-US', 'en'], ['fr', 'en']] as const) {
+      await i18n.changeLanguage(detected);
+      const { unmount } = mount();
+      fireEvent.click(await screen.findByRole('button', { name: /开启远程访问|Turn on remote access/ }));
+      await waitFor(() => expect(start).toHaveBeenLastCalledWith(sent));
+      unmount();
+    }
+  });
+
   it('shows "open the new address" when the status read fails because this browser lost admission', async () => {
     writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
     vi.spyOn(devicesApi, 'claim')

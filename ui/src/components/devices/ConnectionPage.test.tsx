@@ -253,6 +253,13 @@ describe('ConnectionPage · the domain', () => {
     mount('/settings/remote-access/connection/address');
     expect(await screen.findByText(said('avibe.bot 还没有答复，更改还在进行；这一页会自己更新，不用再点一次。'))).toBeTruthy();
     expect(screen.queryByRole('textbox', { name: '新名称' })).toBeNull();
+
+    // Closing it gives the page back; the change is still said in the domain's row.
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection');
+    expect(screen.getByText('正在把域名改为 maxwell-app.avibe.bot…')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '连接诊断与网络路径' })).toBeTruthy();
   });
 });
 

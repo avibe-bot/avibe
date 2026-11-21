@@ -136,6 +136,8 @@ export function ConnectionPage() {
   const preview = useRef<Preview | null>(null);
   const lostChange = useRef<{ reads: number } | null>(null);
   const renameFrom = useRef<string | null>(null);
+  /** The dialog of a running change was closed: its end is not brought back as a dialog. */
+  const renameDismissed = useRef(false);
   const [rebind, setRebind] = useState<RebindState | undefined>();
   const [rebindRefused, setRebindRefused] = useState<RebindRefusal | undefined>();
   const [rebindDialog, setRebindDialog] = useState<RebindDialog | undefined>();
@@ -270,7 +272,12 @@ export function ConnectionPage() {
         lostChange.current = null;
         renameFrom.current = null;
         const name = preview.current?.name ?? '';
-        if (changed && previous) {
+        const dismissed = renameDismissed.current;
+        renameDismissed.current = false;
+        if (dismissed && !changed) {
+          // Closed while it ran: how it ended is in the domain's row, not in a dialog that returns.
+          setStep(undefined);
+        } else if (changed && previous) {
           setStep({ step: 'done', hostname: next.hostname, previous, retired: next.retired.find((each) => each.hostname === previous) ?? null });
         } else if (next.operation?.state === 'failed') {
           setStep({ step: 'form', name, refusal: next.operation.error ?? { code: 'unknown', raw: 'unknown' } });
@@ -355,7 +362,12 @@ export function ConnectionPage() {
   const addressOpen = location.pathname.replace(/\/+$/, '') === CONNECTION_ADDRESS_PATH;
   const rename = useMemo<RenameStep | undefined>(() => {
     if (step?.step === 'cleanup' || step?.step === 'done') return step;
-    if (operation && operation.state !== 'failed') return { step: 'pending', hostname: operation.hostname };
+    // A change that is still running is said in the domain's row at all times; its dialog is open
+    // only where the person asked for it (the rename's own address, or the change they just
+    // confirmed), so closing it gives the page back.
+    if (operation && operation.state !== 'failed') {
+      return addressOpen || step?.step === 'pending' ? { step: 'pending', hostname: operation.hostname } : undefined;
+    }
     if (step) return step;
     if (!addressOpen || !address) return undefined;
     // Reopened: a change that was refused meanwhile is said first.
@@ -392,6 +404,8 @@ export function ConnectionPage() {
     if (step?.step !== 'confirm' || !pending) return;
     const previous = address?.hostname ?? '';
     renameFrom.current = previous || null;
+    renameDismissed.current = false;
+    lostChange.current = null;
     setStep({ ...step, busy: true });
     void (async () => {
       try {
@@ -418,6 +432,7 @@ export function ConnectionPage() {
   };
 
   const renameClose = () => {
+    if (renameRunning) renameDismissed.current = true;
     setStep(undefined);
     preview.current = null;
     if (addressOpen) go(CONNECTION_PATH, true);

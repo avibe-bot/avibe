@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { DevicesApiError, LostAnswer, devicesApi, type ClaimForm, type ClaimState } from './api';
 import {
-  CLAIM_BINDING, CLAIM_OPEN, clearClaimMarker, readClaimMarker, submitClaimForm, writeClaimMarker, type ClaimKind,
+  CLAIM_BINDING, CLAIM_OPEN, claimLocale, clearClaimMarker, readClaimMarker, submitClaimForm, writeClaimMarker, type ClaimKind,
 } from './claimFlow';
 
 const POLL_MS = 1500;
@@ -59,6 +59,11 @@ export function useClaimFlow({ kind, locale, onEnd, submit = submitClaimForm }: 
   const [lost, setLost] = useState<ClaimFlow['lost']>(null);
   const ended = useRef(onEnd);
   useEffect(() => { ended.current = onEnd; }, [onEnd]);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const { start: startRoute, read, cancel: cancelRoute } = routes[kind];
 
   useEffect(() => {
@@ -127,7 +132,13 @@ export function useClaimFlow({ kind, locale, onEnd, submit = submitClaimForm }: 
     if (phase !== 'idle') return;
     setPhase('sending');
     try {
-      const form = await startRoute(locale);
+      const form = await startRoute(claimLocale(locale));
+      if (!mounted.current) {
+        // The person left this page while the request was on its way: nothing takes them to
+        // avibe.bot now, and the claim they did not wait for is withdrawn.
+        void cancelRoute(form.claimId).catch(() => undefined);
+        return;
+      }
       writeClaimMarker({ kind, id: form.claimId, at: Date.now() });
       setClaimId(form.claimId);
       submit(form);
@@ -135,6 +146,7 @@ export function useClaimFlow({ kind, locale, onEnd, submit = submitClaimForm }: 
       setFollowing(true);
       setPhase('waiting');
     } catch (error) {
+      if (!mounted.current) return;
       setPhase('idle');
       if (error instanceof DevicesApiError) {
         const other = typeof error.body.claim_id === 'string' ? error.body.claim_id : undefined;
@@ -144,7 +156,7 @@ export function useClaimFlow({ kind, locale, onEnd, submit = submitClaimForm }: 
         ended.current({ state: 'refused', code: error instanceof LostAnswer ? 'no_answer' : 'unknown' });
       }
     }
-  }, [kind, locale, phase, startRoute, submit]);
+  }, [cancelRoute, kind, locale, phase, startRoute, submit]);
 
   const cancel = useCallback(async (id?: string) => {
     const target = id ?? claimId;
