@@ -137,6 +137,34 @@ describe('ShowPageVoiceHost', () => {
     }));
   });
 
+  it('has the iOS App record the take where it does, and the page elsewhere', async () => {
+    const request = {
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'start',
+      requestId: 'voice-1',
+      before: '',
+      after: '',
+    } as const;
+    for (const [nativeCapture, expected] of [[async () => true, true], [async () => false, undefined], [undefined, undefined]] as const) {
+      const inputs: { nativeCapture?: unknown }[] = [];
+      const events: ShowPageVoiceEvent[] = [];
+      const host = new ShowPageVoiceHost({
+        post: (event) => events.push(event),
+        availability: async () => ({ available: true, maxFileBytes: 1_000_000 }),
+        ...(nativeCapture ? { nativeCapture } : {}),
+        createSession: (input) => {
+          inputs.push(input);
+          return new FakeVoiceSession();
+        },
+      });
+      host.handle(request);
+      await vi.waitFor(() => expect(events).toContainEqual({ type: ANNOTATION_VOICE_EVENT_MESSAGE, kind: 'started', requestId: 'voice-1' }));
+      expect(inputs).toHaveLength(1);
+      expect(inputs[0].nativeCapture).toBe(expected);
+      host.dispose();
+    }
+  });
+
   // ui/design: composer/voice-consent/*
   it('records nothing for a page until the reader allowed voice input', async () => {
     const events: ShowPageVoiceEvent[] = [];

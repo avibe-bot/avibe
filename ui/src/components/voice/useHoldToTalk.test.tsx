@@ -4,6 +4,8 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { NATIVE_HOLD_GONE } from '../../lib/nativeVoiceCapture';
+import { NATIVE_HOLD_GRACE_MS, resetHoldSurfacesForTest } from '../../lib/nativeVoiceHold';
 import { answerVoiceConsent, closeVoiceConsent, voiceConsentAsking } from '../../lib/voiceConsent';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
 import { MobileBotCenter } from '../MobileChrome';
@@ -19,7 +21,7 @@ type Fake = {
     context?: unknown;
     onLevel?: (rms: number) => void;
     onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
-    nativeCapture?: boolean;
+    nativeCapture?: boolean | { adopt: string };
     pressedAt?: number;
   };
   done: Promise<string>;
@@ -56,6 +58,12 @@ const native = vi.hoisted(() => ({
   permission: vi.fn(),
   capture: vi.fn(() => false),
   prepare: vi.fn(async () => true),
+  /** The App recognises holds itself (`voiceHold`), what it answers to a list of surfaces, the
+   *  takes the page refused, and what listens to its word about a press. */
+  hold: vi.fn(() => false),
+  surfaces: vi.fn(async (_surfaces: { id: string }[], _holdMs: number) => 'ok'),
+  reject: vi.fn(async (_take: string) => undefined),
+  holdListeners: [] as ((event: { phase: string; take: string; surface?: string; step?: string }) => void)[],
 }));
 
 vi.mock('../../lib/showPageVoiceDictation', () => ({
@@ -126,6 +134,15 @@ vi.mock('../../lib/native', async (importOriginal) => ({
   nativeVoicePermission: native.permission,
   hasNativeVoiceCapture: native.capture,
   nativeVoiceCapturePrepare: native.prepare,
+  hasNativeVoiceHold: native.hold,
+  nativeVoiceHoldSurfaces: native.surfaces,
+  nativeVoiceHoldReject: native.reject,
+  onNativeVoiceHold: (handler: (typeof native.holdListeners)[number]) => {
+    native.holdListeners.push(handler);
+    return () => {
+      native.holdListeners = native.holdListeners.filter((listener) => listener !== handler);
+    };
+  },
 }));
 
 class PointerEventShim extends MouseEvent {
@@ -146,7 +163,8 @@ function Harness(props: HoldToTalkOptions) {
   useLayoutEffect(() => {
     probe.current = value;
   });
-  return <button type="button" data-testid="held" {...value.bind} />;
+  const { attachSurface, bind } = value;
+  return <button type="button" data-testid="held" ref={attachSurface} {...bind} />;
 }
 const hold = new Proxy({} as ReturnType<typeof useHoldToTalk>, {
   get: (_, key: keyof ReturnType<typeof useHoldToTalk>) => probe.current![key],
@@ -204,6 +222,11 @@ beforeEach(() => {
   native.permission.mockReset().mockResolvedValue(null);
   native.capture.mockReset().mockReturnValue(false);
   native.prepare.mockReset().mockResolvedValue(true);
+  native.hold.mockReset().mockReturnValue(false);
+  native.surfaces.mockReset().mockResolvedValue('ok');
+  native.reject.mockReset().mockResolvedValue(undefined);
+  native.holdListeners = [];
+  resetHoldSurfacesForTest();
   Object.defineProperty(navigator, 'permissions', {
     configurable: true,
     value: { query: vi.fn(async () => ({ state: pipeline.permission })) },
@@ -411,7 +434,9 @@ describe('useHoldToTalk', () => {
     expect(pipeline.takes[0].abort).toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
     expect(hold.outcome).toBe('cancelled');
-    expect(native.selection).toHaveBeenCalledTimes(2);
+    // Into the cancel position and back out of it feel different: rigid in, soft out.
+    expect(native.impact.mock.calls.map(([style]) => style)).toEqual(['medium', 'rigid', 'soft', 'rigid']);
+    expect(native.selection).not.toHaveBeenCalled();
     expect(native.notify).toHaveBeenCalledWith('warning');
   });
 
@@ -1129,3 +1154,309 @@ describe('the main Bot center', () => {
   });
 });
 
+
+// In the iOS App the App recognises the hold itself (lib/nativeVoiceHold): it times the touch,
+// gives the haptic at the threshold and has the microphone open from touch-down. The page names
+// where, and takes the take at the App's word; its own recognition stays the fallback.
+describe('a hold the iOS App recognises', () => {
+  const viewport = (content: string | null) => {
+    document.querySelector('meta[name="viewport"]')?.remove();
+    if (content === null) return;
+    const meta = document.createElement('meta');
+    meta.setAttribute('name', 'viewport');
+    meta.setAttribute('content', content);
+    document.head.append(meta);
+  };
+  /** The harness in an App that recognises holds, its button a box at y 470–530. */
+  async function mountFollowed(options: Partial<HoldToTalkOptions> = {}) {
+    native.hold.mockReturnValue(true);
+    native.capture.mockReturnValue(true);
+    native.permission.mockResolvedValue('granted');
+    const el = await mount(options);
+    el.getBoundingClientRect = () => new DOMRect(0, 470, 300, 60);
+    // The microphone's answer, a frame, and the App's answer to the list.
+    await flush();
+    await elapse(20);
+    await flush();
+    return el;
+  }
+  const namedSurfaces = () => native.surfaces.mock.calls.at(-1)?.[0] ?? [];
+  const surfaceId = () => namedSurfaces()[0].id;
+  const say = (event: { phase: string; take: string; surface?: string; step?: string }) => act(() => {
+    for (const listener of [...native.holdListeners]) listener(event);
+  });
+
+  beforeEach(() => viewport('width=device-width, initial-scale=1.0, viewport-fit=cover'));
+  afterEach(() => viewport(null));
+
+  it('names its surface where a hold may record now, with the finger\'s threshold', async () => {
+    await mountFollowed();
+    expect(native.surfaces).toHaveBeenLastCalledWith([{ id: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/), x: 0, y: 470, width: 300, height: 60 }], 200);
+  });
+
+  it('names none while voice may not record there: no consent, no microphone answer, or a press it would not take', async () => {
+    pipeline.asr.consent = null;
+    await mountFollowed();
+    expect(native.surfaces.mock.calls.every(([surfaces]) => surfaces.length === 0)).toBe(true);
+    cleanup();
+
+    pipeline.asr.consent = 'granted';
+    native.surfaces.mockClear();
+    resetHoldSurfacesForTest();
+    const el = await mountFollowed({ canHold: () => false });
+    expect(native.surfaces.mock.calls.every(([surfaces]) => surfaces.length === 0)).toBe(true);
+    // And the press is the system's, as before.
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(0);
+    cleanup();
+
+    native.surfaces.mockClear();
+    resetHoldSurfacesForTest();
+    native.hold.mockReturnValue(true);
+    native.capture.mockReturnValue(true);
+    native.permission.mockResolvedValue('prompt');
+    const asking = await mount();
+    asking.getBoundingClientRect = () => new DOMRect(0, 470, 300, 60);
+    await flush();
+    await elapse(20);
+    expect(native.surfaces.mock.calls.every(([surfaces]) => surfaces.length === 0)).toBe(true);
+  });
+
+  it('takes the take at the App\'s word, with nothing awaited, and shows the card at once', async () => {
+    // The take's audio reaches the page a while after the cue.
+    pipeline.startMs = 300;
+    const el = await mountFollowed();
+    native.impact.mockClear();
+    native.permission.mockClear();
+    const pressedAt = Date.now();
+    down(el);
+    await elapse(190);
+    expect(hold.phase).toBe('pressing');
+    expect(pipeline.takes).toHaveLength(0);
+
+    // The App's word comes before the page's own timer. Within it, synchronously (not awaited
+    // here, so nothing queued has run): the take is the App's, taken, with no consent read, no
+    // permission read and no request in between.
+    const id = surfaceId();
+    act(() => {
+      for (const listener of [...native.holdListeners]) listener({ phase: 'recognised', take: 'n1', surface: id });
+    });
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toEqual({ adopt: 'n1' });
+    expect(pipeline.takes[0].input.pressedAt).toBe(pressedAt);
+    expect(pipeline.takes[0].start).toHaveBeenCalledTimes(1);
+    expect(native.permission).not.toHaveBeenCalled();
+    expect(native.reject).not.toHaveBeenCalled();
+    // The card comes with the App's haptic, not when the audio has arrived.
+    expect(hold.phase).toBe('listening');
+
+    // The page's own timer does not start another, and gives no haptic of its own.
+    await elapse(400);
+    await flush();
+    expect(pipeline.takes).toHaveLength(1);
+    expect(hold.phase).toBe('listening');
+    expect(native.impact).not.toHaveBeenCalledWith('medium');
+
+    await speak('你好');
+    expect(hold.phase).toBe('recording');
+    await elapse(400);
+    up(el);
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+    await act(async () => pipeline.takes[0].resolve('你好'));
+    await flush();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(hold.outcome).toBe('sent');
+    expect(native.reject).not.toHaveBeenCalled();
+  });
+
+  it('runs the take from its cue: what was said before the audio arrived is not a slip', async () => {
+    pipeline.startMs = 300;
+    const el = await mountFollowed();
+    down(el);
+    await elapse(200);
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    // Released 550 ms after the cue, 250 ms after the take's audio reached the page.
+    await elapse(550);
+    await flush();
+    up(el);
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+    expect(pipeline.takes[0].abort).not.toHaveBeenCalled();
+  });
+
+  it('waits a moment past its own threshold for the App, then recognises the hold itself', async () => {
+    const el = await mountFollowed();
+    down(el);
+    await elapse(200);
+    await flush();
+    expect(pipeline.takes).toHaveLength(0);
+    expect(hold.phase).toBe('pressing');
+
+    await elapse(NATIVE_HOLD_GRACE_MS);
+    await flush();
+    await elapse(0);
+    await flush();
+    expect(pipeline.takes).toHaveLength(1);
+    // Its own start, as in an App that does not recognise holds.
+    expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    expect(hold.phase).toBe('listening');
+    expect(native.impact).toHaveBeenCalledWith('medium');
+
+    // The App's word after that is too late: its take is refused, not a second one.
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    expect(pipeline.takes).toHaveLength(1);
+    expect(native.reject).toHaveBeenCalledWith('n1');
+  });
+
+  it('does not wait for the App on a press it does not follow', async () => {
+    const el = await mountFollowed();
+    // Above the box the App was given.
+    down(el, 100);
+    await elapse(200);
+    await flush();
+    await elapse(0);
+    await flush();
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+  });
+
+  it('recognises the hold itself, at its own threshold, when the App cannot open the microphone', async () => {
+    const el = await mountFollowed();
+    down(el);
+    await elapse(60);
+    await say({ phase: 'failed', take: 'n1', surface: surfaceId(), step: 'activate:561017449' });
+    // Not a hold yet, and maybe a tap: nothing starts on the App's word alone.
+    expect(pipeline.takes).toHaveLength(0);
+    expect(hold.phase).toBe('pressing');
+    await elapse(140);
+    await flush();
+    await elapse(0);
+    await flush();
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+  });
+
+  it('refuses a hold the page does not see: no press, a press that already ended, or a take in the way', async () => {
+    const el = await mountFollowed();
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    expect(native.reject).toHaveBeenLastCalledWith('n1');
+
+    // A tap the App counted as a hold (the surface was told late).
+    down(el);
+    await elapse(150);
+    up(el);
+    await say({ phase: 'recognised', take: 'n2', surface: surfaceId() });
+    expect(native.reject).toHaveBeenLastCalledWith('n2');
+    expect(onTap).toHaveBeenCalledTimes(1);
+    expect(pipeline.takes).toHaveLength(0);
+    expect(hold.phase).toBe('idle');
+  });
+
+  it('has the App drop a take the press ended before the page had it', async () => {
+    pipeline.startMs = 300;
+    const el = await mountFollowed();
+    down(el);
+    await elapse(200);
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    await elapse(100);
+    up(el);
+    expect(pipeline.takes[0].abort).toHaveBeenCalled();
+    expect(native.reject).toHaveBeenCalledWith('n1');
+    expect(hold.outcome).toBe('too-short');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('starts the take itself when the App no longer has the one it recognised, the finger still down', async () => {
+    const el = await mountFollowed();
+    native.impact.mockClear();
+    pipeline.startError = Object.assign(new Error('native voice capture did not start'), { name: NATIVE_HOLD_GONE });
+    down(el);
+    await elapse(200);
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    pipeline.startError = null;
+    await elapse(0);
+    await flush();
+    expect(pipeline.takes).toHaveLength(2);
+    expect(pipeline.takes[0].abort).toHaveBeenCalled();
+    expect(pipeline.takes[1].input.nativeCapture).toBe(true);
+    await elapse(0);
+    await flush();
+    expect(hold.phase).toBe('listening');
+    // The page's own cue, once its microphone is open.
+    expect(native.impact.mock.calls.map(([style]) => style)).toEqual(['medium']);
+    await speak('还在');
+    await elapse(600);
+    up(el);
+    expect(pipeline.takes[1].finish).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the slide haptics of a hold the App recognised to the App', async () => {
+    const el = await mountFollowed();
+    native.impact.mockClear();
+    down(el);
+    await elapse(200);
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    await elapse(0);
+    await flush();
+    await speak('不要了');
+    move(el, 500 - 81);
+    expect(hold.phase).toBe('armed');
+    move(el, 500 - 59);
+    expect(hold.phase).toBe('recording');
+    expect(native.impact).not.toHaveBeenCalled();
+    expect(native.selection).not.toHaveBeenCalled();
+  });
+
+  it('keeps a press\'s surface to its end, whatever a new press would be told', async () => {
+    // As a composer: no hold once its field is focused, which a press may itself bring about.
+    let open = true;
+    const el = await mountFollowed({ canHold: () => open });
+    down(el);
+    open = false;
+    await elapse(20);
+    // Not taken back under the finger: the App would stop following this press.
+    expect(namedSurfaces()).toHaveLength(1);
+    await elapse(170);
+    await say({ phase: 'recognised', take: 'n1', surface: surfaceId() });
+    expect(pipeline.takes).toHaveLength(1);
+    expect(native.reject).not.toHaveBeenCalled();
+  });
+
+  it('takes its surface back while a take is finalized, and names it again after', async () => {
+    const el = await mountFollowed();
+    const id = surfaceId();
+    down(el);
+    await elapse(200);
+    await say({ phase: 'recognised', take: 'n1', surface: id });
+    await elapse(0);
+    await flush();
+    await speak('你好');
+    // Still its own surface while the take records: the App follows no press during a take.
+    await elapse(600);
+    expect(namedSurfaces()).toHaveLength(1);
+    up(el);
+    expect(hold.phase).toBe('settling');
+    await elapse(20);
+    expect(namedSurfaces()).toEqual([]);
+    // A press now is the pending take's, not a hold.
+    await say({ phase: 'recognised', take: 'n2', surface: id });
+    expect(native.reject).toHaveBeenLastCalledWith('n2');
+
+    await act(async () => pipeline.takes[0].resolve('你好'));
+    await flush();
+    expect(hold.phase).toBe('idle');
+    await elapse(20);
+    expect(namedSurfaces()).toEqual([{ id, x: 0, y: 470, width: 300, height: 60 }]);
+  });
+
+  it('names nothing in an App that does not recognise holds, and holds as before', async () => {
+    native.capture.mockReturnValue(true);
+    native.permission.mockResolvedValue('granted');
+    const el = await mount();
+    el.getBoundingClientRect = () => new DOMRect(0, 470, 300, 60);
+    await elapse(20);
+    expect(native.surfaces).not.toHaveBeenCalled();
+    await holdFor(el);
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+  });
+});
