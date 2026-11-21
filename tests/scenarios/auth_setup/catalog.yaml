@@ -571,10 +571,12 @@ scenarios:
     kind: happy_path
     layer: scenario
     backend: personal-claims
-    test: tests/test_remote_rebind_cli.py::test_yes_resets_then_binds_only_after_the_account_and_domain_are_accepted
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account
+    reason: The command as typed, through the real parser, admission, reset, link claim, guarded redemption and publication, read back with `vibe remote status`. Only avibe.bot and the connector are peers; the terminal's answers are scripted.
     supporting_tests:
       - tests/test_remote_rebind_cli.py
       - tests/test_binding_reset.py
+      - tests/test_binding_recovery.py
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered

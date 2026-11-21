@@ -59,6 +59,7 @@ from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_sess
 from tests.test_desktop_local_instance import desktop_host as desktop_host
 from tests.test_personal_claims import claim_peer as claim_peer, owner_browser as owner_browser
 from tests.test_pairing_recovery import pairing_host as pairing_host
+from tests.test_remote_rebind_cli import bound_terminal as bound_terminal, terminal as terminal
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
     CustodiedNativeOAuthScenarioHarness,
@@ -158,6 +159,55 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
     assert cloud.session_secret and cloud.tunnel_token and cloud.instance_secret
     assert remote_access._read_pending_pairing_record() == (None, None)
     assert all(s not in str(outcome) for s in (state, claim_peer.key, claim_peer.calls[-1][1]["code_verifier"], cloud.session_secret))
+
+
+def test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account(bound_terminal, monkeypatch, capsys):
+    """AUTH-SETUP-212: the command as typed, through the parser, admission and dispatch.
+
+    Real reset, link claim, guarded redemption and publication in an isolated data
+    root; only avibe.bot and the connector are peers. Two answers are typed: the
+    word that discards the binding, then the acceptance of the account and domain
+    avibe.bot reported. Read back through `vibe remote status`."""
+    from config.v2_config import V2Config
+    from vibe import binding_admission, cli, desktop_local_instance, remote_access
+
+    def vibe(*argv):
+        monkeypatch.setattr(sys, "argv", ["vibe", *argv])
+        with pytest.raises(SystemExit) as stopped:
+            cli.main()
+        return stopped.value.code, capsys.readouterr()
+
+    before = V2Config.load().remote_access.vibe_cloud
+    old_identity, old_session = desktop_local_instance._installation_id(), before.session_secret
+    code, shown = vibe("remote", "status")
+    assert code == 0 and "Paired: yes" in shown.out and "Binding:" not in shown.out
+
+    # Declining first: the same command, nothing discarded, no request to avibe.bot.
+    bound_terminal.answers = [""]
+    code, shown = vibe("remote", "rebind")
+    assert code == 0 and shown.out.rstrip().endswith("This computer's binding is as it was.")
+    assert desktop_local_instance._installation_id() == old_identity and not bound_terminal.peer.calls
+
+    bound_terminal.answers = ["yes", "y"]
+    code, shown = vibe("remote", "rebind")
+    assert code == 0 and not shown.err
+    out = shown.out
+    assert out.index("You lose:") < out.index("Type yes to bind as a new computer.") < out.index("no longer bound to any Avibe")
+    assert out.index("https://avibe.bot/connect/ABCD234567") < out.index("Account: actual@fixture.test") < out.index("Bound.")
+    assert [prompt[:8] for prompt in bound_terminal.prompts] == ["Type yes", "Type yes", "Bind thi"]
+    assert bound_terminal.peer.decisions == ["owner-id"]
+
+    # A new computer to avibe.bot: a new identity and new session authority, the same workspace root.
+    cloud = V2Config.load().remote_access.vibe_cloud
+    assert cloud.instance_id == "inst_A" and cloud.is_runtime_paired() and cloud.session_secret != old_session
+    new_identity = desktop_local_instance._installation_id()
+    assert new_identity and new_identity != old_identity
+    assert bound_terminal.peer.calls[0][1]["installation_id"] == new_identity
+    assert remote_access._read_pending_pairing_record() == (None, None) and not binding_admission.reset_in_progress()
+    code, shown = vibe("remote", "status", "--json")
+    assert code == 0 and json.loads(shown.out)["paired"] is True and "binding_state" not in shown.out
+    assert all(secret not in out for secret in (old_identity, new_identity, cloud.session_secret, cloud.instance_secret,
+                                                 bound_terminal.peer.key, bound_terminal.peer.calls[-1][1]["code_verifier"]))
 
 
 @pytest.mark.parametrize("instance_kind", ["personal", "organization"])
