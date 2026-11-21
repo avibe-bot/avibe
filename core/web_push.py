@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -287,6 +288,35 @@ def is_native_relay_subscription(subscription: dict[str, Any]) -> bool:
     return _native_relay_registration_id(subscription) is not None
 
 
+def _binding_scoped_send(send):
+    """A selected remote endpoint cannot outlive its binding, even when re-enrolled.
+
+    The OS lease spans the actual provider call, but no database transaction does.
+    Local subscriptions have no remote binding and remain deliverable.
+    """
+    @wraps(send)
+    def checked(*, subscription, **kwargs):
+        if not str(subscription.get('user_key', '')).startswith('remote:'):
+            return send(subscription=subscription, **kwargs)
+        from storage.db import get_cached_sqlite_engine
+        from storage.lock import try_shared_file_lease
+        from storage.web_push_service import get_deliverable_by_endpoint
+        from vibe.binding_admission import publication_lease_path, reset_in_progress
+        lease = try_shared_file_lease(publication_lease_path())
+        if lease is None:
+            raise ValueError('push_delivery_unavailable')
+        with lease:
+            if reset_in_progress():
+                raise ValueError('push_delivery_unavailable')
+            with get_cached_sqlite_engine().connect() as conn:
+                current = get_deliverable_by_endpoint(conn, endpoint=subscription['endpoint'], user_key=subscription['user_key'])
+            if current is None or any(current.get(k) != subscription.get(k) for k in ('_delivery_generation', 'id', 'auth', 'p256dh')):
+                raise ValueError('push_delivery_unavailable')
+            return send(subscription=subscription, **kwargs)
+    return checked
+
+
+@_binding_scoped_send
 def send_badge_update(
     *,
     subscription: dict[str, Any],
@@ -348,6 +378,7 @@ def send_badge_update(
         raise BadgeUpdateProtocolError("badge relay returned a non-contract response")
 
 
+@_binding_scoped_send
 def send_web_push(
     *,
     subscription: dict[str, Any],
@@ -385,6 +416,7 @@ def send_web_push(
     )
 
 
+@_binding_scoped_send
 def send_live_activity_update(
     *, subscription: dict[str, Any], body: dict[str, Any],
     vapid_keys: VapidKeys | None = None, client: httpx.Client | None = None,

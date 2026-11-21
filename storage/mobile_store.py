@@ -610,6 +610,26 @@ class MobileStore:
             conn.execute("INSERT INTO push_attempts VALUES(?,?)", (device_key, now))
             return True
 
+    def retire_other_identities(self, *, instance: str, owner: str, expected_device: str | None) -> None:
+        """Apply a live owner proof, never a delayed answer over a new enrollment."""
+        now = _now()
+        with self.transaction() as conn:
+            current = self.active_device(conn)
+            if (current['id'] if current else None) != expected_device:
+                raise MobileError('instance_eligibility_unavailable', 503)
+            other = '(instance_id != ? OR owner != ?)'
+            args = (instance, owner)
+            devices = conn.execute(f'SELECT id FROM devices WHERE revoked_at IS NULL AND {other}', args).fetchall()
+            for row in devices:
+                self._revoke_device(conn, row['id'], now)
+            codes = conn.execute(f'DELETE FROM pairings WHERE {other}', args).rowcount
+            requests = conn.execute(f"UPDATE requests SET state='canceled',ended_at=? WHERE state IN ('queued','claimed')"
+                                    f' AND {other}', (now, *args)).rowcount
+            if not (devices or codes or requests):
+                return
+            self._audit(conn, 'health.revoke', caller='instance-policy')
+        publish_mobile_schedule_changed()
+
     def revoke_confirmed_pairing(self, device_id: str, *, instance: str, owner: str) -> None:
         """Recheck the exact private enrollment in the same transaction that erases it."""
         with self.transaction() as conn:

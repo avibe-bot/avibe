@@ -2027,12 +2027,79 @@ def _remote_examples_text() -> str:
           vibe remote start
           vibe remote stop
           vibe remote pair vrp_abc123
+          vibe remote rebind
         """
     )
 
 
 def _remote_pair_examples_text() -> str:
-    return "Guidance:\n  This is the direct pairing command for users who already have a pairing key.\n  For the guided setup flow, run `vibe remote`.\n  Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.\n  To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.\n  Pairing saves the remote-access config and then starts the managed tunnel automatically.\n  The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.\n\nExamples:\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot"
+    return dedent(
+        """\
+        Guidance:
+          Use this when avibe.bot has given you a pairing key.
+          To bind a computer again, or to bind it to another account, use
+          `vibe remote rebind`; it needs no key.
+          For the guided setup flow, run `vibe remote`.
+          Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.
+          To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.
+          Pairing saves the binding and starts the tunnel. On a computer that was already
+          bound it replaces that binding and signs every remote device out; if remote
+          access was off there, it stays off.
+          A pairing key works once. If it fails, a new one is needed.
+
+        Examples:
+          vibe remote
+          vibe remote pair vrp_abc123
+          vibe remote pair --device-name "Mac Studio"
+          vibe remote pair --backend-url https://avibe.bot
+        """
+    )
+
+
+def _remote_rebind_help_text() -> str:
+    return dedent(
+        """\
+        What it does depends on the state of this computer:
+          bound         Explains "Bind remote access again", which is done in a browser,
+                        and offers "Bind as a new computer" here.
+          refused       The same. avibe.bot refusing the binding does not say whether the
+                        Avibe was deleted or bound from another computer.
+          not bound     Binds this computer: prints a link, waits for it to be approved
+                        on avibe.bot, then shows the account and the domain and asks
+                        you to accept them.
+          unfinished    Continues the earlier attempt or reset. It never starts a
+                        second one.
+
+        Bind remote access again (browser)
+          For the Avibe this computer is bound to now. Open Avibe at this computer's own
+          address and go to Devices. On a server with no browser, forward the port from
+          your own computer and open it there (5123 unless you changed the port):
+              ssh -L 5123:127.0.0.1:5123 <user>@<this-server>
+              http://127.0.0.1:5123
+          It signs every remote device out. Pages open on this computer are not
+          affected. It does not change the tunnel credential.
+          If someone may have copied this computer's Avibe data as a whole, delete this
+          Avibe at avibe.bot, bind it again, then take your name back.
+
+        Bind as a new computer (this command)
+          This computer forgets the Avibe it is bound to and is then bound as a new
+          one. Remote access through the current domain stops, every remote device is
+          signed out, everyone you gave access to loses it, links already sent stop
+          working, and synced Health data is deleted. Everything on this computer is
+          kept. The Avibe on avibe.bot is not deleted and no credential is changed.
+          The command lists all of this and asks before it does anything.
+
+        Taking the old name back
+          A name that is given up is kept for the account that had it for 30 days;
+          during that time nobody else can claim it. The old Avibe gives up its name
+          when it is deleted on avibe.bot. After that, choose the name when avibe.bot
+          asks you to name this computer's Avibe, or afterwards in Devices, under
+          "Change the domain". avibe.bot decides whether the name can be taken.
+
+        Examples:
+          vibe remote rebind
+        """
+    )
 
 
 def _show_examples_text() -> str:
@@ -16367,10 +16434,34 @@ def _print_remote_status(result: dict) -> None:
         if direct.get("certificate_not_after"):
             print(f"  Direct certificate expiry: {direct['certificate_not_after']}")
         print(f"  Direct transport: {'running' if direct.get('transport_running') else 'stopped'}")
+    binding_line = _REMOTE_BINDING_STATUS_LINES.get(result.get("binding_state"))
+    if binding_line:
+        print(f"  Binding: {binding_line}")
     if result.get("error"):
         print(f"  Error: {result.get('error')}")
     if result.get("detail"):
         print(f"  Detail: {result.get('detail')}")
+
+
+#: Binding states that need the person at this computer; ordinary states add no line.
+_REMOTE_BINDING_STATUS_LINES = {
+    "binding_rejected": "refused by avibe.bot. See: vibe remote rebind",
+    "pairing_recovery_required": "an earlier attempt is unfinished. Continue it: vibe remote rebind",
+    "resetting": "a reset is unfinished. Continue it: vibe remote rebind",
+    "reset_repair_required": "a reset cannot finish. See: vibe remote rebind",
+}
+
+#: `vibe remote start` refusals that are about the binding, not the tunnel.
+_REMOTE_START_BINDING_REFUSALS = {
+    "binding_rejected": (
+        "Remote access was not started: avibe.bot is refusing this computer's binding.",
+        "See what can be done: vibe remote rebind",
+    ),
+    "reset_in_progress": (
+        "Remote access was not started: a reset of this computer's binding has not finished.",
+        "Continue it: vibe remote rebind",
+    ),
+}
 
 
 def _read_pairing_key_from_args(args) -> str:
@@ -16425,6 +16516,10 @@ def _print_remote_pair_failure(result: dict) -> None:
         print("  vibe remote", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
+        return
+    if error_code == "operation_in_progress":
+        print("Another change to this computer's binding or domain is running. No pairing key was used.", file=sys.stderr)
+        print("When it has finished, run the command again.", file=sys.stderr)
         return
     if error_code == "pairing_local_write_unavailable":
         print("Remote access setup stopped before contacting Avibe Cloud.", file=sys.stderr)
@@ -16566,8 +16661,9 @@ def _print_remote_already_configured(result: dict) -> None:
     print("  vibe remote start    Start the tunnel again after a reboot or stop")
     print("  vibe remote stop     Temporarily disable remote access")
     print("")
-    print("Need to switch account or domain?")
-    print("  Run: vibe remote pair")
+    print("To bind this computer again, or to another account:")
+    print("  vibe remote rebind")
+    print("To change the domain, open Devices in Avibe.")
 
 
 def _run_remote_pair(args, *, guided: bool) -> int:
@@ -16628,7 +16724,10 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         getattr(args, "device_name", "avibe"),
     )
     start_result = result.get("start") if isinstance(result.get("start"), dict) else {}
-    command_ok = bool(result.get("ok") and start_result.get("ok"))
+    # Pairing over a computer whose remote access was off keeps it off and starts
+    # no tunnel. That is the result asked for, not a failed start.
+    kept_off = bool(result.get("ok")) and "start" not in result
+    command_ok = bool(result.get("ok") and (kept_off or start_result.get("ok")))
     if getattr(args, "json", False):
         payload = {**result, "ok": command_ok}
         if result.get("ok") and not command_ok:
@@ -16641,6 +16740,12 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         _print_remote_pair_failure(result)
         return 1
 
+    if kept_off:
+        print("")
+        print("Pairing saved. Remote access was off on this computer and stays off.")
+        print("Turn it on with:")
+        print("  vibe remote start")
+        return 0
     _print_remote_pair_success(result, start_result)
     return 0 if command_ok else 1
 
@@ -16653,10 +16758,22 @@ def cmd_remote_setup(args):
     return _run_remote_pair(args, guided=True)
 
 
+def cmd_remote_rebind(args):
+    from vibe import remote_rebind
+
+    return remote_rebind.run()
+
+
 def cmd_remote_status(args):
-    from vibe import remote_access
+    from vibe import remote_access, remote_rebind
 
     result = remote_access.status()
+    try:
+        binding_state = remote_rebind.read_state()[0]
+    except Exception:
+        binding_state = None  # The binding note is extra; status itself must still print.
+    if binding_state in _REMOTE_BINDING_STATUS_LINES:
+        result["binding_state"] = binding_state
     if getattr(args, "json", False):
         _print_cli_payload("remote_status", **result)
     else:
@@ -16680,6 +16797,9 @@ def cmd_remote_start(args):
                 print("Remote access tunnel is ready.")
             if result.get("public_url"):
                 print(f"Remote URL: {result['public_url']}")
+        elif result.get("error") in _REMOTE_START_BINDING_REFUSALS:
+            for line in _REMOTE_START_BINDING_REFUSALS[result["error"]]:
+                print(line, file=sys.stderr)
         else:
             print(f"Remote access failed to start: {result.get('error') or 'unknown_error'}", file=sys.stderr)
             if result.get("detail"):
@@ -19454,7 +19574,7 @@ def build_parser():
 
     remote_pair_parser = remote_subparsers.add_parser(
         "pair",
-        help="Pair directly when you already have a pairing key",
+        help="Pair with a one-time pairing key from avibe.bot",
         description="Redeem an Avibe Cloud pairing key, save remote-access config, and start the managed tunnel.",
         epilog=_remote_pair_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -19464,7 +19584,7 @@ def build_parser():
     remote_pair_parser.add_argument(
         "pairing_key",
         nargs="?",
-        help="One-time pairing key from the Avibe Cloud console. Omit to enter it securely.",
+        help="One-time pairing key from avibe.bot. Omit to enter it securely.",
     )
     remote_pair_parser.add_argument(
         "--backend-url",
@@ -19480,6 +19600,19 @@ def build_parser():
         "--json",
         action="store_true",
         help="Print the pairing result as the JSON envelope.",
+    )
+
+    remote_subparsers.add_parser(
+        "rebind",
+        help="Bind this computer's remote access again (asks at the terminal)",
+        description=(
+            "Show which Avibe this computer is bound to, and bind it again. It asks its questions "
+            "at the terminal, so it runs by hand only: not from an Agent, a Task, a script or a pipe. "
+            "An SSH session works."
+        ),
+        epilog=_remote_rebind_help_text(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe remote rebind --help",
     )
 
     remote_status_parser = remote_subparsers.add_parser(
@@ -21564,6 +21697,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "start"): "member",
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
+    ("remote", "rebind"): "owner",
     ("remote", "direct", "on"): "owner",
     ("remote", "direct", "off"): "owner",
     ("remote", "direct", "status"): "member",
@@ -21939,6 +22073,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_remote_setup(args))
         if args.remote_command == "pair":
             sys.exit(cmd_remote_pair(args))
+        if args.remote_command == "rebind":
+            sys.exit(cmd_remote_rebind(args))
         if args.remote_command == "status":
             sys.exit(cmd_remote_status(args))
         if args.remote_command == "start":

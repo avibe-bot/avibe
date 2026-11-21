@@ -217,7 +217,8 @@ def test_ui_policy_workers_notice_link_pairing_without_ui_restart(claim_peer, mo
             remote_access.start_resource_acl_sync_polling()
         assert len(workers) == 2
     from storage import resource_access_service
-    monkeypatch.setattr(remote_access, "_device_json_request", lambda cfg, *args: (requests.append((cfg.remote_access.vibe_cloud.instance_id, *args)), {"authorization_revision": 1})[1])
+    from vibe import binding_health
+    monkeypatch.setattr(binding_health, "read_revision", lambda cfg: (requests.append((cfg.remote_access.vibe_cloud.instance_id, "GET", "authorization-revision")), {"authorization_revision": 1})[1])
     monkeypatch.setattr(resource_access_service, "list_resource_organization_ids", lambda: (acl_reads.append(True), [])[1])
     class TickDone(Exception):
         pass

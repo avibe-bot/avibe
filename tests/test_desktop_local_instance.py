@@ -259,6 +259,101 @@ def test_remote_owner_cannot_use_guarded_local_pair(desktop_host, monkeypatch, t
     assert response.status_code == 403
     assert response.get_json()["error"] == "direct_loopback_required"
 
+def test_scheduled_replay_leaves_live_desktop_redeem_to_its_caller(desktop_host, monkeypatch):
+    body = _pair_body(_prepare(desktop_host).get_json())
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def issuer(_url, payload, **_kwargs):
+        calls.append(dict(payload))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(10)
+        return _response('live-device')
+
+    monkeypatch.setattr(remote_access, '_json_request', issuer)
+    with ThreadPoolExecutor(1) as pool:
+        original = pool.submit(remote_access.pair, body['pairing_key'], body['backend_url'], body['device_name'],
+                               desktop_enrollment=body['desktop_enrollment'])
+        try:
+            assert entered.wait(10)
+            # Even an unusually slow, still-owned request must not lose publication.
+            os.utime(remote_access._pending_pairing_path(), (1, 1))
+            assert remote_access._drive_pending_pairing()[0]
+            assert len(calls) == 1 and not V2Config.load().remote_access.vibe_cloud.instance_id
+        finally:
+            release.set()
+        assert original.result(timeout=10)['ok']
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'live-device'
+
+
+def test_scheduled_replay_takes_over_only_after_desktop_dispatch_grace(desktop_host, monkeypatch):
+    body = _pair_body(_prepare(desktop_host).get_json())
+    path = remote_access._pending_pairing_path()
+    os.utime(path, (1, 1))  # The prepare can be old when the grant is finally dispatched.
+    calls = []
+
+    def issuer(_url, payload, **_kwargs):
+        calls.append(dict(payload))
+        if len(calls) == 1:
+            raise TimeoutError('lost Desktop reply')
+        return _response('recovered-device')
+
+    monkeypatch.setattr(remote_access, '_json_request', issuer)
+    assert not remote_access.pair(body['pairing_key'], body['backend_url'], body['device_name'],
+                                  desktop_enrollment=body['desktop_enrollment'])['ok']
+    assert remote_access._drive_pending_pairing()[0] and len(calls) == 1
+    os.utime(path, (1, 1))  # No active caller and the current grant is past its grace period.
+    assert remote_access._drive_pending_pairing() == (True, 1)
+    assert len(calls) == 2 and calls[1] == calls[0]
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'recovered-device' and not path.exists()
+
+
+def test_desktop_retry_during_lost_reply_can_prepare_replay_and_renew(desktop_host, monkeypatch):
+    from vibe import binding_admission as gate
+
+    route = '/api/remote-access/vibe-cloud/pair'
+    prepared = _prepare(desktop_host).get_json()
+    body = _pair_body(prepared)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def issuer(_url, payload, **_kwargs):
+        calls.append(dict(payload))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(15)
+            return _response('stale-device')
+        if len(calls) == 2:
+            raise remote_access.BackendRequestError(400, {'error': 'pairing_key_expired'})
+        return _response('renewed-device')
+
+    monkeypatch.setattr(remote_access, '_json_request', issuer)
+    def post(client, payload):
+        return client.post(route, json=payload, headers=csrf_headers(client)).get_json()
+    with ThreadPoolExecutor(1) as pool:
+        old = pool.submit(post, ui_server.app.test_client(), body)
+        try:
+            assert entered.wait(10)
+            for kind in ('reset', 'address', 'pairing'):
+                with pytest.raises(gate.OperationBusy), gate.admitted(kind):
+                    pytest.fail('unrelated writer entered during Desktop redeem')
+            # The native coordinator reads the descriptor, prepares again, and
+            # replays WITHOUT a key before asking ensure-local for a renewed grant.
+            again = _prepare(desktop_host).get_json()
+            assert again['operation_id'] == prepared['operation_id']
+            assert again['local']['enrollment']['state'] == 'redeeming'
+            expired = post(desktop_host, {'pairing_key': '', 'backend_url': body['backend_url']})
+            assert (expired['status'], expired['error']) == (400, 'pairing_key_expired')
+            assert post(desktop_host, {**_pair_body(again), 'pairing_key': 'renewed-key'})['ok']
+        finally:
+            release.set()
+        assert old.result(timeout=10)['error'] == 'pairing_superseded_after_redeem'
+    assert len(calls) == 3 and calls[0] == calls[1]
+    assert calls[2]['redeem_request_id'] != calls[0]['redeem_request_id']
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'renewed-device'
+
+
 @pytest.mark.parametrize("late_outcome", ["expired", "success", "malformed_success"])
 def test_late_old_grant_outcome_cannot_change_replacement_request(desktop_host, monkeypatch, late_outcome):
     """AUTH-SETUP-172/173: renewal fences every old request outcome, not just its operation.

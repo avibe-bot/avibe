@@ -127,15 +127,22 @@ def _settle(digest, attempt, code, now):
 
 
 def run_once(load_config):
-    config = load_config()
-    job = _claim(config, int(time.time()))
+    from config.v2_config import config_file_lock
+    from vibe.binding_admission import reset_in_progress
+    # Retiring other epochs is destructive. Keep the config read and its DB
+    # write on the same side of publication, never around the issuer request.
+    with config_file_lock():
+        if reset_in_progress():
+            return False
+        config = load_config()
+        job = _claim(config, int(time.time()))
     if job is None:
         return False
     digest, reference, epoch, attempt = job
     # Snapshot credentials, never re-read them inside the send. The issuer revalidates current pairing.
     config = load_config()
     credentials = config.remote_access.vibe_cloud.runtime_credentials() if pairing_epoch(config) == epoch else None
-    if not credentials:
+    if not credentials or reset_in_progress():
         return False  # Nothing was sent. Let the next claimant recheck this binding.
     code = dispatch(credentials, reference)
     _settle(digest, attempt, code, int(time.time()))

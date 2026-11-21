@@ -1339,7 +1339,7 @@ def _reconcile_badge_for_owner(
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_success(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             badge_count=badge_count,
                         )
@@ -1352,7 +1352,7 @@ def _reconcile_badge_for_owner(
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_failure(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             disable=status_code in {404, 410},
                         )
@@ -1606,7 +1606,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_success(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             badge_count=badge_count,
                         )
@@ -1624,7 +1624,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     logger.warning("web push: send failed", exc_info=True)
                     with engine.begin() as conn:
                         web_push_service.mark_send_failure(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             disable=disable,
                         )

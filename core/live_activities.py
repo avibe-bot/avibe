@@ -168,9 +168,10 @@ class LiveActivityService:
                 return None
             # Keep the queued phase (including an end) while the phone is paused.
             # Only missing enrollment ends tracking; a pause reserves no relay timestamp.
-            if web_push_service.get_deliverable_by_endpoint(
+            subscription = web_push_service.get_deliverable_by_endpoint(
                 conn, endpoint=subscription["endpoint"], user_key=row["owner_user_key"]
-            ) is None:
+            )
+            if subscription is None:
                 return None
             terminal = queued["ended_at"] is not None
             stamp = max(now, row["last_timestamp"] + 1)

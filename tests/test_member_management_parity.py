@@ -110,6 +110,12 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("GET", "/api/remote-access/rebind"),
+    ("POST", "/api/remote-access/rebind/claims"),
+    ("GET", "/api/remote-access/rebind/claims/{claim_id}"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/cancel"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset"),
     ("POST", "/api/remote-access/claims"),
     ("GET", "/api/remote-access/claims/{claim_id}"),
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
@@ -198,7 +204,8 @@ def test_complete_registered_api_management_inventory():
     # + 3 personal installation claim methods (Owner; browser return is not an API route).
     # + 8 device function, activity and Health ticket methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
-    assert len(endpoints) == 372
+    # + 6 constrained local rebind/reset methods (Owner and local operator).
+    assert len(endpoints) == 378
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),
