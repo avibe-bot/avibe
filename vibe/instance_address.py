@@ -1385,6 +1385,10 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             _hooks["wake_pages"]()
         except Exception:
             pass
+    # A further change seen while this journal was open was recorded but not
+    # journaled (one journal at a time), and its generation now equals every
+    # later hint. Read again now that the journal is closed, so it is adopted.
+    _wake_worker(read_state=True)
     return 0.0
 
 

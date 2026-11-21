@@ -143,8 +143,11 @@ def address(monkeypatch):
         ("_authority", None), ("_quiet", set()), ("_quiet_loaded_for", None), ("_inflight", {}),
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
         ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
-        ("_last_read_failed", None), ("_known_cleanup", None),
+        ("_last_read_failed", None), ("_known_cleanup", None), ("_binding_failure_logged", None),
     ):
+        monkeypatch.setattr(instance_address, name, value)
+    instance_address._worker_read_requested.clear()
+    for name, value in ():
         monkeypatch.setattr(instance_address, name, value)
     monkeypatch.setattr(ui_server, "_start_instance_address", lambda: None)
     return plane, clocks
@@ -171,8 +174,14 @@ def rename_to(prefix, actor=("loopback",)):
 
 
 def run():
-    while instance_address._advance_operation() > 0:
-        pass
+    """What the worker thread does, on this thread: read when asked to, then advance the journal."""
+
+    while True:
+        if instance_address._worker_read_requested.is_set():
+            instance_address._worker_read_requested.clear()
+            instance_address.refresh_state(force=True)
+        if instance_address._advance_operation() <= 0 and not instance_address._worker_read_requested.is_set():
+            return
 
 
 def get(host, path="/", **kwargs):
@@ -891,6 +900,23 @@ def test_a5_a_return_is_drained_whatever_order_the_journal_learned_of_it(address
     assert binding().active_host == OLD
 
 
+def test_b4_a_further_change_seen_while_a_journal_is_open_is_adopted_when_it_closes(address):
+    plane, _ = address
+    seen = []
+
+    def another_change_lands_right_after_the_switch():
+        if not seen:
+            seen.append(plane.move(THIRD, "an-outside-operation"))
+            instance_address.refresh_state(force=True)  # recorded, but one journal is still open
+
+    instance_address._hooks.update(wake_pages=another_change_lands_right_after_the_switch,
+                                   close_connections=lambda hosts: None)
+    rename_to("new")
+    run()
+    assert binding().active_host == THIRD
+    assert [entry["hostname"] for entry in instance_address.describe()["cleanup"]] == [OLD, NEW]
+
+
 def test_a5_a_change_made_elsewhere_is_adopted_without_deleting_anything(address):
     plane, _ = address
     sign_in()
@@ -1031,7 +1057,8 @@ def test_b2_a_read_disowned_by_a_401_cannot_grant_cleaning_or_move_the_address(a
         return result
 
     monkeypatch.setattr(v2_config, "update_config_fields", write_then_be_refused)
-    run()
+    while instance_address._advance_operation() > 0:  # the journal only; the worker's next read comes below
+        pass
     monkeypatch.setattr(v2_config, "update_config_fields", write)
     assert binding().active_host == OLD and instance_address._authority is None
     plane.fail = RuntimeError("resource_acl_device_unavailable")
