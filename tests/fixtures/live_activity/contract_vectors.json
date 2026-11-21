@@ -788,5 +788,44 @@
       "status": 400,
       "error": "invalid_live_activity"
     }
-  ]
+  ],
+  "bridge_v2": {
+    "capability": {
+      "liveActivities": 2
+    },
+    "setting_result": {
+      "enabled": false,
+      "systemEnabled": true
+    },
+    "set_setting": {
+      "enabled": true
+    },
+    "set_setting_result": {
+      "enabled": true,
+      "systemEnabled": true
+    },
+    "observe": {
+      "sessionId": "ses_会话一",
+      "agentName": "首席安全官",
+      "sessionTitle": "依赖审计 · avault 🔒",
+      "running": true
+    },
+    "observe_bot_session": {
+      "sessionId": "ses_main",
+      "agentName": "Vibey",
+      "sessionTitle": null,
+      "running": true
+    },
+    "observe_none": {
+      "sessionId": null
+    },
+    "observe_result": {
+      "ok": true
+    },
+    "retired_methods": [
+      "liveActivity.status",
+      "liveActivity.start",
+      "liveActivity.stop"
+    ]
+  }
 }
