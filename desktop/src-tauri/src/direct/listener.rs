@@ -49,8 +49,8 @@ impl Drop for Listener {
 }
 impl Listener {
     pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Self> {
-        Self::bind_via(host, links, |h| async move {
-            public::open(&h).await.map(|s| Box::new(s) as Stream)
+        Self::bind_with_port(host, links, |h, port| async move {
+            public::open(&h, port).await.map(|s| Box::new(s) as Stream)
         })
         .await
     }
@@ -60,6 +60,7 @@ impl Listener {
     pub(super) fn health(&self) -> watch::Receiver<()> {
         self.health.clone()
     }
+    #[cfg(test)]
     pub(super) async fn bind_via<F, Fut>(
         host: Authority,
         links: watch::Receiver<Option<Arc<Link>>>,
@@ -67,6 +68,17 @@ impl Listener {
     ) -> Option<Self>
     where
         F: Fn(Authority) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future<Output = Option<Stream>> + Send + 'static,
+    {
+        Self::bind_with_port(host, links, move |h, _| open_public(h)).await
+    }
+    async fn bind_with_port<F, Fut>(
+        host: Authority,
+        links: watch::Receiver<Option<Arc<Link>>>,
+        open_public: F,
+    ) -> Option<Self>
+    where
+        F: Fn(Authority, u16) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Option<Stream>> + Send + 'static,
     {
         let credential = Arc::new(Credential::generate()?);
@@ -90,7 +102,7 @@ impl Listener {
                 clients.spawn(async move {
                     serve(socket, &h, &key.header, || async {
                         let link = links.borrow().clone();
-                        let fallback = dial(h.clone());
+                        let fallback = dial(h.clone(), port);
                         match link {
                             Some(l) if l.usable() => l.plan.choose(l.open(&h), fallback).await,
                             _ => timeout(Duration::from_secs(8), fallback).await.ok().flatten(),
@@ -194,6 +206,25 @@ mod tests {
         future::ready,
         io::{Error, ErrorKind},
     };
+    #[tokio::test]
+    async fn authenticated_connect_without_a_backend_returns_502_then_closes() {
+        let host = Authority::managed("desk-app.avibe.bot").unwrap();
+        let (_tx, rx) = watch::channel(None);
+        let l = Listener::bind_via(host.clone(), rx, |_| ready(None)).await.unwrap();
+        let mut browser = TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap();
+        let request = format!(
+            "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
+            host.host(),
+            l.credential.header
+        );
+        browser.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(2), browser.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+    }
     #[tokio::test(start_paused = true)]
     async fn temporary_accept_errors_back_off_and_terminal_errors_are_returned() {
         let start = tokio::time::Instant::now();
