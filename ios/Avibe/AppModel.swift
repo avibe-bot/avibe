@@ -480,7 +480,9 @@ final class AppModel: ObservableObject {
     private func removeDepartedInstanceData(origin: String, accountID: String) async -> Bool {
         guard
             let address = WebOrigin.parseConfigured(origin),
-            sessionCoordinator.currentAccount?.id == accountID,
+            // Not during a sign-out, a reset or a change of account: the
+            // store is about to go, with everything in it.
+            sessionCoordinator.settledAccountID == accountID,
             !sessionCoordinator.currentInstances.contains(where: {
                 WebOrigin(url: $0.url)?.serialized == origin
             }),
@@ -489,7 +491,24 @@ final class AppModel: ObservableObject {
             return false
         }
         let store = websiteDataStore.identifier
-        guard await InstanceSiteDataCleaner.clean(origin: address, in: websiteDataStore.dataStore) else {
+        // Cookies belong to a host: kept while another address the account
+        // lists, or avibe.bot itself, is on that host.
+        let hostInUse = sessionCoordinator.controlPlaneURL.host == address.host
+            || sessionCoordinator.currentInstances.contains {
+                WebOrigin(url: $0.url)?.host == address.host
+            }
+        guard await InstanceSiteDataCleaner.clean(
+            origin: address,
+            in: websiteDataStore.dataStore,
+            removingCookies: !hostInUse,
+            willUse: { [weak self] webView in
+                // A store rotation waits for this WebView as for any other
+                // of the store.
+                self?.recordRuntimeReleaseBarrier(
+                    WebsiteDataStoreReleaseBarrier(webViews: [webView])
+                )
+            }
+        ) else {
             return false
         }
         RuntimePageCache(directory: RuntimePageCache.root

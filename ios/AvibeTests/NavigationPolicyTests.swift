@@ -5371,6 +5371,35 @@ extension NavigationPolicyTests {
         await data.reconcile(live: [], accountID: "a")
         XCTAssertEqual(data.entries(accountID: "a"), [:])
         XCTAssertEqual(removed.count, 3)
+
+        // An answer that arrives while a removal runs decides about what is
+        // left: an address it lists again is not removed, and starts over.
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        data.noteOpened(accountID: "a", origin: two, store: store)
+        await data.reconcile(live: [], accountID: "a")
+        clock += 24 * hour
+        var arrives: (() async -> Void)?
+        let during = DepartedInstanceData(
+            defaults: defaults,
+            now: { clock },
+            currentStore: { store },
+            clean: { origin, _ in
+                removed.append("during \(origin)")
+                if let answer = arrives {
+                    arrives = nil
+                    await answer()
+                }
+                return true
+            }
+        )
+        arrives = { await during.reconcile(live: [two], accountID: "a") }
+        await during.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(removed.filter { $0.hasPrefix("during") }, ["during \(one)"])
+        XCTAssertNil(during.entries(accountID: "a")[one])
+        XCTAssertEqual(
+            during.entries(accountID: "a")[two],
+            DepartedInstanceData.Entry(store: store, missingSince: nil)
+        )
     }
 
     /// The removal itself, in a WebKit store with two sibling addresses of
@@ -5380,7 +5409,12 @@ extension NavigationPolicyTests {
     /// domain stays. No request reaches the address while it is cleaned.
     @MainActor
     func testOnlyTheDepartedAddressesStorageIsRemoved() async throws {
-        let store = WKWebsiteDataStore(forIdentifier: UUID())
+        let storeIdentifier = UUID()
+        let store = WKWebsiteDataStore(forIdentifier: storeIdentifier)
+        addTeardownBlock {
+            // Best effort: the store is the test's own.
+            try? await WKWebsiteDataStore.remove(forIdentifier: storeIdentifier)
+        }
         let departed = try XCTUnwrap(WebOrigin.parseConfigured("https://old-name.avibe-test.example"))
         let sibling = try XCTUnwrap(WebOrigin.parseConfigured("https://other-name.avibe-test.example"))
 

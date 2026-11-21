@@ -33,6 +33,9 @@ final class DepartedInstanceData {
     /// tried again at the next answer).
     private let clean: (_ origin: String, _ accountID: String) async -> Bool
     private var isReconciling = false
+    /// The latest answer that arrived while a removal was running: it is
+    /// applied after it, so an address listed again meanwhile starts over.
+    private var waiting: (live: Set<String>, accountID: String)?
 
     init(
         defaults: UserDefaults,
@@ -57,10 +60,20 @@ final class DepartedInstanceData {
     /// avibe.bot answered, signed in, for `accountID`, listing `live`.
     func reconcile(live: Set<String>, accountID: String) async {
         guard !isReconciling else {
+            waiting = (live, accountID)
             return
         }
         isReconciling = true
         defer { isReconciling = false }
+        var answer: (live: Set<String>, accountID: String)? = (live, accountID)
+        while let next = answer {
+            await apply(live: next.live, accountID: next.accountID)
+            answer = waiting
+            waiting = nil
+        }
+    }
+
+    private func apply(live: Set<String>, accountID: String) async {
         guard let store = currentStore() else {
             return
         }
@@ -85,6 +98,10 @@ final class DepartedInstanceData {
         }
         save(ledger)
         for origin in due.sorted() {
+            // A newer answer decides about what is left.
+            guard waiting == nil else {
+                break
+            }
             guard currentStore() == store, await clean(origin, accountID) else {
                 continue
             }
@@ -138,13 +155,23 @@ enum InstanceSiteDataCleaner {
 
     /// True when everything the script and the cookie store could remove is
     /// gone.
-    static func clean(origin: WebOrigin, in dataStore: WKWebsiteDataStore) async -> Bool {
+    /// `removingCookies`: false when the host is still one the account uses
+    /// (cookies belong to a host, not to an origin). `willUse` receives the
+    /// WebView before anything is loaded, for a caller that tracks the
+    /// WebViews of a store.
+    static func clean(
+        origin: WebOrigin,
+        in dataStore: WKWebsiteDataStore,
+        removingCookies: Bool = true,
+        willUse: (WKWebView) -> Void = { _ in }
+    ) async -> Bool {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
         if let rules = await blockEverything() {
             configuration.userContentController.add(rules)
         }
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        willUse(webView)
         let loader = Loader()
         webView.navigationDelegate = loader
         guard
@@ -178,10 +205,12 @@ enum InstanceSiteDataCleaner {
             in: nil,
             contentWorld: world
         ) as? Bool
-        let cookies = dataStore.httpCookieStore
-        for cookie in await cookies.allCookies()
-        where cookie.domain == origin.host || cookie.domain == "." + origin.host {
-            await cookies.deleteCookie(cookie)
+        if removingCookies {
+            let cookies = dataStore.httpCookieStore
+            for cookie in await cookies.allCookies()
+            where cookie.domain == origin.host || cookie.domain == "." + origin.host {
+                await cookies.deleteCookie(cookie)
+            }
         }
         return outcome == true
     }
@@ -189,26 +218,44 @@ enum InstanceSiteDataCleaner {
     /// True when every store was emptied; a database another page holds
     /// open reports false, and the removal is tried again later.
     private static let script = """
+        // Bounded: a store that never answers reports false, and the
+        // removal is tried again later.
+        const within = (work) => Promise.race([
+          work,
+          new Promise((resolve) => setTimeout(() => resolve("timeout"), 8000)),
+        ]);
         let complete = true;
         try { localStorage.clear(); sessionStorage.clear(); } catch (error) { complete = false; }
         try {
-          const databases = await indexedDB.databases();
-          const results = await Promise.all(databases.map((database) => new Promise((resolve) => {
-            const request = indexedDB.deleteDatabase(database.name);
-            request.onsuccess = () => resolve(true);
-            request.onerror = () => resolve(false);
-            request.onblocked = () => resolve(false);
-          })));
-          if (results.includes(false)) complete = false;
+          const databases = await within(indexedDB.databases());
+          if (databases === "timeout") {
+            complete = false;
+          } else {
+            const results = await within(Promise.all(databases.map((database) => new Promise((resolve) => {
+              const request = indexedDB.deleteDatabase(database.name);
+              request.onsuccess = () => resolve(true);
+              request.onerror = () => resolve(false);
+              request.onblocked = () => resolve(false);
+            }))));
+            if (results === "timeout" || results.includes(false)) complete = false;
+          }
         } catch (error) { complete = false; }
         try {
-          const names = await caches.keys();
-          await Promise.all(names.map((name) => caches.delete(name)));
+          const names = await within(caches.keys());
+          if (names === "timeout") {
+            complete = false;
+          } else if (await within(Promise.all(names.map((name) => caches.delete(name)))) === "timeout") {
+            complete = false;
+          }
         } catch (error) { complete = false; }
         try {
           if ("serviceWorker" in navigator) {
-            const registrations = await navigator.serviceWorker.getRegistrations();
-            await Promise.all(registrations.map((registration) => registration.unregister()));
+            const registrations = await within(navigator.serviceWorker.getRegistrations());
+            if (registrations === "timeout") {
+              complete = false;
+            } else {
+              await within(Promise.all(registrations.map((registration) => registration.unregister())));
+            }
           }
         } catch (error) { complete = false; }
         return complete;
