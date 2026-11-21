@@ -108,6 +108,15 @@ that avibe.bot listed for this instance id.
 | F3 | The list reads as "everything is clean". | The Owner believes no browser holds data when some do. | The route always returns `complete: false` with the reason `sessions_expired_before_rename_not_listed`, the registry's start (only sessions seen since the device registry exists are listed) and the count of unconfirmed rows. It has no all-clear field. | Contract test: no state of the list yields `complete: true`. |
 | F4 | A clearing list outlives its use. | Device and account metadata kept without purpose. | A name's list is deleted when the name leaves the cleanup set: taken back, waiting period over, or route withdrawn. | Take back a name: its list is gone. |
 
+### Checked and unaffected
+
+- **Protected Vault passkeys.** Their relying party is the sandbox origin
+  (`vibe/ui_server.py` `_vault_sandbox_webauthn_origin`), not the instance's
+  name, so a rename neither disables them nor hands them to a later holder of
+  the old name.
+- **Custom hostnames** of organization instances: rename is personal-only and
+  the active-hostname snapshot is not a source of cleanup names.
+
 ## Route contract for the page
 
 All three: Owner by current authorization or direct loopback (A1); JSON;
