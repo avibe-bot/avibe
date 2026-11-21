@@ -207,6 +207,24 @@ def _save_paired_identity(instance_id="existing"):
     return V2Config.load()
 
 
+def test_replacing_an_off_pairing_keeps_it_off_across_recovery(pairing_host, monkeypatch):
+    _, calls = pairing_host
+    assert remote_access.pair("key_A", "https://backend.test")["ok"]
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    monkeypatch.setattr(remote_access, "start", lambda *_: pytest.fail("recovery enabled remote access"))
+    _fail_config_publication_once(monkeypatch)
+    failed = remote_access.pair("key_B", "https://backend.test")
+    assert failed["error"] == "pairing_save_failed_after_redeem"
+    record, error = remote_access._read_pending_pairing_record()
+    assert not error and record["target_identity"]["enabled"] is False
+    assert remote_access.pair("", "")["ok"]
+    cloud = V2Config.load().remote_access.vibe_cloud
+    assert not cloud.enabled and cloud.instance_id == "inst_B"
+    assert [key for _, key in calls] == ["key_A", "key_B"]
+
+
 def test_recovery_really_saves_credentials_and_binding(pairing_host, monkeypatch):
     root, calls = pairing_host
     _fail_config_publication_once(monkeypatch)

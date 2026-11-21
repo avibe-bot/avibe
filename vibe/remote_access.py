@@ -5405,9 +5405,9 @@ def _pairing_identity_fingerprint(identity: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
-def _pairing_target_identity(result: Mapping[str, Any], session_secret: str) -> dict[str, Any]:
+def _pairing_target_identity(result: Mapping[str, Any], session_secret: str, *, enabled: bool = True) -> dict[str, Any]:
     values = {
-        "enabled": True,
+        "enabled": enabled,
         **{field: result.get(field, "") for field in _PAIRING_REQUIRED_FIELDS},
         **{field: result.get(field, "") for field in _PAIRING_SEAL_EXTRA_FIELDS},
         "session_secret": session_secret,
@@ -5519,8 +5519,10 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
             return None, "pending pairing record session_secret is invalid"
         if _pairing_identity_fingerprint(target_identity) != payload.get("target_fingerprint"):
             return None, "pending pairing record target fingerprint is invalid"
+        if type(target_identity.get("enabled")) is not bool:
+            return None, "pending pairing target preference is invalid"
         if _pairing_identity_fingerprint(
-            _pairing_target_identity(normalized, pairing["session_secret"])
+            _pairing_target_identity(normalized, pairing["session_secret"], enabled=target_identity["enabled"])
         ) != payload.get("target_fingerprint"):
             return None, "pending pairing record target identity is invalid"
     if phase == "retirement_pending":
@@ -5802,7 +5804,7 @@ def _config_for_pairing_record(record: Mapping[str, Any]) -> dict[str, Any]:
         "remote_access": {
             "provider": "vibe_cloud",
             "vibe_cloud": {
-                "enabled": True,
+                "enabled": record["target_identity"]["enabled"],
                 "backend_url": pairing["backend_url"],
                 "instance_id": pairing["instance_id"],
                 "instance_kind": pairing.get("instance_kind") or "",
@@ -6387,7 +6389,12 @@ def _persist_pairing_impl(
                     "pairing": {"ok": False, "recoverable": False},
                 }
             session_secret = str(record.get("session_secret") or secrets.token_urlsafe(32))
-            target_identity = _pairing_target_identity(result, session_secret)
+            # First pair enables access. A prior complete pairing keeps its own preference,
+            # including Off. Seal that choice alongside the credentials for crash replay.
+            was_bound = bool(current_identity.get("instance_id") and current_identity.get("instance_secret"))
+            target_identity = _pairing_target_identity(
+                result, session_secret, enabled=bool(current_identity["enabled"]) if was_bound else True,
+            )
             record = {
                 **record,
                 "phase": "redeemed",
@@ -6555,8 +6562,10 @@ def _persist_pairing_impl(
             }
 
     assert config is not None
-    start_result = start(config)
-    _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
+    start_result = None
+    if config.remote_access.vibe_cloud.enabled:
+        start_result = start(config)
+        _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     return _pairing_result_status(config, start_result=start_result)
 
 
