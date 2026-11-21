@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import time
 
 from config.atomic_io import write_atomic
@@ -158,6 +159,68 @@ def _advance(record):
     record['phase'] = _PHASES[_PHASES.index(phase) + 1]
     _save(record)
     return True
+
+
+def _require_local_terminal():
+    from vibe.authorization import current_invocation_authority
+    from vibe.cli import _cli_invocation_authority
+    from vibe.ui_request_context import has_request_context
+
+    if (current_invocation_authority() is not None or has_request_context() or _cli_invocation_authority() is not None
+            or not sys.stdin.isatty() or not sys.stdout.isatty()):
+        raise ClaimError('local_operator_required')
+
+
+def _cli_snapshot():
+    if gate.reset_in_progress():
+        raise ClaimError('operation_in_progress')
+    config = local._config()
+    cloud = config.remote_access.vibe_cloud
+    files = _file_stamps()
+    if not any((cloud.instance_id, cloud.instance_secret, cloud.tunnel_token, cloud.client_id, cloud.session_secret,
+                files['identity_file'], files['pairing_file'])):
+        raise ClaimError('not_bound')
+    record, error = remote._read_pending_pairing_record()
+    if not error and record and record.get('phase') in ('prepared', 'redeemed', 'applied'):
+        stamp = _stamp(cloud)
+        if (record['phase'] != 'prepared' or record.get('redeem_request')) and stamp in (
+                record['source_fingerprint'], record.get('target_fingerprint')):
+            try:
+                identity = local._installation_id()
+            except local.LocalInstanceError:
+                identity = None
+            enrollment = record.get('personal_claim') or record.get('desktop_enrollment')
+            if not enrollment or identity and identity == enrollment['installation_id']:
+                raise ClaimError('pairing_recovery_required')
+    return config, (_stamp(cloud), files)
+
+
+def reset_interactively(*, confirm):
+    """CLI adapter only. A trusted prompt returns literal True after explicit consent.
+
+    Do not hold a config lock across input, or accept a serialized confirmation
+    from an HTTP/Harness caller. Recheck the generation and both authorities
+    before sealing. The ordinary link claim is a separate, later operation.
+    """
+    _require_local_terminal()
+    if not callable(confirm):
+        raise ClaimError('invalid_request')
+    with gate.admitted('reset'), config_file_lock():
+        _, before = _cli_snapshot()
+    try:
+        decision = confirm()
+    except (EOFError, KeyboardInterrupt):
+        decision = False
+    if decision is not True:
+        return {'state': 'declined'}
+    _require_local_terminal()
+    with gate.admitted('reset'):
+        with config_file_lock():
+            cfg, after = _cli_snapshot()
+            if before != after:
+                raise ClaimError('local_binding_changed')
+            _seal(cfg)
+        return resume()
 
 
 def resume():

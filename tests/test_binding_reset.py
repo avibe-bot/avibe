@@ -95,6 +95,61 @@ def test_worker_finishes_authorized_reset_including_private_health_store(reset_h
     assert workspace.read_text() == 'keep' and len(calls) == 1
 
 
+@pytest.fixture
+def cli_host(pairing_host, monkeypatch):
+    from types import SimpleNamespace
+    from vibe import cli, direct_certificates
+
+    assert remote.pair('key_A', 'https://backend.test')['ok']
+    monkeypatch.setattr(reset, 'sys', SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True),
+                                                      stdout=SimpleNamespace(isatty=lambda: True)))
+    monkeypatch.setattr(cli, '_cli_invocation_authority', lambda: None)
+    monkeypatch.setattr(remote, 'stop', lambda _: {'ok': True})
+    monkeypatch.setattr(remote, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
+    monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
+    return pairing_host
+
+
+@pytest.mark.parametrize('kind', ['stdin', 'stdout', 'delegated', 'http'])
+def test_cli_requires_local_interactive_context_before_prompt(cli_host, monkeypatch, kind):
+    from vibe import cli, ui_request_context
+
+    if kind in ('stdin', 'stdout'):
+        monkeypatch.setattr(getattr(reset.sys, kind), 'isatty', lambda: False)
+    elif kind == 'delegated':
+        monkeypatch.setattr(cli, '_cli_invocation_authority', lambda: object())
+    else:
+        monkeypatch.setattr(ui_request_context, 'has_request_context', lambda: True)
+    with pytest.raises(ClaimError, match='local_operator_required'):
+        reset.reset_interactively(confirm=lambda: pytest.fail('prompt reached'))
+    assert not gate.reset_in_progress() and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+
+
+@pytest.mark.parametrize('answer', [False, 1, 'yes', 'eof', 'changed', True])
+def test_cli_confirmation_binds_even_damaged_files(cli_host, answer):
+    local._identity_path().write_bytes(b'broken installation')
+    remote._pending_pairing_path().write_bytes(b'broken journal')
+
+    def confirm():
+        if answer == 'eof':
+            raise EOFError
+        if answer == 'changed':
+            remote._pending_pairing_path().write_bytes(b'another attempt')
+            return True
+        return answer
+
+    if answer == 'changed':
+        with pytest.raises(ClaimError, match='local_binding_changed'):
+            reset.reset_interactively(confirm=confirm)
+    else:
+        view = reset.reset_interactively(confirm=confirm)
+        assert view == {'state': 'unpaired' if answer is True else 'declined'}
+    assert not gate.reset_in_progress() and len(cli_host[1]) == 1
+    assert local._identity_path().exists() is (answer is not True)
+    assert remote._pending_pairing_path().exists() is (answer is not True)
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == ('' if answer is True else 'inst_A')
+
+
 def test_stale_reset_cannot_clear_other_generation(reset_host):
     _, workspace, _ = reset_host
     cfg = V2Config.load()
