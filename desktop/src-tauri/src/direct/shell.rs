@@ -201,13 +201,15 @@ fn published(app: &AppHandle) -> Option<Published> {
     })
 }
 
-/// Whether the system's own proxy settings rule the direct route out now
-/// (`Wiring::system_proxy` has the rule).
+/// Whether the system's own proxy settings rule out a direct route to
+/// `host` now (`Wiring::system_proxy` has the rule). They can change at any
+/// time, so they are read at every look and before every window that would
+/// be routed, never remembered.
 ///
 /// The reading of those settings belongs to the direct core, which needs the
 /// same facts for its public leg (D1c). Until that is merged this answers
-/// "ruled out" on every system, so no session starts and nothing is routed.
-fn system_proxy_rules_out() -> bool {
+/// "ruled out" for every host, so no session starts and nothing is routed.
+async fn system_proxy_rules_out(_host: &str) -> bool {
     true
 }
 
@@ -215,7 +217,10 @@ fn system_proxy_rules_out() -> bool {
 async fn look(app: &AppHandle, state: &Arc<Direct>) {
     let shown = published(app);
     *lock(&state.shown) = shown.clone();
-    lock(&state.wiring).system_proxy(system_proxy_rules_out());
+    if let Some(host) = shown.as_ref().and_then(|shown| shown.target.host()) {
+        let rules_out = system_proxy_rules_out(host).await;
+        lock(&state.wiring).system_proxy(rules_out);
+    }
     let effects = lock(&state.wiring).reconcile(
         shown.as_ref(),
         |window| app.get_webview(window).is_some(),
@@ -434,19 +439,21 @@ pub(crate) struct AtCreation {
 pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Option<AtCreation> {
     let state = direct(app)?;
     let target = target_at(app, destination)?;
+    let host = target.host()?.to_owned();
+    // The system's settings are read, and the listener is bound, here and
+    // now, so its port is in the arguments. Never from a thread that is
+    // running the async runtime.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return None;
+    }
     {
+        let rules_out = tauri::async_runtime::block_on(system_proxy_rules_out(&host));
         let mut wiring = lock(&state.wiring);
-        wiring.system_proxy(system_proxy_rules_out());
+        wiring.system_proxy(rules_out);
         if !wiring.starts_at_creation(&target) {
             return None;
         }
     }
-    // The listener is bound here and now, so its port is in the arguments.
-    // Never from a thread that is running the async runtime.
-    if tokio::runtime::Handle::try_current().is_ok() {
-        return None;
-    }
-    let host = target.host()?.to_owned();
     let client = tauri::async_runtime::block_on(Client::new(&host, target.instance.clone()))?;
     let material = material(&client)?;
     let arguments = native::arguments(&host, &material)?;
@@ -488,9 +495,16 @@ fn target_at(app: &AppHandle, destination: &url::Url) -> Option<Target> {
 
 /// An app window is about to be opened from the instance view at `origin`:
 /// the session it shares, and its route where that is given at creation.
-pub(crate) fn app_window_route(app: &AppHandle, origin: &url::Url) -> Option<AtCreation> {
+pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Option<AtCreation> {
     let state = direct(app)?;
     let origin = origin_of(origin.as_str())?;
+    let rules_out = system_proxy_rules_out(origin.strip_prefix("https://")?).await;
+    lock(&state.wiring).system_proxy(rules_out);
+    if rules_out {
+        // The session ends at the next look; this window gets no route.
+        state.wake.notify_one();
+        return None;
+    }
     let account = app
         .try_state::<instance_client::Client>()?
         .coordinator

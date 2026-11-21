@@ -844,6 +844,9 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         .expect("app windows")
         .windows
         .insert(label.clone(), entry.clone());
+    // The direct session of the instance view this window was opened from,
+    // if it has one; its route here where that can only be given now.
+    let direct_route = crate::direct::shell::app_window_route(app, &source.runtime.origin).await;
     let app_for_nav = app.clone();
     let label_for_nav = label.clone();
     let doc_for_nav = doc.clone();
@@ -908,9 +911,6 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
     {
         builder = builder.proxy_url(proxy);
     }
-    // The direct session of the instance view this window was opened from,
-    // if it has one; its route here where that can only be given now.
-    let direct_route = crate::direct::shell::app_window_route(app, &source.runtime.origin);
     if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
         builder = builder.additional_browser_args(arguments);
     }
