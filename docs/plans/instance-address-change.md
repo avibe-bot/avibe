@@ -2,9 +2,8 @@
 
 Status: rule table for review; no code yet. Base `master` `9d3821989`. Backend
 half: avibe-bot-backend `docs/plans/personal-hostname-release.md` (candidate
-`33c0a7ed`, "Backend ↔ instance wire", as amended by the lead's rulings of
-November 21, 11:23). Open points against that contract are listed under
-[Contract points to settle](#contract-points-to-settle).
+`1ae26668`, "Backend ↔ instance wire"). What was settled with that writer is
+listed under [Contract points to settle](#contract-points-to-settle).
 
 ## Background
 
