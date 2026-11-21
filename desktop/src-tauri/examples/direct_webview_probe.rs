@@ -1,7 +1,9 @@
-//! Hermetic probe of the direct path's macOS WebView adapters with a real,
-//! windowless WKWebView on loopback pages. Nothing is shown, the app is never
-//! activated, the browsing data is not persistent, and no keychain or
-//! clipboard is touched.
+//! Hermetic probe of the direct path's WebView adapters with a real WebView
+//! and no window: a WKWebView on macOS, a WebView2 on Windows, on loopback
+//! pages. Nothing is shown, the app is never activated, the browsing data is
+//! not persistent (macOS) or lives in a folder under the system's temporary
+//! directory that the probe removes (Windows), and no keychain or clipboard
+//! is touched.
 //!
 //! One loopback server is the instance: its pages, its rendezvous route, and
 //! a record of every request. A second listener is the direct listener's
@@ -13,85 +15,89 @@
 //! anything for it. Each case prints one JSON line; the exit code is the
 //! number of failed cases.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {}
 
 #[cfg(target_os = "macos")]
 fn main() {
-    std::process::exit(probe::run());
+    std::process::exit(macos_probe::run());
 }
 
-// Side by side at the root, as in the shell's `direct` module: the adapter
-// names the request through `super`.
-#[cfg(target_os = "macos")]
+#[cfg(windows)]
+fn main() {
+    std::process::exit(windows_probe::run());
+}
+
+// Side by side at the root, as in the shell's `direct` module: the adapters
+// name the request through `super`.
+// The shell's modules offer more than one system's probe calls.
+#[cfg(any(target_os = "macos", windows))]
+#[allow(dead_code)]
 #[path = "../src/direct/rendezvous.rs"]
 mod rendezvous;
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 #[path = "../src/direct/webview_macos.rs"]
 mod webview_macos;
+#[cfg(windows)]
+#[allow(dead_code)]
+#[path = "../src/direct/webview_windows.rs"]
+mod webview_windows;
 
-#[cfg(target_os = "macos")]
-mod probe {
+/// The instance, the direct listener's stand-in, and the report: the same on
+/// both systems.
+#[cfg(any(target_os = "macos", windows))]
+#[allow(dead_code)]
+mod fixture {
     use std::{
-        cell::RefCell,
         collections::HashMap,
-        ffi::c_void,
         io::{Read, Write},
-        net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream},
-        rc::Rc,
+        net::{Ipv4Addr, Shutdown, TcpListener, TcpStream},
         sync::{Arc, Mutex},
         thread,
-        time::{Duration, Instant},
+        time::Duration,
     };
 
-    use block2::RcBlock;
-    use objc2::{rc::Retained, runtime::AnyObject, MainThreadMarker, MainThreadOnly};
-    use objc2_foundation::{NSError, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL};
-    use objc2_web_kit::{WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
     use serde_json::json;
 
-    use crate::{
-        rendezvous::{Reply, Request, MAX_ANSWER_BYTES, PATH},
-        webview_macos::{fetch_rendezvous, install_route, remove_route},
-    };
+    use crate::rendezvous::{MAX_ANSWER_BYTES, PATH};
 
-    const TOKEN: &str = "tok-123";
-    const SESSION: &str = "s3cret-session";
-    const ENDPOINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const ANSWER: &str = r#"{"version":1,"status":"ready","probe":"the instance's own answer"}"#;
+    pub const TOKEN: &str = "tok-123";
+    pub const SESSION: &str = "s3cret-session";
+    pub const ENDPOINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    pub const ANSWER: &str = r#"{"version":1,"status":"ready","probe":"the instance's own answer"}"#;
     /// The host the route sends to the proxy. It resolves nowhere: only the
     /// proxy can reach it, so a load of it proves the route.
-    const ROUTED: &str = "instance.avibe-probe.test";
-    const USERNAME: &str = "avibe";
-    const PASSWORD: &str = "probe-password-9f2c";
-    const WAIT: Duration = Duration::from_secs(20);
+    pub const ROUTED: &str = "instance.avibe-probe.test";
+    pub const USERNAME: &str = "avibe";
+    pub const PASSWORD: &str = "probe-password-9f2c";
 
     // MARK: The instance
 
     #[derive(Clone, Debug)]
-    struct Seen {
-        method: String,
-        path: String,
-        headers: HashMap<String, String>,
-        body: String,
+    pub struct Seen {
+        pub method: String,
+        pub path: String,
+        pub headers: HashMap<String, String>,
+        pub body: String,
     }
 
     #[derive(Clone, Copy, PartialEq)]
-    enum Answer {
+    pub enum Answer {
         Ready,
         Redirect,
         Forbidden,
         Oversize,
     }
 
-    struct Instance {
-        port: u16,
+    pub struct Instance {
+        pub port: u16,
         seen: Arc<Mutex<Vec<Seen>>>,
-        answer: Arc<Mutex<Answer>>,
+        pub answer: Arc<Mutex<Answer>>,
     }
 
     impl Instance {
-        fn start() -> Self {
+        pub fn start() -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("instance port");
             let port = listener.local_addr().expect("instance address").port();
             let seen = Arc::new(Mutex::new(Vec::new()));
@@ -106,19 +112,25 @@ mod probe {
             Self { port, seen, answer }
         }
 
-        fn origin(&self) -> String {
+        pub fn origin(&self) -> String {
             format!("http://127.0.0.1:{}", self.port)
         }
 
-        fn rendezvous_requests(&self) -> Vec<Seen> {
+        pub fn rendezvous_requests(&self) -> Vec<Seen> {
             self.requests(PATH)
         }
 
-        fn requests(&self, path: &str) -> Vec<Seen> {
-            self.seen.lock().expect("seen").iter().filter(|seen| seen.path == path).cloned().collect()
+        pub fn requests(&self, path: &str) -> Vec<Seen> {
+            self.seen
+                .lock()
+                .expect("seen")
+                .iter()
+                .filter(|seen| seen.path == path)
+                .cloned()
+                .collect()
         }
 
-        fn forget(&self) {
+        pub fn forget(&self) {
             self.seen.lock().expect("seen").clear();
         }
     }
@@ -152,11 +164,19 @@ mod probe {
 
     fn serve_instance(mut stream: TcpStream, log: &Mutex<Vec<Seen>>, mode: &Mutex<Answer>) {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-        let Some((head, mut body)) = read_head(&mut stream) else { return };
+        let Some((head, mut body)) = read_head(&mut stream) else {
+            return;
+        };
         let mut first = head.split("\r\n").next().unwrap_or("").split(' ');
-        let (method, path) = (first.next().unwrap_or("").to_owned(), first.next().unwrap_or("").to_owned());
+        let (method, path) = (
+            first.next().unwrap_or("").to_owned(),
+            first.next().unwrap_or("").to_owned(),
+        );
         let headers = headers_of(&head);
-        let length: usize = headers.get("content-length").and_then(|value| value.parse().ok()).unwrap_or(0);
+        let length: usize = headers
+            .get("content-length")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
         let mut buffer = [0u8; 2048];
         while body.len() < length {
             match stream.read(&mut buffer) {
@@ -171,7 +191,8 @@ mod probe {
             body: String::from_utf8_lossy(&body).into_owned(),
         });
         let page = |title: &str, script: &str| {
-            let html = format!("<!doctype html><meta charset=\"utf-8\"><title>{title}</title><script>{script}</script>");
+            let html =
+                format!("<!doctype html><meta charset=\"utf-8\"><title>{title}</title><script>{script}</script>");
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n\
                  Set-Cookie: vibe_csrf_token={TOKEN}; Path=/\r\nSet-Cookie: session={SESSION}; Path=/; HttpOnly\r\n\
@@ -191,6 +212,8 @@ mod probe {
             ("GET", "/worker-page") => page("registering", WORKER_PAGE),
             ("GET", "/worker.js") => plain("200 OK", "text/javascript", WORKER),
             ("GET", "/elsewhere") => plain("200 OK", "application/json", r#"{"moved":true}"#),
+            // A site's own challenge, in the listener's realm.
+            ("GET", "/basic") => "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Avibe Direct\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
             ("POST", PATH) => match *mode.lock().expect("mode") {
                 Answer::Ready => plain("200 OK", "application/json", ANSWER),
                 Answer::Redirect => "HTTP/1.1 307 Temporary Redirect\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
@@ -206,7 +229,7 @@ mod probe {
     /// A page that replaces everything the rendezvous script calls, in its
     /// own world, counts every use of a replacement, and remembers what its
     /// global object had before.
-    const TAMPER: &str = r#"
+    pub const TAMPER: &str = r#"
 window.__calls = 0;
 const count = () => { window.__calls += 1; };
 window.fetch = () => { count(); return Promise.resolve(new Response('{"forged":true}')); };
@@ -225,7 +248,7 @@ window.__before = [];
 window.__before = Object.getOwnPropertyNames(window);
 "#;
 
-    const WORKER_PAGE: &str = r#"
+    pub const WORKER_PAGE: &str = r#"
 (async () => {
   if (!navigator.serviceWorker) { document.title = 'no-worker-container'; return; }
   try {
@@ -242,7 +265,7 @@ window.__before = Object.getOwnPropertyNames(window);
 "#;
 
     /// A worker that answers the rendezvous in the instance's place.
-    const WORKER: &str = r#"
+    pub const WORKER: &str = r#"
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (event) => {
@@ -255,45 +278,50 @@ self.addEventListener('fetch', (event) => {
     // MARK: The direct listener's stand-in
 
     #[derive(Clone, Debug, PartialEq)]
-    struct Asked {
-        target: String,
+    pub struct Asked {
+        pub target: String,
         /// `none`, `wrong`, or `right`.
-        credential: &'static str,
+        pub credential: &'static str,
     }
 
-    struct Proxy {
-        port: u16,
+    pub struct Proxy {
+        pub port: u16,
         asked: Arc<Mutex<Vec<Asked>>>,
     }
 
     impl Proxy {
-        fn start(instance_port: u16) -> Self {
+        /// Serves `CONNECT` to `target` alone. With `upstream` the tunnel
+        /// runs to that loopback port; without, it is granted and closed,
+        /// which is enough to see who asked and with what.
+        pub fn start(target: String, upstream: Option<u16>) -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy port");
             let port = listener.local_addr().expect("proxy address").port();
             let asked = Arc::new(Mutex::new(Vec::new()));
             let log = asked.clone();
             thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
-                    let log = log.clone();
-                    thread::spawn(move || serve_proxy(stream, instance_port, &log));
+                    let (log, target) = (log.clone(), target.clone());
+                    thread::spawn(move || serve_proxy(stream, &target, upstream, &log));
                 }
             });
             Self { port, asked }
         }
 
-        fn asked(&self) -> Vec<Asked> {
+        pub fn asked(&self) -> Vec<Asked> {
             self.asked.lock().expect("asked").clone()
         }
 
-        fn forget(&self) {
+        pub fn forget(&self) {
             self.asked.lock().expect("asked").clear();
         }
     }
 
-    fn serve_proxy(mut browser: TcpStream, instance_port: u16, log: &Mutex<Vec<Asked>>) {
+    fn serve_proxy(mut browser: TcpStream, served: &str, upstream: Option<u16>, log: &Mutex<Vec<Asked>>) {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let _ = browser.set_read_timeout(Some(Duration::from_secs(10)));
-        let Some((head, early)) = read_head(&mut browser) else { return };
+        let Some((head, early)) = read_head(&mut browser) else {
+            return;
+        };
         let mut first = head.split("\r\n").next().unwrap_or("").split(' ');
         let (method, target) = (first.next().unwrap_or(""), first.next().unwrap_or("").to_owned());
         let expected = format!("Basic {}", STANDARD.encode(format!("{USERNAME}:{PASSWORD}")));
@@ -302,13 +330,19 @@ self.addEventListener('fetch', (event) => {
             Some(value) if *value == expected => "right",
             Some(_) => "wrong",
         };
-        log.lock().expect("asked").push(Asked { target: target.clone(), credential });
+        log.lock().expect("asked").push(Asked {
+            target: target.clone(),
+            credential,
+        });
         let refuse = |browser: &mut TcpStream, answer: &str| {
             let _ = browser.write_all(answer.as_bytes());
             let _ = browser.shutdown(Shutdown::Both);
         };
         if method != "CONNECT" {
-            return refuse(&mut browser, "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n");
+            return refuse(
+                &mut browser,
+                "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n",
+            );
         }
         if credential != "right" {
             return refuse(
@@ -317,17 +351,26 @@ self.addEventListener('fetch', (event) => {
             );
         }
         // One host, as the real listener: a child host is refused.
-        if target != format!("{ROUTED}:{instance_port}") {
+        if target != served {
             return refuse(&mut browser, "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
         }
-        let Ok(mut upstream) = TcpStream::connect((Ipv4Addr::LOCALHOST, instance_port)) else {
+        let Some(upstream) = upstream else {
+            return refuse(&mut browser, "HTTP/1.1 200 Connection Established\r\n\r\n");
+        };
+        let Ok(mut upstream) = TcpStream::connect((Ipv4Addr::LOCALHOST, upstream)) else {
             return refuse(&mut browser, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
         };
-        if browser.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").is_err() || upstream.write_all(&early).is_err() {
+        if browser
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .is_err()
+            || upstream.write_all(&early).is_err()
+        {
             return;
         }
         let _ = browser.set_read_timeout(None);
-        let (Ok(mut browser_read), Ok(mut upstream_write)) = (browser.try_clone(), upstream.try_clone()) else { return };
+        let (Ok(mut browser_read), Ok(mut upstream_write)) = (browser.try_clone(), upstream.try_clone()) else {
+            return;
+        };
         let up = thread::spawn(move || {
             let _ = std::io::copy(&mut browser_read, &mut upstream_write);
             let _ = upstream_write.shutdown(Shutdown::Write);
@@ -336,6 +379,44 @@ self.addEventListener('fetch', (event) => {
         let _ = browser.shutdown(Shutdown::Both);
         let _ = up.join();
     }
+
+    pub struct Report {
+        pub failed: i32,
+    }
+
+    impl Report {
+        pub fn case(&mut self, name: &str, ok: bool, detail: serde_json::Value) {
+            if !ok {
+                self.failed += 1;
+            }
+            println!("{}", json!({ "case": name, "ok": ok, "detail": detail }));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_probe {
+    use std::{
+        cell::RefCell,
+        ffi::c_void,
+        net::{Ipv4Addr, SocketAddrV4},
+        rc::Rc,
+        time::{Duration, Instant},
+    };
+
+    use block2::RcBlock;
+    use objc2::{rc::Retained, runtime::AnyObject, MainThreadMarker, MainThreadOnly};
+    use objc2_foundation::{NSError, NSPoint, NSRect, NSSize, NSString, NSURLRequest, NSURL};
+    use objc2_web_kit::{WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
+    use serde_json::json;
+
+    use crate::{
+        fixture::*,
+        rendezvous::{Reply, Request},
+        webview_macos::{fetch_rendezvous, install_route, remove_route},
+    };
+
+    const WAIT: Duration = Duration::from_secs(20);
 
     // MARK: The WebView
 
@@ -378,7 +459,9 @@ self.addEventListener('fetch', (event) => {
         let block = RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
             let text = if error.is_null() && !result.is_null() {
                 // SAFETY: WebKit passes a live object for the duration of the call.
-                unsafe { &*result }.downcast_ref::<NSString>().map(|value| value.to_string())
+                unsafe { &*result }
+                    .downcast_ref::<NSString>()
+                    .map(|value| value.to_string())
             } else {
                 None
             };
@@ -395,45 +478,40 @@ self.addEventListener('fetch', (event) => {
     fn load(webview: &WKWebView, url: &str, title: &str) -> bool {
         // SAFETY: Main thread; `url` is one of this probe's own URLs.
         unsafe {
-            let Some(target) = NSURL::URLWithString(&NSString::from_str(url)) else { return false };
+            let Some(target) = NSURL::URLWithString(&NSString::from_str(url)) else {
+                return false;
+            };
             webview.loadRequest(&NSURLRequest::requestWithURL(&target));
         }
         let wanted = format!("{url}|{title}");
         pump_until(WAIT, || {
             // SAFETY: Main thread.
             !unsafe { webview.isLoading() }
-                && page_eval(webview, "String(location.href) + '|' + String(document.title)").as_deref() == Some(&wanted)
+                && page_eval(webview, "String(location.href) + '|' + String(document.title)").as_deref()
+                    == Some(&wanted)
         })
     }
 
-    fn fetch(webview: &WKWebView, mtm: MainThreadMarker, request: &Request, current: impl Fn() -> bool + 'static) -> Option<Reply> {
+    fn fetch(
+        webview: &WKWebView,
+        mtm: MainThreadMarker,
+        request: &Request,
+        current: impl Fn() -> bool + 'static,
+    ) -> Option<Reply> {
         let slot: Rc<RefCell<Option<Reply>>> = Rc::new(RefCell::new(None));
         let filled = slot.clone();
-        fetch_rendezvous(webview, mtm, request, current, move |reply| *filled.borrow_mut() = Some(reply));
+        fetch_rendezvous(webview, mtm, request, current, move |reply| {
+            *filled.borrow_mut() = Some(reply)
+        });
         pump_until(WAIT, || slot.borrow().is_some());
         let answered = slot.borrow_mut().take();
         answered
     }
 
-    // MARK: The cases
-
-    struct Report {
-        failed: i32,
-    }
-
-    impl Report {
-        fn case(&mut self, name: &str, ok: bool, detail: serde_json::Value) {
-            if !ok {
-                self.failed += 1;
-            }
-            println!("{}", json!({ "case": name, "ok": ok, "detail": detail }));
-        }
-    }
-
     pub fn run() -> i32 {
         let mtm = MainThreadMarker::new().expect("the probe runs on the main thread");
         let instance = Instance::start();
-        let proxy = Proxy::start(instance.port);
+        let proxy = Proxy::start(format!("{ROUTED}:{}", instance.port), Some(instance.port));
         let origin = instance.origin();
         let request = Request::new(&origin, ENDPOINT).expect("a valid request");
         let mut report = Report { failed: 0 };
@@ -489,7 +567,8 @@ self.addEventListener('fetch', (event) => {
         // 3. Another origin's document, and a selection that is no longer
         //    current: nothing is asked.
         instance.forget();
-        let elsewhere = Request::new(&format!("http://localhost:{}", instance.port), ENDPOINT).expect("a valid request");
+        let elsewhere =
+            Request::new(&format!("http://localhost:{}", instance.port), ENDPOINT).expect("a valid request");
         let wrong_origin = fetch(&webview, mtm, &elsewhere, || true);
         let stale = fetch(&webview, mtm, &request, || false);
         report.case(
@@ -531,8 +610,13 @@ self.addEventListener('fetch', (event) => {
         *instance.answer.lock().expect("mode") = Answer::Ready;
         report.case(
             "a-redirect-a-refusal-and-an-oversize-answer-give-no-body",
-            outcomes.iter().all(|(as_expected, followed, _)| *as_expected && !followed),
-            json!(outcomes.iter().map(|(ok, followed, reply)| json!({ "ok": ok, "followed": followed, "reply": reply })).collect::<Vec<_>>()),
+            outcomes
+                .iter()
+                .all(|(as_expected, followed, _)| *as_expected && !followed),
+            json!(outcomes
+                .iter()
+                .map(|(ok, followed, reply)| json!({ "ok": ok, "followed": followed, "reply": reply }))
+                .collect::<Vec<_>>()),
         );
 
         // 6. A service worker that answers in the instance's place.
@@ -546,7 +630,10 @@ self.addEventListener('fetch', (event) => {
             let mut title = None;
             pump_until(WAIT, || {
                 title = page_eval(&webview, "String(document.title)");
-                matches!(title.as_deref(), Some("controlled" | "not-controlled" | "no-worker-container" | "worker-error"))
+                matches!(
+                    title.as_deref(),
+                    Some("controlled" | "not-controlled" | "no-worker-container" | "worker-error")
+                )
             });
             title.unwrap_or_default()
         };
@@ -625,7 +712,11 @@ self.addEventListener('fetch', (event) => {
         //     listener: it does not load, and the instance never hears of it.
         proxy.forget();
         instance.forget();
-        let child = load(&webview, &format!("http://child.{ROUTED}:{}/routed", instance.port), "plain");
+        let child = load(
+            &webview,
+            &format!("http://child.{ROUTED}:{}/routed", instance.port),
+            "plain",
+        );
         report.case(
             "a-child-host-is-refused-by-the-listener",
             !child && instance.requests("/routed").is_empty(),
@@ -645,6 +736,408 @@ self.addEventListener('fetch', (event) => {
             json!({ "removed": removed, "loaded": after, "listener_asked": proxy.asked().len() }),
         );
 
+        report.failed
+    }
+}
+
+#[cfg(windows)]
+mod windows_probe {
+    use std::{
+        cell::RefCell,
+        ffi::c_void,
+        net::{Ipv4Addr, SocketAddrV4},
+        rc::Rc,
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde_json::json;
+    use webview2_com::{
+        CoreWebView2EnvironmentOptions, CreateCoreWebView2ControllerCompletedHandler,
+        CreateCoreWebView2EnvironmentCompletedHandler, ExecuteScriptCompletedHandler,
+        Microsoft::Web::WebView2::Win32::{
+            CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment,
+            ICoreWebView2EnvironmentOptions,
+        },
+    };
+    use windows::{
+        core::{HSTRING, PCWSTR},
+        Win32::Foundation::{E_POINTER, HWND},
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+
+    use crate::{
+        fixture::*,
+        rendezvous::{Reply, Request},
+        webview_windows::{answer_listener_challenge, fetch_rendezvous, route_argument},
+    };
+
+    const WAIT: Duration = Duration::from_secs(30);
+    /// The whole probe. A WebView2 that never answers must not hold the job.
+    const LIMIT: Duration = Duration::from_secs(300);
+
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoInitializeEx(reserved: *const c_void, model: u32) -> i32;
+    }
+
+    /// Dispatches this thread's messages until `ready`, or for `limit`.
+    /// WebView2 delivers every completion and event as a message.
+    fn pump_until(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            // SAFETY: This thread's own message queue.
+            unsafe {
+                let mut message: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            if ready() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A WebView2 with no window, on a new user-data folder, made with
+    /// `arguments`.
+    fn new_webview(
+        folder: &std::path::Path,
+        arguments: String,
+    ) -> webview2_com::Result<(ICoreWebView2Controller, ICoreWebView2)> {
+        let options = CoreWebView2EnvironmentOptions::default();
+        // SAFETY: Set before the options are handed to WebView2.
+        unsafe { options.set_additional_browser_arguments(arguments) };
+        let options: ICoreWebView2EnvironmentOptions = options.into();
+        let folder = HSTRING::from(folder.as_os_str());
+        let (sender, receiver) = mpsc::channel::<ICoreWebView2Environment>();
+        CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
+            Box::new(move |handler| {
+                // SAFETY: A single-threaded apartment; the strings outlive the call.
+                unsafe { CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &folder, &options, &handler) }
+                    .map_err(webview2_com::Error::WindowsError)
+            }),
+            Box::new(move |status, environment| {
+                status?;
+                let _ = sender.send(environment.ok_or_else(|| windows::core::Error::from(E_POINTER))?);
+                Ok(())
+            }),
+        )?;
+        let environment = receiver.recv().map_err(|_| webview2_com::Error::SendError)?;
+        let (sender, receiver) = mpsc::channel::<ICoreWebView2Controller>();
+        CreateCoreWebView2ControllerCompletedHandler::wait_for_async_operation(
+            Box::new(move |handler| {
+                // `HWND_MESSAGE`: a message-only parent, so nothing is shown.
+                let parent = HWND(-3isize as *mut c_void);
+                // SAFETY: A single-threaded apartment.
+                unsafe { environment.CreateCoreWebView2Controller(parent, &handler) }
+                    .map_err(webview2_com::Error::WindowsError)
+            }),
+            Box::new(move |status, controller| {
+                status?;
+                let _ = sender.send(controller.ok_or_else(|| windows::core::Error::from(E_POINTER))?);
+                Ok(())
+            }),
+        )?;
+        let controller = receiver.recv().map_err(|_| webview2_com::Error::SendError)?;
+        // SAFETY: A single-threaded apartment.
+        let view = unsafe { controller.CoreWebView2() }?;
+        Ok((controller, view))
+    }
+
+    /// Evaluates `script` in the page's own world: what page script sees.
+    /// The value comes back as WebView2 gives it, JSON.
+    fn page_eval(view: &ICoreWebView2, script: &str) -> Option<serde_json::Value> {
+        let slot: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
+        let filled = slot.clone();
+        let handler = ExecuteScriptCompletedHandler::create(Box::new(move |status, result: String| {
+            *filled.borrow_mut() = Some(status.ok().map(|()| result));
+            Ok(())
+        }));
+        // SAFETY: A single-threaded apartment; the string outlives the call.
+        if unsafe { view.ExecuteScript(&HSTRING::from(script), &handler) }.is_err() {
+            return None;
+        }
+        pump_until(WAIT, || slot.borrow().is_some());
+        let answered = slot.borrow_mut().take().flatten();
+        answered.and_then(|text| serde_json::from_str(&text).ok())
+    }
+
+    fn navigate(view: &ICoreWebView2, url: &str) -> bool {
+        // SAFETY: A single-threaded apartment; `url` is one of this probe's own.
+        unsafe { view.Navigate(&HSTRING::from(url)) }.is_ok()
+    }
+
+    /// Loads `url` and waits until its document says `title`.
+    fn load(view: &ICoreWebView2, url: &str, title: &str) -> bool {
+        let wanted = json!(format!("{url}|{title}"));
+        navigate(view, url)
+            && pump_until(WAIT, || {
+                page_eval(view, "String(location.href) + '|' + String(document.title)").as_ref() == Some(&wanted)
+            })
+    }
+
+    fn fetch(view: &ICoreWebView2, request: &Request, current: impl Fn() -> bool + 'static) -> Option<Reply> {
+        let slot: Rc<RefCell<Option<Reply>>> = Rc::new(RefCell::new(None));
+        let filled = slot.clone();
+        fetch_rendezvous(view, request, current, move |reply| *filled.borrow_mut() = Some(reply));
+        pump_until(WAIT, || slot.borrow().is_some());
+        let answered = slot.borrow_mut().take();
+        answered
+    }
+
+    pub fn run() -> i32 {
+        std::thread::spawn(|| {
+            std::thread::sleep(LIMIT);
+            eprintln!("direct_webview_probe: no result within {LIMIT:?}");
+            std::process::exit(98);
+        });
+        // SAFETY: First use of COM on this thread; `2` is the single-threaded apartment.
+        unsafe { CoInitializeEx(std::ptr::null(), 2) };
+
+        let instance = Instance::start();
+        // The route is for `https` and `wss` alone, so the listener is asked
+        // for port 443. The probe has no certificate for that host: it sees
+        // who asked and with what, and ends the tunnel there.
+        let proxy = Proxy::start(format!("{ROUTED}:443"), None);
+        let listener = SocketAddrV4::new(Ipv4Addr::LOCALHOST, proxy.port);
+        let origin = instance.origin();
+        let request = Request::new(&origin, ENDPOINT).expect("a valid request");
+        let mut report = Report { failed: 0 };
+
+        let argument = route_argument(ROUTED, listener);
+        report.case(
+            "the-route-argument-holds-one-host-and-no-credential",
+            argument.as_deref().is_some_and(|argument| {
+                argument.starts_with("--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,")
+                    && !argument.contains(PASSWORD)
+                    && !argument.contains(&STANDARD.encode(PASSWORD))
+            }) && route_argument("Instance.Example", listener).is_none()
+                && route_argument("a\" || true || \"", listener).is_none()
+                && route_argument("", listener).is_none(),
+            json!({ "made": argument.is_some() }),
+        );
+        let Some(argument) = argument else { return report.failed };
+
+        let folder = std::env::temp_dir().join(format!("avibe-direct-webview-probe-{}", std::process::id()));
+        let (controller, view) = match new_webview(&folder, argument.clone()) {
+            Ok(made) => made,
+            Err(error) => {
+                report.case(
+                    "a-webview2-without-a-window-exists",
+                    false,
+                    json!({ "error": format!("{error:?}") }),
+                );
+                return report.failed;
+            }
+        };
+        let answering = answer_listener_challenge(&view, listener, USERNAME, PASSWORD).is_ok();
+
+        // 1. The instance's own document: the answer comes back exactly, and
+        //    the request carried this WebView's session and the usual checks.
+        let loaded = load(&view, &format!("{origin}/"), "plain");
+        instance.forget();
+        let reply = fetch(&view, &request, || true);
+        let seen = instance.rendezvous_requests();
+        let one = seen.first();
+        let header = |name: &str| one.and_then(|seen| seen.headers.get(name).cloned()).unwrap_or_default();
+        report.case(
+            "the-instances-document-gets-the-instances-answer",
+            loaded
+                && reply == Some(Reply::Ready(ANSWER.to_owned()))
+                && seen.len() == 1
+                && one.is_some_and(|seen| seen.method == "POST")
+                && header("x-vibe-csrf-token") == TOKEN
+                && header("cookie").contains(&format!("session={SESSION}"))
+                && header("origin") == origin
+                && header("content-type") == "application/json"
+                && one.is_some_and(|seen| seen.body == format!(r#"{{"client_endpoint_id":"{ENDPOINT}","version":1}}"#)),
+            json!({
+                "loaded": loaded, "reply": format!("{reply:?}").chars().take(60).collect::<String>(), "requests": seen.len(),
+                "csrf": header("x-vibe-csrf-token") == TOKEN, "session": header("cookie").contains("session="),
+                "origin": header("origin") == origin, "body": one.map(|seen| seen.body.clone()),
+            }),
+        );
+
+        // 2. A page that replaced everything the script calls.
+        let loaded = load(&view, &format!("{origin}/tamper"), "tamper");
+        instance.forget();
+        let reply = fetch(&view, &request, || true);
+        let seen = instance.rendezvous_requests();
+        let page = page_eval(
+            &view,
+            "String(window.__calls) + '|' + Object.getOwnPropertyNames(window).filter((name) => !window.__before.includes(name)).join(',')",
+        );
+        report.case(
+            "page-script-cannot-see-or-alter-the-request",
+            loaded
+                && reply == Some(Reply::Ready(ANSWER.to_owned()))
+                && seen.len() == 1
+                && seen[0].headers.get("x-vibe-csrf-token").map(String::as_str) == Some(TOKEN)
+                && page == Some(json!("0|")),
+            json!({ "loaded": loaded, "ready": matches!(reply, Some(Reply::Ready(_))), "requests": seen.len(), "page": page }),
+        );
+
+        // 3. Another origin's document, and a selection that is no longer
+        //    current: nothing is asked.
+        instance.forget();
+        let elsewhere =
+            Request::new(&format!("http://localhost:{}", instance.port), ENDPOINT).expect("a valid request");
+        let wrong_origin = fetch(&view, &elsewhere, || true);
+        let stale = fetch(&view, &request, || false);
+        report.case(
+            "another-origin-or-a-stale-selection-asks-nothing",
+            wrong_origin == Some(Reply::NotReady) && stale == Some(Reply::NotReady) && instance.rendezvous_requests().is_empty(),
+            json!({ "wrong_origin": format!("{wrong_origin:?}"), "stale": format!("{stale:?}"), "requests": instance.rendezvous_requests().len() }),
+        );
+
+        // 4. A selection that changes while the request runs.
+        let loaded = load(&view, &format!("{origin}/"), "plain");
+        instance.forget();
+        let asked = Rc::new(RefCell::new(0));
+        let counter = asked.clone();
+        let changed = fetch(&view, &request, move || {
+            *counter.borrow_mut() += 1;
+            *counter.borrow() == 1
+        });
+        report.case(
+            "an-answer-for-a-selection-that-changed-is-dropped",
+            loaded && changed == Some(Reply::Failed) && instance.rendezvous_requests().len() == 1 && *asked.borrow() == 2,
+            json!({ "reply": format!("{changed:?}"), "requests": instance.rendezvous_requests().len(), "asked": *asked.borrow() }),
+        );
+
+        // 5. A redirect, a refusal, an answer that is too large.
+        let mut outcomes = Vec::new();
+        for (answer, expected) in [
+            (Answer::Redirect, Reply::Failed),
+            (Answer::Forbidden, Reply::Refused(403)),
+            (Answer::Oversize, Reply::Failed),
+        ] {
+            *instance.answer.lock().expect("mode") = answer;
+            instance.forget();
+            let reply = fetch(&view, &request, || true);
+            let followed = !instance.requests("/elsewhere").is_empty();
+            outcomes.push((reply == Some(expected), followed, format!("{reply:?}")));
+        }
+        *instance.answer.lock().expect("mode") = Answer::Ready;
+        report.case(
+            "a-redirect-a-refusal-and-an-oversize-answer-give-no-body",
+            outcomes
+                .iter()
+                .all(|(as_expected, followed, _)| *as_expected && !followed),
+            json!(outcomes
+                .iter()
+                .map(|(ok, followed, reply)| json!({ "ok": ok, "followed": followed, "reply": reply }))
+                .collect::<Vec<_>>()),
+        );
+
+        // 6. A service worker that answers in the instance's place.
+        navigate(&view, &format!("{origin}/worker-page"));
+        let mut state = String::new();
+        pump_until(WAIT, || {
+            state = page_eval(&view, "String(document.title)")
+                .and_then(|title| title.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            matches!(
+                state.as_str(),
+                "controlled" | "not-controlled" | "no-worker-container" | "worker-error"
+            )
+        });
+        instance.forget();
+        let reply = fetch(&view, &request, || true);
+        let reached = instance.rendezvous_requests().len();
+        report.case(
+            "a-controlling-service-worker-is-refused",
+            // WebView2 gives pages a service worker: the worker must be there
+            // for this to have been tried at all.
+            state == "controlled" && reply == Some(Reply::Controlled) && reached == 0,
+            json!({ "document": state, "reply": format!("{reply:?}").chars().take(40).collect::<String>(), "reached_instance": reached }),
+        );
+
+        // 7. The route, as WebView2's own script engine reads it: the
+        //    instance's `https` and `wss`, and nothing else.
+        let pac = argument
+            .rsplit_once(',')
+            .and_then(|(_, encoded)| STANDARD.decode(encoded).ok())
+            .and_then(|script| String::from_utf8(script).ok())
+            .unwrap_or_default();
+        let decided = page_eval(
+            &view,
+            &format!(
+                "(() => {{ {pac}; return [\
+                 FindProxyForURL('https://{ROUTED}/a', '{ROUTED}'), FindProxyForURL('wss://{ROUTED}/a', '{ROUTED}'),\
+                 FindProxyForURL('http://{ROUTED}/a', '{ROUTED}'), FindProxyForURL('https://child.{ROUTED}/a', 'child.{ROUTED}'),\
+                 FindProxyForURL('https://other.example/a', 'other.example'), FindProxyForURL('https://{ROUTED}.example/a', '{ROUTED}.example')\
+                 ].join('|'); }})()"
+            ),
+        );
+        let through = format!("PROXY {listener}; DIRECT");
+        report.case(
+            "the-route-names-the-instances-https-and-wss-only",
+            decided == Some(json!(format!("{through}|{through}|DIRECT|DIRECT|DIRECT|DIRECT"))),
+            json!({ "decided": decided.map(|decided| decided.to_string().replace(&proxy.port.to_string(), "PORT")) }),
+        );
+
+        // 8. The instance's host goes to the listener, and its challenge is
+        //    answered with the listener's credential.
+        proxy.forget();
+        navigate(&view, &format!("https://{ROUTED}/"));
+        let right = Asked {
+            target: format!("{ROUTED}:443"),
+            credential: "right",
+        };
+        let answered = pump_until(WAIT, || proxy.asked().contains(&right));
+        let asked = proxy.asked();
+        report.case(
+            "the-instances-host-reaches-the-listener-with-its-credential",
+            answering && answered && asked.iter().all(|asked| asked.target == right.target && asked.credential != "wrong"),
+            json!({ "answering": answering, "asked": asked.iter().map(|asked| format!("{} {}", asked.target, asked.credential)).collect::<Vec<_>>() }),
+        );
+
+        // 9. Any other host, a child host, and plain `http` to the
+        //    instance's host are not routed: the listener is not asked.
+        proxy.forget();
+        for url in [
+            "https://other.avibe-probe.test/".to_owned(),
+            format!("https://child.{ROUTED}/"),
+            format!("http://{ROUTED}/"),
+        ] {
+            navigate(&view, &url);
+            // Each fails to resolve; long enough for a routed one to be seen.
+            pump_until(Duration::from_secs(3), || false);
+        }
+        let unrouted = load(&view, &format!("{origin}/unrouted"), "plain");
+        report.case(
+            "another-host-a-child-host-and-plain-http-are-not-routed",
+            unrouted && proxy.asked().is_empty(),
+            json!({ "loaded": unrouted, "asked": proxy.asked().iter().map(|asked| asked.target.clone()).collect::<Vec<_>>() }),
+        );
+
+        // 10. A site's own challenge in the listener's realm is not the
+        //     listener's: the credential is never sent to a site.
+        instance.forget();
+        navigate(&view, &format!("{origin}/basic"));
+        let challenged = pump_until(WAIT, || !instance.requests("/basic").is_empty());
+        pump_until(Duration::from_secs(3), || false);
+        let basic = instance.requests("/basic");
+        report.case(
+            "a-sites-own-challenge-is-not-answered",
+            challenged && basic.iter().all(|seen| !seen.headers.contains_key("authorization")),
+            json!({ "challenged": challenged, "requests": basic.len(), "answered": basic.iter().any(|seen| seen.headers.contains_key("authorization")) }),
+        );
+
+        // SAFETY: A single-threaded apartment; the probe is done with the WebView.
+        let _ = unsafe { controller.Close() };
+        pump_until(Duration::from_millis(500), || false);
+        let _ = std::fs::remove_dir_all(&folder);
         report.failed
     }
 }

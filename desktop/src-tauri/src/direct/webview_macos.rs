@@ -67,7 +67,9 @@ pub fn fetch_rendezvous(
         let Some(done) = done.borrow_mut().take() else { return };
         let text = if error.is_null() && !result.is_null() {
             // SAFETY: WebKit passes a live object for the duration of the call.
-            unsafe { &*result }.downcast_ref::<NSString>().map(|value| value.to_string())
+            unsafe { &*result }
+                .downcast_ref::<NSString>()
+                .map(|value| value.to_string())
         } else {
             None
         };
@@ -181,35 +183,42 @@ fn set_proxy_configurations(webview: &WKWebView, configurations: &NSArray<NSObje
     true
 }
 
+type EndpointCreateHost = unsafe extern "C" fn(*const c_char, *const c_char) -> *mut NSObject;
+type CreateHttpConnect = unsafe extern "C" fn(*mut NSObject, *mut NSObject) -> *mut NSObject;
+type AddMatchDomain = unsafe extern "C" fn(*mut NSObject, *const c_char);
+type SetUsernameAndPassword = unsafe extern "C" fn(*mut NSObject, *const c_char, *const c_char);
+type SetFailoverAllowed = unsafe extern "C" fn(*mut NSObject, bool);
+
 /// The proxy-configuration functions of Network.framework, which exist from
 /// macOS 14. They are looked up by name when a route is installed, so the
 /// shell still starts on a system without them.
 struct Network {
-    endpoint_create_host: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut NSObject,
-    create_http_connect: unsafe extern "C" fn(*mut NSObject, *mut NSObject) -> *mut NSObject,
-    add_match_domain: unsafe extern "C" fn(*mut NSObject, *const c_char),
-    set_username_and_password: unsafe extern "C" fn(*mut NSObject, *const c_char, *const c_char),
-    set_failover_allowed: unsafe extern "C" fn(*mut NSObject, bool),
+    endpoint_create_host: EndpointCreateHost,
+    create_http_connect: CreateHttpConnect,
+    add_match_domain: AddMatchDomain,
+    set_username_and_password: SetUsernameAndPassword,
+    set_failover_allowed: SetFailoverAllowed,
 }
 
 impl Network {
     fn load() -> Option<Self> {
-        // SAFETY: Each symbol, when present, is the C function of that name
-        // in <Network/endpoint.h> or <Network/proxy_config.h>, whose
-        // signature is the field's type.
+        let endpoint_create_host = symbol(c"nw_endpoint_create_host")?;
+        let create_http_connect = symbol(c"nw_proxy_config_create_http_connect")?;
+        let add_match_domain = symbol(c"nw_proxy_config_add_match_domain")?;
+        let set_username_and_password = symbol(c"nw_proxy_config_set_username_and_password")?;
+        let set_failover_allowed = symbol(c"nw_proxy_config_set_failover_allowed")?;
+        // SAFETY: Each symbol is the C function of that name in
+        // <Network/endpoint.h> or <Network/proxy_config.h>, whose signature
+        // is the type it is given here.
         unsafe {
             Some(Self {
-                endpoint_create_host: std::mem::transmute::<*mut c_void, _>(symbol(c"nw_endpoint_create_host")?),
-                create_http_connect: std::mem::transmute::<*mut c_void, _>(symbol(
-                    c"nw_proxy_config_create_http_connect",
-                )?),
-                add_match_domain: std::mem::transmute::<*mut c_void, _>(symbol(c"nw_proxy_config_add_match_domain")?),
-                set_username_and_password: std::mem::transmute::<*mut c_void, _>(symbol(
-                    c"nw_proxy_config_set_username_and_password",
-                )?),
-                set_failover_allowed: std::mem::transmute::<*mut c_void, _>(symbol(
-                    c"nw_proxy_config_set_failover_allowed",
-                )?),
+                endpoint_create_host: std::mem::transmute::<*mut c_void, EndpointCreateHost>(endpoint_create_host),
+                create_http_connect: std::mem::transmute::<*mut c_void, CreateHttpConnect>(create_http_connect),
+                add_match_domain: std::mem::transmute::<*mut c_void, AddMatchDomain>(add_match_domain),
+                set_username_and_password: std::mem::transmute::<*mut c_void, SetUsernameAndPassword>(
+                    set_username_and_password,
+                ),
+                set_failover_allowed: std::mem::transmute::<*mut c_void, SetFailoverAllowed>(set_failover_allowed),
             })
         }
     }

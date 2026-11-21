@@ -106,7 +106,10 @@ pub fn origin_of(url: &str) -> Option<String> {
                 return None;
             }
             let port: u16 = text.parse().ok()?;
-            (port != 0 && port != default_port).then_some(port)
+            if port == 0 {
+                return None;
+            }
+            (port != default_port).then_some(port)
         }
     };
     Some(match port {
