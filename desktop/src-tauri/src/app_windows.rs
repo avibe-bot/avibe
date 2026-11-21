@@ -941,8 +941,8 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         }
     };
     entry.document.bind(window.as_ref());
-    if let Some(route) = direct_route {
-        crate::direct::shell::window_created(app, &label, route);
+    if source.runtime.disposable {
+        crate::direct::shell::app_window_created(app, &label, &source.runtime.origin, direct_route);
     }
     // A Show window's share entry, in its title bar (ui/design:
     // show-pages/desktop-native-entry/titlebar-*). It only asks the page to

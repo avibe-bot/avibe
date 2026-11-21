@@ -183,12 +183,23 @@ impl Pace {
     }
 }
 
+/// An app window that shows another computer's instance, whether or not a
+/// session exists for it right now.
+struct AppWindow {
+    window: String,
+    account: String,
+    origin: String,
+}
+
 pub struct Wiring {
     routing: Routing,
     proxy_configured: bool,
     system_proxy_rules_out: bool,
     choices: Choices,
     sessions: Vec<Session>,
+    /// Every open app window of a remote instance, so a session that starts
+    /// after a window was opened still finds it.
+    app_windows: Vec<AppWindow>,
     next: u64,
     cooling: Option<(String, Instant)>,
 }
@@ -201,6 +212,7 @@ impl Wiring {
             system_proxy_rules_out: false,
             choices,
             sessions: Vec::new(),
+            app_windows: Vec::new(),
             next: 0,
             cooling: None,
         }
@@ -273,12 +285,26 @@ impl Wiring {
         // Where a route is given only at creation, a session started for a
         // view that is already open can route nothing.
         let scout = self.routing == Routing::AtCreation && runtime.is_some();
+        let mut windows: Vec<String> = runtime.map(str::to_owned).into_iter().collect();
+        // Where a route can be put on an open window, the app windows that
+        // are already open for this instance belong to the session too: one
+        // that replaces an ended session, or starts after they were opened,
+        // routes them with its first answer. (They are closed with their
+        // instance view, so any that are open are this view's.)
+        if self.routing == Routing::Live && runtime.is_some() {
+            windows.extend(
+                self.app_windows
+                    .iter()
+                    .filter(|open| open.account == target.account && open.origin == target.origin)
+                    .map(|open| open.window.clone()),
+            );
+        }
         self.sessions.push(Session {
             id: self.next,
             target,
             material,
             runtime: runtime.map(str::to_owned),
-            windows: runtime.map(str::to_owned).into_iter().collect(),
+            windows,
             routed: Vec::new(),
             away: None,
             ready: false,
@@ -300,6 +326,18 @@ impl Wiring {
                     && session.target.origin == origin
             })
             .map(|session| session.id)
+    }
+
+    /// An app window that shows the instance of `account` at `origin` now
+    /// exists. It is remembered until it closes, with or without a session.
+    pub fn app_window_created(&mut self, window: &str, account: &str, origin: &str) {
+        if self.app_windows.iter().all(|open| open.window != window) {
+            self.app_windows.push(AppWindow {
+                window: window.to_owned(),
+                account: account.to_owned(),
+                origin: origin.to_owned(),
+            });
+        }
     }
 
     /// A window that shows the session's instance now exists.
@@ -342,6 +380,7 @@ impl Wiring {
         now: Instant,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
+        self.app_windows.retain(|app| open(&app.window));
         for session in &mut self.sessions {
             session.windows.retain(|window| open(window));
             session.routed.retain(|window| open(window));

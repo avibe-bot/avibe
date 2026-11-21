@@ -739,3 +739,81 @@ fn the_next_rendezvous_comes_before_a_kept_admission_runs_out() {
     assert_eq!(after(&mut pace, RefreshOutcome::Renewed), 240_000);
     assert_eq!(after(&mut pace, RefreshOutcome::Retired), 5_000);
 }
+
+/// A session that starts after an app window was opened routes that window
+/// too: one that replaces a session whose listener ended, and one that
+/// starts when the choice or the system's proxy settings allow it again.
+#[test]
+fn a_session_that_starts_later_routes_the_app_windows_already_open() {
+    let now = Instant::now();
+    let published = shown(ONE, "main-runtime-1");
+    let mut wiring = live();
+    let first = opened(&mut wiring, ONE, "main-runtime-1", now);
+    // A Show window, opened with the session and registered with it; an
+    // Editor window of another instance and one of another account.
+    wiring.app_window_created("show-1", ACCOUNT, ONE);
+    wiring.window_created(first, "show-1");
+    wiring.app_window_created("editor-2", ACCOUNT, TWO);
+    wiring.app_window_created("editor-3", "account-2", ONE);
+    wiring.probed(first, true);
+
+    // The listener ends: both of the session's windows lose their route.
+    assert_eq!(
+        wiring.listener_ended(first, now),
+        [retire(first, &["main-runtime-1", "show-1"])]
+    );
+    // After the pause a new session starts for the same view, and takes the
+    // Show window that is still open with it; a second one, opened while no
+    // session existed, too. Not the windows of another instance or account.
+    wiring.app_window_created("show-2", ACCOUNT, ONE);
+    let later = now + Duration::from_secs(60);
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, later),
+        [open("main-runtime-1")]
+    );
+    let second = wiring.open(target(ONE), material(4200), Some("main-runtime-1"), later);
+    assert_eq!(wiring.probed(second, false), []);
+    assert_eq!(
+        wiring.probed(second, true),
+        [
+            install(second, "main-runtime-1"),
+            install(second, "show-1"),
+            install(second, "show-2")
+        ]
+    );
+
+    // An app window that closed meanwhile is not waited for.
+    let mut wiring = live();
+    wiring.app_window_created("show-1", ACCOUNT, ONE);
+    wiring.app_window_created("show-2", ACCOUNT, ONE);
+    assert_eq!(
+        wiring.reconcile(Some(&published), |window| window != "show-1", now),
+        [open("main-runtime-1")]
+    );
+    let session = wiring.open(target(ONE), material(4100), Some("main-runtime-1"), now);
+    assert_eq!(
+        wiring.probed(session, true),
+        [install(session, "main-runtime-1"), install(session, "show-2")]
+    );
+
+    // Where a route is given only at creation, a window that was created
+    // without one cannot be given one later: nothing is taken along.
+    let mut choices = Choices::unsaved();
+    choices.remember(ACCOUNT, ONE);
+    let mut wiring = Wiring::new(Routing::AtCreation, false, choices);
+    wiring.app_window_created("show-1", ACCOUNT, ONE);
+    let session = wiring.open(target(ONE), material(4100), None, now);
+    assert_eq!(
+        wiring.window_created(session, "main-runtime-2"),
+        [Effect::Answer {
+            session,
+            window: "main-runtime-2".to_owned()
+        }]
+    );
+    assert_eq!(wiring.reconcile(Some(&shown(ONE, "main-runtime-2")), |_| true, now), []);
+    assert_eq!(wiring.probed(session, true), []);
+    assert_eq!(
+        wiring.listener_ended(session, now),
+        [retire(session, &["main-runtime-2"])]
+    );
+}

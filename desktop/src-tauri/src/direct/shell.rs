@@ -591,6 +591,25 @@ pub(crate) fn window_created(app: &AppHandle, window: &str, route: AtCreation) {
     }
 }
 
+/// An app window opened from the instance view at `origin` now exists, with
+/// the `route` it was created for if it had one. It is remembered with or
+/// without a session: one that starts later (after a listener ended, a
+/// change of the choice, or the system's proxy settings clearing) routes
+/// the app windows that are already open.
+pub(crate) fn app_window_created(app: &AppHandle, window: &str, origin: &url::Url, route: Option<AtCreation>) {
+    let Some(state) = direct(app) else { return };
+    let account = app
+        .try_state::<instance_client::Client>()
+        .and_then(|client| client.coordinator.state().account.identity)
+        .map(|identity| identity.id);
+    if let (Some(account), Some(origin)) = (account, origin_of(origin.as_str())) {
+        lock(&state.wiring).app_window_created(window, &account, &origin);
+    }
+    if let Some(route) = route {
+        window_created(app, window, route);
+    }
+}
+
 /// The app's 「连接方式」 submenu, for its tray and application menus. `None`
 /// where this system or configuration can never route: there is nothing to
 /// choose.
