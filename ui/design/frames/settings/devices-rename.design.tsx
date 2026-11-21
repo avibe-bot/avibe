@@ -17,7 +17,7 @@ const fixtures = settingsFixtures({}, { copy });
 /** The real day the old name is released: 30 days (plus a margin) on, or the day the last direct
  *  certificate signed for it runs out, whichever is later (Product, 11:26). Days are always real. */
 const t = (zh: string, en: string) => ({ zh, en });
-const RELEASE_ON = t('12 月 3 日', 'December 3');
+const RELEASE_ON = t('12 月 23 日', 'December 23');
 /** The most names one account may hold, counting names still waiting (owner, 11:20; one number, per plan later). */
 const NAME_LIMIT = 5;
 const host = 'max-app.avibe.bot';
@@ -102,8 +102,13 @@ const designFrames = frames([
     { ...base, host: 'maxwell-app.avibe.bot', name: 'max', held: [{ name: 'max', until: t('11 月 24 日', 'November 24') }] }),
   frame('reject-taken', '更改域名 · 名称已被占用', WIDE, { ...base, name: 'alex', reject: { kind: 'taken' } }),
   frame('reject-held', '更改域名 · 这个名字在别人的等待期里', WIDE, { ...base, name: 'sam', reject: { kind: 'held' } }),
-  frame('reject-limit', '更改域名 · 账号已持有 5 个名字（含冷却中的），写明最早哪天释放', WIDE,
-    { ...base, name: 'maxim', reject: { kind: 'limit', limit: NAME_LIMIT, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }] }),
+  // Renaming may end at the limit plus the name just left, so it is refused at 6 (the API's real count).
+  frame('reject-limit', '更改域名 · 账号已持有 6 个名字（含冷却中的），写明最早哪天释放；下半部分照常显示', WIDE,
+    { ...base, name: 'maxim', reject: { kind: 'renameLimit', count: NAME_LIMIT + 1, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }] }),
+  frame('reject-limit-collapsed', '更改域名 · 同一拒绝，收起后果、提醒和设备清单（供比较）', { width: 1440, height: 800 },
+    { ...base, name: 'maxim', reject: { kind: 'renameLimit', count: NAME_LIMIT + 1, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }], collapseOnReject: true }),
+  frame('reject-limit-collapsed-phone', '更改域名 · 收起的拒绝 · 375 宽', PHONE,
+    { ...base, name: 'maxim', reject: { kind: 'renameLimit', count: NAME_LIMIT + 1, released: t('12 月 21 日', 'December 21') }, held: [{ name: 'studio', until: t('12 月 21 日', 'December 21') }], collapseOnReject: true }),
   frame('confirm', '更改域名 · 第二次确认：按钮先停 3 秒', { width: 1440, height: 900 }, { ...base, step: 'confirm', countdown: 3 }),
   // After: the same list, each device cleared or not confirmed yet; the reminder stays.
   frame('done-mixed', '改名之后 · 同一张清单：已清理 / 未确认 · 上次活跃，仍带清不到的那句', { width: 1440, height: 1100 },

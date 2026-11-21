@@ -5,7 +5,6 @@
 // claim it. Renaming clears what it can by itself: an open page clears its own data and moves to
 // the new address, and any browser that opens the old address during the waiting period is cleared
 // and told it moved. What it cannot reach, it says plainly. Draft copy, inline in both languages.
-import type { ReactNode } from 'react';
 import { Check, Globe, KeyRound, Laptop, Monitor, RotateCcw, Smartphone, TriangleAlert } from 'lucide-react';
 
 import { ClaimFields } from '@/components/devices/DevicesPageView';
@@ -17,6 +16,30 @@ import { Input } from '@/components/ui/input';
 import { useDraft } from './draft';
 
 type D = (zh: string, en: string) => string;
+
+/**
+ * A paragraph whose last line never holds only a word or two. Chinese breaks between any two
+ * characters and `text-wrap: pretty` does not reliably prevent that, so the tail (at least eight
+ * characters, or three English words, cut at a word boundary) is one unbreakable run, and an
+ * address is never split across lines.
+ */
+export function Para({ text }: { text: string }) {
+  const cjk = /[\u3400-\u9fff]/.test(text);
+  const segments = Array.from(new Intl.Segmenter(cjk ? 'zh' : 'en', { granularity: 'word' }).segment(text));
+  let start = text.length;
+  let words = 0;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    start = segment.index;
+    if (segment.isWordLike) words += 1;
+    if (cjk ? text.length - start >= 8 && segment.isWordLike : words >= 3) break;
+  }
+  const keepAddresses = (part: string) => part.split(/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i).map((piece, index) => (
+    index % 2 === 1 ? <span key={index} className="whitespace-nowrap">{piece}</span> : piece
+  ));
+  if (start <= 0) return <span className="whitespace-nowrap">{text}</span>;
+  return <>{keepAddresses(text.slice(0, start))}<span className="whitespace-nowrap">{text.slice(start)}</span></>;
+}
 
 export const DOMAIN_SUFFIX = '-app.avibe.bot';
 
@@ -45,6 +68,9 @@ export type RenameReject =
   /** This account already holds the most names it may (`limit`, counting names still waiting);
    *  `released` is when the earliest waiting one is released. */
   | { kind: 'limit'; limit: number; released: Day }
+  /** Renaming refused: the account already holds `count` names (renaming may end at the limit plus
+   *  the one just left, so this is the limit plus one). */
+  | { kind: 'renameLimit'; count: number; released: Day }
   /** Every name it may hold is in use (none waiting): binding another computer needs one deleted. */
   | { kind: 'limitInUse'; limit: number };
 
@@ -68,6 +94,8 @@ export type RenameDialogProps = {
   residue?: ResidueWording;
   /** `confirm`: seconds before the button can be pressed. */
   countdown?: number;
+  /** While refused, fold away what renaming would do (Product compares both). */
+  collapseOnReject?: boolean;
 };
 
 const deviceIcon = { host: Laptop, iphone: Smartphone, desktop: Monitor, browser: Globe, homeScreen: Globe } as const;
@@ -104,7 +132,7 @@ function Residue({ wording, host, releaseOn }: { wording: ResidueWording; host: 
   return (
     <div role="note" className="flex gap-3 rounded-lg border border-gold/40 bg-gold/10 px-4 py-3">
       <TriangleAlert className="mt-0.5 size-4 shrink-0 text-gold-ink" />
-      <p className="text-pretty text-[13px] leading-relaxed text-foreground">{text}</p>
+      <p className="text-[13px] leading-relaxed text-foreground"><Para text={text} /></p>
     </div>
   );
 }
@@ -124,7 +152,7 @@ function DeviceChecklist({ devices, host, after }: { devices: RenameDevice[]; ho
             <Icon className="mt-0.5 size-4 shrink-0 text-muted" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] font-medium text-foreground">{device.name}</div>
-              {!after && <div className="text-pretty text-[11px] leading-relaxed text-muted">{howToSignOut(d, device, host)}</div>}
+              {!after && <div className="text-[11px] leading-relaxed text-muted"><Para text={howToSignOut(d, device, host)} /></div>}
             </div>
             {after && (device.cleanup === 'cleared' ? (
               <Badge variant="success" className="shrink-0"><Check className="size-3" />{d('已清理', 'Cleared')}</Badge>
@@ -136,11 +164,11 @@ function DeviceChecklist({ devices, host, after }: { devices: RenameDevice[]; ho
           </div>
         );
       })}
-      <p className="text-pretty border-t border-border px-4 py-2 text-[11px] leading-relaxed text-muted">
-        {d(
+      <p className="border-t border-border px-4 py-2 text-[11px] leading-relaxed text-muted">
+        <Para text={d(
           '这里只有现在还登录着的设备。登录早已过期的浏览器不在清单里，清单全部打勾也不代表没有残留。',
           'Only devices signed in now are listed. Browsers whose sign-in expired long ago are not here, so a fully ticked list does not mean nothing is left.',
-        )}
+        )} />
       </p>
     </div>
   );
@@ -148,7 +176,7 @@ function DeviceChecklist({ devices, host, after }: { devices: RenameDevice[]; ho
 
 function Consequences({ host, releaseOn, health }: { host: string; releaseOn: Day; health: boolean }) {
   const d = useDraft();
-  const items: ReactNode[] = [
+  const items: Array<string | null> = [
     d('所有设备都会退出，要用新地址重新登录。', 'Every device is signed out and signs in again at the new address.'),
     d('已经发出去的展示页和文件链接会失效。', 'Show Page and file links already sent stop working.'),
     d('通知会自己恢复。', 'Notifications come back by themselves.'),
@@ -159,7 +187,7 @@ function Consequences({ host, releaseOn, health }: { host: string; releaseOn: Da
     <div className="rounded-lg bg-field px-4 py-3">
       <div className="text-[12px] font-semibold text-foreground">{d('改名后', 'After renaming')}</div>
       <ul className="mt-1.5 flex list-disc flex-col gap-1 pl-4 text-[12px] leading-relaxed text-muted">
-        {items.map((item, index) => <li key={index} className="text-pretty">{item}</li>)}
+        {items.map((item, index) => <li key={index}><Para text={item ?? ''} /></li>)}
       </ul>
     </div>
   );
@@ -171,6 +199,11 @@ function RejectLine({ reject }: { reject: RenameReject }) {
     ? d('已被占用，换一个名称。', 'Taken. Choose another name.')
     : reject.kind === 'held'
       ? d('这个名字还在原来主人的等待期里，暂时不能取。换一个名称。', 'This name is still in its previous owner’s waiting period and cannot be taken yet. Choose another name.')
+      : reject.kind === 'renameLimit'
+        ? d(
+          `这个账号已持有 ${reject.count} 个名字（包括冷却中的），已到上限。最早的一个在 ${reject.released.zh}释放，之后可以再改。`,
+          `This account already holds ${reject.count} names, including those still waiting, which is the limit. The earliest is released on ${reject.released.en}; you can rename after that.`,
+        )
       : reject.kind === 'limitInUse'
         ? d(
           `这个账号已有 ${reject.limit} 个在用的名字，已到上限。要再绑定一台，先删除一个实例，它的名字释放后可以再取。`,
@@ -180,10 +213,10 @@ function RejectLine({ reject }: { reject: RenameReject }) {
         `这个账号已持有 ${reject.limit} 个名字（包括冷却中的）。最早的一个在 ${reject.released.zh}释放，之后可以再取。`,
         `This account already holds ${reject.limit} names, including those still waiting. The earliest is released on ${reject.released.en}; you can take another after that.`,
       );
-  return <span role="alert" className="text-pretty text-[11px] leading-relaxed text-destructive-ink">{text}</span>;
+  return <span role="alert" className="text-[11px] leading-relaxed text-destructive-ink"><Para text={text} /></span>;
 }
 
-export function RenameDialog({ step, host, name, releaseOn, devices, health, held = [], reject, residue = 'a', countdown = 0 }: RenameDialogProps) {
+export function RenameDialog({ step, host, name, releaseOn, devices, health, held = [], reject, residue = 'a', countdown = 0, collapseOnReject = false }: RenameDialogProps) {
   const d = useDraft();
   const newHost = `${name}${DOMAIN_SUFFIX}`;
   const reclaiming = held.some((each) => each.name === name);
@@ -193,11 +226,11 @@ export function RenameDialog({ step, host, name, releaseOn, devices, health, hel
         <DialogContent className="max-w-md" closeLabel={d('关闭', 'Close')}>
           <DialogHeader>
             <DialogTitle className="text-balance">{d(`改成 ${newHost}？`, `Change to ${newHost}?`)}</DialogTitle>
-            <DialogDescription className="text-balance">
-              {d(
+            <DialogDescription>
+              <Para text={d(
                 `这不能撤销。${host} 立即停用，所有设备都会退出，包括你现在用的这一台。${releaseOn.zh}之前只有你的账号能把它拿回来。`,
                 `This cannot be undone. ${host} stops working at once and every device is signed out, this one included. Until ${releaseOn.en} only your account can take it back.`,
-              )}
+              )} />
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -217,10 +250,10 @@ export function RenameDialog({ step, host, name, releaseOn, devices, health, hel
         <DialogContent className="max-w-[520px]" mobileSheetHeight="tall" closeLabel={d('关闭', 'Close')}>
           <DialogHeader>
             <DialogTitle className="text-balance">{d(`域名已改为 ${newHost}`, `The domain is now ${newHost}`)}</DialogTitle>
-            <DialogDescription className="text-balance">
-              {allCleared
+            <DialogDescription>
+              <Para text={allCleared
                 ? d('清单里的设备都已清理，并退出了登录。', 'Every listed device has been cleared and signed out.')
-                : d('设备再打开旧地址时会自己清理。还没确认的，等它们打开过一次就会变成「已清理」。', 'A device clears itself the next time it opens the old address. Those not confirmed yet turn to Cleared once they have.')}
+                : d('设备再打开旧地址时会自己清理。还没确认的，等它们打开过一次就会变成「已清理」。', 'A device clears itself the next time it opens the old address. Those not confirmed yet turn to Cleared once they have.')} />
             </DialogDescription>
           </DialogHeader>
           <DeviceChecklist devices={devices} host={host} after />
@@ -268,9 +301,13 @@ export function RenameDialog({ step, host, name, releaseOn, devices, health, hel
             </div>
           )}
         </div>
-        <Consequences host={host} releaseOn={releaseOn} health={health} />
-        <Residue wording={residue} host={host} releaseOn={releaseOn} />
-        <DeviceChecklist devices={devices} host={host} after={false} />
+        {!(collapseOnReject && reject) && (
+          <>
+            <Consequences host={host} releaseOn={releaseOn} health={health} />
+            <Residue wording={residue} host={host} releaseOn={releaseOn} />
+            <DeviceChecklist devices={devices} host={host} after={false} />
+          </>
+        )}
         <DialogFooter>
           <Button variant="ghost">{d('取消', 'Cancel')}</Button>
           <Button variant="default" disabled={Boolean(reject) || !name}>{reclaiming ? d('拿回这个名字', 'Take this name back') : d('继续', 'Continue')}</Button>
@@ -289,7 +326,7 @@ export function MovedPage() {
       <div className="w-full max-w-md text-center">
         <div className="mx-auto mb-6 grid size-12 place-items-center rounded-2xl border border-edge bg-field"><Globe className="size-5 text-muted" /></div>
         <p className="text-balance text-[15px] leading-relaxed text-foreground">
-          {d('这个 Avibe 换了新地址。能访问它的人，在 avibe.bot 登录后可以打开。', 'This Avibe has a new address. People who can access it can open it after signing in at avibe.bot.')}
+          <Para text={d('这个 Avibe 换了新地址。能访问它的人，在 avibe.bot 登录后可以打开。', 'This Avibe has a new address. People who can access it can open it after signing in at avibe.bot.')} />
         </p>
         <a href="https://avibe.bot" className="mt-5 inline-flex items-center gap-1 text-[14px] font-medium text-cyan-ink hover:underline">avibe.bot</a>
       </div>
@@ -305,11 +342,11 @@ export function UnrecognizedChangeBanner({ host }: { host: string }) {
       <TriangleAlert className="size-5 shrink-0 text-destructive-ink max-md:hidden" />
       <div className="min-w-0 flex-1">
         <div className="text-balance text-[14px] font-semibold text-foreground">{d('这个 Avibe 的地址在别处被改了', 'This Avibe’s address was changed somewhere else')}</div>
-        <p className="mt-1 text-pretty text-[12px] leading-relaxed text-foreground">
-          {d(
+        <p className="mt-1 text-[12px] leading-relaxed text-foreground">
+          <Para text={d(
             `现在的 ${host} 不是在这台电脑上改的，可能有人拿到了它的设备密钥。请先重新绑定远程访问，再在「更改域名」里把原来的名字拿回来。`,
             `${host} was not set from this computer; someone may have its device key. Bind remote access again first, then take your old name back under Change the domain.`,
-          )}
+          )} />
         </p>
       </div>
       <Button variant="destructive" size="sm" className="shrink-0">{d('重新绑定', 'Bind again')}</Button>
@@ -326,8 +363,8 @@ export function RebindRow() {
         <KeyRound className="mt-0.5 size-4 shrink-0 text-muted" />
         <div className="min-w-0">
           <div className="text-[13px] font-medium text-foreground">{d('重新绑定远程访问', 'Bind remote access again')}</div>
-          <div className="text-pretty text-[11px] leading-relaxed text-muted">
-            {d('怀疑有人动过这台电脑的远程访问时用：旧的设备密钥会作废。', 'For when you suspect someone changed this computer’s remote access: the old device key stops working.')}
+          <div className="text-[11px] leading-relaxed text-muted">
+            <Para text={d('怀疑有人动过这台电脑的远程访问时用：旧的设备密钥会作废。', 'For when you suspect someone changed this computer’s remote access: the old device key stops working.')} />
           </div>
         </div>
       </div>
@@ -343,11 +380,11 @@ export function RebindDialog({ host, account }: { host: string; account: string 
       <DialogContent className="max-w-md" closeLabel={d('关闭', 'Close')}>
         <DialogHeader>
           <DialogTitle className="text-balance">{d('重新绑定远程访问？', 'Bind remote access again?')}</DialogTitle>
-          <DialogDescription className="text-balance">
-            {d(
-              `这台电脑会用 ${account} 重新向 avibe.bot 登记。旧的设备密钥立即作废，用它做的任何事都会失效。${host} 不变；绑定后可以在「更改域名」里拿回你等待期内的旧名字。`,
-              `This computer registers with avibe.bot again as ${account}. The old device key stops working at once, and anything done with it stops too. ${host} stays; afterwards you can take back an old name still in its waiting period under Change the domain.`,
-            )}
+          <DialogDescription>
+            <Para text={d(
+              `这台电脑会用 ${account} 重新向 avibe.bot 登记。旧的设备密钥立即作废，用它做的任何事都会失效。所有设备都会退出，要重新登录；这台电脑上的页面不受影响。${host} 不变；绑定后可以在「更改域名」里拿回你等待期内的旧名字。`,
+              `This computer registers with avibe.bot again as ${account}. The old device key stops working at once, and anything done with it stops too. Every device is signed out and signs in again; pages on this computer are not affected. ${host} stays; afterwards you can take back an old name still in its waiting period under Change the domain.`,
+            )} />
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
