@@ -68,10 +68,15 @@ const HEIGHT = 748;
 const MIN_WIDTH = 720;
 const MIN_HEIGHT = 508;
 
+/** Proposed copy for `apps.window.openInBrowser`: a native window has no tabs, so the Workbench's
+ *  "open in new tab" label cannot stand in for it. It moves to `src/i18n` when the design ships. */
+const browserLabel = (lang: 'zh' | 'en') => (lang === 'zh' ? '在浏览器打开' : 'Open in Browser');
+
 interface State {
   name: string;
   title: string;
-  render: () => ReactNode;
+  render: (lang: 'zh' | 'en') => ReactNode;
+  hover?: string;
   click?: string[];
   width?: number;
   height?: number;
@@ -81,15 +86,33 @@ const states: State[] = [
   {
     name: 'group-idle',
     title: 'A 推荐 · 标题栏一组四个控件（标注 · 打开聊天 · 分享 · 在浏览器打开）',
-    render: () => <NativeShowControlsWindow title={title} sessionId={sid} />,
+    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} />,
+  },
+  {
+    name: 'group-hover',
+    title: 'A 推荐 · 鼠标移到「打开聊天」上：悬停底色',
+    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} />,
+    hover: '[data-titlebar-control="chat"]',
+  },
+  {
+    name: 'group14-idle',
+    title: 'A 推荐 · 符号 14pt：一组四个控件',
+    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} symbol={14} />,
+  },
+  {
+    name: 'group14-hover',
+    title: 'A 推荐 · 符号 14pt：鼠标移到「打开聊天」上',
+    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} symbol={14} />,
+    hover: '[data-titlebar-control="chat"]',
   },
   {
     name: 'group-annotate',
-    title: 'A 推荐 · 标注已开启，模式选择弹层在自己的按钮下方',
-    render: () => (
+    title: 'A 推荐 · 点开标注：同一个模式选择弹层，在自己的按钮下方（标注已开，所以有「关闭标注」）',
+    render: (lang) => (
       <NativeShowControlsWindow
         title={title}
         sessionId={sid}
+        browserLabel={browserLabel(lang)}
         annotation={{ enabled: true, mode: 'smart', available: true }}
       />
     ),
@@ -98,30 +121,30 @@ const states: State[] = [
   {
     name: 'group-share',
     title: 'A 推荐 · 分享弹层在分享按钮下方（与今天同一个弹层）',
-    render: () => <NativeShowControlsWindow title={title} sessionId={sid} />,
+    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} />,
     click: ['role=button[name="{t:chat.showPage.share}"]'],
   },
   {
     name: 'group-min',
     title: 'A 推荐 · 最窄窗口 720pt，长标题：控件不收起，标题在控件组前截断',
-    render: () => <NativeShowControlsWindow title={longTitle} sessionId={sid} titleDraw="drawn" />,
+    render: (lang) => <NativeShowControlsWindow title={longTitle} sessionId={sid} browserLabel={browserLabel(lang)} titleDraw="drawn" />,
     width: MIN_WIDTH,
     height: MIN_HEIGHT,
   },
   {
     name: 'overflow-idle',
     title: 'B 备选 · 标题栏只留分享，其余三个收进「更多」',
-    render: () => <NativeShowControlsWindow title={title} sessionId={sid} variant="overflow" />,
+    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} variant="overflow" />,
   },
   {
     name: 'overflow-menu',
     title: 'B 备选 · 「更多」菜单展开：标注（需二级选模式）· 打开聊天 · 在浏览器打开',
-    render: () => <NativeShowControlsWindow title={title} sessionId={sid} variant="overflow" />,
+    render: (lang) => <NativeShowControlsWindow title={title} sessionId={sid} browserLabel={browserLabel(lang)} variant="overflow" />,
     click: ['role=button[name="{t:nav.more}"]'],
   },
 ];
 
-const designFrames = frames(states.flatMap(({ name, title: frameTitle, render, click, width, height }): FrameSpec[] =>
+const designFrames = frames(states.flatMap(({ name, title: frameTitle, render, click, hover, width, height }): FrameSpec[] =>
   (['zh', 'en'] as const).map((lang) => ({
     name: `${name}-${lang}`,
     title: `${frameTitle} · ${lang === 'zh' ? '中文' : 'English'}`,
@@ -136,7 +159,8 @@ const designFrames = frames(states.flatMap(({ name, title: frameTitle, render, c
     }),
     wait: 800,
     ...(click ? { click } : {}),
-    render,
+    ...(hover ? { hover } : {}),
+    render: () => render(lang),
   }))));
 
 export default designFrames;
