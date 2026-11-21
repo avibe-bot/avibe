@@ -376,11 +376,11 @@ test('W1 complete Library/Preview/Show bodies consume snapshots without command 
   await show.screenshot({ path: '/tmp/w1-ui-evidence/show-reuse.png' });
 });
 
-async function nativeShowWindow(page: Page, session: { status: number; json?: unknown }) {
+async function nativeShowWindow(page: Page, session: { status: number; json?: unknown }, body = '<p>Close fixture</p>') {
   await page.setViewportSize({ width: 880, height: 600 });
   await serveProduct(page);
   await page.route('**/api/sessions/ses-close', route => route.fulfill({ status: session.status, json: session.json ?? { error: 'not found' } }));
-  await page.route('**/show/ses-close/**', route => route.fulfill({ contentType: 'text/html', body: '<p>Close fixture</p>' }));
+  await page.route('**/show/ses-close/**', route => route.fulfill({ contentType: 'text/html', body }));
   await page.route('**/api/dock/**', route => route.fulfill({ json: { ok: true } }));
   const closes: string[] = [];
   await page.exposeFunction('recordNativeClose', (href: string) => { closes.push(href); });
@@ -462,4 +462,51 @@ test('W1 native Terminal snapshot reuse preserves all backend session contexts',
   await expect(page.getByRole('button', { name: 'New tab', exact: true })).toBeVisible();
   expect(sessions.size).toBe(2);
   await page.screenshot({ path: '/tmp/w1-ui-evidence/terminal-reuse.png' });
+});
+
+
+test('native title-bar controls use the annotation bridge and button-aligned popovers', async ({ page }) => {
+  await nativeShowWindow(page, { status: 200, json: { id: 'ses-close', status: 'active', title: 'Controls fixture' } }, `
+    <p>Controls fixture</p><script>
+      let enabled = false, mode = 'screenshot';
+      const report = () => parent.postMessage({ type: 'avibe:annotation:state', enabled, mode, available: true }, location.origin);
+      addEventListener('message', ({ data }) => {
+        if (data.type === 'avibe:annotation:control') {
+          if (data.action === 'enable') enabled = true;
+          if (data.action === 'disable') enabled = false;
+          if (data.mode) mode = data.mode;
+        }
+        report();
+      });
+      report();
+    </script>`);
+  await page.route('**/api/show-pages/ses-close', route => route.fulfill({ json: {
+    session_id: 'ses-close', visibility: 'private', active_url: '/show/ses-close/', share_id: null,
+    url_available: true, offline: false, title: 'Controls fixture',
+  } }));
+  const annotate = page.locator('[data-native-annotate-anchor] button');
+  await expect(annotate).toBeEnabled();
+  await page.evaluate(() => window.dispatchEvent(new Event('avibe:show-annotate-open')));
+  await expect(page.getByRole('radio', { name: /Screenshot/i })).toBeChecked();
+  const picker = page.getByRole('dialog');
+  const anchorRect = await annotate.boundingBox();
+  const pickerRect = await picker.boundingBox();
+  expect(anchorRect?.y).toBe(-28);
+  expect(pickerRect!.y).toBeLessThanOrEqual(8);
+  expect(Math.abs(pickerRect!.x + pickerRect!.width - (anchorRect!.x + anchorRect!.width))).toBeLessThan(2);
+  await page.getByRole('radio', { name: /Smart/i }).click();
+  await expect(page.getByRole('radio', { name: /Smart/i })).toBeChecked();
+  await page.evaluate(() => window.dispatchEvent(new Event('avibe:show-share-open')));
+  await expect(page.getByRole('radiogroup')).toHaveCount(0);
+  await expect(page.getByText('Share this Show Page', { exact: true })).toBeVisible();
+  const shareRect = await page.locator('[data-native-share-anchor] button').boundingBox();
+  const sharePopoverRect = await page.getByRole('dialog').boundingBox();
+  expect(sharePopoverRect!.y).toBeLessThanOrEqual(8);
+  expect(Math.abs(sharePopoverRect!.x + sharePopoverRect!.width - (shareRect!.x + shareRect!.width))).toBeLessThan(2);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[data-share-shield]')).toHaveCount(0);
+  await page.evaluate(() => window.dispatchEvent(new Event('avibe:show-annotate-open')));
+  await expect(page.getByRole('radio', { name: /Smart/i })).toBeChecked();
+  await page.getByRole('button', { name: 'Turn off annotation', exact: true }).click();
+  await expect(page.locator('[data-share-shield]')).toHaveCount(0);
 });

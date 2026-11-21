@@ -3639,6 +3639,7 @@
       "maximize": "Maximize",
       "restore": "Restore",
       "openInNewTab": "Open in New Tab",
+      "openInBrowser": "Open in Browser",
       "openChat": "Open Chat"
     },
     "preview": {
