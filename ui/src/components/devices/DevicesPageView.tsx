@@ -88,6 +88,8 @@ export type DevicesPageViewProps = DevicesPageActions & {
   view?: 'page' | 'activity';
   /** 「添加设备」 on one of its tabs: inline while this computer is the only device, else a dialog. */
   add?: AddKind;
+  /** Owner-only content under how this Avibe is reached (a row a later change adds there). */
+  afterReach?: ReactNode;
 };
 
 const noop = () => undefined;
@@ -537,7 +539,7 @@ function Confirm({ title, body, action, actions }: { title: string; body: string
 }
 
 export function DevicesPageView({
-  reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, ...actions
+  reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, afterReach, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
   // Each device says which list it belongs to; push rows whose origin cannot be shown
@@ -589,6 +591,7 @@ export function DevicesPageView({
       activeTab="remote-access"
     >
       {owner && <ReachCard reach={reach} actions={actions} />}
+      {owner && afterReach}
 
       <SettingsPanel
         title={t('devices.list.mine')}
