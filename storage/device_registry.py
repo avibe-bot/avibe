@@ -340,7 +340,7 @@ def revoke_sid(conn, sid, expiry, now):
     return pending
 
 
-def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
+def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, local_owner_email=None):
     """One atomic selection + revocation; None device means the caller's bulk scope."""
     stmt = select(sessions.c.session_id, sessions.c.expires_at).where(
         sessions.c.binding == binding,
@@ -386,10 +386,17 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
         keys = {(r.device_id, r.subject) for r in rows}
         from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
         # Match list_devices' live-session predicate, excluding push-only and revoked rows.
-        visible = set(conn.execute(stmt.with_only_columns(sessions.c.device_id, sessions.c.subject)
-                         .where(sessions.c.cookie_exp > now, ~select(state_meta.c.key).where(
-                             state_meta.c.key == literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id
-                         ).exists())).all())
+        visible_rows = stmt.with_only_columns(sessions.c.device_id, sessions.c.subject, sessions.c.email).where(
+            sessions.c.cookie_exp > now, ~select(state_meta.c.key).where(
+                state_meta.c.key == literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id
+            ).exists())
+        # Use the same representative account as list_devices. Local administrative
+        # access can fence any target, but is not proof of Health ownership.
+        device_accounts = {}
+        for target, account, email in conn.execute(visible_rows.order_by(sessions.c.last_active_at.desc(), sessions.c.session_id)):
+            device_accounts.setdefault(target, (account, email))
+        visible = {(target, account) for target, (account, email) in device_accounts.items()
+                   if caller or (local_owner_email and local_owner_email == email.casefold())}
         pending = []
         for target, account in keys:
             keep = device_id is None and keeper is not None and target == keeper.device_id

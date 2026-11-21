@@ -55,6 +55,58 @@ def test_expired_cookie_pair_survives_signout_and_stays_individually_removable(i
     assert response.status_code == 200 and listing(owner)["unlinked_health"] == []
 
 
+@pytest.mark.parametrize("bulk", [False, True])
+@pytest.mark.parametrize("proof", ["unavailable", "other-owner", "verified"])
+def test_loopback_signout_fences_without_purging_unverified_health(install, monkeypatch, bulk, proof):
+    from types import SimpleNamespace
+    from vibe import permissions, ui_server
+
+    store = MobileStore()
+    cookie, viewer, target = phone(install, "local-owner-phone")
+    install.remote_access.vibe_cloud.instance_secret = "fixture-runtime-credential"
+    identity, payload = code_for(store, viewer)
+    mid = registry.pair(store, payload, identity)["device_id"]
+    _, unused = code_for(store, viewer)
+    local, origin = ui_server.app.test_client(), "http://127.0.0.1:5123"
+
+    with monkeypatch.context() as m:
+        if proof != "verified":
+
+            def permissions_answer(*_):
+                if proof == "unavailable":
+                    raise permissions.PermissionsError("offline")
+                return SimpleNamespace(
+                    source="live",
+                    projection={
+                        "instance": {"id": identity["id"]},
+                        "access": {"owner": {"email": "other@test.invalid"}},
+                    },
+                )
+
+            m.setattr(permissions, "get_current_permissions", permissions_answer)
+        row = next(r for r in listing(local, origin)["mine"] if r["id"] == target)
+        assert any(f["kind"] == "health" for f in row["functions"]) == (proof == "verified")
+        response = sign_out(local, "sign-out-others" if bulk else target + "/sign-out", origin)
+        assert response.status_code == 200
+        result = response.get_json()
+        assert result["revoked_sessions"] == 1
+        if proof == "unavailable":
+            assert result["health_pairing_cleanup_skipped"] == "current_owner_unverified"
+        else:
+            assert "health_pairing_cleanup_skipped" not in result
+    assert remote_access.parse_session_identity(install, cookie) is None
+    with store.transaction() as mobile:
+        assert bool(mobile.execute("SELECT revoked_at FROM devices WHERE id=?", (mid,)).fetchone()[0]) == (
+            proof == "verified"
+        )
+        assert not mobile.execute(
+            "SELECT 1 FROM pairings WHERE code_hash=?", (registry.digest(unused["pairing_code"]),)
+        ).fetchone()
+    if proof != "verified":
+        assert [p["pairing_id"] for p in listing(local, origin)["unlinked_health"]] == [mid]
+        assert sign_out(local, "unlinked-health/" + mid + "/revoke", origin).status_code == 200
+
+
 def test_missing_private_store_is_not_replaced_by_empty_cleanup(install):
     store = MobileStore()
     _, viewer, target = phone(install, "lost")

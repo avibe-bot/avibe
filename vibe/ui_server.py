@@ -9228,8 +9228,10 @@ def device_sign_out(device_id=None):
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
+    local_owner_email = _device_owner_scope(viewer)[1] if not caller else None
     try:
         ids, count, stopped, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+                                      local_owner_email=local_owner_email,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
@@ -9237,7 +9239,13 @@ def device_sign_out(device_id=None):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
-    response = jsonify({'ok': True, 'revoked_sessions': count, **({'health_cleanup_pending': True} if deferred else {})})
+    result = {'ok': True, 'revoked_sessions': count}
+    if deferred:
+        result['health_cleanup_pending'] = True
+    if binding and not caller and not local_owner_email:
+        # Report the skipped scope, never whether a pairing exists.
+        result['health_pairing_cleanup_skipped'] = 'current_owner_unverified'
+    response = jsonify(result)
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
