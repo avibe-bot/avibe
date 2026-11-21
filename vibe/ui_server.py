@@ -3346,22 +3346,17 @@ def _is_valid_host_header(value: str) -> bool:
 
 
 _address_connections: dict[str, set[Any]] = {}
-_address_connections_loop: Any = None
 
 
 def _close_address_connections(hosts: set[str]) -> None:
     """End every request, stream and socket still open on these Hosts (any thread)."""
 
-    loop = _address_connections_loop
-    if loop is None:
-        return
-
-    def cancel() -> None:
-        for host in hosts:
-            for task in list(_address_connections.get(host, ())):
-                task.cancel()
-
-    loop.call_soon_threadsafe(cancel)
+    for host in hosts:
+        for task in list(_address_connections.get(host, ())):
+            try:
+                task.get_loop().call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass  # its loop is already closed, and the request with it
 
 
 def _wake_address_streams() -> None:
@@ -3392,8 +3387,6 @@ class _InstanceAddressRoleMiddleware:
         self.app = asgi_app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        global _address_connections_loop
-
         if scope["type"] not in {"http", "websocket"} or scope.get(DIRECT_INGRESS_SCOPE_KEY) is not None:
             await self.app(scope, receive, send)
             return
@@ -3411,8 +3404,6 @@ class _InstanceAddressRoleMiddleware:
             return
         decision = await asyncio.to_thread(instance_address.decide, host, forwarded)
         if decision == "pass":
-            if _address_connections_loop is None:
-                _address_connections_loop = asyncio.get_running_loop()
             task = asyncio.current_task()
             open_here = _address_connections.setdefault(normalized, set())
             open_here.add(task)

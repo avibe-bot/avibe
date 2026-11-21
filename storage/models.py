@@ -1480,7 +1480,8 @@ remote_device_push_links = Table(
 # (docs/plans/instance-address-change.md F1-F4).
 instance_address_clearings = Table(
     "instance_address_clearings", metadata,
-    Column("id", Integer, primary_key=True),
+    # One row per (instance, retired name, device): the id is their digest.
+    Column("id", String, primary_key=True),
     Column("instance_id", String, nullable=False),
     Column("hostname", String, nullable=False),
     Column("device_id", String, nullable=False),
@@ -1491,13 +1492,13 @@ instance_address_clearings = Table(
     Column("push_only", Integer, nullable=False),
     Column("retired_at", Integer, nullable=False),
     Column("cleared_at", Integer),
-    UniqueConstraint("instance_id", "hostname", "device_id", name="uq_instance_address_clearings_device"),
+    Index("ix_instance_address_clearings_hostname", "instance_id", "hostname"),
 )
 
 instance_address_clearing_receipts = Table(
     "instance_address_clearing_receipts", metadata,
     Column("receipt_hash", String, primary_key=True),
-    Column("clearing_id", Integer, nullable=False),
+    Column("clearing_id", String, nullable=False),
     Index("ix_instance_address_clearing_receipts_clearing", "clearing_id"),
 )
 

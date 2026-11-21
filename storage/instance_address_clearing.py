@@ -6,6 +6,8 @@ only when the clearing browser posted its receipt back; nothing else marks it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Callable, Iterable
 
 from sqlalchemy import func, select
@@ -15,6 +17,10 @@ from storage.models import instance_address_clearing_receipts as receipts
 from storage.models import instance_address_clearings as clearings
 from storage.models import remote_device_sessions as sessions
 from storage.models import web_push_subscriptions
+
+
+def _row_id(instance_id: str, hostname: str, device_id: str) -> str:
+    return hashlib.sha256(json.dumps([instance_id, hostname, device_id]).encode("utf-8")).hexdigest()
 
 
 def snapshot(conn, *, instance_id: str, hostname: str, binding: str, now: int,
@@ -44,6 +50,7 @@ def snapshot(conn, *, instance_id: str, hostname: str, binding: str, now: int,
         result = conn.execute(
             insert(clearings)
             .values(
+                id=_row_id(instance_id, hostname, device["id"]),
                 instance_id=instance_id,
                 hostname=hostname,
                 device_id=device["id"],
@@ -54,7 +61,7 @@ def snapshot(conn, *, instance_id: str, hostname: str, binding: str, now: int,
                 push_only=1 if device.get("push_only") else 0,
                 retired_at=now,
             )
-            .on_conflict_do_nothing(index_elements=["instance_id", "hostname", "device_id"])
+            .on_conflict_do_nothing(index_elements=["id"])
         )
         written += result.rowcount or 0
     ids = {
