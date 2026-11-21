@@ -458,8 +458,14 @@ def test_pin_outage_survives_ordinary_candidates_without_stealing_the_lane(rig, 
     assert cs.value(V2Config.load(), 'protocol') == 'quic'
 
 
-@pytest.mark.parametrize('saved,automatic,expected', [(True, None, '4'), (False, True, 'auto'), (False, False, '4'), (None, None, '4')])
-def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monkeypatch, saved, automatic, expected):
+@pytest.mark.parametrize('field,pinned', [('ipFamily', '4'), ('outbound', '192.0.2.1')])
+@pytest.mark.parametrize('saved,automatic,expected_return', [(True, None, False), (False, True, True), (False, False, False), (None, None, False)])
+def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monkeypatch, connector_clock, field, pinned, saved, automatic, expected_return):
+    cloud = rig.cfg.remote_access.vibe_cloud
+    cloud.edge_ip_version = 'auto'
+    setattr(cloud, cs.FIELDS[field], pinned)
+    rig.cfg.save()
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', 'http2')
     window = cs.PinFailureWindow(lambda: rig.clock[0])
     def tick(n, count=0):
         rig.clock[0] += n
@@ -477,18 +483,27 @@ def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monke
     attempts = []
     monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
     def spawn(cfg, binary, protocol):
-        assert cs.value(V2Config.load(), 'ipFamily') == '4'
-        attempts.append(cs.value(cfg, 'ipFamily'))
+        assert cs.value(V2Config.load(), field) == pinned
+        assert protocol == 'http2'  # Saved and relaxed IP/outbound candidates both use the remembered transport.
+        attempts.append((cs.value(cfg, field), connector_clock.monotonic()))
         return len(attempts), 'fixture'
+    def registration(url):
+        result = saved if len(attempts) == 1 else automatic
+        if result is None:
+            return None  # Missing metrics must not be treated as a failed saved pin.
+        return int(result and connector_clock.monotonic() - attempts[-1][1] >= 8.030)
     monkeypatch.setattr(ra, '_start_candidate_connector', spawn)
-    monkeypatch.setattr(cr, '_wait_registered', lambda pid, url: saved if pid == 1 else automatic)
+    monkeypatch.setattr(cr, '_registered', registration)
     monkeypatch.setattr(ra, '_discard_candidate_connector', lambda pid: None)
     monkeypatch.setattr(ra, '_promote_candidate_connector', lambda pid, **kw: {})
     monkeypatch.setattr(ra, '_drain_tracked_connector', lambda old: True)
     cr._consume_pin_attempt()
-    assert attempts == (['4', 'auto'] if saved is False else ['4'])
-    assert cs.value(V2Config.load(), 'ipFamily') == expected
-    assert bool(cs.journal.inspect(rig.cfg)['returnedToAutomatic']) == (expected == 'auto')
+    relaxed = cs.AUTOMATIC[field]
+    assert [v for v, _ in attempts] == ([pinned, relaxed] if saved is False else [pinned])
+    if saved is False:
+        assert attempts[1][1] - attempts[0][1] == pytest.approx(30)
+    assert cs.value(V2Config.load(), field) == (relaxed if expected_return else pinned)
+    assert bool(cs.journal.inspect(rig.cfg)['returnedToAutomatic']) == expected_return
 
 
 @pytest.mark.parametrize('pin,preferred,usable,working_family,expected_legs,returned', [
