@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from config.atomic_io import write_atomic
@@ -96,50 +95,6 @@ class AvibeTokenStorage:
         value.pop("expiresAt", None)
         await asyncio.to_thread(_write, self.name, value)
 
-@lru_cache(maxsize=1)
-def _provider_class():
-    """The SDK provider subclass, defined on first use so the SDK loads only then."""
-
-    from mcp.client.auth.oauth2 import OAuthClientProvider
-    from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
-
-    class AvibeOAuthProvider(OAuthClientProvider):
-        """SDK provider with persisted expiry, AS metadata and PRM."""
-
-        async def _initialize(self) -> None:
-            await super()._initialize()
-            raw = await asyncio.to_thread(self.context.storage.raw) if hasattr(self.context.storage, "raw") else {}
-            if raw.get("expiresAt") is not None:
-                self.context.token_expiry_time = float(raw["expiresAt"])
-            for key, attr, model in (("authServerMetadata", "oauth_metadata", OAuthMetadata), ("resourceMetadata", "protected_resource_metadata", ProtectedResourceMetadata)):
-                if isinstance(raw.get(key), dict):
-                    try:
-                        setattr(self.context, attr, model.model_validate(raw[key]))
-                    except Exception:
-                        logger.warning("Ignoring invalid stored MCP OAuth metadata")
-            configured = getattr(self, "_configured_client_info", None)
-            if configured is not None:
-                self.context.client_info = configured
-
-        async def _handle_token_response(self, response) -> None:
-            await super()._handle_token_response(response)
-            raw = await asyncio.to_thread(self.context.storage.raw)
-            if self.context.oauth_metadata is not None:
-                raw["authServerMetadata"] = self.context.oauth_metadata.model_dump(mode="json")
-            if self.context.protected_resource_metadata is not None:
-                raw["resourceMetadata"] = self.context.protected_resource_metadata.model_dump(mode="json")
-            await asyncio.to_thread(_write, self.context.storage.name, raw)
-
-        async def _handle_refresh_response(self, response) -> bool:
-            status = getattr(response, "status_code", 0)
-            ok = await super()._handle_refresh_response(response)
-            if not ok and status in {400, 401}:
-                await self.context.storage.clear_tokens()
-            return ok
-
-    return AvibeOAuthProvider
-
-
 def redirect_mode(origin: str | None, *, cloud_origin: str | None = None, cli: bool = False, port: int | None = None) -> tuple[str, str]:
     candidate = cloud_origin if cli and cloud_origin else origin
     parsed = urlparse(candidate or "")
@@ -167,7 +122,9 @@ def make_provider(name: str, definition: dict, redirect_uri: str, *, redirect_ha
 
     transport = definition["transport"]
     oauth = definition.get("oauth") or {}
-    provider = _provider_class()(
+    from core.mcp_hub.oauth_provider import AvibeOAuthProvider
+
+    provider = AvibeOAuthProvider(
         transport["url"],
         OAuthClientMetadata(redirect_uris=[redirect_uri], client_name="Avibe MCP Hub", application_type="native", token_endpoint_auth_method="none", scope=oauth.get("scopes")),
         AvibeTokenStorage(name, transport["url"], redirect_uri if filter_redirect else None),

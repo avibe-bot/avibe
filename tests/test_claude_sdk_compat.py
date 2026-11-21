@@ -239,7 +239,7 @@ def test_controller_start_loads_neither_the_claude_sdk_nor_the_mcp_client():
 
     code = (
         "import sys\n"
-        "import core.controller, core.internal_server, core.agent_auth_service\n"
+        "import main, core.controller, core.internal_server, core.agent_auth_service\n"
         "import core.handlers.session_handler, modules.agents.claude_agent, modules.claude_client\n"
         "from core.mcp_hub.runtime import McpRuntime\n"
         "McpRuntime()\n"
@@ -250,5 +250,10 @@ def test_controller_start_loads_neither_the_claude_sdk_nor_the_mcp_client():
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
                             cwd=Path(__file__).resolve().parents[1])
     assert result.stdout.strip().splitlines()[-1] == "[]"
-    # First use still works without any restart: the SDK loads then.
+    # First use still works without any restart: the SDK loads then, with the
+    # transport's buffer limit raised before any client is built.
     assert compat.ClaudeAgentOptions is not None
+    from claude_agent_sdk._internal.transport import subprocess_cli
+
+    limits = [getattr(subprocess_cli, name) for name in ("_DEFAULT_MAX_BUFFER_SIZE", "_MAX_BUFFER_SIZE") if hasattr(subprocess_cli, name)]
+    assert limits and all(limit == compat.CLAUDE_SDK_MAX_BUFFER_SIZE for limit in limits)
