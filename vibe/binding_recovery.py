@@ -12,19 +12,23 @@ def _pair_reason(record, error, cfg):
         return 'pairing_record_unusable'
     if remote._issuer_replay_refused(record):
         return 'issuer_replay_refused'
+    # Publication still checks the enrollment after redeem, even if config
+    # already matches the sealed target. Do not promise a replay it must refuse.
+    enrollment = record.get('personal_claim') or record.get('desktop_enrollment')
+    if enrollment:
+        try:
+            if local._installation_id() != enrollment['installation_id']:
+                return 'pairing_record_unusable'
+        except local.LocalInstanceError:
+            return 'pairing_record_unusable'
     stamp = reset._stamp(cfg.remote_access.vibe_cloud)
     phase = record['phase']
     if phase in ('redeemed', 'applied') and (stamp == record['target_fingerprint'] or
             phase == 'redeemed' and stamp == record['source_fingerprint']):
         return 'exact_replay_pending'
-    if phase == 'prepared' and stamp == record['source_fingerprint'] and record.get('redeem_request') and not record.get('desktop_failure'):
-        enrollment = record.get('personal_claim') or record.get('desktop_enrollment')
-        try:
-            installation = local._installation_id()
-        except local.LocalInstanceError:
-            installation = None  # No exact guarded replay, not proof of issuer refusal.
-        if enrollment and installation == enrollment['installation_id']:
-            return 'exact_replay_pending'
+    if (phase == 'prepared' and stamp == record['source_fingerprint'] and enrollment
+            and record.get('redeem_request') and not record.get('desktop_failure')):
+        return 'exact_replay_pending'
     return 'pairing_record_unusable'
 
 

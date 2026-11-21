@@ -215,6 +215,43 @@ def test_damaged_pair_and_unusable_reset_require_fresh_consent(cli_host, monkeyp
     assert len(sends) == 1 and not local._identity_path().exists() and not gate.reset_in_progress()
 
 
+@pytest.mark.parametrize('phase', ['redeemed', 'applied'])
+@pytest.mark.parametrize('identity', ['missing', 'malformed', 'replaced'])
+def test_sealed_enrollment_needs_its_installation_to_protect_replay(cli_host, monkeypatch, phase, identity):
+    from tests.test_pairing_recovery import _fail_config_publication_once
+
+    cfg = V2Config.load()
+    original = local.ensure_installation_id()
+    with monkeypatch.context() as fault:
+        fault.setattr(remote, '_json_request', lambda *_a, **_kw: {**_response(), 'binding_disposition': 'existing'})
+        if phase == 'redeemed':
+            _fail_config_publication_once(fault)
+        else:
+            fault.setattr(remote, '_retire_pending_pairing', lambda **_: False)
+        assert not _attempt(cfg, original)['ok']
+    record, error = remote._read_pending_pairing_record()
+    assert not error and record['phase'] == phase and record['personal_claim']['installation_id'] == original
+    with pytest.raises(ClaimError, match='pairing_recovery_required'):
+        reset.reset_interactively(confirm=lambda: pytest.fail('intact enrollment still owns recovery'))
+
+    path = local._identity_path()
+    path.unlink()
+    if identity == 'malformed':
+        path.write_text('{')
+    elif identity == 'replaced':
+        assert local.ensure_installation_id() != original
+    monkeypatch.setattr(recovery, '_run_pair', lambda *_: pytest.fail('cannot publish for this installation'))
+    assert recovery.resume_interactively() == {'state': 'pairing_recovery_required', 'reason_code': 'pairing_record_unusable'}
+    repair = identity != 'missing'
+    if repair:
+        gate.reset_intent_path().write_text('{')
+        assert 'next_action' not in recovery.resume_interactively()
+    assert reset.reset_interactively(repair=repair, confirm=lambda: False) == {'state': 'declined'}
+    assert remote._read_pending_pairing_record() == (record, None) and gate.reset_in_progress() == repair
+    assert reset.reset_interactively(repair=repair, confirm=lambda: True) == {'state': 'unpaired'}
+    assert remote._read_pending_pairing_record() == (None, None) and not path.exists()
+
+
 def _hold_admission(pipe):
     with gate.admitted('reset'):
         pipe.send('held')
