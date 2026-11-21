@@ -1,0 +1,184 @@
+// Proposed: the native Show window's title bar carrying every control the Workbench's Show window
+// carries (ui/design: show-pages/desktop-native-controls/*). Today it carries only the share button
+// (`kit/desktop-native-show-window.tsx`, show-pages/desktop-native-entry/titlebar-idle).
+//
+// The window frame is AppKit's. This stand-in draws it as that kit does — traffic lights at the
+// system's colours, the window's title, 28 pt tall, the shipped Show route below — and widens its
+// single-button title-bar accessory into one group.
+//
+// In the shipped build each button is an NSButton the shell draws in that accessory
+// (`macos_show_titlebar.rs`): a 15 pt medium SF symbol at label colour in a 28 pt square, 4 pt
+// apart, the group 9 pt from the window's right edge — the same inset the traffic lights take on the
+// left. The symbols stand for the Workbench window's icons:
+//
+//   plus.bubble (标注) · message (打开聊天) · square.and.arrow.up (分享) · arrow.up.forward.square (在浏览器打开)
+//
+// Here they are the lucide icons the Workbench title bar itself uses, at the native size, so the
+// frame shows the group's rhythm and where each popover opens. The annotate popover and the share
+// popover are the shipped components, anchored in their own button's cell: the shipped
+// `NativeShowShareEntry`'s single anchor at the content's top right corner becomes a row of
+// anchors mirroring the group, so a popover opens under the button that asked for it.
+import { useRef, type ReactNode } from 'react';
+import { ChevronRight, ExternalLink, MessageCircle, MessageSquarePlus, MoreHorizontal, Share } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { Route, Routes } from 'react-router-dom';
+
+import { StandaloneAppRoute } from '@/components/apps/StandaloneAppRoute';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { ShowPageAnnotateControl } from '@/components/workbench/ShowPageAnnotateControl';
+import { ShowPageShareControl } from '@/components/workbench/ShowPageShareControl';
+import type { AnnotationState } from '@/components/workbench/useShowPageAnnotation';
+import { DockProvider } from '@/context/DockProvider';
+import { WindowManagerProvider } from '@/context/WindowManagerProvider';
+
+const LIGHTS = ['bg-traffic-close', 'bg-traffic-minimize', 'bg-traffic-zoom'];
+
+/** A title-bar button the shell draws natively: the symbol alone, at the toolbar size. */
+const BUTTON = 'grid size-7 place-items-center rounded-md text-muted transition hover:bg-wash hover:text-foreground';
+
+const noop = () => {};
+
+/** The session-chat button: it raises the Workbench window on this Show's chat. */
+function ChatButton() {
+  const { t } = useTranslation();
+  return (
+    <button type="button" aria-label={t('apps.window.openChat')} title={t('apps.window.openChat')} className={BUTTON}>
+      <MessageCircle className="size-titlebar-symbol" strokeWidth={1.75} />
+    </button>
+  );
+}
+
+/** The open-in-browser button: the same Show, in the system's browser. */
+function BrowserButton() {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      aria-label={t('apps.window.openInNewTab')}
+      title={t('apps.window.openInNewTab')}
+      className={BUTTON}
+    >
+      <ExternalLink className="size-titlebar-symbol" strokeWidth={1.75} />
+    </button>
+  );
+}
+
+/** The share button: the native symbol, opening the shipped share popover under itself. */
+function ShareButton({ sessionId }: { sessionId: string }) {
+  const { t } = useTranslation();
+  const cell = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={cell} className="relative grid size-7 place-items-center">
+      <div className="pointer-events-none absolute inset-0 grid place-items-center">
+        <ShowPageShareControl compact anchorOnly sessionId={sessionId} canManageInstance canPinToDock />
+      </div>
+      <button
+        type="button"
+        aria-label={t('chat.showPage.share')}
+        title={t('chat.showPage.share')}
+        onClick={() => cell.current?.querySelector<HTMLButtonElement>('button[aria-hidden="true"]')?.click()}
+        className={`relative ${BUTTON}`}
+      >
+        <Share className="size-titlebar-symbol" strokeWidth={1.75} />
+      </button>
+    </div>
+  );
+}
+
+/** Option B's overflow button and its menu: the three controls the title bar does not draw. */
+function OverflowButton() {
+  const { t } = useTranslation();
+  const row = 'flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-titlebar text-foreground transition-colors hover:bg-wash';
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" aria-label={t('nav.more')} title={t('nav.more')} className={BUTTON}>
+          <MoreHorizontal className="size-titlebar-symbol" strokeWidth={1.75} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" sideOffset={6} className="w-56 p-1.5">
+        <button type="button" className={row}>
+          <MessageSquarePlus className="size-4 shrink-0 text-muted" />
+          <span className="min-w-0 flex-1 truncate">{t('chat.showPage.annotate.toggle')}</span>
+          <ChevronRight className="size-4 shrink-0 text-muted" />
+        </button>
+        <button type="button" className={row}>
+          <MessageCircle className="size-4 shrink-0 text-muted" />
+          <span className="min-w-0 flex-1 truncate">{t('apps.window.openChat')}</span>
+        </button>
+        <button type="button" className={row}>
+          <ExternalLink className="size-4 shrink-0 text-muted" />
+          <span className="min-w-0 flex-1 truncate">{t('apps.window.openInNewTab')}</span>
+        </button>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+export interface NativeShowControlsProps {
+  /** The window's title, which the page gives it. */
+  title: string;
+  /** The Show this window was opened for. */
+  sessionId: string;
+  /** A: one group of four, as the Workbench window orders them. B: share, and the rest behind `•••`. */
+  variant?: 'group' | 'overflow';
+  /** The annotation overlay's state, which the title bar's annotate button draws. */
+  annotation?: AnnotationState | null;
+  /** How the title is laid out: `system` is macOS 25 and earlier, which centres it; `drawn` is
+   *  macOS 26 and later, where the shell draws it from the traffic lights and truncates it before
+   *  the group. */
+  titleDraw?: 'system' | 'drawn';
+}
+
+/** A native Show window with the proposed title-bar controls, and the shipped Show below them. */
+export function NativeShowControlsWindow({
+  title,
+  sessionId,
+  variant = 'group',
+  annotation = null,
+  titleDraw = 'system',
+}: NativeShowControlsProps) {
+  const controls: ReactNode = variant === 'group' ? (
+    <>
+      <div className="grid size-7 place-items-center">
+        <ShowPageAnnotateControl compact state={annotation} onEnable={noop} onDisable={noop} onSetMode={noop} />
+      </div>
+      <ChatButton />
+      <ShareButton sessionId={sessionId} />
+      <BrowserButton />
+    </>
+  ) : (
+    <>
+      <OverflowButton />
+      <ShareButton sessionId={sessionId} />
+    </>
+  );
+  return (
+    <WindowManagerProvider>
+      <DockProvider enabled>
+        <div className="flex h-full w-full flex-col overflow-hidden bg-background text-foreground">
+          <div className="relative flex h-7 shrink-0 items-center gap-2 border-b border-border bg-surface px-titlebar-inset">
+            <div className="flex shrink-0 items-center gap-2">
+              {LIGHTS.map((light) => (
+                <span key={light} className={`size-3 rounded-full ${light}`} />
+              ))}
+            </div>
+            {titleDraw === 'drawn' ? (
+              <span className="min-w-0 flex-1 truncate text-titlebar font-semibold text-foreground">{title}</span>
+            ) : (
+              <span className="pointer-events-none absolute inset-x-36 truncate text-center text-titlebar font-semibold text-foreground">
+                {title}
+              </span>
+            )}
+            <div className="ml-auto flex shrink-0 items-center gap-1">{controls}</div>
+          </div>
+          <div className="min-h-0 flex-1">
+            <Routes>
+              <Route path="/apps/show/:sessionId" element={<StandaloneAppRoute appId="showpage" />} />
+            </Routes>
+          </div>
+        </div>
+      </DockProvider>
+    </WindowManagerProvider>
+  );
+}
