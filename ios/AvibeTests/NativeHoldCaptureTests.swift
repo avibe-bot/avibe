@@ -79,7 +79,7 @@ final class NativeHoldCaptureTests: XCTestCase {
     }
 
     /// Runs the pending timer of `delay` seconds (the hold's 0.2 s, the
-    /// adoption wait's 3 s); false when there is none.
+    /// adoption wait's 1 s); false when there is none.
     @discardableResult
     private func fire(_ delay: TimeInterval) -> Bool {
         guard let index = timers.firstIndex(where: { !$0.cancelled && $0.delay == delay }) else { return false }
@@ -475,9 +475,14 @@ final class NativeHoldCaptureTests: XCTestCase {
         let (capture, webView) = makeHoldCapture(audio)
         _ = try hold(capture, in: webView)
         audio.onPCM?(Data([1, 0]))
+        // The microphone stays open no longer than a second for a page
+        // that does not answer, and the kept audio is bounded with it.
+        XCTAssertEqual(NativeHoldCapture.adoptionWait, 1)
+        XCTAssertEqual(NativeHoldCapture.unadoptedBytes, 64_000)
         XCTAssertTrue(fire(NativeHoldCapture.adoptionWait))
         drain()
         XCTAssertNil(capture.currentTake)
+        XCTAssertEqual(audio.calls, ["arm", "begin", "stop"])
         XCTAssertTrue(heard.isEmpty)
         XCTAssertTrue(try XCTUnwrap(notes.last).hasSuffix("end=unadopted"), notes.last ?? "")
 
@@ -934,7 +939,13 @@ final class NativeHoldCaptureTests: XCTestCase {
     /// surfaces.
     func testTheHoldThresholdIsTheOneThePageNames() throws {
         XCTAssertEqual(NativeHoldCapture.holdMs(from: 250), 250)
-        let invalid: [Any?] = [nil, 99, 1001, 250.5, true, "250"]
+        // At most half a second: the privacy policy calls what a touch that
+        // is not a hold records "that fraction of a second".
+        XCTAssertEqual(NativeHoldCapture.holdMsRange, 100...500)
+        XCTAssertEqual(NativeHoldCapture.holdMs(from: 100), 100)
+        XCTAssertEqual(NativeHoldCapture.holdMs(from: 500), 500)
+        XCTAssertTrue(NativeHoldCapture.holdMsRange.contains(Int((NativeHoldCapture.defaultHoldSeconds * 1000).rounded())))
+        let invalid: [Any?] = [nil, 99, 501, 1000, 250.5, true, "250"]
         for value in invalid {
             XCTAssertNil(NativeHoldCapture.holdMs(from: value), String(describing: value))
         }
@@ -1233,15 +1244,19 @@ final class NativeHoldCaptureTests: XCTestCase {
             const named = code("voice.holdSurfaces", \(surfaces));
             const withdrawn = code("voice.holdSurfaces", {surfaces: []});
             const codes = [await named, await withdrawn];
-            codes.push(await code("voice.holdSurfaces", \(surfaces)));
+            // A threshold over half a second is refused, with its list.
+            codes.push(await code("voice.holdSurfaces", {...\(surfaces), holdMs: 501}));
+            codes.push(await code("voice.holdSurfaces", {...\(surfaces), holdMs: 500}));
             return JSON.stringify(codes);
             """,
             arguments: [:], in: nil, contentWorld: .page
         )
-        XCTAssertEqual(result as? String, #"["superseded","ok","ok"]"#)
-        // The last call stands: a list named on its own is applied.
+        XCTAssertEqual(result as? String, #"["superseded","ok","invalid_argument","ok"]"#)
+        // The last call stands: a list named on its own is applied, with
+        // its threshold.
         capture.touchDown(at: Self.onComposer, in: webView)
         XCTAssertTrue(capture.followsPress)
+        XCTAssertEqual(timers.last?.delay, 0.5)
         capture.touchEnded(in: webView)
 
         let again = try await webView.callAsyncJavaScript(

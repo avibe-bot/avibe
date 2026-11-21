@@ -289,9 +289,15 @@ final class NativeHoldCapture {
     static let cancelDistance: CGFloat = 80
     static let uncancelDistance: CGFloat = 60
     /// How long a recognised hold's take waits for its page.
-    static let adoptionWait: TimeInterval = 3
-    /// The most audio kept for a page that has not taken its take: 15 s.
-    static let unadoptedBytes = 15 * 16_000 * 2
+    /// The microphone is open meanwhile, so no longer than a page needs:
+    /// its answer is two turns of its main thread (the event, then the
+    /// consent check), tens of ms. In 85 holds on a device the page's own
+    /// 200 ms timer was never more than 153 ms late. When it runs out the
+    /// take is dropped and its line ends `end=unadopted`.
+    static let adoptionWait: TimeInterval = 1
+    /// The most audio kept for a page that has not taken its take: 2 s,
+    /// more than the longest threshold and the wait together can give.
+    static let unadoptedBytes = 2 * 16_000 * 2
 
     /// `afterQueued` runs its work once what the input already sent to the
     /// main queue has arrived (by default, the main queue's next turn);
@@ -371,10 +377,19 @@ final class NativeHoldCapture {
         audio.prepare()
     }
 
-    /// The page's `holdMs` argument: a whole number of ms from 100 to 1000.
+    /// The hold thresholds the App takes from a page, in ms. The upper end
+    /// is a promise, not a taste: the privacy policy says the audio of a
+    /// touch that is not a hold is "that fraction of a second"
+    /// (avibe-backend#397), and such a touch records for at most its
+    /// threshold. Do not raise it without changing that sentence.
+    static let holdMsRange = 100...500
+
+    /// The page's `holdMs` argument: a whole number of ms in `holdMsRange`.
+    /// Any other is refused, not rounded: the page and the App time a hold
+    /// with one number.
     static func holdMs(from value: Any?) -> Int? {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
-              number.doubleValue == number.doubleValue.rounded(), (100...1000).contains(number.intValue)
+              number.doubleValue == number.doubleValue.rounded(), holdMsRange.contains(number.intValue)
         else { return nil }
         return number.intValue
     }
