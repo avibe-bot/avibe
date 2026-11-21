@@ -1932,6 +1932,13 @@ class AudioAsrConfig:
     endpoint_path: str = "/v1/audio/transcriptions"
     model: str = "qwen3-asr-flash"
     max_file_bytes: Optional[int] = None
+    # In the iOS App, the App recognises a hold itself and records every voice
+    # take (ui/src/lib/nativeVoiceHold.ts). False turns that off for this
+    # instance's pages: a hold is recognised by the page again and tap and Show
+    # Page takes record through the page, as before. An off switch that needs
+    # no new build; read per request by ``/api/asr/status``, so it takes effect
+    # without a restart. There is no Settings row for it.
+    app_hold: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a value that is not the kind this class declares.

@@ -12,6 +12,7 @@
 import { useSyncExternalStore } from 'react';
 
 import { apiFetch } from './apiFetch';
+import { noteAppVoice } from './appVoice';
 import { subscribeLocalSnapshotPrincipal } from './localSnapshots';
 
 export type VoiceConsent = 'granted' | 'declined' | null;
@@ -62,6 +63,8 @@ if (typeof window !== 'undefined') {
  *  instance that asks no question and refuses nothing, so voice goes on as before. */
 export function noteVoiceStatus(data: unknown, read: number = beginVoiceConsentRead()): void {
   if (typeof data !== 'object' || data === null) return;
+  // The same body says whether the iOS App's own hold recognition is on (lib/appVoice).
+  noteAppVoice(data);
   // Superseded by a newer read or a saved answer.
   if (read <= applied) return;
   applied = read;

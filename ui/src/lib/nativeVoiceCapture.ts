@@ -2,6 +2,7 @@
 // getUserMedia and Web Audio, which opened about 0.5 s (p90 1 s) after a hold on an iPhone. Only
 // the capture step changes: the pipeline (lib/voiceRecording) segments, previews and sends the
 // App's PCM as it does the page's own.
+import { appVoiceEnabled } from './appVoice';
 import {
   hasNativeVoiceCapture,
   nativeVoiceCaptureStart,
@@ -27,11 +28,16 @@ export const NATIVE_CAPTURE_SAMPLE_RATE = 16_000;
 /** Samples per loudness reading, as the page's own capture reports them. */
 const LEVEL_SAMPLES = Math.round(NATIVE_CAPTURE_SAMPLE_RATE * VOICE_LEVEL_INTERVAL_MS / 1000);
 
-/** Whether the App records this take: it can, and its microphone is allowed. Until the user
- *  has answered the microphone question the take is WebKit's, which asks it. In the App every
- *  voice entry records through the App, so its audio session has one owner. */
+/** Whether, here, the App records every voice take, so that its audio session has one owner
+ *  and the page makes no audio of its own: an App that records, with the instance's switch for
+ *  it on (lib/appVoice). */
+export const appRecordsEveryTake = (): boolean => appVoiceEnabled() && hasNativeVoiceCapture();
+
+/** Whether the App records this take: it records every take here, and its microphone is
+ *  allowed. Until the user has answered the microphone question the take is WebKit's, which
+ *  asks it. */
 export const nativeCaptureAllowed = async (): Promise<boolean> => (
-  hasNativeVoiceCapture() && (await nativeVoicePermission()) === 'granted'
+  appRecordsEveryTake() && (await nativeVoicePermission()) === 'granted'
 );
 
 /** The stream a take the App records stands on: no track of the page's own. */

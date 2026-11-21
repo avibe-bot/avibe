@@ -5,6 +5,7 @@
 //
 // The page's own recognition remains the fallback: a place the App does not follow (an older App,
 // a popup, a document that is not `viewport-fit=cover`, a list not yet answered) holds as before.
+import { appVoiceEnabled, subscribeAppVoice } from './appVoice';
 import {
   hasNativeVoiceHold,
   nativeVoiceHoldReject,
@@ -119,7 +120,8 @@ const measure = (): { list: NativeVoiceHoldSurface[]; holdMs: number; covered: b
   const list: NativeVoiceHoldSurface[] = [];
   let holdMs = 0;
   let covered = false;
-  if (!coversViewport()) return { list, holdMs, covered };
+  // Turned off for this instance (lib/appVoice): the App is told it follows nothing.
+  if (!appVoiceEnabled() || !coversViewport()) return { list, holdMs, covered };
   for (const [id, surface] of surfaces) {
     // One threshold for the App: the first surface's. A surface that holds differently is the page's.
     if (holdMs && surface.holdMs !== holdMs) continue;
@@ -229,6 +231,7 @@ const listen = (): (() => void) => {
       surface?.failed();
     }
   });
+  const unsubscribe = subscribeAppVoice(refreshHoldSurfaces);
   const viewport = window.visualViewport;
   const meta = document.querySelector('meta[name="viewport"]');
   // The App's shell makes the document cover the viewport, or not, by rewriting this tag.
@@ -245,6 +248,7 @@ const listen = (): (() => void) => {
   viewport?.addEventListener('scroll', refreshHoldSurfaces);
   return () => {
     off?.();
+    unsubscribe();
     observer?.disconnect();
     overlays?.disconnect();
     if (afterScroll) clearTimeout(afterScroll);

@@ -14706,6 +14706,9 @@ def asr_status():
                 # This account's answer to the voice disclosure: "granted",
                 # "declined", or null when it has not been asked.
                 "consent": _voice_consent_for(_voice_consent_user_key()),
+                # Whether, in the iOS App, the App recognises holds and records
+                # every take (``audio_asr.app_hold``); false is the off switch.
+                "app_hold": getattr(audio_asr_config, "app_hold", True) is not False,
             }
         )
     except Exception:
