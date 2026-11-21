@@ -145,23 +145,47 @@ describe('ShowPageVoiceHost', () => {
       before: '',
       after: '',
     } as const;
-    for (const [nativeCapture, expected] of [[async () => true, true], [async () => false, undefined], [undefined, undefined]] as const) {
-      const inputs: { nativeCapture?: unknown }[] = [];
-      const events: ShowPageVoiceEvent[] = [];
-      const host = new ShowPageVoiceHost({
-        post: (event) => events.push(event),
-        availability: async () => ({ available: true, maxFileBytes: 1_000_000 }),
-        ...(nativeCapture ? { nativeCapture } : {}),
-        createSession: (input) => {
-          inputs.push(input);
-          return new FakeVoiceSession();
-        },
-      });
-      host.handle(request);
-      await vi.waitFor(() => expect(events).toContainEqual({ type: ANNOTATION_VOICE_EVENT_MESSAGE, kind: 'started', requestId: 'voice-1' }));
-      expect(inputs).toHaveLength(1);
-      expect(inputs[0].nativeCapture).toBe(expected);
-      host.dispose();
+    // An App that records with its microphone allowed; one still to be asked (WebKit asks);
+    // an App that does not record; and a browser.
+    const shells = [
+      [{ voice: 1, voiceCapture: 1 }, 'granted', true],
+      [{ voice: 1, voiceCapture: 1 }, 'prompt', undefined],
+      [{ voice: 1 }, 'granted', undefined],
+      [null, 'granted', undefined],
+    ] as const;
+    try {
+      for (const [capabilities, permission, expected] of shells) {
+        vi.unstubAllGlobals();
+        if (capabilities) {
+          vi.stubGlobal('window', {
+            avibeNative: {
+              contract: 1,
+              platform: 'ios',
+              shellVersion: '1.0 (1)',
+              capabilities,
+              call: async (method: string) => (method === 'voice.permission' ? { state: permission } : null),
+              on: () => () => undefined,
+            },
+          });
+        }
+        const inputs: { nativeCapture?: unknown }[] = [];
+        const events: ShowPageVoiceEvent[] = [];
+        const host = new ShowPageVoiceHost({
+          post: (event) => events.push(event),
+          availability: async () => ({ available: true, maxFileBytes: 1_000_000 }),
+          createSession: (input) => {
+            inputs.push(input);
+            return new FakeVoiceSession();
+          },
+        });
+        host.handle(request);
+        await vi.waitFor(() => expect(events).toContainEqual({ type: ANNOTATION_VOICE_EVENT_MESSAGE, kind: 'started', requestId: 'voice-1' }));
+        expect(inputs).toHaveLength(1);
+        expect(inputs[0].nativeCapture, `${JSON.stringify(capabilities)} ${permission}`).toBe(expected);
+        host.dispose();
+      }
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 
