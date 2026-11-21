@@ -45,6 +45,23 @@ function returnProblem(search: string): ClaimProblem | undefined {
   return error === 'invalid_return' || error === 'claim_unavailable' ? claimProblem(error) : undefined;
 }
 
+type ActivityFeed = { items: DeviceActivity[]; cursor: string | null; extended: boolean };
+
+/**
+ * The newest page, read again, joined to the activity already listed. While only that page is
+ * listed it simply replaces it. Once older pages were read, the entries the new page no longer
+ * carries stay (they were pushed down by newer ones, not removed), and the cursor keeps pointing
+ * past the oldest entry listed. If the two do not meet at all, more happened than a page holds:
+ * the list starts over from the newest page rather than hide a gap.
+ */
+function joinNewest(current: ActivityFeed, page: { items: DeviceActivity[]; nextCursor: string | null }): ActivityFeed {
+  const fresh = new Set(page.items.map((each) => each.id));
+  if (!current.extended || !current.items.some((each) => fresh.has(each.id))) {
+    return { items: page.items, cursor: page.nextCursor, extended: false };
+  }
+  return { items: [...page.items, ...current.items.filter((each) => !fresh.has(each.id))], cursor: current.cursor, extended: true };
+}
+
 /** What a sign-out's answer says about whose devices they were: the instance's word when it
  *  gives one, else what the page itself knows without guessing. */
 function noticeFrom(answer: SignOutAnswer, known: { device: string | null; owner: SignOutNotice['owner']; hadHealth: boolean }): SignOutNotice {
@@ -78,12 +95,9 @@ export function DevicesPage() {
   const [statusAt, setStatusAt] = useState(() => Date.now());
   const [statusRead, setStatusRead] = useState<'loading' | 'known' | 'unknown'>('loading');
   const [snapshot, setSnapshot] = useState<DevicesSnapshot>(EMPTY);
-  // The newest page is read again with every refresh; pages of older entries, asked for one at a
-  // time from the activity list, are kept beside it so a refresh does not drop them.
-  const [recent, setRecent] = useState<DeviceActivity[]>([]);
-  const [older, setOlder] = useState<DeviceActivity[]>([]);
-  const [recentCursor, setRecentCursor] = useState<string | null>(null);
-  const [olderCursor, setOlderCursor] = useState<string | null | undefined>();
+  // Everything read so far, newest first, with the cursor that continues it. A refresh reads the
+  // newest page again and joins it to what is already listed, so no entry between them is lost.
+  const [feed, setFeed] = useState<{ items: DeviceActivity[]; cursor: string | null; extended: boolean }>({ items: [], cursor: null, extended: false });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const names = useRef<(id: string | undefined) => string | null>(() => null);
   const [unrecognizedChange, setUnrecognizedChange] = useState<{ hostname: string } | undefined>();
@@ -122,8 +136,8 @@ export function DevicesPage() {
     const [events, address] = await Promise.allSettled([api.activity(nameOf), api.address()]);
     if (!current()) return;
     if (events.status === 'fulfilled') {
-      setRecent(events.value.items);
-      setRecentCursor(events.value.nextCursor);
+      const page = events.value;
+      setFeed((current) => joinNewest(current, page));
     }
     // The notice must be seen; a failed read leaves the last answer as it was.
     if (address.status === 'fulfilled') {
@@ -185,20 +199,20 @@ export function DevicesPage() {
     return () => window.clearInterval(timer);
   }, [load, operate, recovering]);
 
-  const activity = useMemo(() => {
-    const seen = new Set(recent.map((each) => each.id));
-    return [...recent, ...older.filter((each) => !seen.has(each.id))];
-  }, [older, recent]);
-  // Until an older page was read, the next one follows the newest page.
-  const nextCursor = olderCursor === undefined ? recentCursor : olderCursor;
+  const activity = feed.items;
+  const nextCursor = feed.cursor;
   const loadOlder = useCallback(async () => {
     if (!nextCursor || loadingOlder) return;
     setLoadingOlder(true);
     try {
       const page = await api.activity(names.current, nextCursor);
       if (!alive.current) return;
-      setOlder((current) => [...current, ...page.items]);
-      setOlderCursor(page.nextCursor);
+      setFeed((current) => {
+        // Only the page that continues what is listed now is appended.
+        if (current.cursor !== nextCursor) return current;
+        const seen = new Set(current.items.map((each) => each.id));
+        return { items: [...current.items, ...page.items.filter((each) => !seen.has(each.id))], cursor: page.nextCursor, extended: true };
+      });
     } catch {
       // The list stays as it is; the button is still there to ask again.
     } finally {

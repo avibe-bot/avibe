@@ -151,7 +151,15 @@ export const devicesApi = {
     const body = await get<{ interfaces?: TunnelNetworkInterface[] }>('/api/remote-access/network-interfaces');
     return Array.isArray(body.interfaces) ? body.interfaces : [];
   },
-  optimizeRoute: () => post<RemoteAccessStatus>('/api/remote-access/optimize-route'),
+  /** A refusal (`409`) carries the reason and when to try again: it is an answer, not a failure. */
+  optimizeRoute: async (): Promise<RemoteAccessStatus> => {
+    try {
+      return await post<RemoteAccessStatus>('/api/remote-access/optimize-route');
+    } catch (error) {
+      if (error instanceof DevicesApiError && error.status === 409) return { ...error.body, ok: false } as RemoteAccessStatus;
+      throw error;
+    }
+  },
   diagnose: () => post<TunnelConnectivityDiagnostics>('/api/remote-access/diagnostics'),
 
   address: async (): Promise<AddressState | null> => addressFromWire(await get('/api/instance-address')),

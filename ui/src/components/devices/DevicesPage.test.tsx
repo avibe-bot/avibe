@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -81,6 +81,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -335,6 +336,24 @@ describe('DevicesPage · devices', () => {
     await waitFor(() => expect(screen.getAllByText('远程访问已开启')).toHaveLength(3));
     expect(read).toHaveBeenLastCalledWith(expect.any(Function), 'page-2');
     expect(screen.queryByRole('button', { name: '更早的活动' })).toBeNull();
+  });
+
+  it('keeps the entries a refresh pushes off the newest page once older ones were read', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const entry = (id: string, minutes: number) => ({ id, deviceId: 'host', at: new Date(Date.now() - minutes * 60_000).toISOString(), device: 'MacBook', event: { kind: 'remoteAccessOn' as const } });
+    let newest = [entry('e3', 30), entry('e2', 40)];
+    vi.spyOn(devicesApi, 'activity').mockImplementation(async (_names, cursor) => (
+      cursor ? { items: [entry('e1', 50)], nextCursor: null } : { items: newest, nextCursor: 'older' }
+    ));
+    mount('/settings/remote-access/activity');
+    fireEvent.click(await screen.findByRole('button', { name: '更早的活动' }));
+    await waitFor(() => expect(screen.getAllByText('远程访问已开启')).toHaveLength(3));
+
+    // A new event arrives: the newest page is now e4, e3, and e2 is no longer on it.
+    newest = [entry('e4', 1), entry('e3', 30)];
+    await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+    await waitFor(() => expect(screen.getAllByText('远程访问已开启')).toHaveLength(4));
+    vi.useRealTimers();
   });
 
   it('shows the notice that the address was changed somewhere else, with the way to bind again', async () => {
