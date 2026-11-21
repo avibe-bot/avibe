@@ -153,10 +153,18 @@ export function listenDesktopPetSettings(handler: DesktopPetSettingsListener): (
   return () => window.removeEventListener(DESKTOP_PET_SETTINGS_EVENT, listener);
 }
 
+/** What the system allows the shell to post. `unavailable`: no system permission to report (not macOS). */
+export type DesktopNotificationAuthorization = 'authorized' | 'denied' | 'not_determined' | 'unavailable';
+
 export type DesktopNotificationsActions = {
   get: () => Promise<boolean>;
   set: (enabled: boolean) => Promise<boolean>;
+  /** Rejects on a shell that predates the command; the page then shows no system state. */
+  authorization: () => Promise<DesktopNotificationAuthorization>;
+  openSystemSettings: () => Promise<void>;
 };
+
+const AUTHORIZATIONS = new Set<DesktopNotificationAuthorization>(['authorized', 'denied', 'not_determined', 'unavailable']);
 
 const desktopNotificationsInvoke = (): ShellInvoke | null => {
   if (!canConfigureDesktopNotifications()) return null;
@@ -177,6 +185,14 @@ export function desktopNotificationsActions(): DesktopNotificationsActions | nul
       const value = await invoke('desktop_notifications_set_enabled', { enabled });
       if (typeof value !== 'boolean') throw new Error('Desktop notification preference was not confirmed');
       return value;
+    },
+    authorization: async () => {
+      const value = await invoke('desktop_notifications_authorization');
+      if (!AUTHORIZATIONS.has(value as DesktopNotificationAuthorization)) throw new Error('Desktop notification authorization is unavailable');
+      return value as DesktopNotificationAuthorization;
+    },
+    openSystemSettings: async () => {
+      await invoke('desktop_notifications_open_settings');
     },
   };
 }

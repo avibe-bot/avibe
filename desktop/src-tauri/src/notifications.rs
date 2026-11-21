@@ -512,6 +512,31 @@ pub fn desktop_notifications_set_enabled(window: Webview, app: AppHandle, enable
     set_enabled(&app, enabled)
 }
 
+/// What macOS currently allows Avibe to post: `authorized`, `denied`,
+/// `not_determined` (asked by the first post), or `unavailable` where this
+/// shell has no system notification permission to report.
+#[tauri::command]
+pub async fn desktop_notifications_authorization(window: Webview) -> Result<String, String> {
+    ensure_workbench(&window)?;
+    #[cfg(target_os = "macos")]
+    let authorization = macos::authorization().await;
+    #[cfg(not(target_os = "macos"))]
+    let authorization = "unavailable";
+    Ok(authorization.to_owned())
+}
+
+/// Opens Avibe's own page in System Settings › Notifications. No URL comes from the page.
+#[tauri::command]
+pub fn desktop_notifications_open_settings(window: Webview, app: AppHandle) -> Result<(), String> {
+    ensure_workbench(&window)?;
+    #[cfg(target_os = "macos")]
+    tauri_plugin_opener::open_url(macos::settings_url(&app.config().identifier), None::<&str>)
+        .map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+    Ok(())
+}
+
 /// A stopped connection leaves no count it can vouch for. The clear queues
 /// behind any paint already dispatched, which the generation bump voids.
 pub fn stop(app: &AppHandle) {

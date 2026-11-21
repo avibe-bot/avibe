@@ -664,6 +664,8 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_reset_voice_shortcut",
         "desktop_notifications_state",
         "desktop_notifications_set_enabled",
+        "desktop_notifications_authorization",
+        "desktop_notifications_open_settings",
         "desktop_update_remote_decline",
         "pet_ready",
         "pet_context_menu",
@@ -1734,7 +1736,9 @@ fn desktop_notifications_are_main_only_and_loopback_scoped() {
         grant["permissions"],
         serde_json::json!([
             "allow-desktop-notifications-state",
-            "allow-desktop-notifications-set-enabled"
+            "allow-desktop-notifications-set-enabled",
+            "allow-desktop-notifications-authorization",
+            "allow-desktop-notifications-open-settings"
         ])
     );
     let patterns = loopback_patterns(&grant);

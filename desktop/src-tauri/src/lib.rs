@@ -2973,6 +2973,8 @@ pub fn run() {
             pet::pet_set_voice_mode,
             notifications::desktop_notifications_state,
             notifications::desktop_notifications_set_enabled,
+            notifications::desktop_notifications_authorization,
+            notifications::desktop_notifications_open_settings,
             updater::desktop_update_prereleases_set,
             updater::desktop_update_auto_update_set,
             updater::desktop_update_remote_decline,

@@ -3193,6 +3193,9 @@
       "desktopTitle": "桌面 App 系统通知",
       "desktopHint": "Vault 审批和后台任务完成。只对本机生效，和菜单栏里的开关是同一个。",
       "desktopHintMenuBar": "Vault 审批和后台任务完成。本机的开关在菜单栏图标 › 通知。",
+      "desktopHintAnswers": "Vault 审批、后台任务完成，以及 Agent 等你回复的消息。等你回复的消息可以直接在通知里选或回复。只对这台电脑生效，和菜单栏里的开关是同一个。",
+      "desktopDenied": "macOS 没有允许 Avibe 发通知，所以这台电脑收不到通知，也不能在通知里回复。",
+      "openSystemSettings": "打开系统设置",
       "desktopSaveFailed": "无法保存通知开关，请稍后重试。"
     }
   },

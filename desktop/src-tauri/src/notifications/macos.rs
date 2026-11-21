@@ -99,6 +99,39 @@ fn authorized(then: impl Fn(bool) + 'static) {
     center().getNotificationSettingsWithCompletionHandler(&settings);
 }
 
+fn authorization_label(status: UNAuthorizationStatus) -> &'static str {
+    match status {
+        UNAuthorizationStatus::NotDetermined => "not_determined",
+        status if permission(status) == Permission::Granted => "authorized",
+        _ => "denied",
+    }
+}
+
+/// What macOS currently allows, read without asking.
+pub(super) async fn authorization() -> &'static str {
+    if !available() {
+        return "unavailable";
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    {
+        let sender = Mutex::new(Some(sender));
+        let settings = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+            // SAFETY: the center passes a valid settings object for the call.
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            if let Some(sender) = sender.lock().expect("authorization reply").take() {
+                let _ = sender.send(authorization_label(status));
+            }
+        });
+        center().getNotificationSettingsWithCompletionHandler(&settings);
+    }
+    receiver.await.unwrap_or("unavailable")
+}
+
+/// Avibe's own page in System Settings › Notifications.
+pub(super) fn settings_url(identifier: &str) -> String {
+    format!("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={identifier}")
+}
+
 /// What an answer from a notification needs to reach the Runtime: the
 /// question, the options it offered with their revision, and the presentation
 /// epoch it was posted in, so an answer never reaches another instance.
@@ -576,6 +609,21 @@ pub(super) mod tests {
         let long = action_title(&"选".repeat(80));
         assert_eq!(long.chars().count(), ACTION_TITLE_CHARS);
         assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn settings_report_the_decision_without_asking() {
+        assert_eq!(
+            authorization_label(UNAuthorizationStatus::NotDetermined),
+            "not_determined"
+        );
+        assert_eq!(authorization_label(UNAuthorizationStatus::Authorized), "authorized");
+        assert_eq!(authorization_label(UNAuthorizationStatus::Provisional), "authorized");
+        assert_eq!(authorization_label(UNAuthorizationStatus::Denied), "denied");
+        assert_eq!(
+            settings_url("bot.avibe.desktop"),
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=bot.avibe.desktop"
+        );
     }
 
     #[test]
