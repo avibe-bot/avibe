@@ -238,6 +238,25 @@ Use `POST /api/config`:
 
 Do not overwrite scope-level `custom_cwd` entries.
 
+### Turn the iPhone App's own hold-to-talk recognition off or on
+
+In the iPhone App, the App itself recognises a hold on the composer or the main Bot and records
+every voice take. If hold-to-talk or tap-to-talk misbehaves there (taps that do not focus the
+input, holds that do not record), turn that off with `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold": false
+  }
+}
+```
+
+The page then recognises holds and records as it did before, in the same App build. No restart
+is needed: it takes effect the next time the user opens a conversation or the App. Send
+`"app_hold": true` to turn it on again. Voice input itself stays on either way; this is not
+`audio_asr.enabled`.
+
 ### Switch primary platform
 
 Use `POST /api/config` and keep `platforms.enabled` complete:

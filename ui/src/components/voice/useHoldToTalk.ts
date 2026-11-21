@@ -5,12 +5,16 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isDesktopShell } from '../../lib/desktopShell';
 import {
   hasNativeVoiceCapture,
+  hasNativeVoiceHold,
   nativeHapticImpact,
   nativeHapticNotify,
-  nativeHapticSelection,
   nativeVoiceCapturePrepare,
+  nativeVoiceHoldReject,
   nativeVoicePermission,
+  type NativeImpactStyle,
 } from '../../lib/native';
+import { isNativeHoldGone } from '../../lib/nativeVoiceCapture';
+import { holdFollowed, NATIVE_HOLD_GRACE_MS, refreshHoldSurfaces, registerHoldSurface } from '../../lib/nativeVoiceHold';
 import { IS_APPLE } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
 import type { VoiceContextSource } from '../../lib/voiceContext';
@@ -21,7 +25,7 @@ import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voi
 import { isVoiceCaptureActive, prewarmVoiceCapture, type VoiceCaptureState } from '../../lib/voiceRecording';
 import { emitVoiceTelemetry, type VoiceTelemetryEvent, type VoiceTelemetryOutcome } from '../../lib/voiceTelemetry';
 import { VoiceTranscriptionError } from '../../lib/voiceTranscription';
-import { beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
+import { beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, subscribeVoiceConsent, voiceConsentForPress } from '../../lib/voiceConsent';
 
 // Press and hold to talk (ui/design: mobile/main-bot-voice/*, composer/hold-*): one gesture
 // and one take, from the press to the sent message. A press that reaches `holdMs` opens the
@@ -104,6 +108,10 @@ export type HoldToTalkOptions = {
    *  (lib/voiceTakeStore) until they land, so a reload or a surface that goes away loses none
    *  of it. The intent is always `send`. */
   keep?: () => Omit<VoiceTakeKeep, 'intent'> | null;
+  /** The element whose box the iOS App may follow a hold on (lib/nativeVoiceHold): every touch
+   *  inside it is this hold's, so the surface's own controls are left out. Without it (and
+   *  without `attachSurface` on an element) the page recognises the hold itself, as elsewhere. */
+  surface?: () => Element | null;
 };
 
 const HOLD_STYLE: CSSProperties = {
@@ -125,6 +133,15 @@ type Press = {
   frame: number;
   /** Stops the window following a press the element has not captured (a mouse before `holdMs`). */
   unfollow: (() => void) | null;
+  /** The iOS App follows this press (lib/nativeVoiceHold): its word is waited for a moment past
+   *  `holdMs` before the page recognises the hold itself. */
+  followed: boolean;
+  /** The page's own recognition has begun (its timer ran): it runs once. */
+  reached: boolean;
+  /** The App's take was taken for this press: the page's own recognition stops where it is. */
+  taken: boolean;
+  /** A mouse (or trackpad) press: the App times a finger, and its word is not for this one. */
+  mouse: boolean;
 };
 
 /** What the gesture reads from a pointer event, React's or the window's. */
@@ -142,6 +159,8 @@ type Take = {
   heard: { text: string; stash: string };
   /** How many endings this take has logged (a take retried after an interruption ends again). */
   reports: number;
+  /** The App's take this one takes: a hold the App recognised itself, recording since touch-down. */
+  adopt?: string;
 };
 
 /** A hold's outcome as the reliability log names it. */
@@ -198,9 +217,11 @@ const vibrate = () => {
   }
 };
 
-const impactFeedback = (style: 'light' | 'medium') => {
+/** `elsewhere`: whether a browser without the App's haptics buzzes instead. Its one buzz cannot
+ *  tell two crossings apart, so only the crossing into cancel has it, as before. */
+const impactFeedback = (style: NativeImpactStyle, elsewhere = true) => {
   void nativeHapticImpact(style).then((handled) => {
-    if (!handled) vibrate();
+    if (!handled && elsewhere) vibrate();
   });
 };
 
@@ -210,16 +231,12 @@ const cancelFeedback = () => {
   });
 };
 
-const selectionFeedback = () => {
-  void nativeHapticSelection().then((handled) => {
-    if (!handled) vibrate();
-  });
-};
-
 // The user allowed the microphone when a hold asked, in this page. iOS Safari can go on
 // answering `prompt` to the permission query after that, which would turn every later press
 // into another ask that never records; the stream it handed over is the better answer.
 let allowedOnAsk = false;
+
+let surfaceCount = 0;
 
 const permissionState = async (): Promise<PermissionState | null> => {
   const native = await nativeVoicePermission();
@@ -301,6 +318,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   // A permission answer may arrive after another press, dismissal, or unmount.
   // Its stream is always stopped, but its error belongs only to the original ask.
   const permissionAsk = useRef<symbol | null>(null);
+  // Reads the App's microphone answer again (below): the first allow is given to WebKit.
+  const askMicRef = useRef<() => void>(() => undefined);
 
   const toPhase = useCallback((next: HoldPhase) => {
     phaseRef.current = next;
@@ -381,6 +400,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const end = useCallback((how: HoldOutcome | null) => {
     if (how !== 'asking') permissionAsk.current = null;
     if (how) reportHold(TELEMETRY_OUTCOME[how], take.current);
+    // Over before the page had taken the App's take: the App drops it now, not after its wait.
+    if (take.current?.adopt && !take.current.started) void nativeVoiceHoldReject(take.current.adopt);
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
     take.current = null;
@@ -470,7 +491,11 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     interrupt(failureReason(current, error), heard);
   }, [end, interrupt]);
 
-  const startTake = useCallback((granted: boolean, pressedAt: number) => {
+  // The take's own start, for the one case where a take starts another (below).
+  const restartTake = useRef<(granted: boolean, pressedAt: number) => void>(() => undefined);
+  // `adopt`: the App recognised this hold itself and has been recording since touch-down; the
+  // take is that one, taken, and the cue is already given.
+  const startTake = useCallback((granted: boolean, pressedAt: number, adopt?: string) => {
     const startupAsk = isDesktopShell() ? Symbol('capture-start') : null;
     if (startupAsk) permissionAsk.current = startupAsk;
     const keep = latest.current.keep?.();
@@ -478,7 +503,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       entry: 'hold',
       pressedAt,
       // The App records once the microphone is allowed; its first answer is still WebKit's.
-      ...(granted && hasNativeVoiceCapture() ? { nativeCapture: true } : {}),
+      ...(adopt ? { nativeCapture: { adopt } } : granted && hasNativeVoiceCapture() ? { nativeCapture: true } : {}),
       before: '',
       after: '',
       context: latest.current.context?.(),
@@ -502,12 +527,18 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         if (phaseRef.current === 'listening' && `${preview.text}${preview.stash}`.trim()) toPhase('recording');
       },
     });
-    const current: Take = { dictation, startedAt: Date.now(), started: false, ending: 'none', granted, heard: { text: '', stash: '' }, reports: 0 };
+    const current: Take = {
+      dictation, startedAt: Date.now(), started: false, ending: 'none', granted, heard: { text: '', stash: '' }, reports: 0,
+      ...(adopt ? { adopt } : {}),
+    };
     take.current = current;
     // The last take's words (kept for its toast) are not this one's.
     setText('');
     setStash('');
     setSeconds(0);
+    // The App gave the speak-now haptic when it recognised the hold, with the microphone already
+    // open: the card comes now, not when the take's audio has reached the page.
+    if (adopt) toPhase('listening');
     void dictation.done.then((words) => settle(current, words), (error: unknown) => fail(current, error));
     void dictation.start().then(() => {
       if (take.current !== current) {
@@ -515,8 +546,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         return;
       }
       current.started = true;
-      // The take runs from here: setup time is not speech, so it cannot carry a slip past the minimum.
-      current.startedAt = Date.now();
+      // The take runs from here: setup time is not speech, so it cannot carry a slip past the
+      // minimum. A take the App began has been recording since touch-down: it runs from its cue.
+      if (!adopt) current.startedAt = Date.now();
       // A release (or the system) may come before the microphone is ready.
       if (current.ending === 'send' || current.ending === 'system') {
         dictation.finish();
@@ -527,7 +559,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // capturing: on an iPhone it opens about 0.5 s (p90 1 s) after the hold, and words spoken at
       // an earlier cue were lost (11-20). Until then the press stays as it was, its ring full.
       // Armed (released now, it cancels): no speak-now cue; the card shows once disarmed.
-      if (!armed.current) {
+      // A take the App began had its cue when the hold was recognised.
+      if (!adopt && !armed.current) {
         toPhase('listening');
         impactFeedback('medium');
       }
@@ -535,6 +568,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         if (mounted.current) setSeconds(Math.floor((Date.now() - current.startedAt) / 1000));
       }, 250);
     }, (error: unknown) => {
+      // The App no longer had the take (it waits a second for the page, or the system ended it):
+      // while the finger is still down, the page starts the take itself, as it does elsewhere.
+      if (adopt && isNativeHoldGone(error) && take.current === current && current.ending === 'none' && mounted.current) {
+        take.current = null;
+        dictation.abort();
+        restartTake.current(true, pressedAt);
+        return;
+      }
       // A macOS alert can take the press before its answer arrives. Keep that
       // answer visible only while the original asking note still owns feedback.
       if (startupAsk && permissionAsk.current === startupAsk && take.current !== current
@@ -549,10 +590,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       dictation.abort();
     });
   }, [fail, level, settle, toPhase]);
+  useEffect(() => {
+    restartTake.current = startTake;
+  }, [startTake]);
 
   const holdReached = useCallback(async () => {
     const current = press.current;
-    if (!current) return;
+    if (!current || current.reached) return;
+    current.reached = true;
     cancelAnimationFrame(current.frame);
     if (current.unfollow) {
       // A hold now: the pointer is the element's until the press ends, wherever it goes. If the
@@ -573,14 +618,16 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Voice goes to a third-party AI service: nothing is recorded before this account said yes
     // (ui/design: composer/voice-consent/*). The question, asked again after a "no", takes this
     // press, as the system's microphone question does: after Allow, the next press records.
+    // The App's word may come while these two are read (a busy page): its take then is the
+    // press's, and this recognition stops here, before a start of its own.
     const consent = await resolveVoicePress();
-    if (press.current !== current) return;
+    if (press.current !== current || current.taken) return;
     if (consent !== 'granted') {
       end(null);
       return;
     }
     const permission = await permissionState();
-    if (press.current !== current) return;
+    if (press.current !== current || current.taken) return;
     if (permission === 'denied') {
       end('denied');
       return;
@@ -599,6 +646,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       void request.then(
         (stream) => {
           allowedOnAsk = true;
+          // The App's microphone is allowed with it: its surface can be named from here.
+          askMicRef.current();
           trace.micSettled(requestedAt);
           stream.getTracks().forEach((track) => track.stop());
           // A permission probe records no audio; `mic: ok` is only a stream grant.
@@ -617,6 +666,102 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     }
     startTake(permission === 'granted', current.startedAt);
   }, [end, startTake]);
+
+  /** The App recognised this press as a hold (lib/nativeVoiceHold) and gave the cue: the take it
+   *  has been recording since touch-down becomes this press's. Nothing is awaited between its word
+   *  and the take: consent and the microphone were settled when the surface was named. False when
+   *  the press is not one to take (it ended, moved on to the page's own recognition, or voice may
+   *  not record now); the App then drops what it recorded. */
+  const adoptHold = useCallback((nativeTake: string): boolean => {
+    const current = press.current;
+    // The page's own recognition may be under way (its timer ran, its checks are being read):
+    // until it has started a take of its own, the App's, recorded since touch-down, is the better one.
+    if (!current || current.mouse || current.taken || take.current || phaseRef.current !== 'pressing') return false;
+    if (availableRef.current !== true || voiceConsentForPress() !== 'granted') return false;
+    current.taken = true;
+    current.reached = true;
+    clearTimeout(current.timer);
+    cancelAnimationFrame(current.frame);
+    setProgress(1);
+    startTake(true, current.startedAt, nativeTake);
+    return true;
+  }, [startTake]);
+
+  /** The App could not open the microphone for the press it follows: the page recognises this
+   *  hold itself, at its own threshold, and its own start says what is wrong. */
+  const holdUnfollowed = useCallback(() => {
+    const current = press.current;
+    if (!current || current.reached) return;
+    current.followed = false;
+    clearTimeout(current.timer);
+    current.timer = setTimeout(() => void holdReached(), Math.max(0, current.gesture.holdMs - (Date.now() - current.startedAt)));
+  }, [holdReached]);
+
+  // The App follows a hold on this surface only where one may record now: voice works, this
+  // account allowed it, the App's microphone is allowed, and a press here would be taken.
+  const [, setMicAllowed] = useState(false);
+  const micAllowedRef = useRef(false);
+  const surfaceElement = useRef<Element | null>(null);
+  const attachSurface = useCallback((element: Element | null) => {
+    surfaceElement.current = element;
+    refreshHoldSurfaces();
+  }, []);
+  const [surfaceId] = useState(() => {
+    surfaceCount += 1;
+    return `hold-${surfaceCount}`;
+  });
+  const followable = hasNativeVoiceHold();
+  const askMic = useCallback(() => {
+    if (!hasNativeVoiceHold() || micAllowedRef.current) return;
+    void nativeVoicePermission().then((state) => {
+      if (state !== 'granted' || !mounted.current) return;
+      micAllowedRef.current = true;
+      setMicAllowed(true);
+    });
+  }, []);
+  useEffect(() => {
+    askMicRef.current = askMic;
+  }, [askMic]);
+  useEffect(() => {
+    // Asked until it is allowed, after each press: the first answer is to WebKit's question.
+    if (followable && phase === 'idle') askMic();
+  }, [askMic, followable, phase]);
+  const adoptHoldRef = useRef(adoptHold);
+  const holdUnfollowedRef = useRef(holdUnfollowed);
+  useEffect(() => {
+    adoptHoldRef.current = adoptHold;
+    holdUnfollowedRef.current = holdUnfollowed;
+  });
+  useEffect(() => {
+    if (!followable) return;
+    const touch = latest.current.gesture;
+    const unregister = registerHoldSurface(surfaceId, {
+      holdMs: { ...HOLD_GESTURE, ...(typeof touch === 'function' ? touch('touch') : touch) }.holdMs,
+      element: () => {
+        // A take being finalized, or one cut off, owns the surface: a press there is not a hold.
+        if (phaseRef.current !== 'idle') return null;
+        if (availableRef.current !== true || !micAllowedRef.current || voiceConsentForPress() !== 'granted') return null;
+        if (latest.current.canHold && !latest.current.canHold('touch')) return null;
+        return latest.current.surface?.() ?? surfaceElement.current;
+      },
+      // A press already down keeps its surface to its end, whatever a new press would be told.
+      live: () => {
+        const at = phaseRef.current;
+        return at === 'pressing' || at === 'listening' || at === 'recording' || at === 'armed';
+      },
+      recognised: (nativeTake) => adoptHoldRef.current(nativeTake),
+      failed: () => holdUnfollowedRef.current(),
+    });
+    const unsubscribe = subscribeVoiceConsent(refreshHoldSurfaces);
+    return () => {
+      unsubscribe();
+      unregister();
+    };
+  }, [followable, surfaceId]);
+  // Each commit may have moved the surface, or changed whether a hold may record on it.
+  useEffect(() => {
+    if (followable) refreshHoldSurfaces();
+  });
 
   /** Release (or Esc, or the system) decides how the take ends. */
   const finishTake = useCallback((how: 'send' | 'cancel' | 'system') => {
@@ -724,6 +869,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const current = take.current;
     take.current = null;
     if (current) {
+      if (current.adopt && !current.started) void nativeVoiceHoldReject(current.adopt);
       if (current.started && current.ending !== 'cancel') current.dictation.detach();
       else current.dictation.abort();
       current.ending = 'cancel';
@@ -752,10 +898,13 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const next = armed.current ? distance > uncancelPx : distance > cancelPx;
     if (next === armed.current) return;
     armed.current = next;
-    if (next) selectionFeedback();
+    // Into the cancel position and back out of it feel different (owner decision, 2026-11-21).
+    // The App gives both itself for a hold it recognised, at the same two lines.
+    if (!take.current.adopt) impactFeedback(next ? 'rigid' : 'soft', next);
     const heard = `${take.current.heard.text}${take.current.heard.stash}`.trim();
-    // Before the microphone is capturing, an unarmed press stays a press (no listening card yet).
-    toPhase(next ? 'armed' : heard ? 'recording' : take.current.started ? 'listening' : 'pressing');
+    // Before the microphone is capturing, an unarmed press stays a press (no listening card yet);
+    // a take the App began has had its cue, and shows its card.
+    toPhase(next ? 'armed' : heard ? 'recording' : take.current.started || take.current.adopt ? 'listening' : 'pressing');
   }, [end, toPhase]);
 
   const onPointerUp = useCallback((event: PointerAt) => {
@@ -817,6 +966,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const requested = latest.current.gesture;
     const gesture: HoldGesture = { ...HOLD_GESTURE, ...(typeof requested === 'function' ? requested(event.pointerType) : requested) };
     const { holdMs, ringDelayMs } = gesture;
+    // A finger on a surface the App follows: the App recognises this hold, and its word normally
+    // comes before the page's own timer. That timer waits a moment longer for it, then goes on alone.
+    const followed = event.pointerType !== 'mouse' && hasNativeVoiceHold() && holdFollowed(surfaceId, event.clientX, event.clientY);
     const tick = () => {
       const current = press.current;
       if (!current || current.startedAt !== startedAt) return;
@@ -831,14 +983,18 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       y: event.clientY,
       element,
       startedAt,
-      timer: setTimeout(() => void holdReached(), holdMs),
+      timer: setTimeout(() => void holdReached(), holdMs + (followed ? NATIVE_HOLD_GRACE_MS : 0)),
       frame: requestAnimationFrame(tick),
       unfollow,
+      followed,
+      reached: false,
+      taken: false,
+      mouse: event.pointerType === 'mouse',
     };
     setOutcome(null);
     setProgress(0);
     toPhase('pressing');
-  }, [holdReached, onPointerCancel, onPointerMove, onPointerUp, toPhase]);
+  }, [holdReached, onPointerCancel, onPointerMove, onPointerUp, surfaceId, toPhase]);
 
   const onLostPointerCapture = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (releasing.current) return;
@@ -934,6 +1090,9 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       onClick,
       style: holdable ? HOLD_STYLE : undefined,
     },
+    /** The `ref` of the element a hold starts on, when every touch in its box is this hold's:
+     *  the iOS App then recognises the hold there itself (lib/nativeVoiceHold). See `surface`. */
+    attachSurface,
     sendInterrupted,
     retry,
     discard,

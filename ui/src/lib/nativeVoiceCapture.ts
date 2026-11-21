@@ -2,11 +2,17 @@
 // getUserMedia and Web Audio, which opened about 0.5 s (p90 1 s) after a hold on an iPhone. Only
 // the capture step changes: the pipeline (lib/voiceRecording) segments, previews and sends the
 // App's PCM as it does the page's own.
+import { appVoiceEnabled } from './appVoice';
 import {
+  hasNativeVoiceCapture,
   nativeVoiceCaptureStart,
   nativeVoiceCaptureStop,
+  nativeVoiceHoldAdopt,
+  nativeVoicePermission,
   onNativeVoiceCapture,
+  onNativeVoiceHold,
   type NativeVoiceCaptureEvent,
+  type NativeVoiceHoldTimings,
 } from './native';
 import { VOICE_LEVEL_INTERVAL_MS } from './voiceActivity';
 import type { VoiceCaptureAttempt, VoiceCaptureTrace, VoiceNativeEnd } from './voiceCaptureTrace';
@@ -22,6 +28,18 @@ export const NATIVE_CAPTURE_SAMPLE_RATE = 16_000;
 /** Samples per loudness reading, as the page's own capture reports them. */
 const LEVEL_SAMPLES = Math.round(NATIVE_CAPTURE_SAMPLE_RATE * VOICE_LEVEL_INTERVAL_MS / 1000);
 
+/** Whether, here, the App records every voice take, so that its audio session has one owner
+ *  and the page makes no audio of its own: an App that records, with the instance's switch for
+ *  it on (lib/appVoice). */
+export const appRecordsEveryTake = (): boolean => appVoiceEnabled() && hasNativeVoiceCapture();
+
+/** Whether the App records this take: it records every take here, and its microphone is
+ *  allowed. Until the user has answered the microphone question the take is WebKit's, which
+ *  asks it. */
+export const nativeCaptureAllowed = async (): Promise<boolean> => (
+  appRecordsEveryTake() && (await nativeVoicePermission()) === 'granted'
+);
+
 /** The stream a take the App records stands on: no track of the page's own. */
 export const emptyVoiceStream = (): MediaStream => (
   typeof MediaStream === 'function'
@@ -33,6 +51,11 @@ const NATIVE_ENDS = new Set<VoiceNativeEnd>(['interrupted', 'route', 'background
 const nativeEnd = (reason: string | undefined): VoiceNativeEnd => (
   NATIVE_ENDS.has(reason as VoiceNativeEnd) ? reason as VoiceNativeEnd : 'other'
 );
+
+/** The most samples handed on at once: 100 ms, what the App sends at a time. A take the App
+ *  began at touch-down arrives first as everything since then, in one event (over a second of
+ *  audio); live recognition takes frames, not one of any size. */
+const MAX_SAMPLES_AT_ONCE = NATIVE_CAPTURE_SAMPLE_RATE / 10;
 
 /** Readings held back to be paced out: a chunk's worth, about 100 ms. */
 const MAX_QUEUED_LEVELS = 8;
@@ -62,13 +85,49 @@ const bridgeErrorName = (error: unknown): string => {
   return 'other';
 };
 
+/** The name of the error a capture rejects with when the App no longer has the hold's take it
+ *  was to take (dropped after its wait, or ended by the system): the page starts its own. */
+export const NATIVE_HOLD_GONE = 'NativeHoldGoneError';
+
+export const isNativeHoldGone = (error: unknown): boolean => (
+  Boolean(error) && typeof error === 'object' && (error as { name?: unknown }).name === NATIVE_HOLD_GONE
+);
+
+const count = (value: unknown): number | undefined => (
+  typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
+);
+
+/** The App's own timings of a hold, as the capture trace keeps them (ms from touch-down, except
+ *  the two durations). Unknown values are left out. */
+const holdTimings = (timings: NativeVoiceHoldTimings | undefined): Partial<VoiceCaptureAttempt> => {
+  if (!timings) return {};
+  const variant = timings.variant;
+  const fields: Partial<VoiceCaptureAttempt> = {
+    ...(variant === 'early' || variant === 'quiet' || variant === 'late' ? { hold: variant } : {}),
+    holdRecMs: count(timings.recognisedAt),
+    holdLiveMs: count(timings.liveAt),
+    holdBufMs: count(timings.firstBufferAt),
+    holdAdoptMs: count(timings.adoptedAt),
+    holdUpMs: count(timings.releasedAt),
+    holdActMs: count(timings.activateMs),
+    holdStartMs: count(timings.startMs),
+  };
+  for (const key of Object.keys(fields) as (keyof VoiceCaptureAttempt)[]) {
+    if (fields[key] === undefined) delete fields[key];
+  }
+  return fields;
+};
+
 export class NativePcmCapture implements VoicePcmCapture {
   private readonly handlers: VoicePcmCaptureHandlers;
   private readonly stopTimeoutMs: number;
   private readonly trace: VoiceCaptureTrace | null;
-  private readonly take = newTakeId();
+  private readonly take: string;
+  /** The take is one the App began itself, at the hold's touch-down: taken, not started. */
+  private readonly adopted: boolean;
   private attempt: VoiceCaptureAttempt | null = null;
   private unsubscribe: (() => void) | null = null;
+  private unsubscribeHold: (() => void) | null = null;
   private stopTimer: ReturnType<typeof setTimeout> | null = null;
   private levelSum = 0;
   private levelCount = 0;
@@ -80,10 +139,12 @@ export class NativePcmCapture implements VoicePcmCapture {
   private stopping = false;
   private stopped = false;
 
-  constructor(handlers: VoicePcmCaptureHandlers, stopTimeoutMs: number, trace?: VoiceCaptureTrace) {
+  constructor(handlers: VoicePcmCaptureHandlers, stopTimeoutMs: number, trace?: VoiceCaptureTrace, adopt?: string) {
     this.handlers = handlers;
     this.stopTimeoutMs = stopTimeoutMs;
     this.trace = trace ?? null;
+    this.take = adopt ?? newTakeId();
+    this.adopted = adopt !== undefined;
   }
 
   async start(): Promise<void> {
@@ -101,9 +162,22 @@ export class NativePcmCapture implements VoicePcmCapture {
     // The take's microphone is the App's: its start is what the trace's `micMs` and `mic` say.
     const traceRequestedAt = this.trace?.mark() ?? 0;
     try {
-      await nativeVoiceCaptureStart(this.take);
+      if (this.adopted) {
+        // The App's timings of this hold, when the take ends, for the trace.
+        this.unsubscribeHold = onNativeVoiceHold((event) => {
+          if (event.take === this.take && event.phase === 'timings' && attempt) Object.assign(attempt, holdTimings(event.timings));
+        });
+        const taken = await nativeVoiceHoldAdopt(this.take);
+        if (attempt) Object.assign(attempt, holdTimings(taken.timings));
+      } else {
+        const started = await nativeVoiceCaptureStart(this.take);
+        // The App's own steps: activating its session, and starting the microphone.
+        if (attempt) Object.assign(attempt, holdTimings({ activateMs: started.activateMs, startMs: started.engineMs }));
+      }
     } catch (error) {
-      const failure = Object.assign(new Error('native voice capture did not start'), { name: bridgeErrorName(error) });
+      const failure = Object.assign(new Error('native voice capture did not start'), {
+        name: this.adopted ? NATIVE_HOLD_GONE : bridgeErrorName(error),
+      });
       this.trace?.micSettled(traceRequestedAt, failure);
       if (attempt) {
         attempt.micMs = Math.round(performance.now() - requestedAt);
@@ -144,7 +218,9 @@ export class NativePcmCapture implements VoicePcmCapture {
     if (event.take !== this.take || this.stopped) return;
     if (event.pcm) {
       const samples = decodePcm(event.pcm);
-      if (samples && samples.length > 0) this.deliver(samples);
+      for (let from = 0; samples && from < samples.length; from += MAX_SAMPLES_AT_ONCE) {
+        this.deliver(samples.slice(from, from + MAX_SAMPLES_AT_ONCE));
+      }
     }
     if (event.ended) {
       if (!this.stopping) {
@@ -220,6 +296,8 @@ export class NativePcmCapture implements VoicePcmCapture {
     this.levels = [];
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.unsubscribeHold?.();
+    this.unsubscribeHold = null;
   }
 }
 
@@ -234,4 +312,18 @@ export const nativeCaptureFactory: VoicePcmCaptureFactory = (
 ) => {
   if (sampleRate !== NATIVE_CAPTURE_SAMPLE_RATE) throw new Error('native voice capture records 16 kHz only');
   return new NativePcmCapture(handlers, stopTimeoutMs ?? VOICE_CAPTURE_STOP_TIMEOUT_MS, trace);
+};
+
+/** The same for a hold the App recognised itself: its capture takes that take (`voice.holdAdopt`),
+ *  whose audio since touch-down comes first. */
+export const adoptedCaptureFactory = (take: string): VoicePcmCaptureFactory => (
+  _stream,
+  sampleRate,
+  _segmentSamples,
+  handlers,
+  stopTimeoutMs,
+  trace,
+) => {
+  if (sampleRate !== NATIVE_CAPTURE_SAMPLE_RATE) throw new Error('native voice capture records 16 kHz only');
+  return new NativePcmCapture(handlers, stopTimeoutMs ?? VOICE_CAPTURE_STOP_TIMEOUT_MS, trace, take);
 };
