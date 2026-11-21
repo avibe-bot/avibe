@@ -1370,6 +1370,20 @@ def _refuse_operation(binding: Binding, journal: dict[str, Any], failure: dict[s
 def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
     """Apply a committed change. Every step is recorded and safe to repeat."""
 
+    from vibe.binding_health import rejected_at
+
+    if rejected_at(_load_config()) is not None:
+        # The issuer may already have renamed this instance. Retire only local
+        # reconciliation; a receipt is not authority for more destructive work.
+        _drop_authority()
+        with _DRAINED:
+            if any(_inflight.values()):
+                return 1.0
+        _set_journal(binding, None, last={
+            'operation_id': journal.get('operation_id'), 'hostname': journal['target_hostname'],
+            'state': 'interrupted', 'error': 'reconciliation_interrupted', 'status': 409,
+        })
+        return 0.0
     steps = dict(journal.get("steps") or {})
     target = journal["target_hostname"]
     local = journal.get("origin") == "local"

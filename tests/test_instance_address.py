@@ -848,6 +848,28 @@ def test_b1_a_journal_is_not_left_idle_while_the_pairing_is_unreadable(address):
     assert binding().active_host == NEW
 
 
+def test_rejected_committed_rename_retires_reconciliation_not_cloud_change(address, monkeypatch):
+    from vibe import binding_health
+
+    plane, _ = address
+    phone = health_pairing()
+    rename_to('new')
+    before_commit = plane.state()
+    monkeypatch.setattr(plane, 'state', lambda: before_commit)
+    assert instance_address._advance_operation() > 0
+    committed = instance_address._journal(binding())
+    assert committed['phase'] == 'committed' and plane.active == NEW
+    binding_health._set(settings_service.load_config(), rejected=True)
+    assert binding_health.rejected_at(settings_service.load_config()) is not None
+    calls = len(plane.calls)
+    assert instance_address._advance_operation() == 0
+    assert instance_address._journal(binding()) is None
+    last = instance_address._load_state(binding().instance_id)['last_operation']
+    assert last['state'] == 'interrupted' and last['operation_id'] == committed['operation_id']
+    assert binding().active_host == OLD and plane.active == NEW and len(plane.calls) == calls
+    assert phone and active_health_devices()
+
+
 def test_b5_the_state_from_before_our_own_commit_does_not_end_the_journal(address):
     plane, _ = address
     phone = health_pairing()
