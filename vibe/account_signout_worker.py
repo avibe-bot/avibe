@@ -135,12 +135,18 @@ def run_once(load_config):
     return True
 
 
-async def serve(load_config):
+async def _poll(operation, load_config, label):
     while True:
         try:
-            busy = await asyncio.to_thread(run_once, load_config)
+            busy = await asyncio.to_thread(operation, load_config)
         except Exception:
             # Neither a transport exception nor a query parameter belongs in the service log.
-            logger.warning('Device account sign-out worker unavailable')
+            logger.warning('%s worker unavailable', label)
             busy = False
         await asyncio.sleep(0.25 if busy else 3)
+
+
+async def serve(load_config):
+    from storage import device_health_owner_checks
+    await asyncio.gather(_poll(run_once, load_config, 'Device account sign-out'),
+                         _poll(device_health_owner_checks.run_once, load_config, 'Device Health owner proof'))

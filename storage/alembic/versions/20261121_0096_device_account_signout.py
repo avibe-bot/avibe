@@ -78,7 +78,19 @@ def upgrade() -> None:
     op.create_index("ix_remote_signout_items_receipt", "remote_signout_items", ['receipt'], if_not_exists=True)
 
 
+    op.create_table(
+        'device_health_owner_checks',
+        sa.Column('mobile_id', sa.String(), primary_key=True),
+        *(sa.Column(name, sa.String(), nullable=False) for name in
+          ('operation', 'epoch', 'binding', 'subject', 'device_id', 'owner_email', 'linked_at')),
+        sa.Column('next_at', sa.Integer(), nullable=False), sa.Column('expires_at', sa.Integer(), nullable=False),
+        if_not_exists=True,
+    )
+    op.create_index('ix_device_health_owner_checks_next_at', 'device_health_owner_checks', ['next_at'], if_not_exists=True)
+
+
 def downgrade() -> None:
+    op.drop_table('device_health_owner_checks')
     op.drop_table("remote_signout_items")
     op.drop_table("remote_signout_receipts")
     op.drop_table("remote_account_pairings")

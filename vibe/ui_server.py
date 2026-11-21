@@ -9237,13 +9237,15 @@ def device_sign_out(device_id=None):
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
-    local_owner_email = _device_owner_scope(viewer)[1] if not caller else None
+    from vibe.account_session_revoke import pairing_epoch
+    host_config = _load_remote_access_config() if binding and not caller else None
+    host_epoch = pairing_epoch(host_config) if host_config and remote_access.device_binding(host_config) == binding else None
     try:
         context = _request_authorization_context()
         delegate = bool(binding and owner and (not caller or context.instance_access_source == 'owner'))
         ids, count, results, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
-                                      delegate=delegate, local_owner_email=local_owner_email)
+                                      delegate=delegate, host_epoch=host_epoch)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
     if device_id is not None and not (ids or results):
@@ -9251,11 +9253,9 @@ def device_sign_out(device_id=None):
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
     result = {'ok': True, 'revoked_sessions': count, 'sign_out_results': results}
-    if deferred:
+    if deferred or (binding and not caller and ids):
+        # Conditional local cleanup is unconfirmed; never reveal whether this scope had a Health pairing.
         result['health_cleanup_pending'] = True
-    if binding and not caller and not local_owner_email:
-        # Report the skipped scope, never whether a pairing exists.
-        result['health_pairing_cleanup_skipped'] = 'current_owner_unverified'
     response = jsonify(result)
     if caller in ids:
         _clear_remote_browser_cookie(response)

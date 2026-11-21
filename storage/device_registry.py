@@ -305,10 +305,10 @@ def list_devices(binding, subject, *, owner, caller, now, paths=None, conn=None)
     return list(grouped.values())
 
 
-def _end_functions(conn,binding,subject,device,now,sids,keep,actor,actor_subject,*,visible):
+def _end_functions(conn,binding,subject,device,now,sids,keep,actor,actor_subject,*,visible, codes_only=False):
     from storage.models import device_function_settings as settings
     pending = device_health_registry.queue_disconnect(conn, binding, subject, device, sids=sids,
-                                                      remove_pairing=visible and not keep)
+                                                      remove_pairing=visible and not keep, codes_only=codes_only)
     if not keep:
         conn.execute(settings.delete().where(settings.c.binding==binding,settings.c.subject==subject,settings.c.device_id==device))
     device_activity.record(conn,kind='signedOut',binding=binding,subject=subject,device=device,now=now,
@@ -347,7 +347,7 @@ def revoke_sid(conn, sid, expiry, now):
     return pending
 
 
-def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, local_owner_email=None, delegate=False):
+def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False):
     """One atomic selection + revocation; None device means the caller's bulk scope."""
     stmt = select(sessions.c.session_id, sessions.c.expires_at).where(
         sessions.c.binding == binding,
@@ -406,13 +406,16 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, local
         device_accounts = {}
         for target, account, email in conn.execute(visible_rows.order_by(sessions.c.last_active_at.desc(), sessions.c.session_id)):
             device_accounts.setdefault(target, (account, email))
-        visible = {(target, account) for target, (account, email) in device_accounts.items()
-                   if caller or (local_owner_email and local_owner_email == email.casefold())}
+        visible = {(target, account) for target, (account, _) in device_accounts.items() if caller}
+        if host_epoch and not caller:
+            from storage.device_health_owner_checks import queue
+            for target, (account, email) in device_accounts.items():
+                queue(conn, binding=binding, epoch=host_epoch, subject=account, device=target, email=email, now=now)
         pending = []
         for target, account in keys:
             keep = device_id is None and keeper is not None and target == keeper.device_id
             pending.extend(_end_functions(conn, binding, account, target, now, ids, keep,
-                           keeper.device_id if keeper else 'host', subject, visible=(target, account) in visible))
+                           keeper.device_id if keeper else 'host', subject, visible=(target, account) in visible, codes_only=not caller))
         if ids:
             from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 

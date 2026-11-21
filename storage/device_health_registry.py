@@ -65,7 +65,7 @@ def pair(store, payload, identity):
         return result
 
 
-def queue_disconnect(conn, binding, subject, device, *, sids, remove_pairing):
+def queue_disconnect(conn, binding, subject, device, *, sids, remove_pairing, codes_only=False):
     """Commit the exact cleanup targets with the session tombstone. No private DB IO."""
     condition = (links.c.code_hash.is_not(None) & links.c.issuer_sid.in_(sids))
     if remove_pairing:
@@ -74,7 +74,7 @@ def queue_disconnect(conn, binding, subject, device, *, sids, remove_pairing):
     # Caller owns the main DB write lock. This also works on SQLite before RETURNING.
     targets = list(conn.scalars(select(links.c.mobile_id).where(*scope)))
     if targets:
-        conn.execute(links.update().where(*scope).values(cleanup_pending=1, ticket_hash=None))
+        conn.execute(links.update().where(*scope).values(cleanup_pending=2 if codes_only else 1, ticket_hash=None))
     return targets
 
 
@@ -87,7 +87,7 @@ def finish_pending(engine, targets):
             with engine.begin() as conn:
                 conn.exec_driver_sql('BEGIN IMMEDIATE')
                 row = conn.execute(select(links).where(links.c.mobile_id == mid,
-                                                       links.c.cleanup_pending == 1)).mappings().first()
+                                                       links.c.cleanup_pending.in_((1, 2)))).mappings().first()
                 if not row:
                     continue
                 store = MobileStore(existing_only=True)
@@ -95,7 +95,7 @@ def finish_pending(engine, targets):
                     if row['code_hash']:
                         mobile.execute('DELETE FROM pairings WHERE code_hash=?', (row['code_hash'],))
                     active = mobile.execute('SELECT 1 FROM devices WHERE id=? AND revoked_at IS NULL', (mid,)).fetchone()
-                if active:
+                if active and row['cleanup_pending'] == 1:
                     store.revoke(device_id=mid, caller='device_sign_out')
                 if row['code_hash'] and not active:
                     conn.execute(links.delete().where(links.c.mobile_id == mid))
@@ -111,7 +111,7 @@ def finish_pending(engine, targets):
 
 def maintain(engine, now, cancel=None):
     with engine.connect() as conn:
-        pending = conn.execute(select(links.c.mobile_id).where(links.c.cleanup_pending == 1)
+        pending = conn.execute(select(links.c.mobile_id).where(links.c.cleanup_pending.in_((1, 2)))
                                .order_by(links.c.mobile_id).limit(128)).scalars().all()
     if cancel is not None and cancel.is_set():
         return

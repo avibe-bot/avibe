@@ -1543,6 +1543,20 @@ remote_account_revocations = Table(
     Index("ix_rar_forget", "forget_at", sqlite_where=text("forget_at IS NOT NULL")),
 )
 
+device_health_owner_checks = Table(
+    "device_health_owner_checks", metadata,
+    Column("mobile_id", String, primary_key=True),
+    Column("operation", String, nullable=False),
+    Column("epoch", String, nullable=False),
+    Column("binding", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Column("owner_email", String, nullable=False),
+    Column("linked_at", String, nullable=False),
+    Column("next_at", Integer, nullable=False, index=True),
+    Column("expires_at", Integer, nullable=False),
+)
+
 remote_account_pairings = Table(
     "remote_account_pairings", metadata,
     Column("epoch", String, primary_key=True),
