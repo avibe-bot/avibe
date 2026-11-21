@@ -742,6 +742,68 @@ def test_b8_a_settings_save_cannot_write_the_address_and_a_new_pairing_inherits_
     assert instance_address.describe()["cleanup"] == []
 
 
+def test_a6_after_binding_again_the_old_name_is_still_listed_and_can_be_taken_back(address):
+    from config.v2_config import update_config_fields
+
+    plane, clocks = address
+    _cookie, sid = sign_in()
+    rename_to("new")
+    run()
+    receipt = instance_address.receipt_for_session(sid)
+    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "instance_secret", "a-new-device-secret"))
+    plane.fail = RuntimeError("resource_acl_device_unavailable")
+    clocks.advance(6)
+    assert get(OLD).status_code == 503  # the old secret's permission is gone with the old secret
+    plane.fail = None
+    clocks.advance(6)
+    assert is_cleaning(get(OLD))  # read again under the new secret: the same instance, the same names
+    assert [entry["hostname"] for entry in instance_address.describe()["cleanup"]] == [OLD]
+    assert instance_address.record_cleared(OLD, receipt)  # receipts do not depend on the binding
+    rename_to("old")
+    run()
+    assert binding().active_host == OLD and instance_address.describe()["unrecognized_change"] is None
+
+
+def test_c1_requests_open_on_the_old_name_are_ended_at_the_switch(address):
+    """A stream admitted without any session (a public Show page's) has nothing else to end it."""
+
+    import asyncio
+
+    async def scenario():
+        started, cancelled = asyncio.Event(), []
+
+        async def never_ending_app(scope, receive, send):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(scope["path"])
+                raise
+
+        middleware = ui_server._InstanceAddressRoleMiddleware(never_ending_app)
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        def request(host):
+            scope = {"type": "http", "method": "GET", "path": "/show/x/events", "headers": [(b"host", host.encode())]}
+            return asyncio.create_task(middleware(scope, None, send))
+
+        old_stream, local_stream = request(OLD), request("localhost:5123")
+        await started.wait()
+        await asyncio.sleep(0.05)
+        instance_address._hooks.update(wake_pages=lambda: None, close_connections=ui_server._close_address_connections)
+        await asyncio.to_thread(lambda: (rename_to("new"), run()))
+        await asyncio.wait_for(asyncio.gather(old_stream, return_exceptions=True), timeout=5)
+        assert cancelled == ["/show/x/events"] and old_stream.done() and not old_stream.cancelled()
+        assert not local_stream.done()  # a page on this computer's own address is untouched
+        local_stream.cancel()
+        await asyncio.gather(local_stream, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 # --- D1, F2: receipts and the final frame -------------------------------------------------
 
 
@@ -798,6 +860,21 @@ def test_d1_only_streams_open_at_the_switch_are_told_the_new_origin(address):
                                            "sub": "member", "email": "member@test.invalid"})
     assert not can_receive_workbench_event(member, instance_address.ADDRESS_RETIRED_EVENT)
     assert not can_receive_workbench_event(member, instance_address.ADDRESS_CHANGED_EVENT)
+
+
+def test_the_browser_suite_replays_exactly_what_the_instance_answers():
+    """``ui/e2e/address-retired`` drives real browsers with these bytes; they must be the real ones."""
+
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "ui" / "e2e" / "address-retired" / "write_fixture.py"
+    spec = importlib.util.spec_from_file_location("address_retired_fixture", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert json.loads(module.FIXTURE.read_text(encoding="utf-8")) == module.build(), (
+        "run: python ui/e2e/address-retired/write_fixture.py"
+    )
 
 
 # --- migration ---------------------------------------------------------------------------

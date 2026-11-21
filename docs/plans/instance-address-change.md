@@ -1,6 +1,6 @@
 # Changing this Avibe's address, and cleaning up after the old one
 
-Status: rule table agreed with the independent reviewer (November 21, second pass); implementation in progress. Base `master` `ca534deea`
+Status: rule table agreed with the independent reviewer (November 21, second pass); implemented, awaiting the backend half for the exercise. The settings page that calls these routes is separate work. Base `master` `ca534deea`
 (#4107, migration 0096; this work takes 0097). Backend
 half: avibe-bot-backend `docs/plans/personal-hostname-release.md` (candidate
 `f7324025`, "Backend ↔ instance wire"). What was settled with that writer is
@@ -291,6 +291,10 @@ has actually returned to the pool.
   clean and does not try.
 - **Browsers without the header and without script**, and web views inside
   other apps, are not cleared by a visit.
+- **Safari.** Measured with WebKit in the browser suite: the header empties
+  storage, the page's script still reports, but the page is ended once the
+  header is processed and a background script it controlled can stay listed
+  until that script next checks for an update, when the replacement removes it.
 - **An iPhone App not opened during the whole waiting period** may open its
   saved old address once before it refreshes its instance list; the App is not
   changed in this work.
@@ -321,19 +325,28 @@ has actually returned to the pool.
 
 ## Verification
 
-Focused tests for every acceptance check above; browser tests of D2, D3, E2 and
-E3 in the repository's safe browser. Then, once the backend half is live, the
-reviewed head in a fresh temporary Runtime in the local Incus regression
-environment, bound under the test account on Production: rename, a browser
-that held data on the old address shown empty on its next visit, take the name
-back, a foreign change shown non-destructive. The exact steps are written as a
-separate file for the lead.
+- `tests/test_instance_address.py`: the rules above against the real config
+  file and SQLite state, with a fake of the agreed wire contract.
+- `ui/src/lib/addressRetired.test.ts`: the page's own clearing (D2, D3).
+- `ui/e2e/address-retired` (`npm run test:address-retired`, in the browser
+  lanes of CI): Chromium and WebKit, under the repository's browser isolation,
+  given the instance's exact answers for a retired address: one visit empties a
+  seeded origin and reports; the script alone does; the header alone does and
+  leaves cookies alone; a background script that updates removes itself.
+- Then, once the backend half is live, the reviewed head in a fresh temporary
+  Runtime in the local Incus regression environment, bound under the test
+  account on Production: rename, a browser that held data on the old address
+  shown empty on its next visit, take the name back, a foreign change shown
+  non-destructive. The exact steps are a separate file for the lead.
 
 ## Todo
 
 - [x] Agree this table (reviewer) and the contract points (backend, direct).
-- [ ] Migration for the clearing list (number from the lead).
-- [ ] Journal, role table, state reader, routes.
-- [ ] Cleanup-host middleware, cleaning page, replacement worker.
-- [ ] Page: complete clearing, final frame, header handling, receipt.
-- [ ] Tests; exercise steps file.
+- [x] Migration 0097 for the clearing list.
+- [x] Journal, role table, state reader, routes (`vibe/instance_address.py`).
+- [x] Cleanup-host middleware, cleaning page, replacement worker
+      (`vibe/ui_server.py`, `vibe/instance_address_responses.py`).
+- [x] Page: complete clearing, final frame, header handling, receipt
+      (`ui/src/lib/addressRetired.ts`).
+- [x] Focused tests and the browser suite.
+- [ ] Exercise on Production after the backend half is live.

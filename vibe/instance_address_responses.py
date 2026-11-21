@@ -42,7 +42,7 @@ CLEANING_SCRIPT = (
     "for(var i=0;i<regs.length;i++){try{var s=await regs[i].pushManager.getSubscription();"
     "if(s)await s.unsubscribe()}catch(e){}await regs[i].unregister()}}}catch(e){ok=false}"
     "try{document.cookie.split(';').forEach(function(c){var n=c.split('=')[0].trim();"
-    "if(n)document.cookie=n+'=; Max-Age=0; Path=/; Secure'})}catch(e){}"
+    "if(n){document.cookie=n+'=; Max-Age=0; Path=/';document.cookie=n+'=; Max-Age=0; Path=/; Secure'}})}catch(e){}"
     "if(ok&&r){try{await fetch(" + json.dumps(CLEARED_REPORT_PATH) + ",{method:'POST',body:r,"
     "credentials:'omit',cache:'no-store'})}catch(e){}}})();"
 )
