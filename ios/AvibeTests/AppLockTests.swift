@@ -455,3 +455,78 @@ private final class AppLockPageLoader: NSObject, WKNavigationDelegate {
         continuation = nil
     }
 }
+
+/// Draft probe (not for merge): does an instance page in the App's web view
+/// have focus before the reader taps it? The chat page marks a conversation
+/// read only while `document.hasFocus()` is true.
+@MainActor
+final class PageFocusProbeTests: XCTestCase {
+    func testProbePageFocusOfAFreshInstancePage() async throws {
+        let instance = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.example"))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIViewController()
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        var loaders: [AppLockPageLoader] = []
+        func page() async throws -> WKWebView {
+            let webView = WKWebView(
+                frame: window.bounds,
+                configuration: NativeBridgeConfiguration.make(
+                    instanceOrigin: instance,
+                    setOuterScrollLocked: { _, _ in false }
+                )
+            )
+            host.view.addSubview(webView)
+            let loader = AppLockPageLoader()
+            loaders.append(loader)
+            webView.navigationDelegate = loader
+            try await loader.load(
+                "<!doctype html><title>chat</title><body style='height:4000px'>chat</body>",
+                baseURL: instance.url,
+                in: webView
+            )
+            return webView
+        }
+        func state(_ webView: WKWebView) async throws -> String {
+            let value = try await webView.callAsyncJavaScript(
+                "return JSON.stringify({hasFocus: document.hasFocus(), visibility: document.visibilityState, active: document.activeElement && document.activeElement.tagName})",
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            )
+            return value as? String ?? "nil"
+        }
+        func firstResponder(_ webView: WKWebView) -> String {
+            let content = webView.scrollView.subviews.first { $0.canBecomeFirstResponder }
+            return "content=\(content.map { String(describing: type(of: $0)) } ?? "none") isFirst=\(content?.isFirstResponder ?? false) key=\(window.isKeyWindow)"
+        }
+
+        let first = try await page()
+        print("[probe] fresh page (cold open or push tap): \(try await state(first)) \(firstResponder(first))")
+        try await Task.sleep(for: .seconds(1))
+        print("[probe] fresh page after 1 s: \(try await state(first)) \(firstResponder(first))")
+        first.scrollView.setContentOffset(CGPoint(x: 0, y: 600), animated: false)
+        try await Task.sleep(for: .milliseconds(300))
+        print("[probe] after a scroll: \(try await state(first)) \(firstResponder(first))")
+        // A tap in web content makes the content view first responder; stand in for it.
+        let content = first.scrollView.subviews.first { $0.canBecomeFirstResponder }
+        let became = content?.becomeFirstResponder() ?? false
+        try await Task.sleep(for: .milliseconds(300))
+        print("[probe] after first responder (as after a tap, became=\(became)): \(try await state(first)) \(firstResponder(first))")
+        // A push tap opens the instance again: the App draws a new web view
+        // (RootView `.id(runtimeIdentity)`).
+        first.removeFromSuperview()
+        let second = try await page()
+        try await Task.sleep(for: .seconds(1))
+        print("[probe] replacement page (warm push tap): \(try await state(second)) \(firstResponder(second))")
+        // The same web view reloaded in place, for comparison.
+        let againBecame = second.scrollView.subviews.first { $0.canBecomeFirstResponder }?.becomeFirstResponder() ?? false
+        let loader = AppLockPageLoader()
+        loaders.append(loader)
+        second.navigationDelegate = loader
+        try await loader.load("<!doctype html><title>chat2</title>", baseURL: instance.url, in: second)
+        print("[probe] same web view reloaded after focus (became=\(againBecame)): \(try await state(second)) \(firstResponder(second))")
+        window.isHidden = true
+    }
+}

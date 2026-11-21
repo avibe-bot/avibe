@@ -129,6 +129,7 @@ jobs:
 
       - name: Build the sheet gesture XCUITest fixture
         id: sheet-fixture-build
+        if: false
         run: |
           set -euo pipefail
           xcodebuild \
@@ -152,6 +153,7 @@ jobs:
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
+            -only-testing:AvibeTests/PageFocusProbeTests \
             test
 
       - name: Upload XCTest result bundle
