@@ -5059,6 +5059,77 @@ final class DirectPathAppTests: XCTestCase {
         )
     }
 
+    /// Opening an instance records its address for the account. When
+    /// avibe.bot's answers have not listed it for a day, what the App keeps
+    /// for that address goes: its stored site data (the removal itself:
+    /// `NavigationPolicyTests.testOnlyTheDepartedAddressesStorageIsRemoved`),
+    /// its cached page, and this device's path choice. The other instance
+    /// keeps its own.
+    @MainActor
+    func testAnAddressTheAccountNoLongerListsLosesWhatTheAppKeptForIt() async throws {
+        let first = try await makeApp(directTransport: nil)
+        let one = try await select("instance-1", in: first)
+        let two = try await select("instance-2", in: first)
+        let defaults = try XCTUnwrap(appDefaults)
+        let ledgerKey = DepartedInstanceData.key
+        func recorded() throws -> [String: DepartedInstanceData.Entry] {
+            let data = try XCTUnwrap(defaults.data(forKey: ledgerKey))
+            return try XCTUnwrap(
+                JSONDecoder().decode([String: [String: DepartedInstanceData.Entry]].self, from: data)["account-1"]
+            )
+        }
+        let originOne = try XCTUnwrap(WebOrigin(url: one.instance.url)).serialized
+        let originTwo = try XCTUnwrap(WebOrigin(url: two.instance.url)).serialized
+        XCTAssertEqual(Set(try recorded().keys), [originOne, originTwo])
+        XCTAssertEqual(try recorded()[originOne]?.store, one.websiteDataStoreID)
+
+        // What the App keeps per address.
+        let page = RuntimeCachedPage(
+            url: one.instance.url,
+            headers: ["Content-Type": "text/html"],
+            body: Data("<!doctype html>".utf8),
+            capturedAt: Date()
+        )
+        for origin in [originOne, originTwo] {
+            first.runtimePageCache.store(page, accountID: "account-1", origin: origin)
+        }
+        defer { first.runtimePageCache.removeAll() }
+        let choices = DirectPathPreferenceStore(defaults: defaults)
+        choices.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: originOne)
+        choices.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: originTwo)
+
+        // avibe.bot has not listed instance-1 for more than a day, and its
+        // next answer still does not. (Past the confirmation's lifetime, so
+        // the launch asks first and opens nothing of instance-1.)
+        var ledger = try JSONDecoder().decode(
+            [String: [String: DepartedInstanceData.Entry]].self,
+            from: try XCTUnwrap(defaults.data(forKey: ledgerKey))
+        )
+        ledger["account-1"]?[originOne]?.missingSince = Date().addingTimeInterval(-25 * 60 * 60)
+        defaults.set(try JSONEncoder().encode(ledger), forKey: ledgerKey)
+        confirmSession(in: defaults, daysAgo: 15)
+        let withoutInstanceOne = LocalHTTPResponse.json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-2","name":"Two","host":"instance-two.example",
+             "url":"https://instance-two.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true}]}
+            """)
+        let next = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { withoutInstanceOne },
+            reusingDefaults: defaults
+        )
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            (try? recorded()[originOne]) == nil && next.mobileSessionCoordinator.currentAccount != nil
+        }
+        XCTAssertNil(next.runtimePageCache.page(accountID: "account-1", origin: originOne))
+        XCTAssertEqual(choices.preference(accountID: "account-1", origin: originOne), .automatic)
+        // The listed instance keeps its own.
+        XCTAssertNotNil(try recorded()[originTwo])
+        XCTAssertNotNil(next.runtimePageCache.page(accountID: "account-1", origin: originTwo))
+        XCTAssertEqual(choices.preference(accountID: "account-1", origin: originTwo).mode, .tunnel)
+    }
+
     /// The control plane's ordinary signed-in answer for account-1.
     private static var signedInSessionAnswer: LocalHTTPResponse {
         .json("""

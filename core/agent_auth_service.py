@@ -25,12 +25,8 @@ from core.delivery_evidence import DeliveryEvidence, STAGE_PERSIST, STAGE_SEND
 from core.delivery_target import routed_delivery_context
 from core.message_output import MessageOutput, terminal_turn_output
 from core.resource_governance import governor_from_controller
-from modules.claude_sdk_compat import (
-    CLAUDE_SDK_AVAILABLE,
-    CLAUDE_SDK_MAX_BUFFER_SIZE,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-)
+from modules import claude_sdk_compat as claude_sdk
+from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_AUTH_OWNER,
     AVIBE_CLAUDE_PROCESS_OWNER_ENV,
@@ -54,6 +50,7 @@ from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
 
 if TYPE_CHECKING:
+    from modules.claude_sdk_compat import ClaudeSDKClient
     from modules.agents.opencode.client_manager import OpenCodeServerLease
 
 logger = logging.getLogger(__name__)
@@ -1596,7 +1593,7 @@ class AgentAuthService:
         ] | None = None,
         owner_flow: AgentAuthFlow | WebAuthFlow | None = None,
     ) -> tuple[ClaudeSDKClient, str, ClaudeOAuthAttempt]:
-        if not CLAUDE_SDK_AVAILABLE:
+        if not claude_sdk.CLAUDE_SDK_AVAILABLE:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
         if force_reset:
@@ -1718,7 +1715,7 @@ class AgentAuthService:
         if cli_override:
             option_kwargs["cli_path"] = cli_override
 
-        client = ClaudeSDKClient(options=ClaudeAgentOptions(**option_kwargs))
+        client = claude_sdk.ClaudeSDKClient(options=claude_sdk.ClaudeAgentOptions(**option_kwargs))
         if owner_flow is not None:
             # Connect can spawn before failing: publish the cleanup owner first.
             owner_flow.claude_client = client
@@ -3235,7 +3232,7 @@ class AgentAuthService:
 
         option_kwargs["extra_args"] = {"model": require_agent_model(model, "claude")}
 
-        client = ClaudeSDKClient(options=ClaudeAgentOptions(**option_kwargs))
+        client = claude_sdk.ClaudeSDKClient(options=claude_sdk.ClaudeAgentOptions(**option_kwargs))
         assistant_text = ""
         assistant_error = ""
         terminal_text = ""

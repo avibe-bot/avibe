@@ -64,6 +64,15 @@ and Web resizing cannot both run.
   that leaves an account cannot become another account's for 30 days, so within
   14 days of a confirmation the address still leads to the instance avibe.bot
   listed. The limit trusts the phone's clock.
+- The App records which instance addresses an account has opened. When
+  avibe.bot has answered, signed in, twice at least a day apart without listing
+  one of them, what that address left on the phone is removed: its site data in
+  the account's WebKit store (localStorage, IndexedDB, Cache Storage, cookies of
+  that host), its cached page, and this device's path choice for it. WebKit's
+  own removal works per registrable domain (all of `avibe.bot`), so the App
+  shows a page of its own at the address instead, without the network, and
+  deletes that origin's storage from it. Other instances and the avibe.bot
+  sign-in are untouched.
 - On a cold start the App may show the instance's last page from its own
   cache (stored per store, account and origin, at most a day old). A cached page
   whose bytes carry `<meta name="avibe-cached-shell" content="1">` comes from a

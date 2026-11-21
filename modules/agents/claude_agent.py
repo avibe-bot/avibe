@@ -46,7 +46,8 @@ from core.services.agent_steering import (
     result as steer_result,
 )
 from core.session_activities import SessionActivity, activity_completion_output
-from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
+from modules import claude_sdk_compat as claude_sdk
+from modules.claude_sdk_compat import is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
     claude_diagnostic_without_stderr,
@@ -1646,7 +1647,7 @@ class ClaudeAgent(BaseAgent):
             texts = [
                 block.text
                 for block in content
-                if isinstance(block, TextBlock) and isinstance(block.text, str)
+                if isinstance(block, claude_sdk.TextBlock) and isinstance(block.text, str)
             ]
             if len(texts) == len(content):
                 return "\n".join(texts)
@@ -2364,7 +2365,7 @@ class ClaudeAgent(BaseAgent):
                         # the visible assistant/toolcall output remains buffered
                         # until Result.origin classifies the phase.
                         for block in getattr(message, "content", []) or []:
-                            if isinstance(block, ToolUseBlock):
+                            if isinstance(block, claude_sdk.ToolUseBlock):
                                 self._track_tool_activity_mode(
                                     composite_key,
                                     block,
@@ -2408,7 +2409,7 @@ class ClaudeAgent(BaseAgent):
                         # ask_user_question_block = None
 
                         for block in getattr(message, "content", []) or []:
-                            if isinstance(block, ToolUseBlock):
+                            if isinstance(block, claude_sdk.ToolUseBlock):
                                 self._track_tool_activity_mode(
                                     composite_key,
                                     block,
@@ -2442,7 +2443,7 @@ class ClaudeAgent(BaseAgent):
                                         ),
                                     )
                                 )
-                            elif isinstance(block, TextBlock):
+                            elif isinstance(block, claude_sdk.TextBlock):
                                 text = block.text.strip() if block.text else ""
                                 if text:
                                     text_parts.append(text)
@@ -4376,7 +4377,7 @@ class ClaudeAgent(BaseAgent):
     def _track_tool_activity_mode(
         self,
         composite_key: str,
-        block: ToolUseBlock,
+        block: "claude_sdk.ToolUseBlock",
         *,
         detached: bool = False,
         provisional: bool = False,
@@ -4438,7 +4439,7 @@ class ClaudeAgent(BaseAgent):
             (),
         ):
             for block in getattr(message, "content", []) or []:
-                if not isinstance(block, ToolUseBlock):
+                if not isinstance(block, claude_sdk.ToolUseBlock):
                     continue
                 tool_id = str(getattr(block, "id", "") or "").strip()
                 if tool_id:
@@ -4820,7 +4821,7 @@ class ClaudeAgent(BaseAgent):
                     self.controller.note_session_tokens(context, total=context_tokens)
                 toolcalls = []
                 for block in getattr(message, "content", []) or []:
-                    if not isinstance(block, ToolUseBlock):
+                    if not isinstance(block, claude_sdk.ToolUseBlock):
                         continue
                     self._track_tool_activity_mode(
                         composite_key,
@@ -6381,7 +6382,7 @@ class ClaudeAgent(BaseAgent):
         """Extract text-only content blocks for result fallbacks."""
         parts = []
         for block in getattr(message, "content", []) or []:
-            if isinstance(block, TextBlock):
+            if isinstance(block, claude_sdk.TextBlock):
                 text = block.text.strip() if block.text else ""
                 if text:
                     parts.append(text)
