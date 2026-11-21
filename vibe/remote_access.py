@@ -2319,6 +2319,31 @@ def sync_authorization_revision_once(
             _AUTHORIZATION_REVISION_SYNC_LOCK.release()
 
 
+# Three normal 20-second redeem timeouts (four 15-second polling ticks).
+_DESKTOP_REPLAY_GRACE_SECONDS = 60
+
+
+def _desktop_replay_delay() -> int:
+    """Scheduling hint only: explicit Desktop retries do not wait for this."""
+    from vibe.binding_admission import OperationBusy, admitted
+
+    try:
+        # The current dispatch (including a renewed grant) atomically replaces
+        # this file. The operation's prepared_at may predate it by hours.
+        age = time.time() - _pending_pairing_path().stat().st_mtime
+        if 0 <= age < _DESKTOP_REPLAY_GRACE_SECONDS:
+            return max(1, int(_DESKTOP_REPLAY_GRACE_SECONDS - age))
+        # A slow live request can outlast the grace period. Only select work
+        # when no foreground lease is held. Release before network I/O so a
+        # returning Desktop can still prepare/retry; replay rechecks the exact
+        # record under its own shared admission. Clock rollback also uses this
+        # liveness check instead of indefinitely postponing abandoned work.
+        with admitted('pairing'):
+            return 0
+    except (OperationBusy, OSError):
+        return 15
+
+
 def _drive_pending_pairing() -> tuple[bool, int]:
     """One scheduled recovery step; a journal always preempts probing the old key.
 
@@ -2344,6 +2369,8 @@ def _drive_pending_pairing() -> tuple[bool, int]:
     if record['phase'] == 'prepared' and record.get('redeem_request') and (
         record.get('personal_claim') or record.get('desktop_enrollment')
     ) and not record.get('desktop_failure'):
+        if record.get('desktop_enrollment') and (delay := _desktop_replay_delay()):
+            return True, delay
         result = _retry_installation_pairing(record)
     elif record['phase'] in ('redeemed', 'applied'):
         result = _persist_pairing(None, device_name=record['device_name'], operation_id=record['operation_id'])
