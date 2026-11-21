@@ -2567,8 +2567,6 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(world.failureNotices.first?.errorCode, 7)
     }
 
-    /// Notifications off: the alert Avibe shows on coming forward carries
-    /// the same step and code.
     /// A press past the session's confirmation lifetime: every surface says
     /// only 打开 Avibe 继续, never the sign-in sentence.
     func testAnUnconfirmedSessionShowsOnlyThePhaseLine() async throws {
@@ -2639,6 +2637,8 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertFalse(VoiceCaptureTarget.waitsForConfirmation(defaults: defaults))
     }
 
+    /// Notifications off: the alert Avibe shows on coming forward carries
+    /// the same step and code.
     func testTheForegroundAlertCarriesTheStepAndCodeToo() async throws {
         let world = World()
         world.activityRequestFails = true
