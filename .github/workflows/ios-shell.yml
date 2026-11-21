@@ -104,7 +104,7 @@ jobs:
             "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" \
             YES
 
-      - name: Select the pinned iPhone 17 Pro / iOS 27.2 simulator
+      - name: Select the pinned iPhone 18 Pro / iOS 27.2 simulator
         run: |
           set -euo pipefail
           xcrun simctl list devices available --json > "$RUNNER_TEMP/ios-simulators.json"
@@ -114,7 +114,7 @@ jobs:
           import sys
 
           runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-2"
-          device_name = "iPhone 17 Pro"
+          device_name = "iPhone 18 Pro"
           with open(sys.argv[1], encoding="utf-8") as source:
               devices = json.load(source)["devices"].get(runtime, [])
           matches = sorted(
