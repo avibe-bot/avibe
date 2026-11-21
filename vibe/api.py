@@ -1298,7 +1298,10 @@ def save_config(
         from vibe import remote_access
 
         if generic_remote_access and remote_access.pairing_identity_settings_changed(base_config, config):
-            raise ValueError("Pairing identity must be changed through the remote access pairing flow")
+            raise ValueError(
+                "This computer's binding is not changed by saving settings. "
+                "Bind it again from Devices, or run 'vibe remote rebind' on this computer."
+            )
 
         # Admit the pairing clear before publishing the separate settings
         # store: an unreadable journal or failed fence must reject this
