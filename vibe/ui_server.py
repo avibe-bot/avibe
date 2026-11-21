@@ -9046,9 +9046,19 @@ def remote_access_vibe_cloud_pair():
     payload = request.json or {}
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "invalid_request"}), 400
+    local_pair = not _is_direct_ingress_request() and _is_direct_loopback_connection()
     desktop = {}
+    if not local_pair:
+        from vibe import desktop_local_instance as local
+        try:
+            if remote_access._bound_http_pair_forbidden(local._config(), local._pending()):
+                return jsonify({"ok": False, "error": "local_operator_required"}), 403
+        except (OSError, local.LocalInstanceError):
+            return jsonify({"ok": False, "error": "pairing_recovery_unavailable"}), 503
+        # Check again under the writer lock, before any one-time redeem or keyless replay.
+        desktop["unbound_only"] = True
     if "desktop_enrollment" in payload:
-        if not _is_direct_loopback_connection() or not _same_origin(
+        if not local_pair or not _same_origin(
             _request_origin(request.headers.get("Origin")) or "", request.host_url.rstrip("/")
         ):
             return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
@@ -9070,6 +9080,8 @@ def remote_access_vibe_cloud_pair():
         _ensure_remote_access_monitoring()
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
+    if result.get("error") == "local_operator_required":
+        return response, 403
     conflict = result.get("error") in {"local_binding_changed", "local_instance_conflict"}
     return response, 200 if result.get("ok") else (409 if conflict else 400)
 

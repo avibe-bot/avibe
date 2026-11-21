@@ -1164,7 +1164,7 @@ def test_member_config_write_cannot_change_pairing_identity(
     assert after.enabled is True
 
 
-def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_path) -> None:
+def test_remote_member_and_owner_cannot_replace_this_computers_pairing(monkeypatch, tmp_path) -> None:
     from tests.ui_server_test_helpers import csrf_headers, remote_peer, remote_session_cookie, save_config
     from vibe import remote_access
     from vibe.ui_server import app
@@ -1223,9 +1223,9 @@ def test_pair_is_forbidden_for_member_and_succeeds_for_owner(monkeypatch, tmp_pa
         base_url="https://alex.avibe.bot",
         environ_base=remote_peer(),
     )
-    assert owner_response.status_code == 200
-    assert owner_response.get_json()["ok"] is True
-    assert paired == [("key", "https://avibe.bot", "avibe")]
+    assert owner_response.status_code == 403
+    assert owner_response.get_json()["error"] == "local_operator_required"
+    assert paired == []
 
 
 def test_member_can_set_instance_default_agent(monkeypatch, tmp_path) -> None:

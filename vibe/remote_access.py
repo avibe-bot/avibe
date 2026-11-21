@@ -5983,9 +5983,17 @@ def complete_pairing_revocation(operation_id: str | None) -> bool:
     return True
 
 
+def _bound_http_pair_forbidden(config: V2Config, pending=None) -> bool:
+    # Off is a connection preference, not a release of the existing authority.
+    cloud = config.remote_access.vibe_cloud
+    return bool(config_recovery_refusal(config, "remote_access") or cloud.instance_id or cloud.instance_secret
+                or cloud.session_secret or cloud.client_id or cloud.tunnel_token
+                or (pending and pending.get("source_instance_id")))
+
+
 def pair(
     pairing_key: str, backend_url: str, device_name: str = "avibe", *,
-    desktop_enrollment: Any = None,
+    desktop_enrollment: Any = None, unbound_only: bool = False,
 ) -> dict[str, Any]:
     from vibe import desktop_local_instance
 
@@ -6001,6 +6009,16 @@ def pair(
         # The existing recovery owner can resume a Desktop redemption after a
         # process restart, without requiring the UI to retain its pairing key.
         record, error = _read_pending_pairing_record()
+        if unbound_only:
+            try:
+                with _pairing_persist_lock():
+                    record = desktop_local_instance._pending()
+                    if _bound_http_pair_forbidden(desktop_local_instance._config(), record):
+                        return {"ok": False, "error": "local_operator_required", "status": 403}
+            except (OSError, desktop_local_instance.LocalInstanceError, _PairingLockUnavailable):
+                return {"ok": False, "error": "pairing_recovery_unavailable", "status": 503}
+            if not record:
+                return {"ok": False, "error": "missing_pairing_key"}
         if not error and record and record.get("redeem_request") and record["phase"] == "prepared":
             try:
                 return _retry_installation_pairing(record)
@@ -6008,7 +6026,7 @@ def pair(
                 return {"ok": False, "error": exc.code, "status": exc.status}
             except (OSError, _PairingLockUnavailable):
                 return {"ok": False, "error": "pairing_recovery_unavailable", "status": 503}
-        return _persist_pairing(None, device_name=device_name)
+        return _persist_pairing(None, device_name=device_name, operation_id=record["operation_id"] if unbound_only else None)
     backend, backend_url_error = _normalize_pairing_backend_url(backend_url)
     if backend_url_error or backend is None:
         return {"ok": False, "error": backend_url_error or "invalid_pairing_backend_url"}
@@ -6049,7 +6067,9 @@ def pair(
                 current_config = V2Config.load()
             except FileNotFoundError:
                 current_config = V2Config.default()
-            pending, _ = _read_pending_pairing_record()
+            pending, error = _read_pending_pairing_record()
+            if unbound_only and (error or _bound_http_pair_forbidden(current_config, pending)):
+                return {"ok": False, "error": "local_operator_required", "status": 403}
             if pending is not None and _same_pairing_request(pending, backend.base_url, pairing_key):
                 duplicate_operation_id = str(pending["operation_id"])
             else:
