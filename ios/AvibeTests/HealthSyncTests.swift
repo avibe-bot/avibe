@@ -1316,8 +1316,8 @@ final class HealthSyncTests: XCTestCase {
     @MainActor
     func testAListedOriginOrAnUnknownListKeepsTheConnection() async throws {
         let origin = WebOrigin.parseConfigured("https://health-fixture.invalid")!.serialized
-        // Listed at its origin; a list not known yet; an empty one.
-        let lists: [[String: String]?] = [["instance-1": origin, "instance-2": "https://other.invalid"], nil, [:]]
+        // Listed at its origin; a list avibe.bot has not confirmed yet.
+        let lists: [[String: String]?] = [["instance-1": origin, "instance-2": "https://other.invalid"], nil]
         for list in lists {
             let fixture = try coordinatorFixture(savedIdentity: true)
             fixture.coordinator.instancesProvider = { list }
@@ -1332,8 +1332,10 @@ final class HealthSyncTests: XCTestCase {
     @MainActor
     func testAnOriginTheConfirmedListNoLongerHasIsDisconnectedWithoutAnyRequest() async throws {
         let origin = WebOrigin.parseConfigured("https://health-fixture.invalid")!.serialized
-        // Renamed (the same instance at another origin), and no longer listed.
-        for list in [["instance-1": "https://renamed.invalid"], ["instance-2": origin]] {
+        // Renamed (the same instance at another origin), no longer listed,
+        // and an account avibe.bot confirms has no instance at all.
+        let lists: [[String: String]] = [["instance-1": "https://renamed.invalid"], ["instance-2": origin], [:]]
+        for list in lists {
             let fixture = try coordinatorFixture(savedIdentity: true)
             fixture.coordinator.instancesProvider = { list }
             await fixture.coordinator.resume(foreground: true)
@@ -1391,6 +1393,28 @@ final class HealthSyncTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(300))
         XCTAssertEqual(fixture.client.calls.count, calls)
         XCTAssertTrue(fixture.client.pendingClaims.isEmpty)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    @MainActor
+    func testAnAccountLeftWithNoInstanceEndsAnIdleDeviceWithoutARevoke() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var list: [String: String]? = ["instance-1": fixture.origin.serialized]
+        fixture.coordinator.instancesProvider = { list }
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertNotNil(fixture.credentials.identity)
+        let calls = fixture.client.calls.count
+
+        // The paired instance was deleted and was the account's only one:
+        // avibe.bot answers an empty list, published after the event. Its
+        // name may later belong to someone else, so nothing more goes there.
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: []))
+        list = [:]
+        try await eventually { fixture.credentials.identity == nil }
+
+        fixture.coordinator.accountEvent(.signedOut(explicit: true))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.calls.count, calls)
         XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
     }
 
