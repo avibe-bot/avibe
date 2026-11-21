@@ -4970,7 +4970,6 @@ final class DirectPathAppTests: XCTestCase {
         let controller = try makeRuntimeController(app, reopened)
         app.registerRuntimeController(controller, for: reopened)
         let page = try RuntimePage(controller: controller)
-        defer { page.close() }
         try await page.load(
             """
             <!doctype html><script>
@@ -4986,6 +4985,11 @@ final class DirectPathAppTests: XCTestCase {
         )
         app.didFinishRuntimeLoading()
         try await eventually { try await page.changes() == #"["/chat/waited"]"# }
+        // Closed before the App closes the page itself below: on iOS 27 a
+        // page closed after its controller was invalidated keeps the store
+        // in use past the teardown.
+        page.close()
+        withExtendedLifetime(controller) {}
 
         // No answer: the instance list, and what waited goes with it.
         confirmSession(in: defaults, daysAgo: 15)
@@ -4998,7 +5002,13 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertNil(app.runtimeOpenAttempt)
         XCTAssertFalse(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
-        withExtendedLifetime(controller) {}
+
+        // An answer again ends the test settled: no session read is left
+        // on its last transport when the teardown removes the store.
+        session.replace(with: Self.signedInSessionAnswer)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        _ = try await waitForBrowser("instance-2", in: app)
+        XCTAssertTrue(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
     }
 
     /// With a direct transport an open waits for its route before its
@@ -7735,7 +7745,9 @@ final class DirectPathAppTests: XCTestCase {
         for identifier in storeIdentifiers {
             var removed = false
             var lastError: Error?
-            for _ in 0..<50 {
+            // iOS 27's WebKit can report a store "in use (by network
+            // process)" for longer after its views are gone: up to 30 s.
+            for _ in 0..<300 {
                 lastError = await AccountWebsiteDataStoreOperations.live
                     .removeIdentifier(identifier)
                 let registered = await withCheckedContinuation { continuation in

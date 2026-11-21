@@ -2,21 +2,44 @@ import UIKit
 import UIKit.UIGestureRecognizerSubclass
 import WebKit
 
+/// Scene-based, as apps built with the iOS 27 SDK must be: without it UIKit
+/// stops the fixture at its first scene (`UIApplicationEvaluateRuntimeIssue
+/// ForNoSceneLifecycleAdoption`).
 @main
 final class SheetFixtureAppDelegate: UIResponder, UIApplicationDelegate {
-    var window: UIWindow?
-
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [
             UIApplication.LaunchOptionsKey: Any
         ]? = nil
     ) -> Bool {
-        let window = UIWindow(frame: UIScreen.main.bounds)
+        true
+    }
+
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        configuration.delegateClass = SheetFixtureSceneDelegate.self
+        return configuration
+    }
+}
+
+final class SheetFixtureSceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(
+        _ scene: UIScene,
+        willConnectTo session: UISceneSession,
+        options connectionOptions: UIScene.ConnectionOptions
+    ) {
+        guard let scene = scene as? UIWindowScene else { return }
+        let window = UIWindow(windowScene: scene)
         window.rootViewController = SheetFixtureRootViewController()
         window.makeKeyAndVisible()
         self.window = window
-        return true
     }
 }
 
