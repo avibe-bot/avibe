@@ -46,8 +46,9 @@ const CHALLENGE: &str = "Basic realm=\"Avibe Direct\"";
 /// A ready answer is accepted only if the top frame is still the same
 /// document (the same frame and the same loader), which takes one more
 /// question to WebView2; otherwise it is dropped. Every other outcome, a
-/// refusal by the instance above all, needs no such look and is delivered
-/// at once, so nothing can make it arrive too late.
+/// refusal by the instance and a selection that changed above all, needs no
+/// such look and is delivered at once, so nothing can make it arrive too
+/// late.
 pub fn fetch_rendezvous(
     view: &ICoreWebView2,
     request: &Request,
@@ -97,9 +98,11 @@ pub fn fetch_rendezvous(
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 let reply = Reply::read(text.as_deref());
-                // Only a ready answer depends on which document gave it:
-                // everything else is delivered at once.
-                if !matches!(reply, Reply::Ready(_)) {
+                // Only a ready answer depends on which document gave it,
+                // and only while the selection is still current: everything
+                // else is delivered at once. A selection that changed is
+                // never made to wait for another question to WebView2.
+                if !matches!(reply, Reply::Ready(_)) || !current() {
                     done(reply);
                     return;
                 }

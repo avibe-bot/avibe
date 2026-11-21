@@ -1061,7 +1061,11 @@ mod windows_probe {
             loaded
                 && changed == Some(Reply::SelectionChanged)
                 && requests == 1
-                && *asked.borrow() == 2
+                // Asked before the request, when its ready answer arrived,
+                // and on delivery. Three, not two: the answer's arrival is
+                // where the change is seen, before anything more is asked
+                // of WebView2, so the change is never said late.
+                && *asked.borrow() == 3
                 && refused == Some(Reply::SelectionChanged),
             json!({ "reply": format!("{changed:?}"), "requests": requests, "asked": *asked.borrow(), "refused": format!("{refused:?}") }),
         );
