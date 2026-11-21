@@ -55,6 +55,8 @@ pub enum Drag {
     Native,
     /// The shell moves the window itself, keeping this point of the window
     /// under the pointer (`follow_pointer`, on every poll of the button).
+    /// macOS only; elsewhere the platform drags.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Follow(PointerOffset),
 }
 
