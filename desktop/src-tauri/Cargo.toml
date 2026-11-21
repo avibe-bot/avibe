@@ -147,6 +147,8 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
   "std",
   "block2",
   "UNNotification",
+  "UNNotificationAction",
+  "UNNotificationCategory",
   "UNNotificationContent",
   "UNNotificationRequest",
   "UNNotificationResponse",

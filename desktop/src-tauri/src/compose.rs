@@ -322,7 +322,7 @@ fn settle(shares: &mut VecDeque<Share>, id: &str, outcome: Outcome) -> Step {
 
 /// The shown Workbench document and the Runtime origin it must have, when one
 /// is current.
-fn current(app: &AppHandle) -> Option<(Webview, String)> {
+pub(crate) fn current(app: &AppHandle) -> Option<(Webview, String)> {
     if !crate::instance_client::enabled(app) {
         // No instance client (development builds): only the local loopback Runtime.
         let view = app.get_webview(crate::MAIN_WINDOW)?;
@@ -334,7 +334,7 @@ fn current(app: &AppHandle) -> Option<(Webview, String)> {
     Some((view, origin.origin().ascii_serialization()))
 }
 
-fn local_origin(url: &url::Url) -> Option<String> {
+pub(crate) fn local_origin(url: &url::Url) -> Option<String> {
     let loopback = matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
         || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback())
         || url.host_str() == Some("localhost");
@@ -380,7 +380,7 @@ fn reopen(content: &Content) -> (Content, Vec<Option<std::fs::File>>) {
     (Content::Files(parts), handles)
 }
 
-async fn eval(view: &Webview, script: String) -> Option<String> {
+pub(crate) async fn eval(view: &Webview, script: String) -> Option<String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = Mutex::new(Some(tx));
     view.eval_with_callback(script, move |raw| {

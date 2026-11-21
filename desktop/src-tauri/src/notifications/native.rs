@@ -20,13 +20,15 @@ fn plugin_notice(app: &AppHandle, copy: NotificationCopy) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
-/// A one-off notice nothing withdraws (Ask Vibey's, for example).
-pub(crate) fn notice(app: &AppHandle, copy: NotificationCopy) -> Result<(), String> {
+/// A one-off notice nothing withdraws (Ask Vibey's, for example). On macOS a
+/// click opens `opens`, an `avibe://` link, when there is one.
+pub(crate) fn notice(app: &AppHandle, copy: NotificationCopy, opens: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if super::macos::available() {
-        super::macos::notice(copy);
+        super::macos::notice(copy, opens);
         return Ok(());
     }
+    let _ = opens;
     plugin_notice(app, copy)
 }
 

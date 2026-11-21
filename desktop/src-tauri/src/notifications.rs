@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use avibe_runtime_host::notifications::{
-    run_notifications, HttpNotificationTransport, NotificationFilter, NotificationGate, NotificationIntent,
-    NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot,
+    run_notifications, AnswerRequest, HttpNotificationTransport, NotificationFilter, NotificationGate,
+    NotificationIntent, NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,8 @@ use tauri::{AppHandle, Manager, Webview};
 
 use crate::{native_catalog_for_locales, pet, updater, MAIN_WINDOW};
 
+#[cfg(target_os = "macos")]
+mod answer;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 mod native;
@@ -32,11 +34,33 @@ pub struct NativeNotificationCatalog {
     run_succeeded: NotificationCopy,
     run_failed: NotificationCopy,
     run_canceled: NotificationCopy,
+    answer_requested: NotificationCopy,
+    answer: AnswerCatalog,
+}
+
+/// The words of an answerable notification and of an answer that did not go through.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct AnswerCatalog {
+    pub reply: String,
+    pub send: String,
+    pub placeholder: String,
+    pub not_sent: String,
+    pub not_delivered: String,
+    pub already_choice: String,
+    pub already_text: String,
+    pub stale: String,
+    pub gone: String,
+    pub unavailable: String,
 }
 
 #[derive(Clone, Deserialize)]
 struct NotificationCopy {
     title: String,
+    /// The second line macOS draws under the title; other systems leave it out.
+    #[serde(default)]
+    subtitle: Option<String>,
     body: String,
 }
 
@@ -47,8 +71,20 @@ impl NativeNotificationCatalog {
             NotificationIntent::RunSucceeded => &self.run_succeeded,
             NotificationIntent::RunFailed => &self.run_failed,
             NotificationIntent::RunCanceled => &self.run_canceled,
+            NotificationIntent::AnswerRequested => &self.answer_requested,
         }
         .clone()
+    }
+
+    /// An answerable question: where it was asked as the title, "waiting for
+    /// your answer" under it, and the message itself as the body.
+    fn render_question(&self, source: Option<String>, preview: Option<String>) -> NotificationCopy {
+        let copy = &self.answer_requested;
+        NotificationCopy {
+            title: source.clone().unwrap_or_else(|| copy.title.clone()),
+            subtitle: source.map(|_| copy.title.clone()),
+            body: preview.unwrap_or_else(|| copy.body.clone()),
+        }
     }
 
     /// With a known source the banner reads like a mail notification: where it
@@ -59,6 +95,7 @@ impl NativeNotificationCatalog {
         match source {
             Some(source) => NotificationCopy {
                 title: source,
+                subtitle: None,
                 body: copy.title,
             },
             None => copy,
@@ -281,6 +318,58 @@ impl NotificationSink for NativeSink {
         });
     }
 
+    fn deliver_answer_request(
+        &self,
+        request: AnswerRequest,
+        source: Option<String>,
+        presentation_generation: u64,
+        receipt: Arc<NotificationReceipt>,
+    ) {
+        let sink = self.clone();
+        let cleanup = receipt.clone();
+        let queued = self.app.run_on_main_thread(move || {
+            if receipt.retired() || sink.presentation_generation() != presentation_generation || !sink.gate().allows() {
+                sink.registry
+                    .lock()
+                    .expect("notification registry lock")
+                    .forget(receipt.id());
+                return;
+            }
+            let catalog = native_catalog_for_locales(sys_locale::get_locales()).notifications;
+            let copy = catalog.render_question(source.clone(), request.preview.clone());
+            #[cfg(target_os = "macos")]
+            if macos::available() {
+                macos::show_question(
+                    &receipt,
+                    copy,
+                    &request,
+                    source,
+                    presentation_generation,
+                    &catalog.answer,
+                    sink.registry.clone(),
+                );
+                receipt.posted();
+                return;
+            }
+            let _ = (&request, source);
+            if native::show(&sink.app, &receipt, copy, sink.registry.clone()).is_err() {
+                sink.registry
+                    .lock()
+                    .expect("notification registry lock")
+                    .forget(receipt.id());
+                eprintln!("The desktop notification could not be submitted to the operating system.");
+            } else {
+                receipt.posted();
+            }
+        });
+        if queued.is_err() {
+            self.registry
+                .lock()
+                .expect("notification registry lock")
+                .forget(cleanup.id());
+        }
+    }
+
     fn show_unread(&self, total: u64, presentation_generation: u64) {
         let sink = self.clone();
         let _ = self.app.run_on_main_thread(move || {
@@ -325,7 +414,17 @@ pub(crate) fn notice(app: &AppHandle, title: String, body: String) {
     {
         return;
     }
-    if native::notice(app, NotificationCopy { title, body }).is_err() {
+    if native::notice(
+        app,
+        NotificationCopy {
+            title,
+            subtitle: None,
+            body,
+        },
+        None,
+    )
+    .is_err()
+    {
         eprintln!("The desktop notification could not be submitted to the operating system.");
     }
 }
@@ -491,6 +590,7 @@ mod tests {
                 NotificationIntent::RunSucceeded,
                 NotificationIntent::RunFailed,
                 NotificationIntent::RunCanceled,
+                NotificationIntent::AnswerRequested,
             ] {
                 let copy = catalog.copy(intent);
                 assert!(!copy.title.is_empty() && !copy.body.is_empty());

@@ -137,6 +137,22 @@
       "runCanceled": {
         "title": "Run canceled",
         "body": "Background work was canceled."
+      },
+      "answerRequested": {
+        "title": "Waiting for your answer",
+        "body": "An Agent is waiting for your answer."
+      },
+      "answer": {
+        "reply": "Reply…",
+        "send": "Send",
+        "placeholder": "Reply to this conversation",
+        "notSent": "Not sent",
+        "notDelivered": "Not delivered",
+        "alreadyChoice": "Already answered \"{{choice}}\" on another device.",
+        "alreadyText": "Already answered on another device.",
+        "stale": "The conversation has moved on. Open it to see the latest before replying.",
+        "gone": "This conversation can't be opened anymore.",
+        "unavailable": "Couldn't reach this instance. Open Avibe to answer again."
       }
     },
     "pet": {
