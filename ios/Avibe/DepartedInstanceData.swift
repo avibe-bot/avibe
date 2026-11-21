@@ -114,11 +114,6 @@ final class DepartedInstanceData {
         }
     }
 
-    /// The addresses recorded for `accountID`, for tests and diagnosis.
-    func entries(accountID: String) -> [String: Entry] {
-        stored()[accountID] ?? [:]
-    }
-
     private func stored() -> [String: [String: Entry]] {
         guard
             let data = defaults.data(forKey: Self.key),
@@ -261,8 +256,8 @@ enum InstanceSiteDataCleaner {
             const registrations = await within(navigator.serviceWorker.getRegistrations());
             if (registrations === "timeout") {
               complete = false;
-            } else {
-              await within(Promise.all(registrations.map((registration) => registration.unregister())));
+            } else if (await within(Promise.all(registrations.map((registration) => registration.unregister()))) === "timeout") {
+              complete = false;
             }
           }
         } catch (error) { complete = false; }

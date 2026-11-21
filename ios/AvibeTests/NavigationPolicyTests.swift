@@ -5312,23 +5312,35 @@ extension NavigationPolicyTests {
         let one = "https://one.example"
         let two = "https://two.example"
         let hour: TimeInterval = 60 * 60
+        // The record as it is kept, read from the test's own defaults.
+        func entries(_ accountID: String) -> [String: DepartedInstanceData.Entry] {
+            guard
+                let stored = defaults.data(forKey: DepartedInstanceData.key),
+                let ledger = try? JSONDecoder().decode(
+                    [String: [String: DepartedInstanceData.Entry]].self, from: stored
+                )
+            else {
+                return [:]
+            }
+            return ledger[accountID] ?? [:]
+        }
         data.noteOpened(accountID: "a", origin: one, store: store)
         data.noteOpened(accountID: "a", origin: two, store: store)
 
         // Listed: nothing is counted.
         await data.reconcile(live: [one, two], accountID: "a")
-        XCTAssertNil(data.entries(accountID: "a")[one]?.missingSince)
+        XCTAssertNil(entries("a")[one]?.missingSince)
 
         // Missing once, and again within the day: nothing is removed.
         await data.reconcile(live: [two], accountID: "a")
-        XCTAssertEqual(data.entries(accountID: "a")[one]?.missingSince, clock)
+        XCTAssertEqual(entries("a")[one]?.missingSince, clock)
         clock += 23 * hour
         await data.reconcile(live: [two], accountID: "a")
         XCTAssertEqual(removed, [])
 
         // Listed again: it starts over.
         await data.reconcile(live: [one, two], accountID: "a")
-        XCTAssertNil(data.entries(accountID: "a")[one]?.missingSince)
+        XCTAssertNil(entries("a")[one]?.missingSince)
         clock += 2 * hour
         await data.reconcile(live: [two], accountID: "a")
         XCTAssertEqual(removed, [])
@@ -5349,12 +5361,12 @@ extension NavigationPolicyTests {
         removalSucceeds = false
         await data.reconcile(live: [two], accountID: "a")
         XCTAssertEqual(removed, ["a \(one)"])
-        XCTAssertNotNil(data.entries(accountID: "a")[one])
+        XCTAssertNotNil(entries("a")[one])
         removalSucceeds = true
         await data.reconcile(live: [two], accountID: "a")
         XCTAssertEqual(removed, ["a \(one)", "a \(one)"])
-        XCTAssertNil(data.entries(accountID: "a")[one])
-        XCTAssertNotNil(data.entries(accountID: "a")[two])
+        XCTAssertNil(entries("a")[one])
+        XCTAssertNotNil(entries("a")[two])
 
         // An empty list is one answer like any other.
         await data.reconcile(live: [], accountID: "a")
@@ -5362,14 +5374,14 @@ extension NavigationPolicyTests {
         clock += 24 * hour
         await data.reconcile(live: [], accountID: "a")
         XCTAssertEqual(removed, ["a \(one)", "a \(one)", "a \(two)"])
-        XCTAssertEqual(data.entries(accountID: "a"), [:])
+        XCTAssertEqual(entries("a"), [:])
 
         // The store changed (a sign-out, another account): its data went
         // with it, so the record goes with no removal.
         data.noteOpened(accountID: "a", origin: one, store: store)
         store = UUID()
         await data.reconcile(live: [], accountID: "a")
-        XCTAssertEqual(data.entries(accountID: "a"), [:])
+        XCTAssertEqual(entries("a"), [:])
         XCTAssertEqual(removed.count, 3)
 
         // An answer that arrives while a removal runs decides about what is
@@ -5395,9 +5407,9 @@ extension NavigationPolicyTests {
         arrives = { await during.reconcile(live: [two], accountID: "a") }
         await during.reconcile(live: [], accountID: "a")
         XCTAssertEqual(removed.filter { $0.hasPrefix("during") }, ["during \(one)"])
-        XCTAssertNil(during.entries(accountID: "a")[one])
+        XCTAssertNil(entries("a")[one])
         XCTAssertEqual(
-            during.entries(accountID: "a")[two],
+            entries("a")[two],
             DepartedInstanceData.Entry(store: store, missingSince: nil)
         )
     }
