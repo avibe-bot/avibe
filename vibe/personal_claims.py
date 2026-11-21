@@ -524,7 +524,8 @@ class RedirectClaims:
         with config_file_lock():
             record = _journal_for(claim_id)
             if record and ("binding_disposition" in record["personal_claim"]) == self.flow_type.constrained:
-                return {"state": "error", "code": "pairing_recovery_required"}
+                code = 'issuer_replay_refused' if remote_access._issuer_replay_refused(record) else 'pairing_recovery_required'
+                return {"state": "error", "code": code}
             saved = _outcome(self.flow_type.constrained)
             bound = saved.get("bound", {})
             if bound.get("claim_id") == claim_id:
@@ -641,7 +642,9 @@ class RebindClaims(RedirectClaims):
             cfg, pending = local._config(), local._pending()
             cloud = cfg.remote_access.vibe_cloud
             bound = bool(cloud.instance_id and cloud.instance_secret and cloud.backend_url)
-            state = ("pairing_recovery_required" if pending else
+            refused = remote_access._issuer_replay_refused(pending)
+            recovering = pending is not None and not refused
+            state = ("pairing_recovery_required" if recovering else
                      "binding_rejected" if bound and binding_health.rejected_at(cfg) is not None else
                      "bound" if bound else "unpaired")
             if not bound and any((cloud.instance_id, cloud.instance_secret, cloud.client_id, cloud.tunnel_token, cloud.session_secret)):
@@ -652,14 +655,14 @@ class RebindClaims(RedirectClaims):
             claim_id = flow.ticket.id if flow and flow.ticket else None
         attempt = self.state(claim_id) if claim_id else None
         active = flow and (not attempt or attempt["state"] not in ("error", "bound", "declined"))
-        unavailable = ("pairing_recovery_required" if pending and not remote_access._issuer_replay_refused(pending) else "not_bound" if not bound else
+        unavailable = ("pairing_recovery_required" if recovering else "not_bound" if not bound else
                        "operation_in_progress" if active or instance_address._journal(instance_address._binding_from_config(cfg)) is not None else None)
         eligible = (unavailable is None and (attempt or {}).get('reason_code') in _RESET_REASONS
                     and flow and flow.reset_browser is not None)
         return {"binding_state": state, "connector_still_running": remote_access._is_cloudflared_pid(remote_access._read_pid()),
                 "can_start": unavailable is None, "unavailable_reason": unavailable, "attempt": attempt,
                 "next_action": "confirm_as_new" if eligible else "rebind" if unavailable is None else None,
-                "reason_code": (attempt or {}).get("reason_code")}
+                "reason_code": (attempt or {}).get("reason_code") or ('issuer_replay_refused' if refused else None)}
 
 
 redirect_claims = RedirectClaims()

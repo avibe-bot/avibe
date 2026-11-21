@@ -1402,6 +1402,13 @@ jobs:
       - name: Verify owner-private Model Hub state
         run: python -m pytest tests/test_private_fs.py tests/test_model_hub_state_private.py -q -ra
 
+      - name: Verify shared publication leases on native Windows
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_binding_reset.py::test_two_senders_share_publication_lease --junitxml=ci-junit/publication-lease.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "import xml.etree.ElementTree as E; cases=list(E.parse('ci-junit/publication-lease.xml').iter('testcase')); assert len(cases)==1 and cases[0].get('name')=='test_two_senders_share_publication_lease' and cases[0].find('skipped') is None, 'Native Windows publication lease case missing or skipped'"
+
       # Windows byte-range locks are mandatory and per-handle, so a lock taken
       # over the bytes of a record makes that record unreadable to every other
       # handle -- including this process's own. Nothing on Linux can observe

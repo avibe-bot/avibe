@@ -202,18 +202,10 @@ def _cli_snapshot():
     if not any((cloud.instance_id, cloud.instance_secret, cloud.tunnel_token, cloud.client_id, cloud.session_secret,
                 files['identity_file'], files['pairing_file'])):
         raise ClaimError('not_bound')
+    from vibe.binding_recovery import _pair_reason
     record, error = remote._read_pending_pairing_record()
-    if not error and record and not remote._issuer_replay_refused(record) and record.get('phase') in ('prepared', 'redeemed', 'applied'):
-        stamp = _stamp(cloud)
-        if (record['phase'] != 'prepared' or record.get('redeem_request')) and stamp in (
-                record['source_fingerprint'], record.get('target_fingerprint')):
-            try:
-                identity = local._installation_id()
-            except local.LocalInstanceError:
-                identity = None
-            enrollment = record.get('personal_claim') or record.get('desktop_enrollment')
-            if not enrollment or identity and identity == enrollment['installation_id']:
-                raise ClaimError('pairing_recovery_required')
+    if _pair_reason(record, error, config) == 'exact_replay_pending':
+        raise ClaimError('pairing_recovery_required')
     return config, (_stamp(cloud), files)
 
 
@@ -245,7 +237,8 @@ def reset_interactively(*, confirm, repair=False):
             if before != after:
                 raise ClaimError('local_binding_changed')
             _seal(cfg)
-        return resume()
+        from vibe.binding_recovery import _resume_reset
+        return _resume_reset()
 
 
 def resume():

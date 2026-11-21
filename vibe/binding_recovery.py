@@ -19,7 +19,11 @@ def _pair_reason(record, error, cfg):
         return 'exact_replay_pending'
     if phase == 'prepared' and stamp == record['source_fingerprint'] and record.get('redeem_request') and not record.get('desktop_failure'):
         enrollment = record.get('personal_claim') or record.get('desktop_enrollment')
-        if enrollment and local._installation_id() == enrollment['installation_id']:
+        try:
+            installation = local._installation_id()
+        except local.LocalInstanceError:
+            installation = None  # No exact guarded replay, not proof of issuer refusal.
+        if enrollment and installation == enrollment['installation_id']:
             return 'exact_replay_pending'
     return 'pairing_record_unusable'
 
@@ -55,12 +59,9 @@ def _repair_snapshot():
     if reason is None:
         raise ClaimError('operation_in_progress')
     record, error = remote._read_pending_pairing_record()
-    if error:
-        # A malformed pairing file cannot be declared terminal on behalf of the issuer.
-        raise ClaimError('reset_repair_required')
+    # As with first consent: damaged/legacy files are part of the generation
+    # snapshot, never instructions. Protect only an actually recoverable request.
     recoverable = _pair_reason(record, error, cfg) == 'exact_replay_pending'
-    if record and not recoverable and not remote._issuer_replay_refused(record):
-        raise ClaimError('reset_repair_required')
     root_stat = root.stat()
     state_stat = marker.parent.stat()
     stamps = (str(root), root_stat.st_dev, root_stat.st_ino, state_stat.st_dev, state_stat.st_ino,
@@ -76,10 +77,27 @@ def _consents(confirm):
         return False
 
 
-def _repair(*, confirm, keep_pairing):
+def _approved_hostname(record):
+    from vibe.personal_claim_client import _HOST
+    # Personal claims retain the approved URL before dispatch. Desktop has
+    # no such proof while prepared; only use the sealed receipt after redeem.
+    personal = record.get('personal_claim') or {}
+    receipt = record.get('pairing') if record['phase'] in ('redeemed', 'applied') else None
+    url = personal.get('public_url') if personal else (receipt or {}).get('public_url')
+    if personal and receipt and receipt.get('public_url') != url:
+        return None
+    if not isinstance(url, str) or not url.startswith('https://'):
+        return None
+    host = url[len('https://'):]
+    return host if len(host) <= 253 and all(_HOST.fullmatch(label) for label in host.split('.')) else None
+
+
+def _repair(*, confirm, keep_pairing, expected_hostname=None):
     reset._require_local_terminal()
     with gate.admitted('reset'), config_file_lock():
-        _, before, _, replay = _repair_snapshot()
+        _, before, record, replay = _repair_snapshot()
+        if replay and expected_hostname is not None and expected_hostname != _approved_hostname(record):
+            raise ClaimError('local_binding_changed')
         if replay != keep_pairing:
             raise ClaimError('pairing_recovery_required' if replay else 'reset_repair_required')
         if replay:
@@ -122,20 +140,22 @@ def _resume_reset():
         view = {'state': 'reset_repair_required', 'reason_code': reason}
         try:
             with config_file_lock():
-                _, _, _, replay = _repair_snapshot()
+                _, _, record, replay = _repair_snapshot()
             if replay:
                 view['next_action'] = 'confirm_resume_pairing'
+                if hostname := _approved_hostname(record):
+                    view['hostname'] = hostname
         except (ClaimError, OSError, ValueError, local.LocalInstanceError):
             pass
         return view
 
 
-def resume_interactively(*, confirm_pairing=None):
+def resume_interactively(*, confirm_pairing=None, expected_hostname=None):
     """Try one existing operation in this process. Busy/idle never mean success."""
     reset._require_local_terminal()
     try:
         if confirm_pairing is not None:
-            result = _repair(confirm=confirm_pairing, keep_pairing=True)
+            result = _repair(confirm=confirm_pairing, keep_pairing=True, expected_hostname=expected_hostname)
             return result if result['state'] != 'declined' else {'state': 'reset_repair_required'}
         if gate.reset_in_progress():
             observed = reset._file_stamp(gate.reset_intent_path())

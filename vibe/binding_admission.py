@@ -93,9 +93,9 @@ def admitted(kind):
         if kind != 'reset' and reset_in_progress():
             raise OperationBusy()
         if kind == 'address':
-            from vibe.remote_access import _read_pending_pairing_record
+            from vibe.remote_access import _issuer_replay_refused, _read_pending_pairing_record
             record, error = _read_pending_pairing_record()
-            if record is not None or error is not None:
+            if error is not None or (record is not None and not _issuer_replay_refused(record)):
                 raise OperationBusy()
         elif kind == 'pairing':
             check_rename_admission()

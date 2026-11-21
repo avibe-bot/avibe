@@ -2339,11 +2339,11 @@ def _drive_pending_pairing() -> tuple[bool, int]:
     record, error = _read_pending_pairing_record()
     if error:
         return True, 60
-    if record is None:
-        return False, 0
+    if record is None or _issuer_replay_refused(record):
+        return False, 0  # A terminal outcome remains readable, but owns no worker.
     if record['phase'] == 'prepared' and record.get('redeem_request') and (
         record.get('personal_claim') or record.get('desktop_enrollment')
-    ) and not record.get('desktop_failure') and not _issuer_replay_refused(record):
+    ) and not record.get('desktop_failure'):
         result = _retry_installation_pairing(record)
     elif record['phase'] in ('redeemed', 'applied'):
         result = _persist_pairing(None, device_name=record['device_name'], operation_id=record['operation_id'])
@@ -6359,6 +6359,10 @@ def _redeem_pairing_claim(
         # This answer is about the exact constrained request. It says no
         # more replay, NOT that the issuer never committed or rolled back.
         code = exc.payload.get('error')
+        if exc.status == 400 and code == 'pairing_key_expired' and claim.get('redeem_request'):
+            # The issuer proves this key was never consumed. No ambiguous
+            # outcome to keep (Desktop still retains its enrollment reservation).
+            return _pairing_failure_after_claim(claim, failure)
         if ((claim.get('personal_claim') or {}).get('binding_disposition') in ('existing', 'new')
                 and ((exc.status == 409 and code == 'registration_indeterminate') or
                      (exc.status in (400, 401, 403, 404, 409, 410, 422)

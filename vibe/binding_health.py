@@ -45,7 +45,7 @@ def _set(config: V2Config, *, rejected: bool) -> None:
             return
         from vibe import remote_access
         journal, error = remote_access._read_pending_pairing_record()
-        if error or journal:
+        if error or (journal and not remote_access._issuer_replay_refused(journal)):
             return  # An exact redeem may already have committed; recovery owns this verdict.
         if rejected:
             if rejected_at(current) is None:

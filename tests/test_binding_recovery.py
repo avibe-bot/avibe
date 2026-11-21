@@ -21,7 +21,7 @@ def _attempt(cfg, ident, *, pending=None):
 
 
 @pytest.mark.parametrize('status,code,terminal', [(409, 'registration_indeterminate', True),
-    (400, 'pairing_key_expired', True), (503, 'registration_indeterminate', False),
+    (400, 'invalid_pairing_key', True), (503, 'registration_indeterminate', False),
     (409, 'pairing_redeem_pending', False), (409, 'unknown', False)])
 def test_exact_refusal_requires_new_explicit_handoff(cli_host, monkeypatch, status, code, terminal):
     cfg = V2Config.load()
@@ -40,7 +40,23 @@ def test_exact_refusal_requires_new_explicit_handoff(cli_host, monkeypatch, stat
     if terminal:
         assert claims._BoundSource.load(None).revision == local.claim_revision(cfg, ident, old)
         assert reset.reset_interactively(confirm=lambda: False) == {'state': 'declined'}
-        assert remote._drive_pending_pairing() == (True, 60) and len(sends) == 1
+        assert remote._drive_pending_pairing() == (False, 0) and len(sends) == 1
+        from vibe import binding_health
+        with gate.admitted('address'):
+            pass
+        # Read through the same routes used by the page, including after service restart.
+        from vibe import ui_server
+        monkeypatch.setattr(claims, 'rebind_claims', claims.RebindClaims())
+        browser = ui_server.app.test_client()
+        base = '/api/remote-access/rebind'
+        view = browser.get(base).get_json()
+        assert view['binding_state'] == 'bound' and view['reason_code'] == 'issuer_replay_refused' and view['can_start']
+        assert view['next_action'] == 'rebind'
+        claim = browser.get(base + '/claims/' + old['personal_claim']['claim_id']).get_json()
+        assert claim == {'state': 'error', 'code': 'issuer_replay_refused'}
+        binding_health._set(cfg, rejected=True)
+        assert claims.RebindClaims().overview()['binding_state'] == 'binding_rejected'
+        binding_health._set(cfg, rejected=False)
         # Use the product's actual Off operation before explicit replacement.
         monkeypatch.setattr(remote, '_stop_connector', lambda *_: {'ok': True})
         monkeypatch.setattr(remote, '_record_device_access_switch', lambda *_: None)
@@ -54,6 +70,19 @@ def test_exact_refusal_requires_new_explicit_handoff(cli_host, monkeypatch, stat
         assert sends[0] == sends[1]
         with pytest.raises(ClaimError, match='pairing_recovery_required'):
             claims._BoundSource.load(None)
+
+
+def test_unconsumed_expired_key_leaves_no_journal(cli_host, monkeypatch):
+    cfg = V2Config.load()
+    ident = local.ensure_installation_id()
+    def expired(*args, **kwargs):
+        raise remote.BackendRequestError(400, {'error': 'pairing_key_expired'})
+    monkeypatch.setattr(remote, '_json_request', expired)
+    assert _attempt(cfg, ident)['error'] == 'pairing_key_expired'
+    assert remote._read_pending_pairing_record() == (None, None)
+    assert claims.RebindClaims().overview()['binding_state'] == 'bound'
+    assert recovery.resume_interactively() == {'state': 'idle'}
+    assert local._installation_id() == ident and V2Config.load().remote_access.vibe_cloud == cfg.remote_access.vibe_cloud
 
 
 @pytest.mark.parametrize('damage,reason', [('record','reset_record_damaged'), ('config','binding_changed'), ('file','files_changed')])
@@ -101,14 +130,27 @@ def test_damaged_reset_protects_exact_pair_over_reset(cli_host, monkeypatch):
     monkeypatch.setattr(remote, '_json_request', issuer)
     assert not _attempt(cfg, ident)['ok']
     gate.reset_intent_path().write_text('{')
-    assert recovery.resume_interactively()['next_action'] == 'confirm_resume_pairing'
+    keep = recovery.resume_interactively()
+    assert keep == {'state': 'reset_repair_required', 'reason_code': 'reset_record_damaged',
+                    'next_action': 'confirm_resume_pairing', 'hostname': 'fixture.avibe.bot'}
+    assert recovery.resume_interactively(confirm_pairing=lambda: pytest.fail('different host than displayed'),
+              expected_hostname='other.invalid')['state'] == 'reset_repair_required'
     with pytest.raises(ClaimError, match='pairing_recovery_required'):
         reset.reset_interactively(repair=True, confirm=lambda: pytest.fail('wrong consent'))
     assert recovery.resume_interactively(confirm_pairing=lambda: False)['state'] == 'reset_repair_required'
     assert gate.reset_in_progress() and len(sends) == 1
-    assert recovery.resume_interactively(confirm_pairing=lambda: True) == {'state':'bound'}
+    assert recovery.resume_interactively(confirm_pairing=lambda: True, expected_hostname=keep['hostname']) == {'state':'bound'}
     assert len(sends) == 2 and sends[0] == sends[1] and not gate.reset_in_progress()
     assert local._installation_id() == ident and remote._read_pending_pairing_record() == (None, None)
+
+
+@pytest.mark.parametrize('url', [None, 'http://example.test', 'https://user@example.test',
+                                 'https://example.test/path', 'https://example.test\n'])
+def test_keep_prompt_omits_unusable_targets(url):
+    record = {'phase': 'redeemed', 'pairing': {'public_url': url}}
+    assert recovery._approved_hostname(record) is None
+    # An unsealed field in a prepared Desktop request is not evidence of approval.
+    assert recovery._approved_hostname({'phase': 'prepared', 'pairing': {'public_url': 'https://other.test'}}) is None
 
 
 @pytest.mark.parametrize('old', ['truncated', 'other-instance', 'other-schema'])
@@ -146,12 +188,31 @@ def test_reset_removes_local_remote_rows_even_after_config_was_cleared(cli_host)
             assert not conn.execute(select(table)).first()
 
 
-def test_no_reset_consent_if_scope_or_pairing_is_unreadable(cli_host):
+@pytest.mark.parametrize('damage', ['unreadable', 'old-format', 'source-changed', 'identity-damaged'])
+def test_damaged_pair_and_unusable_reset_require_fresh_consent(cli_host, monkeypatch, damage):
+    cfg = V2Config.load()
+    ident = local.ensure_installation_id()
+    sends = []
+    def offline(*args, **kwargs):
+        sends.append(True)
+        raise TimeoutError
+    monkeypatch.setattr(remote, '_json_request', offline)
+    assert not _attempt(cfg, ident)['ok']
+    if damage == 'unreadable':
+        remote._pending_pairing_path().write_text('{')
+    elif damage == 'old-format':
+        remote._write_pending_pairing_record(remote._new_pairing_claim(cfg, 'https://backend.test', 'test'))
+    elif damage == 'source-changed':
+        cfg.remote_access.vibe_cloud.instance_secret = 'changed-key'
+        cfg.save()
+    else:
+        local._identity_path().write_text('{')
     gate.reset_intent_path().write_text('{')
-    remote._pending_pairing_path().write_text('{')
-    with pytest.raises(ClaimError, match='reset_repair_required'):
-        reset.reset_interactively(repair=True, confirm=lambda: pytest.fail('cannot authorize unknown scope'))
-    assert gate.reset_in_progress() and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    assert 'next_action' not in recovery.resume_interactively()
+    assert reset.reset_interactively(repair=True, confirm=lambda: False) == {'state': 'declined'}
+    assert gate.reset_in_progress() and remote._pending_pairing_path().is_file()
+    assert reset.reset_interactively(repair=True, confirm=lambda: True) == {'state': 'unpaired'}
+    assert len(sends) == 1 and not local._identity_path().exists() and not gate.reset_in_progress()
 
 
 def _hold_admission(pipe):
@@ -186,10 +247,9 @@ def test_cli_never_claims_worker_completion_or_waits_on_other_process(cli_host):
 
 
 def test_stop_busy_keeps_retryable_reset(cli_host, monkeypatch):
-    with gate.admitted('reset'), config_file_lock():
-        reset._seal(V2Config.load())
     with monkeypatch.context() as patch:
         patch.setattr(remote, 'stop', lambda *_: {'ok':False, 'error':'remote_access_busy'})
+        assert reset.reset_interactively(confirm=lambda: True) == {'state':'resetting'}
         assert recovery.resume_interactively() == {'state':'resetting'}
         assert reset._read()['phase'] == 'retire'
     assert recovery.resume_interactively() == {'state':'unpaired'}
