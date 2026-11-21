@@ -5014,7 +5014,7 @@ def test_cmd_remote_setup_shows_existing_pairing_without_prompt(monkeypatch, cap
     output = capsys.readouterr().out
     assert "Remote access is already configured." in output
     assert "https://alex.avibe.bot" in output
-    assert "vibe remote pair" in output
+    assert "vibe remote rebind" in output and "vibe remote pair" not in output
 
 
 def test_cmd_remote_pair_maps_invalid_key_to_user_action(monkeypatch, capsys):

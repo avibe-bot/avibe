@@ -75,6 +75,7 @@ Remote access:
 - `vibe remote pair <key>` — pair using an existing one-time key
 - `vibe remote status [--json]` — show tunnel + OIDC state
 - `vibe remote start` / `vibe remote stop` — manage the cloudflared tunnel after pairing
+- `vibe remote rebind` — bind this computer again. The user runs it by hand in a terminal on that computer; it refuses an Agent, a Task, a script or a pipe. See [Remote access](remote-access.md).
 
 Screenshots:
 

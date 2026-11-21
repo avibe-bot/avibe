@@ -565,6 +565,16 @@ scenarios:
     backend: shared
     scope: same_service_instance
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_same_service_instance_native_login_conflict_is_localized
+  - id: AUTH-SETUP-212
+    name: A bound computer is reset at the terminal only on a typed yes, then bound only after the account and domain shown are accepted
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: personal-claims
+    test: tests/test_remote_rebind_cli.py::test_yes_resets_then_binds_only_after_the_account_and_domain_are_accepted
+    supporting_tests:
+      - tests/test_remote_rebind_cli.py
+      - tests/test_binding_reset.py
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
