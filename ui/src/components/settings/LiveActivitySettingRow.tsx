@@ -11,7 +11,7 @@ import { SettingsRow, ToggleSwitch } from './SettingsPrimitives';
 /** ui/design: settings/live-activity/off, on, system-off (device-local, owned by the App). */
 export function LiveActivitySettingRow() {
   const { t } = useTranslation();
-  const supported = hasNativeCapability('liveActivities', 2);
+  const supported = hasNativeCapability('lockScreenProgress');
   const [setting, setSetting] = useState<NativeLiveActivitySetting | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);

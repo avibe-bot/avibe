@@ -3,7 +3,7 @@ import { hasNativeCapability, nativeLiveActivityObserve, type NativeLiveActivity
 
 /** The App owns activity lifetime; the page only reports the conversation on screen. */
 export function useLiveActivityObservation(observation: NativeLiveActivityObservation) {
-  const supported = hasNativeCapability('liveActivities', 2);
+  const supported = hasNativeCapability('lockScreenProgress');
   const last = useRef<string | null>(null);
   const send = useCallback((next: NativeLiveActivityObservation) => {
     if (!supported) return;

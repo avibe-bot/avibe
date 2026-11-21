@@ -4,22 +4,22 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { useLiveActivityObservation } from './useLiveActivityObservation';
 
 const observation = { sessionId: 'ses_a', agentName: '首席安全官', sessionTitle: '依赖审计 🔒', running: true };
-function shell(version: number) {
+function shell(capabilities: Record<string, number>) {
   const call = vi.fn(async (_method: string, _params?: Record<string, unknown>) => ({ ok: true }));
-  vi.stubGlobal('avibeNative', { contract: 1, platform: 'ios', shellVersion: 'test', capabilities: { liveActivities: version }, call, on: () => () => {} });
+  vi.stubGlobal('avibeNative', { contract: 1, platform: 'ios', shellVersion: 'test', capabilities, call, on: () => () => {} });
   return call;
 }
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it.each([0, 1])('does not observe on capability version %s', (version) => {
-  const call = shell(version);
+it.each([{}, { liveActivities: 1 }, { liveActivities: 2 }, { lockScreenProgress: 0 }])('does not observe with capabilities %j', (capabilities) => {
+  const call = shell(capabilities);
   const view = renderHook(() => useLiveActivityObservation(observation));
   view.unmount();
   expect(call).not.toHaveBeenCalled();
 });
 
 it('observes changed fields once, preserves Unicode and clears on departure', () => {
-  const call = shell(2);
+  const call = shell({ lockScreenProgress: 1 });
   const view = renderHook((props) => useLiveActivityObservation(props), { initialProps: observation });
   expect(call).toHaveBeenCalledExactlyOnceWith('liveActivity.observe', observation);
   view.rerender({ ...observation });
@@ -38,7 +38,7 @@ it('observes changed fields once, preserves Unicode and clears on departure', ()
 });
 
 it('deduplicates a cleared observation and accepts a Bot without a title', async () => {
-  const call = shell(2);
+  const call = shell({ lockScreenProgress: 1 });
   const view = renderHook((props: Parameters<typeof useLiveActivityObservation>[0]) => useLiveActivityObservation(props), {
     initialProps: { ...observation, sessionTitle: null },
   });

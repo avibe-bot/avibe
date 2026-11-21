@@ -9,7 +9,7 @@ export type NativeCapability =
   | 'haptics'
   | 'instancePresentation'
   | 'keyboardResizesViewport'
-  | 'liveActivities'
+  | 'lockScreenProgress'
   | 'notifications'
   | 'push'
   | 'systemSchedule'
@@ -177,10 +177,9 @@ async function callNative<T>(
   capability: NativeCapability,
   method: string,
   params: Record<string, unknown> = {},
-  minimumVersion = 1,
 ): Promise<T | null> {
   const native = bridge();
-  if (!native || (native.capabilities[capability] ?? 0) < minimumVersion) return null;
+  if (!native || (native.capabilities[capability] ?? 0) < 1) return null;
   return native.call<T>(method, params);
 }
 
@@ -1161,17 +1160,17 @@ export type NativeLiveActivityObservation = {
 } | { sessionId: null };
 
 export function nativeLiveActivitySetting() {
-  return callNative<NativeLiveActivitySetting>('liveActivities', 'liveActivity.setting', {}, 2);
+  return callNative<NativeLiveActivitySetting>('lockScreenProgress', 'liveActivity.setting');
 }
 
 export function nativeLiveActivitySetSetting(enabled: boolean) {
-  return callNative<NativeLiveActivitySetting>('liveActivities', 'liveActivity.setSetting', { enabled }, 2);
+  return callNative<NativeLiveActivitySetting>('lockScreenProgress', 'liveActivity.setSetting', { enabled });
 }
 
 export function nativeLiveActivityObserve(observation: NativeLiveActivityObservation) {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.observe', observation, 2);
+  return callNative<{ ok: true }>('lockScreenProgress', 'liveActivity.observe', observation);
 }
 
 export function nativeLiveActivityOpenSettings() {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.openSettings', {}, 2);
+  return callNative<{ ok: true }>('lockScreenProgress', 'liveActivity.openSettings');
 }

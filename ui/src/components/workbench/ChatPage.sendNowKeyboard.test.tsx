@@ -335,12 +335,12 @@ function SessionLinks() {
 }
 it.each([
   { version: 0, prefix: 'session-' }, { version: 1, prefix: 'session-' },
-  { version: 2, prefix: 'session-' }, { version: 2, prefix: 'ses_' },
+  { version: 2, prefix: 'session-' }, { version: 1, prefix: 'ses_' },
 ])('leaves no chat nodes behind when switching $prefix sessions on shell capability $version', async ({ version, prefix }) => {
   const call = vi.fn(async (_method: string, _params?: Record<string, unknown>) => ({ ok: true }));
   vi.stubGlobal('avibeNative', {
     contract: 1, platform: 'ios', shellVersion: 'test',
-    capabilities: { liveActivities: version }, call, on: () => () => {},
+    capabilities: { lockScreenProgress: version }, call, on: () => () => {},
   });
   mocks.api.getSessionBootstrap.mockImplementation(async (id: string) => ({
     ...bootstrap, session: { ...bootstrap.session, id, title: `Title ${id}` },
@@ -362,13 +362,13 @@ it.each([
     expect(screen.queryByText(/liveActivity\./)).toBeNull();
     expect(view.container.querySelectorAll('*')).toHaveLength(nodeCount);
   }
-  if (version < 2) expect(call).not.toHaveBeenCalled();
+  if (version < 1) expect(call).not.toHaveBeenCalled();
   else expect(call).toHaveBeenLastCalledWith('liveActivity.observe', {
     sessionId: `${prefix}b`, agentName: prefix === 'ses_' ? `Title ${prefix}b` : 'vibey',
     sessionTitle: prefix === 'ses_' ? null : `Title ${prefix}b`, running: true,
   });
   view.unmount();
-  if (version >= 2) expect(call).toHaveBeenLastCalledWith('liveActivity.observe', { sessionId: null });
+  if (version >= 1) expect(call).toHaveBeenLastCalledWith('liveActivity.observe', { sessionId: null });
 });
 
 // Settings keeps the chat mounted underneath its route surface. Leaving that
@@ -377,7 +377,7 @@ it('clears the observation while Settings covers the retained chat and restores 
   const call = vi.fn(async (_method: string, _params?: Record<string, unknown>) => ({ ok: true }));
   vi.stubGlobal('avibeNative', {
     contract: 1, platform: 'ios', shellVersion: 'test',
-    capabilities: { liveActivities: 2 }, call, on: () => () => {},
+    capabilities: { lockScreenProgress: 1 }, call, on: () => () => {},
   });
   const page = (active: boolean) => <MemoryRouter initialEntries={[`/chat/${SESSION}`]}>
     <RouteSurfaceActiveContext.Provider value={active}>
