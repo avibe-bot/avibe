@@ -810,9 +810,20 @@ final class NativeHoldCapture {
     private func end(reason: String?) {
         guard let take = running else { return }
         running = nil
-        // The input stops here; what it had already sent is still queued
-        // for the main actor, and belongs to this take.
-        audio.stop()
+        closing[take.id] = take
+        // The input stops here. What it sent before it had stopped is still
+        // on its way to the main actor and belongs to this take: the rest
+        // of its audio and `ended` go once it has stopped (a hold's input
+        // stops on its own queue, a moment after this).
+        audio.stop { [weak self, afterQueued] in
+            afterQueued {
+                MainActor.assumeIsolated {
+                    self?.closing[take.id] = nil
+                    take.flush()
+                    take.deliver(.ended(reason: reason))
+                }
+            }
+        }
         if take.hold != nil, !take.adopted {
             // No page took it: what it recorded never leaves memory.
             take.detached = true
@@ -827,14 +838,6 @@ final class NativeHoldCapture {
             if take.adopted, !take.detached {
                 // For the page's own trace of this take.
                 sendHoldEvent(take.webView, ["phase": "timings", "take": take.id, "timings": hold.timings.fields])
-            }
-        }
-        closing[take.id] = take
-        afterQueued { [weak self] in
-            MainActor.assumeIsolated {
-                self?.closing[take.id] = nil
-                take.flush()
-                take.deliver(.ended(reason: reason))
             }
         }
     }
@@ -1071,7 +1074,10 @@ protocol NativeHoldCaptureAudio: AnyObject {
         onPCM: @escaping @MainActor (Data) -> Void,
         onEnd: @escaping @MainActor (String) -> Void
     ) throws -> NativeHoldCapture.Timings
-    func stop()
+    /// Stops the input. `stopped` runs on the main actor once it has
+    /// stopped and can send no more audio: at once for an input stopped
+    /// here, later for one stopped on its own queue.
+    func stop(stopped: @escaping @MainActor () -> Void)
 }
 
 /// 16 kHz mono Int16 from whatever the input delivers.
@@ -1274,16 +1280,23 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
         return .success(.init(armed: armedNow, startMs: startMs))
     }
 
-    func takeDown(deactivate: Bool) {
+    /// `stopped` runs once the input can send no more audio, before the
+    /// session is deactivated (which can take a while).
+    func takeDown(deactivate: Bool, stopped: (() -> Void)? = nil) {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
+        armed = nil
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        // After the engine has stopped: what it sent until then is the
+        // take's, and nothing reaches this sink again.
         sink?.set(nil)
         sink = nil
-        armed = nil
-        guard let engine else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        self.engine = nil
+        stopped?()
+        guard engine != nil else { return }
+        engine = nil
         guard deactivate else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -1342,7 +1355,7 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
     }
 
     func disarm() {
-        takeDownHeld()
+        takeDownHeld(stopped: nil)
     }
 
     func settle() {
@@ -1350,13 +1363,22 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
         queue.sync {}
     }
 
-    private func takeDownHeld() {
-        guard heldInUse else { return }
+    /// Asks for the held input's takedown; false when there is none (and
+    /// `stopped` is the caller's to run).
+    @discardableResult
+    private func takeDownHeld(stopped: (@MainActor () -> Void)?) -> Bool {
+        guard heldInUse else { return false }
         heldInUse = false
         held.askTakedown()
         // An Action Button take that has the session now keeps it.
         let deactivate = !VoiceCaptureAudioState.active
-        queue.async { [held] in held.takeDown(deactivate: deactivate) }
+        queue.async { [held] in
+            held.takeDown(deactivate: deactivate, stopped: stopped.map { stopped in
+                // After whatever the input sent to the main queue before it stopped.
+                { DispatchQueue.main.async { MainActor.assumeIsolated { stopped() } } }
+            })
+        }
+        return true
     }
 
     nonisolated static func configure() throws {
@@ -1448,8 +1470,11 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
         return .init(activateMs: activateMs, engineMs: Self.ms(since: engineStart), categoryMs: categoryMs)
     }
 
-    func stop() {
-        takeDownHeld()
+    func stop(stopped: @escaping @MainActor () -> Void) {
+        // A hold's input stops on its queue and says so from there; a
+        // page-started take's stops here.
+        let heldStops = takeDownHeld(stopped: stopped)
+        defer { if !heldStops { stopped() } }
         guard engine != nil || !observers.isEmpty else { return }
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
