@@ -6652,6 +6652,8 @@ def make_session_cookie(
     *,
     session_claims: Mapping[str, Any],
     device_headers: Mapping[str, str] | None = None,
+    account_session_ref: str | None = None,
+    account_enroll_before: int | None = None,
 ) -> str:
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
@@ -6699,7 +6701,8 @@ def make_session_cookie(
         _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
     }
     cookie = _encode_session_cookie(cloud.session_secret, payload)
-    register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True)
+    register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True,
+                            account_session_ref=account_session_ref, account_enroll_before=account_enroll_before)
     return cookie
 
 
@@ -6710,13 +6713,16 @@ def device_binding(config: V2Config) -> str:
     return binding_key(cloud.instance_id, cloud.session_secret)
 
 
-def register_device_session(config, identity, claims, headers, *, fresh=False):
+def register_device_session(config, identity, claims, headers, *, fresh=False, account_session_ref=None, account_enroll_before=None):
+    from vibe.account_session_revoke import pairing_epoch
     from storage import device_registry
     from vibe.device_metadata import describe
 
     device_registry.record_session(
         device_binding(config), identity, claims['vibe_instance_role'], describe(headers),
         expires_at=identity['auth_time'] + SESSION_ABSOLUTE_TTL_SECONDS, now=int(time.time()), fresh=fresh,
+        epoch=pairing_epoch(config) if account_session_ref else None, reference=account_session_ref,
+        account_enroll_before=account_enroll_before,
     )
 
 

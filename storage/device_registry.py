@@ -110,7 +110,8 @@ def prune(conn, now):
     )
 
 
-def record_session(binding, identity, role, metadata, *, expires_at, now, fresh):
+def record_session(binding, identity, role, metadata, *, expires_at, now, fresh, epoch=None, reference=None,
+                   account_enroll_before=None):
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
     sid, subject = identity["browser_session_id"], identity["sub"]
@@ -150,6 +151,12 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh)
             )
             .on_conflict_do_nothing(index_elements=["session_id"])
         )
+        if fresh and reference:
+            from storage.device_account_signout import AccountSessionSignedOut, enroll
+            import time
+            if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
+                raise AccountSessionSignedOut('account_session_signed_out')
+            enroll(conn, sid=sid, subject=subject, epoch=epoch, reference=reference, expires_at=expires_at)
 
 
 def describe_self(binding, subject, sid, report, now):
@@ -315,7 +322,7 @@ def revoke_sid(conn, sid, expiry, now):
     conn.execute(sessions.delete().where(sessions.c.session_id == sid))
 
 
-def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
+def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, delegate=False):
     """One atomic selection + revocation; None device means the caller's bulk scope."""
     stmt = select(sessions.c.session_id, sessions.c.expires_at).where(
         sessions.c.binding == binding,
@@ -357,6 +364,10 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
             keeper.push_id if keeper else None,
             now,
         )
+        from storage.device_account_signout import stage
+        results = stage(conn, binding=binding, actor=subject, delegate=delegate, caller=caller,
+                        keeper_device=keeper.device_id if keeper else None, target=device_id,
+                        selection=stmt.whereclause, push_devices=stopped, now=now)
         if ids:
             from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
@@ -379,4 +390,4 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
             )
             conn.execute(sessions.delete().where(stmt.whereclause))
         prune(conn, now)
-    return ids, visible_count, stopped
+    return ids, visible_count, results

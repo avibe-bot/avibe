@@ -8915,8 +8915,10 @@ def remote_access_login():
 
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
+    from storage.device_account_signout import AccountSessionSignedOut
     from vibe import remote_access
 
+    callback_started = int(time.time())
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
         return jsonify({"error": "remote_access_not_enabled"}), 400
@@ -8991,6 +8993,7 @@ def remote_access_auth_callback():
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
+    from vibe.account_session_revoke import verified_reference
     try:
         session_cookie = remote_access.make_session_cookie(
             config,
@@ -8998,7 +9001,11 @@ def remote_access_auth_callback():
             str(claims.get("sub", "")),
             session_claims=session_claims,
             device_headers=request.headers,
+            account_session_ref=verified_reference(claims),
+            account_enroll_before=callback_started + remote_access.OAUTH_HANDSHAKE_TTL_SECONDS,
         )
+    except AccountSessionSignedOut:
+        return _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
     except Exception as exc:
         _log_oauth_callback_failure("session_cookie", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
@@ -9052,7 +9059,7 @@ def device_list():
     if viewer is None:
         config = _load_remote_access_config()
         if config and not config.remote_access.vibe_cloud.is_runtime_paired() and _is_setup_host_request(config):
-            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None})
+            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': []})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
@@ -9072,7 +9079,12 @@ def device_list():
             group = 'mine' if is_mine else 'others'
         row['group'] = group
         groups[group].append(row)
-    return jsonify({**groups, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+    from storage.device_account_signout import recent
+    from storage.db import get_cached_sqlite_engine
+    with get_cached_sqlite_engine().connect() as conn:
+        history = recent(conn, binding, subject, owner, int(time.time()))
+    return jsonify({**groups, 'recent_sign_outs': history,
+                    'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
 
 
 @app.route('/api/devices/self', methods=['POST'])
@@ -9111,15 +9123,18 @@ def device_sign_out(device_id=None):
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
     try:
-        ids, count, stopped = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
-                                      now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
+        context = _request_authorization_context()
+        delegate = bool(binding and owner and (not caller or context.instance_access_source == 'owner'))
+        ids, count, results = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+                                      now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
+                                      delegate=delegate)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
-    if device_id is not None and not (ids or stopped):
+    if device_id is not None and not (ids or results):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
-    response = jsonify({'ok': True, 'revoked_sessions': count})
+    response = jsonify({'ok': True, 'revoked_sessions': count, 'sign_out_results': results})
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
@@ -19981,6 +19996,29 @@ async def _stop_inbox_bridge() -> None:
             logger.debug("inbox bridge shutdown raised", exc_info=True)
 
 
+_account_signout_task: asyncio.Task | None = None
+
+
+async def _start_account_signout_worker():
+    from vibe.account_signout_worker import serve
+    global _account_signout_task
+    if _account_signout_task is None or _account_signout_task.done():
+        _account_signout_task = asyncio.create_task(serve(_load_remote_access_config), name='account-session-sign-out')
+
+
+async def _stop_account_signout_worker():
+    global _account_signout_task
+    task, _account_signout_task = _account_signout_task, None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app.add_event_handler('startup', _start_account_signout_worker)
+app.add_event_handler('shutdown', _stop_account_signout_worker)
 app.add_event_handler("startup", _start_direct_lifecycle)
 app.add_event_handler("shutdown", _stop_direct_lifecycle)
 app.add_event_handler("startup", _start_inbox_bridge)
