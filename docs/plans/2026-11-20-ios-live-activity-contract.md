@@ -8,7 +8,7 @@ Status: **FROZEN** for implementation on 2026-11-20. Owner decisions (Max, 2026-
 - with it on, leaving the App while the open conversation's Turn runs shows that Turn;
 - a Turn dismissed from the Lock Screen is not shown again.
 
-This amendment replaces §1 steps 1–2, §2.2, and the start rules of §2.3. The Runtime is unchanged: §4.4 already keeps one `tracking` row per device (`push_registration_id`), and two devices tracking the same Turn each keep their own row. The relay (§3), the vectors, and every other rule are unchanged.
+This amendment replaces §1 steps 1–2, §2.2, the start rules of §2.3, and §4.3's Web-entry bullet. The Runtime is unchanged: §4.4 already keeps one `tracking` row per device (`push_registration_id`), and two devices tracking the same Turn each keep their own row. The relay (§3), the vectors, and every other rule are unchanged.
 
 Vectors shared byte for byte by every lane: `tests/fixtures/live_activity/contract_vectors.json`. Reference rules and the vector checks: `tests/test_live_activity_contract.py`. Design frames: `ui/design: ios/live-activity/*`.
 
@@ -49,9 +49,9 @@ struct TurnActivityAttributes: ActivityAttributes {
 - `ContentState` decoding must accept every `content-state` in `relay_cases` (an iOS test decodes each `apns.body_utf8`). Adding a phase is a contract amendment, because an older App cannot decode an unknown case.
 - The session title is captured when tracking starts and is **not** updated afterwards; attributes are immutable. Following a rename would require the title to travel in `content-state` through the relay and APNs in the clear. That is out of scope.
 
-### 2.2 Bridge (Web ↔ App), capability `liveActivities: 2`
+### 2.2 Bridge (Web ↔ App), capability `lockScreenProgress: 1`
 
-Version 1 (`status`, `start`, `stop`, and the in-conversation entry) is retired. The Web uses the methods below only when the shell announces `liveActivities` at version 2 or later. A shell that announces version 1 (TestFlight builds before #4125), or no version (from #4125 on), gets no setting row and no observation. The App answers every version-1 method with `unsupported`.
+The `liveActivities` capability and its methods (`status`, `start`, `stop`, and the in-conversation entry) are retired. **The App never announces `liveActivities` again, at any version.** An older instance's Web bundle still renders its entry whenever that capability is present at version 1 or higher, so announcing it would bring the entry back. The new behavior uses a capability of its own, `lockScreenProgress: 1`: the Web uses the methods below only when the shell announces it, and old bundles do not know it. The App answers `liveActivity.status`, `liveActivity.start`, and `liveActivity.stop` with `unsupported`, for any page that still calls them.
 
 | Method | Params | Result |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ Version 1 (`status`, `start`, `stop`, and the in-conversation entry) is retired.
 Examples are the `bridge_v2` vectors. The `bridge` vectors are version 1 and are kept only as a record.
 
 **Web rules:**
-- Settings › Notifications shows one row when the capability is at version 2 or later: a switch bound to `setting` and `setSetting`. When `systemEnabled` is false, the switch is disabled and the row shows the existing system-off line with the existing Settings button (`openSettings`).
+- Settings › Notifications shows one row when the shell announces `lockScreenProgress`: a switch bound to `setting` and `setSetting`. When `systemEnabled` is false, the switch is disabled and the row shows the existing system-off line with the existing Settings button (`openSettings`).
 - The conversation page renders no Lock Screen element of any kind. A hook with no DOM sends `observe` whenever `sessionId`, `agentName`, `sessionTitle`, or `running` changes, and `{sessionId: null}` when the conversation page goes away. It skips a call identical to the last one and does not depend on the setting.
 - The page passes the title it shows in the conversation header (`null` for a Bot's session).
 - ChatPage tests fail on any React duplicate-key warning: the stacked copies came from two siblings sharing `key={sessionId}`.
@@ -250,7 +250,7 @@ Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`,
   - at `expires_at = requested_at + 28800`, the system's eight-hour limit, without a push.
 - **Restart:** tracking resumes from the table. A pending state is sent, and otherwise a send happens only if the phase differs from `last_phase`; the pending state is part of the row, so it survives a restart.
 - Sending reuses the VAPID signing of `send_badge_update` and posts the body of §3.2 exactly.
-- The Web entry and its zh/en copy are part of this lane (`ui/src/i18n`).
+- The Web side of this lane is the setting row and the observation hook of §2.2, with their zh/en copy in `ui/src/i18n`. The in-conversation entry is retired (Amendment 1).
 
 ### 4.4 Tracking row lifecycle
 

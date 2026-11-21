@@ -791,7 +791,7 @@
   ],
   "bridge_v2": {
     "capability": {
-      "liveActivities": 2
+      "lockScreenProgress": 1
     },
     "setting_result": {
       "enabled": false,
@@ -826,6 +826,7 @@
       "liveActivity.status",
       "liveActivity.start",
       "liveActivity.stop"
-    ]
+    ],
+    "retired_capability": "liveActivities"
   }
 }

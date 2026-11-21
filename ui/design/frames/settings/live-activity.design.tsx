@@ -1,21 +1,16 @@
-// Settings › Notifications on the iPhone App with the Lock Screen progress setting (I5 Amendment 1,
-// docs/plans/2026-11-20-ios-live-activity-contract.md §2.2): one device-only switch in the
-// "this device" panel, off by default, shown only when the shell offers `liveActivities` at
-// version 2. With it on, leaving the App while the open conversation's Turn runs shows that Turn
-// (ui/design: ios/live-activity/*). The conversation page carries no entry. The page's other
-// panels are unchanged and not redrawn here.
+// Settings › Notifications on the iPhone App: the Lock Screen progress setting (I5 Amendment 1,
+// docs/plans/2026-11-20-ios-live-activity-contract.md §2.2). It is one device-only switch, added as the
+// last row of the page's "this device" panel, off by default, and shown only when the shell announces
+// `lockScreenProgress`. With it on, leaving the App while the open conversation's Turn runs shows that
+// Turn (ui/design: ios/live-activity/*). The conversation page carries no entry. As with App Lock
+// (ui/design: app-lock/settings/*), the proposed row is drawn alone in the page shell; the page's
+// shipped panels and rows are unchanged and are not redrawn.
 import { frames } from '../../frame';
 import { NotificationsDevicePanel, type LockScreenSettingState } from '../../kit/live-activity';
 import { IOS_APP_CAPABILITIES, IPHONE_17_PRO } from '../../shell/fixtures';
 import { settingsFixtures, settingsPage } from './fixtures';
 
-const fixtures = settingsFixtures(
-  {
-    '/api/web-push/status': { ok: true, configured: true, public_key: 'BDesignVapidPublicKey', subscription_count: 1, current_subscription_enabled: true },
-    '/api/web-push/vapid-public-key': { ok: true, public_key: 'BDesignVapidPublicKey' },
-  },
-  { nativeShell: { ...IOS_APP_CAPABILITIES, push: 1, liveActivities: 2 } },
-);
+const fixtures = settingsFixtures({}, { nativeShell: { ...IOS_APP_CAPABILITIES, lockScreenProgress: 1 } });
 const frame = (name: string, title: string, state: LockScreenSettingState) => ({
   name,
   title,

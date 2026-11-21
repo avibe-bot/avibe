@@ -13,7 +13,6 @@ import logo from '@/assets/logo.png';
 import { Button } from '@/components/ui/button';
 import { SettingsPageShell } from '@/components/settings/SettingsPageShell';
 import { SettingsPanel, SettingsRow, ToggleSwitch } from '@/components/settings/SettingsPrimitives';
-import { WebPushControl } from '@/components/workbench/WebPushControl';
 import { useTranslation } from 'react-i18next';
 
 import { useDraft } from './draft';
@@ -195,7 +194,7 @@ export function IslandExpanded({ activity }: { activity: TurnActivity }) {
 export type LockScreenSettingState = 'off' | 'on' | 'systemOff';
 
 /** The device-only setting in Settings › Notifications (contract Amendment 1, §2.2): shown only when
- *  the shell offers `liveActivities` at version 2; off until the person turns it on. */
+ *  the shell announces `lockScreenProgress`; off until the person turns it on. */
 export function LockScreenProgressSetting({ state }: { state: LockScreenSettingState }) {
   const t = useDraft();
   const title = t('在锁屏上显示进度', 'Show progress on the Lock Screen');
@@ -217,20 +216,15 @@ export function LockScreenProgressSetting({ state }: { state: LockScreenSettingS
   );
 }
 
-/** Settings › Notifications' "this device" panel as it would read with the setting: the shipped push row, then the new one. */
+/** The proposed row alone in the Notifications page shell, under the page's existing "this device"
+ *  panel title. The shipped panels and rows stay as they are and are not redrawn here. */
 export function NotificationsDevicePanel({ state }: { state: LockScreenSettingState }) {
   const { t } = useTranslation();
   return (
     <SettingsPageShell title={t('settings.sections.notifications')} subtitle={t('settings.notifications.subtitle')} activeTab="notifications">
       <SettingsPanel title={t('settings.notifications.deviceTitle')}>
-        <SettingsRow
-          title={t('settings.notifications.nativePushTitle')}
-          description={t('settings.notifications.nativePushHint')}
-          control={<WebPushControl />}
-        />
         <LockScreenProgressSetting state={state} />
       </SettingsPanel>
     </SettingsPageShell>
   );
 }
-

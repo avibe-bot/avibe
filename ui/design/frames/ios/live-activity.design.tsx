@@ -19,7 +19,7 @@ const runningChat = chatFixtures({
   session: bot,
   messages: [userSays('看一下这周新增依赖有没有高危漏洞，有问题直接开修复 PR。', 42)],
   turnState: runningTurn,
-  extra: { nativeShell: { ...IOS_APP_CAPABILITIES, liveActivities: 2 } },
+  extra: { nativeShell: { ...IOS_APP_CAPABILITIES, lockScreenProgress: 1 } },
 });
 const lock = (name: string, title: string, state: StateName, time?: string) => ({
   name,

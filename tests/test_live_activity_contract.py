@@ -217,7 +217,8 @@ def test_runtime_examples_match_the_relay_and_ios_shapes(vectors):
 
 def test_bridge_v2_examples_match_the_amendment(vectors):
     bridge = vectors["bridge_v2"]
-    assert bridge["capability"] == {"liveActivities": 2}
+    assert bridge["capability"] == {"lockScreenProgress": 1}
+    assert bridge["retired_capability"] == "liveActivities"  # never announced again
     assert bridge["setting_result"] == {"enabled": False, "systemEnabled": True}  # off by default
     assert set(bridge["observe"]) == {"sessionId", "agentName", "sessionTitle", "running"}
     assert bridge["observe_bot_session"]["sessionTitle"] is None
