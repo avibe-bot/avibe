@@ -73,7 +73,7 @@ that avibe.bot listed for this instance id.
 |---|---|---|---|---|
 | C1 | A signed-in browser, the iPhone App's WebView, or a copied cookie keeps working after the rename. | "Every device signed out" would be false. | All remote sessions end through the registry's existing all-remote sign-out: a tombstone per registered session and the instance-wide cutoff for unregistered old cookies. The cookie-signing secret is **kept** (see contradiction 1). Event streams and sockets admitted on the old Host end at the switch; sign-in flows started on the old Host cannot finish there. avibe.bot account sessions are not ended. | A cookie from before the switch, replayed by hand on the new Host: `401`. An unregistered pre-upgrade cookie: `401`. A fresh sign-in on the new Host works. Open stream on the old Host ends within one heartbeat. Activity history from before the rename is still listed. |
 | C2 | The instance keeps pushing to a browser subscription created under the old address. | After the name passes on, the next holder's service worker receives this instance's notification text. | In the same transaction that ends the sessions, every Web Push subscription registered through the remote address (`user_key` `remote:*`, attested or not) is disabled and cannot be re-enabled by a rotation or re-registration arriving on a cleanup Host. Subscriptions made on this computer's local address are untouched. Native App registrations follow the existing sign-out rule and come back when the App signs in at the new address. | After the switch no send is attempted to a pre-rename remote subscription, including an unattributed legacy row; a `pushsubscriptionchange` post on the old Host changes nothing; a local-origin subscription still delivers. |
-| C3 | The direct transport keeps answering for the old name, or has no certificate for the new one. | A second door to the old name; direct path dead after rename. | Stated need, no change to the certificate flow: on the config change the direct lifecycle stops ingress and rendezvous for the old name, closes its live transports, and orders the new name's certificate through the existing flow. A direct request whose Host is not the active name keeps today's `421`; cleaning responses are not sent on the direct listener. Asked of the direct lane: confirm the lifecycle already does this on a `public_url` change, and whether the old name's private key is destroyed at the switch. | Direct-lane review. Test here: direct-ingress request on a cleanup Host is `421`, no clearing header. |
+| C3 | The direct transport keeps answering for the old name, or has no certificate for the new one. | A second door to the old name; direct path dead after rename. | No change to the certificate flow; confirmed by the direct lane (November 21): `public_url` is part of the lifecycle's config signature, so the config write withdraws the rendezvous, stops the sidecar and listener (closing live transports) and voids the old permission; the next certificate poll discards the old name's key and files and orders the new name's certificate. A direct request whose Host is not the active name keeps today's `421`; cleaning responses are not sent on the direct listener. **Order that must hold:** avibe.bot's name changes before this instance's `public_url` does, or the new order is refused and retried for up to an hour; B1 applies the config only after the committed receipt, so it holds. | Test here: the config is never written before a committed receipt; a direct-ingress request on a cleanup Host is `421` with no clearing header. Direct path after a rename is part of the exercise. |
 | C4 | The phone keeps syncing Health to the old address; synced data stays after the Owner was told it is deleted; or data is deleted for a rename the Owner did not make. | Health data and the device credential reaching a later holder; or data lost to an impostor. | For a rename from this instance's own journal (A5), after the switch: revoke every Health pairing with the existing all-pairing revoke and delete synced days; record `done` once so a replay cannot delete data paired later. If the private store cannot finish, the durable cleanup marker retries and the state route says `health: pending`, never `deleted`. For any other name change: no revoke-and-purge. In both cases Health device routes on a cleanup Host get `401 device_unauthorized` without the body being read (E5). The preview states that Health data will be deleted and the iPhone connected again. | Own rename: pairing rows gone, synced days gone, old credential refused on the new Host too. Crash between switch and Health: completed on restart, once. Phone paired after the rename, then a replay of the old receipt: its data stays. Foreign change: data intact. Canary values never in logs. |
 | C5 | Share links and Show pages already handed out. | People holding an old link. | Share records and Show pages are kept and work at the new address under the same paths; links carrying the old name are dead (E1). Nothing is redirected. The preview says so. | Old-name `/p/<id>`: cleaning response. Same path on the new name: served to an entitled reader. |
 
@@ -128,7 +128,7 @@ named below.
   operation, unrecognized_change, cleanup, health}`.
   `operation`: `null` or `{state:"pending"|"applying"|"failed", hostname, error}`.
   `unrecognized_change`: `null` or `{previous_hostname, hostname, noticed_at}`.
-  `cleanup`: `[{hostname, retired_at, hold_until, complete:false,
+  `cleanup`: `[{hostname, retired_at, release_at (the real date from avibe.bot, passed through; it can be later than the waiting period when a direct certificate outlives it), complete:false,
   incomplete_reason, listed_since, unconfirmed, devices:[{id, kind,
   display_name, account:{email}|null, last_active_at, push_only,
   state, cleared_at}]}]`.
@@ -195,8 +195,9 @@ device routes `401`.
    margin: a smaller number, or a browser whose clock runs behind, lets a later
    holder receive a visitor's email in a cookie from a browser that never
    returned. For deleted instances there is no cleaning response to expire the
-   cookie earlier. Our direct certificates live 90 days; that consequence is
-   with the lead and the direct lane and is not settled in this table.
+   cookie earlier. Handled on avibe.bot: 48 more hours pass before a name is
+   actually given out, and no earlier than our last direct certificate for it
+   expires.
 
 ## Contract points to settle
 
@@ -226,7 +227,11 @@ Settled with the backend writer (Session `ses6x9a627t9a`, November 21, 11:27):
 The limit on names comes back as `409 name_holding_limit_reached` with
 `limit`, `held_count` and `earliest_release_at`.
 
-Open with the direct lane (coordinator Session `ses8mgme5623t`): C3.
+Settled with the direct lane (coordinator Session `ses8mgme5623t`): C3.
+
+Open with the backend writer: the real `release_at` of each cleanup name in
+`hostname-state`, and the date the active name would be released if it were
+changed now, so the dialog can show a real date before the rename.
 
 ## Residuals, in plain words
 
@@ -245,10 +250,20 @@ Open with the direct lane (coordinator Session `ses8mgme5623t`): C3.
 - **An iPhone App not opened during the whole waiting period** may open its
   saved old address once before it refreshes its instance list; the App is not
   changed in this work.
+- **Direct path after a rename.** It is unavailable for a few minutes while
+  the new certificate is issued; the tunnel works meanwhile. Changing back and
+  forth more than twice in 7 days hits the certificate rotation limit, and the
+  direct path stays off until the window passes. If remote access was bound
+  again between a rename and taking the name back, an unfinished certificate
+  order of the old binding can keep the direct path off for that name until it
+  is cleared by hand. With the direct path off at the time of the rename, the
+  old name's key and certificate files stay on this computer until the direct
+  path is next turned on or remote access is bound again.
 - **A certificate obtained by the tenant from a public authority** while
   holding the name can live about 200 days, longer than the waiting period.
-  Our own direct certificates live 90 days; what covers the days beyond the
-  waiting period is being decided (see contradiction 6).
+  Our own direct certificates live 90 days: avibe.bot gives a name out no
+  earlier than the last such certificate's expiry, so the real release date
+  can be later than the waiting period, and every date shown is that real one.
 - **Deleted and transferred instances.** After an instance is deleted, or a
   live instance is transferred, its old names answer nothing: returning
   browsers are not cleaned.
