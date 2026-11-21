@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { noteAppVoice } from './appVoice';
 import {
   adoptedCaptureFactory,
   emptyVoiceStream,
@@ -218,6 +219,16 @@ describe('NativePcmCapture', () => {
     expect(await nativeCaptureAllowed()).toBe(false);
     delete (window as { avibeNative?: unknown }).avibeNative;
     expect(await nativeCaptureAllowed()).toBe(false);
+
+    // The instance's off switch: tap and Show Page takes are the page's again.
+    install();
+    try {
+      noteAppVoice({ app_hold: false });
+      expect(await nativeCaptureAllowed()).toBe(false);
+    } finally {
+      noteAppVoice({ app_hold: true });
+    }
+    expect(await nativeCaptureAllowed()).toBe(true);
   });
 
   it('reports a take the App ended on its own as a capture failure, keeping what came', async () => {

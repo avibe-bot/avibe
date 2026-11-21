@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { noteAppVoice } from './appVoice';
 import {
   holdFollowed,
   refreshHoldSurfaces,
@@ -113,6 +114,7 @@ beforeEach(() => {
   document.elementFromPoint = topAt;
 });
 afterEach(async () => {
+  noteAppVoice({ app_hold: true });
   // Every surface taken back, and the App told: the next test starts from nothing named.
   await unregisterAll();
   document.body.replaceChildren();
@@ -416,6 +418,33 @@ describe('the hold surfaces the iOS App follows', () => {
     // A take's timings at its end are its capture's to keep (lib/nativeVoiceCapture).
     emit({ phase: 'timings', take: 'n1' });
     expect(taking.recognised).toHaveBeenCalledTimes(1);
+  });
+
+  // The off switch (`audio_asr.app_hold`, said by `/api/asr/status`): no new build needed.
+  it('names nothing while the instance has the App\'s hold recognition turned off, and takes back what was named', async () => {
+    registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
+    await settle();
+    expect(named()).toHaveLength(1);
+
+    // Turned off while a surface is named: the App is told at once that it follows nothing.
+    noteAppVoice({ app_hold: false });
+    await settle();
+    expect(named().at(-1)).toEqual({ surfaces: [] });
+    expect(holdFollowed('composer', 100, 720)).toBe(false);
+    refreshHoldSurfaces();
+    window.dispatchEvent(new Event('pointerdown'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(named()).toHaveLength(2);
+
+    // A status body without the field (an instance with no such switch) changes nothing.
+    noteAppVoice({ available: true });
+    await settle();
+    expect(named()).toHaveLength(2);
+
+    noteAppVoice({ app_hold: true });
+    await settle();
+    expect(named().at(-1)).toEqual({ surfaces: [{ id: 'composer', x: 0, y: 700, width: 390, height: 60 }], holdMs: 200 });
+    expect(holdFollowed('composer', 100, 720)).toBe(true);
   });
 
   it('does nothing in an App that does not recognise holds itself', async () => {

@@ -494,6 +494,17 @@ def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path, sqlite_sch
     assert payload["audio_asr"]["enabled_configured"] is True
     assert payload["audio_asr"]["echo_transcript"] is False
 
+    # The off switch for the iOS App's hold recognition: on unless turned off, set
+    # and unset by a one-key save that leaves the rest of the section as it was.
+    assert updated.audio_asr.app_hold is True
+    off = api.save_config({"audio_asr": {"app_hold": False}})
+    assert off.audio_asr.app_hold is False
+    assert off.audio_asr.echo_transcript is False
+    assert api.config_to_payload(off)["audio_asr"]["app_hold"] is False
+    assert api.save_config({"audio_asr": {"app_hold": True}}).audio_asr.app_hold is True
+    with pytest.raises(ValueError):
+        api.save_config({"audio_asr": {"app_hold": []}})
+
 
 def test_save_config_marks_explicit_audio_asr_disable_patch(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

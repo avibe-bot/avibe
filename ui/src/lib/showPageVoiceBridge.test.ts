@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { noteAppVoice } from './appVoice';
+
 import {
   ANNOTATION_VOICE_EVENT_MESSAGE,
   ANNOTATION_VOICE_REQUEST_MESSAGE,
@@ -148,13 +150,16 @@ describe('ShowPageVoiceHost', () => {
     // An App that records with its microphone allowed; one still to be asked (WebKit asks);
     // an App that does not record; and a browser.
     const shells = [
-      [{ voice: 1, voiceCapture: 1 }, 'granted', true],
-      [{ voice: 1, voiceCapture: 1 }, 'prompt', undefined],
-      [{ voice: 1 }, 'granted', undefined],
-      [null, 'granted', undefined],
+      [{ voice: 1, voiceCapture: 1 }, 'granted', true, true],
+      [{ voice: 1, voiceCapture: 1 }, 'prompt', true, undefined],
+      [{ voice: 1 }, 'granted', true, undefined],
+      [null, 'granted', true, undefined],
+      // The instance's off switch (`audio_asr.app_hold`): the page records, in the same App.
+      [{ voice: 1, voiceCapture: 1 }, 'granted', false, undefined],
     ] as const;
     try {
-      for (const [capabilities, permission, expected] of shells) {
+      for (const [capabilities, permission, appHold, expected] of shells) {
+        noteAppVoice({ app_hold: appHold });
         vi.unstubAllGlobals();
         if (capabilities) {
           vi.stubGlobal('window', {
@@ -186,6 +191,7 @@ describe('ShowPageVoiceHost', () => {
       }
     } finally {
       vi.unstubAllGlobals();
+      noteAppVoice({ app_hold: true });
     }
   });
 

@@ -290,6 +290,32 @@ describe('Composer voice shortcut', () => {
     }
   });
 
+  // The off switch (`audio_asr.app_hold`, said by the status): the same App, the page's own way.
+  it('records a tap take through the page in the iOS App while the instance has the App\'s recording turned off', async () => {
+    const call = vi.fn(async (method: string) => (method === 'voice.permission' ? { state: 'granted' } : null));
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: { contract: 1, platform: 'ios', shellVersion: '1.0 (1)', capabilities: { voice: 1, voiceCapture: 1 }, call, on: () => () => undefined },
+    });
+    apiFetch.mockResolvedValue({ ok: true, json: async () => ({ available: true, max_file_bytes: 10_000_000, app_hold: false }) });
+    try {
+      renderComposer();
+      const textbox = await screen.findByRole('textbox');
+      await act(async () => undefined);
+      // Its audio is warmed again, once the status has said so.
+      await waitFor(() => expect(voiceMocks.prewarm).toHaveBeenCalled());
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledOnce());
+      expect(voiceMocks.createCapture).toBeUndefined();
+      expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce();
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+    } finally {
+      delete (window as { avibeNative?: unknown }).avibeNative;
+      act(() => { noteVoiceStatus({ app_hold: true }); });
+    }
+  });
+
   it('records a tap take through the page, its audio warmed, where no App records', async () => {
     renderComposer();
     const textbox = await screen.findByRole('textbox');

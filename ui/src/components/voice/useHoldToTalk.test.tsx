@@ -42,7 +42,7 @@ type Fake = {
 
 const pipeline = vi.hoisted(() => ({
   takes: [] as Fake[],
-  asr: { available: true, consent: 'granted' as 'granted' | 'declined' | null },
+  asr: { available: true, consent: 'granted' as 'granted' | 'declined' | null, appHold: true },
   permission: 'granted' as PermissionState,
   captureActive: false,
   /** How long the microphone and audio graph take to open. */
@@ -115,7 +115,10 @@ vi.mock('../../lib/voiceTelemetry', async (importOriginal) => ({
   emitVoiceTelemetry: telemetry.emit,
 }));
 vi.mock('../../lib/apiFetch', () => ({
-  apiFetch: vi.fn(async () => ({ ok: true, json: async () => ({ available: pipeline.asr.available, consent: pipeline.asr.consent }) })),
+  apiFetch: vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ available: pipeline.asr.available, consent: pipeline.asr.consent, app_hold: pipeline.asr.appHold }),
+  })),
 }));
 vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/avibeFetch')>()),
@@ -207,6 +210,7 @@ beforeEach(() => {
   pipeline.takes = [];
   pipeline.asr.available = true;
   pipeline.asr.consent = 'granted';
+  pipeline.asr.appHold = true;
   closeVoiceConsent();
   pipeline.permission = 'granted';
   pipeline.captureActive = false;
@@ -1504,6 +1508,34 @@ describe('a hold the iOS App recognises', () => {
     expect(hold.phase).toBe('idle');
     await elapse(20);
     expect(namedSurfaces()).toEqual([{ id, x: 0, y: 470, width: 300, height: 60 }]);
+  });
+
+  // The off switch (`audio_asr.app_hold`): with it off the page behaves as it did before the App
+  // recognised holds, in the same App build.
+  it('names nothing and holds as before while the instance has the App\'s recognition turned off', async () => {
+    pipeline.asr.appHold = false;
+    const el = await mountFollowed();
+    expect(native.surfaces.mock.calls.every(([surfaces]) => surfaces.length === 0)).toBe(true);
+    native.impact.mockClear();
+    down(el);
+    // Its own threshold, with no wait for the App, its own start, and its own cue.
+    await elapse(200);
+    await flush();
+    await elapse(0);
+    await flush();
+    expect(pipeline.takes).toHaveLength(1);
+    expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    expect(hold.phase).toBe('listening');
+    expect(native.impact).toHaveBeenCalledWith('medium');
+    up(el);
+    cleanup();
+    await elapse(20);
+
+    // Turned on again: the next page that reads the status names its surface.
+    pipeline.asr.appHold = true;
+    native.surfaces.mockClear();
+    await mountFollowed();
+    expect(namedSurfaces()).toHaveLength(1);
   });
 
   it('names nothing in an App that does not recognise holds, and holds as before', async () => {
