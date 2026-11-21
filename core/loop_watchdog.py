@@ -122,12 +122,13 @@ class EventLoopWatchdog:
         whatever is running or streaming then: on the owner's machine moments with no
         open model stream were 2 in 1,827 slow collections, so any such condition is
         no condition. Cost: objects frozen then are never collected by the cycle
-        collector until unfreeze or restart (reference counting still frees acyclic
-        ones, such as request bodies and stream buffers, as each stream ends), and an
-        unreachable cycle that passes through a frozen object also keeps whatever it
-        references later. That is not bounded by the heap at freeze time; the field
-        trial's memory guard and the unfreeze command are the safeguard. The number
-        of Vibey streams open at the freeze is logged, so what they left can be read.
+        collector until unfreeze or restart. Reference counting still frees an
+        acyclic object once its last reference goes, but an unreachable cycle that
+        passes through a frozen object keeps everything it references, including
+        buffers it held at freeze time and whatever it references later. That is not
+        bounded by the heap at freeze time; the field trial's memory guard and the
+        unfreeze command are the safeguard. The number of Vibey streams open at the
+        freeze is logged as context; it does not attribute what was retained.
         """
         with self._freeze_lock:
             if self._freeze_state == "off" and not gc.get_freeze_count():
