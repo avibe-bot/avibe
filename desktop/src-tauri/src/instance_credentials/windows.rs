@@ -5,18 +5,21 @@ mod os;
 mod tests;
 
 use super::{ClientError, Credentials, NativeCredentials};
-use avibe_runtime_host::instance_client::storage::CredentialWrite;
+use avibe_runtime_host::{hashing::lower_hex, instance_client::storage::CredentialWrite};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     os::windows::fs::OpenOptionsExt,
     sync::Arc,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::Security::Credentials::CRED_MAX_CREDENTIAL_BLOB_SIZE;
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, ClientError>;
 const CHUNK: usize = CRED_MAX_CREDENTIAL_BLOB_SIZE as usize;
+const MAX_LOCK_WAIT: Duration = Duration::from_secs(5);
+const LOCK_RETRY: Duration = Duration::from_millis(40);
 const MAX_JAR: usize = 64 * 1024;
 const MAX_SEALED: usize = 72 * 1024;
 const SLOTS: usize = MAX_SEALED.div_ceil(CHUNK);
@@ -97,7 +100,20 @@ impl Scope {
             .share_mode(3) // FILE_SHARE_READ | FILE_SHARE_WRITE: no rename/unlink while locked
             .open(dir.join("instance-client.lock"))
             .map_err(|_| unavailable())?;
-        lock.lock().map_err(|_| unavailable())?;
+        let deadline = Instant::now() + MAX_LOCK_WAIT;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::Error(_)) => return Err(unavailable()),
+                Err(TryLockError::WouldBlock) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(remaining.min(LOCK_RETRY));
+                    if Instant::now() >= deadline {
+                        return Err(unavailable());
+                    }
+                }
+            }
+        }
         let mut hash = Sha256::new();
         hash.update(b"avibe/desktop/account-jar/scope/v1\0");
         for part in [&*owner.service, id] {
@@ -107,7 +123,7 @@ impl Scope {
         }
         Ok(Self {
             root,
-            namespace: format!("AvibeJar:v1:{:x}", hash.finalize()),
+            namespace: format!("AvibeJar:v1:{}", lower_hex(&hash.finalize())),
             _lock: lock,
         })
     }
@@ -171,18 +187,19 @@ impl Scope {
         .encode())
     }
     fn erase(&self) -> Result<()> {
-        delete(&self.root)?; // removing decryption authority is the commit, never the last cleanup step
-        let mut failed = false;
+        self.erase_and_sweep(|bank, i| delete(&self.chunk(bank, i)?))
+    }
+    fn erase_and_sweep(&self, mut delete_chunk: impl FnMut(u8, usize) -> Result<()>) -> Result<()> {
+        // A root deletion error is a real sign-out failure. Once it succeeds no fragment can
+        // restore this generation; a cleanup error must not appear on the next account. An erase
+        // retries every slot, including when the root is already absent. Writes reuse fixed slots.
+        delete(&self.root)?;
         for bank in 0..2 {
             for i in 0..SLOTS {
-                failed |= delete(&self.chunk(bank, i)?).is_err();
+                let _ = delete_chunk(bank, i);
             }
         }
-        if failed {
-            Err(unavailable())
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 

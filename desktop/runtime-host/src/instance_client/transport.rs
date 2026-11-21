@@ -167,9 +167,18 @@ impl NativeSession {
         }
     }
     pub fn restore(origin: Url, transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
+        let mut result = Self::decode_released_jar(origin, transport, bytes)?;
+        // Older versions may have saved a proof or an unfinished ceremony.
+        remove_memory_only_cookies(&mut result.cookies);
+        Ok(result)
+    }
+
+    // The released restore implementation. Keep its input and error semantics for downgrade
+    // checks. This is private so callers cannot bypass the post-restore proof filter above.
+    fn decode_released_jar(origin: Url, transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
         let cookies =
             cookie_store::serde::json::load(bytes).map_err(|_| ClientError::new("credentials_unavailable"))?;
-        let mut result = Self {
+        let result = Self {
             origin,
             cookies,
             transport,
@@ -182,8 +191,6 @@ impl NativeSession {
         }) {
             return Err(ClientError::new("credentials_unavailable"));
         }
-        // Older versions may have saved a proof or an unfinished ceremony.
-        remove_memory_only_cookies(&mut result.cookies);
         Ok(result)
     }
     pub fn fence(&mut self, epoch: Epoch) {
