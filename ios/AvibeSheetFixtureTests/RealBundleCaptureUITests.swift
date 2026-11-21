@@ -138,7 +138,7 @@ final class RealBundleCaptureUITests: XCTestCase {
                         }
                         // Synthetic data only; no credential UI is reachable. Neither
                         // native nor fallback clipboard paths are called by this flow.
-                        let attachment = XCTAttachment(screenshot: app.screenshot())
+                        let attachment = XCTAttachment(screenshot: settledScreenshot(of: app))
                         attachment.name = name
                         attachment.lifetime = .keepAlways
                         add(attachment)
@@ -205,6 +205,26 @@ final class RealBundleCaptureUITests: XCTestCase {
             predicate: NSPredicate { _, _ in matches() }, object: nil
         )
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed, description)
+    }
+
+    /// For the SDK comparison (`ios-sdk-comparison`, which sets
+    /// `AVIBE_NATIVE_CAPTURES`): the screen once its picture has stopped
+    /// changing, two screenshots in a row with the same pixels, so a row
+    /// still expanding or a list still fading in is not caught mid-way,
+    /// differently on each run. Elsewhere the first screenshot, as before.
+    private func settledScreenshot(of app: XCUIApplication) -> XCUIScreenshot {
+        var shot = app.screenshot()
+        guard ProcessInfo.processInfo.environment["AVIBE_NATIVE_CAPTURES"] == "1" else {
+            return shot
+        }
+        for _ in 0..<8 {
+            Thread.sleep(forTimeInterval: 0.3)
+            let next = app.screenshot()
+            let settled = next.pngRepresentation == shot.pngRepresentation
+            shot = next
+            if settled { break }
+        }
+        return shot
     }
 
     private func requireText(_ text: String, in app: XCUIApplication) {

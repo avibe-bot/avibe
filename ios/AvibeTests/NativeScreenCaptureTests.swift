@@ -35,7 +35,7 @@ final class NativeScreenCaptureTests: XCTestCase {
             for (name, view) in screens() {
                 window.rootViewController = UIHostingController(rootView: view)
                 try await settle()
-                attach(window, name: "native-\(name)-\(theme)")
+                try await attach(window, name: "native-\(name)-\(theme)")
             }
             for (name, present) in alerts() {
                 let root = UIHostingController(rootView: AnyView(Color(uiColor: .systemBackground).ignoresSafeArea()))
@@ -43,7 +43,7 @@ final class NativeScreenCaptureTests: XCTestCase {
                 try await settle()
                 present()
                 try await waitForPresentation(on: root)
-                attach(window, name: "native-alert-\(name)-\(theme)")
+                try await attach(window, name: "native-alert-\(name)-\(theme)")
                 root.dismiss(animated: false)
             }
         }
@@ -159,9 +159,24 @@ final class NativeScreenCaptureTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(600))
     }
 
-    private func attach(_ window: UIWindow, name: String) {
-        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
-            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+    /// The window once its picture has stopped changing: two renders in a
+    /// row with the same pixels (a material or a presentation still
+    /// settling would otherwise be caught mid-way, differently on each
+    /// run). A screen that keeps moving (a running timer) is taken as it is
+    /// after a few tries.
+    private func attach(_ window: UIWindow, name: String) async throws {
+        func render() -> UIImage {
+            UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+        }
+        var image = render()
+        for _ in 0..<12 {
+            try await Task.sleep(for: .milliseconds(200))
+            let next = render()
+            let settled = next.pngData() == image.pngData()
+            image = next
+            if settled { break }
         }
         let attachment = XCTAttachment(image: image)
         attachment.name = name
