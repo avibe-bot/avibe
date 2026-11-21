@@ -29,8 +29,11 @@ final class HoldTouchUITests: XCTestCase {
     }
 
     override func tearDown() {
-        // What the page and the App said at the end, pass or fail: the run's record.
-        print("[hold smoke] \(name): \(facts())")
+        // What the page and the App said at the end, pass or fail: the run's record. A test
+        // that launches the App more than once has printed each launch's, and ended the last.
+        if app.state == .runningForeground {
+            print("[hold smoke] \(name): \(facts())")
+        }
         super.tearDown()
     }
 
