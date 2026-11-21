@@ -281,14 +281,18 @@ describe('ChatPage transcript hydration', () => {
   });
 
   it.each([
-    { surface: 'the phone App', native: true, marked: true },
-    { surface: 'a browser', native: false, marked: false },
-  ])('marks a shown chat read without page focus only in $surface', async ({ native, marked }) => {
+    { surface: 'the phone App, untouched', native: true, hidden: false, touch: false, marked: false },
+    { surface: 'the phone App, touched', native: true, hidden: false, touch: true, marked: true },
+    { surface: 'the phone App, hidden', native: true, hidden: true, touch: true, marked: false },
+    { surface: 'a browser, touched', native: false, hidden: false, touch: true, marked: false },
+  ])('marks an unfocused chat read in $surface: $marked', async ({ native, hidden, touch, marked }) => {
     // A push tap opens the conversation in a new App web view, which has no focus
-    // until the reader taps inside it. In the App a shown page is in front of the
-    // reader; in a browser an unfocused window may not be.
+    // until a tap makes it first responder; the reader scrolls it. In the App a
+    // touch since the page was shown counts; in a browser an unfocused window may
+    // not be looked at, touched or not.
     mocks.realInbox = true;
     document.hasFocus = () => false;
+    if (hidden) Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
     if (native) {
       Object.defineProperty(window, 'avibeNative', {
         configurable: true,
@@ -307,6 +311,9 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
     mocks.api.listInbox.mockResolvedValue({ sessions: [], next_cursor: null, unread_by_session: { 'session-new': 1 } });
     mocks.api.markSessionRead.mockResolvedValue({ updated: 1, unread_counts: {}, unread_by_session: {} });
+    const settle = () => act(async () => {
+      for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
     try {
       render(
@@ -317,13 +324,18 @@ describe('ChatPage transcript hydration', () => {
         </WorkbenchInboxProvider>,
       );
       await waitFor(() => expect(mocks.api.listInbox).toHaveBeenCalled());
-      await act(async () => {
-        for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
-      });
+      await settle();
+      // Nothing is read before the reader touches the page.
+      expect(mocks.api.markSessionRead).not.toHaveBeenCalled();
+      if (touch) {
+        fireEvent.pointerDown(document.body);
+        await settle();
+      }
       if (marked) await waitFor(() => expect(mocks.api.markSessionRead).toHaveBeenCalledWith('session-new', undefined, { handleError: false }));
       else expect(mocks.api.markSessionRead).not.toHaveBeenCalled();
     } finally {
       Reflect.deleteProperty(window, 'avibeNative');
+      Reflect.deleteProperty(document, 'visibilityState');
     }
   });
 
