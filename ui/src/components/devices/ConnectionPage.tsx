@@ -532,9 +532,16 @@ export function ConnectionPage() {
     }));
   };
   const peopled = (retired: RetiredName): RetiredName => ({ ...retired, devices: withPeople(retired.devices) });
+  // The dialog names an old address; what is shown about it is the latest read, so a device that
+  // reports its clean-up while the dialog is open is seen to. The copy taken when the dialog
+  // opened stands in only while the address state no longer lists the name.
+  const latest = (name: string, taken: RetiredName | null): RetiredName | null => (
+    address?.retired.find((each) => each.hostname === name) ?? taken
+  );
+  const doneList = rename?.step === 'done' ? latest(rename.previous, rename.retired) : null;
   const renameShown: RenameStep | undefined = rename?.step === 'cleanup'
-    ? { ...rename, retired: peopled(rename.retired) }
-    : rename?.step === 'done' && rename.retired ? { ...rename, retired: peopled(rename.retired) } : rename;
+    ? { ...rename, retired: peopled(latest(rename.retired.hostname, rename.retired) ?? rename.retired) }
+    : rename?.step === 'done' ? { ...rename, retired: doneList ? peopled(doneList) : null } : rename;
   const shown = connection ? { ...connection, change } : null;
   const host = address?.hostname ?? (() => {
     try {

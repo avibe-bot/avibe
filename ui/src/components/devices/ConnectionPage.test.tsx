@@ -312,6 +312,27 @@ describe('ConnectionPage · the domain', () => {
     expect(screen.getAllByText(newHost).length).toBeGreaterThan(0);
   });
 
+  it('shows a device clearing its old-address data while the clean-up dialog is open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const old = 'studio-app.avibe.bot';
+    const kept = (cleanup: 'cleared' | 'unconfirmed') => ({
+      hostname: old, releaseAt: '2026-12-21T00:00:00.000Z', devices: [{ id: 'd1', name: 'Chrome', kind: 'browser' as const, cleanup }],
+    });
+    const read = vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ retired: [kept('unconfirmed')] }));
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '清理情况' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('未确认')).toBeTruthy();
+    // The device reports in; the page's regular read brings it, and the open dialog shows it.
+    read.mockResolvedValue(address({ retired: [kept('cleared')] }));
+    for (let second = 0; second < 31; second += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+    expect(await within(dialog).findByText('已清理')).toBeTruthy();
+    expect(within(dialog).queryByText('未确认')).toBeNull();
+  });
+
   it('reopens on a change that is still running, and offers no second one', async () => {
     vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ operation: { state: 'pending', hostname: 'maxwell-app.avibe.bot' } }));
     mount('/settings/remote-access/connection/address');
