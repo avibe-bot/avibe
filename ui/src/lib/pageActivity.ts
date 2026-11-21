@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react';
 
+import { isNativeShell } from './native';
+
 export type PageActivitySnapshot = {
   visibilityState: DocumentVisibilityState;
   hasFocus: boolean;
@@ -377,9 +379,69 @@ const subscribeDocumentVisible = (listener: () => void): (() => void) => {
  * Whether the document is shown at all, ignoring focus. This is the half of
  * page activity that decides whether work drawn on screen is seen: a visible
  * window the user has not clicked into is still in front of them. Read
- * `usePageActive` instead where the user's attention matters, such as marking
- * a conversation read.
+ * `usePageActive` instead where the user's attention matters, and
+ * `usePagePresented` for marking a conversation read.
  */
 export function useDocumentVisible(): boolean {
   return useSyncExternalStore(subscribeDocumentVisible, readDocumentVisible, () => true);
+}
+
+// Whether the reader has touched the page since it was last shown. In a phone
+// App's web view this stands in for focus, which the web view reports only once a
+// tap has made it first responder: a push tap opens the conversation in a new web
+// view, read by scrolling. Touches under App Lock or the account sheet land on
+// those native windows, not here. Hiding the page, a blur (the App Lock taking
+// focus away) and leaving it clear the touch.
+let touchedSinceShown = false;
+const touchListeners = new Set<() => void>();
+let detachTouch: (() => void) | null = null;
+
+const setTouched = (touched: boolean) => {
+  if (touchedSinceShown === touched) return;
+  touchedSinceShown = touched;
+  notify(touchListeners);
+};
+
+const subscribeTouched = (listener: () => void): (() => void) => {
+  if (typeof document === 'undefined' || typeof window === 'undefined' || !isNativeShell()) return () => {};
+  touchListeners.add(listener);
+  if (!detachTouch) {
+    const touch = () => setTouched(document.visibilityState === 'visible');
+    const away = () => setTouched(false);
+    const visibility = () => {
+      if (document.visibilityState !== 'visible') setTouched(false);
+    };
+    document.addEventListener('pointerdown', touch, true);
+    document.addEventListener('touchstart', touch, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('blur', away);
+    window.addEventListener('pagehide', away);
+    detachTouch = () => {
+      document.removeEventListener('pointerdown', touch, true);
+      document.removeEventListener('touchstart', touch, true);
+      document.removeEventListener('visibilitychange', visibility);
+      window.removeEventListener('blur', away);
+      window.removeEventListener('pagehide', away);
+      detachTouch = null;
+      touchedSinceShown = false;
+    };
+  }
+  return () => {
+    touchListeners.delete(listener);
+    if (touchListeners.size === 0) detachTouch?.();
+  };
+};
+
+/**
+ * Whether the reader is looking at what the page shows, for marking it read. In
+ * a browser that is `usePageActive`: a visible window the user has not focused
+ * may not be looked at. In a phone App the page also counts once the reader has
+ * touched it since it was shown, because the App's web view has no focus until
+ * a tap makes it first responder (see `touchedSinceShown`).
+ */
+export function usePagePresented(): boolean {
+  const active = usePageActive();
+  const visible = useDocumentVisible();
+  const touched = useSyncExternalStore(subscribeTouched, () => touchedSinceShown, () => false);
+  return active || (isNativeShell() && visible && touched);
 }
