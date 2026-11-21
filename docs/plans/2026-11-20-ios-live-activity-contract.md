@@ -84,10 +84,12 @@ The version-1 toasts and the in-conversation frames (`app-offer`, `app-tracking`
   2. the latest observation has a `sessionId` and `running: true`, and its session belongs to the selected account and instance;
   3. a prefetched Turn for that session exists, and its `turn_id` is not in the ledger;
   4. `NativePushCoordinator` has an active relay registration for this instance.
-- Then, in order:
-  - end any other `TurnActivityAttributes` activity (row "a new start displaces it");
+- Then, synchronously inside the notification callback, while the App is still active (nothing here awaits):
+  - mark any other `TurnActivityAttributes` activity as displaced. Its token and state observers stop at once, and it is never registered or updated again;
   - call `Activity.request(attributes, content: (state from the prefetched Turn, staleDate: confirmedAt + 2400), pushType: .token)`;
-  - on success, record its `turn_id` in the ledger at once, and hold a background task so the following steps can run as the App leaves;
+  - on success, record its `turn_id` in the ledger at once, and begin a background task.
+- Inside that background task, after the callback has returned:
+  - end each displaced activity and DELETE it with `replaced` (row "a new start displaces it"). The old card may stay visible next to the new one for a moment, but it is never restored;
   - wait for the first value of `pushTokenUpdates` (none within 10 s: end `.immediate`);
   - PUT, and handle the answer by R(PUT) below.
   If `Activity.request` throws, nothing is recorded, and the next departure may try again.
