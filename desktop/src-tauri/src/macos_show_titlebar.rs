@@ -375,7 +375,7 @@ fn install_title(window: &NSWindow, mtm: MainThreadMarker, height: f64) -> Optio
 pub fn install(
     window: &tauri::WebviewWindow,
     labels: [String; 4],
-    route: String,
+    destination: tauri::Url,
     action: impl Fn(Action) + Send + 'static,
 ) {
     let owned = window.clone();
@@ -387,7 +387,10 @@ pub fn install(
             return;
         };
         let page = owned.clone();
-        let origin = page.url().ok().map(|url| url.origin());
+        // The window starts at about:blank while Runtime cookies are projected.
+        // Bind to its registered destination, never the provisional document.
+        let origin = destination.origin();
+        let route = destination.path().to_owned();
         install_on(
             &ns_window,
             mtm,
@@ -395,7 +398,7 @@ pub fn install(
             Box::new(move |pressed| {
                 if !page
                     .url()
-                    .is_ok_and(|url| Some(url.origin()) == origin && url.path() == route)
+                    .is_ok_and(|url| url.origin() == origin && url.path() == route)
                 {
                     return;
                 }

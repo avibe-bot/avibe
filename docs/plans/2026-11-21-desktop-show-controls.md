@@ -15,7 +15,9 @@ installation, production service changes or backend API changes are included.
 ## Behavior and ownership
 
 - Native buttons dispatch annotation/share events only on the Show route and
-  origin at which their window was opened. These open the existing compact
+  registered Runtime origin. Installation uses the intended destination even
+  while cookie projection keeps the initial document at `about:blank`.
+  These open the existing compact
   annotation picker and share popover through invisible anchors. Anchors mirror
   the native group and end at the content's top edge. Only one picker is open at
   a time. A shield lets an outside click dismiss it instead of entering the Show.
@@ -49,7 +51,8 @@ system-owned.
 - A browser scenario drives the actual standalone route and its iframe bridge:
   remembered mode, mode switch, mutually exclusive pickers, button-relative
   placement, dismissal and re-entry.
-- The hermetic native WebKit probe drives all four AppKit controls, verifies
+- The hermetic native WebKit probe installs the controls at `about:blank`, then
+  navigates to the Runtime document and drives all four AppKit controls. It verifies
   geometry, route gating, title truncation at 720 pt, narrow-title hiding, and
   cleanup after close. It exports optional system-appearance title-bar captures under
   `AVIBE_SHOW_CONTROLS_SHOTS` without activating the application.
