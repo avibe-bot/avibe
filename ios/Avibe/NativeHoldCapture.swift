@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import WebKit
 
 /// The in-App hold-to-talk's microphone (`voice.capturePrepare`,
@@ -1640,5 +1641,94 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
 
     nonisolated static func ms(since start: DispatchTime) -> Int {
         Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
+    }
+}
+
+/// Sees the first finger on the instance WebView for the App's own hold
+/// recognition (NativeHoldCapture). It never recognises, cancels or delays
+/// anything: the page gets every touch exactly as before.
+final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    private weak var tracked: UITouch?
+    /// A touch was handed to the capture and its end not yet.
+    private var following = false
+
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard tracked == nil, let touch = touches.first, let webView = view as? WKWebView else { return }
+        tracked = touch
+        following = true
+        NativeHoldCapture.shared.touchDown(
+            at: touch.location(in: webView), in: webView, timestamp: touch.timestamp,
+            // The touch itself knows where the finger is and when it lifts,
+            // whether or not UIKit goes on telling this recogniser.
+            touch: { [weak touch, weak webView] in Self.state(of: touch, in: webView) }
+        )
+    }
+
+    /// What `touch` says of itself: when it lifted, by its own time (nil
+    /// while the finger is down), and where it is. A touch that is gone has
+    /// lifted.
+    private static func state(of touch: UITouch?, in webView: WKWebView?) -> NativeHoldCapture.TouchState {
+        guard let touch else { return .init(liftedAt: ProcessInfo.processInfo.systemUptime, point: nil) }
+        let lifted = touch.phase == .ended || touch.phase == .cancelled
+        return .init(liftedAt: lifted ? touch.timestamp : nil, point: webView.map { touch.location(in: $0) })
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let tracked, touches.contains(tracked), let webView = view as? WKWebView else { return }
+        NativeHoldCapture.shared.touchMoved(to: tracked.location(in: webView), in: webView)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches)
+    }
+
+    private func finish(_ touches: Set<UITouch>) {
+        guard let tracked, touches.contains(tracked) else { return }
+        self.tracked = nil
+        following = false
+        if let webView = view as? WKWebView {
+            NativeHoldCapture.shared.touchEnded(in: webView, timestamp: tracked.timestamp)
+        }
+        // Never a gesture of its own: the next touch starts it afresh.
+        state = .failed
+    }
+
+    override func reset() {
+        super.reset()
+        // UIKit took the gesture back without ending the touch for us: so it
+        // is on a surface whose page took the press for itself. The lift's
+        // time is still the touch's own.
+        // A reset is not always a lift: the capture is told of an end only
+        // when the touch is gone or says it lifted. A finger still down is
+        // asked again when its cue is due.
+        if following, let webView = view as? WKWebView,
+           let lifted = Self.state(of: tracked, in: webView).liftedAt {
+            NativeHoldCapture.shared.touchEnded(in: webView, timestamp: lifted)
+        }
+        following = false
+        tracked = nil
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
     }
 }
