@@ -254,8 +254,22 @@ def _save_state(state: Mapping[str, Any]) -> None:
     write_atomic(_state_path(), json.dumps(state, indent=2, sort_keys=True))
 
 
+class _PairingChanged(Exception):
+    """This computer is now paired as another instance; the work in hand is not its work."""
+
+
+def _require_instance(instance_id: str) -> None:
+    current = current_binding()
+    if current is None or current.instance_id != instance_id:
+        raise _PairingChanged()
+
+
 def _update_state(instance_id: str, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
     with _LOCK:
+        # The state file is one per computer. Work begun for one instance must
+        # never write over the state of the instance this computer is paired as
+        # now, however late that work comes back from a wait.
+        _require_instance(instance_id)
         state = _load_state(instance_id)
         mutate(state)
         _save_state(state)
@@ -984,6 +998,8 @@ def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str,
         entry = _confirmations.pop(confirmation_id, None) if isinstance(confirmation_id, str) else None
         if entry is None or entry["actor"] != actor or entry["expires_monotonic"] <= _monotonic():
             raise AddressError(409, "confirmation_expired")
+        if current_binding() != binding:
+            raise AddressError(409, "address_changed")
         state = _load_state(binding.instance_id)
         if isinstance(state.get("journal"), dict):
             raise AddressError(409, "operation_in_progress")
@@ -1145,6 +1161,8 @@ def _worker_loop() -> None:
                 retry = owed_delay
                 owed_delay = min(owed_delay * 2, _OWED_READ_RETRY_MAX_SECONDS) if _read_refused else _OWED_READ_RETRY_SECONDS
                 delay = min(_advance_operation() or retry, retry)
+        except _PairingChanged:
+            delay = 0.0  # the journal belonged to another pairing; this one starts from its own state
         except Exception:
             logger.warning("instance address: operation step failed; it will be retried", exc_info=True)
             delay = 15.0
@@ -1386,7 +1404,9 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             except Exception:
                 logger.debug("instance address: waking pages failed", exc_info=True)
     previous = journal.get("previous_hostname") or ""
+    owner = binding.instance_id
     if "sessions" not in steps:
+        _require_instance(owner)  # never another pairing's sessions
         _end_sessions(binding, previous)
         done("sessions")
         _sleep(FINAL_FRAME_GRACE_SECONDS)
@@ -1399,11 +1419,13 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
                 logger.debug("instance address: closing old connections failed", exc_info=True)
         done("closed")
     if "health" not in steps:
+        _require_instance(owner)  # never another pairing's Health data
         if journal.get("destructive") and journal.get("origin") == "local":
             # A store that cannot be opened raises: the step is retried and the
             # state route keeps saying "pending", never "none".
             _revoke_health(journal.get("health_cutoff"))
         done("health")
+    _require_instance(owner)
     final_binding = current_binding() or binding
     summary = {
         "operation_id": journal.get("operation_id"),
@@ -1558,6 +1580,7 @@ def _snapshot_devices(binding: Binding, hostname: str) -> None:
     from vibe import remote_access
 
     ensure_sqlite_state()
+    _require_instance(binding.instance_id)
     registry_binding = remote_access.device_binding(_load_config())
     _receipt_key()  # before the write transaction: the key's first read takes the role lock
     with get_cached_sqlite_engine().begin() as conn:

@@ -1361,6 +1361,63 @@ def test_b2_a_401_on_the_request_itself_ends_cleaning_at_once(address):
     assert not instance_address.cleanup_ready(OLD) and instance_address._authority is None
 
 
+def test_f2_a_report_whose_answer_was_not_admitted_marks_nothing(address, monkeypatch):
+    plane, clocks = address
+    _cookie, sid = sign_in()
+    rename_to("new")
+    run()
+    receipt = instance_address.receipt_for_session(sid)
+    read_body = ui_server._bounded_request_text
+
+    async def permission_lapses_while_the_body_is_read(receive, limit):
+        text = await read_body(receive, limit)
+        plane.fail = RuntimeError("resource_acl_device_unavailable")
+        clocks.advance(61)
+        return text
+
+    monkeypatch.setattr(ui_server, "_bounded_request_text", permission_lapses_while_the_body_is_read)
+    answer = ui_server.app.test_client().post(
+        instance_address.CLEARED_REPORT_PATH, base_url=f"https://{OLD}", data=receipt)
+    # No cache-clearing answer went out, so the browser's HTTP cache was not cleared.
+    assert answer.status_code == 503 and "Clear-Site-Data" not in answer.headers
+    (old,) = instance_address.describe()["cleanup"]
+    assert [device["state"] for device in old["devices"]] == ["unconfirmed"]
+
+
+def test_b8_work_begun_for_one_instance_never_writes_over_the_next_pairing(address, monkeypatch):
+    from config.v2_config import update_config_fields
+
+    plane, clocks = address
+    sign_in()
+    phone = health_pairing()
+    rename_to("new")
+    settle = instance_address._sleep
+    repaired = []
+
+    def paired_as_another_instance_during_the_grace(seconds):
+        settle(seconds)
+        if seconds == instance_address.FINAL_FRAME_GRACE_SECONDS and not repaired:
+            def repair(config):
+                cloud = config.remote_access.vibe_cloud
+                cloud.instance_id, cloud.instance_secret = "inst_other", "another-secret"
+                cloud.public_url = "https://other-app.avibe.bot"
+
+            update_config_fields(repair)
+            # The new pairing already has state of its own.
+            instance_address._update_state(
+                "inst_other", lambda state: state.__setitem__("last_operation", {"state": "applied", "theirs": True}))
+            repaired.append(True)
+
+    monkeypatch.setattr(instance_address, "_sleep", paired_as_another_instance_during_the_grace)
+    with pytest.raises(instance_address._PairingChanged):
+        run()
+    run()  # nothing left to do for this pairing
+    stored = json.loads(instance_address._state_path().read_text(encoding="utf-8"))
+    assert stored["instance_id"] == "inst_other" and stored["last_operation"] == {"state": "applied", "theirs": True}
+    assert stored["journal"] is None
+    assert active_health_devices() == [phone]  # the old change's Health step did not run against the new pairing
+
+
 def test_d1_only_streams_open_at_the_switch_are_told_the_new_origin(address):
     plane, _ = address
     _cookie, sid = sign_in()

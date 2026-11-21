@@ -3539,10 +3539,9 @@ class _InstanceAddressRoleMiddleware:
             finally:
                 instance_address.end_cleanup_response(host)
             return True
+        reported_receipt = ""
         if method == "POST" and path == instance_address.CLEARED_REPORT_PATH:
-            receipt = await _bounded_request_text(receive, 256)
-            if receipt:
-                await asyncio.to_thread(instance_address.record_cleared, instance_address.normalize_host(host), receipt.strip())
+            reported_receipt = (await _bounded_request_text(receive, 256)).strip()
             status, content_type = 204, None
             clear = instance_address_responses.CLEAR_HTTP_CACHE
         elif method in {"GET", "HEAD"} and path == "/push-sw.js":
@@ -3576,6 +3575,13 @@ class _InstanceAddressRoleMiddleware:
         try:
             await send({"type": "http.response.start", "status": status, "headers": headers})
             await send({"type": "http.response.body", "body": b"" if method == "HEAD" or status == 204 else body})
+            if reported_receipt:
+                # Only now: the page's HTTP cache is cleared by this very answer,
+                # so "cleared" is recorded once it was admitted and sent, never
+                # for a report that ended in the plain 503.
+                await asyncio.to_thread(
+                    instance_address.record_cleared, instance_address.normalize_host(host), reported_receipt
+                )
         finally:
             instance_address.end_cleanup_response(host)
         return True
