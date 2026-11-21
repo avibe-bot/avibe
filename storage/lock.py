@@ -270,8 +270,21 @@ def try_shared_file_lease(lock_path: Path) -> IO[str] | None:
     try:
         handle.seek(0)
         if os.name == 'nt':
-            import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBRLCK, 1)
+            from ctypes import byref, c_size_t, c_void_p, get_last_error, POINTER, Structure, WinDLL, WinError
+            from ctypes.wintypes import BOOL, DWORD, HANDLE
+            from msvcrt import get_osfhandle
+
+            # CRT LK_NBRLCK aliases the exclusive nonblocking lock. LockFileEx
+            # without LOCKFILE_EXCLUSIVE_LOCK is a real shared byte-range lock.
+            class Overlapped(Structure):
+                _fields_ = [('internal', c_size_t), ('internal_high', c_size_t),
+                            ('offset', DWORD), ('offset_high', DWORD), ('event', c_void_p)]
+
+            lock = WinDLL('kernel32', use_last_error=True).LockFileEx
+            lock.argtypes = (HANDLE, DWORD, DWORD, DWORD, DWORD, POINTER(Overlapped))
+            lock.restype = BOOL
+            if not lock(get_osfhandle(handle.fileno()), 1, 0, 1, 0, byref(Overlapped())):
+                raise WinError(get_last_error())
         else:
             import fcntl
             fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)

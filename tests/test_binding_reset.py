@@ -150,6 +150,18 @@ def test_cli_confirmation_binds_even_damaged_files(cli_host, answer):
     assert V2Config.load().remote_access.vibe_cloud.instance_id == ('' if answer is True else 'inst_A')
 
 
+def test_two_senders_share_publication_lease(tmp_path):
+    from storage.lock import MigrationFileLock, MigrationLockTimeout, try_shared_file_lease
+    path = tmp_path / 'egress.lock'
+    with try_shared_file_lease(path):
+        with try_shared_file_lease(path):
+            with pytest.raises(MigrationLockTimeout):
+                with MigrationFileLock(path, timeout_seconds=0):
+                    pytest.fail('publisher admitted during sends')
+    with MigrationFileLock(path, timeout_seconds=0):
+        assert try_shared_file_lease(path) is None
+
+
 def _hold_old_response(pipe):
     from vibe import instance_address as addr
 

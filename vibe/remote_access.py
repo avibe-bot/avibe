@@ -5913,6 +5913,22 @@ def _config_for_pairing_record(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _continue_requested_after_pairing(config: V2Config) -> dict[str, Any] | None:
+    """Refresh a previously requested connector; never turn an existing installation On."""
+    if not _connector_requested_path().is_file():
+        return None
+    install_failure = _ensure_cloudflared_pin(config)
+    try:
+        with _connector_lifecycle():
+            # stop() serialized with this check wins even if the user switched
+            # Off after redeem or while the binary was being prepared.
+            if not _connector_requested_path().is_file():
+                return None
+            return _start(config, record_request=False, install_failure=install_failure)
+    except _ConnectorLifecycleBusy:
+        return {'ok': False, 'error': 'remote_access_busy', 'started': False}
+
+
 def _pairing_result_status(config: V2Config, *, start_result: dict[str, Any] | None = None) -> dict[str, Any]:
     result = {**status(config), "ok": True, "pairing": {"ok": True}}
     if start_result is not None:
@@ -6688,8 +6704,10 @@ def _persist_pairing_impl(
     assert config is not None
     start_result = None
     if config.remote_access.vibe_cloud.enabled:
-        start_result = start(config)
-        _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
+        start_result = (start(config) if record['source_instance_id'] == '' else
+                        _continue_requested_after_pairing(config))
+        if start_result is not None:
+            _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     result = _pairing_result_status(config, start_result=start_result)
     if disposition := (record.get("personal_claim") or {}).get("binding_disposition"):
         result["binding_disposition"] = disposition

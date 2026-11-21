@@ -225,6 +225,35 @@ def test_replacing_an_off_pairing_keeps_it_off_across_recovery(pairing_host, mon
     assert [key for _, key in calls] == ["key_A", "key_B"]
 
 
+@pytest.mark.parametrize('preference', ['off', 'on', 'stop-before-replay'])
+def test_publication_preserves_real_connector_request(pairing_host, monkeypatch, preference):
+    assert remote_access.pair('key_A', 'https://backend.test')['ok']
+    cfg = V2Config.load()
+    requested = remote_access._connector_requested_path()
+    requested.touch()  # this paired fixture substitutes the initial connector start
+    monkeypatch.setattr(remote_access, '_stop_connector', lambda *_: {'ok': True})
+    monkeypatch.setattr(remote_access, '_record_device_access_switch', lambda *_: None)
+    starts = []
+    monkeypatch.setattr(remote_access, '_ensure_cloudflared_pin', lambda *_: None)
+    def start(_, *, record_request, **kw):
+        starts.append(record_request)
+        return {'ok': True}
+    monkeypatch.setattr(remote_access, '_start', start)
+    monkeypatch.setattr(remote_access, 'start', lambda *_: pytest.fail('must not write back the user switch'))
+    if preference == 'off':
+        assert remote_access.stop(cfg)['ok']
+    _fail_config_publication_once(monkeypatch)
+    assert remote_access.pair('key_B', 'https://backend.test')['error'] == 'pairing_save_failed_after_redeem'
+    if preference == 'stop-before-replay':
+        assert remote_access.stop(cfg)['ok']
+    result = remote_access.pair('', '')
+    assert result['ok'] and ('start' in result) == (preference == 'on')
+    assert starts == ([False] if preference == 'on' else [])
+    assert requested.is_file() == (preference == 'on')
+    cloud = V2Config.load().remote_access.vibe_cloud
+    assert cloud.enabled and cloud.instance_id == 'inst_B'
+
+
 def test_recovery_really_saves_credentials_and_binding(pairing_host, monkeypatch):
     root, calls = pairing_host
     _fail_config_publication_once(monkeypatch)
