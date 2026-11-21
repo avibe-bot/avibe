@@ -178,6 +178,11 @@ impl Wiring {
         self.choices.reached(&target.account, &target.origin)
     }
 
+    /// Whether a route is given to a window only when it is created.
+    pub fn routes_at_creation(&self) -> bool {
+        self.routing == Routing::AtCreation
+    }
+
     /// Routing at creation: whether the instance view about to be created
     /// for `target` gets a route, so that a client must exist before it does.
     pub fn starts_at_creation(&self, target: &Target) -> bool {

@@ -226,6 +226,7 @@ fn where_a_route_is_given_only_at_creation_a_first_open_only_asks() {
     let path = directory.path().join("direct-paths.json");
     let mut wiring = Wiring::new(Routing::AtCreation, false, Choices::load(path.clone()));
 
+    assert!(wiring.routes_at_creation() && !live().routes_at_creation());
     // Never answered before: the instance view is created without a route.
     assert!(!wiring.starts_at_creation(&target(ONE)));
     // Once it is shown, a session only asks whether the instance answers.

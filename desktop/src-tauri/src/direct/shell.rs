@@ -454,6 +454,9 @@ pub(crate) struct AtCreation {
 /// as it always was.
 pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Option<AtCreation> {
     let state = direct(app)?;
+    if !lock(&state.wiring).routes_at_creation() {
+        return None;
+    }
     let target = target_at(app, destination)?;
     let host = target.host()?.to_owned();
     // The system's settings are read, and the listener is bound, here and
@@ -514,13 +517,6 @@ fn target_at(app: &AppHandle, destination: &url::Url) -> Option<Target> {
 pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Option<AtCreation> {
     let state = direct(app)?;
     let origin = origin_of(origin.as_str())?;
-    let rules_out = system_proxy_rules_out(origin.strip_prefix("https://")?).await;
-    lock(&state.wiring).system_proxy(rules_out);
-    if rules_out {
-        // The session ends at the next look; this window gets no route.
-        state.wake.notify_one();
-        return None;
-    }
     let account = app
         .try_state::<instance_client::Client>()?
         .coordinator
@@ -528,7 +524,20 @@ pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Opti
         .account
         .identity?
         .id;
-    let wiring = lock(&state.wiring);
+    let host = {
+        let wiring = lock(&state.wiring);
+        let session = wiring.shared(&account, &origin)?;
+        wiring.route(session)?.0.to_owned()
+    };
+    // The system's settings may have changed since the last look.
+    let rules_out = system_proxy_rules_out(&host).await;
+    let mut wiring = lock(&state.wiring);
+    wiring.system_proxy(rules_out);
+    if rules_out {
+        // The session ends at the next look; this window gets no route.
+        state.wake.notify_one();
+        return None;
+    }
     let session = wiring.shared(&account, &origin)?;
     let (host, material) = wiring.route(session)?;
     Some(AtCreation {
