@@ -127,6 +127,11 @@ pub enum Reply {
     Ready(String),
     /// The document is not the instance's, or has no CSRF cookie yet.
     NotReady,
+    /// Native ownership was lost; never retain a lease across selections.
+    /// The selection this request was started for is no longer the one on
+    /// show: another session, account or instance view. Never a page that is
+    /// only loading or reloading in the same selection; that is `NotReady`.
+    SelectionChanged,
     /// The instance answered, and not with `200`.
     Refused(u16),
     /// A service worker controls the document, or took control meanwhile.
@@ -137,6 +142,17 @@ pub enum Reply {
 }
 
 impl Reply {
+    /// What an adapter delivers for a request whose selection is, or is no
+    /// longer, the one on show. Every completion of an adapter passes
+    /// through this, so no outcome can outlive the selection it was for.
+    pub fn for_selection(self, current: bool) -> Self {
+        if current {
+            self
+        } else {
+            Reply::SelectionChanged
+        }
+    }
+
     /// What `Client::refresh` takes.
     pub fn body(self) -> Option<String> {
         match self {
