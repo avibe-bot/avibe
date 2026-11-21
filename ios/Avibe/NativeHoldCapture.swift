@@ -153,6 +153,14 @@ final class NativeHoldCapture {
         }
     }
 
+    /// What a touch says of itself when asked: when it lifted, by its own
+    /// time (nil while the finger is down), and where it is in its WebView
+    /// (nil when that is not known).
+    struct TouchState {
+        var liftedAt: TimeInterval?
+        var point: CGPoint?
+    }
+
     /// A press the App itself follows, from its touch-down until its take
     /// has ended (or it turned out not to be a hold).
     @MainActor
@@ -164,10 +172,10 @@ final class NativeHoldCapture {
         let downAt: Int
         /// The touch's own time at touch-down (`UITouch.timestamp`).
         var downStamp: TimeInterval?
-        /// Asks the touch itself: nil while the finger is down, else the
-        /// time it lifted. UIKit does not tell the observer of a lift on a
-        /// surface whose page took the press for itself.
-        var liftedAt: (@MainActor () -> TimeInterval?)?
+        /// Asks the touch itself where it is and whether it has lifted. On
+        /// a surface whose page took the press for itself, UIKit tells the
+        /// observer of neither.
+        var touch: (@MainActor () -> TouchState)?
         /// How long the touch lasted by its own times, when that made it a tap.
         var tapMs: Int?
         var recognised = false
@@ -175,8 +183,6 @@ final class NativeHoldCapture {
         var begun = false
         /// The input was prepared at touch-down (`quiet`).
         var prepared = false
-        /// A recognised hold's finger is in the cancel position.
-        var inCancel = false
         var timings = HoldTimings()
         var cancelTimer: (() -> Void)?
 
@@ -289,10 +295,6 @@ final class NativeHoldCapture {
     /// move first: the page's own numbers for a finger (`HOLD_GESTURE`).
     static let defaultHoldSeconds: TimeInterval = 0.2
     static let slop: CGFloat = 10
-    /// A recognised hold slides up this far to arm its cancel, and comes
-    /// back within this to disarm it: the page's own lines (`HOLD_GESTURE`).
-    static let cancelDistance: CGFloat = 80
-    static let uncancelDistance: CGFloat = 60
     /// How long a recognised hold's take waits for its page.
     /// The microphone is open meanwhile, so no longer than a page needs:
     /// its answer is two turns of its main thread (the event, then the
@@ -554,11 +556,10 @@ final class NativeHoldCapture {
     /// A finger came down in `webView` at `point` (its own points). On one
     /// of the page's surfaces the App prepares the microphone, without
     /// starting it, and times the hold itself.
-    /// `liftedAt` asks the touch itself whether the finger has lifted (nil
-    /// while it is down, else when it lifted, by the touch's own time).
+    /// `touch` asks the touch itself where it is and whether it has lifted.
     func touchDown(
         at point: CGPoint, in webView: WKWebView, timestamp: TimeInterval? = nil,
-        liftedAt: (@MainActor () -> TimeInterval?)? = nil
+        touch: (@MainActor () -> TouchState)? = nil
     ) {
         guard hold == nil, running == nil, surfacesWebView === webView,
               let surface = surfaces.first(where: { $0.rect.contains(point) }),
@@ -570,7 +571,7 @@ final class NativeHoldCapture {
         )
         self.hold = hold
         hold.downStamp = timestamp
-        hold.liftedAt = liftedAt
+        hold.touch = touch
         hold.timings.route = audio.route
         hold.timings.holdMs = Int((holdSeconds * 1000).rounded())
         hold.timings.variant = "quiet"
@@ -613,12 +614,18 @@ final class NativeHoldCapture {
             hold.cancelTimer = self.onceTouchesAreHeard { [weak self, weak hold] in
                 guard let self, let hold, self.hold === hold, !hold.recognised else { return }
                 // And the touch itself is asked. On a surface whose page took
-                // the press for itself, UIKit tells the observer of the lift
-                // only when it resets it, which a tap that raises the keyboard
-                // delays past this moment.
-                if let lifted = hold.liftedAt?() {
+                // the press for itself (it prevents the default on touchstart,
+                // as the composer does), UIKit stops telling the observer:
+                // no moves, and the lift only when it resets it, which a tap
+                // that raises the keyboard delays past this moment.
+                let touch = hold.touch?()
+                if let lifted = touch?.liftedAt {
                     if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
                     self.cancelHold(hold, why: "tap")
+                    return
+                }
+                if let point = touch?.point, hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
+                    self.cancelHold(hold, why: "moved")
                     return
                 }
                 self.recognise(hold)
@@ -628,23 +635,11 @@ final class NativeHoldCapture {
 
     func touchMoved(to point: CGPoint, in webView: WKWebView) {
         guard let hold, hold.webView === webView else { return }
-        guard hold.recognised else {
-            if hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
-                cancelHold(hold, why: "moved")
-            }
-            return
-        }
-        // Sliding up arms the cancel and coming back disarms it, each felt
-        // once per crossing: the two lines are 20 pt apart, so a finger
-        // resting at either does not repeat it.
-        guard let take = running, take.hold === hold else { return }
-        let up = hold.origin.y - point.y
-        if !hold.inCancel, up > Self.cancelDistance {
-            hold.inCancel = true
-            haptic.intoCancel()
-        } else if hold.inCancel, up <= Self.uncancelDistance {
-            hold.inCancel = false
-            haptic.back()
+        // After the cue the finger's slides are the page's to answer: it
+        // sees them on every surface, and gives their haptics.
+        guard !hold.recognised else { return }
+        if hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
+            cancelHold(hold, why: "moved")
         }
     }
 
@@ -686,7 +681,6 @@ final class NativeHoldCapture {
         hold.timings.recognisedAt = since(hold)
         haptic.fire()
         hold.timings.hapticAt = since(hold)
-        haptic.prepareSlide()
         if !hold.begun { begin(hold) }
         sendHoldEvent(hold.webView, ["phase": "recognised", "take": hold.take, "surface": hold.surface])
         hold.cancelTimer = after(Self.adoptionWait) { [weak self, weak hold] in
@@ -921,34 +915,16 @@ let nativeHoldBatchBytes = 3_200
 struct NativeHoldHaptic {
     var prepare: @MainActor () -> Void
     var fire: @MainActor () -> Void
-    /// The two slide haptics, made ready at recognition: into the cancel
-    /// position, and back onto the composer.
-    var prepareSlide: @MainActor () -> Void
-    var intoCancel: @MainActor () -> Void
-    var back: @MainActor () -> Void
 
     @MainActor
     static func system() -> NativeHoldHaptic {
-        // The page's own cue for a hold (`impactFeedback('medium')`); rigid
-        // and soft differ from it and from the release's light.
+        // The page's own cue for a hold (`impactFeedback('medium')`). The
+        // slides into the cancel position and back are the page's to give:
+        // the App does not see them on every surface.
         let start = UIImpactFeedbackGenerator(style: .medium)
-        let cancel = UIImpactFeedbackGenerator(style: .rigid)
-        let back = UIImpactFeedbackGenerator(style: .soft)
         return NativeHoldHaptic(
             prepare: { start.prepare() },
-            fire: { start.impactOccurred() },
-            prepareSlide: {
-                cancel.prepare()
-                back.prepare()
-            },
-            intoCancel: {
-                cancel.impactOccurred()
-                back.prepare()
-            },
-            back: {
-                back.impactOccurred()
-                cancel.prepare()
-            }
+            fire: { start.impactOccurred() }
         )
     }
 }
