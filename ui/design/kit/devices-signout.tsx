@@ -123,6 +123,7 @@ const accountLine = (d: D, status: SignOutAccount) => ({
   unconfirmed: d('多次重试后，仍不确定它的账号登录有没有结束。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。', 'After many tries, it is still unclear whether its account sign-in ended. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.'),
   refused: d('avibe.bot 没有接受这次请求，这次没有结束它的账号登录。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。', 'avibe.bot did not accept the request, so its account sign-in was not ended this time. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.'),
 })[status];
+const accountTone = (status: SignOutAccount) => (status === 'accepted' ? 'text-mint-ink' : status === 'refused' || status === 'unconfirmed' ? 'text-gold-ink' : 'text-muted');
 const accountIcon = { requesting: LoaderCircle, retrying: LoaderCircle, accepted: Check, not_applicable: LogOut, unconfirmed: Clock, refused: X } as const;
 
 /** Devices signed out lately, each with what avibe.bot did about its account sign-in. */
@@ -134,7 +135,7 @@ export function RecentSignOutsPanel({ rows }: { rows: SignOutRow[] }) {
         const Icon = accountIcon[row.account];
         return (
           <div key={row.device} className="flex items-start gap-3 border-b border-border px-5 py-3 last:border-b-0">
-            <Icon className={`mt-0.5 size-4 shrink-0 ${row.account === 'accepted' ? 'text-mint-ink' : row.account === 'refused' || row.account === 'unconfirmed' ? 'text-gold-ink' : 'text-muted'}`} />
+            <Icon className={`mt-0.5 size-4 shrink-0 ${accountTone(row.account)}`} />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-baseline gap-x-2">
                 <span className="text-[13px] font-medium text-foreground">{row.device}</span>
@@ -154,9 +155,10 @@ export function RecentSignOutsPanel({ rows }: { rows: SignOutRow[] }) {
  *  that stays connected shows later under Health connections not matched to a device. */
 export function SignOutNotice({ device, account, health }: { device: string; account: SignOutAccount; health?: 'cleanup_pending' }) {
   const d = useDraft();
+  const Icon = accountIcon[account];
   return (
     <div role="status" className="flex gap-3 rounded-xl border border-edge bg-surface px-5 py-3 shadow-elevation-0">
-      <LoaderCircle className="mt-0.5 size-4 shrink-0 text-muted" />
+      <Icon className={`mt-0.5 size-4 shrink-0 ${accountTone(account)}`} />
       <div className="min-w-0 text-[12px] leading-relaxed text-foreground">
         <div className="font-medium">{d(`已在这个 Avibe 上退出 ${device}`, `${device} is signed out of this Avibe`)}</div>
         <div><Para text={accountLine(d, account)} /></div>
