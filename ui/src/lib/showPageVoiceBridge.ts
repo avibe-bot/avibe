@@ -1,3 +1,4 @@
+import { nativeCaptureAllowed } from './nativeVoiceCapture';
 import {
   ShowPageVoiceDictation,
   type ShowPageVoiceDictationInput,
@@ -93,6 +94,8 @@ export type ShowPageVoiceHostDependencies = {
   /** Whether this reader allowed voice input (lib/voiceConsent). Asked at each start; a start
    *  without it records nothing and is refused as `unavailable` (the host asks the reader). */
   allowed?: () => boolean;
+  /** Whether the iOS App records the take (lib/nativeVoiceCapture) rather than the page. */
+  nativeCapture?: () => Promise<boolean>;
 };
 
 type StartingVoiceSession = {
@@ -174,6 +177,7 @@ export class ShowPageVoiceHost {
         ?? ((input) => new ShowPageVoiceDictation(input)),
       keep: dependencies.keep ?? (() => null),
       allowed: dependencies.allowed ?? (() => true),
+      nativeCapture: dependencies.nativeCapture ?? nativeCaptureAllowed,
     };
   }
 
@@ -259,11 +263,14 @@ export class ShowPageVoiceHost {
         this.postError(request.requestId, 'unavailable', false);
         return;
       }
+      const nativeCapture = await this.dependencies.nativeCapture().catch(() => false);
+      if (this.disposed || pending.cancelled || this.starting !== pending) return;
       const keep = this.dependencies.keep?.() ?? null;
       const session = this.dependencies.createSession({
         before: request.before,
         after: request.after,
         captureClaim,
+        ...(nativeCapture ? { nativeCapture: true } : {}),
         maxFileBytes: availability.maxFileBytes,
         ...(keep ? { keep } : {}),
         onPreview: (text) => {

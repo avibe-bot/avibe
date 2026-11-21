@@ -78,7 +78,8 @@ const MainBotTabBar: React.FC<{ items: ShellNavItem[] }> = ({ items }) => {
           onClick: open,
           // Pressed from the gesture's ring delay (100 ms), as every hold surface is: a tap does not flash.
           phase: hold.phase === 'pressing' && hold.progress <= 0 ? 'idle' : CENTER_PHASE[hold.phase],
-          hold: hold.bind,
+          // The whole button is the hold's: the iOS App may recognise a hold on it itself.
+          hold: { ...hold.bind, ref: hold.attachSurface },
         }}
       />
       <MainBotHoldOverlay hold={hold} bot={{ name, avatar }} />
