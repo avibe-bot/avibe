@@ -126,6 +126,7 @@ class Binding:
 
 
 _BINDING_CACHE: tuple[tuple[Any, ...], Binding | None] | None = None
+_binding_failure_logged: tuple[Any, ...] | None = None
 
 
 def _binding_from_config(config: Any) -> Binding:
@@ -162,7 +163,7 @@ def current_binding() -> Binding | None:
     no content and no cleaning.
     """
 
-    global _BINDING_CACHE
+    global _BINDING_CACHE, _binding_failure_logged
 
     path = paths.get_config_path()
     try:
@@ -183,8 +184,10 @@ def current_binding() -> Binding | None:
             binding = _binding_from_config(settings_service.load_config())
         except Exception:
             # Not cached: one transient read error must not refuse every managed
-            # Host until the file next changes.
-            logger.warning("instance address: configuration unreadable", exc_info=True)
+            # Host until the file next changes. Logged once per file, not per request.
+            if _binding_failure_logged != signature:
+                _binding_failure_logged = signature
+                logger.warning("instance address: configuration unreadable", exc_info=True)
             return None
     _BINDING_CACHE = (signature, binding)
     return binding
@@ -213,6 +216,7 @@ def _empty_state(instance_id: str) -> dict[str, Any]:
         "active_release_at_if_renamed_now": None,
         "state_read_at": None,
         "quiet": [],
+        "returning": None,
         "journal": None,
         "last_operation": None,
         "unrecognized_change": None,
@@ -766,10 +770,22 @@ def _apply_state(read: _StateRead) -> bool:
         else:
             # avibe.bot names another active name than this computer does.
             _authority = None
+            if was_cleanup:
+                # A name coming back, in whatever order the journal learns of it,
+                # goes through quiet, drain and settle (rule B3).
+                _update_state(
+                    binding.instance_id,
+                    lambda target: target.__setitem__("returning", state["active_hostname"]),
+                )
             _note_other_active_name(binding, stored, state, was_cleanup)
     if prune:
         # Outside the role lock: the event loop and every request take that lock.
-        _forget_closed_lists(binding, state)
+        # The active name's own list is kept: a switch in progress has just
+        # written it for the name about to retire, which this state, read
+        # before the switch, cannot list yet.
+        _forget_closed_lists(
+            binding, {"cleanup": [*state["cleanup"], {"hostname": binding.active_host}]}
+        )
     return True
 
 
@@ -1172,9 +1188,10 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
     from vibe import remote_access
 
     target = journal["target_hostname"]
-    if journal.get("is_return") and not journal.get("quieted"):
+    if journal.get("is_return"):
         # Before asking for one of our own old names back: stop cleaning it and
-        # let responses already started finish (rule B3).
+        # let responses already started finish (rule B3). At every attempt: a
+        # drain that timed out last time has not been waited for.
         journal = _quiet_and_drain(binding, journal)
     body = {
         "operation_id": journal["operation_id"],
@@ -1231,11 +1248,12 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
 
 
 def _refuse_operation(binding: Binding, journal: dict[str, Any], failure: dict[str, Any]) -> None:
+    if journal.get("quieted"):
+        # The permission goes first: once the name is no longer quiet it cleans
+        # again only if a fresh state still lists it.
+        _drop_authority()
     # One write ends the journal and the quiet state together.
     _set_journal(binding, None, last=failure)
-    if journal.get("quieted"):
-        # The name cleans again only if a fresh state still lists it.
-        _drop_authority()
     # "Read current state" after any refusal: a change made elsewhere while our
     # request was unanswered, or an earlier attempt of ours that did commit, is
     # then seen now and not at some later hint.
@@ -1260,6 +1278,15 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
         if read is None:
             return 10.0  # roles change only on a state read from avibe.bot
         state = read.state
+        # First of all: a reply older than what is already known is read again.
+        # The one that really arrives after our own commit is the state from
+        # before it, which still names the old address; taken at its word it
+        # would end the journal of a change avibe.bot did commit.
+        committed_generation = (journal.get("receipt") or {}).get("committed_generation")
+        with _LOCK:
+            stale = _read_is_stale_locked(read)
+        if stale or (local and isinstance(committed_generation, int) and state["generation"] < committed_generation):
+            return 2.0
         if state["active_hostname"] != target:
             if state["active_hostname"] == binding.active_host:
                 # The address this journal describes is not the address any
@@ -1273,11 +1300,6 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             target = state["active_hostname"]
             journal = {**journal, "origin": "elsewhere", "target_hostname": target}
             local = False
-        committed_generation = (journal.get("receipt") or {}).get("committed_generation")
-        with _LOCK:
-            stale = _read_is_stale_locked(read)
-        if stale or (local and isinstance(committed_generation, int) and state["generation"] < committed_generation):
-            return 2.0  # an older reply than what is already known: read again
         destructive = bool(
             local
             and state.get("last_rename_operation_id") == journal.get("operation_id")
@@ -1291,11 +1313,13 @@ def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
             # or a page that reports at once would be reporting to nothing. The
             # sign-out transaction snapshots again for a session that began since.
             _snapshot_devices(binding, binding.active_host)
-        if destructive and not journal.get("health_cutoff"):
+        if destructive and (binding.active_host != target or not journal.get("health_cutoff")):
             # Fixed before the new address can be reached, and without opening
             # the Health store: a phone paired there afterwards is not this
-            # change's to delete, however late the Health step runs. The store's
-            # own clock is the real one.
+            # change's to delete, however late the Health step runs. Taken anew at
+            # each attempt until the address has moved, so a pairing made on the
+            # old address during a long retry is not left behind. The store's own
+            # clock is the real one.
             journal = {**journal, "health_cutoff": datetime.now(timezone.utc).isoformat()}
             _set_journal(binding, journal)
         try:
@@ -1378,13 +1402,13 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
 
     state = read.state
     previous = binding.active_host
-    known_cleanup = {
-        entry.get("hostname") for entry in _load_state(binding.instance_id).get("cleanup", []) if isinstance(entry, dict)
-    }
+    stored = _load_state(binding.instance_id)
+    known_cleanup = {entry.get("hostname") for entry in stored.get("cleanup", []) if isinstance(entry, dict)}
     with _LOCK:
         _load_quiet(binding)
         was_cleanup = (
             bool(journal.get("is_return"))
+            or stored.get("returning") == target
             or target in known_cleanup
             or target in _quiet
             or (_authority is not None and target in _authority.hosts)
@@ -1449,6 +1473,7 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
             def record(target_state: dict[str, Any]) -> None:
                 target_state["generation"] = state["generation"]
                 target_state["cleanup"] = [entry for entry in state["cleanup"] if entry["hostname"] != target]
+                target_state["returning"] = None
                 target_state["release_delay_seconds"] = state["release_delay_seconds"]
                 target_state["active_release_at_if_renamed_now"] = state["active_release_at_if_renamed_now"]
                 target_state["state_read_at"] = int(read.started_wall)

@@ -838,6 +838,59 @@ def test_b1_a_journal_is_not_left_idle_while_the_pairing_is_unreadable(address):
     assert binding().active_host == NEW
 
 
+def test_b5_the_state_from_before_our_own_commit_does_not_end_the_journal(address):
+    plane, _ = address
+    phone = health_pairing()
+    rename_to("new")
+    before_commit, current, served = plane.state(), plane.state, []
+
+    def lagging_state():
+        # The first read after the commit is answered from before it: the old name, the old generation.
+        if plane.active == NEW and not served:
+            served.append(True)
+            return before_commit
+        return current()
+
+    plane.state = lagging_state
+    assert instance_address._advance_operation() > 0  # read again; the journal is kept
+    journal = instance_address._journal(binding())
+    assert journal["origin"] == "local" and journal["phase"] == "committed" and binding().active_host == OLD
+    run()
+    assert binding().active_host == NEW and active_health_devices() == [] and phone
+    assert instance_address.describe()["unrecognized_change"] is None
+
+
+def test_f1_a_read_from_before_the_switch_does_not_prune_the_list_just_written(address):
+    plane, _ = address
+    sign_in()
+    # The switch has snapshotted the devices of the name about to retire; a state read taken
+    # before the commit, and applied only now, does not list that name yet.
+    instance_address._snapshot_devices(binding(), OLD)
+    assert instance_address.refresh_state(force=True)
+    with get_cached_sqlite_engine().connect() as conn:
+        assert [row.hostname for row in conn.execute(select(instance_address_clearings))] == [OLD]
+
+
+def test_a5_a_return_is_drained_whatever_order_the_journal_learned_of_it(address, monkeypatch):
+    plane, clocks = address
+    rename_to("new")
+    run()
+    assert instance_address.begin_cleanup_response(OLD)  # still being written on the old name
+    monkeypatch.setattr(instance_address._DRAINED, "wait", lambda timeout=None: clocks.advance(timeout or 1))
+    plane.move(THIRD, "an-outside-operation")
+    clocks.advance(6)
+    assert instance_address.refresh_state(force=True)  # journaled as a change to the third name
+    plane.move(OLD, "another-outside-operation")
+    clocks.advance(6)
+    assert instance_address.refresh_state(force=True)  # the journal exists already; the return is still noted
+    with pytest.raises(RuntimeError, match="did not drain"):
+        run()
+    assert binding().active_host == NEW
+    instance_address.end_cleanup_response(OLD)
+    run()
+    assert binding().active_host == OLD
+
+
 def test_a5_a_change_made_elsewhere_is_adopted_without_deleting_anything(address):
     plane, _ = address
     sign_in()
