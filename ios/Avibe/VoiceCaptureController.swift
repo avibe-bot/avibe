@@ -273,8 +273,12 @@ struct VoiceCaptureEnvironment {
         noteEndDecision: { VoiceCaptureEndSwitch.noteDecision($0) },
         holdWhileRetrying: { VoiceCaptureEnvironment.backgroundHold("voice-capture-retry") },
         noteEarlier: { VoiceCaptureEarlier.add($0) },
-        earlier: { VoiceCaptureEarlier.lines },
-        dropEarlier: { VoiceCaptureEarlier.drop($0) },
+        // With the in-App holds' timings (NativeHoldTimings): numbers only.
+        earlier: { VoiceCaptureEarlier.lines + NativeHoldTimings.lines },
+        dropEarlier: {
+            VoiceCaptureEarlier.drop($0)
+            NativeHoldTimings.drop($0)
+        },
         outbox: (try? VoiceCaptureOutbox.standardDirectory()).map(VoiceCaptureOutbox.init(directory:)),
         scheduleUnsentNotice: { VoiceCaptureFailureNotification.scheduleUnsent(at: $0) },
         presentUnsent: { VoiceCaptureAlert.presentUnsent(count: $0, oldest: $1, answer: $2) },
