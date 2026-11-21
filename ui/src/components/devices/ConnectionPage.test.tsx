@@ -283,6 +283,35 @@ describe('ConnectionPage · the domain', () => {
     expect(screen.queryByText('改名后')).toBeNull();
   });
 
+  it('keeps following a change whose answer was lost after its dialog is closed, and shows where it ended', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const newHost = 'maxwell-app.avibe.bot';
+    vi.spyOn(devicesApi, 'previewRename').mockResolvedValue({ confirmationId: 'conf-1', hostname: newHost, isReturn: false, holdDays: 30, releaseAt: '2026-12-23T00:00:00.000Z', healthConnected: false, devices: [] });
+    vi.spyOn(devicesApi, 'changeAddress').mockRejectedValue(new LostAnswer());
+    const read = vi.spyOn(devicesApi, 'address').mockResolvedValue(address());
+    mount('/settings/remote-access/connection/address');
+
+    fireEvent.change(await screen.findByRole('textbox', { name: '新名称' }), { target: { value: 'maxwell' } });
+    fireEvent.click(screen.getByRole('button', { name: '继续' }));
+    await screen.findByText(`改成 ${newHost}？`);
+    for (let second = 0; second < 6; second += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+    fireEvent.click(screen.getByRole('button', { name: '更改域名' }));
+    expect(await screen.findByText(said('avibe.bot 还没有答复，更改还在进行'))).toBeTruthy();
+
+    // Closed before any read has seen the change: the row says it, and the page keeps reading.
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.getByText(`正在把域名改为 ${newHost}…`)).toBeTruthy();
+    // It had gone through after all.
+    const retired = { hostname: host, releaseAt: '2026-12-23T00:00:00.000Z', devices: [] };
+    read.mockResolvedValue(address({ hostname: newHost, retired: [retired] }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(await screen.findByText(`域名已改为 ${newHost}`)).toBeTruthy();
+    expect(screen.getAllByText(newHost).length).toBeGreaterThan(0);
+  });
+
   it('reopens on a change that is still running, and offers no second one', async () => {
     vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ operation: { state: 'pending', hostname: 'maxwell-app.avibe.bot' } }));
     mount('/settings/remote-access/connection/address');

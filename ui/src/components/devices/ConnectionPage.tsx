@@ -141,6 +141,8 @@ export function ConnectionPage() {
   const renameFrom = useRef<string | null>(null);
   /** The dialog of a running change was closed: its end is not brought back as a dialog. */
   const renameDismissed = useRef(false);
+  /** The address a change this page sent is heading for, until the page has seen how it ended. */
+  const [tracking, setTracking] = useState<string | null>(null);
   const [rebind, setRebind] = useState<RebindState | undefined>();
   // A bind-again whose return from avibe.bot was refused lands here with the callback's one
   // allowlisted word (the Devices page hands it on): read once, said, and removed.
@@ -238,6 +240,7 @@ export function ConnectionPage() {
       void readConnection();
       void readStatus();
       void readRebind();
+      void readAddress();
     };
     const timer = window.setInterval(refresh, REFRESH_MS);
     const stop = onPageReactivated(refresh);
@@ -263,7 +266,9 @@ export function ConnectionPage() {
   // A rename that avibe.bot has not answered yet is followed the same way. `renameFrom` is the
   // name it had when the change was first seen, so the list afterwards is the right name's.
   const operation = address?.operation;
-  const renameRunning = operation?.state === 'pending' || operation?.state === 'applying' || step?.step === 'pending';
+  // A change this page sent and has not seen the end of is followed whether or not its dialog is
+  // open: closing the dialog must not stop the page from learning that the address changed.
+  const renameRunning = operation?.state === 'pending' || operation?.state === 'applying' || tracking !== null;
   const currentHost = address?.hostname;
   useEffect(() => {
     if (renameRunning && currentHost && !renameFrom.current) renameFrom.current = currentHost;
@@ -284,6 +289,7 @@ export function ConnectionPage() {
         }
         lostChange.current = null;
         renameFrom.current = null;
+        setTracking(null);
         const name = preview.current?.name ?? '';
         const dismissed = renameDismissed.current;
         renameDismissed.current = false;
@@ -432,12 +438,16 @@ export function ConnectionPage() {
         if (answer.state === 'applied') {
           renameFrom.current = null;
           setStep({ step: 'done', hostname: answer.hostname, previous, retired: next?.retired.find((each) => each.hostname === previous) ?? null });
-        } else setStep({ step: 'pending', hostname: pending.hostname });
+        } else {
+          setTracking(pending.hostname);
+          setStep({ step: 'pending', hostname: pending.hostname });
+        }
       } catch (error) {
         if (!alive.current) return;
         if (error instanceof LostAnswer) {
           // Unknown: the address state says whether the change is running, done, or never arrived.
           lostChange.current = { reads: 0 };
+          setTracking(pending.hostname);
           setStep({ step: 'pending', hostname: pending.hostname });
           return;
         }
@@ -554,7 +564,9 @@ export function ConnectionPage() {
           : undefined,
       } : undefined}
       host={owner ? host : undefined}
-      address={owner ? address : undefined}
+      // A change still being followed with its dialog closed is said in the domain's row even
+      // before the instance reports it.
+      address={owner ? (address && tracking && !address.operation ? { ...address, operation: { state: 'pending', hostname: tracking } } : address) : undefined}
       renameDevices={renameDevices(devices)}
       rename={renameShown}
       rebind={owner ? rebindState : undefined}
