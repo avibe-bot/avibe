@@ -41,6 +41,7 @@ fn main() {
         "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
+        "pet_pointer",
         "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
