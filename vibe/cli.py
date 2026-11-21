@@ -16729,7 +16729,7 @@ def cmd_remote_direct(args):
                     print(exc.code, file=sys.stderr)
                     return 1
             config = update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "public_relay_trial", enabled))
-            connection_journal.supersede(config, {"public_relay_trial"})
+            connection_journal.legacy_supersede(config, {"public_relay_trial"})
         print(f"Public relay trial setting: {args.trial_state}. Direct-path permission and installation are unchanged.")
         return 0
     if action == "install":
@@ -16771,7 +16771,7 @@ def cmd_remote_direct(args):
             return 0
         with config_file_lock():
             config = update_config_fields(apply)
-            connection_journal.supersede(config, {"direct"})
+            connection_journal.legacy_supersede(config, {"direct"})
         result = remote_access.status(config)
         result["direct_setting_changed"] = enabled
     else:

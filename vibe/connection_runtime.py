@@ -70,7 +70,8 @@ def observe_public_path(config, active, allowed, sample, began):
     identity = (cs.relay_pairing(config), _active_id(active)) if config and active.get('pid') else None
     if not identity:
         _probe_window = None
-    elif not allowed or _probe_window is None or _probe_window[0] != identity:
+    elif _probe_window is None or _probe_window[0] != identity or (not allowed and not _probe_window[2]):
+        # Start the wait once per change or pause, not on every paused tick.
         _probe_window = (identity, now, True)
     if not allowed or not config:
         _probe = None
@@ -179,8 +180,7 @@ def prepare(actor, key, new):
             old = state['operation'] or {}
             if old.get('setting') == key and old['state'] != 'restoring':
                 raise cs.ConnectionError('connection_change_busy')
-            cs.journal.supersede(config, {cs.FIELDS[key]})
-            return None
+            return None  # reaffirming a value does not cancel an in-flight pin retry
         if key in cs.SWITCHES:
             _switch_gate(actor, config, key, new)
         if key in cs.AUTOMATIC:

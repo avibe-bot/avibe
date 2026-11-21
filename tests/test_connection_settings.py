@@ -100,6 +100,16 @@ def test_replaced_connector_is_busy_until_first_window_then_reports_health(rig):
         cr.prepare(rig.actor, 'direct', False)
 
 
+def test_paused_ticks_do_not_restart_first_sample_deadline(rig):
+    cr.observe_public_path(rig.cfg, rig.active, True, SimpleNamespace(successes=(True,)), rig.clock[0])
+    for dt, refusal in [(1, 'connection_change_busy'), (20, 'connection_change_busy'), (11, 'tunnel_unhealthy')]:
+        rig.clock[0] += dt
+        cr.observe_public_path(rig.cfg, rig.active, False, None, rig.clock[0])
+        with pytest.raises(cs.ConnectionError, match=refusal):
+            cr.prepare(rig.actor, 'direct', False)
+    assert cs.value(V2Config.load(), 'direct') is True
+
+
 def test_one_fresh_success_only_for_this_connector(rig):
     sample = SimpleNamespace(successes=(False, True, False))
     cr.observe_public_path(rig.cfg, rig.active, True, sample, rig.clock[0])
@@ -266,6 +276,24 @@ def test_lifecycle_contention_is_immediate_busy(rig, monkeypatch):
     assert exc.value.status == 409 and not cs.journal.path.exists()
 
 
+@pytest.mark.parametrize(('arguments', 'key', 'new'), [
+    (['off'], 'direct', False), (['relay', 'public-trial', 'on'], 'relay', True),
+])
+def test_host_cli_reports_applied_even_with_unreadable_journal(rig, monkeypatch, arguments, key, new):
+    from vibe import cli
+    from vibe.authorization import current_invocation_authority
+
+    assert current_invocation_authority() is None
+    cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
+    cs.journal.path.write_text('broken optional journal')
+    monkeypatch.setattr(ra, 'status', lambda _config: {'ok': True})
+    monkeypatch.setattr(ra, 'live_direct_status', lambda *_args, **_kwargs: {})
+    assert cs.value(V2Config.load(), key) is not new
+    assert cli.cmd_remote_direct(cli.build_parser().parse_args(['remote', 'direct', *arguments])) == 0
+    assert cs.value(V2Config.load(), key) is new
+    assert cs.journal.path.read_text() == 'broken optional journal'
+
+
 def test_unreadable_settings_disable_only_new_feature(rig, monkeypatch):
     from vibe import ui_server
     cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
@@ -328,7 +356,9 @@ def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monke
     tick(14.9)
     assert not cs.journal.path.exists()
     tick(0.2)
-    assert cs.journal.load(rig.cfg)['pinAttempt']
+    attempt = cs.journal.load(rig.cfg)['pinAttempt']
+    assert cr.prepare(rig.actor, 'protocol', cs.value(rig.cfg, 'protocol')) is None
+    assert cs.journal.load(rig.cfg)['pinAttempt'] == attempt
     attempts = []
     monkeypatch.setattr(ra, '_resolve_binary', lambda cfg: 'fixture-binary')
     def spawn(cfg, binary, protocol):
