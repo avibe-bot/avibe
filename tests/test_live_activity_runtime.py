@@ -770,6 +770,44 @@ async def test_terminal_put_settles_pending_end_locally_without_another_push(sta
 
 
 @pytest.mark.asyncio
+async def test_pause_keeps_enrollment_and_resumes_terminal_delivery(state, monkeypatch):
+    from core import web_push_notifications as notifications
+    from storage.models import device_function_settings as settings, remote_device_push_links as links
+    from types import SimpleNamespace
+
+    owner = "remote:reader"
+    device = dict(binding="test", subject="reader", device_id="phone")
+    with state.begin() as conn:
+        conn.execute(web_push_subscriptions.update().values(user_key=owner, device_id="push"))
+        sub_id = conn.scalar(select(web_push_subscriptions.c.id))
+        conn.execute(links.insert().values(**device, subscription_id=sub_id, email="test@example.invalid",
+                                           login_role="viewer", push_id="push", session_id="signed-in"))
+        conn.execute(settings.insert().values(**device, notifications_on=1))
+    monkeypatch.setattr(notifications, "_resolve_owner_authorization_decisions", lambda *a, **kw: {
+        owner: SimpleNamespace(authorized=True, context=None)
+    })
+    service, _, sent = service_for(state)
+    result = await service.handle("put", owner, "activity-1", BODY)
+    assert result["body"]["activity"]["status"] == "tracking"
+    with state.begin() as conn:
+        conn.execute(settings.update().values(notifications_on=0))
+    service.pending_question = lambda sid: True
+    await service.tick()
+    assert sent == []
+    assert service._read("activity-1")["status"] == "tracking"
+    with state.begin() as conn:
+        message_deliveries.terminalize_turn(conn, TURN, outcome="completed", settled_by="terminal_result", evidence_kind="test")
+    await service.tick()
+    assert sent == []
+    with state.begin() as conn:
+        conn.execute(settings.update().values(notifications_on=1))
+    await service.tick()
+    await service.tick()
+    assert [body["event"] for body in sent] == ["end"]
+    assert service._read("activity-1")["status"] == "ended"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("revoked", [True, False])
 async def test_confirmed_owner_revocation_stops_but_authority_outage_only_defers(state, monkeypatch, revoked):
     from core import web_push_notifications as notifications

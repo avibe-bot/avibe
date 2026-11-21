@@ -7635,6 +7635,8 @@ def system_schedule_claim():
             device_id=payload.get("device_id"),
             exclude_lease_tokens=payload.get("exclude_lease_tokens"),
             allow_create=payload["allow_create"],
+            claimant=_request_authorization_context(),
+            device_viewer=_device_viewer(),
             **({"kinds": payload["kinds"]} if "kinds" in payload else {}),
         )
     except system_schedule_service.SystemScheduleServiceError as exc:
@@ -7720,6 +7722,7 @@ def web_push_status():
             else None
         )
         current_subscription_enabled = bool(current_subscription and current_subscription["enabled"])
+        paused = bool(current_subscription_enabled and not web_push_service.get_deliverable_by_endpoint(conn, endpoint=endpoint,user_key=user_key))
         current_subscription_repairable = bool(
             current_subscription
             and not current_subscription_enabled
@@ -7732,6 +7735,7 @@ def web_push_status():
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
             "current_subscription_enabled": current_subscription_enabled,
+            "device_delivery_paused": paused,
             "current_subscription_repairable": current_subscription_repairable,
             "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
@@ -7885,7 +7889,7 @@ def web_push_test():
     )
     with web_push_notifications._owner_delivery_lock(user_key):
         with engine.connect() as conn:
-            subscription = web_push_service.get_enabled_by_endpoint(
+            subscription = web_push_service.get_deliverable_by_endpoint(
                 conn,
                 endpoint=endpoint,
                 user_key=user_key,
@@ -9040,15 +9044,37 @@ def _device_viewer():
     return None
 
 
+def _device_owner_scope(viewer):
+    config = _load_remote_access_config()
+    if not config or not viewer[0]:
+        return None,None
+    instance = config.remote_access.vibe_cloud.instance_id
+    if not viewer[2]:
+        return instance,None
+    context = _request_authorization_context()
+    if viewer[3]:
+        return instance,context.email.casefold() if context.email and context.instance_id==instance else None
+    from vibe import permissions
+    try:
+        answer = permissions.get_current_permissions(config)
+        if answer.source == 'live' and answer.projection['instance']['id']==instance:
+            return instance,(answer.projection['access']['owner'].get('email') or '').casefold() or None
+    except permissions.PermissionsError:
+        pass
+    return instance,None
+
+
 @app.route('/api/devices', methods=['GET'])
-def device_list():
-    from storage import device_registry
+async def device_list():
+    from storage import device_catalog
+    from storage.device_functions import DeviceError
     from vibe import __version__
 
     viewer = _device_viewer()
     host = {'id': 'host', 'kind': 'host', 'group': 'mine', 'display_name': socket.gethostname(), 'app_version': __version__,
             'account': None, 'system_version': None, 'signed_in_at': None, 'last_active_at': None,
             'push_only': False, 'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
+    host['functions'] = []
     if viewer is None:
         config = _load_remote_access_config()
         if config and not config.remote_access.vibe_cloud.is_runtime_paired() and _is_setup_host_request(config):
@@ -9056,23 +9082,93 @@ def device_list():
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
-    from storage.importer import ensure_sqlite_state
-    ensure_sqlite_state()
+    from storage.db import get_cached_sqlite_engine
     from vibe.direct_rendezvous import rendezvous
     from vibe.sse_broker import broker
+
     paths = rendezvous.session_paths(binding)
     for key in broker.tunnel_sessions(binding):
         paths.setdefault(key, {"kind": "tunnel", "family": None, "rtt_ms": None})
-    for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time()), paths=paths):
-        account = row['account']
-        if account is None:
-            group = 'unattributed'
-        else:
-            is_mine = account['subject'] == subject if subject else account['login_role'] == 'owner'
-            group = 'mine' if is_mine else 'others'
-        row['group'] = group
-        groups[group].append(row)
-    return jsonify({**groups, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+
+    def load():
+        from storage.importer import ensure_sqlite_state
+        ensure_sqlite_state()
+        scope = _device_owner_scope(viewer)
+        with get_cached_sqlite_engine().connect() as conn:
+            conn.exec_driver_sql('BEGIN')
+            return device_catalog.snapshot(conn, viewer, *scope, int(time.time()), paths=paths)
+    try:
+        rows, _, unlinked = await asyncio.to_thread(load)
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
+    for row in rows.values():
+        groups[row['group']].append(row)
+    if owner and _desktop_computer_use_supported():
+        from vibe import internal_client
+        status = await asyncio.to_thread(effective_computer_use_status)
+        effective = status.status if status.status in ('ready','off','needs_permission') else 'unavailable'
+        if effective=='ready' and await internal_client.health_identity() is None:
+            effective = 'unavailable'
+        host['functions'] = [{'kind':'computerUse','fixed':True,'can_change':False,'on':status.enabled,'status':effective}]
+    return jsonify({**groups, 'unlinked_health':unlinked, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+
+
+@app.route('/api/devices/<device_id>/notifications', methods=['PUT'])
+@app.route('/api/devices/<device_id>/schedule', methods=['PUT'])
+@app.route('/api/devices/<device_id>/health', methods=['GET'])
+@app.route('/api/devices/<device_id>/health/revoke', methods=['POST'])
+@app.route('/api/devices/unlinked-health/<device_id>/revoke', methods=['POST'])
+def device_function(device_id):
+    from storage import device_catalog
+    from storage.db import get_cached_sqlite_engine
+    from storage.device_functions import DeviceError
+    viewer = _device_viewer()
+    if not viewer or not viewer[0]:
+        return jsonify({'error':'device_access_forbidden'}),403
+    scope = _device_owner_scope(viewer)
+    if request.method=='PUT' and (not isinstance(request.json,dict) or set(request.json)!={'on'} or type(request.json['on']) is not bool):
+        return jsonify({'error':'invalid_device_function'}),400
+    kind = 'unlinkedHealth' if request.path.startswith('/api/devices/unlinked-health/') else request.path.split('/')[4]
+    try:
+        with get_cached_sqlite_engine().begin() as conn:
+            now = int(time.time())
+            conn.exec_driver_sql('BEGIN' if request.method=='GET' else 'BEGIN IMMEDIATE')
+            if request.method=='GET':
+                rows,_,_ = device_catalog.snapshot(conn,viewer,*scope,now)
+                feature = next((x for x in rows.get(device_id,{}).get('functions',[]) if x['kind']=='health'),None)
+                if not feature:
+                    raise DeviceError('device_not_found',404)
+                result = {'function':feature}
+            else:
+                result = device_catalog.change(conn,viewer,*scope,device_id,kind,request.json['on'] if request.method=='PUT' else False,now)
+        return jsonify(result)
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
+
+
+@app.route('/api/devices/activity', methods=['GET'])
+@app.route('/api/devices/<device_id>/health/reads', methods=['GET'])
+def device_activity_list(device_id=None):
+    from storage import device_activity_feed
+    from storage.db import get_cached_sqlite_engine
+    from storage.device_functions import DeviceError
+    viewer = _device_viewer()
+    if not viewer or not viewer[0]:
+        return jsonify({'error':'device_access_forbidden'}),403
+    try:
+        limit = int(request.args.get('limit','25'))
+    except ValueError:
+        return jsonify({'error':'invalid_activity_limit'}),400
+    try:
+        with get_cached_sqlite_engine().connect() as conn:
+            conn.exec_driver_sql('BEGIN')
+            result = device_activity_feed.list_page(conn,viewer,_request_authorization_context(),*_device_owner_scope(viewer),
+                limit=limit,raw_cursor=request.args.get('cursor'),device=device_id or request.args.get('device_id'),health_only=device_id is not None)
+        response = jsonify(result)
+        response.headers['Cache-Control']='no-store'
+        return response
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
 
 
 @app.route('/api/devices/self', methods=['POST'])
@@ -9083,11 +9179,33 @@ def device_self_description():
     viewer = _device_viewer()
     if viewer is None or not viewer[3]:
         return jsonify({'error': 'remote_session_required'}), 403
+    body = request.json
+    has_ticket = isinstance(body, dict) and 'health_binding_ticket' in body
     try:
-        report = self_description(request.json)
+        report = self_description({k: v for k, v in body.items() if k != 'health_binding_ticket'} if has_ticket else body)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     binding, subject, _, caller = viewer
+    if has_ticket:
+        from core.mobile_health_contract import MobileError
+        from sqlalchemy.exc import SQLAlchemyError
+        from storage import device_health_tickets
+        from storage.mobile_store import MobileStore, mobile_store_path
+        import sqlite3
+
+        try:
+            if not mobile_store_path().exists():
+                return jsonify({'error': 'health_binding_not_accepted'}), 403
+            status, code = device_health_tickets.redeem(MobileStore(), viewer, _request_authorization_context(),
+                report, body['health_binding_ticket'], int(time.time()))
+        except (MobileError, sqlite3.Error, SQLAlchemyError, OSError):
+            return jsonify({'error': 'health_binding_unavailable'}), 503
+        if code:
+            response = jsonify({'error': code})
+            if status == 429:
+                response.headers['Retry-After'] = '60'
+            return response, status
+        return jsonify({'ok': True})
     status = device_registry.describe_self(binding, subject, caller, report, int(time.time()))
     if status != 200:
         return jsonify({'error': {404:'device_not_found', 409:'installation_mismatch', 429:'device_report_rate_limited'}[status]}), status
@@ -9110,8 +9228,10 @@ def device_sign_out(device_id=None):
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
+    local_owner_email = _device_owner_scope(viewer)[1] if not caller else None
     try:
-        ids, count, stopped = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+        ids, count, stopped, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+                                      local_owner_email=local_owner_email,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
@@ -9119,7 +9239,13 @@ def device_sign_out(device_id=None):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
-    response = jsonify({'ok': True, 'revoked_sessions': count})
+    result = {'ok': True, 'revoked_sessions': count}
+    if deferred:
+        result['health_cleanup_pending'] = True
+    if binding and not caller and not local_owner_email:
+        # Report the skipped scope, never whether a pairing exists.
+        result['health_pairing_cleanup_skipped'] = 'current_owner_unverified'
+    response = jsonify(result)
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
@@ -9324,11 +9450,12 @@ def remote_access_logout():
         else None
     )
     revocation_recorded = True
+    deferred = False
     signed_in = False
     if identity is not None:
         # Read before recording: a session already signed out keeps its Push.
         signed_in = remote_access.session_identity_is_current(identity)
-        revocation_recorded = remote_access.revoke_browser_session(identity)
+        revocation_recorded, deferred = remote_access.revoke_browser_session_with_cleanup(identity)
     if signed_in:
         body = request.json if isinstance(request.json, dict) else {}
         device_id = body.get("device_id")
@@ -9349,7 +9476,7 @@ def remote_access_logout():
     # The cookie is cleared either way; a sign-out that could not be recorded
     # says so, because a copy of the cookie would still be accepted.
     if revocation_recorded:
-        response = jsonify({"ok": True})
+        response = jsonify({"ok": True, **({"health_cleanup_pending": True} if deferred else {})})
     else:
         response = jsonify({"ok": False, "error": "remote_logout_unavailable"})
         response.status_code = 503

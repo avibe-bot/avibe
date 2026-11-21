@@ -15,7 +15,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy import select
 
 from core.web_push import send_live_activity_update
-from storage import live_activity_service as store
+from storage import live_activity_service as store, web_push_service
 from storage.db import create_sqlite_engine
 from storage.models import live_activity_trackings as tracks
 
@@ -165,6 +165,12 @@ class LiveActivityService:
                 store.update(conn, activity_id, pending_state=json.dumps(queued), retry_count=0, retry_at=0)
                 row["retry_at"] = 0
             if queued is None or now < row["retry_at"]:
+                return None
+            # Keep the queued phase (including an end) while the phone is paused.
+            # Only missing enrollment ends tracking; a pause reserves no relay timestamp.
+            if web_push_service.get_deliverable_by_endpoint(
+                conn, endpoint=subscription["endpoint"], user_key=row["owner_user_key"]
+            ) is None:
                 return None
             terminal = queued["ended_at"] is not None
             stamp = max(now, row["last_timestamp"] + 1)

@@ -175,6 +175,18 @@ def _schedule(operation_id: str = "wake-up") -> dict:
     return claim
 
 
+def test_first_schedule_claim_requires_originating_session_read_access(isolated_state):
+    from vibe.authorization import AuthorizationContext
+
+    _create()
+    # The standalone Session is not in a Project this remote editor can read.
+    denied = AuthorizationContext(instance_role="editor", subject="guest", is_remote=True)
+    owner = AuthorizationContext(instance_role="owner", subject="owner", is_remote=True)
+    assert claim_next(instance_id="instance-a", device_id="guest-phone", claimant=denied, now=NOW) is None
+    allowed = claim_next(instance_id="instance-a", device_id="owner-phone", claimant=owner, now=NOW)
+    assert allowed["request"]["operationId"] == "wake-up"
+
+
 def test_create_is_canonical_session_bound_idempotent_and_conflict_safe(isolated_state):
     created = _create()
     retried = _create()
