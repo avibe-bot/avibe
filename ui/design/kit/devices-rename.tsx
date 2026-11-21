@@ -128,7 +128,7 @@ function DeviceChecklist({ devices, host, after }: { devices: RenameDevice[]; ho
               <Badge variant="success" className="shrink-0"><Check className="size-3" />{d('已清理', 'Cleared')}</Badge>
             ) : (
               <span className="shrink-0 pt-0.5 text-right text-[11px] text-muted">
-                {d('未确认', 'Not confirmed')}{device.lastActive ? d(` · 上次活跃于 ${device.lastActive.zh}`, ` · last active ${device.lastActive.en}`) : ''}
+                {d('未确认', 'Not confirmed')}{device.lastActive ? d(` · 上次活跃于${device.lastActive.zh}`, ` · last active ${device.lastActive.en}`) : ''}
               </span>
             ))}
           </div>

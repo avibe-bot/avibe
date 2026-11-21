@@ -4,10 +4,10 @@
 // itself and says plainly what it cannot. The dialogs open over the shipped 「连接方式」 page at the
 // computer itself; 「重新绑定」 is a quiet row beside 「更改域名」 at the bottom of that page.
 import { frames, type FrameSpec } from '../../frame';
-import { ConnectionPageView, type ConnectionPageViewProps } from '@/components/devices/ConnectionPageView';
+import { ConnectionV2 } from '../../kit/devices-connection-v2';
 import { DevicesPageView } from '@/components/devices/DevicesPageView';
 import type { Device } from '@/components/devices/types';
-import { ClaimLimitCard, MovedPage, RebindDialog, RebindRow, RenameDialog, UnrecognizedChangeBanner, type RenameDevice, type RenameDialogProps } from '../../kit/devices-rename';
+import { ClaimLimitCard, DOMAIN_SUFFIX, MovedPage, RebindDialog, RenameDialog, UnrecognizedChangeBanner, type RenameDevice, type RenameDialogProps } from '../../kit/devices-rename';
 import { settingsFixtures, settingsPage } from './fixtures';
 
 const route = '/settings/remote-access';
@@ -23,18 +23,8 @@ const NAME_LIMIT = 5;
 const host = 'max-app.avibe.bot';
 const account = 'max@example.test';
 
-const page: ConnectionPageViewProps = {
-  viewer: 'local',
-  host,
-  direct: 'ready',
-  relay: false,
-  tunnel: {
-    ms: 120,
-    active: 'quic',
-    settings: { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: '4', edge_bind_address: '' },
-    interfaces: [],
-  },
-};
+/** The new 「连接方式」 at the computer itself, with the owner's domain at the bottom. */
+const connection = (domain: string) => <ConnectionV2 viewer="local" direct="ready" protocol="auto" host={domain} />;
 
 const devices: RenameDevice[] = [
   { name: 'Max 的 MacBook Pro', kind: 'host', self: true },
@@ -63,7 +53,7 @@ function frame(name: string, title: string, size: { width: number; height: numbe
     name, title, ...size, status: 'proposed', themes: ['light'], route, fixtures,
     render: settingsPage('remote-access', (
       <>
-        <ConnectionPageView {...page} host={props.step === 'done' ? `${props.name}-app.avibe.bot` : props.host} />
+        {connection(props.step === 'done' ? `${props.name}${DOMAIN_SUFFIX}` : props.host)}
         <RenameDialog {...props} />
       </>
     )),
@@ -90,7 +80,7 @@ const devicesPage = () => settingsPage('remote-access', (
 ));
 const rebindPage = (dialog: boolean) => settingsPage('remote-access', (
   <>
-    <ConnectionPageView {...page} domainRows={<RebindRow />} />
+    {connection(host)}
     {dialog && <RebindDialog host={host} account={account} />}
   </>
 ));

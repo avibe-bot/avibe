@@ -15,12 +15,15 @@ import { useDraft } from './draft';
 import { Para } from './devices-text';
 
 type D = (zh: string, en: string) => string;
+
+const addressOf = (host: string) => `https://${host}`;
 type Text = { zh: string; en: string };
 
 export type Fn =
   | { kind: 'notifications' | 'schedule'; on: boolean; canChange: boolean }
   | { kind: 'health'; on: boolean; canChange: boolean; detail: Text }
-  | { kind: 'computerUse'; status: 'ready' | 'needs_permission' | 'off' | 'unavailable' };
+  /** `here`: the page is open on that computer itself. */
+  | { kind: 'computerUse'; status: 'ready' | 'needs_permission' | 'off' | 'unavailable'; here?: boolean };
 
 const fnName = (d: D, kind: Fn['kind']) => ({
   notifications: d('通知', 'Notifications'),
@@ -36,10 +39,10 @@ function FunctionRow({ fn }: { fn: Fn }) {
   const Icon = fnIcon[fn.kind];
   const name = fnName(d, fn.kind);
   const state = fn.kind === 'computerUse'
-    ? { ready: d('已就绪', 'Ready'), needs_permission: d('需要在那台电脑上授权', 'Needs permission on that computer'), off: d('未开启', 'Off'), unavailable: d('暂时不可用', 'Unavailable right now') }[fn.status]
+    ? { ready: d('已就绪', 'Ready'), needs_permission: fn.here ? d('需要授权', 'Needs permission') : d('需要在那台电脑上授权', 'Needs permission on that computer'), off: d('未开启', 'Off'), unavailable: d('暂时不可用', 'Unavailable right now') }[fn.status]
     : fn.on ? d('已开启', 'On') : d('未开启', 'Off');
   const detail = fn.kind === 'health' ? d(fn.detail.zh, fn.detail.en)
-    : fn.kind === 'computerUse' ? d('在那台电脑的 Avibe 里开关。', 'Turned on or off in Avibe on that computer.')
+    : fn.kind === 'computerUse' ? fn.here ? d('在「电脑操作」设置里开关。', 'Turned on or off in the Computer Use settings.') : d('在那台电脑的 Avibe 里开关。', 'Turned on or off in Avibe on that computer.')
       : fn.kind === 'notifications' ? d('伙伴和会话的消息会推送到这台设备。', 'Messages from Bots and Sessions are pushed to this device.')
         : d('由 Agent 提出，每次都由你在这台设备上确认。', 'An Agent asks; you confirm each one on this device.');
   const canChange = fn.kind !== 'computerUse' && fn.canChange && !(fn.kind === 'health' && !fn.on);
@@ -82,46 +85,45 @@ export function FunctionsDialog({ name, app, functions, note }: { name: string; 
   );
 }
 
-/** A Health connection no listed device can be proven to own: one row, disconnectable on its own. */
-export function UnlinkedHealthPanel({ device, synced }: { device: string; synced: Text }) {
+/** Health connections no listed device can be proven to own: one row each, disconnectable on its own. */
+export function UnlinkedHealthPanel({ items }: { items: Array<{ device: string; data: Text; lastSeen: Text }> }) {
   const d = useDraft();
   return (
     <SettingsPanel
-      title={d('未对应到设备的健康连接', 'Health connection not matched to a device')}
-      description={d(
-        '这台 iPhone 连着健康，但认不出它是列表里的哪一台。可以在这里单独断开；在 iPhone 上重新打开 Avibe App 后通常会自己对上。',
-        'This iPhone has Health connected, but it cannot be matched to a device in the list. You can disconnect it here; opening the Avibe App on the iPhone again usually matches it by itself.',
-      )}
+      title={d('未对应到设备的健康连接', 'Health connections not matched to a device')}
+      description={<Para text={d(
+        '这些 iPhone 连着健康，但认不出是列表里的哪一台。可以在这里单独断开；在 iPhone 上重新打开 Avibe App 后通常会自己对上。',
+        'These iPhones have Health connected, but cannot be matched to a device in the list. You can disconnect each here; opening the Avibe App on the iPhone again usually matches it by itself.',
+      )} />}
     >
-      <div className="flex items-center gap-3.5 px-5 py-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-field text-muted"><HeartPulse size={18} /></span>
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-medium text-foreground">{device}</div>
-          <div className="text-[11px] leading-relaxed text-muted">{d(`iOS · 上次同步 ${synced.zh}`, `iOS · last synced ${synced.en}`)}</div>
+      {items.map((item) => (
+        <div key={item.device} className="flex items-center gap-3.5 border-b border-border px-5 py-3 last:border-b-0">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-field text-muted"><HeartPulse size={18} /></span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-medium text-foreground">{item.device}</div>
+            <div className="text-[11px] leading-relaxed text-muted">{d(`${item.data.zh} · 上次连接 ${item.lastSeen.zh}`, `${item.data.en} · last connected ${item.lastSeen.en}`)}</div>
+          </div>
+          <Button variant="destructive-soft" size="sm">{d('断开', 'Disconnect')}</Button>
         </div>
-        <Button variant="destructive-soft" size="sm">{d('断开', 'Disconnect')}</Button>
-      </div>
+      ))}
     </SettingsPanel>
   );
 }
 
-export type SignOutAccount = 'accepted' | 'pending' | 'not_applicable' | 'unconfirmed' | 'refused';
-export type SignOutRow = {
-  device: string;
-  at: Text;
-  account: SignOutAccount;
-  /** Signed out at the computer itself: whether this row showed Health, and what the response said. */
-  health?: 'cleanup_pending' | 'skipped_unverified';
-};
+/** What avibe.bot did about the account sign-in: `requesting` (queued, every sign-out starts
+ *  here) and `retrying` are the two halves of the contract's `pending`. */
+export type SignOutAccount = 'requesting' | 'retrying' | 'accepted' | 'not_applicable' | 'unconfirmed' | 'refused';
+export type SignOutRow = { device: string; at: Text; account: SignOutAccount };
 
 const accountLine = (d: D, status: SignOutAccount) => ({
-  accepted: d('已请求 avibe.bot 结束这台设备的账号登录。', 'Asked avibe.bot to end this device’s account sign-in.'),
-  pending: d('待处理：暂时连不上 avibe.bot，会继续重试。', 'Pending: avibe.bot cannot be reached right now; Avibe keeps trying.'),
-  not_applicable: d('只在这个 Avibe 上退出了；avibe.bot 上的账号登录不受影响。', 'Signed out of this Avibe only; the account sign-in at avibe.bot is unaffected.'),
-  unconfirmed: d('未确认：多次重试后，仍不知道 avibe.bot 是否结束了这台设备的账号登录。', 'Not confirmed: after many tries it is still unknown whether avibe.bot ended this device’s account sign-in.'),
-  refused: d('avibe.bot 没有接受结束账号登录的请求；这台设备只在这个 Avibe 上退出了。', 'avibe.bot did not accept the request to end the account sign-in; this device is signed out of this Avibe only.'),
+  requesting: d('正在请求 avibe.bot 结束这台设备的账号登录。', 'Asking avibe.bot to end this device’s account sign-in.'),
+  retrying: d('暂时连不上 avibe.bot，会自动重试，连上后结束它的账号登录。', 'Cannot reach avibe.bot right now; Avibe keeps trying and ends its account sign-in once it gets through.'),
+  accepted: d('已通知 avibe.bot 结束它的账号登录。', 'Told avibe.bot to end its account sign-in.'),
+  not_applicable: d('这次没有结束它的账号登录，它可能不用验证就能再登录。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。', 'Its account sign-in was not ended this time, and it may be able to sign in again without verifying. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.'),
+  unconfirmed: d('多次重试后，仍不确定它的账号登录有没有结束。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。', 'After many tries, it is still unclear whether its account sign-in ended. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.'),
+  refused: d('avibe.bot 没有接受这次请求，这次没有结束它的账号登录。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。', 'avibe.bot did not accept the request, so its account sign-in was not ended this time. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.'),
 })[status];
-const accountIcon = { accepted: Check, pending: LoaderCircle, not_applicable: LogOut, unconfirmed: Clock, refused: X } as const;
+const accountIcon = { requesting: LoaderCircle, retrying: LoaderCircle, accepted: Check, not_applicable: LogOut, unconfirmed: Clock, refused: X } as const;
 
 /** Devices signed out lately, each with what avibe.bot did about its account sign-in. */
 export function RecentSignOutsPanel({ rows }: { rows: SignOutRow[] }) {
@@ -139,22 +141,35 @@ export function RecentSignOutsPanel({ rows }: { rows: SignOutRow[] }) {
                 <span className="text-[11px] text-muted">{d(`已在这个 Avibe 上退出 · ${row.at.zh}`, `Signed out of this Avibe · ${row.at.en}`)}</span>
               </div>
               <div className="mt-0.5 text-[12px] leading-relaxed text-foreground"><Para text={accountLine(d, row.account)} /></div>
-              {row.health === 'cleanup_pending' && (
-                <div className="mt-0.5 text-[11px] leading-relaxed text-muted"><Para text={d('它同步过的健康数据，清理尚未确认。', 'Clearing the Health data it synced is not confirmed yet.')} /></div>
-              )}
-              {row.health === 'skipped_unverified' && (
-                <div className="mt-0.5 text-[11px] leading-relaxed text-muted">
-                  <Para text={d(
-                    '它的健康连接没有断开：没能确认是所有者在这台电脑前操作。可以在上面的「未对应到设备的健康连接」里单独断开。',
-                    'Its Health connection was not disconnected: it could not be confirmed that the owner is at this computer. You can disconnect it on its own under Health connection not matched to a device.',
-                  )} />
-                </div>
-              )}
             </div>
           </div>
         );
       })}
     </SettingsPanel>
+  );
+}
+
+/** Right after signing a device out (the response): the outcome, and Health only here, because only
+ *  this response says what happened to it, once for the whole sign-out. */
+export function SignOutNotice({ device, health }: { device: string; health?: 'cleanup_pending' | 'skipped_unverified' }) {
+  const d = useDraft();
+  return (
+    <div role="status" className="flex gap-3 rounded-xl border border-edge bg-surface px-5 py-3 shadow-elevation-0">
+      <LoaderCircle className="mt-0.5 size-4 shrink-0 text-muted" />
+      <div className="min-w-0 text-[12px] leading-relaxed text-foreground">
+        <div className="font-medium">{d(`已在这个 Avibe 上退出 ${device}`, `${device} is signed out of this Avibe`)}</div>
+        <div><Para text={accountLine(d, 'requesting')} /></div>
+        {health === 'cleanup_pending' && <div className="text-muted"><Para text={d('它同步过的健康数据，清理尚未确认。', 'Clearing the Health data it synced is not confirmed yet.')} /></div>}
+        {health === 'skipped_unverified' && (
+          <div className="text-muted">
+            <Para text={d(
+              '它的健康连接没有断开：没能确认是所有者在这台电脑前操作。可以在「未对应到设备的健康连接」里单独断开。',
+              'Its Health connection was not disconnected: it could not be confirmed that the owner is at this computer. You can disconnect it on its own under Health connections not matched to a device.',
+            )} />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -165,17 +180,11 @@ export function SignInNotFinishedPage() {
     <main className="flex min-h-screen items-center justify-center bg-background px-6">
       <div className="w-full max-w-md">
         <div className="mb-6 grid size-12 place-items-center rounded-2xl border border-edge bg-field"><TriangleAlert className="size-5 text-gold-ink" /></div>
-        <h1 className="text-xl font-semibold text-foreground">{d('登录未完成', 'Sign-in not finished')}</h1>
+        <h1 className="text-xl font-semibold text-foreground">{d('这台设备已被退出', 'This device was signed out')}</h1>
         <p className="mt-3 text-[14px] leading-relaxed text-muted">
           <Para text={d(
-            '这台设备刚被退出，avibe.bot 还在结束它原来的登录。过几分钟再登录一次。',
-            'This device was just signed out, and avibe.bot is still ending its earlier sign-in. Sign in again in a few minutes.',
-          )} />
-        </p>
-        <p className="mt-2 text-[14px] leading-relaxed text-muted">
-          <Para text={d(
-            '若一直不行，先在 avibe.bot 退出登录，再回到这里登录。',
-            'If it keeps failing, sign out at avibe.bot first, then come back here and sign in.',
+            '请过几分钟再登录。一直不行的话，先在 avibe.bot 退出登录，再回来登录。',
+            'Sign in again in a few minutes. If it keeps failing, sign out at avibe.bot first, then come back and sign in.',
           )} />
         </p>
         <div className="mt-7 flex flex-wrap gap-3">
@@ -190,24 +199,26 @@ export function SignInNotFinishedPage() {
 /** Remote access was claimed from another computer on the network: this browser must move to the new address. */
 export function OpenNewAddressCard({ host }: { host: string }) {
   const d = useDraft();
+  const url = addressOf(host);
   return (
     <SettingsPanel>
       <div className="flex flex-col gap-3 px-5 py-4">
         <div className="flex items-center gap-2">
           <Badge variant="success"><Check className="size-3" />{d('已开启', 'On')}</Badge>
-          <span className="text-[14px] font-semibold text-foreground">{d('远程访问已开启，请打开新地址', 'Remote access is on. Open the new address')}</span>
+          <span className="text-[14px] font-semibold text-foreground">{d('远程访问已开启', 'Remote access is on')}</span>
         </div>
-        <p className="text-[12px] leading-relaxed text-muted">
-          <Para text={d(
-            '这个页面是从局域网打开的，绑定之后它不再被认作这台电脑，读不到新的状态。接下来请用新地址打开这个 Avibe：',
-            'This page was opened over the local network; once bound, it is no longer treated as this computer and cannot read the new state. From now on, open this Avibe at its new address:',
-          )} />
-        </p>
+        <p className="text-[13px] leading-relaxed text-foreground">{d('从现在起，请用新地址打开这个 Avibe：', 'From now on, open this Avibe at its new address:')}</p>
         <div className="flex flex-wrap items-center gap-2">
-          <a href={`https://${host}`} className="font-mono text-[14px] font-semibold text-cyan-ink hover:underline">{`https://${host}`}</a>
+          <a href={url} className="font-mono text-[14px] font-semibold text-cyan-ink hover:underline">{url}</a>
           <Button variant="ghost" size="2xs" aria-label={d('复制地址', 'Copy address')}><Copy /></Button>
         </div>
         <div><Button variant="brand"><ExternalLink />{d('打开新地址', 'Open the new address')}</Button></div>
+        <p className="text-[11px] leading-relaxed text-muted">
+          <Para text={d(
+            '这个页面是从局域网地址打开的，绑定后需要登录，所以不再更新。',
+            'This page was opened at a local network address; after binding it needs a sign-in, so it no longer updates.',
+          )} />
+        </p>
       </div>
     </SettingsPanel>
   );
