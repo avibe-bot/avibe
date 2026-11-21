@@ -101,13 +101,16 @@ def test_pairing_is_one_use_request_bound_and_stores_only_hashes(store, clock):
 
 
 def test_targeted_disconnect_preserves_other_phone_data_and_pending_pairing(store, clock):
+    # Two independent clients check before either creates its request. The
+    # second creation happens after the first phone has actually paired.
+    assert not store.status()['connected']
+    assert not store.status()['connected']
     first, req_a = pair_device(store, installation="phone-a")
     store.upload(device_for(store, first), upload_payload())
-    store.cancel_request(req_a["id"])
     clock[0] += timedelta(seconds=1)
     second, req_b = pair_device(store, installation="phone-b")
+    assert req_b['id'] != req_a['id']
     store.upload(device_for(store, second), upload_payload())
-    store.cancel_request(req_b["id"])
     pending, _ = store.create_request("health.connect", IDENTITY)
     code = store.issue_pairing(pending["id"], IDENTITY)
 

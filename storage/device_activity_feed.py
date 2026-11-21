@@ -14,6 +14,7 @@ from storage.mobile_store import MobileStore, mobile_store_path
 from storage.models import (
     device_activity_events as events,
     device_health_links as links,
+    device_schedule_links as schedule_links,
     system_schedule_operations as ops,
     system_schedule_attempts as attempts,
 )
@@ -93,14 +94,17 @@ def list_page(conn, viewer, context, instance, owner_email, *, limit, raw_cursor
 
         stmt = (
             select(
-                ops.c.registry_activity_id,
-                ops.c.registry_device,
-                ops.c.registry_subject,
+                schedule_links.c.registry_activity_id,
+                schedule_links.c.registry_device,
+                schedule_links.c.registry_subject,
                 ops.c.session_id,
                 ops.c.kind,
                 ops.c.created_at,
                 ops.c.title,
                 attempts.c.terminal_state,
+            )
+            .join_from(
+                ops, schedule_links, schedule_links.c.operation_id == ops.c.operation_id,
             )
             .join_from(
                 ops,
@@ -112,19 +116,19 @@ def list_page(conn, viewer, context, instance, owner_email, *, limit, raw_cursor
                 ),
             )
             .where(
-                ops.c.registry_binding == binding,
-                ops.c.registry_activity_id.is_not(None),
+                schedule_links.c.registry_binding == binding,
+                schedule_links.c.registry_activity_id.is_not(None),
                 ops.c.created_at > instant(cutoff).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             )
         )
         if not owner:
-            stmt = stmt.where(ops.c.registry_subject == subject)
+            stmt = stmt.where(schedule_links.c.registry_subject == subject)
         if device:
-            stmt = stmt.where(ops.c.registry_device == device)
+            stmt = stmt.where(schedule_links.c.registry_device == device)
         for r in page(
             stmt,
             ops.c.created_at,
-            ops.c.registry_activity_id,
+            schedule_links.c.registry_activity_id,
             "s",
             1000,
             lambda t: instant(t / 1e6).isoformat(timespec="milliseconds").replace("+00:00", "Z"),

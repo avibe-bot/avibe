@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import json
+import math
 import secrets
 import time
 
@@ -12,7 +13,7 @@ from storage.db import get_cached_sqlite_engine
 from storage.device_functions import DeviceError, live_caller
 from storage.device_health_tickets import digest
 from storage.models import device_health_links as links
-from storage.mobile_store import MobileStore, mobile_store_path
+from storage.mobile_store import MobileStore
 
 
 def issue_pairing(store, request_id, identity, viewer):
@@ -34,6 +35,7 @@ def issue_pairing(store, request_id, identity, viewer):
                 device_id=row["device_id"],
                 issuer_sid=row["session_id"],
                 code_hash=digest(result["pairing_code"]),
+                code_expires_at=math.ceil(datetime.fromisoformat(result['expires_at']).timestamp()),
                 linked_at=datetime.now(timezone.utc).isoformat(),
             )
         )
@@ -51,6 +53,8 @@ def pair(store, payload, identity):
         )
         if not link:
             return store.pair(payload, identity)
+        if link['cleanup_pending']:
+            raise MobileError('device_unauthorized', 401)
         viewer = (link["binding"], link["subject"], True, link["issuer_sid"])
         try:
             live_caller(conn, viewer, int(time.time()))
@@ -61,31 +65,71 @@ def pair(store, payload, identity):
         return result
 
 
-def disconnect(conn, binding, subject, device, *, sids=(), keep_device=False):
-    rows = (
-        conn.execute(
-            select(links).where(links.c.binding == binding, links.c.subject == subject, links.c.device_id == device)
-        )
-        .mappings()
-        .all()
-    )
-    if not rows or not mobile_store_path().exists():
+def queue_disconnect(conn, binding, subject, device, *, sids, remove_pairing):
+    """Commit the exact cleanup targets with the session tombstone. No private DB IO."""
+    condition = (links.c.code_hash.is_not(None) & links.c.issuer_sid.in_(sids))
+    if remove_pairing:
+        condition |= links.c.linked_at.is_not(None) & links.c.code_hash.is_(None)
+    scope = (links.c.binding == binding, links.c.subject == subject, links.c.device_id == device, condition)
+    # Caller owns the main DB write lock. This also works on SQLite before RETURNING.
+    targets = list(conn.scalars(select(links.c.mobile_id).where(*scope)))
+    if targets:
+        conn.execute(links.update().where(*scope).values(cleanup_pending=1, ticket_hash=None))
+    return targets
+
+
+def finish_pending(engine, targets):
+    """True if cleanup still needs retry. Both steps are idempotent across crashes."""
+    import logging
+    deferred = False
+    for mid in targets:
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql('BEGIN IMMEDIATE')
+                row = conn.execute(select(links).where(links.c.mobile_id == mid,
+                                                       links.c.cleanup_pending == 1)).mappings().first()
+                if not row:
+                    continue
+                store = MobileStore(existing_only=True)
+                with store.transaction() as mobile:
+                    if row['code_hash']:
+                        mobile.execute('DELETE FROM pairings WHERE code_hash=?', (row['code_hash'],))
+                    active = mobile.execute('SELECT 1 FROM devices WHERE id=? AND revoked_at IS NULL', (mid,)).fetchone()
+                if active:
+                    store.revoke(device_id=mid, caller='device_sign_out')
+                if row['code_hash'] and not active:
+                    conn.execute(links.delete().where(links.c.mobile_id == mid))
+                else:
+                    conn.execute(links.update().where(links.c.mobile_id == mid).values(
+                        cleanup_pending=None, code_hash=None, ticket_hash=None))
+        except Exception:
+            # The tombstone has committed. Never include credentials, ids or private DB errors.
+            logging.getLogger(__name__).warning('Device Health cleanup deferred')
+            deferred = True
+    return deferred
+
+
+def maintain(engine, now, cancel=None):
+    with engine.connect() as conn:
+        pending = conn.execute(select(links.c.mobile_id).where(links.c.cleanup_pending == 1)
+                               .order_by(links.c.mobile_id).limit(128)).scalars().all()
+    if cancel is not None and cancel.is_set():
         return
-    store = MobileStore()
-    for row in rows:
-        if keep_device and (not row["code_hash"] or row["issuer_sid"] not in sids):
-            continue
-        with store.transaction() as mobile:
-            if row["code_hash"]:
-                mobile.execute("DELETE FROM pairings WHERE code_hash=?", (row["code_hash"],))
-            active = mobile.execute(
-                "SELECT 1 FROM devices WHERE id=? AND revoked_at IS NULL", (row["mobile_id"],)
-            ).fetchone()
-        if active and not keep_device:
-            store.revoke(device_id=row["mobile_id"], caller="device_sign_out")
-        conn.execute(
-            links.update().where(links.c.mobile_id == row["mobile_id"]).values(code_hash=None, ticket_hash=None)
-        )
+    finish_pending(engine, pending)
+    # A private pairing may have committed before the main DB transaction was interrupted.
+    # Retain that exact pairing's provenance; delete only unused, expired reservations.
+    with engine.begin() as conn:
+        conn.exec_driver_sql('BEGIN IMMEDIATE')
+        expired = conn.execute(select(links.c.mobile_id).where(links.c.code_expires_at <= now,
+            links.c.code_hash.is_not(None), links.c.cleanup_pending.is_(None)).limit(128)).scalars().all()
+        if expired:
+            with MobileStore(existing_only=True).transaction() as mobile:
+                for mid in expired:
+                    match = links.c.mobile_id == mid
+                    if mobile.execute('SELECT 1 FROM devices WHERE id=?', (mid,)).fetchone():
+                        conn.execute(links.update().where(match).values(code_hash=None, code_expires_at=None))
+                    else:
+                        conn.execute(links.delete().where(match))
 
 
 def scoped_rows(conn, instance, owner):

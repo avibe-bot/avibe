@@ -293,7 +293,7 @@ def test_inflight_push_registration_cannot_restore_signed_out_delivery(install, 
     def revoke_before_transaction(conn, identity, *, now):
         # Force the ordering: HTTP authorization succeeded, then sign-out committed,
         # then the registration handler tries to mutate the subscription.
-        _, count, _ = device_registry.sign_out(
+        _, count, _, _ = device_registry.sign_out(
             identity["_device_binding"],
             "subject",
             owner=False,

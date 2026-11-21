@@ -169,6 +169,8 @@ HEAD_TABLES = INITIAL_TABLES | {
     "device_health_links",
     "device_activity_events",
     "device_function_settings",
+    "device_session_extensions",
+    "device_schedule_links",
     "remote_device_sessions",
     "remote_device_push_links",
     "remote_device_deadlines",

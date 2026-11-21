@@ -1,6 +1,7 @@
 {
   "systemSchedule": {
-    "waitingForDevice": "正在等待设备返回结果。"
+    "waitingForDevice": "正在等待设备返回结果。",
+    "enableOnDevice": "能接收这条的手机都关着「闹钟与提醒」。先请用户在「设备」中打开，再发新的闹钟或提醒。"
   },
   "storage": {
     "notice": {

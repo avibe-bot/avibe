@@ -99,16 +99,11 @@ def prune(conn, now):
         )
     elif cursor:
         conn.execute(state_meta.delete().where(state_meta.c.key == cursor_key))
-    conn.execute(
-        sessions.delete().where(
-            sessions.c.session_id.in_(
-                select(sessions.c.session_id)
-                .where(sessions.c.expires_at <= now)
-                .order_by(sessions.c.expires_at)
-                .limit(32)
-            )
-        )
-    )
+    from storage.models import device_session_extensions as ext
+    expired_sessions = select(sessions.c.session_id).where(sessions.c.expires_at <= now).order_by(
+        sessions.c.expires_at, sessions.c.session_id).limit(32)
+    conn.execute(ext.delete().where(ext.c.session_id.in_(expired_sessions)))
+    conn.execute(sessions.delete().where(sessions.c.session_id.in_(expired_sessions)))
 
 
 def record_session(binding, identity, role, metadata, *, expires_at, now, fresh):
@@ -303,13 +298,15 @@ def list_devices(binding, subject, *, owner, caller, now, paths=None, conn=None)
     return list(grouped.values())
 
 
-def _end_functions(conn,binding,subject,device,now,sids,keep,actor,actor_subject):
+def _end_functions(conn,binding,subject,device,now,sids,keep,actor,actor_subject,*,visible):
     from storage.models import device_function_settings as settings
-    device_health_registry.disconnect(conn,binding,subject,device,sids=sids,keep_device=keep)
+    pending = device_health_registry.queue_disconnect(conn, binding, subject, device, sids=sids,
+                                                      remove_pairing=visible and not keep)
     if not keep:
         conn.execute(settings.delete().where(settings.c.binding==binding,settings.c.subject==subject,settings.c.device_id==device))
     device_activity.record(conn,kind='signedOut',binding=binding,subject=subject,device=device,now=now,
                            actor=actor,actor_subject=actor_subject)
+    return pending
 
 
 def revoke_sid(conn, sid, expiry, now):
@@ -327,6 +324,7 @@ def revoke_sid(conn, sid, expiry, now):
             where=cast(state_meta.c.value_json, Integer) < expiry,
         )
     )
+    pending = []
     row = conn.execute(select(sessions).where(sessions.c.session_id==sid)).mappings().first()
     if row:
         sibling = conn.scalar(select(sessions.c.session_id).where(sessions.c.binding==row['binding'],
@@ -334,8 +332,12 @@ def revoke_sid(conn, sid, expiry, now):
             sessions.c.cookie_exp>now,sessions.c.expires_at>now).limit(1))
         if not sibling:
             device_push.stop_targets(conn,row['binding'],row['subject'],False,sid,row['device_id'],None,None,now)
-        _end_functions(conn,row['binding'],row['subject'],row['device_id'],now,[sid],bool(sibling),row['device_id'],row['subject'])
+        pending = _end_functions(conn,row['binding'],row['subject'],row['device_id'],now,[sid],bool(sibling),row['device_id'],row['subject'],
+                                 visible=row['cookie_exp'] > now and row['expires_at'] > now)
+    from storage.models import device_session_extensions as ext
+    conn.execute(ext.delete().where(ext.c.session_id == sid))
     conn.execute(sessions.delete().where(sessions.c.session_id == sid))
+    return pending
 
 
 def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
@@ -381,10 +383,18 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
             keeper.push_id if keeper else None,
             now,
         )
-        for target, account in {(r.device_id, r.subject) for r in rows}:
+        keys = {(r.device_id, r.subject) for r in rows}
+        from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+        # Match list_devices' live-session predicate, excluding push-only and revoked rows.
+        visible = set(conn.execute(stmt.with_only_columns(sessions.c.device_id, sessions.c.subject)
+                         .where(sessions.c.cookie_exp > now, ~select(state_meta.c.key).where(
+                             state_meta.c.key == literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id
+                         ).exists())).all())
+        pending = []
+        for target, account in keys:
             keep = device_id is None and keeper is not None and target == keeper.device_id
-            _end_functions(conn, binding, account, target, now, ids, keep,
-                           keeper.device_id if keeper else 'host', subject)
+            pending.extend(_end_functions(conn, binding, account, target, now, ids, keep,
+                           keeper.device_id if keeper else 'host', subject, visible=(target, account) in visible))
         if ids:
             from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
@@ -405,6 +415,9 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime):
                     where=cast(state_meta.c.value_json, Integer) < cast(tombstones.excluded.value_json, Integer),
                 )
             )
+            from storage.models import device_session_extensions as ext
+            conn.execute(ext.delete().where(ext.c.session_id.in_(stmt.with_only_columns(sessions.c.session_id))))
             conn.execute(sessions.delete().where(stmt.whereclause))
         prune(conn, now)
-    return ids, visible_count, stopped
+    deferred = device_health_registry.finish_pending(get_cached_sqlite_engine(), pending)
+    return ids, visible_count, stopped, deferred

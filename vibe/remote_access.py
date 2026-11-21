@@ -4498,7 +4498,14 @@ def start_runtime_monitoring(config: V2Config | None = None) -> None:
 
 
 def _record_device_access_switch(config, enabled):
-    """Record a change of requested access, not a connector restart or outage."""
+    """Activity is observational: a ledger failure cannot undo a connector transition."""
+    try:
+        _write_device_access_switch(config, enabled)
+    except Exception:
+        logger.warning("Could not record the remote access switch")
+
+
+def _write_device_access_switch(config, enabled):
     from storage import device_activity
     from storage.db import get_cached_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -4527,7 +4534,7 @@ def _record_device_access_switch(config, enabled):
             elif not _is_direct_loopback_connection():
                 return
         device_activity.record(conn,kind='remoteAccessOn' if enabled else 'remoteAccessOff',
-                               binding=binding,subject=None,device=device,now=int(time.time()))
+                               binding=binding,subject=subject,device=device,now=int(time.time()))
 
 
 def stop(config: V2Config | None = None) -> dict[str, Any]:
@@ -6815,7 +6822,12 @@ def _legacy_browser_session_id(secret: str, cookie_value: str) -> str:
 
 
 def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
-    """Durably sign one browser session out; return whether it was recorded.
+    recorded, _ = revoke_browser_session_with_cleanup(payload)
+    return recorded
+
+
+def revoke_browser_session_with_cleanup(payload: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Durably sign one browser session out; report revocation and deferred cleanup separately.
 
     The revocation is kept until the session's absolute cap, the latest
     ``exp`` any cookie of this browser session can carry, so a copy of an older
@@ -6826,25 +6838,25 @@ def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
 
     session_id = payload.get(_SESSION_BROWSER_ID_KEY)
     if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
-        return False
+        return False, False
     try:
         expires_at = int(payload.get("exp", 0))
     except (TypeError, ValueError):
-        return False
+        return False, False
     auth_time = _session_auth_time(payload)
     if auth_time is not None:
         expires_at = max(expires_at, auth_time + SESSION_ABSOLUTE_TTL_SECONDS)
     try:
-        remote_access_authorization_service.revoke_browser_session(
+        deferred = remote_access_authorization_service.revoke_browser_session(
             session_id,
             expires_at=expires_at,
             now=int(time.time()),
         )
     except Exception:
         logger.warning("browser session revocation persistence failed", exc_info=True)
-        return False
+        return False, False
     publish_browser_session_revoked(session_id)
-    return True
+    return True, bool(deferred)
 
 
 def publish_browser_session_revoked(session_id: str) -> None:

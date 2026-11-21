@@ -291,16 +291,9 @@ system_schedule_operations = Table(
     Column("title", String, nullable=False),
     Column("fire_at", String, nullable=False),
     Column("time_zone", String, nullable=False),
-    Column('registry_activity_id', Integer),
-    Index('ix_sso_registry_activity', 'registry_activity_id'),
-    Column('blocked_by_schedule_gate', Integer),
-    Column("registry_binding", String),
-    Column("registry_subject", String),
-    Column("registry_device", String),
     Column("bound_device_id", String, nullable=True),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
-    Index("ix_sso_registry", "registry_binding", "registry_subject", "created_at"),
     Index("idx_system_schedule_operations_session", "session_id", "created_at"),
 )
 
@@ -1414,6 +1407,21 @@ media_object_references = Table(
     Index("ix_media_object_references_session", "session_id"),
 )
 
+device_session_extensions = Table(
+    "device_session_extensions", metadata,
+    Column("session_id", String, primary_key=True),
+    Column("ticket_window", Integer), Column("ticket_attempts", Integer),
+    Column("schedule_principal", Text),
+)
+
+device_schedule_links = Table(
+    "device_schedule_links", metadata,
+    Column("operation_id", String, primary_key=True),
+    Column("registry_binding", String), Column("registry_subject", String), Column("registry_device", String),
+    Column("registry_activity_id", Integer, unique=True), Column("schedule_probe_binding", String),
+    Index("ix_dsl_scope", "registry_binding", "registry_subject", "registry_device"),
+)
+
 device_health_links = Table(
     "device_health_links", metadata,
     Column("mobile_id", String, primary_key=True),
@@ -1422,6 +1430,7 @@ device_health_links = Table(
     Column("ticket_hash", String, unique=True), Column("ticket_binding", String),
     Column("issued_at", Integer), Column("expires_at", Integer),
     Column("code_hash", String, unique=True), Column("issuer_sid", String),
+    Column("code_expires_at", Integer), Column("cleanup_pending", Integer),
     Index("ix_dhl_device", "binding", "subject", "device_id"),
 )
 
@@ -1485,8 +1494,6 @@ remote_device_sessions = Table(
     Column("identity_source", String, nullable=False),
     Column("described_at", Integer),
     Column("health_alias_hash", String),
-    Column("ticket_attempts", Integer),
-    Column("ticket_window", Integer),
     Column("schedule_alias", String),
     Column("push_id", String),
     Column("kind", String, nullable=False),

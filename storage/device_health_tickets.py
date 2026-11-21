@@ -13,7 +13,7 @@ from sqlalchemy.dialects.sqlite import insert
 
 from core.mobile_health_contract import MobileError
 from storage.db import get_cached_sqlite_engine
-from storage.models import device_health_links as links, remote_device_sessions as sessions
+from storage.models import device_health_links as links, remote_device_sessions as sessions, device_session_extensions as ext
 from vibe.device_metadata import device_key
 
 
@@ -29,6 +29,8 @@ def issue(store, device, binding):
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         with store.transaction() as mobile:
             store._ensure_active(mobile, device["id"])
+            if conn.scalar(select(links.c.cleanup_pending).where(links.c.mobile_id == device['id'])):
+                raise MobileError('device_revoked', 403)
             now = int(time.time())
             token = secrets.token_urlsafe(32)
             values = dict(ticket_hash=digest(token), ticket_binding=binding, issued_at=now, expires_at=now + 120)
@@ -60,7 +62,9 @@ def redeem(store, viewer, context, report, ticket, now):
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         row = (
             conn.execute(
-                select(sessions).where(
+                select(sessions, ext.c.ticket_window, ext.c.ticket_attempts).select_from(
+                    sessions.outerjoin(ext, ext.c.session_id == sessions.c.session_id)
+                ).where(
                     sessions.c.session_id == sid,
                     sessions.c.binding == binding,
                     sessions.c.subject == subject,
@@ -79,15 +83,14 @@ def redeem(store, viewer, context, report, ticket, now):
             window, count = now, 0
         if count >= 5:
             return 429, "health_binding_rate_limited"
-        conn.execute(
-            sessions.update()
-            .where(sessions.c.session_id == sid)
-            .values(ticket_window=window, ticket_attempts=count + 1)
-        )
+        counters = dict(ticket_window=window, ticket_attempts=count + 1)
+        conn.execute(insert(ext).values(session_id=sid, **counters).on_conflict_do_update(
+            index_elements=[ext.c.session_id], set_=counters))
         proof = (
             conn.execute(
                 select(links).where(
-                    links.c.ticket_hash == digest(ticket), links.c.ticket_binding == binding, links.c.expires_at > now
+                    links.c.ticket_hash == digest(ticket), links.c.ticket_binding == binding, links.c.expires_at > now,
+                    links.c.cleanup_pending.is_(None),
                 )
             )
             .mappings()

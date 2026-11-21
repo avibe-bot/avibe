@@ -23,6 +23,8 @@ def upgrade() -> None:
         sa.Column("issuer_sid", sa.String()),
         sa.Column("ticket_hash", sa.String(), unique=True),
         sa.Column("code_hash", sa.String(), unique=True),
+        sa.Column("code_expires_at", sa.Integer()),
+        sa.Column("cleanup_pending", sa.Integer()),
         sa.Column("issued_at", sa.Integer()),
         sa.Column("expires_at", sa.Integer()),
         if_not_exists=True,
@@ -54,40 +56,30 @@ def upgrade() -> None:
         sa.Column("notifications_on", sa.Integer(), nullable=False, server_default="1"),
         if_not_exists=True,
     )
-    op.add_column("remote_device_sessions", sa.Column("ticket_window", sa.Integer(), nullable=True))
-    op.add_column("remote_device_sessions", sa.Column("ticket_attempts", sa.Integer(), nullable=True))
-    op.add_column("system_schedule_operations", sa.Column("registry_binding", sa.String(), nullable=True))
-    op.add_column("system_schedule_operations", sa.Column("registry_subject", sa.String(), nullable=True))
-    op.add_column("system_schedule_operations", sa.Column("registry_device", sa.String(), nullable=True))
-    op.add_column("system_schedule_operations", sa.Column("registry_activity_id", sa.Integer(), nullable=True))
-    op.add_column("system_schedule_operations", sa.Column("blocked_by_schedule_gate", sa.Integer(), nullable=True))
-    op.create_index("ix_sso_registry_activity", "system_schedule_operations", ["registry_activity_id"], if_not_exists=True)
-    op.create_index(
-        "ix_sso_registry",
-        "system_schedule_operations",
-        ["registry_binding", "registry_subject", "created_at"],
+    op.create_table(
+        "device_session_extensions",
+        sa.Column("session_id", sa.String(), primary_key=True),
+        sa.Column("ticket_window", sa.Integer()),
+        sa.Column("ticket_attempts", sa.Integer()),
+        sa.Column("schedule_principal", sa.Text()),
         if_not_exists=True,
     )
+    op.create_table(
+        "device_schedule_links",
+        sa.Column("operation_id", sa.String(), primary_key=True),
+        sa.Column("registry_binding", sa.String()),
+        sa.Column("registry_subject", sa.String()),
+        sa.Column("registry_device", sa.String()),
+        sa.Column("registry_activity_id", sa.Integer(), unique=True),
+        sa.Column("schedule_probe_binding", sa.String()),
+        if_not_exists=True,
+    )
+    op.create_index("ix_dsl_scope", "device_schedule_links", ["registry_binding", "registry_subject", "registry_device"], if_not_exists=True)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_sso_registry_activity", table_name="system_schedule_operations")
-    op.drop_index("ix_sso_registry", table_name="system_schedule_operations")
-    for table, cols in (
-        (
-            "system_schedule_operations",
-            [
-                "registry_binding",
-                "registry_subject",
-                "registry_device",
-                "registry_activity_id",
-                "blocked_by_schedule_gate",
-            ],
-        ),
-        ("remote_device_sessions", ["ticket_window", "ticket_attempts"]),
-    ):
-        for col in cols:
-            op.drop_column(table, col)
+    op.drop_table("device_schedule_links")
+    op.drop_table("device_session_extensions")
     op.drop_table("device_health_links")
     op.drop_table("device_activity_events")
     op.drop_table("device_function_settings")

@@ -9229,7 +9229,7 @@ def device_sign_out(device_id=None):
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
     try:
-        ids, count, stopped = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+        ids, count, stopped, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
@@ -9237,7 +9237,7 @@ def device_sign_out(device_id=None):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
-    response = jsonify({'ok': True, 'revoked_sessions': count})
+    response = jsonify({'ok': True, 'revoked_sessions': count, **({'health_cleanup_pending': True} if deferred else {})})
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
@@ -9442,11 +9442,12 @@ def remote_access_logout():
         else None
     )
     revocation_recorded = True
+    deferred = False
     signed_in = False
     if identity is not None:
         # Read before recording: a session already signed out keeps its Push.
         signed_in = remote_access.session_identity_is_current(identity)
-        revocation_recorded = remote_access.revoke_browser_session(identity)
+        revocation_recorded, deferred = remote_access.revoke_browser_session_with_cleanup(identity)
     if signed_in:
         body = request.json if isinstance(request.json, dict) else {}
         device_id = body.get("device_id")
@@ -9467,7 +9468,7 @@ def remote_access_logout():
     # The cookie is cleared either way; a sign-out that could not be recorded
     # says so, because a copy of the cookie would still be accepted.
     if revocation_recorded:
-        response = jsonify({"ok": True})
+        response = jsonify({"ok": True, **({"health_cleanup_pending": True} if deferred else {})})
     else:
         response = jsonify({"ok": False, "error": "remote_logout_unavailable"})
         response.status_code = 503

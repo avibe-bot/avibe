@@ -113,7 +113,7 @@ def publish_mobile_schedule_changed() -> None:
 
 
 class MobileStore:
-    def __init__(self, path: Path | None = None):
+    def __init__(self, path: Path | None = None, *, existing_only: bool = False):
         self.path = path or mobile_store_path()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.path.parent.is_symlink() or not self.path.parent.is_dir():
@@ -123,7 +123,7 @@ class MobileStore:
             try:
                 if self.path.is_symlink():
                     raise MobileError("private_storage_unavailable", 503)
-                fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                fd = os.open(self.path, (0 if existing_only else os.O_CREAT) | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 try:
                     if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
                         raise MobileError("private_storage_unavailable", 503)
@@ -153,7 +153,7 @@ class MobileStore:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        conn = sqlite3.connect(self.path.absolute().as_uri() + '?mode=rw', uri=True, timeout=5, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA foreign_keys=ON")

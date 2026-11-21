@@ -9,7 +9,8 @@ from storage.models import (
     device_health_links as health,
     remote_device_sessions as sessions,
     remote_device_push_links as attestations,
-    system_schedule_operations as operations,
+    device_schedule_links as operations,
+    device_session_extensions as ext,
     web_push_subscriptions as subscriptions,
 )
 
@@ -53,11 +54,19 @@ def preference(conn, binding, subject, device, **updates):
     )
 
 
-def schedule_claimant(conn, viewer, now):
+def schedule_claimant(conn, viewer, now, context):
+    import json
+    from core.web_push_notifications import web_push_authorization_context_record
+
     caller = live_caller(conn, viewer, now)
     if not caller:
         return None, True
     key = caller["binding"], caller["subject"], caller["device_id"]
+    principal = web_push_authorization_context_record('remote:' + caller['subject'], context)
+    encoded = json.dumps(principal, sort_keys=True) if principal else None
+    stmt = insert(ext).values(session_id=caller['session_id'], schedule_principal=encoded)
+    conn.execute(stmt.on_conflict_do_update(index_elements=[ext.c.session_id],
+        set_={'schedule_principal': encoded}, where=ext.c.schedule_principal.is_distinct_from(encoded)))
     preference(conn, *key, schedule_capable=1)
     on = conn.scalar(
         select(settings.c.schedule_on).where(
