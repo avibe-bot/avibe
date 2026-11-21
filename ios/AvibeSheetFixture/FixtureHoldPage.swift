@@ -50,6 +50,10 @@ final class FixtureHoldViewController: UIViewController {
         // As `WebViewController` sets its primary WebView up.
         webView.addGestureRecognizer(NativeHoldTouchObserver())
         NativeHoldCapture.shared.watch(webView)
+        // The fixture's own record of each touch as UIKit delivers it, beside
+        // the production observer: when a check fails, it says whether the
+        // touch reached the App late, without its moves, or not at all.
+        webView.addGestureRecognizer(touchLog)
         view.addSubview(webView)
         self.webView = webView
 
@@ -66,9 +70,12 @@ final class FixtureHoldViewController: UIViewController {
         webView.loadHTMLString(Self.page, baseURL: URL(string: "\(Self.origin)/hold.html")!)
     }
 
+    private let touchLog = FixtureHoldTouchLog()
+
     private func publishEvidence() {
         let lines = NativeHoldTimings.lines
-        evidence.accessibilityValue = lines.isEmpty ? "none" : lines.joined(separator: " | ")
+        evidence.accessibilityValue = (lines.isEmpty ? "none" : lines.joined(separator: " | "))
+            + " || touches: " + (touchLog.touches.isEmpty ? "none" : touchLog.touches.joined(separator: " "))
     }
 
     /// The stand-in page. Its states are shown as text, one fact a line, for
@@ -88,7 +95,8 @@ final class FixtureHoldViewController: UIViewController {
       /* As the composer while a hold may start on it (ui: Composer `holdBoxStyle`). */
       #input.holdable { touch-action: none; -webkit-touch-callout: none; }
       button { min-width: 64px; min-height: 44px; font-size: 15px; }
-      #plain { margin: 12px 0; height: 64px; background: #dde; display: flex; align-items: center; justify-content: center; }
+      #plain, #control { margin: 12px 0; height: 64px; background: #dde; display: flex; align-items: center; justify-content: center; }
+      #control { background: #ded; }
       #filler { height: 1600px; background: linear-gradient(#eef, #fee); }
       #sheet { position: fixed; left: 0; right: 0; top: 60px; bottom: 0; background: #fff; border-top: 2px solid #888; padding: 16px; display: none; }
       #sheet.open { display: block; }
@@ -106,6 +114,9 @@ final class FixtureHoldViewController: UIViewController {
       <p id="s-send">send=0/0</p>
       <p id="s-sheet">sheet=0</p>
       <p id="s-scroll">scrolled=no</p>
+      <p id="s-warm">warm=no</p>
+      <p id="s-press">press=none</p>
+      <p id="s-drag">drag=none</p>
       <div id="row">
         <textarea id="input" class="holdable" aria-label="Message"></textarea>
         <button id="send" type="button">Send</button>
@@ -113,6 +124,7 @@ final class FixtureHoldViewController: UIViewController {
       <button id="open-sheet" type="button">Open sheet</button>
       <button id="blur" type="button">Hide keyboard</button>
       <div id="plain">Plain surface</div>
+      <div id="control">Control box</div>
       <div id="filler"></div>
       <div id="sheet"><div id="sheet-body"><button id="close-sheet" type="button">Close sheet</button><p>Sheet content</p></div></div>
     <script>
@@ -164,8 +176,22 @@ final class FixtureHoldViewController: UIViewController {
         window.visualViewport.addEventListener("scroll", name);
       }
 
+      // What the page saw of a drag on a box: its pointer events, in order.
+      for (const box of [plain, document.getElementById("control")]) {
+        let seen = [], moves = 0;
+        const show = () => set("s-drag", "drag=" + box.id + ":" + seen.join(",") + (moves ? ",move" + moves : ""));
+        box.addEventListener("pointerdown", () => { seen = ["down"]; moves = 0; show(); });
+        box.addEventListener("pointermove", () => { moves += 1; show(); });
+        box.addEventListener("pointerup", () => { seen.push("up"); show(); });
+        box.addEventListener("pointercancel", () => { seen.push("cancel"); show(); });
+      }
+      // The first touch after a launch is slow on a CI simulator: the tests warm up on this.
+      document.getElementById("s-ready").addEventListener("pointerup", () => set("s-warm", "warm=yes"));
+
       // One press on the input, and the take it becomes.
       let press = null;
+      // How long the page saw the last press on the input, and how it ended.
+      const pressed = (how) => set("s-press", "press=" + how + ":" + Math.round(performance.now() - press.at));
       // As the composer: a press the hold took keeps iOS from focusing or selecting, and a
       // tap focuses in touchend, where iOS allows it.
       let touchHeld = false, tapFocus = false;
@@ -220,6 +246,7 @@ final class FixtureHoldViewController: UIViewController {
       });
       input.addEventListener("pointerup", (event) => {
         if (!press || event.pointerId !== press.id) return;
+        pressed("up");
         if (!press.recognised && !press.own) {
           // A tap: the input takes the focus.
           drop();
@@ -230,6 +257,7 @@ final class FixtureHoldViewController: UIViewController {
       });
       input.addEventListener("pointercancel", (event) => {
         if (!press || event.pointerId !== press.id) return;
+        pressed("cancel");
         if (press.recognised || press.own) end("system");
         else drop();
       });
@@ -291,4 +319,58 @@ final class FixtureHoldViewController: UIViewController {
     </body>
     </html>
     """#
+}
+
+/// Each touch as UIKit delivered it to a recogniser on the WebView: how late
+/// its start and its end arrived (ms after the touch's own time), how many
+/// moves came between, and how long the touch lasted by its own times.
+/// `b+3,m12,e+5/340` is a touch whose start came 3 ms late, with 12 moves,
+/// whose end came 5 ms late after 340 ms. Passive, as the production observer.
+private final class FixtureHoldTouchLog: UIGestureRecognizer {
+    private(set) var touches: [String] = []
+    private var current = ""
+    private var moves = 0
+    private var began: TimeInterval = 0
+
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    private func late(_ touch: UITouch) -> Int {
+        Int(((ProcessInfo.processInfo.systemUptime - touch.timestamp) * 1000).rounded())
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let touch = touches.first else { return }
+        began = touch.timestamp
+        moves = 0
+        current = "b+\(late(touch))"
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        moves += 1
+    }
+
+    private func finish(_ touches: Set<UITouch>, as kind: String) {
+        if let touch = touches.first {
+            let length = Int(((touch.timestamp - began) * 1000).rounded())
+            self.touches.append("\(current),m\(moves),\(kind)+\(late(touch))/\(length)")
+            if self.touches.count > 6 { self.touches.removeFirst() }
+        }
+        state = .failed
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches, as: "e")
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches, as: "c")
+    }
 }
