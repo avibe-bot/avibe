@@ -139,17 +139,24 @@ class PinFailureWindow:
     def __init__(self, clock: Callable[[], float] = _clock):
         self.clock = clock
         self.identity: tuple | None = None
-        self.start = self.last = 0.0
+        self.seconds = self.last_down = 0.0
+        self.paused = False
 
-    def observe(self, identity: tuple | None, *, disconnected: bool, max_gap: float) -> bool:
+    def observe(self, identity: tuple | None, *, disconnected: bool | None, max_gap: float) -> bool:
+        """Only adjacent, confirmed down samples earn time. A short unknown pauses it."""
         tick = self.clock()
-        if not disconnected or identity is None:
+        gap = tick - self.last_down
+        if self.identity != identity or not 0 <= gap <= max_gap or disconnected is False:
             self.identity = None
+        if identity is None or disconnected is not True:
+            self.paused = True
             return False
-        if self.identity != identity or not 0 <= tick - self.last <= max_gap:
-            self.start = tick
-        self.identity, self.last = identity, tick
-        return tick - self.start >= OUTAGE_SECONDS
+        if self.identity is None:
+            self.seconds = 0.0
+        elif not self.paused:
+            self.seconds += gap
+        self.identity, self.last_down, self.paused = identity, tick, False
+        return self.seconds >= OUTAGE_SECONDS
 
 
 class Journal:

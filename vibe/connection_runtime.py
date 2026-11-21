@@ -441,8 +441,19 @@ def observe_pins(window, config, *, active, pid_state, sample, max_gap):
     pins = {k: cs.value(config, k) for k, auto in cs.AUTOMATIC.items() if cs.value(config, k) != auto} if config and _requested(config) else {}
     request = _request_identity() if pins else None
     identity = (cs.relay_pairing(config), tuple(pins.items()), request) if request else None
-    down = pid_state in {'dead', 'other'} or (pid_state == 'cloudflared' and sample is not None and sample.registered_connections == 0)
-    if not window.observe(identity, disconnected=down and not tunnel._state_connector('candidate') and not tunnel._state_connector('draining'), max_gap=max_gap):
+    # Measure the requested tunnel, independently of who currently owns the
+    # candidate lane. A partial registration is enough; a missing active
+    # sample is neither a confirmed outage nor a successful connection.
+    registered = sample.registered_connections if sample is not None and pid_state == 'cloudflared' else None
+    down = True if pid_state in {'dead', 'other'} else (registered == 0 if registered is not None else None)
+    if identity and down is not False:
+        for name in ('candidate', 'draining'):
+            connector = tunnel._state_connector(name)
+            if (connector and tunnel._cloudflared_pid_state(connector.get('pid')) == 'cloudflared'
+                    and (_registered(connector.get('metrics_url')) or 0) > 0):
+                down = False
+                break
+    if not window.observe(identity, disconnected=down, max_gap=max_gap):
         return
     with tunnel._connector_lifecycle(timeout=0), tunnel._RECOVERY_LOCK, config_file_lock():
         live = V2Config.load()

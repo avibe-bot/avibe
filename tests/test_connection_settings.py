@@ -343,6 +343,50 @@ def test_explicit_new_intent_supersedes_recovery(rig):
         cs.journal.applying(rig.cfg, op['id'])
 
 
+@pytest.mark.parametrize('restored_by', ['active', 'candidate', 'draining'])
+def test_pin_outage_survives_ordinary_candidates_without_stealing_the_lane(rig, monkeypatch, restored_by):
+    # With route optimization enabled, unregistered candidates repeatedly occupy
+    # the lane for ~30 s. Their existence is not a successful connection.
+    window = cs.PinFailureWindow(lambda: rig.clock[0])
+    candidate = {'pid': 222, 'started_at': 2, 'metrics_url': 'fixture-candidate'}
+    records = {'active': rig.active}
+    monkeypatch.setattr(ra, '_state_connector', records.get)
+    monkeypatch.setattr(ra, '_connector_lane_reserved_locked', lambda: any(records.get(k) for k in ('candidate', 'draining')))
+    secondary_count = 0
+    monkeypatch.setattr(cr, '_registered', lambda url: secondary_count)
+    rig.cfg.remote_access.vibe_cloud.transport_protocol = 'quic'
+    rig.cfg.save()
+
+    def tick(at, *, busy=False, count=0, pid_state='cloudflared', sampled=True):
+        rig.clock[0] = at
+        records['candidate'] = candidate if busy else None
+        cr.observe_pins(window, rig.cfg, active=rig.active, pid_state=pid_state,
+                        sample=SimpleNamespace(registered_connections=count) if sampled else None, max_gap=22)
+        return cs.journal.load(rig.cfg).get('pinAttempt')
+
+    for at in range(0, 170, 10):
+        assert tick(at, busy=at % 40 != 0) is None
+    secondary_count = 1
+    if restored_by == 'draining':
+        records['draining'] = candidate
+    assert tick(170, count=int(restored_by == 'active'), busy=restored_by == 'candidate') is None
+    records.pop('draining', None)
+    secondary_count = 0
+    for at in range(180, 360, 10):
+        # A single unobserved tick preserves the window, but neither adjoining
+        # interval is counted. Exercise each source of an unknown active sample.
+        assert tick(at, busy=at % 40 != 0,
+                    count=None if at == 240 and restored_by == 'active' else 0,
+                    sampled=not (at == 240 and restored_by == 'candidate'),
+                    pid_state='unknown' if at == 240 and restored_by == 'draining' else 'cloudflared') is None
+    assert tick(360) is None
+    assert tick(370) is None
+    assert tick(380, busy=True) is None  # Due, but the ordinary candidate still owns the lane.
+    attempt = tick(390)
+    assert attempt and attempt['pins'] == {'protocol': 'quic', 'ipFamily': '4'}
+    assert cs.value(V2Config.load(), 'protocol') == 'quic'
+
+
 @pytest.mark.parametrize('saved,automatic,expected', [(True, None, '4'), (False, True, 'auto'), (False, False, '4'), (None, None, '4')])
 def test_pin_recovery_requires_failed_saved_then_registered_automatic(rig, monkeypatch, saved, automatic, expected):
     window = cs.PinFailureWindow(lambda: rig.clock[0])
