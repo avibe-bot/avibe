@@ -407,7 +407,9 @@ struct RunEvent {
 }
 
 enum Candidate {
-    Approval,
+    Approval {
+        request_id: String,
+    },
     Run {
         run_id: String,
         session_id: Option<String>,
@@ -440,7 +442,9 @@ impl NotificationFilter {
             return self
                 .approvals
                 .insert(&approval.request_id, now)
-                .then_some(Candidate::Approval);
+                .then_some(Candidate::Approval {
+                    request_id: approval.request_id,
+                });
         }
         let run: RunEvent = serde_json::from_value(envelope.data).ok()?;
         if run.run_id.is_empty() {
@@ -690,7 +694,7 @@ pub async fn run_notifications(
                         .filter(|_| allowed_at_receipt);
                     match candidate {
                         None => {}
-                        Some(Candidate::Approval) => {
+                        Some(Candidate::Approval { request_id }) => {
                             if sink.gate().allows() {
                                 let receipt = sink
                                     .registry()
@@ -698,6 +702,7 @@ pub async fn run_notifications(
                                     .expect("notification registry lock")
                                     .reserve(None);
                                 if let Some(receipt) = receipt {
+                                    receipt.set_opens(format!("avibe://vaults/request/{request_id}"));
                                     sink.deliver(
                                         NotificationIntent::ApprovalRequested,
                                         None,

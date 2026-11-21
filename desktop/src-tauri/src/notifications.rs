@@ -14,6 +14,8 @@ use tauri::{AppHandle, Manager, Webview};
 
 use crate::{native_catalog_for_locales, pet, updater, MAIN_WINDOW};
 
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 mod native;
 
 pub const MENU_ID: &str = "notifications";
@@ -273,14 +275,8 @@ impl NotificationSink for NativeSink {
             if receipts.is_empty() {
                 return;
             }
-            match native::withdraw(&sink.app, receipts) {
-                Ok(removed) => {
-                    let mut registry = sink.registry.lock().expect("notification registry lock");
-                    for id in removed {
-                        registry.forget(id);
-                    }
-                }
-                Err(_) => eprintln!("The desktop notifications could not be withdrawn from the operating system."),
+            if native::withdraw(&sink.app, receipts, sink.registry.clone()).is_err() {
+                eprintln!("The desktop notifications could not be withdrawn from the operating system.");
             }
         });
     }
@@ -317,6 +313,20 @@ fn badge_count(total: u64) -> Option<i64> {
 fn paint_badge(app: &AppHandle, total: u64) {
     if let Some(window) = app.get_window(MAIN_WINDOW) {
         let _ = window.set_badge_count(badge_count(total));
+    }
+}
+
+/// A one-off notice from the shell itself (not a Runtime event). It honors the
+/// shell's notification switch and nothing withdraws it.
+pub(crate) fn notice(app: &AppHandle, title: String, body: String) {
+    if app
+        .try_state::<Notifications>()
+        .is_some_and(|notifications| !notifications.enabled())
+    {
+        return;
+    }
+    if native::notice(app, NotificationCopy { title, body }).is_err() {
+        eprintln!("The desktop notification could not be submitted to the operating system.");
     }
 }
 

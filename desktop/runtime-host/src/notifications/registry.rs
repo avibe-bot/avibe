@@ -20,6 +20,7 @@ pub struct NotificationReceipt {
     read_reconciliation_eligible: AtomicBool,
     observed_unread: AtomicBool,
     posted_at: OnceLock<Instant>,
+    opens: OnceLock<String>,
 }
 
 impl NotificationReceipt {
@@ -33,6 +34,24 @@ impl NotificationReceipt {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// Name what a click on this notification opens, as an `avibe://` link.
+    /// Only a link the deep-link parser accepts is kept, and only the first.
+    pub fn set_opens(&self, link: String) {
+        if crate::deep_link::parse_deep_link(&link).is_some() {
+            let _ = self.opens.set(link);
+        }
+    }
+
+    /// The `avibe://` link a click opens: the one named for it, else its
+    /// Session's conversation. `None` when neither is a valid deep link.
+    pub fn opens(&self) -> Option<String> {
+        if let Some(link) = self.opens.get() {
+            return Some(link.clone());
+        }
+        let link = format!("avibe://session/{}", self.session_id.as_deref()?);
+        crate::deep_link::parse_deep_link(&link).map(|_| link)
     }
 
     pub fn confirm_workbench_session(&self, read_reconciliation_eligible: bool) {
@@ -95,6 +114,7 @@ impl NotificationRegistry {
             read_reconciliation_eligible: AtomicBool::new(false),
             observed_unread: AtomicBool::new(false),
             posted_at: OnceLock::new(),
+            opens: OnceLock::new(),
         });
         if receipt.session_id.is_some() {
             self.prune_abandoned();
@@ -254,5 +274,32 @@ mod tests {
         assert!(registry.snapshot().is_empty());
         let mut reconnected = NotificationRegistry::default();
         assert!(reconnected.reserve(Some("a".into())).unwrap().id() > old_id);
+    }
+
+    #[test]
+    fn a_click_opens_the_named_link_or_the_session_and_never_an_unparsed_target() {
+        let mut registry = NotificationRegistry::default();
+        let session = registry.reserve(Some("ses_a".into())).unwrap();
+        assert_eq!(session.opens().as_deref(), Some("avibe://session/ses_a"));
+
+        let approval = registry.reserve(None).unwrap();
+        assert_eq!(approval.opens(), None);
+        approval.set_opens("avibe://vaults/request/req_1".into());
+        assert_eq!(approval.opens().as_deref(), Some("avibe://vaults/request/req_1"));
+        // The first accepted link stays; later ones do not replace it.
+        approval.set_opens("avibe://vaults/request/req_2".into());
+        assert_eq!(approval.opens().as_deref(), Some("avibe://vaults/request/req_1"));
+
+        let refused = registry.reserve(None).unwrap();
+        for link in [
+            "https://avibe.bot/vaults",
+            "avibe://vaults/request/a b",
+            "avibe://session/../x",
+        ] {
+            refused.set_opens(link.into());
+        }
+        assert_eq!(refused.opens(), None);
+        let odd_session = registry.reserve(Some("ses a".into())).unwrap();
+        assert_eq!(odd_session.opens(), None);
     }
 }

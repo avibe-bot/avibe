@@ -1,5 +1,8 @@
-//! Exact-delivery identifiers at the OS boundary. Sessionless notifications
-//! stay on the existing plugin path. No preference, copy, or badge logic here.
+//! Exact-delivery identifiers at the OS boundary. No preference, copy, or
+//! badge logic here. On macOS every post goes through the
+//! `UNUserNotificationCenter` owner (`super::macos`); a development build
+//! without a bundle identity, Windows sessionless posts and Linux keep the
+//! plugin path.
 use std::sync::{Arc, Mutex};
 
 use avibe_runtime_host::notifications::{NotificationReceipt, NotificationRegistry, NotificationSnapshot};
@@ -8,25 +11,50 @@ use tauri_plugin_notification::NotificationExt;
 
 use super::NotificationCopy;
 
+fn plugin_notice(app: &AppHandle, copy: NotificationCopy) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(copy.title)
+        .body(copy.body)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
+/// A one-off notice nothing withdraws (Ask Vibey's, for example).
+pub(crate) fn notice(app: &AppHandle, copy: NotificationCopy) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if super::macos::available() {
+        super::macos::notice(copy);
+        return Ok(());
+    }
+    plugin_notice(app, copy)
+}
+
 pub(super) fn show(
     app: &AppHandle,
     receipt: &Arc<NotificationReceipt>,
     copy: NotificationCopy,
-    _registry: Arc<Mutex<NotificationRegistry>>,
+    registry: Arc<Mutex<NotificationRegistry>>,
 ) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if super::macos::available() {
+        super::macos::show(receipt, copy, registry);
+        return Ok(());
+    }
     if receipt.session_id().is_none() {
-        return app
-            .notification()
-            .builder()
-            .title(copy.title)
-            .body(copy.body)
-            .show()
-            .map_err(|e| e.to_string());
+        return plugin_notice(app, copy);
     }
     #[cfg(target_os = "macos")]
-    macos::show(app, receipt, &copy);
+    {
+        // A development build has no notification identity to withdraw by.
+        let _ = registry;
+        plugin_notice(app, copy)?;
+    }
     #[cfg(windows)]
-    windows::show(app, receipt, &copy).map_err(|e| e.to_string())?;
+    {
+        let _ = registry;
+        windows::show(app, receipt, &copy).map_err(|e| e.to_string())?;
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         // Tauri only indexes local ids for removal while an action listener
@@ -44,7 +72,7 @@ pub(super) fn show(
             .title(copy.title)
             .body(copy.body)
             .on_close(move || {
-                _registry.lock().expect("notification registry lock").forget(id);
+                registry.lock().expect("notification registry lock").forget(id);
             })
             .show()
             .map_err(|e| e.to_string())?;
@@ -53,19 +81,33 @@ pub(super) fn show(
 }
 
 /// Fresh native/plugin posts are retried by the existing unread refresh using
-/// the SAME exact key. Confirmed-absent native keys are eventually forgotten.
-pub(super) fn withdraw(app: &AppHandle, receipts: NotificationSnapshot) -> Result<Vec<i32>, String> {
+/// the SAME exact key. Confirmed-absent native keys are eventually forgotten,
+/// here or, on macOS, once the center has listed what it still shows.
+pub(super) fn withdraw(
+    app: &AppHandle,
+    receipts: NotificationSnapshot,
+    registry: Arc<Mutex<NotificationRegistry>>,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let _ = app;
-        Ok(macos::withdraw(receipts))
+        if super::macos::available() {
+            super::macos::withdraw(receipts, registry);
+        }
+        Ok(())
     }
     #[cfg(windows)]
     {
-        windows::withdraw(app, receipts).map_err(|e| e.to_string())
+        let removed = windows::withdraw(app, receipts).map_err(|e| e.to_string())?;
+        let mut registry = registry.lock().expect("notification registry lock");
+        for id in removed {
+            registry.forget(id);
+        }
+        Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        let _ = registry;
         app.notification()
             .remove_active(
                 receipts
@@ -76,7 +118,7 @@ pub(super) fn withdraw(app: &AppHandle, receipts: NotificationSnapshot) -> Resul
             )
             .map_err(|e| e.to_string())?;
         // The plugin's on_close confirms removal and forgets the receipt.
-        Ok(Vec::new())
+        Ok(())
     }
 }
 
@@ -84,7 +126,7 @@ pub(super) fn withdraw(app: &AppHandle, receipts: NotificationSnapshot) -> Resul
 // fresh absent key may still be queued; after the bounded delivery grace it
 // must not become a permanent tombstone or an unbounded unread registry entry.
 #[cfg(any(target_os = "macos", windows, test))]
-fn reconcile_posts(
+pub(super) fn reconcile_posts(
     receipts: NotificationSnapshot,
     mut present: impl FnMut(&NotificationReceipt) -> bool,
 ) -> (NotificationSnapshot, Vec<i32>) {
@@ -100,68 +142,6 @@ fn reconcile_posts(
         }
     }
     (remove, forget)
-}
-
-// Keep the plugin's existing legacy center and authorization behavior in 3.2.7.
-// A modern UNUserNotificationCenter migration is a separate change.
-#[cfg(target_os = "macos")]
-#[allow(deprecated)]
-mod macos {
-    use objc2_foundation::{NSString, NSUserNotification, NSUserNotificationCenter};
-
-    use super::*;
-
-    fn identifier(receipt: &NotificationReceipt) -> String {
-        format!("avibe:{}:{}", receipt.session_id().unwrap_or_default(), receipt.key())
-    }
-
-    pub(super) fn show(app: &AppHandle, receipt: &NotificationReceipt, copy: &NotificationCopy) {
-        // Exactly the application identity setup the plugin's sender uses,
-        // including its unbundled development-build fallback.
-        let _ = notify_rust::set_application(if tauri::is_dev() {
-            "com.apple.Terminal"
-        } else {
-            &app.config().identifier
-        });
-        let notification = NSUserNotification::new();
-        notification.setIdentifier(Some(&NSString::from_str(&identifier(receipt))));
-        notification.setTitle(Some(&NSString::from_str(&copy.title)));
-        notification.setInformativeText(Some(&NSString::from_str(&copy.body)));
-        notification.setHasActionButton(false);
-        NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&notification);
-    }
-
-    pub(super) fn withdraw(receipts: NotificationSnapshot) -> Vec<i32> {
-        let center = NSUserNotificationCenter::defaultUserNotificationCenter();
-        let shown = center.deliveredNotifications();
-        let (remove, mut forgotten) = reconcile_posts(receipts, |receipt| {
-            shown.iter().any(|delivered| {
-                delivered
-                    .identifier()
-                    .is_some_and(|key| identifier(receipt) == key.to_string())
-            })
-        });
-        for receipt in remove {
-            if let Some(delivered) = shown.iter().find(|delivered| {
-                delivered
-                    .identifier()
-                    .is_some_and(|key| identifier(&receipt) == key.to_string())
-            }) {
-                center.removeDeliveredNotification(&delivered);
-                forgotten.push(receipt.id());
-            }
-        }
-        forgotten
-    }
-
-    #[test]
-    fn identifiers_keep_session_identity_and_do_not_replace_newer_deliveries() {
-        let mut registry = NotificationRegistry::default();
-        let first = registry.reserve(Some("ses_a".into())).unwrap();
-        let next = registry.reserve(Some("ses_a".into())).unwrap();
-        assert!(identifier(&first).starts_with("avibe:ses_a:"));
-        assert_ne!(identifier(&first), identifier(&next));
-    }
 }
 
 // Windows limits Tag and Group to 16 characters. Full Session identity stays

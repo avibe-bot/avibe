@@ -473,15 +473,7 @@ async fn poll(view: &Webview, status: &str) -> Outcome {
 }
 
 fn notify(app: &AppHandle, notice: crate::AskVibeyNotice) {
-    use tauri_plugin_notification::NotificationExt;
-    if app
-        .try_state::<crate::notifications::Notifications>()
-        .is_some_and(|notifications| !notifications.enabled())
-    {
-        return;
-    }
-    let body = crate::ask_vibey_notice(notice);
-    let _ = app.notification().builder().title("Avibe").body(body).show();
+    crate::notifications::notice(app, "Avibe".to_owned(), crate::ask_vibey_notice(notice));
 }
 
 #[cfg(test)]

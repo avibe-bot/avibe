@@ -2778,6 +2778,8 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(macos_deep_link::init());
     #[cfg(target_os = "macos")]
+    let builder = builder.plugin(notifications::macos::init());
+    #[cfg(target_os = "macos")]
     let builder = builder.plugin(computer_use::activation_plugin());
     builder
         .plugin(
