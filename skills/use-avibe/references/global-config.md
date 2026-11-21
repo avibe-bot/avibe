@@ -274,7 +274,8 @@ one button open the microphone only when the hold is recognised, use `POST /api/
 
 No restart and no new App build are needed: it takes effect the next time the user opens a
 conversation or the App. The composer is not changed by it. Send `"app_hold_main_at_touch": true`
-to go back. It needs the iPhone App from TestFlight 51.1 on.
+to go back. It needs the iPhone App from TestFlight 51.1 on. What it costs: a hold on that button
+then records from the cue, so what is said in the first moment of the press is not in the take.
 
 ### Switch primary platform
 
