@@ -600,6 +600,9 @@ final class NativeHoldCaptureTests: XCTestCase {
         let enders: [(String, (NativeHoldCapture, WKWebView, String) -> Void)] = [
             ("stopped", { capture, _, take in capture.stop(take: take) }),
             ("inactive", { capture, _, _ in capture.appWillResignActive() }),
+            ("background", { _, _, _ in
+                NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+            }),
             ("action_button", { capture, _, _ in capture.yieldToActionButton() }),
             ("replaced", { capture, webView, _ in _ = capture.start(take: "own", webView: webView) { _ in } }),
             ("gone", { capture, webView, _ in capture.stop(webView: webView) }),
@@ -696,15 +699,114 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertTrue(heard.isEmpty)
         XCTAssertTrue(try XCTUnwrap(notes.last).hasSuffix("end=engine:1"), notes.last ?? "")
         assertGone(capture.adopt(take: take, webView: webView))
+        // Its page is told which step, so it can start the take itself.
+        let failed = try XCTUnwrap(holdEvents.first { $0["phase"] as? String == "failed" })
+        XCTAssertEqual(failed["take"] as? String, take)
+        XCTAssertEqual(failed["surface"] as? String, "composer")
+        XCTAssertEqual(failed["step"] as? String, "engine:1")
 
         // After: its page hears the end, as for any take.
         audio.holdsAnswers = true
+        holdEvents = []
         let later = try hold(capture, in: webView)
         _ = try capture.adopt(take: later, webView: webView).get()
         audio.answer()
         drain()
         XCTAssertEqual(heard, [.ended(reason: "engine:1")])
         XCTAssertNil(capture.currentTake)
+        XCTAssertFalse(holdEvents.contains { $0["phase"] as? String == "failed" })
+
+        // Started at touch-down, a start that fails before the threshold
+        // leaves no press and gives no cue: the page is told, or it could
+        // not tell the press from a tap.
+        startsAtTouchDown = true
+        heard = []
+        holdEvents = []
+        haptics = []
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertTrue(capture.followsPress)
+        audio.answer()
+        XCTAssertFalse(capture.followsPress)
+        XCTAssertNil(capture.currentTake)
+        XCTAssertEqual(holdEvents.count, 1)
+        XCTAssertEqual(holdEvents.first?["phase"] as? String, "failed")
+        XCTAssertEqual(holdEvents.first?["surface"] as? String, "composer")
+        XCTAssertEqual(holdEvents.first?["step"] as? String, "engine:1")
+        XCTAssertFalse(fire(NativeHoldCapture.defaultHoldSeconds))
+        XCTAssertEqual(haptics, ["prepare"])
+        drain()
+        XCTAssertTrue(heard.isEmpty)
+    }
+
+    /// A finger lifted just before the threshold while the main thread was
+    /// busy: the hold's timer can run before the touch's end is handled.
+    /// By the touch's own times it was a tap, and its audio is a tap's.
+    func testATouchShorterThanTheThresholdIsATapEvenWhenItsEndIsHandledLate() throws {
+        startsAtTouchDown = true
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 10)
+        audio.onPCM?(Data([1, 0]))
+        clock = 230
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        let take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        XCTAssertEqual(capture.currentTake, take)
+        // The touch ended at 190 ms; its end is handled after the timer.
+        capture.touchEnded(in: webView, timestamp: 10.19)
+        XCTAssertNil(capture.currentTake)
+        XCTAssertFalse(capture.followsPress)
+        XCTAssertEqual(audio.calls, ["begin", "stop"])
+        assertGone(capture.adopt(take: take, webView: webView))
+        audio.onPCM?(Data([2, 0]))
+        drain()
+        XCTAssertTrue(heard.isEmpty)
+        // Counted as the tap it was, by its own length.
+        XCTAssertEqual(taps, ["190"])
+        XCTAssertTrue(notes.isEmpty)
+
+        // Past the threshold, a hold: the release is only noted.
+        clock = 1_000
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 20)
+        clock = 1_200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        let held = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        capture.touchEnded(in: webView, timestamp: 20.25)
+        XCTAssertEqual(capture.currentTake, held)
+        // And one its page has taken is the page's, whatever its length.
+        capture.stop(take: held)
+        drain()
+        clock = 2_000
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 30)
+        clock = 2_200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        let taken = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        _ = try capture.adopt(take: taken, webView: webView).get()
+        capture.touchEnded(in: webView, timestamp: 30.1)
+        XCTAssertEqual(capture.currentTake, taken)
+        capture.stop(take: taken)
+        drain()
+    }
+
+    /// The page's calls count in the order it made them: a list is applied
+    /// only while it is still its WebView's last call, in the same document.
+    func testAListOvertakenByALaterCallOrItsDocumentGoingIsNotApplied() {
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        let other = WKWebView(frame: .zero)
+
+        let first = capture.surfacesRequested(by: webView)
+        XCTAssertTrue(capture.isLatestSurfacesRequest(first, of: webView))
+        XCTAssertFalse(capture.isLatestSurfacesRequest(first, of: other))
+        let second = capture.surfacesRequested(by: webView)
+        XCTAssertFalse(capture.isLatestSurfacesRequest(first, of: webView))
+        XCTAssertTrue(capture.isLatestSurfacesRequest(second, of: webView))
+        // Another WebView's calls are its own.
+        _ = capture.surfacesRequested(by: other)
+        XCTAssertTrue(capture.isLatestSurfacesRequest(second, of: webView))
+        // Its document went (a navigation, a reload).
+        capture.stop(webView: webView)
+        XCTAssertFalse(capture.isLatestSurfacesRequest(second, of: webView))
     }
 
     /// Adopted before any audio (the usual order: the page answers within a
@@ -855,6 +957,12 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(timings["liveQuiet"] as? Int, 250)
         capture.stop(take: take)
         drain()
+
+        // A list that names none is timed with the default again.
+        XCTAssertTrue(capture.setSurfaces([Self.composer], for: webView))
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertEqual(timers.last?.delay, 0.2)
+        capture.touchEnded(in: webView)
     }
 
     /// Touches on a surface that were not holds are counted by how long
@@ -1094,6 +1202,63 @@ final class NativeHoldCaptureTests: XCTestCase {
             XCTAssertEqual(capture.followsPress, expected.hasPrefix(#"["ok""#), "\(base) \(expected)")
             capture.touchEnded(in: webView)
         }
+    }
+
+    /// A list and then its withdrawal, sent one after the other: the list's
+    /// consent answer comes back after the withdrawal was applied, and must
+    /// not put the surface back.
+    func testAWithdrawalSentRightAfterAListIsNotOvertakenByIt() async throws {
+        let marked = #"<!doctype html><meta name="avibe-voice-consent" content="1"><title>t</title>"#
+        let surfaces = #"{surfaces: [{id: "composer", x: 0, y: 700, width: 390, height: 60}]}"#
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                voiceCapture: capture
+            )
+        )
+        capture.watch(webView)
+        let loader = Loader()
+        webView.navigationDelegate = loader
+        try await loader.load(marked, baseURL: URL(string: "https://instance-one.example/chat")!, in: webView)
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const code = (method, params) => window.avibeNative.call(method, params).then(
+              () => "ok",
+              (error) => (error.code === "failed" ? error.message : error.code),
+            );
+            const named = code("voice.holdSurfaces", \(surfaces));
+            const withdrawn = code("voice.holdSurfaces", {surfaces: []});
+            const codes = [await named, await withdrawn];
+            codes.push(await code("voice.holdSurfaces", \(surfaces)));
+            return JSON.stringify(codes);
+            """,
+            arguments: [:], in: nil, contentWorld: .page
+        )
+        XCTAssertEqual(result as? String, #"["superseded","ok","ok"]"#)
+        // The last call stands: a list named on its own is applied.
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertTrue(capture.followsPress)
+        capture.touchEnded(in: webView)
+
+        let again = try await webView.callAsyncJavaScript(
+            """
+            const code = (method, params) => window.avibeNative.call(method, params).then(
+              () => "ok",
+              (error) => (error.code === "failed" ? error.message : error.code),
+            );
+            const named = code("voice.holdSurfaces", \(surfaces));
+            const withdrawn = code("voice.holdSurfaces", {surfaces: []});
+            return JSON.stringify([await named, await withdrawn]);
+            """,
+            arguments: [:], in: nil, contentWorld: .page
+        )
+        XCTAssertEqual(again as? String, #"["superseded","ok"]"#)
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertFalse(capture.followsPress)
     }
 
     func testOnlyTheInstancesOwnDocumentReachesTheMicrophone() async throws {
