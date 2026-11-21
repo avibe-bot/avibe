@@ -8,7 +8,7 @@ Status: **FROZEN** for implementation on 2026-11-20. Owner decisions (Max, 2026-
 - with it on, leaving the App while the open conversation's Turn runs shows that Turn;
 - a Turn dismissed from the Lock Screen is not shown again.
 
-This amendment replaces §1 steps 1–2, §2.2, and the start rules of §2.3, and adds one §4.4 rule. The relay (§3), the vectors, and every other rule are unchanged.
+This amendment replaces §1 steps 1–2, §2.2, and the start rules of §2.3. The Runtime is unchanged: §4.4 already keeps one `tracking` row per device (`push_registration_id`), and two devices tracking the same Turn each keep their own row. The relay (§3), the vectors, and every other rule are unchanged.
 
 Vectors shared byte for byte by every lane: `tests/fixtures/live_activity/contract_vectors.json`. Reference rules and the vector checks: `tests/test_live_activity_contract.py`. Design frames: `ui/design: ios/live-activity/*`.
 
@@ -78,7 +78,7 @@ The version-1 toasts and the in-conversation frames (`app-offer`, `app-tracking`
 ### 2.3 Lifecycle owned by the App
 
 - **Observation and prefetch:** while an observation reports `running: true`, the App reads that Turn with `GET …/turn` and keeps the answer: `turn_id`, `phase`, `started_at`, `confirmed_at`. It reads again when the observation changes and when the App comes to the foreground. A `409`, `404`, `503`, or no answer leaves no prefetched Turn. `running: false` or `{sessionId: null}` drops it.
-- **Ledger:** the App records, persisted on the device, every `turn_id` that has had an activity. **A Turn gets at most one activity, ever:** once recorded, no later start creates another for it, whatever ended the first one (dismissed, ended, replaced, or failed after `Activity.request` succeeded). Entries older than 28800 s may be pruned. Starts are serialized: at most one is in flight.
+- **Ledger:** the App records, persisted on the device, every `turn_id` that has had an activity. **A Turn gets at most one activity, ever:** once recorded, no later start creates another for it, whatever ended the first one (dismissed, ended, replaced, or failed after `Activity.request` succeeded). An entry is kept until the App knows that Turn is over: a read for its session returns a terminal phase or a different `turn_id`, or its activity received a terminal state. It is not pruned on time alone, because a Turn can run past the 8-hour activity limit. An entry 30 days old may go regardless. Starts are serialized: at most one is in flight.
 - **start** happens only on `UIScene.willDeactivateNotification`, while the App is still active (ActivityKit refuses `Activity.request` from the background). That notification also fires when the person only pulls down Notification Center or Control Center; a start then is accepted (owner, 2026-11-22), and the ledger keeps it to one per Turn. Every condition below must hold, checked in order; if one fails, nothing happens, with no UI and no toast:
   1. the device setting is on, and `areActivitiesEnabled` is true;
   2. the latest observation has a `sessionId` and `running: true`, and its session belongs to the selected account and instance;
@@ -264,7 +264,7 @@ A row is `tracking`, `ended`, or `stopped`. This table is the whole row lifecycl
 | PUT at or after `requested_at + 28800` | `409 activity_expired` | becomes `stopped` (`expired`); `409 activity_expired` | `409 activity_expired` | same |
 | PUT, turn live | create `tracking`; `200` | store the token, keep `pending_state`; `200` | — | `stop_reason: token_gone` and a token different from the row's: back to `tracking` with the new token, keeping `pending_state`; `200`. Any other: `200` with `status: stopped`, unchanged |
 | PUT, turn terminal | create `ended`; `409 turn_not_active` | becomes `ended` (no end push is owed: the App ends the card from this answer); `409 turn_not_active` | `409 turn_not_active` | `200` with `status: stopped`, unchanged |
-| a PUT that creates or revives a `tracking` row for another `activity_id` on the same `push_registration_id`, or on the same owner and `turn_id` | — | becomes `stopped` (`replaced`) | — | — |
+| a PUT that creates or revives a `tracking` row for another `activity_id` on the same `push_registration_id` | — | becomes `stopped` (`replaced`) | — | — |
 | the publisher's send | — | §4.3 | — | — |
 | `now ≥ expires_at` | — | becomes `stopped` (`expired`), no push | — | — |
 | the row's source goes away: its push registration is no longer an enabled subscription of the owner, the owner can no longer read the session, or the Turn row is gone | — | becomes `stopped` (`registration_unavailable`, `session_unavailable`, or `turn_unavailable`), no push | — | — |
@@ -277,7 +277,7 @@ A row is `tracking`, `ended`, or `stopped`. This table is the whole row lifecycl
 - Through the relay and APNs, only the phase enum and Unix seconds travel in the clear; names and titles stay on the phone.
 - An activity token's death never affects the device's ordinary notifications.
 - A tracked Turn has exactly one terminal state. Once its end has been attempted, the publisher sends nothing but that same end again; on the wire it can arrive more than once, because a send whose answer is lost is resent (§4.3) and the relay keeps no idempotency state. Every copy carries the same `phase`, `started_at`, and `ended_at`. ActivityKit ignores a push to an activity that has already ended, so a duplicate changes nothing on the phone.
-- A Turn gets at most one activity on a device (the App ledger). An owner has at most one `tracking` row per `turn_id` (§4.4).
+- A Turn gets at most one activity on a device (the App ledger). A device has at most one `tracking` row (§4.4); two devices of one owner tracking the same Turn keep a row each.
 - The conversation page renders no Lock Screen element, and with the device setting off the App starts nothing.
 - Logout, account switch, and instance switch leave no `TurnActivityAttributes` activity on the phone.
 - Required end-to-end check: a real instance sends through the deployed relay to a TestFlight build with non-ASCII names (the vectors use `首席安全官` and `依赖审计 · avault 🔒`).
