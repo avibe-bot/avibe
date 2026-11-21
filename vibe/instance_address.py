@@ -1315,6 +1315,11 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
             target_state["state_read_at"] = int(read.started_wall)
 
         _update_state(flipped.instance_id, record)
+        # A name that is active again, or no longer listed, has no list any more:
+        # kept, its marks would be read as true of a later retirement.
+        _forget_closed_lists(
+            flipped, {"cleanup": [entry for entry in state["cleanup"] if entry["hostname"] != target]}
+        )
     remote_access.discard_managed_active_hostnames()
     remote_access.record_connector_public_url(public_url)
 

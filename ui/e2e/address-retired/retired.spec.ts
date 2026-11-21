@@ -17,6 +17,8 @@ const fixture = JSON.parse(
 type Mode = 'live' | 'retired' | 'script-only' | 'header-only' | 'worker-only' | 'probe';
 let mode: Mode = 'live';
 let reports: string[] = [];
+/** Times the server itself answered the long-cached private response. */
+let privateHits = 0;
 let server: http.Server;
 let origin = '';
 
@@ -37,6 +39,8 @@ const SEED_PAGE = `<!doctype html><title>seed</title><script>
       request.onerror = () => reject(request.error);
     });
   }
+  // An authenticated response the app lets the browser keep for a year.
+  await (await fetch('/private-cached')).text();
   const cache = await caches.open('avibe-web-push-endpoints');
   await cache.put('/cached', new Response('private'));
   await navigator.serviceWorker.register('/push-sw.js');
@@ -65,6 +69,12 @@ function plain(res: http.ServerResponse, type: string, body: string): void {
 test.beforeAll(async () => {
   server = http.createServer((req, res) => {
     const path = (req.url ?? '/').split('?')[0];
+    if (path === '/private-cached' && (mode === 'live' || mode === 'probe')) {
+      privateHits += 1;
+      res.writeHead(200, { 'content-type': 'text/plain', 'cache-control': 'private, max-age=31536000, immutable' });
+      res.end('private bytes');
+      return;
+    }
     if (mode === 'live') {
       if (path === '/push-sw.js') plain(res, 'text/javascript', "self.addEventListener('push', () => {});");
       else plain(res, 'text/html', SEED_PAGE);
@@ -116,6 +126,7 @@ test.beforeEach(async ({ context, page }) => {
   await installBrowserIsolation(context);
   mode = 'live';
   reports = [];
+  privateHits = 0;
   await page.goto(`${origin}/sessions/abc`);
   await page.waitForFunction(() => (window as unknown as { __seeded?: boolean }).__seeded === true);
   expect((await held(page)).databases).toEqual(['another-store', 'avibe-local-snapshots', 'avibe-local-store']);
@@ -129,6 +140,20 @@ async function held(page: Page) {
     workers: (await navigator.serviceWorker.getRegistrations()).length,
     cookie: document.cookie,
   }));
+}
+
+/** Whether the browser still answers the private response from its HTTP cache. */
+async function servesPrivateFromCache(page: Page): Promise<boolean> {
+  mode = 'probe';
+  const fresh = await page.context().newPage();
+  try {
+    await fresh.goto(`${origin}/`);
+    const before = privateHits;
+    await fresh.evaluate(async () => (await fetch('/private-cached')).text());
+    return privateHits === before;
+  } finally {
+    await fresh.close();
+  }
 }
 
 /** What the origin still holds, read from a fresh page of the same browser profile. */
@@ -167,7 +192,10 @@ test('one visit to the retired address empties the origin and reports the receip
   expectOnlyTheFence(after.local, browserName);
   // With the header, a registration the page controlled can still be listed in
   // WebKit afterwards. The script-only and worker cases below show it removed.
-  if (browserName === 'chromium') expect(after).toMatchObject({ workers: 0, cookie: '' });
+  if (browserName === 'chromium') {
+    expect(after).toMatchObject({ workers: 0, cookie: '' });
+    expect(await servesPrivateFromCache(page)).toBe(false);
+  }
 });
 
 test('without the header, the page script alone empties the origin', async ({ page, browserName }) => {
@@ -187,6 +215,23 @@ test('without the script, the header alone empties storage and leaves cookies al
   // The directive list never names cookies: a script-readable cookie survives the header.
   expect(await probe(page)).toMatchObject({ ...EMPTY, local: [], cookie: 'script_cookie=1' });
   expect(reports).toEqual([]);
+  expect(await servesPrivateFromCache(page)).toBe(false);
+});
+
+test('the answer to an open page\'s report clears the HTTP cache and nothing the page wrote', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'Clear-Site-Data support outside Chromium has gaps.');
+  // The page has emptied its own storage and left its write fence; script cannot reach the HTTP cache.
+  expect(await servesPrivateFromCache(page)).toBe(true);
+  mode = 'retired';
+  const cleared = await page.evaluate(async () => {
+    localStorage.clear();
+    localStorage.setItem('avibe.sign-out-generation.v1', '1763700000000');
+    const response = await fetch('/__avibe/address-cleared', { method: 'POST', body: '', credentials: 'same-origin' });
+    return { marker: response.headers.get('X-Avibe-Address'), status: response.status };
+  });
+  expect(cleared).toEqual({ marker: 'retired', status: 204 });
+  expect(await servesPrivateFromCache(page)).toBe(false);
+  expect((await probe(page)).local).toEqual(['avibe.sign-out-generation.v1']);
 });
 
 test('a worker that updates from the retired address removes itself and what it can reach', async ({ page }) => {

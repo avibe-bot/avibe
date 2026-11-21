@@ -21,6 +21,10 @@ from vibe.instance_address import CLEARED_REPORT_PATH, RETIRED_HEADER, RETIRED_H
 # whole registered domain, signing the visitor out of avibe.bot and of their
 # other instances.
 CLEAR_SITE_DATA = '"cache", "storage"'
+# For the report an open page posts after it has emptied its own storage: the
+# HTTP cache is the one thing its script cannot reach, and clearing storage
+# again would take the write fence it just left.
+CLEAR_HTTP_CACHE = '"cache"'
 
 _LOCAL_DATABASES = ("avibe-local-store", "avibe-local-snapshots")
 # The counters by which a tab of the old app knows that what it captured is void
@@ -146,9 +150,11 @@ def expiring_cookies(raw_path: str, cookie_header: str) -> list[str]:
     return values
 
 
-def cleanup_headers(raw_path: str, cookie_header: str, *, content_type: str | None) -> list[tuple[bytes, bytes]]:
+def cleanup_headers(
+    raw_path: str, cookie_header: str, *, content_type: str | None, clear: str = CLEAR_SITE_DATA
+) -> list[tuple[bytes, bytes]]:
     headers = [
-        (b"clear-site-data", CLEAR_SITE_DATA.encode("ascii")),
+        (b"clear-site-data", clear.encode("ascii")),
         (b"cache-control", b"no-store"),
         (b"referrer-policy", b"no-referrer"),
         (b"x-content-type-options", b"nosniff"),

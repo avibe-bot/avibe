@@ -83,7 +83,7 @@ beforeEach(async () => {
   });
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
     fetchCalls.push({ url, init });
-    return new Response(null, { status: 204 });
+    return new Response(null, { status: 204, headers: { 'X-Avibe-Address': 'retired' } });
   }));
 });
 
@@ -106,18 +106,30 @@ describe('a page on a retired address', () => {
     expect([unsubscribed, unregistered]).toEqual([1, 1]);
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0].url).toBe('/__avibe/address-cleared');
-    expect(fetchCalls[0].init).toMatchObject({ method: 'POST', body: RECEIPT, credentials: 'omit' });
+    // Credentialed: only then does the browser honour the answer that clears the HTTP cache.
+    expect(fetchCalls[0].init).toMatchObject({ method: 'POST', body: RECEIPT, credentials: 'same-origin' });
     expect(replaced).toEqual([`${NEW_ORIGIN}/sessions/abc`]);
   });
 
-  it('clears and leaves even when the report request never succeeds', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('blocked'); }));
+  it.each([
+    ['is blocked', async () => { throw new TypeError('blocked'); }],
+    ['is answered by something else', async () => new Response(null, { status: 204 })],
+  ])('empties its storage but stays on the old address when the request that clears the HTTP cache %s', async (_name, answer) => {
+    vi.stubGlobal('fetch', vi.fn(answer));
     const address = await load();
     address.rememberAddressReceipt(RECEIPT);
     await address.leaveRetiredAddress(NEW_ORIGIN);
 
     expect(heldKeys()).toEqual([]);
     expect(await databaseNames()).toEqual([]);
+    // The navigation to the old root is itself answered with a response that clears.
+    expect(replaced).toEqual(['/']);
+  });
+
+  it('asks the old address to clear the HTTP cache even without a receipt', async () => {
+    const address = await load();
+    await address.leaveRetiredAddress(NEW_ORIGIN);
+    expect(fetchCalls[0].init).toMatchObject({ method: 'POST', body: '', credentials: 'same-origin' });
     expect(replaced).toEqual([`${NEW_ORIGIN}/sessions/abc`]);
   });
 

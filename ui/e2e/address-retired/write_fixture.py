@@ -21,8 +21,8 @@ def build() -> dict:
     sys.path.insert(0, str(REPOSITORY))
     from vibe import instance_address_responses as responses
 
-    def fixed(status: int, content_type: str | None, body: bytes) -> dict:
-        headers = responses.cleanup_headers("/", "", content_type=content_type)
+    def fixed(status: int, content_type: str | None, body: bytes, clear: str = responses.CLEAR_SITE_DATA) -> dict:
+        headers = responses.cleanup_headers("/", "", content_type=content_type, clear=clear)
         return {
             "status": status,
             "headers": [[key.decode("ascii"), value.decode("ascii")] for key, value in headers],
@@ -37,7 +37,7 @@ def build() -> dict:
             responses.cleaning_document(language="en", control_plane_origin="https://avibe.bot", receipt=RECEIPT),
         ),
         "worker": fixed(200, "text/javascript; charset=utf-8", responses.REPLACEMENT_WORKER.encode("utf-8")),
-        "report": fixed(204, None, b""),
+        "report": fixed(204, None, b"", responses.CLEAR_HTTP_CACHE),
     }
 
 

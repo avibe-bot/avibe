@@ -121,7 +121,7 @@
     "headers": [
       [
         "clear-site-data",
-        "\"cache\", \"storage\""
+        "\"cache\""
       ],
       [
         "cache-control",

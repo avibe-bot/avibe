@@ -4,9 +4,10 @@
 // The old name is kept for a waiting period and then passes to someone else,
 // who can serve a page there and read whatever this browser still holds under
 // it. So the page empties everything under its own origin before it leaves.
-// It needs no request to succeed for that; and it goes to the new address only
-// when its own clearing finished, otherwise to the old address's root, where
-// the instance answers with a response that clears.
+// Everything script can reach is removed without any request. The HTTP cache
+// needs one answer from the old address; the page goes to the new address only
+// when that arrived too, otherwise to the old address's root, where the
+// instance answers the navigation with a response that clears.
 import { blockBootSessionRecording } from './bootSession';
 import { forgetLocalSnapshots } from './localSnapshots';
 import { SIGN_OUT_GENERATION_KEY } from './signOutGeneration';
@@ -120,10 +121,8 @@ export async function clearThisOrigin(): Promise<boolean> {
     window.sessionStorage.clear();
     // Clearing also removed the counters that fence other tabs' writes, and a
     // tab that captured the starting value would pass again and put its data
-    // back. Leave both at a value no tab can hold: the time of this clearing,
-    // which is all that stays behind under this address.
-    const fence = String(Date.now());
-    for (const key of WRITE_FENCE_KEYS) window.localStorage.setItem(key, fence);
+    // back.
+    leaveWriteFence();
   });
   return complete;
 }
@@ -132,22 +131,34 @@ function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
 }
 
-async function reportCleared(): Promise<void> {
-  if (!receipt) return;
+function leaveWriteFence(): void {
+  // A value no tab can have captured: the time of this clearing. It is all that
+  // stays behind under this address.
+  const fence = String(Date.now());
+  for (const key of WRITE_FENCE_KEYS) window.localStorage.setItem(key, fence);
+}
+
+/** One request to the old address, after the page emptied its storage. Script
+ *  cannot reach the HTTP cache, where authenticated responses can sit for a
+ *  year; the answer to this request clears it, and a browser honours that only
+ *  on a request that carries credentials. The same request reports the receipt
+ *  for the Owner's list. Resolves `true` when that answer arrived. */
+async function finishAtRetiredAddress(): Promise<boolean> {
   try {
-    await within(
+    const response = await within(
       fetch(CLEARED_REPORT_PATH, {
         method: 'POST',
-        body: receipt,
-        credentials: 'omit',
+        body: receipt ?? '',
+        credentials: 'same-origin',
         cache: 'no-store',
         keepalive: true,
-      }).then(() => undefined),
+      }),
       REPORT_TIMEOUT_MS,
-      undefined,
+      null,
     );
+    return response !== null && isRetiredAddressResponse(response);
   } catch {
-    // The report is for the Owner's list. Clearing never depends on it.
+    return false;
   }
 }
 
@@ -156,10 +167,11 @@ async function reportCleared(): Promise<void> {
 export function leaveRetiredAddress(movedTo: string | null): Promise<void> {
   if (leaving) return leaving;
   leaving = (async () => {
-    const cleared = await within(clearThisOrigin(), CLEAR_TIMEOUT_MS, false);
-    if (cleared) await reportCleared();
-    // Only a page that emptied itself goes on to the new address. Otherwise it
-    // goes to the old address's root, where the response does the clearing.
+    const emptied = await within(clearThisOrigin(), CLEAR_TIMEOUT_MS, false);
+    const cleared = emptied && await finishAtRetiredAddress();
+    // Only a page that emptied itself, HTTP cache included, goes on to the new
+    // address. Otherwise it goes to the old address's root, where the response
+    // to that navigation does the clearing.
     const target = cleared && movedTo && MANAGED_ORIGIN.test(movedTo)
       ? `${movedTo}${window.location.pathname}`
       : '/';

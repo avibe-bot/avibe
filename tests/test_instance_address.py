@@ -682,6 +682,7 @@ def test_a5_our_own_operation_overtaken_by_another_deletes_nothing(address):
 
 def test_b3_b4_taking_a_name_back_quiets_it_first_and_serves_it_only_after_the_commit(address):
     plane, clocks = address
+    sign_in()
     rename_to("new")
     run()
     assert is_cleaning(get(OLD))
@@ -705,6 +706,10 @@ def test_b3_b4_taking_a_name_back_quiets_it_first_and_serves_it_only_after_the_c
     assert not is_cleaning(get(OLD, "/health")) and get(OLD, "/health").status_code == 200
     assert is_cleaning(get(NEW))
     assert [entry["hostname"] for entry in instance_address.describe()["cleanup"]] == [NEW]
+    with get_cached_sqlite_engine().connect() as conn:
+        # The returned name's list is closed at the switch, not at some later read: a mark
+        # kept there would be read as true of a later retirement of the same name.
+        assert OLD not in {row.hostname for row in conn.execute(select(instance_address_clearings))}
     # A to B to C: both former names are cleaned, each with its own date.
     rename_to("third")
     run()
@@ -862,9 +867,11 @@ def test_f2_only_a_sessions_own_receipt_marks_its_own_device_once(address):
         instance_address.CLEARED_REPORT_PATH, base_url=f"https://{OLD}", data=body)
     for forged in ("x" * 43, owner_sid, "", "y" * 5000):
         assert report(forged).status_code == 204
+        assert report(forged).headers["X-Avibe-Address"] == "retired"
     assert states()["owner@test.invalid"] == "unconfirmed"
     reported = report(owner_receipt)
-    assert reported.status_code == 204 and is_cleaning(reported) and reported.content == b""
+    # The page already emptied its storage; this answer clears the HTTP cache, which its script cannot reach.
+    assert reported.status_code == 204 and reported.headers["Clear-Site-Data"] == '"cache"' and reported.content == b""
     assert states() == {"owner@test.invalid": "cleared", "member@test.invalid": "unconfirmed"}
     assert instance_address.record_cleared(OLD, owner_receipt) is False  # once
     assert instance_address.record_cleared(NEW, instance_address.receipt_for_session(member_sid)) is False

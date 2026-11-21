@@ -3465,6 +3465,7 @@ class _InstanceAddressRoleMiddleware:
             value.decode("latin-1") for key, value in scope.get("headers") or () if key == b"cookie"
         )
         status, content_type, body = 410, "text/html; charset=utf-8", b""
+        clear = instance_address_responses.CLEAR_SITE_DATA
         if path == DEVICE_PREFIX or path.startswith(f"{DEVICE_PREFIX}/"):
             # The phone stops and clears locally on 401. Its body is never read.
             if not instance_address.begin_cleanup_response(host):
@@ -3484,6 +3485,7 @@ class _InstanceAddressRoleMiddleware:
             if receipt:
                 await asyncio.to_thread(instance_address.record_cleared, instance_address.normalize_host(host), receipt.strip())
             status, content_type = 204, None
+            clear = instance_address_responses.CLEAR_HTTP_CACHE
         elif method in {"GET", "HEAD"} and path == "/push-sw.js":
             status, content_type = 200, "text/javascript; charset=utf-8"
             body = instance_address_responses.REPLACEMENT_WORKER.encode("utf-8")
@@ -3507,7 +3509,9 @@ class _InstanceAddressRoleMiddleware:
                 control_plane_origin=binding.backend_origin if binding is not None else "",
                 receipt=receipt,
             )
-        headers = instance_address_responses.cleanup_headers(raw_path, cookie_header, content_type=content_type)
+        headers = instance_address_responses.cleanup_headers(
+            raw_path, cookie_header, content_type=content_type, clear=clear
+        )
         # The role is checked again, under its lock, immediately before the headers.
         if not instance_address.begin_cleanup_response(host):
             return False
@@ -15794,7 +15798,9 @@ async def workbench_events():
     remote_config = _load_remote_access_config() if remote_session_payload is not None else None
     remote_session_cookie = None
     remote_request_host = None
-    stream_host = _normalized_host(request.host)
+    # The public name this stream was admitted under: its own Host, or the one a
+    # trusted proxy forwards while it rewrites Host to a local address.
+    stream_host = _effective_normalized_host()
     address_receipt = None
     if remote_session_payload is not None:
         from vibe import remote_access
