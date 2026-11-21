@@ -3193,7 +3193,7 @@ def protect_mutating_ui_requests():
 
 @app.after_request
 def prevent_desktop_enrollment_caching(response: Response) -> Response:
-    if request.path == "/remote/claim/callback" or request.path.startswith("/api/remote-access/claims"):
+    if request.path == "/remote/claim/callback" or request.path.startswith(("/api/remote-access/claims", "/api/remote-access/rebind")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
@@ -8948,16 +8948,39 @@ def desktop_local_instance_prepare():
     ))
 
 
-def _claim_route(operation):
+def _direct_rebind_denial():
+    from vibe.authorization import current_invocation_authority
+
+    if _is_direct_ingress_request() or not _is_direct_loopback_connection():
+        return "direct_loopback_required"
+    if (getattr(_request_authorization_context(), "is_remote", False) or current_invocation_authority() is not None
+            or "X-Avibe-Delegated-Caller" in request.headers):
+        return "local_operator_required"
+    return None
+
+
+def _claim_route(operation, *, constrained=False):
     from vibe.desktop_local_instance import LocalInstanceError
     from vibe.personal_claim_client import ClaimError
-    from vibe.personal_claims import redirect_claims
+    from vibe.personal_claims import rebind_claims, redirect_claims
 
+    if constrained:
+        reason = _direct_rebind_denial()
+        if reason:
+            return jsonify({"state": "error", "code": reason}), 403
+        if request.method == "POST":
+            if request.headers.get("Origin") != request.host_url.rstrip("/"):
+                return jsonify({"state": "error", "code": "invalid_origin"}), 403
+            if request.headers.get("Content-Type", "").partition(";")[0].strip().lower() != "application/json":
+                return jsonify({"state": "error", "code": "invalid_request"}), 400
+            cookie, token = request.cookies.get(CSRF_COOKIE_NAME, ""), request.headers.get(CSRF_HEADER_NAME, "")
+            if not token or not token.isascii() or not cookie.isascii() or not hmac.compare_digest(token, cookie):
+                return jsonify({"state": "error", "code": "invalid_csrf"}), 403
     denied = _access_administration_forbidden()
     if denied is not None:
         return denied
     try:
-        return operation(redirect_claims)
+        return operation(rebind_claims if constrained else redirect_claims)
     except LocalInstanceError as exc:
         return jsonify({"state": "error", "code": exc.code}), exc.status
     except ClaimError as exc:
@@ -8976,6 +8999,15 @@ def _claim_route(operation):
 
 @app.route("/api/remote-access/claims", methods=["POST"])
 def personal_claim_start():
+    return _start_redirect_claim(constrained=False)
+
+
+@app.route("/api/remote-access/rebind/claims", methods=["POST"])
+def rebind_claim_start():
+    return _start_redirect_claim(constrained=True)
+
+
+def _start_redirect_claim(*, constrained):
     from vibe.personal_claim_client import ClaimError
 
     def start(service):
@@ -8989,11 +9021,12 @@ def personal_claim_start():
         body, nonce = service.start(origin, request.json.get("locale", "en"), admitted_owner=admitted,
                                     on_bound=_ensure_remote_access_monitoring)
         response = jsonify(body)
-        response.set_cookie("avibe_claim_browser", nonce, httponly=True, samesite="lax", path="/remote/claim/callback",
+        response.set_cookie("avibe_rebind_browser" if constrained else "avibe_claim_browser", nonce,
+                            httponly=True, samesite="lax", path="/remote/claim/callback",
                             expires=datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")))
         return response, 201
 
-    return _claim_route(start)
+    return _claim_route(start, constrained=constrained)
 
 
 @app.route("/api/remote-access/claims/<claim_id>", methods=["GET"])
@@ -9001,8 +9034,22 @@ def personal_claim_state(claim_id):
     return _claim_route(lambda service: jsonify(service.state(claim_id)))
 
 
+@app.route("/api/remote-access/rebind/claims/<claim_id>", methods=["GET"])
+def rebind_claim_state(claim_id):
+    return _claim_route(lambda service: jsonify(service.state(claim_id)), constrained=True)
+
+
+@app.route("/api/remote-access/rebind/claims/<claim_id>/cancel", methods=["POST"])
+def rebind_claim_cancel(claim_id):
+    return _cancel_redirect_claim(claim_id, constrained=True)
+
+
 @app.route("/api/remote-access/claims/<claim_id>/cancel", methods=["POST"])
 def personal_claim_cancel(claim_id):
+    return _cancel_redirect_claim(claim_id, constrained=False)
+
+
+def _cancel_redirect_claim(claim_id, *, constrained):
     from vibe.personal_claim_client import ClaimError
 
     def cancel(service):
@@ -9010,14 +9057,16 @@ def personal_claim_cancel(claim_id):
             raise ClaimError("invalid_request")
         return jsonify(service.cancel(claim_id))
 
-    return _claim_route(cancel)
+    return _claim_route(cancel, constrained=constrained)
 
 
 @app.route("/remote/claim/callback", methods=["GET"])
 def personal_claim_callback():
     from vibe.personal_claim_client import ClaimError
 
-    def callback(service):
+    from vibe.personal_claims import callback_service
+
+    def callback(_service):
         fields = list(request.args.multi_items())
         cookies = [(name, value) for line in request.headers.getlist("cookie")
                    for item in line.split(";") for name, _, value in [item.strip().partition("=")]]
@@ -9025,9 +9074,9 @@ def personal_claim_callback():
             ids = [value for name, value in fields if name == "claim_id"]
             if len(ids) != 1:
                 raise ClaimError("invalid_return")
+            service = callback_service(ids[0])
             cookie_name = service.callback_fields(
-                ids[0], fields, cookies, request.host_url.rstrip("/"),
-                direct=not _is_direct_ingress_request() and _is_direct_loopback_connection(),
+                ids[0], fields, cookies, request.host_url.rstrip("/"), direct=_direct_rebind_denial() is None,
             )
         except ClaimError as exc:
             # Never echo browser inputs or clear the real initiator's nonce on a bad navigation.

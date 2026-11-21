@@ -47,7 +47,11 @@ def test_constrained_pair_replays_same_request_until_receipt_matches(pairing_hos
     assert recovered['ok'] and recovered['binding_disposition'] == 'existing'
     assert requests[0] == requests[1] and requests[0]['redeem_request_id']
     assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_B'
-    assert claims._outcome()['bound']['binding_disposition'] == 'existing'
+    assert 'bound' not in claims._outcome()
+    assert claims._outcome(constrained=True)['bound']['binding_disposition'] == 'existing'
+    assert claims.RebindClaims().state(claim_id) == {'state': 'bound', 'binding_disposition': 'existing'}
+    with pytest.raises(claims.ClaimError, match='claim_unavailable'):
+        claims.RedirectClaims().state(claim_id)
     assert remote_access._read_pending_pairing_record() == (None, None)
 
 
