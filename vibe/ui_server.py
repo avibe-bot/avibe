@@ -3481,6 +3481,17 @@ class _InstanceAddressRoleMiddleware:
         await self._refuse(scope, send)
 
     @staticmethod
+    async def _begin_cleanup(host: str) -> bool:
+        """The last role check before the headers; a busy role lock is asked again a few times, never waited on."""
+
+        for _ in range(10):
+            begun = instance_address.begin_cleanup_response(host)
+            if begun is not None:
+                return begun
+            await asyncio.sleep(0.01)
+        return False
+
+    @staticmethod
     async def _refuse(scope: Any, send: Any) -> None:
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
@@ -3496,7 +3507,7 @@ class _InstanceAddressRoleMiddleware:
         """Answer a cleanup Host. ``False`` when the permission lapsed before the headers."""
 
         if scope["type"] == "websocket":
-            if not instance_address.begin_cleanup_response(host):
+            if not await self._begin_cleanup(host):
                 return False
             try:
                 await send({"type": "websocket.close", "code": 1008})
@@ -3516,7 +3527,7 @@ class _InstanceAddressRoleMiddleware:
         clear = instance_address_responses.CLEAR_SITE_DATA
         if path == DEVICE_PREFIX or path.startswith(f"{DEVICE_PREFIX}/"):
             # The phone stops and clears locally on 401. Its body is never read.
-            if not instance_address.begin_cleanup_response(host):
+            if not await self._begin_cleanup(host):
                 return False
             try:
                 await send({
@@ -3560,7 +3571,7 @@ class _InstanceAddressRoleMiddleware:
             raw_path, cookie_header, content_type=content_type, clear=clear
         )
         # The role is checked again, under its lock, immediately before the headers.
-        if not instance_address.begin_cleanup_response(host):
+        if not await self._begin_cleanup(host):
             return False
         try:
             await send({"type": "http.response.start", "status": status, "headers": headers})

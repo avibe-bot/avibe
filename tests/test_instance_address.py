@@ -1005,6 +1005,42 @@ def test_b3_a_slow_cleaning_response_holds_the_switch_back(address, monkeypatch)
     assert binding().active_host == OLD
 
 
+def test_e7_a_request_that_meets_a_busy_role_lock_asks_again_and_is_cleaned(address):
+    import asyncio
+    import threading
+
+    plane, _ = address
+    rename_to("new")
+    run()
+    held = threading.Event()
+
+    def hold_the_role_lock_briefly():
+        with instance_address._LOCK:
+            held.set()
+            time.sleep(0.03)
+
+    async def scenario():
+        async def app(scope, receive, send):
+            raise AssertionError("the application is never entered on a cleanup name")
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        holder = threading.Thread(target=hold_the_role_lock_briefly)
+        middleware = ui_server._InstanceAddressRoleMiddleware(app)
+        scope = {"type": "http", "method": "GET", "path": "/", "raw_path": b"/", "headers": [(b"host", OLD.encode())]}
+        assert await asyncio.to_thread(instance_address.cleanup_ready, OLD)
+        holder.start()
+        held.wait(timeout=5)
+        assert await middleware._clean(scope, None, send, OLD) is True
+        holder.join()
+        return sent[0]["status"]
+
+    assert asyncio.run(scenario()) == 410
+
+
 def test_b3_a_crash_while_refusing_a_return_leaves_no_name_quiet_for_ever(address, monkeypatch):
     plane, clocks = address
     rename_to("new")
@@ -1088,7 +1124,7 @@ def test_e7_the_last_check_before_the_headers_never_waits_for_the_role_lock(addr
     held.wait(timeout=5)
     started = time.monotonic()
     try:
-        assert instance_address.begin_cleanup_response(OLD) is False  # a role is changing: nothing, at once
+        assert instance_address.begin_cleanup_response(OLD) is None  # a role is changing: no answer, at once
         assert time.monotonic() - started < 1
         instance_address.end_cleanup_response(OLD)  # and completion never takes that lock either
         assert time.monotonic() - started < 1

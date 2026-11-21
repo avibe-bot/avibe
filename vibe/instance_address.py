@@ -544,17 +544,20 @@ def _read_too_recent() -> bool:
     return last is not None and _monotonic() - last < STATE_READ_MIN_INTERVAL_SECONDS
 
 
-def begin_cleanup_response(raw_host: str | None) -> bool:
+def begin_cleanup_response(raw_host: str | None) -> bool | None:
     """The last check, under the role lock, immediately before headers are written.
 
-    Called on the event loop, so it never waits: when the role lock is held (a
-    role is changing right now) the answer is no, and the request gets nothing.
+    Called on the event loop, so it never waits. ``None`` means the role lock is
+    held right now (a state is being applied, a role is changing): the caller
+    may ask again in a moment, and answers with nothing if it stays so.
     """
 
     host = normalize_host(raw_host)
     binding = current_binding()
-    if binding is None or not _LOCK.acquire(blocking=False):
+    if binding is None:
         return False
+    if not _LOCK.acquire(blocking=False):
+        return None
     try:
         if not _cleanup_allowed_locked(host, binding):
             return False
