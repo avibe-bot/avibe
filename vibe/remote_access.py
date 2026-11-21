@@ -4887,8 +4887,7 @@ def _json_request_to_validated_backend(
     if connection_target.requires_proxy and not proxy_url:
         raise RuntimeError("pairing_backend_proxy_required")
     last_network_error: Exception | None = None
-    for connect_host in connection_target.connect_hosts:
-        connection = _validated_backend_connection(connect_host, connection_target, timeout, proxy_url)
+    for connection in _validated_backend_connections(connection_target, timeout, proxy_url):
         try:
             connection.request("POST", request_path, body=body, headers=request_headers)
             response = connection.getresponse()
@@ -4924,6 +4923,12 @@ def _validated_backend_proxy_url(url: str) -> str | None:
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise RuntimeError("unsupported_https_proxy_scheme")
     return proxy_url
+
+
+def _validated_backend_connections(target: _ValidatedPairingBackend, timeout: float, proxy_url: str | None):
+    """Only validated addresses, using the approved proxy and certificate policy. Caller closes each candidate."""
+    for host in target.connect_hosts:
+        yield _validated_backend_connection(host, target, timeout, proxy_url)
 
 
 def _validated_backend_connection(
@@ -6700,6 +6705,8 @@ def make_session_cookie(
     *,
     session_claims: Mapping[str, Any],
     device_headers: Mapping[str, str] | None = None,
+    account_session_ref: str | None = None,
+    account_enroll_before: int | None = None,
 ) -> str:
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
@@ -6747,7 +6754,8 @@ def make_session_cookie(
         _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
     }
     cookie = _encode_session_cookie(cloud.session_secret, payload)
-    register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True)
+    register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True,
+                            account_session_ref=account_session_ref, account_enroll_before=account_enroll_before)
     return cookie
 
 
@@ -6758,13 +6766,16 @@ def device_binding(config: V2Config) -> str:
     return binding_key(cloud.instance_id, cloud.session_secret)
 
 
-def register_device_session(config, identity, claims, headers, *, fresh=False):
+def register_device_session(config, identity, claims, headers, *, fresh=False, account_session_ref=None, account_enroll_before=None):
+    from vibe.account_session_revoke import pairing_epoch
     from storage import device_registry
     from vibe.device_metadata import describe
 
     device_registry.record_session(
         device_binding(config), identity, claims['vibe_instance_role'], describe(headers),
         expires_at=identity['auth_time'] + SESSION_ABSOLUTE_TTL_SECONDS, now=int(time.time()), fresh=fresh,
+        epoch=pairing_epoch(config) if account_session_ref else None, reference=account_session_ref,
+        account_enroll_before=account_enroll_before,
     )
 
 

@@ -1849,6 +1849,85 @@ def test_organization_remote_session_idles_out_renews_daily_and_ends_at_the_cap(
     _remote_session_lifetime_scenario(monkeypatch, tmp_path, "organization", 7 * 24 * 60 * 60)
 
 
+@pytest.mark.parametrize('caller_source', ['owner', 'email'])
+def test_device_account_signout_from_verified_exchange(monkeypatch, tmp_path, caller_source):
+    """Scenario: AUTH-SETUP-915. The exchange, nonce, enrollment, routes and worker are real."""
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from tests.test_device_account_signout import fake_issuer
+    from vibe import account_signout_worker
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    cfg = _save_remote_session_authorization_config('personal')
+    cloud = cfg.remote_access.vibe_cloud
+    cloud.issuer, cloud.token_endpoint, cloud.jwks_uri = 'https://issuer.invalid', 'https://issuer.invalid/token', 'https://issuer.invalid/keys'
+    cfg.save()
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(remote_access, 'PyJWKClient', lambda _: SimpleNamespace(
+        get_signing_key_from_jwt=lambda _: SimpleNamespace(key=key.public_key())))
+    a, b = app.test_client(), app.test_client()
+    origin = cloud.public_url
+    ref_a, ref_b = 'asr1_' + 'a' * 43, 'asr1_' + 'b' * 43
+    def callback(client, ref, *, wrong_nonce=False, source='owner'):
+        authorize = httpx.URL(client.get('/auth/login?next=/inbox', base_url=origin).headers['Location'])
+        claims = {**_REMOTE_SESSION_OWNER_CLAIMS, 'iss': cloud.issuer, 'aud': cloud.client_id,
+                  'sub':'owner-1', 'email':'owner@example.com', 'email_verified':True,
+                  'nonce':'not-the-handshake' if wrong_nonce else authorize.params['nonce'],
+                  'exp': int(time.time()) + 300, 'avibe_account_session_ref':ref, 'vibe_instance_access_source':source}
+        token = jwt.encode(claims, key, algorithm='RS256')
+        monkeypatch.setattr(remote_access.requests, 'post', lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {'id_token': token}))
+        return client.get('/auth/callback', base_url=origin, params={'code':'fixture','state':authorize.params['state']})
+    bad = callback(app.test_client(), ref_a, wrong_nonce=True)
+    assert bad.status_code == 400 and _remote_session_set_cookie(bad) is None
+    for client, ref in ((a, ref_a), (b, ref_b)):
+        response = callback(client, ref, source=caller_source if client is b else 'owner')
+        assert response.status_code == 302 and ref not in _remote_session_set_cookie(response)[0]
+    def view():
+        return b.get('/api/devices', base_url=origin).get_json()
+    target = next(row['id'] for row in view()['mine'] if row['kind'] != 'host' and not row['current'])
+    calls = fake_issuer(monkeypatch, 204)
+    result = b.post('/api/devices/' + target + '/sign-out', base_url=origin, headers=csrf_headers(b, origin), json={}).get_json()
+    receipt, = result['sign_out_results']
+    assert result['revoked_sessions'] == 1 and not calls
+    assert a.get('/api/session', base_url=origin).get_json()['authenticated'] is False
+    if caller_source != 'owner':
+        # The same subject, role and eligible target as the positive case; only the actor's source differs.
+        assert receipt['account_results'] == [{'status':'not_applicable', 'reason':'not_eligible', 'count':1}]
+        assert not account_signout_worker.run_once(V2Config.load) and not calls
+        assert callback(a, ref_a).status_code == 302  # No account fence either.
+        return
+
+    assert receipt['account_results'][0]['status'] == 'pending'
+    from vibe import direct_lifecycle
+    monkeypatch.setattr(remote_access, 'reconcile', lambda: {'ok': True})
+    monkeypatch.setattr(ui_server, '_ensure_remote_access_monitoring', lambda *_: None)
+    monkeypatch.setattr(direct_lifecycle, 'notify_config_changed', lambda *_: None)
+    host = app.test_client()
+    def settings(enabled):
+        response = host.post('/api/config', base_url='http://localhost', headers=csrf_headers(host),
+                             json={'remote_access': {'vibe_cloud': {'enabled': enabled}}})
+        assert response.status_code == 200, response.text
+        current = V2Config.load().remote_access.vibe_cloud
+        assert current.enabled is enabled and current.instance_secret == cloud.instance_secret
+        return current
+    assert settings(False).session_secret != cloud.session_secret
+    assert not account_signout_worker.run_once(V2Config.load) and not calls
+    settings(True)
+    assert callback(b, ref_b).status_code == 302  # The old B cookie was rotated by Settings.
+    pending, = view()['recent_sign_outs']
+    assert pending == receipt
+    fenced = callback(app.test_client(), ref_a)
+    assert fenced.status_code == 403 and _remote_session_set_cookie(fenced) is None
+    assert ref_a not in fenced.text and 'account_session_signed_out' in fenced.text
+    assert account_signout_worker.run_once(V2Config.load)
+    assert [call[2] for call in calls] == [{'account_session_ref':ref_a}]
+    history, = view()['recent_sign_outs']
+    assert history['operation_id'] == receipt['operation_id'] and history['account_results'][0]['status'] == 'accepted'
+    assert b.get('/api/session', base_url=origin).get_json()['authenticated'] is True
+
+
 def _remote_session_lifetime_scenario(monkeypatch, tmp_path, instance_kind, idle_seconds):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_session_authorization_config(instance_kind)

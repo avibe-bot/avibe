@@ -26,7 +26,9 @@ DEFAULT_QUERY_STEP_LIMIT = 250_000
 # of a query result carry it); names/policy live behind the proper Vaults API/CLI.
 # Sibling vault tables (requests/links/grants/audit) stay queryable for inspection.
 # Normalized historical ACL evidence is internal to the authorized audit reader.
-_DENIED_TABLES = frozenset({"vault_secrets", "vault_audit_access_snapshots"})
+_DENIED_TABLES = frozenset({"vault_secrets", "vault_audit_access_snapshots", "remote_account_refs",
+                            "remote_account_revocations", "remote_account_pairings", "device_health_owner_checks",
+                            "remote_signout_receipts", "remote_signout_items"})
 
 # Harness concepts whose table name shares nothing a fuzzy match could find.
 _CONCEPT_TABLES = {
