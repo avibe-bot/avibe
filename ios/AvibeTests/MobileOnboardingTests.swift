@@ -2255,6 +2255,9 @@ final class MobileOnboardingTests: XCTestCase {
                 "voice.capturePrepare",
                 "voice.captureStart",
                 "voice.captureStop",
+                "voice.holdAdopt",
+                "voice.holdReject",
+                "voice.holdSurfaces",
             ]
         )
     }

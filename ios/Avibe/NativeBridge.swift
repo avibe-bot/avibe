@@ -44,6 +44,9 @@ struct NativeShellMetadata: Equatable {
         "viewport": 1,
         "voice": 1,
         "voiceCapture": 1,
+        // The App recognises a hold on the page's surfaces itself
+        // (`voice.holdSurfaces`, `voice.holdAdopt`, `voice.holdReject`).
+        "voiceHold": 1,
     ]
 
     let shellVersion: String
@@ -257,6 +260,9 @@ enum NativeBridgeMethod: String, CaseIterable {
     case voiceCapturePrepare = "voice.capturePrepare"
     case voiceCaptureStart = "voice.captureStart"
     case voiceCaptureStop = "voice.captureStop"
+    case voiceHoldSurfaces = "voice.holdSurfaces"
+    case voiceHoldAdopt = "voice.holdAdopt"
+    case voiceHoldReject = "voice.holdReject"
     case shareCapabilities = "share.capabilities"
     case sharePresent = "share.present"
 }
@@ -1695,7 +1701,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 replyHandler,
                 result: ["state": microphonePermissionState()]
             )
-        case .voiceCapturePrepare, .voiceCaptureStart, .voiceCaptureStop:
+        case .voiceCapturePrepare, .voiceCaptureStart, .voiceCaptureStop,
+             .voiceHoldSurfaces, .voiceHoldAdopt, .voiceHoldReject:
             handleVoiceCapture(request, sourceWebView: sourceWebView, replyHandler: replyHandler)
         }
     }
@@ -1758,6 +1765,88 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     self.reply(replyHandler, error: .failed(step))
                 }
             }
+        case .voiceHoldSurfaces:
+            // Where a hold may record now, in this WebView's points, and the
+            // page's hold threshold; an empty list means the App follows no
+            // press.
+            let holdMs = NativeHoldCapture.holdMs(from: request.params["holdMs"])
+            guard request.params.count == (request.params["holdMs"] == nil ? 1 : 2),
+                  request.params["holdMs"] == nil || holdMs != nil,
+                  let surfaces = NativeHoldCapture.surfaces(from: request.params["surfaces"])
+            else {
+                reply(replyHandler, error: .invalidArgument("voice.holdSurfaces requires surfaces, and takes holdMs."))
+                return
+            }
+            // The page's calls take effect in the order it made them: a
+            // list whose consent answer comes back after a later call, or
+            // after its document went, is not applied.
+            let request = capture.surfacesRequested(by: sourceWebView)
+            guard !surfaces.isEmpty else {
+                capture.setSurfaces([], for: sourceWebView)
+                reply(replyHandler, result: NSNull())
+                return
+            }
+            // A surface makes the App open the microphone on a touch: the
+            // same document gate as `voice.captureStart`.
+            let origin = policy.instanceOrigin
+            sourceWebView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak sourceWebView] result, error in
+                guard let self, let sourceWebView, let url = sourceWebView.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin
+                else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                guard capture.isLatestSurfacesRequest(request, of: sourceWebView) else {
+                    self.reply(replyHandler, error: .failed("superseded"))
+                    return
+                }
+                guard error == nil, VoiceConsentMarker(result: result) == .marked else {
+                    self.reply(replyHandler, error: .failed("consent"))
+                    return
+                }
+                guard capture.setSurfaces(surfaces, holdMs: holdMs, for: sourceWebView) else {
+                    // A WebView whose touches the App does not see (a popup).
+                    self.reply(replyHandler, error: .failed("unwatched"))
+                    return
+                }
+                self.reply(replyHandler, result: NSNull())
+            }
+        case .voiceHoldAdopt:
+            guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
+                reply(replyHandler, error: .invalidArgument("voice.holdAdopt requires take."))
+                return
+            }
+            // The same document gate as `voice.captureStart`, asked before
+            // any of the take's audio reaches the page.
+            let origin = policy.instanceOrigin
+            sourceWebView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak sourceWebView] result, error in
+                guard let self, let sourceWebView, let url = sourceWebView.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin
+                else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                guard error == nil, VoiceConsentMarker(result: result) == .marked else {
+                    capture.reject(take: take, webView: sourceWebView)
+                    self.reply(replyHandler, error: .failed("consent"))
+                    return
+                }
+                switch capture.adopt(take: take, webView: sourceWebView) {
+                case .success(let timings):
+                    self.reply(replyHandler, result: ["sampleRate": 16_000, "timings": timings])
+                case .failure(.failed(let step)):
+                    self.reply(replyHandler, error: .failed(step))
+                case .failure:
+                    self.reply(replyHandler, error: .failed("gone"))
+                }
+            }
+        case .voiceHoldReject:
+            guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
+                reply(replyHandler, error: .invalidArgument("voice.holdReject requires take."))
+                return
+            }
+            capture.reject(take: take, webView: sourceWebView)
+            reply(replyHandler, result: NSNull())
         default:
             guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
                 reply(replyHandler, error: .invalidArgument("voice.captureStop requires take."))
