@@ -374,7 +374,7 @@ export function ClaimLimitCard({ account, name, reject }: { account: string; nam
       actions={<Badge variant="secondary">{d('未开启', 'Off')}</Badge>}
     >
       <ClaimFields account={account} name={name} />
-      <div className="px-5 pb-1 md:pl-[116px]"><RejectLine reject={reject} /></div>
+      <div className="px-5 pb-1 md:pl-28"><RejectLine reject={reject} /></div>
       <div className="border-t border-border px-5 py-4">
         <Button variant="brand" disabled>{d('开启远程访问', 'Turn on remote access')}</Button>
       </div>

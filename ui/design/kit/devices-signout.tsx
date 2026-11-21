@@ -68,7 +68,7 @@ export function FunctionsDialog({ name, app, functions, note }: { name: string; 
       <DialogContent className="max-w-md gap-0 p-0 max-md:p-0" closeLabel={d('关闭', 'Close')}>
         <DialogHeader className="px-6 pb-4 pt-6 max-md:px-5 max-md:pt-3">
           <div className="flex items-center gap-3.5">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-field text-muted"><Smartphone size={18} /></span>
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-field text-muted"><Smartphone size={18} /></span>
             <div className="min-w-0 text-left">
               <DialogTitle className="truncate text-[15px]">{name}</DialogTitle>
               <DialogDescription className="mt-0.5 truncate text-[12px]">{app}</DialogDescription>
@@ -98,7 +98,7 @@ export function UnlinkedHealthPanel({ items }: { items: Array<{ device: string; 
     >
       {items.map((item) => (
         <div key={item.device} className="flex items-center gap-3.5 border-b border-border px-5 py-3 last:border-b-0">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-field text-muted"><HeartPulse size={18} /></span>
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-field text-muted"><HeartPulse size={18} /></span>
           <div className="min-w-0 flex-1">
             <div className="text-[13px] font-medium text-foreground">{item.device}</div>
             <div className="text-[11px] leading-relaxed text-muted">{d(`${item.data.zh} · 上次连接 ${item.lastSeen.zh}`, `${item.data.en} · last connected ${item.lastSeen.en}`)}</div>
