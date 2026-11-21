@@ -266,6 +266,8 @@ class _Flow:
             self.update("pending")
             if self.mode == "redirect":
                 self._browser = secrets.token_urlsafe(32)
+                if self.constrained:
+                    self.reset_browser = reset_browser_token(self._browser)
                 self._proof = return_proof(state, ticket.id)
                 self.first = ({"claim_id": ticket.id, "expires_at": ticket.expiry, "form": {
                     "method": "POST", "action": client.base + "/api/v1/claims/redirect-entry",
@@ -448,8 +450,24 @@ def run_desktop(*, signed_in_subject: str, show_link: Callable[[str], None], loc
     return _Flow("desktop", locale, expected=signed_in_subject, show=show_link).run()
 
 
+def reset_browser_token(callback_nonce):
+    return hmac.digest(callback_nonce.encode('ascii'), b'avibe-rebind-reset-browser:v1', 'sha256').hex()
+
+
+_RESET_REASONS = frozenset({'other_account', 'predecessor_unrecoverable'})
+
+
 class _RebindFlow(_Flow):
     constrained = True
+    reset_browser = None
+    reset_confirmation = None
+    reset_expiry = 0.
+
+    def cancel(self):
+        with self.lock:
+            result = super().cancel()
+            self.reset_browser = self.reset_confirmation = None
+            return result
 
     def _execute(self):
         if self.mode != "redirect" or not self.admitted_owner or not loopback_origin(self.origin):
@@ -562,6 +580,48 @@ class RebindClaims(RedirectClaims):
                 return {"state": "error", "code": "expired"}
         return view
 
+    def reset_request(self, claim_id, origin, browser, *, confirmation=None):
+        """Preview never seals. Confirm requires the same browser, generation and unspent nonce."""
+        from datetime import datetime, timezone
+        from storage.mobile_store import MobileStore, mobile_store_path
+        from vibe import binding_reset
+
+        try:
+            with admitted('reset'):
+                # Serialize superseding start/cancel with the validation + seal, not the cleanup.
+                with self._lock:
+                    flow = self._flow
+                    if flow is None or not flow.ticket or flow.ticket.id != claim_id:
+                        raise ClaimError('reset_not_eligible')
+                    with flow.lock, config_file_lock():
+                        now = time.time()
+                        if (not flow.returned or flow.accepting or flow.cancelled or origin != flow.origin
+                                or not flow.reset_browser or not _matches(flow.reset_browser, browser)
+                                or flow.view.get('code') != 'installation_unverified'
+                                or flow.view.get('reason_code') not in _RESET_REASONS or now >= flow.ticket.deadline):
+                            raise ClaimError('reset_not_eligible')
+                        cfg = local._config()
+                        if local.claim_revision(cfg, local._installation_id(), local._pending()) != flow.refused_revision:
+                            raise ClaimError('local_binding_changed')
+                        if confirmation is None:
+                            connected = mobile_store_path().is_file() and MobileStore(existing_only=True).active_device() is not None
+                            flow.reset_expiry = min(now + 120, flow.ticket.deadline)
+                            flow.reset_confirmation = secrets.token_urlsafe(32)
+                            return {'confirmation_id': flow.reset_confirmation, 'health_connected': connected,
+                                    'expires_at': datetime.fromtimestamp(flow.reset_expiry, timezone.utc).isoformat()}
+                        if not flow.reset_confirmation or not _matches(flow.reset_confirmation, confirmation):
+                            raise ClaimError('reset_not_eligible')
+                        if now >= flow.reset_expiry:
+                            raise ClaimError('confirmation_expired')
+                        binding_reset._seal(cfg)
+                        flow.reset_confirmation = flow.reset_browser = None
+                try:
+                    return binding_reset.resume()
+                except Exception:
+                    return {'state': 'resetting'}  # The sealed marker retains exclusive ownership.
+        except OperationBusy:
+            raise ClaimError('operation_in_progress') from None
+
     def overview(self):
         from vibe import binding_health, instance_address
 
@@ -584,9 +644,12 @@ class RebindClaims(RedirectClaims):
         active = flow and (not attempt or attempt["state"] not in ("error", "bound", "declined"))
         unavailable = ("pairing_recovery_required" if pending else "not_bound" if not bound else
                        "operation_in_progress" if active or instance_address._any_journal_stored() else None)
+        eligible = (unavailable is None and (attempt or {}).get('reason_code') in _RESET_REASONS
+                    and flow and flow.reset_browser is not None)
         return {"binding_state": state, "connector_still_running": remote_access._is_cloudflared_pid(remote_access._read_pid()),
                 "can_start": unavailable is None, "unavailable_reason": unavailable, "attempt": attempt,
-                "next_action": "rebind" if unavailable is None else None, "reason_code": (attempt or {}).get("reason_code")}
+                "next_action": "confirm_as_new" if eligible else "rebind" if unavailable is None else None,
+                "reason_code": (attempt or {}).get("reason_code")}
 
 
 redirect_claims = RedirectClaims()

@@ -9029,6 +9029,12 @@ def _start_redirect_claim(*, constrained):
         response.set_cookie("avibe_rebind_browser" if constrained else "avibe_claim_browser", nonce,
                             httponly=True, samesite="lax", path="/remote/claim/callback",
                             expires=datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")))
+        if constrained:
+            from vibe.personal_claims import reset_browser_token
+            response.set_cookie('avibe_rebind_initiator', reset_browser_token(nonce), httponly=True, samesite='strict',
+                                path='/api/remote-access/rebind/claims/' + body['claim_id'] + '/reset',
+                                secure=request.is_secure,
+                                expires=datetime.fromisoformat(body['expires_at'].replace('Z', '+00:00')))
         return response, 201
 
     return _claim_route(start, constrained=constrained)
@@ -9042,6 +9048,34 @@ def personal_claim_state(claim_id):
 @app.route("/api/remote-access/rebind/claims/<claim_id>", methods=["GET"])
 def rebind_claim_state(claim_id):
     return _claim_route(lambda service: jsonify(service.state(claim_id)), constrained=True)
+
+
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset/preview', methods=['POST'])
+def rebind_reset_preview(claim_id):
+    return _rebind_reset_route(claim_id, preview=True)
+
+
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset', methods=['POST'])
+def rebind_reset_confirm(claim_id):
+    return _rebind_reset_route(claim_id, preview=False)
+
+
+def _rebind_reset_route(claim_id, *, preview):
+    from vibe.personal_claim_client import ClaimError
+
+    def reset(service):
+        body = request.json
+        if (not isinstance(body, dict) or (body != {} if preview else
+                set(body) != {'confirmation_id'} or not isinstance(body['confirmation_id'], str) or not body['confirmation_id'])):
+            raise ClaimError('invalid_request')
+        tokens = [value for line in request.headers.getlist('cookie') for item in line.split(';')
+                  for name, _, value in [item.strip().partition('=')] if name == 'avibe_rebind_initiator']
+        if len(tokens) != 1:
+            raise ClaimError('reset_not_eligible')
+        result = service.reset_request(claim_id, request.host_url.rstrip('/'), tokens[0], confirmation=body.get('confirmation_id'))
+        return jsonify(result), 202 if result.get('state') == 'resetting' else 200
+
+    return _claim_route(reset, constrained=True)
 
 
 @app.route("/api/remote-access/rebind/claims/<claim_id>/cancel", methods=["POST"])

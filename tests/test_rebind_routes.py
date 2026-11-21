@@ -95,12 +95,71 @@ def test_rebind_through_shared_callback(machine, reason):
         assert view['code'] == 'installation_unverified'
         assert view.get('reason_code') == (None if reason == 'malformed' else reason)
         assert not redeemed and cloud.instance_secret == 'fixture-secret-inst_A'
+        path = ROOT + '/' + ident + '/reset'
+        preview = browser.post(path + '/preview', base_url=ORIGIN, headers=hdr, json={})
+        if reason in ('other_account', 'predecessor_unrecoverable'):
+            assert preview.status_code == 200, preview.get_json()
+            assert set(preview.get_json()) == {'confirmation_id', 'expires_at', 'health_connected'}
+            confirmation = {'confirmation_id': preview.get_json()['confirmation_id']}
+            stranger = ui_server.app.test_client()
+            denied = stranger.post(path, base_url=ORIGIN, headers=csrf_headers(stranger), json=confirmation)
+            assert denied.status_code == 409 and denied.get_json()['code'] == 'reset_not_eligible'
+            assert browser.post(path, base_url=ORIGIN, headers=hdr, json={'confirmation_id': None}).status_code == 400
+        else:
+            assert preview.status_code == 409 and preview.get_json()['code'] == 'reset_not_eligible'
         if reason != 'malformed':
             cfg = V2Config.load()
             cfg.remote_access.vibe_cloud.instance_secret = 'fixture-replaced'
             cfg.save()
             assert browser.get(ROOT + '/' + ident).get_json() == {'state': 'error', 'code': 'local_binding_changed'}
+            if reason in ('other_account', 'predecessor_unrecoverable'):
+                stale = browser.post(path, base_url=ORIGIN, headers=hdr, json=confirmation)
+                assert stale.status_code == 409 and stale.get_json()['code'] == 'local_binding_changed'
+                assert V2Config.load().remote_access.vibe_cloud.instance_secret == 'fixture-replaced'
     else:
         assert view['state'] == 'bound' and view['binding_disposition'] == 'existing', view
         assert len(redeemed) == 1 and redeemed[0]['redeem_request_id']
         assert cloud.instance_secret == 'fixture-rotated'
+
+
+@pytest.mark.parametrize('finish', ['confirm', 'cancel', 'expired'])
+def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
+    from vibe import binding_admission, desktop_local_instance as local, direct_certificates
+
+    peer, redeems = machine
+    monkeypatch.setattr(remote_access, 'stop', lambda _: {'ok': True})
+    monkeypatch.setattr(remote_access, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
+    monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
+    browser = ui_server.app.test_client()
+    hdr = csrf_headers(browser)
+    def post(path, body):
+        return browser.post(path, base_url=ORIGIN, headers=hdr, json=body)
+    started = post(ROOT, {}).get_json()
+    ident = started['claim_id']
+    scope = ROOT + '/' + ident
+    path = scope + '/reset'
+    assert post(path + '/preview', {}).status_code == 409
+    peer.outcomes.append((409, {'error': 'installation_unverified', 'recovery': 'reset_as_new',
+                                'reason': 'predecessor_unrecoverable'}, None))
+    callback = '/remote/claim/callback?claim_id=' + ident + '&state=' + callback_proof(started) + '&callback_token=' + 'A' * 43
+    assert browser.get(callback, base_url=ORIGIN).headers['Location'] == '/settings/remote-access'
+    flow = claims.rebind_claims._get(ident)
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view['state'] == 'error', timeout=5)
+    assert browser.get('/api/remote-access/rebind', base_url=ORIGIN).get_json()['next_action'] == 'confirm_as_new'
+    old, fresh = (post(path + '/preview', {}).get_json()['confirmation_id'] for _ in range(2))
+    assert old != fresh and post(path, {'confirmation_id': old}).status_code == 409
+    assert not binding_admission.reset_in_progress() and local._installation_id()
+    if finish == 'cancel':
+        assert post(scope + '/cancel', {}).status_code == 200
+    elif finish == 'expired':
+        flow.reset_expiry = 0
+    result = post(path, {'confirmation_id': fresh})
+    if finish == 'confirm':
+        assert result.status_code == 200 and result.get_json() == {'state': 'unpaired'}
+        assert local._installation_id() is None and not V2Config.load().remote_access.vibe_cloud.instance_id
+        assert post(path, {'confirmation_id': fresh}).status_code == 409
+    else:
+        assert result.status_code == 409 and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+        assert local._installation_id()
+    assert len(peer.calls) == 2 and not redeems and not binding_admission.reset_in_progress()
