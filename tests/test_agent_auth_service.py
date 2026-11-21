@@ -2012,8 +2012,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
                 captured["connected"] = True
 
         with (
-            patch("core.agent_auth_service.ClaudeAgentOptions", _StubClaudeAgentOptions),
-            patch("core.agent_auth_service.ClaudeSDKClient", _StubClaudeSDKClient),
+            patch("modules.claude_sdk_compat.ClaudeAgentOptions", _StubClaudeAgentOptions),
+            patch("modules.claude_sdk_compat.ClaudeSDKClient", _StubClaudeSDKClient),
         ):
             await service._create_claude_control_client(context)
 

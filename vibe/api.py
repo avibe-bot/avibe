@@ -1280,6 +1280,20 @@ def save_config(
                     and remote_access_runtime_changed(base_config, config)
                 ),
             )
+        if generic_remote_access and base_config is not None:
+            # The address has one writer: the journaled change in
+            # ``vibe.instance_address`` (and pairing). A stale client or a script
+            # writing a former name back here would have this Avibe serve content
+            # on a name in its waiting period. Nothing sets them here from empty
+            # either; clearing them (turning the pairing off) stays possible.
+            for field in ("public_url", "redirect_uri", "client_id"):
+                before = str(getattr(base_config.remote_access.vibe_cloud, field) or "")
+                after = str(getattr(config.remote_access.vibe_cloud, field) or "")
+                if after and before != after:
+                    raise ValueError(
+                        f"Config 'remote_access.vibe_cloud.{field}' is changed by pairing "
+                        "or through '/api/instance-address', not by a settings save"
+                    )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         from vibe import remote_access
 

@@ -571,8 +571,11 @@ final class TurnActivityTests: XCTestCase {
         await owner.endAll(reason: "logout")
     }
 
-    func testAllBridgeMethodsAreRecognizedAndCapabilityIsVersionOne() {
-        XCTAssertEqual(NativeShellMetadata.capabilities["liveActivities"], 1)
+    /// Withdrawn (owner, 11-21): the capability is not announced, and the
+    /// methods, still recognized, refuse without reaching the App.
+    func testTheCapabilityIsWithdrawnAndTheMethodsAreStillRecognized() {
+        XCTAssertFalse(NativeShellMetadata.liveActivitiesAvailable)
+        XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         for method in ["status", "start", "stop", "openSettings"] {
             guard case .success(let request) = NativeBridgeRequest.parse(["method": "liveActivity." + method, "params": [:]]) else {
                 XCTFail("Missing bridge method: " + method); continue
@@ -581,30 +584,56 @@ final class TurnActivityTests: XCTestCase {
         }
     }
 
-    func testBridgeInvokesAllFourMethodsFromTheOwnedDocument() async throws {
+    func testTheBridgeRefusesAllFourMethodsWithoutReachingTheApp() async throws {
         let origin = try XCTUnwrap(WebOrigin(url: URL(string: target.instanceOrigin)!))
         var received: [NativeBridgeMethod] = []
         let webView = WKWebView(frame: .zero, configuration: NativeBridgeConfiguration.make(
             instanceOrigin: origin, websiteDataStore: .nonPersistent(), setOuterScrollLocked: { _, _ in false },
-            liveActivity: { request, admittedOrigin in
-                XCTAssertEqual(admittedOrigin, origin)
+            liveActivity: { request, _ in
                 received.append(request.method)
-                return request.method == .liveActivityStatus ? ["enabled": true, "tracking": false] : ["ok": true]
+                return ["ok": true]
             }))
         let loader = TurnActivityPageLoader()
         webView.navigationDelegate = loader
         try await loader.loadHTML("<!doctype html><title>Live Activity bridge</title>", baseURL: origin.url, in: webView)
         let result = try await webView.callAsyncJavaScript("""
-            const status = await window.avibeNative.call('liveActivity.status', {sessionId: 'session-1'});
-            const start = await window.avibeNative.call('liveActivity.start', {
-              sessionId: 'session-1', agentName: 'Agent', sessionTitle: null
-            });
-            const stop = await window.avibeNative.call('liveActivity.stop', {sessionId: 'session-1'});
-            const settings = await window.avibeNative.call('liveActivity.openSettings', {});
-            return [status.enabled, status.tracking, start.ok, stop.ok, settings.ok];
+            const codes = [];
+            for (const [method, params] of [
+              ['liveActivity.status', {sessionId: 'session-1'}],
+              ['liveActivity.start', {sessionId: 'session-1', agentName: 'Agent', sessionTitle: null}],
+              ['liveActivity.stop', {sessionId: 'session-1'}],
+              ['liveActivity.openSettings', {}],
+            ]) {
+              try { await window.avibeNative.call(method, params); codes.push('ok'); }
+              catch (error) { codes.push(error.code); }
+            }
+            return codes;
             """, arguments: [:], in: nil, contentWorld: .page)
-        XCTAssertEqual(result as? [Bool], [true, false, true, true, true])
-        XCTAssertEqual(received, [.liveActivityStatus, .liveActivityStart, .liveActivityStop, .liveActivityOpenSettings])
+        XCTAssertEqual(result as? [String], ["unsupported", "unsupported", "unsupported", "unsupported"])
+        XCTAssertEqual(received, [])
+    }
+
+    /// At launch every card an earlier build left ends at once, and the
+    /// ledger goes, with no instance request then or at a later sign-out.
+    func testEndingAllLocallyDismissesEveryCardAndForgetsTheLedgerWithoutRequests() async throws {
+        let owner = coordinator()
+        _ = await start(owner)
+        _ = await owner.start(sessionID: "session-2", agentName: "Agent", sessionTitle: nil, target: target, registrationID: "registration-1")
+        XCTAssertFalse(cards.isEmpty)
+        calls.removeAll()
+
+        await owner.endAllLocally()
+
+        for card in cards {
+            XCTAssertEqual(card.state, .dismissed)
+        }
+        XCTAssertTrue(calls.isEmpty)
+        let stored = try XCTUnwrap(defaults.data(forKey: "avibe.liveActivities.turns.v1"))
+        let ledger = try XCTUnwrap(JSONSerialization.jsonObject(with: stored) as? [String: Any])
+        XCTAssertEqual((ledger["records"] as? [String: Any])?.isEmpty, true)
+
+        await owner.endAll(reason: "logout")
+        XCTAssertFalse(calls.contains { $0.0 == "DELETE" })
     }
 
     func testRefusedStartKeepsExistingCardAndAdmittedReplacementUsesReplaced() async throws {

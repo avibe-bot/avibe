@@ -2141,7 +2141,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        with patch("modules.agents.claude_agent.ToolUseBlock", FakeToolUseBlock):
+        with patch("modules.claude_sdk_compat.ToolUseBlock", FakeToolUseBlock):
             agent._get_formatter = lambda _context: _Formatter()
             await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 

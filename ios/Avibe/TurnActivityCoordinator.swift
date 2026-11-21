@@ -244,6 +244,23 @@ final class TurnActivityCoordinator {
         for record in missing { await remove(record, reason: reason) }
     }
 
+    /// Ends every Turn Live Activity on this phone at once and forgets the
+    /// ledger, telling no instance (the entry is withdrawn, 11-21). The
+    /// ledger goes first: a reconcile running meanwhile then finds no record
+    /// to register or DELETE, and only ends what it finds.
+    func endAllLocally() async {
+        epoch += 1
+        tokenTasks.values.forEach { $0.cancel() }
+        tokenTasks.removeAll()
+        stateTasks.values.forEach { $0.cancel() }
+        stateTasks.removeAll()
+        ledger = Ledger()
+        save()
+        for activity in activities() where activity.state != .dismissed {
+            await activity.end(nil, immediately: true)
+        }
+    }
+
     func removeInstances(outside origins: Set<String>, accountID: String) async {
         let removed = activities().filter {
             $0.attributes.accountID == accountID && !origins.contains($0.attributes.instanceOrigin)
