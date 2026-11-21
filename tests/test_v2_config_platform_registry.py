@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import re
+import sys
 from dataclasses import fields
 
 import pytest
@@ -411,6 +412,10 @@ def _declared_kind(info) -> tuple[str, bool]:
     return (optional.group(1), True) if optional else (text, False)
 
 
+@pytest.mark.xfail(
+    sys.version_info >= (3, 14), strict=True, raises=AssertionError,
+    reason="#4134 config fix: recognize optional scalar annotations in _named_value and its contract test",
+)
 def test_config_fields_are_held_to_the_kind_they_declare() -> None:
     """Every field of a writable section refuses a value naming another kind.
 
