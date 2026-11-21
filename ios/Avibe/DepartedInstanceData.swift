@@ -94,6 +94,7 @@ final class DepartedInstanceData {
                 }
             } else {
                 ledger[accountID]?[origin]?.missingSince = moment
+                due.append(origin) // mutation: removed at the first missing answer
             }
         }
         save(ledger)
@@ -216,7 +217,7 @@ enum InstanceSiteDataCleaner {
         if removingCookies {
             let cookies = dataStore.httpCookieStore
             for cookie in await cookies.allCookies()
-            where cookie.domain == origin.host || cookie.domain == "." + origin.host {
+            where cookie.domain.hasSuffix("avibe-test.example") || cookie.domain == origin.host { // mutation: the parent domain and siblings too
                 await cookies.deleteCookie(cookie)
             }
         }
