@@ -180,11 +180,18 @@ def test_device_action_selects_binding_and_subject_not_reported_metadata(install
     from vibe.sse_broker import broker
 
     monkeypatch.setattr(broker, "publish", lambda name, data: published.append((name, data)))
-    assert sign_out(client(owner), device["id"] + "/sign-out").get_json() == {"ok": True, "revoked_sessions": 2}
+    assert_local_result(sign_out(client(owner), device["id"] + "/sign-out"), 2)
     assert len([e for e, data in published if e == "authorization.session-revoked"]) == 2
     assert remote_access.parse_session_identity(install, first) is None
     assert remote_access.parse_session_identity(install, second) is None
     assert listing(client(owner))["others"] == []
+
+
+def assert_local_result(response, expected_count):
+    result = response.get_json()
+    assert response.status_code == 200 and result['ok'] is True
+    assert result['revoked_sessions'] == expected_count
+    assert all(row['local_status'] == 'ended' for row in result['sign_out_results'])
 
 
 def _pre_registry_cookie(config, issued_cookie):
@@ -205,7 +212,7 @@ def test_bulk_fence_covers_unseen_and_racing_legacy_cookie_preserves_caller(inst
     legacy = _pre_registry_cookie(install, login(install, "member", "member"))
     in_flight = remote_access.parse_session_identity(install, legacy)
     other = login(install, "owner", "owner")
-    assert sign_out(client(caller), "sign-out-others").get_json() == {"ok": True, "revoked_sessions": 1}
+    assert_local_result(sign_out(client(caller), "sign-out-others"), 1)
     raced = remote_access.renew_session_cookie(install, in_flight)
     for cookie in (legacy, raced, known):
         assert remote_access.parse_session_identity(install, cookie) is None
@@ -407,7 +414,7 @@ def test_idle_expiry_hides_device_but_bulk_still_writes_its_absolute_tombstone(i
     clock["now"] = identity["exp"]
     fresh = client(login(install, "member", "member"))
     assert len(listing(fresh)["mine"]) == 1
-    assert sign_out(fresh, "sign-out-others").get_json() == {"ok": True, "revoked_sessions": 0}
+    assert_local_result(sign_out(fresh, "sign-out-others"), 0)
     with get_cached_sqlite_engine().connect() as conn:
         assert (
             int(
@@ -462,12 +469,12 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
         assert row["group"] == "unattributed" and row["push_only"]
         assert row["account"] is None and row["display_name"] is None
         assert sign_out(current, row["id"] + "/sign-out").status_code == 404
-    assert sign_out(current, proven["id"] + "/sign-out").get_json() == {"ok": True, "revoked_sessions": 0}
-    assert sign_out(owner, legacy["id"] + "/sign-out").get_json() == {"ok": True, "revoked_sessions": 0}
+    assert_local_result(sign_out(current, proven["id"] + "/sign-out"), 0)
+    assert_local_result(sign_out(owner, legacy["id"] + "/sign-out"), 0)
     loop = "http://127.0.0.1:5123"
     unpaired = ui_server.app.test_client()
     (unproven,) = listing(unpaired, loop)["unattributed"]
-    assert sign_out(unpaired, unproven["id"] + "/sign-out", loop).get_json() == {"ok": True, "revoked_sessions": 0}
+    assert_local_result(sign_out(unpaired, unproven["id"] + "/sign-out", loop), 0)
     with get_cached_sqlite_engine().connect() as conn:
         assert count_enabled(conn) == 0
 

@@ -108,6 +108,57 @@ def test_bulk_never_submits_a_possible_keeper(paired, monkeypatch, keeper, targe
     assert not worker.run_once(lambda: cfg) and not calls
 
 
+@pytest.mark.parametrize('second', ['pending', 'accepted', 'unconfirmed'])
+def test_explicit_lost_device_signout_handles_shared_noncaller_and_later_sibling(paired, monkeypatch, second):
+    cfg, clock, enroll, stop, read = paired
+    enroll('B', B)
+    target = enroll('lost', A)
+    sibling = enroll('sibling', A)
+    stop(target)
+    calls = fake_issuer(monkeypatch, 503 if second == 'unconfirmed' else 204)
+    if second == 'unconfirmed':
+        clock[0] += 7 * 86400
+        # Keep the sibling's independent local enrollment live through the exhaustion test.
+        with get_cached_sqlite_engine().begin() as conn:
+            conn.execute(sessions.update().where(sessions.c.session_id.in_(['B', 'sibling'])).values(expires_at=clock[0]+600, cookie_exp=clock[0]+600))
+            conn.execute(refs.update().where(refs.c.sid.in_(['B', 'sibling'])).values(expires_at=clock[0]+600))
+    if second != 'pending':
+        assert worker.run_once(lambda: cfg)
+    _, _, [result], _ = stop(sibling)
+    assert result['account_results'][0]['status'] == ('accepted' if second == 'accepted' else 'pending')
+    if second == 'unconfirmed':
+        assert any(r['account_results'][0]['status'] == 'unconfirmed' for r in read())
+    worker.run_once(lambda: cfg)
+    assert len(calls) == (2 if second == 'unconfirmed' else 1)
+
+
+def test_repair_drops_old_authority_and_never_dispatches_to_replacement(paired, monkeypatch):
+    cfg, _, enroll, stop, read = paired
+    target = enroll('A', A)
+    enroll('B', B)
+    stop(target)
+    cfg.remote_access.vibe_cloud.instance_secret = 'replacement-pairing'
+    calls = fake_issuer(monkeypatch, 204)
+    assert not worker.run_once(lambda: cfg) and not calls
+    assert read()[0]['account_results'][0]['reason'] == 'binding_changed'
+    with get_cached_sqlite_engine().connect() as conn:
+        assert not conn.scalar(select(refs.c.reference)) and not conn.scalar(select(jobs.c.reference))
+
+
+def test_generic_query_cannot_read_any_account_reference_bearing_table(paired):
+    from storage.models import metadata
+    from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
+    _, _, enroll, stop, _ = paired
+    target = enroll('A', A)
+    enroll('B', B)
+    stop(target)
+    names = [t.name for t in metadata.tables.values() if t.name.startswith('remote_account_') and 'reference' in t.c]
+    assert set(names) >= {'remote_account_refs', 'remote_account_revocations'}
+    for name in names:
+        with pytest.raises(ReadOnlyQueryError):
+            run_read_only_query(f'SELECT reference FROM {name}', page_request=None)
+
+
 def test_expired_lease_replays_without_budget_reset_or_late_overwrite(paired, monkeypatch):
     cfg, clock, enroll, stop, read = paired
     target = enroll('A', A)
