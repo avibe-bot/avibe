@@ -177,9 +177,10 @@ async function callNative<T>(
   capability: NativeCapability,
   method: string,
   params: Record<string, unknown> = {},
+  minimumVersion = 1,
 ): Promise<T | null> {
   const native = bridge();
-  if (!native || (native.capabilities[capability] ?? 0) < 1) return null;
+  if (!native || (native.capabilities[capability] ?? 0) < minimumVersion) return null;
   return native.call<T>(method, params);
 }
 
@@ -1154,23 +1155,23 @@ export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
 }
 
 
-export type NativeLiveActivityStatus = { enabled: boolean; tracking: boolean };
-export type NativeLiveActivityResult = { ok: true } | {
-  ok: false; code: 'disabled' | 'no_active_turn' | 'push_unavailable' | 'failed';
-};
+export type NativeLiveActivitySetting = { enabled: boolean; systemEnabled: boolean };
+export type NativeLiveActivityObservation = {
+  sessionId: string; agentName: string; sessionTitle: string | null; running: boolean;
+} | { sessionId: null };
 
-export function nativeLiveActivityStatus(sessionId: string) {
-  return callNative<NativeLiveActivityStatus>('liveActivities', 'liveActivity.status', { sessionId });
+export function nativeLiveActivitySetting() {
+  return callNative<NativeLiveActivitySetting>('liveActivities', 'liveActivity.setting', {}, 2);
 }
 
-export function nativeLiveActivityStart(sessionId: string, agentName: string, sessionTitle: string | null) {
-  return callNative<NativeLiveActivityResult>('liveActivities', 'liveActivity.start', { sessionId, agentName, sessionTitle });
+export function nativeLiveActivitySetSetting(enabled: boolean) {
+  return callNative<NativeLiveActivitySetting>('liveActivities', 'liveActivity.setSetting', { enabled }, 2);
 }
 
-export function nativeLiveActivityStop(sessionId: string) {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.stop', { sessionId });
+export function nativeLiveActivityObserve(observation: NativeLiveActivityObservation) {
+  return callNative<{ ok: true }>('liveActivities', 'liveActivity.observe', observation, 2);
 }
 
 export function nativeLiveActivityOpenSettings() {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.openSettings');
+  return callNative<{ ok: true }>('liveActivities', 'liveActivity.openSettings', {}, 2);
 }

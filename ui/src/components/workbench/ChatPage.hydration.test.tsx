@@ -1,4 +1,5 @@
 /** @vitest-environment jsdom */
+import './ChatPage.duplicateKeyGuard';
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useEffect } from 'react';

@@ -1,0 +1,7 @@
+# Automatic Live Activity: Web settings and observation
+
+Contract: Amendment 1 of `2026-11-20-ios-live-activity-contract.md` (PR #4135), including the approved English description. This lane changes Web only; the existing per-registration Runtime lifecycle stays unchanged so two phones can follow the same Turn independently.
+
+Remove the retired entry, bridge methods, and refusal toasts. The contract PR owns replacement design frames in `settings/live-activity/*`. A v2-capable shell gets a device-only switch in Settings > Notifications; system-disabled activities show the existing Settings action. The conversation observes its displayed identity and foreground running state without rendering an activity control. Identical observations are suppressed and departure clears the observation.
+
+Validation covers absent/v1/v2 capabilities, native setting reads/writes and system-disabled state, observation deduplication and departure, and repeated real ChatPage session switches. Every ChatPage test fails on duplicate-key warnings. The setting follows the contract PR’s proposed off/on/system-off frames. Build, typechecks, focused tests, and visual checks precede PR review; native lifecycle and real-device APNs acceptance belong to the iOS/integration lane.

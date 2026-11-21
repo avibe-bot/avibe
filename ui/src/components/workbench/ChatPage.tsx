@@ -1,3 +1,4 @@
+import { useLiveActivityObservation } from '../../lib/useLiveActivityObservation';
 import { HealthRequestCard } from '../health/HealthRequest';
 import { readHealthRequest } from '../../lib/healthRequests';
 import { isNativeAppWindow } from '../../lib/desktopShell';
@@ -3450,20 +3451,29 @@ export const ChatPage: React.FC = () => {
     [expandedActivity, loadActivityDetail],
   );
 
-  if (!sessionId) {
-    return <ChatMissing onBack={goBack} />;
-  }
-
   // A direct session→session switch reuses this ChatPage instance. Until the
   // current row arrives, the state can still hold the previous row or be empty
   // while a newer recovery read supersedes bootstrap. Neither means not-found.
   const viewState = chatSessionViewState({
-    routeSessionId: sessionId,
+    routeSessionId: sessionId ?? '',
     loadedSessionId: session?.id ?? null,
     hydratedTranscriptSessionId,
     failedBootstrapSessionId,
     snapshotSessionId: chatSnapshotView?.sessionId ?? null,
   });
+  const agentDisplayName = session ? sessionAgentDisplayName(session, agents) : '';
+  const conversationBot = botConversation ? botForSession(sessionId) : undefined;
+  const conversationBotName = conversationBot
+    ? botDisplayName(conversationBot)
+    : botConversation ? session?.title?.trim() || t('bots.mainDefaultName') : null;
+  const observationAgentName = conversationBotName ?? agentDisplayName;
+  useLiveActivityObservation(observationAgentName && session && session.id === sessionId && viewState !== 'loading' && viewState !== 'failed' ? {
+    sessionId: session.id,
+    agentName: observationAgentName,
+    sessionTitle: botConversation ? null : session.title || t('chat.untitled'),
+    running: runtimeState.foreground === 'running',
+  } : { sessionId: null });
+  if (!sessionId) return <ChatMissing onBack={goBack} />;
   // Nothing is known of this chat yet, not even its row (opened by a link, or
   // before any list has it): a skeleton of the whole chat, never a spinner.
   if (viewState === 'loading') return <ChatPageSkeleton onBack={goBack} />;
@@ -3490,15 +3500,8 @@ export const ChatPage: React.FC = () => {
     );
   }
 
-  const agentDisplayName = sessionAgentDisplayName(session, agents);
   // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
   const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
-  // Who the conversation is with: the Bot, by the name the user gave it, or its
-  // Session title (which follows that name) until the Bot list has answered.
-  const conversationBot = botConversation ? botForSession(sessionId) : undefined;
-  const conversationBotName = conversationBot
-    ? botDisplayName(conversationBot)
-    : botConversation ? session.title?.trim() || t('bots.mainDefaultName') : null;
   // A Bot's conversation reads like talking to a person while its "Hide details"
   // is on (docs/plans/bots.md D5): on unless the Bot turned it off, including
   // before the Bot list has answered. Anything else shows what it always has.
