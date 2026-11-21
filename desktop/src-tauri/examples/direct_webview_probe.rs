@@ -617,7 +617,9 @@ mod macos_probe {
         let stale = fetch(&webview, mtm, &request, || false);
         report.case(
             "another-origin-or-a-stale-selection-asks-nothing",
-            wrong_origin == Some(Reply::NotReady) && stale == Some(Reply::NotReady) && instance.rendezvous_requests().is_empty(),
+            wrong_origin == Some(Reply::NotReady)
+                && stale == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().is_empty(),
             json!({ "wrong_origin": format!("{wrong_origin:?}"), "stale": format!("{stale:?}"), "requests": instance.rendezvous_requests().len() }),
         );
 
@@ -631,10 +633,21 @@ mod macos_probe {
             *counter.borrow_mut() += 1;
             *counter.borrow() == 1
         });
+        let requests = instance.rendezvous_requests().len();
+        // The same when the instance refused meanwhile: the selection's
+        // change is what is said, whatever the instance said.
+        *instance.answer.lock().expect("mode") = Answer::Forbidden;
+        let first = Rc::new(RefCell::new(true));
+        let refused = fetch(&webview, mtm, &request, move || first.replace(false));
+        *instance.answer.lock().expect("mode") = Answer::Ready;
         report.case(
             "an-answer-for-a-selection-that-changed-is-dropped",
-            loaded && changed == Some(Reply::Failed) && instance.rendezvous_requests().len() == 1 && *asked.borrow() == 2,
-            json!({ "reply": format!("{changed:?}"), "requests": instance.rendezvous_requests().len(), "asked": *asked.borrow() }),
+            loaded
+                && changed == Some(Reply::SelectionChanged)
+                && requests == 1
+                && *asked.borrow() == 2
+                && refused == Some(Reply::SelectionChanged),
+            json!({ "reply": format!("{changed:?}"), "requests": requests, "asked": *asked.borrow(), "refused": format!("{refused:?}") }),
         );
 
         // 5. A redirect is refused and not followed; a refusal and an answer
@@ -1075,7 +1088,9 @@ mod windows_probe {
         let stale = fetch(&view, &request, || false);
         report.case(
             "another-origin-or-a-stale-selection-asks-nothing",
-            wrong_origin == Some(Reply::NotReady) && stale == Some(Reply::NotReady) && instance.rendezvous_requests().is_empty(),
+            wrong_origin == Some(Reply::NotReady)
+                && stale == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().is_empty(),
             json!({ "wrong_origin": format!("{wrong_origin:?}"), "stale": format!("{stale:?}"), "requests": instance.rendezvous_requests().len() }),
         );
 
@@ -1088,10 +1103,26 @@ mod windows_probe {
             *counter.borrow_mut() += 1;
             *counter.borrow() == 1
         });
+        let requests = instance.rendezvous_requests().len();
+        // The same when the instance refused meanwhile, on the path that
+        // delivers at once: the selection's change is what is said,
+        // whatever the instance said.
+        *instance.answer.lock().expect("mode") = Answer::Forbidden;
+        let first = Rc::new(RefCell::new(true));
+        let refused = fetch(&view, &request, move || first.replace(false));
+        *instance.answer.lock().expect("mode") = Answer::Ready;
         report.case(
             "an-answer-for-a-selection-that-changed-is-dropped",
-            loaded && changed == Some(Reply::Failed) && instance.rendezvous_requests().len() == 1 && *asked.borrow() == 2,
-            json!({ "reply": format!("{changed:?}"), "requests": instance.rendezvous_requests().len(), "asked": *asked.borrow() }),
+            loaded
+                && changed == Some(Reply::SelectionChanged)
+                && requests == 1
+                // Asked before the request, when its ready answer arrived,
+                // and on delivery. Three, not two: the answer's arrival is
+                // where the change is seen, before anything more is asked
+                // of WebView2, so the change is never said late.
+                && *asked.borrow() == 3
+                && refused == Some(Reply::SelectionChanged),
+            json!({ "reply": format!("{changed:?}"), "requests": requests, "asked": *asked.borrow(), "refused": format!("{refused:?}") }),
         );
 
         // 5. A redirect, a refusal, an answer that is too large.
