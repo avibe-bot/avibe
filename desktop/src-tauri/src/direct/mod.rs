@@ -110,6 +110,8 @@ pub struct Client {
     links: watch::Sender<Option<Arc<Link>>>,
     listener: Listener,
     status: watch::Sender<PathStatus>,
+    // Only writers take this gate. Never nest the public status and link watch locks.
+    status_writer: Arc<std::sync::Mutex<()>>,
     monitor: Option<JoinHandle<()>>,
 }
 impl Client {
@@ -130,6 +132,7 @@ impl Client {
             key: SecretKey::generate(),
             links,
             listener,
+            status_writer: Default::default(),
             status: watch::channel(PathStatus::default()).0,
             monitor: None,
         })
@@ -171,7 +174,7 @@ impl Client {
                     .links
                     .borrow()
                     .as_ref()
-                    .filter(|l| self.listener.is_alive() && l.usable())
+                    .filter(|l| l.usable())
                     .map(|l| l.remaining())
                     .unwrap_or_default();
                 if remaining.is_zero() {
@@ -243,6 +246,7 @@ impl Client {
     }
 
     fn withdraw(&mut self, involuntary: bool) -> Option<JoinHandle<()>> {
+        let _writer = self.status_writer.lock().unwrap();
         if let Some(l) = self.links.send_replace(None) {
             // Withdraw immediately; a zero deadline also wakes the monitor.
             let closed = l.claim_loss();
@@ -313,9 +317,11 @@ impl Client {
         self.links.send_replace(Some(link.clone()));
         PathStatus::publish(&self.status, link.selected_path(), false);
         let status = self.status.clone();
+        let writer = self.status_writer.clone();
         let mut health = self.listener.health();
         let tx = self.links.clone();
         self.monitor = Some(tokio::spawn(async move {
+            let mut accepting = true;
             let mut paths = link.conn.paths_stream();
             let mut deadlines = link.deadlines();
             loop {
@@ -330,26 +336,37 @@ impl Client {
                     biased;
                     _=deadlines.changed()=>continue,
                     _=tokio::time::sleep(remaining.min(Duration::from_millis(250)))=>continue,
-                    _=health.changed()=>break,
+                    _=health.changed(), if accepting => {
+                        accepting=false;
+                        let _writer=writer.lock().unwrap();
+                        if tx.borrow().as_ref().is_some_and(|l|Arc::ptr_eq(l,&link)) {
+                            PathStatus::publish(&status,None,false);
+                        }
+                    },
                     next=paths.next()=>{
                         let Some(path)=next.and_then(|snapshot|link.selected_in(snapshot)) else{break};
-                        let slot=tx.borrow();
-                        if !slot.as_ref().is_some_and(|current|Arc::ptr_eq(current,&link)) {break;}
-                        PathStatus::publish(&status,Some(path),false);
+                        let _writer=writer.lock().unwrap();
+                        if !tx.borrow().as_ref().is_some_and(|current|Arc::ptr_eq(current,&link)) {break;}
+                        if accepting && health.has_changed().is_ok() {PathStatus::publish(&status,Some(path),false);}
                     }
                 }
             }
             // The old watcher can finish while a new link is being published.
-            tx.send_if_modified(|value| {
-                if value.as_ref().is_some_and(|v| Arc::ptr_eq(v, &link)) {
-                    let closed = link.claim_loss();
+            {
+                let _writer = writer.lock().unwrap();
+                let mut closed = false;
+                let removed = tx.send_if_modified(|value| {
+                    if !value.as_ref().is_some_and(|v| Arc::ptr_eq(v, &link)) {
+                        return false;
+                    }
+                    closed = link.claim_loss();
                     *value = None;
-                    PathStatus::publish(&status, None, closed);
                     true
-                } else {
-                    false
+                });
+                if removed {
+                    PathStatus::publish(&status, None, closed);
                 }
-            });
+            }
             link.retire();
             drain.close().await;
         }));

@@ -18,23 +18,52 @@ use tokio::{
 pub(super) struct PublicLegs(Arc<Mutex<Vec<Weak<Leg>>>>);
 struct Leg(Mutex<Activity>);
 struct Activity {
+    setup: bool,
+    inputs: Option<[std::net::TcpStream; 2]>,
     last: Instant,
     buffered: usize,
     stop: Option<oneshot::Sender<()>>,
 }
 impl Activity {
     fn quiet(&self, now: Instant) -> bool {
-        self.buffered == 0 && now.saturating_duration_since(self.last) >= Duration::from_secs(1)
+        !self.setup
+            && self.buffered == 0
+            && now.saturating_duration_since(self.last) >= Duration::from_secs(1)
+            && self.inputs.as_ref().is_some_and(|inputs| {
+                inputs
+                    .iter()
+                    .all(|s| matches!(s.peek(&mut [0]), Err(e) if e.kind() == io::ErrorKind::WouldBlock))
+            })
     }
 }
+// Peek in the kernel, not in Tokio's (possibly not yet updated) readiness cache.
+// Duplicates refer to the same receive queues. If duplication or a peek fails,
+// don't impair the public connection: just exclude it from discretionary closure.
+fn probe(s: &tokio::net::TcpStream) -> io::Result<std::net::TcpStream> {
+    #[cfg(unix)]
+    let copy = {
+        use std::os::fd::AsFd;
+        s.as_fd().try_clone_to_owned()?
+    };
+    #[cfg(windows)]
+    let copy = {
+        use std::os::windows::io::AsSocket;
+        s.as_socket().try_clone_to_owned()?
+    };
+    let stream = std::net::TcpStream::from(copy);
+    stream.set_nonblocking(true)?;
+    Ok(stream)
+}
+pub(super) struct PublicCopy {
+    leg: Arc<Leg>,
+    stopped: oneshot::Receiver<()>,
+}
 impl PublicLegs {
-    pub(super) async fn copy<A, B>(&self, a: A, b: B)
-    where
-        A: AsyncRead + AsyncWrite + Unpin,
-        B: AsyncRead + AsyncWrite + Unpin,
-    {
-        let (stop, mut stopped) = oneshot::channel();
+    pub(super) fn commit(&self, browser: &tokio::net::TcpStream, peer: &tokio::net::TcpStream) -> PublicCopy {
+        let (stop, stopped) = oneshot::channel();
         let leg = Arc::new(Leg(Mutex::new(Activity {
+            setup: true,
+            inputs: probe(browser).ok().zip(probe(peer).ok()).map(|(a, b)| [a, b]),
             last: Instant::now(),
             buffered: 0,
             stop: Some(stop),
@@ -44,8 +73,7 @@ impl PublicLegs {
             entries.retain(|e| e.strong_count() != 0);
             entries.push(Arc::downgrade(&leg));
         }
-        let (mut a, mut b) = (Metered(a, &leg), Metered(b, &leg));
-        tokio::select! {biased; _=&mut stopped=>{}, _=tokio::io::copy_bidirectional(&mut a,&mut b)=>{} }
+        PublicCopy { leg, stopped }
     }
     /// None means there are still busy connections and we have time to wait.
     pub(super) fn claim(&self, deadline: Instant) -> Option<(usize, usize)> {
@@ -53,17 +81,38 @@ impl PublicLegs {
         let live: Vec<_> = entries.iter().filter_map(Weak::upgrade).collect();
         let mut states: Vec<_> = live.iter().map(|l| l.0.lock().unwrap()).collect();
         let now = Instant::now();
-        let kept = states.iter().filter(|s| s.stop.is_some() && !s.quiet(now)).count();
-        if kept > 0 && now < deadline {
+        if now < deadline && states.iter().any(|s| s.stop.is_some() && !s.quiet(now)) {
             return None;
         }
-        let mut closed = 0;
-        for state in states.iter_mut().filter(|s| s.quiet(now)) {
+        let (mut closed, mut kept) = (0, 0);
+        for state in &mut states {
+            if state.stop.is_none() {
+                continue;
+            }
+            if !state.quiet(now) {
+                kept += 1;
+                continue;
+            }
             if let Some(stop) = state.stop.take() {
                 closed += usize::from(stop.send(()).is_ok());
             }
         }
         Some((closed, kept))
+    }
+}
+impl PublicCopy {
+    pub(super) async fn copy<A: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
+        mut self,
+        a: A,
+        b: B,
+    ) {
+        {
+            let mut activity = self.leg.0.lock().unwrap();
+            activity.setup = false;
+            activity.last = Instant::now();
+        }
+        let (mut a, mut b) = (Metered(a, &self.leg), Metered(b, &self.leg));
+        tokio::select! {biased; _=&mut self.stopped=>{}, _=tokio::io::copy_bidirectional(&mut a,&mut b)=>{} }
     }
 }
 // Mark positive reads/writes in the same critical section as the close claim.

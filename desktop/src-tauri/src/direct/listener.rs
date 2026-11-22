@@ -35,6 +35,8 @@ impl Credential {
     }
 }
 pub(super) struct Listener {
+    #[cfg(test)]
+    pub(super) accept_fault: Arc<tokio::sync::Notify>,
     pub public_legs: PublicLegs,
     pub port: u16,
     pub credential: Arc<Credential>,
@@ -51,10 +53,7 @@ impl Drop for Listener {
 }
 impl Listener {
     pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Self> {
-        Self::bind_with_port(host, links, |h, port| async move {
-            public::open(&h, port).await.map(|s| Box::new(s) as Stream)
-        })
-        .await
+        Self::bind_with_port(host, links, |h, port| async move { public::open(&h, port).await }).await
     }
     pub(super) fn is_alive(&self) -> bool {
         self.health.has_changed().is_ok() && !self.task.is_finished()
@@ -70,7 +69,7 @@ impl Listener {
     ) -> Option<Self>
     where
         F: Fn(Authority) -> Fut + Send + Sync + Clone + 'static,
-        Fut: Future<Output = Option<Stream>> + Send + 'static,
+        Fut: Future<Output = Option<TcpStream>> + Send + 'static,
     {
         Self::bind_with_port(host, links, move |h, _| {
             let f = open_public(h);
@@ -85,7 +84,7 @@ impl Listener {
     ) -> Option<Self>
     where
         F: Fn(Authority, u16) -> Fut + Send + Sync + Clone + 'static,
-        Fut: Future<Output = Result<Stream, public::OpenError>> + Send + 'static,
+        Fut: Future<Output = Result<TcpStream, public::OpenError>> + Send + 'static,
     {
         let credential = Arc::new(Credential::generate()?);
         let socket = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.ok()?);
@@ -95,10 +94,19 @@ impl Listener {
         let key = credential.clone();
         let public_legs = PublicLegs::default();
         let legs = public_legs.clone();
+        #[cfg(test)]
+        let accept_fault = Arc::new(tokio::sync::Notify::new());
+        #[cfg(test)]
+        let fault = accept_fault.clone();
         let task = tokio::spawn(async move {
             let _live = live;
             let mut clients = JoinSet::new();
-            while let Ok((socket, peer)) = accept_with_retry(|| socket.accept()).await {
+            while let Ok((socket, peer)) = accept_with_retry(|| async {
+                #[cfg(test)]
+                { tokio::select! { biased; _=fault.notified()=>Err(std::io::ErrorKind::InvalidInput.into()), incoming=socket.accept()=>incoming } }
+                #[cfg(not(test))]
+                { socket.accept().await }
+            }).await {
                 while clients.try_join_next().is_some() {}
                 if !peer.ip().is_loopback() || clients.len() >= 64 {
                     continue;
@@ -132,6 +140,8 @@ impl Listener {
             while clients.join_next().await.is_some() {}
         });
         Some(Self {
+            #[cfg(test)]
+            accept_fault,
             public_legs,
             port,
             credential,
@@ -166,7 +176,7 @@ async fn accept_with_retry<T, F: Future<Output = std::io::Result<T>>>(
 }
 enum Backend {
     Direct(Stream, Arc<Link>),
-    Public(Stream),
+    Public(TcpStream),
 }
 async fn serve<F: Future<Output = Option<Backend>>>(
     mut browser: TcpStream,
@@ -210,7 +220,7 @@ async fn serve<F: Future<Output = Option<Backend>>>(
             .await;
         return;
     };
-    let (mut stream, committed) = match backend {
+    let (mut stream, _direct, public_copy) = match backend {
         Backend::Direct(s, link) => {
             let Some(guard) = link.commit_stream() else {
                 let _ = browser
@@ -218,9 +228,12 @@ async fn serve<F: Future<Output = Option<Backend>>>(
                     .await;
                 return;
             };
-            (s, Some(guard))
+            (s, Some(guard), None)
         }
-        Backend::Public(s) => (s, None),
+        Backend::Public(s) => {
+            let copy = public.commit(&browser, &s);
+            (Box::new(s) as Stream, None, Some(copy))
+        }
     };
     if browser
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -230,10 +243,10 @@ async fn serve<F: Future<Output = Option<Backend>>>(
     {
         return;
     }
-    if committed.is_some() {
-        let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
+    if let Some(copy) = public_copy {
+        copy.copy(browser, stream).await;
     } else {
-        public.copy(browser, stream).await;
+        let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
     }
 }
 
@@ -277,7 +290,7 @@ mod tests {
                     .choose(
                         async {
                             waiting.await.unwrap();
-                            Some(Backend::Public(Box::new(tokio::io::duplex(16).0)))
+                            panic!("a late LAN success must not be polled after refusal")
                         },
                         async {
                             // A LAN success is available if selection polls it again.

@@ -231,6 +231,21 @@ async fn run(changed_selection: bool) {
             "intentional quiet handover is not an involuntary closure"
         );
     }
+    if changed_selection {
+        // A terminal accept error ends eligibility for *new* connections.
+        // The already-committed stream must survive, including a transient refresh.
+        client.listener.accept_fault.notify_one();
+        timeout(
+            Duration::from_secs(2),
+            changes_status.wait_for(|s| s.preferred == super::PreferredPath::Tunnel),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(changes_status.borrow().closure, 0);
+        assert!(client.route().is_none());
+        assert_eq!(client.refresh_reply(|_| async { Reply::Failed }).await, retained);
+    }
     // Same established stream, after the failed renewals; no CONNECT replay.
     r.get_mut().write_all(b"opaque").await.unwrap();
     let mut answer = [0; 6];
