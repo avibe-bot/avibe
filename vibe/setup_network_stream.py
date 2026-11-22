@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from vibe.network_position import BindingState, position_snapshot
+from vibe.network_position import position_snapshot
 
 CHECK_INTERVAL_SECONDS = 1.0
 
@@ -22,7 +22,7 @@ async def serve_setup_connection(app, scope, receive, send, still_admitted):
     def lease_valid():
         try:
             config, state = position_snapshot()
-            return state is BindingState.UNBOUND and still_admitted(config)
+            return still_admitted(config, state)
         except Exception:
             # A failed admission read must close the lease, not just its watcher.
             return False

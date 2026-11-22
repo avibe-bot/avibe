@@ -692,34 +692,21 @@ def _trusted_public_origin_matches(
     )
 
 
-def _trusted_public_origin_allowed_for_peer(
-    config: V2Config | None,
-    peer_address: ipaddress._BaseAddress | None,
-) -> bool:
-    if binding_state(config) is not BindingState.UNBOUND:
+def _declared_proxy_admits(config, headers, peer, *, direct_ingress, websocket=False):
+    if direct_ingress or peer is None or not headers.get('x-forwarded-host'):
         return False
-    cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
-    if not getattr(cloud, "enabled", False):
-        return True
-    if peer_address is not None and not peer_address.is_loopback:
-        return True
-    logger.warning(
-        "Ignoring %s for loopback trusted proxy while remote access is enabled; "
-        "use a non-loopback proxy peer, disable remote access, or enforce authentication before the proxy.",
-        TRUSTED_PUBLIC_ORIGINS_ENV,
-    )
-    return False
+    origin = declared_proxy.forwarded_origin(headers, websocket=websocket)
+    host = _normalized_host(headers.get('host'))
+    if not origin or not host or instance_address.is_managed_name(host):
+        return False
+    if not config or _remote_access_host_allowed(config, host):
+        return False
+    policy = declared_proxy.listener_policy(config)
+    return policy is not None and policy.admits(peer, origin)
 
 
 def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
-    if not _has_trusted_forwarded_metadata():
-        return False
-    if not _trusted_public_origin_matches(config, _trusted_forwarded_origin_identity()):
-        return False
-    return _trusted_public_origin_allowed_for_peer(
-        config,
-        _request_peer_address(),
-    )
+    return _declared_proxy_admits(config, request.headers, _request_peer_address(), direct_ingress=_is_direct_ingress_request())
 
 
 def _is_mutation_guard_exempt() -> bool:
@@ -2588,9 +2575,6 @@ def enforce_remote_access_cookie():
             return jsonify({"ok": False, "error": "remote_access_host_mismatch"}), 503
         g.authorization_context = instance_owner_context()
         return None
-    if _trusted_public_origin_local_request(config):
-        g.authorization_context = instance_owner_context()
-        return None
     if _remote_auth_exempt_path():
         return None
     from vibe import remote_access
@@ -3708,6 +3692,14 @@ class _SetupNetworkMiddleware:
         if state is not BindingState.UNAVAILABLE and _websocket_is_trusted_docker_loopback_request(conn):
             await self.app(scope, receive, send)
             return
+        if await asyncio.to_thread(_websocket_trusted_public_origin_local_request, conn, config):
+            # The lease belongs to this pair even across binding publication. A
+            # subsequent withdrawal must not fall through to another old grant.
+            def same_proxy(current, current_state):
+                return current_state is not BindingState.UNAVAILABLE and _websocket_trusted_public_origin_local_request(conn, current)
+
+            await serve_setup_connection(self.app, scope, receive, send, same_proxy)
+            return
         if state is BindingState.UNBOUND:
             # A private-IP stream must keep its own admission. Classify the
             # origin, not the result of a second, fallible interface lookup:
@@ -3719,8 +3711,8 @@ class _SetupNetworkMiddleware:
             except ValueError:
                 private_origin = False
 
-            def still_admitted(current):
-                return not private_origin or _websocket_is_local_request(conn, current)
+            def still_admitted(current, current_state):
+                return current_state is BindingState.UNBOUND and (not private_origin or _websocket_is_local_request(conn, current))
 
             await serve_setup_connection(self.app, scope, receive, send, still_admitted)
             return
@@ -5195,14 +5187,10 @@ def _websocket_is_private_peer_address(address: ipaddress._BaseAddress | None) -
 
 
 def _websocket_trusted_public_origin_local_request(websocket: Any, config: V2Config | None) -> bool:
-    if not _websocket_has_trusted_forwarded_metadata(websocket):
-        return False
-    if not _trusted_public_origin_matches(config, _websocket_trusted_forwarded_origin_identity(websocket)):
-        return False
-    return _trusted_public_origin_allowed_for_peer(
-        config,
-        _websocket_peer_address(websocket),
-    )
+    scope = getattr(websocket, 'scope', {}) or {}
+    return _declared_proxy_admits(config, websocket.headers, _websocket_peer_address(websocket),
+                                  direct_ingress=scope.get(DIRECT_INGRESS_SCOPE_KEY) is not None,
+                                  websocket=scope.get('type') == 'websocket')
 
 
 def _websocket_peer_shares_setup_host_network(

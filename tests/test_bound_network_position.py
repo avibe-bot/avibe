@@ -282,6 +282,9 @@ def test_declared_origin_navigation_shares_private_notice_without_granting_acces
     monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
     config = _bind(_unbound())
     origin = 'https://home.example.test:9443'
+    # When remote access is enabled, the listener's loopback connector is
+    # ineligible even if its network and the custom origin were declared.
+    config.remote_access.vibe_cloud.enabled = True
     config.ui.trusted_public_origins = [origin]
     config.save()
     client = ui_server.app.test_client()
@@ -430,7 +433,7 @@ def test_missing_partial_reset_block_position(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('publication', ['binding', 'settings-save'])
+@pytest.mark.parametrize('publication', ['binding', 'settings-save', 'proxy-withdrawal'])
 async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path, publication):
     # Real persisted config and actual ASGI middleware. Only the consumers are
     # stand-ins: no PTY, Vite server, network sockets or user's processes.
@@ -440,7 +443,14 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path,
     from vibe import setup_network_stream
 
     monkeypatch.setattr(setup_network_stream, "CHECK_INTERVAL_SECONDS", 60.0)
-    _unbound()
+    config = _unbound()
+    proxy = publication == 'proxy-withdrawal'
+    if proxy:
+        _bind(config)
+        config.ui.trusted_public_origins = ['https://workbench.example.test']
+        config.save()
+        monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.10')
+        monkeypatch.delenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, raising=False)
     inbox = asyncio.Queue()
     release_output = asyncio.Event()
     events = {k: [] for k in ("terminal", "hmr", "sse", "host")}
@@ -479,13 +489,18 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path,
             await inbox.get()
             return {"type": "websocket.receive", "text": "first"}
 
+        address = '127.0.0.1' if host else '192.168.2.4'
+        headers = [(b'host', b'localhost' if host else b'192.168.2.3')]
+        if proxy and not host:
+            address = '192.0.2.10'
+            headers += [(b'x-forwarded-host', b'workbench.example.test'), (b'x-forwarded-proto', b'https')]
         await gate(
             {
                 "type": "http" if name == "sse" else "websocket",
                 "path": "/" + name,
                 "method": "GET",
-                "client": ("127.0.0.1" if host else "192.168.2.4", 42100),
-                "headers": [(b"host", b"localhost" if host else b"192.168.2.3")],
+                "client": (address, 42100),
+                "headers": headers,
             },
             receive,
             send,
@@ -501,8 +516,9 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path,
                 sys.executable,
                 "-c",
                 'import sys,json; from vibe.api import save_config; save_config(json.loads(sys.argv[1]))',
-                ('{"ui":{"setup_host":"127.0.0.1"}}' if publication == 'settings-save' else
-                 '{"remote_access":{"vibe_cloud":{"instance_id":"fixture","instance_secret":"bound","session_secret":"fixture-cookie"}}}'),
+                {'settings-save': '{"ui":{"setup_host":"127.0.0.1"}}',
+                 'proxy-withdrawal': '{"ui":{"trusted_public_origins":[]}}',
+                 'binding': '{"remote_access":{"vibe_cloud":{"instance_id":"fixture","instance_secret":"bound","session_secret":"fixture-cookie"}}}'}[publication],
             ],
             check=True,
             timeout=15,

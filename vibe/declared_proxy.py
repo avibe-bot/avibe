@@ -113,6 +113,39 @@ class Policy:
         return any(peer in network for network in self.networks)
 
 
+def forwarded_origin(headers, *, websocket=False) -> str | None:
+    """One unambiguous forwarded authority. The transport peer is checked separately."""
+    def single(name):
+        getlist = getattr(headers, 'getlist', None)
+        values = getlist(name) if getlist else ([headers[name]] if name in headers else [])
+        if len(values) > 1 or (values and ',' in values[0]):
+            raise ValueError('ambiguous authority')
+        return values[0].strip() if values else None
+
+    try:
+        scheme = (single('x-forwarded-proto') or '').lower()
+        if websocket:
+            scheme = {'ws': 'http', 'wss': 'https'}.get(scheme, scheme)
+        authority = single('x-forwarded-host')
+        port = single('x-forwarded-port')
+        if not authority or any(c in authority for c in '/\\?#@') or scheme not in ('http', 'https'):
+            return None
+        if headers.get('forwarded'):
+            # We implement X-Forwarded-* authority only, not a second competing chain.
+            return None
+        if port is not None:
+            if not re.fullmatch('[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+                return None
+            explicit = urlsplit('//' + authority).port
+            if explicit is not None and explicit != int(port):
+                return None
+            if explicit is None:
+                authority += ':' + port
+        return normalize_origin(f'{scheme}://{authority}')
+    except ValueError:
+        return None
+
+
 def listener_policy(config) -> Policy | None:
     """None means unavailable (not an attestation of an empty policy)."""
     if binding_state(config) is BindingState.UNAVAILABLE or config_recovery_refusal(config, 'ui', 'remote_access'):
