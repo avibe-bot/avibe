@@ -55,12 +55,17 @@ export function writeClaimMarker(marker: ClaimMarker): void {
   }
 }
 
-/** The page is back from avibe.bot: true exactly once per trip, for the kind asked about. */
-export function arriveFromClaim(kind: ClaimKind): boolean {
+/** Whether this tab left for avibe.bot with a claim of this kind and no page has been shown since.
+ *  A read only, so that it is safe while rendering: a render React throws away loses nothing. */
+export function awayOnClaim(kind: ClaimKind): boolean {
   const marker = readClaimMarker();
-  if (marker?.kind !== kind || !marker.away) return false;
-  writeClaimMarker({ ...marker, away: undefined });
-  return true;
+  return marker?.kind === kind && marker.away === true;
+}
+
+/** A page is shown again (opened, or restored as it was by the browser's Back): the trip is over. */
+export function landFromClaim(): void {
+  const marker = readClaimMarker();
+  if (marker?.away) writeClaimMarker({ ...marker, away: undefined });
 }
 
 export function clearClaimMarker(): void {

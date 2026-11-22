@@ -19,7 +19,7 @@ import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { deviceUsing, directCertificateDate, lastConnectionLegs } from '@/lib/remoteAccessDirect';
 import { useNativeDirectPath } from '../remoteAccess/useNativeDirectPath';
 import { DevicesApiError, LostAnswer, devicesApi as api, type RenamePreview } from './api';
-import { arriveFromClaim, clearClaimMarker, returnRefusal } from './claimFlow';
+import { clearClaimMarker, returnRefusal } from './claimFlow';
 import { ConnectionPageView } from './ConnectionPageView';
 import { CONNECTION_ADDRESS_PATH, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_PATH } from './paths';
 import { renameDevices } from './rules';
@@ -150,11 +150,7 @@ export function ConnectionPage() {
   const [rebind, setRebind] = useState<RebindState | undefined>();
   // A bind-again whose return from avibe.bot was refused lands here with the callback's one
   // allowlisted word (the Devices page hands it on): read once, said, and removed.
-  const [returned] = useState(() => {
-    // Back here straight from avibe.bot (the browser's own Back): the trip is over.
-    arriveFromClaim('rebind');
-    return returnRefusal(location.search);
-  });
+  const [returned] = useState(() => returnRefusal(location.search));
   const [rebindRefused, setRebindRefused] = useState<RebindRefusal | undefined>(() => (returned ? rebindRefusal(returned) : undefined));
   useEffect(() => {
     const params = new URLSearchParams(location.search);

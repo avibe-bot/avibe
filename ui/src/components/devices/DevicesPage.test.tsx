@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { MemoryRouter, Route, RouterProvider, Routes, createMemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,7 +9,7 @@ import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationCon
 import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import i18n from '../../i18n';
 import { DevicesApiError, LostAnswer, devicesApi, type ClaimForm } from './api';
-import { readClaimMarker, writeClaimMarker } from './claimFlow';
+import { awayOnClaim, readClaimMarker, writeClaimMarker } from './claimFlow';
 import { DevicesPage } from './DevicesPage';
 import { DevicesPageView } from './DevicesPageView';
 import { accountResultTexts, functionControl, lockedOutCount } from './rules';
@@ -174,6 +175,33 @@ describe('DevicesPage · turning remote access on', () => {
     mount();
     expect(await screen.findByRole('button', { name: '开启远程访问' })).toBeTruthy();
     expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access');
+  });
+
+  it('reads the trip without ending it, so a render that is thrown away cannot lose the hand-over', async () => {
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now(), away: true });
+    // Asking is only a read, however often a render asks.
+    expect(awayOnClaim('rebind')).toBe(true);
+    expect(awayOnClaim('rebind')).toBe(true);
+    expect(awayOnClaim('claim')).toBe(false);
+    expect(readClaimMarker()).toMatchObject({ away: true });
+    // React renders twice here before any effect runs: the hand-over still happens, and the
+    // trip is over only once the page has been shown.
+    const capabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true, is_instance_owner: true };
+    render(
+      <StrictMode>
+        <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: 'personal', instanceRole: 'owner', capabilities }}>
+          <MemoryRouter initialEntries={['/settings/remote-access']}>
+            <Routes>
+              <Route path="/settings/remote-access" element={<DevicesPage />} />
+              <Route path="/settings/remote-access/connection" element={<Where />} />
+            </Routes>
+          </MemoryRouter>
+        </InstanceAuthorizationContext.Provider>
+      </StrictMode>,
+    );
+    expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
+    expect(readClaimMarker()).toMatchObject({ kind: 'rebind', id: 'rebind-1' });
+    expect(readClaimMarker()?.away).toBeUndefined();
   });
 
   // With the product's own router (a data router), where two navigations in one tick do not both

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { DevicesApiError, LostAnswer, devicesApi, type ClaimForm, type ClaimState } from './api';
 import {
-  CLAIM_BINDING, CLAIM_OVER, CLAIM_RETRYING, claimLocale, clearClaimMarker, readClaimMarker, submitClaimForm, writeClaimMarker,
+  CLAIM_BINDING, CLAIM_OVER, CLAIM_RETRYING, claimLocale, clearClaimMarker, landFromClaim, readClaimMarker, submitClaimForm, writeClaimMarker,
   type ClaimKind, type ReturnRefusal,
 } from './claimFlow';
 
@@ -74,6 +74,16 @@ export function useClaimFlow({ kind, locale, onEnd, returned = null, submit = su
     return () => { mounted.current = false; };
   }, []);
   const { start: startRoute, read, cancel: cancelRoute } = routes[kind];
+
+  // The flow marks the trip when it leaves for avibe.bot; a page that uses it being shown again
+  // ends the trip. After the render that read the mark, never during it; and also when the
+  // browser's Back restores the page as it was left, which mounts nothing.
+  useEffect(() => {
+    landFromClaim();
+    const restored = (event: PageTransitionEvent) => { if (event.persisted) landFromClaim(); };
+    window.addEventListener('pageshow', restored);
+    return () => window.removeEventListener('pageshow', restored);
+  }, []);
 
   useEffect(() => {
     if (!refusedReturn) return;

@@ -14,7 +14,7 @@ import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { copyTextToClipboard } from '@/lib/utils';
 import { DevicesApiError, LostAnswer, devicesApi as api, type SignOutAnswer } from './api';
-import { arriveFromClaim, returnRefusal } from './claimFlow';
+import { awayOnClaim, returnRefusal } from './claimFlow';
 import { DevicesPageView } from './DevicesPageView';
 import { deviceName } from './format';
 import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, instanceUrl } from './paths';
@@ -108,8 +108,9 @@ export function DevicesPage() {
   // A bind-again started from the connection page comes back here (the claim's return is one
   // fixed address): it is followed there, with the callback's word if there is one. Only that one
   // arrival is handed on: the same tab opening Devices later, while the attempt is still kept for
-  // what only its starter may do, is an ordinary visit.
-  const [rebindReturn] = useState(() => arriveFromClaim('rebind'));
+  // what only its starter may do, is an ordinary visit (the claim flow ends the trip once this
+  // page has been shown).
+  const [rebindReturn] = useState(() => awayOnClaim('rebind'));
   const [claimIssue, setClaimIssue] = useState<ClaimProblem | undefined>(() => (returned && !rebindReturn ? claimProblem(returned) : undefined));
   const [notice, setNotice] = useState<SignOutNotice | undefined>();
   const alive = useRef(true);

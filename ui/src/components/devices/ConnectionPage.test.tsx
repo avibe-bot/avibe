@@ -448,6 +448,19 @@ describe('ConnectionPage · binding again', () => {
     expect(readClaimMarker()).toBeNull();
   });
 
+  it('ends the trip when the browser\'s Back restores this page as it was left', async () => {
+    mount();
+    await screen.findByRole('button', { name: '重新绑定' });
+    // The page left for avibe.bot, and Back brings it out of the back-forward cache: nothing mounts.
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now(), away: true });
+    window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: false }));
+    expect(readClaimMarker()?.away).toBe(true);
+    window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }));
+    // The attempt is kept; only the trip is over, so 「返回设备」 opens Devices.
+    expect(readClaimMarker()).toMatchObject({ kind: 'rebind', id: 'rebind-1' });
+    expect(readClaimMarker()?.away).toBeUndefined();
+  });
+
   it('offers binding as a new computer only after a refusal that allows it, to the browser that started the attempt', async () => {
     vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' });
     vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'other_account' });
