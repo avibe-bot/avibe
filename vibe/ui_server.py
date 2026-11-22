@@ -14459,11 +14459,40 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     # starting the microphone.
     "holdActMs",
     "holdStartMs",
+    # When a hold's microphone may start, and how it went: the earliest time in ms after
+    # touch-down, how long the touch took to reach the App, when the input was prepared and
+    # when it was asked to start (ms from the App's handling of the touch), and the session's
+    # category and the engine's set-up durations.
+    "holdT",
+    "holdDlyMs",
+    "holdArmMs",
+    "holdBeginMs",
+    "holdCatMs",
+    "holdPrepMs",
+    # The App's counts of the touches on its surfaces that were not holds, since it was
+    # installed: those that lifted, those that moved away, those it opened the microphone
+    # for, and those it would have with each judged time.
+    "holdTaps",
+    "holdTapsMoved",
+    "holdTapsOpen",
+    "holdTapsW50",
+    "holdTapsW80",
+    "holdTapsW100",
+    "holdTapsW120",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8
 _VOICE_CAPTURE_MAX_STALLED_RATES = 4
 _VOICE_CAPTURE_MAX_TRACK_EVENTS = 24
+
+
+def _app_hold_start_ms(audio_asr_config: Any) -> int | None:
+    """``audio_asr.app_hold_start_ms`` as the page may send it to the App: a whole number of ms
+    from 0 to 500, else null (the App's own default)."""
+    value = getattr(audio_asr_config, "app_hold_start_ms", None)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 500:
+        return value
+    return None
 
 
 def _voice_count(value: Any) -> bool:
@@ -14593,6 +14622,12 @@ def asr_telemetry():
         "audioSession": {"auto", "playback", "transient", "transient-solo", "ambient", "play-and-record"},
         "audioSessionState": _VOICE_AUDIO_SESSION_STATES,
         "audioSessionStateEnd": _VOICE_AUDIO_SESSION_STATES,
+        # In the iOS App, why a hold's press was not followed by the App
+        # (ui/src/lib/nativeVoiceHold.ts, `holdMissReason`).
+        "holdMiss": {
+            "off", "viewport", "unlisted", "closed", "hidden", "covered", "limit",
+            "pending", "refused", "outside", "failed", "gone",
+        },
     }
     outcome = payload.get("outcome")
     if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
@@ -14749,6 +14784,13 @@ def asr_status():
                 # there at once (``audio_asr.app_hold_main_at_touch``); false
                 # makes that button open it when the hold is recognised.
                 "app_hold_main_at_touch": getattr(audio_asr_config, "app_hold_main_at_touch", True) is not False,
+                # The earliest a hold's microphone may start in the App, in ms
+                # after touch-down (``audio_asr.app_hold_start_ms``); null: the
+                # App's own default. A value out of 0..500 is said as null.
+                "app_hold_start_ms": _app_hold_start_ms(audio_asr_config),
+                # Whether the App may activate its audio session before the
+                # microphone starts (``audio_asr.app_hold_prepare_at_touch``).
+                "app_hold_prepare_at_touch": getattr(audio_asr_config, "app_hold_prepare_at_touch", True) is not False,
             }
         )
     except Exception:

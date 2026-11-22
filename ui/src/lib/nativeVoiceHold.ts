@@ -5,9 +5,10 @@
 //
 // The page's own recognition remains the fallback: a place the App does not follow (an older App,
 // a popup, a document that is not `viewport-fit=cover`, a list not yet answered) holds as before.
-import { appVoiceEnabled, subscribeAppVoice } from './appVoice';
+import { appHoldPreparesAtTouch, appHoldStartMs, appVoiceEnabled, subscribeAppVoice } from './appVoice';
 import {
   hasNativeVoiceHold,
+  hasNativeVoiceHoldStart,
   nativeVoiceHoldReject,
   nativeVoiceHoldSurfaces,
   onNativeVoiceHold,
@@ -41,7 +42,24 @@ const MAX_BOXES = 8;
 /** A surface's own box, and at most this many of its children's that stick out of it. */
 const MAX_PARTS = 2;
 
+/** Why the App did not follow a press on a surface (the capture trace's `holdMiss`):
+ *  - `off`: the instance turned the App's recognition off; `viewport`: not a cover document;
+ *  - `unlisted`: no surface of that id was measured; `closed`: a hold may not record there now
+ *    (a take being finalized, no consent or microphone, a press it would not take);
+ *    `hidden`: not on the page or of no size; `covered`: something lay over it; `limit`: left out
+ *    for the threshold or the number of boxes;
+ *  - `pending`: named, and the App had not answered yet; `refused`: the App refused the list;
+ *    `outside`: followed, and the finger was outside its boxes;
+ *  - `failed`, `gone`: the App followed it and could not record (set by the gesture). */
+export type HoldMiss =
+  | 'off' | 'viewport' | 'unlisted' | 'closed' | 'hidden' | 'covered' | 'limit'
+  | 'pending' | 'refused' | 'outside' | 'failed' | 'gone';
+
 const surfaces = new Map<string, HoldSurface>();
+/** How each surface fared at the last measure: in the list, or why not. */
+let fared = new Map<string, 'listed' | HoldMiss>();
+/** The App's answer to the last list sent. */
+let answered: 'waiting' | 'ok' | 'refused' = 'ok';
 /** What the App has before the page names anything: no surface. */
 const NOTHING = JSON.stringify([[], 0]);
 /** The last list sent (as text, and each surface's boxes), and the boxes of the last list the
@@ -123,34 +141,57 @@ const measure = (): { list: NativeVoiceHoldSurface[]; holdMs: number; covered: b
   const list: NativeVoiceHoldSurface[] = [];
   let holdMs = 0;
   let covered = false;
+  fared = new Map();
   // Turned off for this instance (lib/appVoice): the App is told it follows nothing.
   if (!appVoiceEnabled() || !coversViewport()) return { list, holdMs, covered };
+  // From `voiceHold` 3: when the microphone may start, and whether the App may prepare before.
+  const timed = hasNativeVoiceHoldStart();
+  const startAfterMs = timed ? appHoldStartMs() : undefined;
+  const prepare = timed && !appHoldPreparesAtTouch() ? { prepare: 'start' as const } : {};
   for (const [id, surface] of surfaces) {
     // One threshold for the App: the first surface's. A surface that holds differently is the page's.
-    if (holdMs && surface.holdMs !== holdMs) continue;
+    if (holdMs && surface.holdMs !== holdMs) {
+      fared.set(id, 'limit');
+      continue;
+    }
     let boxes: NativeVoiceHoldSurface[] | undefined;
     if (surface.live()) {
       // Its own card may lie over it now; it is the App's as last named until the press is over.
       boxes = named.get(id);
     } else {
       const element = surface.element();
-      if (!element || !element.isConnected) continue;
-      const box = element.getBoundingClientRect();
-      if (!(box.width > 0 && box.height > 0)) continue;
-      if (!reachable(element, box)) {
-        covered = true;
+      if (!element) {
+        fared.set(id, 'closed');
         continue;
       }
-      const start = surface.startsAtRecognition?.() ? { start: 'recognition' as const } : {};
+      const box = element.isConnected ? element.getBoundingClientRect() : null;
+      if (!box || !(box.width > 0 && box.height > 0)) {
+        fared.set(id, 'hidden');
+        continue;
+      }
+      if (!reachable(element, box)) {
+        covered = true;
+        fared.set(id, 'covered');
+        continue;
+      }
+      const atRecognition = surface.startsAtRecognition?.() === true;
+      const start = atRecognition
+        ? { start: 'recognition' as const }
+        : startAfterMs !== undefined ? { startAfterMs } : {};
       boxes = boxesOf(element, box).map((part, index) => ({
         id: partId(id, index),
         ...toWebView(part.left, part.top, part.width, part.height),
         ...start,
+        ...prepare,
       }));
     }
-    if (!boxes || boxes.length === 0 || list.length + boxes.length > MAX_BOXES) continue;
+    if (!boxes || boxes.length === 0 || list.length + boxes.length > MAX_BOXES) {
+      fared.set(id, 'limit');
+      continue;
+    }
     holdMs = surface.holdMs;
     list.push(...boxes);
+    fared.set(id, 'listed');
   }
   return { list, holdMs, covered };
 };
@@ -177,10 +218,12 @@ const tell = (): boolean => {
   for (const box of list) named.set(surfaceOf(box.id), [...(named.get(surfaceOf(box.id)) ?? []), box]);
   request += 1;
   const mine = request;
+  answered = 'waiting';
   void nativeVoiceHoldSurfaces(list, holdMs).then((answer) => {
     // A list overtaken by a later one says nothing: that one's answer does.
     if (mine !== request || answer === 'superseded') return;
     followed = answer === 'ok' ? list : [];
+    answered = answer === 'ok' ? 'ok' : 'refused';
   });
   return covered;
 };
@@ -296,4 +339,18 @@ export const holdFollowed = (id: string, clientX: number, clientY: number): bool
     surfaceOf(box.id) === id
     && point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height
   ));
+};
+
+/** Why the App does not follow a press at this point of the layout viewport on surface `id`,
+ *  for the trace, read at the press's pointerdown; undefined when it does. */
+export const holdMissReason = (id: string, clientX: number, clientY: number): HoldMiss | undefined => {
+  if (holdFollowed(id, clientX, clientY)) return undefined;
+  if (!appVoiceEnabled()) return 'off';
+  if (!coversViewport()) return 'viewport';
+  const how = fared.get(id);
+  if (!how) return 'unlisted';
+  if (how !== 'listed') return how;
+  if (answered === 'waiting') return 'pending';
+  if (answered === 'refused') return 'refused';
+  return 'outside';
 };

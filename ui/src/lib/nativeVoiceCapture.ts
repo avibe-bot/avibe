@@ -97,6 +97,30 @@ const count = (value: unknown): number | undefined => (
   typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
 );
 
+/** The App's counts of the touches that were not holds (`taps`: `50:3 75:12 moved=2 open=1
+ *  w50=9 …`, ios/Avibe/NativeHoldCapture.swift `NativeHoldTaps`), as the trace keeps them: the
+ *  25 ms buckets summed into the lifted touches. Anything else is left out. */
+const tapCounts = (taps: unknown): Partial<VoiceCaptureAttempt> => {
+  if (typeof taps !== 'string' || taps.length > 400) return {};
+  let lifted = 0;
+  const named: Record<string, number> = {};
+  for (const part of taps.split(' ')) {
+    const match = /^(\d{1,3}):(\d{1,7})$|^(moved|open|w50|w80|w100|w120)=(\d{1,7})$/.exec(part);
+    if (!match) return {};
+    if (match[1] !== undefined) lifted += Number(match[2]);
+    else named[match[3]] = Number(match[4]);
+  }
+  return {
+    holdTaps: lifted,
+    holdTapsMoved: named.moved ?? 0,
+    holdTapsOpen: named.open ?? 0,
+    holdTapsW50: named.w50 ?? 0,
+    holdTapsW80: named.w80 ?? 0,
+    holdTapsW100: named.w100 ?? 0,
+    holdTapsW120: named.w120 ?? 0,
+  };
+};
+
 /** The App's own timings of a hold, as the capture trace keeps them (ms from touch-down, except
  *  the two durations). Unknown values are left out. */
 const holdTimings = (timings: NativeVoiceHoldTimings | undefined): Partial<VoiceCaptureAttempt> => {
@@ -111,6 +135,13 @@ const holdTimings = (timings: NativeVoiceHoldTimings | undefined): Partial<Voice
     holdUpMs: count(timings.releasedAt),
     holdActMs: count(timings.activateMs),
     holdStartMs: count(timings.startMs),
+    holdT: count(timings.startAfterMs),
+    holdDlyMs: count(timings.deliveryMs),
+    holdArmMs: count(timings.armedAt),
+    holdBeginMs: count(timings.beginAt),
+    holdCatMs: count(timings.categoryMs),
+    holdPrepMs: count(timings.prepareMs),
+    ...tapCounts(timings.taps),
   };
   for (const key of Object.keys(fields) as (keyof VoiceCaptureAttempt)[]) {
     if (fields[key] === undefined) delete fields[key];

@@ -14,7 +14,14 @@ import {
   type NativeImpactStyle,
 } from '../../lib/native';
 import { isNativeHoldGone } from '../../lib/nativeVoiceCapture';
-import { holdFollowed, NATIVE_HOLD_GRACE_MS, refreshHoldSurfaces, registerHoldSurface } from '../../lib/nativeVoiceHold';
+import {
+  holdFollowed,
+  holdMissReason,
+  NATIVE_HOLD_GRACE_MS,
+  refreshHoldSurfaces,
+  registerHoldSurface,
+  type HoldMiss,
+} from '../../lib/nativeVoiceHold';
 import { IS_APPLE } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
 import type { VoiceContextSource } from '../../lib/voiceContext';
@@ -139,6 +146,8 @@ type Press = {
   /** The iOS App follows this press (lib/nativeVoiceHold): its word is waited for a moment past
    *  `holdMs` before the page recognises the hold itself. */
   followed: boolean;
+  /** Why the App did not follow it, or could not record it, for the trace. */
+  miss?: HoldMiss;
   /** The page's own recognition has begun (its timer ran): it runs once. */
   reached: boolean;
   /** The App's take was taken for this press: the page's own recognition stops where it is. */
@@ -505,6 +514,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const dictation = new ShowPageVoiceDictation({
       entry: 'hold',
       pressedAt,
+      // The page's own take of a press the App did not follow, or could not record: why.
+      ...(!adopt && press.current?.miss ? { holdMiss: press.current.miss } : {}),
       // The App records once the microphone is allowed; its first answer is still WebKit's.
       ...(adopt ? { nativeCapture: { adopt } } : granted && hasNativeVoiceCapture() ? { nativeCapture: true } : {}),
       before: '',
@@ -574,6 +585,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // The App no longer had the take (it waits a second for the page, or the system ended it):
       // while the finger is still down, the page starts the take itself, as it does elsewhere.
       if (adopt && isNativeHoldGone(error) && take.current === current && current.ending === 'none' && mounted.current) {
+        if (press.current) press.current.miss = 'gone';
         take.current = null;
         dictation.abort();
         restartTake.current(true, pressedAt);
@@ -696,6 +708,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const current = press.current;
     if (!current || current.reached) return;
     current.followed = false;
+    current.miss = 'failed';
     clearTimeout(current.timer);
     current.timer = setTimeout(() => void holdReached(), Math.max(0, current.gesture.holdMs - (Date.now() - current.startedAt)));
   }, [holdReached]);
@@ -975,6 +988,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // A finger on a surface the App follows: the App recognises this hold, and its word normally
     // comes before the page's own timer. That timer waits a moment longer for it, then goes on alone.
     const followed = event.pointerType !== 'mouse' && hasNativeVoiceHold() && holdFollowed(surfaceId, event.clientX, event.clientY);
+    // For the trace: why the App did not follow a finger here.
+    const miss = event.pointerType !== 'mouse' && hasNativeVoiceHold() && !followed
+      ? holdMissReason(surfaceId, event.clientX, event.clientY)
+      : undefined;
     const tick = () => {
       const current = press.current;
       if (!current || current.startedAt !== startedAt) return;
@@ -993,6 +1010,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       frame: requestAnimationFrame(tick),
       unfollow,
       followed,
+      ...(miss ? { miss } : {}),
       reached: false,
       taken: false,
       mouse: event.pointerType === 'mouse',

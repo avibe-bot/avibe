@@ -277,6 +277,27 @@ conversation or the App. The composer is not changed by it. Send `"app_hold_main
 to go back. It needs the iPhone App from TestFlight 51.1 on. What it costs: a hold on that button
 then records from the cue, so what is said in the first moment of the press is not in the take.
 
+### Set when a hold's microphone may start in the iPhone App
+
+From TestFlight 52.1, the iPhone App prepares the microphone when a finger comes down on the
+composer or the main Bot, and starts it only if the finger is still down at a set moment: 50 ms
+after touch-down by default. A tap that has lifted by then never opens the microphone (no orange
+dot); a longer moment spares longer taps, and a hold records from that moment on. To set it, in
+whole ms from 0 to 500, use `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold_start_ms": 80
+  }
+}
+```
+
+Send `null` to go back to the App's own default. If the orange dot ever shows on a plain tap even
+so, `"app_hold_prepare_at_touch": false` makes the App prepare nothing before the start (each hold
+then starts a little later). No restart and no new App build are needed for either: it takes
+effect the next time the user opens a conversation or the App.
+
 ### Switch primary platform
 
 Use `POST /api/config` and keep `platforms.enabled` complete:
