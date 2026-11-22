@@ -112,9 +112,9 @@ fn reads_check_the_machine_and_session_before_projecting_or_freezing_any_target(
     wrong["hostname"] = json!("old-legacy-app.avibe.bot.example.test");
     assert!(parsed(wrong, None).is_err());
     for hint in ["***", "张***@e***"] {
-        assert!(
-            matches!(parsed(envelope(json!({"state":"other_account","owner_hint":hint})),None).unwrap().screen,Screen::OtherAccount{masked_hint} if masked_hint == hint)
-        );
+        let read = parsed(envelope(json!({"state":"other_account","owner_hint":hint})), None).unwrap();
+        assert!(matches!(read.screen, Screen::OtherAccount));
+        assert!(read.target.is_none());
     }
     for hint in ["secret@example.test", "xx***@e***", "\n***@e***"] {
         assert!(parsed(envelope(json!({"state":"other_account","owner_hint":hint})), None).is_err());

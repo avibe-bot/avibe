@@ -188,7 +188,7 @@ impl ReviewView<'_> {
                 json!({"state":"existing","prefix":prefix,"hostname":hostname})
             }
             Screen::Existing { .. } => json!({"state":"local_runtime_upgrade_required"}),
-            Screen::OtherAccount { .. } => json!({"state":"owner_conflict"}),
+            Screen::OtherAccount => json!({"state":"owner_conflict"}),
             Screen::Capacity { prefilled, names } => {
                 json!({"state":"name_holding_limit_reached","prefilled_prefix":prefilled,"names":names})
             }
@@ -266,10 +266,7 @@ impl HostedClaim {
         Ok((m, a))
     }
     pub(crate) fn is_owner_conflict(&self) -> bool {
-        matches!(
-            self.review.as_ref().map(|r| &r.screen),
-            Some(Screen::OtherAccount { .. })
-        )
+        matches!(self.review.as_ref().map(|r| &r.screen), Some(Screen::OtherAccount))
     }
     pub(crate) fn check_conflict(&self, flow: &AccountFlow, state: &AccountState) -> Result<()> {
         self.current(flow, state)?;
@@ -332,7 +329,7 @@ impl HostedClaim {
         self.current(flow, state)?;
         match evidence {
             Evidence::Review(read) => {
-                if matches!(&read.screen, Screen::OtherAccount { .. }) {
+                if matches!(&read.screen, Screen::OtherAccount) {
                     self.conflict_credential = Some(credential.ok_or_else(changed)?);
                     // Observation only. A cookie from the answer did not authenticate the request.
                 } else {

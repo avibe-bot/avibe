@@ -137,9 +137,7 @@ pub(crate) enum Screen {
         prefix: String,
         hostname: String,
     },
-    OtherAccount {
-        masked_hint: String,
-    },
+    OtherAccount,
     Capacity {
         prefilled: Option<String>,
         names: Option<Names>,
@@ -264,12 +262,8 @@ pub(super) fn parse(
             };
             (Screen::Existing { prefix: p, hostname }, Some(target))
         }
-        State::OtherAccount { owner_hint } if masked(&owner_hint) => (
-            Screen::OtherAccount {
-                masked_hint: owner_hint,
-            },
-            None,
-        ),
+        // Ordinary review needs the conflict, not a hint about the other account.
+        State::OtherAccount { owner_hint } if masked(&owner_hint) => (Screen::OtherAccount, None),
         State::Granted { hostname } if hostname.strip_suffix("-app.avibe.bot").is_some_and(prefix) => {
             return Ok(Evidence::RecordedHostname(hostname))
         }
