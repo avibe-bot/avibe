@@ -120,7 +120,7 @@ pub struct Client {
     instance: String,
     key: SecretKey,
     links: watch::Sender<Option<Arc<Link>>>,
-    listener: Listener,
+    listener: Arc<Listener>,
     status: watch::Sender<PathStatus>,
     // Only writers take this gate. Never nest the public status and link watch locks.
     status_writer: Arc<std::sync::Mutex<()>>,
@@ -251,10 +251,7 @@ impl Client {
     /// Trusted shell window identity. Idempotent until revoked; reopening a
     /// window with the same label gets an unrelated secret and census.
     pub fn window_credential(&self, window: &str) -> Option<WindowRegistration> {
-        self.listener
-            .is_alive()
-            .then(|| self.listener.windows.credential(window))
-            .flatten()
+        self.listener.window_credential(window)
     }
     pub fn revoke_window(&self, registration: &WindowRegistration) {
         self.listener.windows.revoke(registration)
@@ -264,7 +261,7 @@ impl Client {
             host: self.host.clone(),
             links: self.links.subscribe(),
             health: self.listener.health(),
-            windows: Arc::downgrade(&self.listener.windows),
+            listener: Arc::downgrade(&self.listener),
         }
     }
 

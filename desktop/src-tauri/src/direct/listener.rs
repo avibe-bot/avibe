@@ -33,11 +33,14 @@ impl Drop for Listener {
     }
 }
 impl Listener {
-    pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Self> {
+    pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Arc<Self>> {
         Self::bind_with_port(host, links, |h, port| async move { public::open(&h, port).await }).await
     }
     pub(super) fn is_alive(&self) -> bool {
         self.health.has_changed().is_ok() && !self.task.is_finished()
+    }
+    pub(super) fn window_credential(&self, window: &str) -> Option<super::WindowRegistration> {
+        self.is_alive().then(|| self.windows.credential(window)).flatten()
     }
     pub(super) fn health(&self) -> watch::Receiver<()> {
         self.health.clone()
@@ -47,7 +50,7 @@ impl Listener {
         host: Authority,
         links: watch::Receiver<Option<Arc<Link>>>,
         open_public: F,
-    ) -> Option<Self>
+    ) -> Option<Arc<Self>>
     where
         F: Fn(Authority) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Option<TcpStream>> + Send + 'static,
@@ -62,7 +65,7 @@ impl Listener {
         host: Authority,
         links: watch::Receiver<Option<Arc<Link>>>,
         open_public: F,
-    ) -> Option<Self>
+    ) -> Option<Arc<Self>>
     where
         F: Fn(Authority, u16) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Result<TcpStream, public::OpenError>> + Send + 'static,
@@ -117,7 +120,7 @@ impl Listener {
             drop(_live);
             while clients.join_next().await.is_some() {}
         });
-        Some(Self {
+        Some(Arc::new(Self {
             #[cfg(test)]
             accept_fault,
             windows,
@@ -125,7 +128,7 @@ impl Listener {
             task,
             health,
             _reservation: reservation,
-        })
+        }))
     }
 }
 async fn accept_with_retry<T, F: Future<Output = std::io::Result<T>>>(
