@@ -8400,7 +8400,10 @@
         "limitPlainDated": "这个账号持有的名字（包括冷却中的）已到上限。最早的一个在 {{date}}释放，之后可以再改。",
         "limitPlain": "这个账号持有的名字（包括冷却中的）已到上限。",
         "unknown": "这次更改没有完成。（代码：{{code}}）",
-        "rebindRequired": "没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。先重新绑定远程访问，再改一次。"
+        "rebindRequired": "没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。先重新绑定远程访问，再改一次。",
+        "pairingInvalidPlain": "没有改：avibe.bot 不再接受这台电脑的绑定。",
+        "configurationMismatchPlain": "没有改：avibe.bot 上的记录和这台电脑的远程访问配置对不上。",
+        "rebindRequiredPlain": "没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。"
       },
       "howOther": "在那台设备上退出登录。",
       "stateRebindRequired": "avibe.bot 上这台电脑有不止一条绑定记录，现在读不到域名的状态。先重新绑定远程访问。"

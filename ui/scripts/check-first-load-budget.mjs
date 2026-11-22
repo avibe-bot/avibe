@@ -45,8 +45,15 @@ const KiB = 1024;
 // sign-out results, renaming and binding again, in place of the old page's).
 // The candidate to win it back is the locale itself: one chunk per surface
 // instead of one per language, so Settings' copy stops riding with the home.
+//
+// home 604 -> 608 KiB (2026-11-22, decided by the owner of merges). Temporary,
+// until the locale is split by surface; then back within 600, at the latest
+// by 3.2.9 RC1. 608 covers the growth brought by the Devices pages (#4147),
+// #4166 and rc12. If master still crosses 608, whoever merges last resolves
+// it; it is not raised again without him, and no sentence is deleted to fit.
+// Splitting the locale by surface is its own task, not part of #4147.
 const BUDGETS = {
-  home: 604 * KiB,
+  home: 608 * KiB,
   chat: 900 * KiB,
 };
 

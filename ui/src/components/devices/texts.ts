@@ -55,7 +55,14 @@ const refusalKeys = {
   rename_ineligible: 'devices.rename.refused.ineligible',
 } as const satisfies Record<string, TranslationKey>;
 /** Why the domain was not changed, in one sentence. An unknown code is said with its code. */
-export function renameRefusalText(t: TFunction, language: string, refusal: RenameRefusal): string {
+/** `rebindOffered`: this instance has binding again. Without it, the refusals whose way out that
+ *  is say their reason only, and send nobody to an entry that is not there. */
+export function renameRefusalText(t: TFunction, language: string, refusal: RenameRefusal, rebindOffered = true): string {
+  if (!rebindOffered) {
+    if (refusal.code === 'pairing_invalid') return t('devices.rename.refused.pairingInvalidPlain');
+    if (refusal.code === 'remote_access_configuration_mismatch') return t('devices.rename.refused.configurationMismatchPlain');
+    if (refusal.code === 'rebind_required') return t('devices.rename.refused.rebindRequiredPlain');
+  }
   switch (refusal.code) {
     case 'unknown':
       return t('devices.rename.refused.unknown', { code: refusal.raw });

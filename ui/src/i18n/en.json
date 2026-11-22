@@ -8400,7 +8400,10 @@
         "limitPlainDated": "This account already holds as many names as it may, including those still waiting. The earliest is released on {{date}}; you can rename after that.",
         "limitPlain": "This account already holds as many names as it may, including those still waiting.",
         "unknown": "This change did not complete. (code: {{code}})",
-        "rebindRequired": "Not changed: avibe.bot holds more than one binding record for this computer and cannot tell which to use. Bind remote access again, then try again."
+        "rebindRequired": "Not changed: avibe.bot holds more than one binding record for this computer and cannot tell which to use. Bind remote access again, then try again.",
+        "pairingInvalidPlain": "Not changed: avibe.bot no longer accepts this computer's binding.",
+        "configurationMismatchPlain": "Not changed: this computer's remote-access configuration does not match avibe.bot's record.",
+        "rebindRequiredPlain": "Not changed: avibe.bot holds more than one binding record for this computer and cannot tell which to use."
       },
       "howOther": "Sign out on that device.",
       "stateRebindRequired": "avibe.bot holds more than one binding record for this computer, so the domain's state cannot be read. Bind remote access again first."

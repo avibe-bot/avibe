@@ -306,7 +306,7 @@ export function ConnectionPageView({
                 <KeptTail
                   text={t('devices.rename.earlierFailed', {
                     reason: address.operation.error
-                      ? renameRefusalText(t, i18n.language, address.operation.error)
+                      ? renameRefusalText(t, i18n.language, address.operation.error, Boolean(rebind))
                       : t('devices.rename.refused.unknown', { code: 'unknown' }),
                   })}
                 />
@@ -337,7 +337,7 @@ export function ConnectionPageView({
   ) : null;
   const dialogs = (
     <>
-      {rename && host && address && <RenameDialogs host={host} rename={rename} address={address} devices={renameDevices} actions={actions} />}
+      {rename && host && address && <RenameDialogs host={host} rename={rename} address={address} devices={renameDevices} rebindOffered={Boolean(rebind)} actions={actions} />}
       {rebindDialog && rebind && <RebindDialogs dialog={rebindDialog} state={rebind} host={host} busy={rebindBusy} actions={actions} />}
     </>
   );

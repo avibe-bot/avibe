@@ -146,13 +146,15 @@ function CleanupDialog({ title, oldHost, retired, onClose }: { title: string; ol
   );
 }
 
-export function RenameDialogs({ host, rename, address, devices, actions }: {
+export function RenameDialogs({ host, rename, address, devices, rebindOffered = true, actions }: {
   /** The domain now. */
   host: string;
   rename: RenameStep;
   address: AddressState;
   /** The viewer's devices, listed before the rename. */
   devices: RenameDevice[];
+  /** This instance has binding again: a refusal may point there. */
+  rebindOffered?: boolean;
   actions: RenameActions;
 }) {
   const { t, i18n } = useTranslation();
@@ -210,7 +212,7 @@ export function RenameDialogs({ host, rename, address, devices, actions }: {
           </DialogHeader>
           {rename.refusal && (
             <p role="alert" className="text-[12px] leading-relaxed text-destructive-ink">
-              <KeptTail text={renameRefusalText(t, i18n.language, rename.refusal)} />
+              <KeptTail text={renameRefusalText(t, i18n.language, rename.refusal, rebindOffered)} />
             </p>
           )}
           <DialogFooter>
@@ -228,7 +230,7 @@ export function RenameDialogs({ host, rename, address, devices, actions }: {
   // moment (avibe.bot out of reach, an expired confirmation) can simply be tried again.
   const blocking = Boolean(refusal) && !RETRYABLE.has(refusal!.code);
   const reclaiming = address.retired.some((each) => prefixOf(each.hostname) === rename.name);
-  const reason = refusal ? renameRefusalText(t, i18n.language, refusal) : null;
+  const reason = refusal ? renameRefusalText(t, i18n.language, refusal, rebindOffered) : null;
   return (
     <Dialog open onOpenChange={close}>
       <DialogContent className="max-w-xl content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>

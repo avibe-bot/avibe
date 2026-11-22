@@ -631,8 +631,26 @@ describe('ConnectionPageView', () => {
     expect(screen.getByText(said('avibe.bot 上这台电脑有不止一条绑定记录，现在读不到域名的状态。先重新绑定远程访问。'))).toBeTruthy();
     read.unmount();
     // Without binding again on this instance, nothing sends anyone there.
-    view({ address: address({ eligible: false, stateError: 'rebind_required' }) });
+    const without = view({ address: address({ eligible: false, stateError: 'rebind_required' }) });
     expect(document.body.textContent).not.toContain('重新绑定');
+    without.unmount();
+
+    // The three refusals whose way out is binding again say only their reason there.
+    for (const [code, reason] of [
+      ['pairing_invalid', '没有改：avibe.bot 不再接受这台电脑的绑定。'],
+      ['remote_access_configuration_mismatch', '没有改：avibe.bot 上的记录和这台电脑的远程访问配置对不上。'],
+      ['rebind_required', '没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。'],
+    ] as const) {
+      const bare = view({ address: address(), rename: { step: 'form', name: 'maxwell', refusal: { code } } });
+      expect(screen.getByText(said(reason))).toBeTruthy();
+      expect(document.body.textContent).not.toContain('重新绑定');
+      bare.unmount();
+      // Found again when the page is reopened: the same, in the domain's row.
+      const reopened = view({ address: address({ operation: { state: 'failed', hostname: 'maxwell-app.avibe.bot', error: { code } } }) });
+      expect(document.body.textContent).toContain(reason.replace('没有改：', ''));
+      expect(document.body.textContent).not.toContain('重新绑定');
+      reopened.unmount();
+    }
   });
 
   it('says how the last connection\'s two paths raced where the App recorded it, and an expired certificate has no date', () => {
