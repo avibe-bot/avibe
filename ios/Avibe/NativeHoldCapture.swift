@@ -52,6 +52,26 @@ final class NativeHoldCapture {
         /// is only prepared at touch-down and starts when the hold is
         /// recognised (`start: "recognition"`), whatever the App's default.
         var startsAtRecognition = false
+        /// The earliest the input may start, in ms after touch-down
+        /// (`startAfterMs`); nil: the App's default.
+        var startAfterMs: Int?
+        /// Nothing is prepared at touch-down either (`prepare: "start"`):
+        /// the session is activated only when the input starts.
+        var preparesAtStart = false
+    }
+
+    /// A touch on a surface that was not a hold, as it is counted.
+    struct Tap: Equatable {
+        /// How long it lasted, by the touch's own times where known.
+        var ms: Int
+        /// It moved away (a scroll); else it lifted.
+        var moved: Bool
+        /// The microphone was started for it.
+        var opened = false
+        /// For each threshold in `NativeHoldTaps.thresholds`: whether the
+        /// finger was still down when the input could have started with
+        /// it (prepared, and not before the threshold).
+        var wouldOpen: [Int: Bool] = [:]
     }
 
     /// What preparing a hold took (`NativeHoldCaptureAudio.arm`), in ms.
@@ -71,20 +91,36 @@ final class NativeHoldCapture {
 
     /// One press's timings, in ms from its touch-down unless a duration.
     struct HoldTimings: Equatable {
-        /// `early`: started at touch-down (the default). `quiet`: prepared
-        /// at touch-down, started at recognition. `late`: all of it at
-        /// recognition (other audio playing, or a Bluetooth route).
+        /// What was planned at touch-down. `early`: start before
+        /// recognition, once prepared and not before `startAfterMs`, with the
+        /// finger seen down (the default). `quiet`: prepared at touch-down,
+        /// started at recognition. `late`: all of it at recognition (other
+        /// audio playing, or a Bluetooth route). An `early` press whose
+        /// start was overtaken by recognition (preparing slower than the
+        /// threshold, a stalled main thread) has `beginAt` at or after
+        /// `recognisedAt`.
         var variant = "early"
         /// The hold threshold this press was timed with, in ms.
         var holdMs = 200
         /// Why nothing was prepared at touch-down (`other`, `bluetooth`).
         var why: String?
         var route = ""
+        /// The earliest the input might start after touch-down, in ms.
+        var startAfterMs: Int?
+        /// Nothing was prepared before the start (`prepare: "start"`).
+        var bare = false
+        /// How long the touch took to reach the App (its own time to the
+        /// App's handling of it), in ms. Every other time here counts from
+        /// that handling, not from the finger meeting the glass.
+        var deliveryMs: Int?
         var categoryMs: Int?
         var activateMs: Int?
         var prepareMs: Int?
         /// When the prepared engine was ready.
         var armedAt: Int?
+        /// When the input was asked to start: the finger had just been
+        /// seen down.
+        var beginAt: Int?
         var recognisedAt: Int?
         var hapticAt: Int?
         /// `engine.start()`'s own duration.
@@ -112,10 +148,10 @@ final class NativeHoldCapture {
         }
 
         /// Touch-down to the first captured audio had the input started at
-        /// touch-down: measured when it did (`early`), else from this
-        /// press's own set-up and start times.
+        /// touch-down with no wait: this press's own set-up and start times,
+        /// worked out the same way for every variant. (`liveAt` is what this
+        /// press measured, waits included.)
         var liveEarly: Int? {
-            if variant == "early" { return liveAt }
             guard let setUpMs, let startMs else { return nil }
             return setUpMs + startMs
         }
@@ -131,14 +167,16 @@ final class NativeHoldCapture {
         var fields: [String: Any] {
             var fields: [String: Any] = ["variant": variant, "route": route]
             let numbers: [(String, Int?)] = [
+                ("startAfterMs", startAfterMs), ("deliveryMs", deliveryMs),
                 ("categoryMs", categoryMs), ("activateMs", activateMs), ("prepareMs", prepareMs),
-                ("armedAt", armedAt), ("recognisedAt", recognisedAt), ("hapticAt", hapticAt),
+                ("armedAt", armedAt), ("beginAt", beginAt), ("recognisedAt", recognisedAt), ("hapticAt", hapticAt),
                 ("startMs", startMs), ("liveAt", liveAt), ("cueToLive", cueToLive),
                 ("liveEarly", liveEarly), ("liveQuiet", liveQuiet), ("holdMs", holdMs),
                 ("firstBufferAt", firstBufferAt), ("firstBufferBytes", firstBufferBytes),
                 ("adoptedAt", adoptedAt), ("releasedAt", releasedAt),
             ]
             for (name, value) in numbers { if let value { fields[name] = value } }
+            if bare { fields["bare"] = true }
             if let why { fields["why"] = why }
             if let end { fields["end"] = end }
             return fields
@@ -148,8 +186,9 @@ final class NativeHoldCapture {
         var line: String {
             func part(_ name: String, _ value: Int?) -> String { value.map { " \(name)=\($0)" } ?? "" }
             return "hold \(variant)\(why.map { ":" + $0 } ?? "") \(route)"
+                + part("t", startAfterMs) + (bare ? " bare" : "") + part("dly", deliveryMs)
                 + part("cat", categoryMs) + part("act", activateMs) + part("prep", prepareMs)
-                + part("armed", armedAt) + part("rec", recognisedAt) + part("hap", hapticAt)
+                + part("armed", armedAt) + part("begin", beginAt) + part("rec", recognisedAt) + part("hap", hapticAt)
                 + part("start", startMs) + part("live", liveAt) + part("gap", cueToLive)
                 + part("e", liveEarly) + part("q", liveQuiet)
                 + part("buf", firstBufferAt) + part("bytes", firstBufferBytes)
@@ -184,10 +223,16 @@ final class NativeHoldCapture {
         /// How long the touch lasted by its own times, when that made it a tap.
         var tapMs: Int?
         var recognised = false
-        /// The input was asked to start (at touch-down for `early`).
+        /// The input was asked to start.
         var begun = false
-        /// The input was prepared at touch-down (`quiet`).
+        /// The input was asked to prepare at touch-down.
         var prepared = false
+        /// That preparing has answered (it may have failed: the start says how).
+        var armAnswered = false
+        /// The earliest the input may start has passed.
+        var startDue = false
+        /// Ends the wait for that moment, and the look at the finger then.
+        var cancelStart: (() -> Void)?
         var timings = HoldTimings()
         var cancelTimer: (() -> Void)?
 
@@ -292,13 +337,17 @@ final class NativeHoldCapture {
     private let haptic: NativeHoldHaptic
     private let startsAtTouchDown: () -> Bool
     private let noteTimings: (String) -> Void
-    private let noteTap: (_ ms: Int, _ moved: Bool) -> Void
+    private let noteTap: (Tap) -> Void
+    private let tapsTotal: () -> String?
     private let sendHoldEvent: @MainActor (WKWebView?, [String: Any]) -> Void
     private let sendCaptureEvent: @MainActor (WKWebView?, String, Event) -> Void
 
     /// How long a press is held before it is a hold, and how far it may
     /// move first: the page's own numbers for a finger (`HOLD_GESTURE`).
     static let defaultHoldSeconds: TimeInterval = 0.2
+    /// The earliest the input starts after touch-down when the page names
+    /// no time for a surface: long enough that a quick tap has lifted.
+    static let defaultStartAfterMs = 50
     static let slop: CGFloat = 10
     /// How long a recognised hold's take waits for its page.
     /// The microphone is open meanwhile, so no longer than a page needs:
@@ -328,7 +377,8 @@ final class NativeHoldCapture {
         haptic: NativeHoldHaptic? = nil,
         startsAtTouchDown: @escaping () -> Bool = { !NativeHoldQuietSwitch.isOn },
         noteTimings: @escaping (String) -> Void = { NativeHoldTimings.add($0) },
-        noteTap: @escaping (_ ms: Int, _ moved: Bool) -> Void = { NativeHoldTaps.note(ms: $0, moved: $1) },
+        noteTap: @escaping (Tap) -> Void = { NativeHoldTaps.note($0) },
+        tapsTotal: @escaping () -> String? = { NativeHoldTaps.total() },
         sendHoldEvent: (@MainActor (WKWebView?, [String: Any]) -> Void)? = nil,
         sendCaptureEvent: (@MainActor (WKWebView?, String, Event) -> Void)? = nil
     ) {
@@ -342,6 +392,7 @@ final class NativeHoldCapture {
         self.startsAtTouchDown = startsAtTouchDown
         self.noteTimings = noteTimings
         self.noteTap = noteTap
+        self.tapsTotal = tapsTotal
         self.sendHoldEvent = sendHoldEvent ?? { webView, detail in NativeHoldCapture.dispatchHoldEvent(webView, detail) }
         self.sendCaptureEvent = sendCaptureEvent ?? { webView, take, event in
             webView?.evaluateJavaScript(NativeHoldCapture.eventScript(take: take, event: event))
@@ -412,10 +463,23 @@ final class NativeHoldCapture {
         return number.intValue
     }
 
+    /// A surface's `startAfterMs`: a whole number of ms from 0 to the
+    /// longest hold threshold. Any other is refused, not rounded.
+    static func startAfterMs(from value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue == number.doubleValue.rounded(),
+              (0...holdMsRange.upperBound).contains(number.intValue)
+        else { return nil }
+        return number.intValue
+    }
+
     /// The page's `surfaces` argument: at most eight, each an id and a
     /// rectangle of finite, positive size, and optionally when its input
-    /// starts (`start`: `touch`, the default, or `recognition`). Nil when
-    /// it is not that.
+    /// may start: `start` (`touch`, the default, or `recognition`),
+    /// `startAfterMs` (the earliest, in ms after touch-down; the App's
+    /// default without it), and `prepare` (`touch`, the default, or
+    /// `start`: nothing is prepared before the start). Nil when it is not
+    /// that.
     static func surfaces(from value: Any?) -> [Surface]? {
         guard let items = value as? [[String: Any]], items.count <= 8 else { return nil }
         var surfaces: [Surface] = []
@@ -427,8 +491,15 @@ final class NativeHoldCapture {
                 return CGFloat(value.doubleValue)
             }
             let start = item["start"] as? String
-            guard item.count == (item["start"] == nil ? 5 : 6),
+            let prepare = item["prepare"] as? String
+            let startAfterMs = Self.startAfterMs(from: item["startAfterMs"])
+            let optional = ["start", "startAfterMs", "prepare"].filter { item[$0] != nil }.count
+            guard item.count == 5 + optional,
                   item["start"] == nil || start == "touch" || start == "recognition",
+                  item["startAfterMs"] == nil || startAfterMs != nil,
+                  // At recognition is a time of its own: not both.
+                  !(start == "recognition" && startAfterMs != nil),
+                  item["prepare"] == nil || prepare == "touch" || prepare == "start",
                   let id = isValidTake(item["id"]),
                   let x = number("x"), let y = number("y"),
                   let width = number("width"), let height = number("height"),
@@ -436,7 +507,9 @@ final class NativeHoldCapture {
             else { return nil }
             surfaces.append(Surface(
                 id: id, rect: CGRect(x: x, y: y, width: width, height: height),
-                startsAtRecognition: start == "recognition"
+                startsAtRecognition: start == "recognition",
+                startAfterMs: startAfterMs,
+                preparesAtStart: prepare == "start"
             ))
         }
         return surfaces
@@ -573,9 +646,11 @@ final class NativeHoldCapture {
     /// A finger came down in `webView` at `point` (its own points). On one
     /// of the page's surfaces the App prepares the microphone, without
     /// starting it, and times the hold itself.
-    /// `touch` asks the touch itself where it is and whether it has lifted.
+    /// `touch` asks the touch itself where it is and whether it has lifted;
+    /// `deliveredAfterMs` is how long the touch took to reach the App.
     func touchDown(
         at point: CGPoint, in webView: WKWebView, timestamp: TimeInterval? = nil,
+        deliveredAfterMs: Int? = nil,
         touch: (@MainActor () -> TouchState)? = nil
     ) {
         guard hold == nil, running == nil, surfacesWebView === webView,
@@ -590,8 +665,16 @@ final class NativeHoldCapture {
         hold.downStamp = timestamp
         hold.touch = touch
         hold.timings.route = audio.route
-        hold.timings.holdMs = Int((holdSeconds * 1000).rounded())
-        hold.timings.variant = "quiet"
+        let holdMs = Int((holdSeconds * 1000).rounded())
+        hold.timings.holdMs = holdMs
+        hold.timings.deliveryMs = deliveredAfterMs
+        // The earliest the input may start: at recognition when the page
+        // (or the App's own switch) says so, else the surface's time or the
+        // App's default, and never after recognition.
+        let startAfterMs = !startsAtTouchDown() || surface.startsAtRecognition
+            ? holdMs
+            : min(surface.startAfterMs ?? Self.defaultStartAfterMs, holdMs)
+        hold.timings.variant = startAfterMs < holdMs ? "early" : "quiet"
         haptic.prepare()
         if audio.otherAudioPlaying {
             // Activating would pause it: a touch that is not a hold must not.
@@ -601,23 +684,35 @@ final class NativeHoldCapture {
             // Activating can switch a headset to its call mode.
             hold.timings.variant = "late"
             hold.timings.why = "bluetooth"
-        } else if startsAtTouchDown(), !surface.startsAtRecognition {
-            hold.timings.variant = "early"
-            begin(hold)
         } else {
-            hold.prepared = true
-            audio.arm { [weak self, weak hold] result in
-                guard let self, let hold else { return }
-                switch result {
-                case .success(let armed):
-                    hold.timings.categoryMs = armed.categoryMs
-                    hold.timings.activateMs = armed.activateMs
-                    hold.timings.prepareMs = armed.prepareMs
-                    hold.timings.armedAt = self.since(hold)
-                case .failure:
-                    // The start at recognition says what failed.
-                    break
+            hold.timings.startAfterMs = startAfterMs
+            if surface.preparesAtStart {
+                hold.timings.bare = true
+            } else {
+                hold.prepared = true
+                audio.arm { [weak self, weak hold] result in
+                    guard let self, let hold else { return }
+                    hold.armAnswered = true
+                    switch result {
+                    case .success(let armed):
+                        hold.timings.categoryMs = armed.categoryMs
+                        hold.timings.activateMs = armed.activateMs
+                        hold.timings.prepareMs = armed.prepareMs
+                        hold.timings.armedAt = self.since(hold)
+                    case .failure:
+                        // The start says what failed.
+                        break
+                    }
+                    self.startIfDue(hold)
                 }
+            }
+            if startAfterMs < holdMs {
+                let cancel = after(TimeInterval(startAfterMs) / 1000) { [weak self, weak hold] in
+                    guard let self, let hold else { return }
+                    hold.startDue = true
+                    self.startIfDue(hold)
+                }
+                hold.cancelStart = cancel
             }
         }
         hold.cancelTimer = after(holdSeconds) { [weak self, weak hold] in
@@ -698,6 +793,9 @@ final class NativeHoldCapture {
         hold.timings.recognisedAt = since(hold)
         haptic.fire()
         hold.timings.hapticAt = since(hold)
+        // The finger was just seen down: the input starts now if it has not.
+        hold.cancelStart?()
+        hold.cancelStart = nil
         if !hold.begun { begin(hold) }
         sendHoldEvent(hold.webView, ["phase": "recognised", "take": hold.take, "surface": hold.surface])
         hold.cancelTimer = after(Self.adoptionWait) { [weak self, weak hold] in
@@ -706,9 +804,42 @@ final class NativeHoldCapture {
         }
     }
 
+    /// Starts the input before the hold is recognised, once it may: it is
+    /// prepared (or nothing is prepared before the start), its earliest
+    /// time has passed, and the finger is seen still down.
+    ///
+    /// **A lift before the start never opens the microphone.** The finger
+    /// is asked on the main thread, once every touch event that has reached
+    /// the App has been handled: UIKit reports no lift for a press the page
+    /// took for itself, and a touch may only be asked here. So a main
+    /// thread that is stalled starts nothing: a hold made then records from
+    /// when it is free, and a tap made then opens no microphone.
+    private func startIfDue(_ hold: Hold) {
+        guard self.hold === hold, !hold.begun, !hold.recognised, hold.startDue,
+              hold.armAnswered || !hold.prepared
+        else { return }
+        hold.cancelStart?()
+        hold.cancelStart = onceTouchesAreHeard { [weak self, weak hold] in
+            guard let self, let hold, self.hold === hold, !hold.begun, !hold.recognised else { return }
+            hold.cancelStart = nil
+            let touch = hold.touch?()
+            if let lifted = touch?.liftedAt {
+                if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+                self.cancelHold(hold, why: "tap")
+                return
+            }
+            if let point = touch?.point, hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
+                self.cancelHold(hold, why: "moved")
+                return
+            }
+            self.begin(hold)
+        }
+    }
+
     /// Starts the input for `hold`; its audio waits in memory for the page.
     private func begin(_ hold: Hold) {
         hold.begun = true
+        hold.timings.beginAt = since(hold)
         let webView = hold.webView
         let id = hold.take
         let send = sendCaptureEvent
@@ -781,6 +912,8 @@ final class NativeHoldCapture {
     private func cancelHold(_ hold: Hold, why: String) {
         hold.cancelTimer?()
         hold.cancelTimer = nil
+        hold.cancelStart?()
+        hold.cancelStart = nil
         if let take = running, take.hold === hold {
             discard(take, why: why)
             return
@@ -795,10 +928,35 @@ final class NativeHoldCapture {
     /// by how long it lasted: they are many, and would push the holds out.
     private func note(_ hold: Hold) {
         switch hold.timings.end {
-        case "tap": noteTap(hold.tapMs ?? since(hold), false)
-        case "moved": noteTap(since(hold), true)
+        case "tap": noteTap(tap(hold, ms: hold.tapMs ?? since(hold), moved: false))
+        case "moved": noteTap(tap(hold, ms: since(hold), moved: true))
         default: noteTimings(hold.timings.line)
         }
+    }
+
+    /// A press that was not a hold, as it is counted: its length, whether
+    /// the microphone was started for it, and for each threshold in
+    /// `NativeHoldTaps.thresholds` whether it would have been.
+    ///
+    /// With a threshold the input starts at the later of "prepared" and the
+    /// threshold, if the finger is still down then. A press whose preparing
+    /// had not answered when it ended was shorter than its preparing. A
+    /// press that moved away is not judged: when it left the slop is not
+    /// kept.
+    ///
+    /// The threshold and "prepared" count from the App's handling of the
+    /// touch-down; a length by the touch's own times counts from the finger
+    /// meeting the glass. So such a length is compared after adding how long
+    /// the touch took to reach the App.
+    private func tap(_ hold: Hold, ms: Int, moved: Bool) -> Tap {
+        var tap = Tap(ms: ms, moved: moved, opened: hold.begun)
+        guard !moved, hold.timings.variant != "late" else { return tap }
+        let ready = hold.prepared ? hold.timings.armedAt : 0
+        let delivery = hold.tapMs != nil ? hold.timings.deliveryMs ?? 0 : 0
+        for threshold in NativeHoldTaps.thresholds {
+            tap.wouldOpen[threshold] = ready.map { ms >= delivery + max($0, threshold) } ?? false
+        }
+        return tap
     }
 
     /// Ends a hold's take that no page took: its audio never leaves memory.
@@ -899,12 +1057,17 @@ final class NativeHoldCapture {
         if let hold = take.hold {
             hold.cancelTimer?()
             hold.cancelTimer = nil
+            hold.cancelStart?()
+            hold.cancelStart = nil
             if self.hold === hold { self.hold = nil }
             hold.timings.end = reason ?? "stopped"
             note(hold)
             if take.adopted, !take.detached {
                 // For the page's own trace of this take.
-                sendHoldEvent(take.webView, ["phase": "timings", "take": take.id, "timings": hold.timings.fields])
+                var timings = hold.timings.fields
+                // The touches that were not holds, as counted so far.
+                if let taps = tapsTotal() { timings["taps"] = taps }
+                sendHoldEvent(take.webView, ["phase": "timings", "take": take.id, "timings": timings])
             }
         }
     }
@@ -1023,11 +1186,25 @@ enum NativeHoldTimings {
 /// How long the touches on a hold surface that were not holds lasted: counts
 /// per 25 ms, and those that moved away counted apart. Counts only, to judge
 /// the hold threshold; sent with the holds' timings and then taken off.
+///
+/// And, to judge the time before the microphone may start: how many of them
+/// had the microphone started (`open`), and how many of the taps would have
+/// had with each of `thresholds` (`w50`…): the finger still down when the
+/// input was prepared and the threshold had passed.
 enum NativeHoldTaps {
     static let key = "avibe.voiceHold.taps"
+    /// The same counts since the App was installed, never taken off: each
+    /// hold's timings carry them to its page, so they reach the instance
+    /// without an Action Button message.
+    static let totalKey = "avibe.voiceHold.tapsTotal"
     static let bucketMs = 25
     static let moved = "moved"
+    static let opened = "open"
+    /// The times before the start that are judged, in ms.
+    static let thresholds = [50, 80, 100, 120]
     private static let prefix = "hold taps"
+
+    private static func would(_ threshold: Int) -> String { "w\(threshold)" }
 
     /// The bucket a touch of `ms` falls in: its lower edge, capped at 975.
     static func bucket(ms: Int) -> String {
@@ -1035,20 +1212,30 @@ enum NativeHoldTaps {
     }
 
     static func adding(ms: Int, moved: Bool, to counts: [String: Int]) -> [String: Int] {
+        adding(NativeHoldCapture.Tap(ms: ms, moved: moved), to: counts)
+    }
+
+    static func adding(_ tap: NativeHoldCapture.Tap, to counts: [String: Int]) -> [String: Int] {
         var counts = counts
-        counts[moved ? Self.moved : bucket(ms: ms), default: 0] += 1
+        counts[tap.moved ? Self.moved : bucket(ms: tap.ms), default: 0] += 1
+        if tap.opened { counts[opened, default: 0] += 1 }
+        for (threshold, open) in tap.wouldOpen where open { counts[would(threshold), default: 0] += 1 }
         return counts
     }
 
-    /// `hold taps 50:3 75:12 100:4 moved=2`, or nil with nothing counted.
+    /// `hold taps 50:3 75:12 100:4 moved=2 open=1 w50=9 w80=4`, or nil with
+    /// nothing counted. `open` and the `w…` counts are left out at zero.
     static func line(for counts: [String: Int]) -> String? {
-        let buckets = counts.filter { $0.key != moved && $0.value > 0 }
+        let buckets = counts.filter { Int($0.key) != nil && $0.value > 0 }
             .sorted { (Int($0.key) ?? 0) < (Int($1.key) ?? 0) }
             .map { " \($0.key):\($0.value)" }
             .joined()
         let movedCount = counts[moved] ?? 0
         guard !buckets.isEmpty || movedCount > 0 else { return nil }
-        return prefix + buckets + (movedCount > 0 ? " \(moved)=\(movedCount)" : "")
+        let named = ([moved, opened] + thresholds.map(would))
+            .compactMap { name in (counts[name] ?? 0) > 0 ? " \(name)=\(counts[name] ?? 0)" : nil }
+            .joined()
+        return prefix + buckets + named
     }
 
     /// The counts in a line `line(for:)` made (nil for any other line).
@@ -1077,12 +1264,21 @@ enum NativeHoldTaps {
         UserDefaults.standard.dictionary(forKey: key) as? [String: Int] ?? [:]
     }
 
-    static func note(ms: Int, moved: Bool) {
-        UserDefaults.standard.set(adding(ms: ms, moved: moved, to: stored), forKey: key)
+    static func note(_ tap: NativeHoldCapture.Tap) {
+        UserDefaults.standard.set(adding(tap, to: stored), forKey: key)
+        let total = UserDefaults.standard.dictionary(forKey: totalKey) as? [String: Int] ?? [:]
+        UserDefaults.standard.set(adding(tap, to: total), forKey: totalKey)
     }
 
     static func line() -> String? {
         line(for: stored)
+    }
+
+    /// The counts since the App was installed, without the line's prefix
+    /// (`50:3 75:12 moved=2 open=1 w50=9`); nil with nothing counted.
+    static func total() -> String? {
+        line(for: UserDefaults.standard.dictionary(forKey: totalKey) as? [String: Int] ?? [:])
+            .map { String($0.dropFirst(prefix.count + 1)) }
     }
 
     static func drop(line: String) {
@@ -1666,6 +1862,7 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
         following = true
         NativeHoldCapture.shared.touchDown(
             at: touch.location(in: webView), in: webView, timestamp: touch.timestamp,
+            deliveredAfterMs: max(0, Int(((ProcessInfo.processInfo.systemUptime - touch.timestamp) * 1000).rounded())),
             // The touch itself knows where the finger is and when it lifts,
             // whether or not UIKit goes on telling this recogniser.
             touch: { [weak touch, weak webView] in Self.state(of: touch, in: webView) }
