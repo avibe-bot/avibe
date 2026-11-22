@@ -701,6 +701,8 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
               : isWorkbenchHome
                 ? 'flex min-h-full flex-col px-4 md:min-h-screen md:px-10 md:py-8'
             : 'mx-auto px-4 pt-4 pb-5 md:px-10 md:py-8',
+          !chromeless && !isSettings && !isFullScreenMobile && desktopDragRegion() !== undefined
+            && 'md:pt-[calc(var(--shell-titlebar-inset)+0.25rem)]',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
