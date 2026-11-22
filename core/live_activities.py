@@ -196,6 +196,10 @@ class LiveActivityService:
             return body, subscription
 
     def _deliver(self, activity_id, subscription, body):
+        from storage.web_push_cutover import may_dispatch
+
+        if not may_dispatch(self.engine, subscription):
+            return
         now = int(self.clock())
         try:
             self.sender(subscription=subscription, body=body)

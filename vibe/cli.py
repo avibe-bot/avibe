@@ -15943,7 +15943,12 @@ def cmd_start(
                 else f"Vibe service process pid={service_pid} exited before acquiring the service lock"
             )
 
-        ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
+        from vibe.network_position import BindingState, binding_state
+        from vibe.desktop_runtime import desktop_origin
+
+        ui_url = (desktop_origin(config.ui.setup_host, config.ui.setup_port)
+                  if binding_state(config) is not BindingState.UNBOUND
+                  else "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port))
 
         # Always print Web UI access instructions.
         print("Web UI:")
@@ -17070,7 +17075,12 @@ def _read_cli_text_argument(
 
 
 def _ui_show_events_host(config: V2Config) -> str:
+    from vibe.desktop_runtime import desktop_loopback_host
+    from vibe.network_position import BindingState, binding_state
+
     host = (getattr(config.ui, "setup_host", "") or "").strip() or "127.0.0.1"
+    if binding_state(config) is not BindingState.UNBOUND:
+        host = desktop_loopback_host(host)
     if host in {"0.0.0.0", "*"}:
         return "127.0.0.1"
     if host == "::":

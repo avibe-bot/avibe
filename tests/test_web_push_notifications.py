@@ -5,6 +5,7 @@ import threading
 import httpx
 import pytest
 
+from config.v2_config import V2Config
 from core import web_push_notifications
 from storage import message_deliveries, messages_service, project_access_service, web_push_service
 from storage.db import create_sqlite_engine
@@ -346,6 +347,7 @@ def test_badge_reconciliation_targets_only_native_and_suppresses_same_success(
     tmp_path,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.default().save()
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     native_endpoint = f"https://avibe.bot/api/push/apns/{'A' * 43}"
@@ -411,6 +413,7 @@ def test_badge_reconciliation_reuses_provider_invalidation_without_advancing_bas
     disabled,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.default().save()
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     endpoint = f"https://avibe.bot/api/push/apns/{'B' * 43}"
@@ -473,6 +476,7 @@ def test_badge_reconciliation_retries_transient_relay_failure(
     tmp_path,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.default().save()
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     endpoint = f"https://avibe.bot/api/push/apns/{'C' * 43}"
@@ -3622,6 +3626,7 @@ def test_send_to_enabled_subscriptions_skips_unowned_remote_single_owner(monkeyp
 
 def test_send_to_enabled_subscriptions_falls_back_to_local_owner(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.default().save()
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -3691,6 +3696,7 @@ def test_owner_delivery_lock_orders_ordinary_notification_before_read_clear(
     tmp_path,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.default().save()
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-11-11T00:00:00Z"

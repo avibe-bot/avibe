@@ -1190,6 +1190,15 @@ def save_config(
         str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
     )
 
+    remote_fields = payload.get('remote_access')
+    pairing_fields = remote_fields.get('vibe_cloud') if isinstance(remote_fields, dict) else None
+    if isinstance(pairing_fields, dict) and pairing_fields.keys() & {'backend_url', 'instance_id', 'instance_secret', 'session_secret'}:
+        # A pairing publication needs the push table, including a first pair
+        # performed by a standalone CLI before service startup. Migration takes
+        # place outside the config lock; inside it only reserve the SQLite writer.
+        from storage.importer import ensure_sqlite_state
+
+        ensure_sqlite_state()
     pairing_revocation_operation_id: str | None = None
     # Serialize the WHOLE read-merge-write cycle across processes
     # (#1458 stage ③): the base load, merge, validation, and write all
@@ -1312,7 +1321,10 @@ def save_config(
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store, user_context=context)
-        config.save()
+        from storage.web_push_cutover import publishing
+
+        with publishing(base_config, config):
+            config.save()
         if not remote_access.complete_pairing_revocation(pairing_revocation_operation_id):
             logger.error(
                 "Pairing revocation committed but its pending record could not be retired; "

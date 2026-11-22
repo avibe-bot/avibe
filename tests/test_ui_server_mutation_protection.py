@@ -248,7 +248,7 @@ def test_config_post_allows_trusted_public_origin_from_proxy_when_remote_access_
     assert response.get_json()["mode"] == "self_host"
 
 
-def test_config_post_allows_trusted_public_origin_during_first_run(monkeypatch, tmp_path):
+def test_config_post_refuses_proxy_when_binding_state_is_unavailable(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
     monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://avibe.example.com")
@@ -276,8 +276,8 @@ def test_config_post_allows_trusted_public_origin_during_first_run(monkeypatch, 
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
 
-    assert response.status_code == 200
-    assert response.get_json()["mode"] == "self_host"
+    assert response.status_code == 503
+    assert response.get_json()['error'] == 'remote_access_config_unavailable'
 
 
 def test_config_post_prefers_trusted_public_origin_over_disabled_public_url(monkeypatch, tmp_path):

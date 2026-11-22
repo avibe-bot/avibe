@@ -13124,7 +13124,9 @@ def test_remote_org_show_page_hmr_ignores_resource_acl_changes(
 
 def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    from config.v2_config import V2Config
+
+    config = V2Config.default()
     config.ui.setup_host = "192.168.2.3"
     config.save()
     _mock_interface(monkeypatch, "192.168.2.3", 24)
@@ -13167,7 +13169,9 @@ def test_shared_mode_show_page_hmr_websocket_accepts_local_peer(
     # runtime proxy with 1011 — not the 1008 visibility rejection an offline page
     # would get), keeping live HMR when the audience changes.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
+    from config.v2_config import V2Config
+
+    config = V2Config.default()
     config.ui.setup_host = "192.168.2.3"
     config.save()
     _mock_interface(monkeypatch, "192.168.2.3", 24)
@@ -13195,12 +13199,12 @@ def test_shared_mode_show_page_hmr_websocket_accepts_local_peer(
 
 
 def test_private_show_page_hmr_websocket_accepts_trusted_public_origin(monkeypatch, tmp_path):
+    from config.v2_config import V2Config
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
     monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://avibe.example.com")
-    config = _save_config(tmp_path)
-    config.remote_access.vibe_cloud.enabled = False
-    config.save()
+    V2Config.default().save()
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager()
     set_show_runtime_manager_for_tests(manager)
