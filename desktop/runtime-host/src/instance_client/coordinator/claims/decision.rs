@@ -7,8 +7,7 @@ use crate::instance_client::{
 };
 
 pub(super) enum DecisionOutcome<'a> {
-    Published(ConfirmedPublication),
-    Declined,
+    Terminal(PendingDecision),
     ProofOffered(PendingProofOffer<'a>),
 }
 
@@ -19,6 +18,7 @@ struct Confirming {
     revision: Uuid,
     account: Account,
     cookies: FactorCookies,
+    adoption: tokio::sync::watch::Receiver<bool>,
 }
 impl Confirming {
     fn with_owner<T>(&self, c: &Coordinator, f: impl FnOnce(&mut Instant) -> Result<T>) -> Result<T> {
@@ -27,7 +27,7 @@ impl Confirming {
         }
         let _operation = c.operation.try_lock().map_err(|_| busy())?;
         c.check_claim_admission()?;
-        let inner = c.inner.lock().expect("client state");
+        let inner = c.inner.try_lock().map_err(|_| busy())?;
         let mut owner = c.claims.lock().expect("claim owner");
         self.epoch.check()?;
         self.caller.check()?;
@@ -40,6 +40,9 @@ impl Confirming {
         {
             return Err(stale());
         }
+        if !*self.adoption.borrow() || !matches!(self.adoption.has_changed(), Ok(false)) {
+            return Err(stale());
+        }
         f(until)
     }
 }
@@ -47,16 +50,26 @@ impl Confirming {
 /// Own the confirming receipt until direct native delivery or drop. Dropping the
 /// old waiter after cancellation must not retire a new document or receipt.
 #[must_use]
-pub(super) struct ConfirmedPublication {
+pub(super) struct PendingDecision {
     owner: Confirming,
-    observed: ObservedOwner,
+    result: Result<Option<ObservedOwner>>,
 }
-impl ConfirmedPublication {
-    pub(super) fn deliver(self, c: &Coordinator) -> Result<()> {
-        self.owner.with_owner(c, |_| self.observed.check())
+impl PendingDecision {
+    /// True means verified publication; false only means that the original worker
+    /// declined. Neither a private error nor its retry hint leaves without admission.
+    pub(super) fn deliver(self, c: &Coordinator) -> Result<bool> {
+        self.owner
+            .with_owner(c, |_| {
+                Ok(match &self.result {
+                    Ok(Some(observed)) => observed.check().map(|()| true),
+                    Ok(None) => Ok(false),
+                    Err(error) => Err(error.clone()),
+                })
+            })
+            .map_err(|_| stale())?
     }
 }
-impl Drop for ConfirmedPublication {
+impl Drop for PendingDecision {
     fn drop(&mut self) {
         let s = &self.owner;
         let mut owner = s.caller.owner.lock().expect("claim owner");
@@ -90,7 +103,11 @@ impl Coordinator {
             epoch.check()?;
             caller.check()?;
             let a = inner.state.account.identity.as_ref().ok_or_else(auth)?;
-            if inner.state.account.status != AccountStatus::SignedIn || !inner.account.session.is_account() {
+            if inner.state.account.status != AccountStatus::SignedIn
+                || !inner.account.session.is_account()
+                || inner.record.account_id.as_ref() != Some(&a.id)
+                || inner.account.resumes.as_ref() != Some(&a.id)
+            {
                 return Err(auth());
             }
             let previous = inner.account.session.factor_cookies().ok_or_else(auth)?;
@@ -109,29 +126,50 @@ impl Coordinator {
             receipt,
             returned: false,
         };
+        let mut confirming = Confirming {
+            caller: caller.clone(),
+            epoch: epoch.clone(),
+            receipt,
+            revision,
+            account: state.identity.clone().ok_or_else(stale)?,
+            cookies: previous,
+            adoption: claim.adoption()?,
+        };
         let deadline = claim.deadline()?;
         let grant = tokio::select! { biased;
             _ = &mut interrupted => return Err(stale()),
-            _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("fresh_claim_required")),
-            response = claim.confirm(&mut flow, &state, revision) => response?,
+            _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+            response = claim.confirm(&mut flow, &state, revision) => response,
         };
-        let (completion, confirming, jar) = {
+        let grant = match grant {
+            Ok(value) => value,
+            Err(error) => {
+                // The published account jar did not change. Drop the private pipe,
+                // but retain the confirming receipt until final delivery or expiry.
+                confirming.with_owner(self, |_| Ok(())).map_err(|_| stale())?;
+                borrow.returned = true;
+                return Ok(DecisionOutcome::Terminal(PendingDecision {
+                    owner: confirming,
+                    result: Err(error),
+                }));
+            }
+        };
+        let (completion, jar) = {
             // A submission has already been dispatched. Contention never permits a replay.
-            let _operation = self
-                .operation
-                .try_lock()
-                .map_err(|_| ClientError::new("fresh_claim_required"))?;
-            self.check_claim_admission()
-                .map_err(|_| ClientError::new("fresh_claim_required"))?;
+            let _operation = self.operation.try_lock().map_err(|_| stale())?;
+            self.check_claim_admission().map_err(|_| stale())?;
             let mut inner = self.inner.lock().expect("client state");
             let mut owner = self.claims.lock().expect("claim owner");
             epoch.check()?;
             caller.check()?;
-            let a = inner.state.account.identity.as_ref().ok_or_else(auth)?;
-            if inner.state.account.status != AccountStatus::SignedIn || !inner.account.session.is_account() {
-                return Err(auth());
+            let a = inner.state.account.identity.as_ref().ok_or_else(stale)?;
+            if inner.state.account.status != AccountStatus::SignedIn
+                || !inner.account.session.is_account()
+                || a != &confirming.account
+            {
+                return Err(stale());
             }
-            if inner.account.session.factor_cookies().as_ref() != Some(&previous)
+            if inner.account.session.factor_cookies().as_ref() != Some(&confirming.cookies)
                 || inner.record.account_id.as_ref() != Some(&a.id)
                 || inner.account.resumes.as_ref() != Some(&a.id)
             {
@@ -141,8 +179,10 @@ impl Coordinator {
             let grant = match grant {
                 GrantResponse::Matched(grant) => grant,
                 GrantResponse::ProofRequired(proof) => {
-                    let cookies = flow.session.factor_cookies().ok_or_else(auth)?;
-                    owner.offer_proof(receipt, revision, a, proof, cookies)?;
+                    let cookies = flow.session.factor_cookies().ok_or_else(stale)?;
+                    owner
+                        .offer_proof(receipt, revision, a, proof, cookies)
+                        .map_err(|_| stale())?;
                     inner.account.session = flow.session;
                     return Ok(DecisionOutcome::ProofOffered(PendingProofOffer::new(
                         self,
@@ -155,18 +195,12 @@ impl Coordinator {
             };
             // Synchronous, single-use enqueue under the same locks that retire
             // either epoch. The pipe driver rechecks them immediately before writing.
-            let confirming = Confirming {
-                caller: caller.clone(),
-                epoch: epoch.clone(),
-                receipt,
-                revision,
-                account: a.clone(),
-                cookies: flow.session.factor_cookies().ok_or_else(auth)?,
-            };
-            let completion = grant.dispatch(revision, a)?;
+            let cookies = flow.session.factor_cookies().ok_or_else(stale)?;
+            let completion = grant.dispatch(revision, a).map_err(|_| stale())?;
+            confirming.cookies = cookies;
             let jar = flow.session.clone();
             inner.account.session = flow.session;
-            (completion, confirming, jar)
+            (completion, jar)
         };
         let verify = async {
             match completion.wait().await? {
@@ -185,20 +219,21 @@ impl Coordinator {
         let observed = tokio::select! {biased;
             _ = &mut interrupted => return Err(stale()),
             _ = tokio::time::sleep_until(deadline) => return Err(stale()),
-            r = verify => r?,
+            r = verify => r,
         };
-        let Some(observed) = observed else {
-            return Ok(DecisionOutcome::Declined);
-        };
-        confirming.with_owner(self, |until| {
-            observed.check()?;
-            *until = (*until).min(observed.deadline()); // a retained, undelivered reply cannot keep this receipt alive
-            Ok(())
-        })?;
-        borrow.returned = true; // ownership transfers, not publication to a page
-        Ok(DecisionOutcome::Published(ConfirmedPublication {
+        confirming
+            .with_owner(self, |until| {
+                if let Ok(Some(p)) = &observed {
+                    p.check()?;
+                    *until = (*until).min(p.deadline());
+                }
+                Ok(())
+            })
+            .map_err(|_| stale())?;
+        borrow.returned = true;
+        Ok(DecisionOutcome::Terminal(PendingDecision {
             owner: confirming,
-            observed,
+            result: observed,
         }))
     }
 }

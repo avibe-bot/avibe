@@ -233,6 +233,11 @@ impl HostedClaim {
             after_proof: false,
         })
     }
+    /// A read-only stamp for late delivery, including when the worker has already
+    /// consumed the arm or the grant response has closed this private pipe.
+    pub(in crate::instance_client) fn adoption(&self) -> Result<tokio::sync::watch::Receiver<bool>> {
+        Ok(self.machine.as_ref().ok_or_else(retired)?.adoption.clone())
+    }
     pub(crate) fn machine_live(&self) -> bool {
         self.machine.as_ref().is_some_and(|m| m.check_live().is_ok())
     }

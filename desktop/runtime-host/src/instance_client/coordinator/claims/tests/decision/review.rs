@@ -91,7 +91,10 @@ pub(super) async fn exercise(
             peer.assert_unarmed();
             assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
             if cut == "refused" {
-                assert_eq!(confirm(fresh).await.err().unwrap().code, "reauthentication_failed");
+                let DecisionOutcome::Terminal(reply) = confirm(fresh).await.unwrap() else {
+                    panic!("unexpected second offer")
+                };
+                assert_eq!(reply.deliver(c).unwrap_err().code, "reauthentication_failed");
                 assert!(peer.arm().await.is_err());
             } else {
                 let second = confirm(fresh);
@@ -102,10 +105,10 @@ pub(super) async fn exercise(
                 let challenge = tokio::select! { _ = &mut second => panic!("recheck held"), n = nonce => n.unwrap() };
                 assert_eq!(challenge.len(), 32);
                 ack.send(Ok(())).unwrap();
-                let DecisionOutcome::Published(reply) = second.await.unwrap() else {
+                let DecisionOutcome::Terminal(reply) = second.await.unwrap() else {
                     panic!("original owner unverified")
                 };
-                reply.deliver(c).unwrap();
+                assert!(reply.deliver(c).unwrap());
             }
             assert!(confirm(fresh).await.is_err());
             assert_eq!(hosted.grants.load(Ordering::SeqCst), 2);

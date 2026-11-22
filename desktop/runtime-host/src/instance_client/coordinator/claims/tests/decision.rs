@@ -118,7 +118,9 @@ impl Transport for Hosted {
                 self.resume_observation.notified().await;
             }
             let rows = match self.publication_case {
-                "publication_offline" => return Err(ClientError::new("network_unavailable")),
+                "publication_offline" | "publication_error_replaced" => {
+                    return Err(ClientError::new("network_unavailable"))
+                }
                 "publication_shared" => {
                     json!([{ "id":"fixture-published", "relationship":"shared" }, {"id":"other", "relationship":"owner", "host":"desk-app.avibe.bot"}])
                 }
@@ -278,7 +280,10 @@ impl Transport for Hosted {
                     );
                     assert_eq!(self.grants.load(Ordering::SeqCst), 2);
                 }
-                if (first && self.require_proof) || self.review == Some("refused") {
+                if self.publication_case.starts_with("grant_denied_") {
+                    status = 409;
+                    json!({"error":"binding_unavailable", "reason":"paired_installation_loopback_required"})
+                } else if (first && self.require_proof) || self.review == Some("refused") {
                     status = 403;
                     if self.publication_case == "proof_offer_refreshed" {
                         headers.insert(
@@ -504,8 +509,15 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
     for cut in [
         "http",
         "busy_after_grant",
+        "no_saved_owner_at_confirm",
         "machine",
         "publication_offline",
+        "grant_denied_live",
+        "grant_denied_replaced",
+        "decline_live",
+        "decline_replaced",
+        "decline_changed_jar",
+        "publication_error_replaced",
         "publication_absent",
         "publication_shared",
         "publication_read_changed",
@@ -949,6 +961,13 @@ async fn check_cut(cut: &'static str) {
     assert!(confirm(receipt).await.is_err()); // generated but not released
     assert!(read_reply.deliver().unwrap().is_some());
     assert!(confirm(Uuid::new_v4()).await.is_err());
+    if cut == "no_saved_owner_at_confirm" {
+        c.inner.lock().unwrap().record.account_id = None;
+        assert!(confirm(receipt).await.is_err());
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 0);
+        peer.assert_unarmed();
+        return;
+    }
     let decision = confirm(receipt);
     tokio::pin!(decision);
     tokio::select! { _ = &mut decision => panic!("grant response was held"), _ = hosted.sent.notified() => () }
@@ -974,7 +993,7 @@ async fn check_cut(cut: &'static str) {
     if cut == "busy_after_grant" {
         let _ordinary_transaction = c.operation.try_lock().unwrap();
         reply.send(()).unwrap();
-        assert_eq!(decision.await.err().unwrap().code, "fresh_claim_required");
+        assert_eq!(decision.await.err().unwrap().code, "stale_generation");
         assert!(peer.arm().await.is_err());
         assert!(!caller.monitoring());
         return;
@@ -1161,6 +1180,28 @@ async fn check_cut(cut: &'static str) {
         assert!(peer.arm().await.is_err());
         return;
     }
+    if cut.starts_with("grant_denied_") {
+        let DecisionOutcome::Terminal(pending) = decision.await.unwrap() else {
+            panic!("hosted refusal became an offer")
+        };
+        assert!(peer.arm().await.is_err());
+        assert!(caller.monitoring());
+        if cut == "grant_denied_replaced" {
+            caller.retire();
+            let next = c.claim_document(generation).unwrap();
+            let successor = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
+            assert_eq!(pending.deliver(&c).unwrap_err().code, "stale_generation");
+            assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
+            drop(next);
+        } else {
+            assert_eq!(
+                pending.deliver(&c).unwrap_err().code,
+                "paired_installation_loopback_required"
+            );
+        }
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
+        return;
+    }
     let arm =
         tokio::select! { _ = &mut decision => panic!("machine result was held"), frame = peer.arm() => frame.unwrap() };
     assert_eq!(arm["hostname"], "desk-app.avibe.bot");
@@ -1168,13 +1209,40 @@ async fn check_cut(cut: &'static str) {
     if cut == "machine" {
         c.window_destroyed();
     }
+    if cut.starts_with("decline_") {
+        peer.finish.send(Ok(MachineOutcome::Declined)).ok().unwrap();
+        let DecisionOutcome::Terminal(pending) = decision.await.unwrap() else {
+            panic!("decline became an offer")
+        };
+        assert!(caller.monitoring());
+        if cut == "decline_replaced" {
+            caller.retire();
+            let next = c.claim_document(generation).unwrap();
+            let successor = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
+            assert_eq!(pending.deliver(&c).unwrap_err().code, "stale_generation");
+            assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
+            drop(next);
+        } else if cut == "decline_changed_jar" {
+            replace_credential();
+            assert_eq!(pending.deliver(&c).unwrap_err().code, "stale_generation");
+        } else {
+            assert!(!pending.deliver(&c).unwrap());
+        }
+        assert_eq!(hosted.owner_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
+        return;
+    }
     let (adoption, nonce, ack) = peer.published();
     if cut == "machine" {
         assert!(decision.await.is_err());
         assert_eq!(hosted.owner_reads.load(Ordering::SeqCst), 0);
     } else if matches!(
         cut,
-        "publication_offline" | "publication_absent" | "publication_shared" | "publication_read_changed"
+        "publication_offline"
+            | "publication_error_replaced"
+            | "publication_absent"
+            | "publication_shared"
+            | "publication_read_changed"
     ) {
         if cut == "publication_read_changed" {
             tokio::select! { _ = &mut decision => panic!("account GET held"), _ = hosted.observing.notified() => () };
@@ -1182,7 +1250,23 @@ async fn check_cut(cut: &'static str) {
             c.inner.lock().unwrap().account.session = NativeSession::account(hosted.clone());
             hosted.resume_observation.notify_one();
         }
-        assert!(decision.await.is_err());
+        let outcome = decision.await;
+        if cut == "publication_read_changed" {
+            assert_eq!(outcome.err().unwrap().code, "stale_generation");
+        } else {
+            let DecisionOutcome::Terminal(pending) = outcome.unwrap() else {
+                panic!("unexpected proof")
+            };
+            if cut == "publication_error_replaced" {
+                caller.retire();
+            }
+            let expected = match cut {
+                "publication_error_replaced" => "stale_generation",
+                "publication_offline" => "account_observation_unavailable",
+                _ => "binding_owner_unconfirmed",
+            };
+            assert_eq!(pending.deliver(&c).unwrap_err().code, expected);
+        }
         assert!(nonce.await.is_err()); // not even a readback dispatched on ineligible account evidence
         assert_eq!(hosted.owner_reads.load(Ordering::SeqCst), 1);
     } else {
@@ -1203,13 +1287,10 @@ async fn check_cut(cut: &'static str) {
             Ok(())
         });
         let result = decision.await;
-        if matches!(
-            cut,
-            "publication_cancel" | "publication_changed_jar" | "publication_ack_failed"
-        ) {
+        if matches!(cut, "publication_cancel" | "publication_changed_jar") {
             assert!(result.is_err());
         } else {
-            let DecisionOutcome::Published(reply) = result.unwrap() else {
+            let DecisionOutcome::Terminal(reply) = result.unwrap() else {
                 panic!("not the original publication")
             };
             if cut == "delivery_expired" {
@@ -1234,7 +1315,11 @@ async fn check_cut(cut: &'static str) {
             if cut == "publication_drop" {
                 drop(reply);
             } else {
-                assert_eq!(reply.deliver(&c).is_ok(), cut == "complete");
+                if cut == "complete" {
+                    assert!(reply.deliver(&c).unwrap());
+                } else {
+                    assert!(reply.deliver(&c).is_err());
+                }
             }
         }
     }
