@@ -4846,6 +4846,92 @@ final class FormAccessoryBarTests: XCTestCase {
     }
 }
 
+/// A view that says whether it is first responder, and counts being asked.
+private final class FirstResponderProbe: UIView {
+    var first = false
+    private(set) var asked = 0
+
+    override var isFirstResponder: Bool { first }
+
+    override func becomeFirstResponder() -> Bool {
+        asked += 1
+        first = true
+        return true
+    }
+}
+
+final class PageFocusTouchObserverTests: XCTestCase {
+    private let instance = WebOrigin.parseConfigured("https://alice-app.avibe.bot")!
+
+    /// Every WebView the factory makes has the observer, and it is passive.
+    @MainActor
+    func testEveryInstanceWebViewHasThePassiveObserver() throws {
+        let factory = WebViewFactory(
+            instanceOrigin: instance,
+            websiteDataStore: .nonPersistent()
+        )
+        let delegate = WebViewDelegateProbe()
+        let primary = factory.makeWebView(delegate: delegate)
+        let child = factory.makeWebView(
+            configuration: primary.configuration,
+            delegate: delegate
+        )
+        for webView in [primary, child] {
+            let observers = (webView.gestureRecognizers ?? []).compactMap { $0 as? PageFocusTouchObserver }
+            XCTAssertEqual(observers.count, 1)
+            let observer = try XCTUnwrap(observers.first)
+            XCTAssertFalse(observer.cancelsTouchesInView)
+            XCTAssertFalse(observer.delaysTouchesBegan)
+            XCTAssertFalse(observer.delaysTouchesEnded)
+        }
+    }
+
+    /// A view in a window with no first responder inside it is asked to
+    /// become it, once.
+    @MainActor
+    func testAViewWithNoFirstResponderInsideIsMadeFirstResponder() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let view = FirstResponderProbe()
+        let inner = FirstResponderProbe()
+        view.addSubview(inner)
+        window.addSubview(view)
+
+        PageFocusTouchObserver.focusPage(in: view)
+        XCTAssertEqual(view.asked, 1)
+        XCTAssertEqual(inner.asked, 0)
+
+        // Now it is: the next touch asks nothing.
+        PageFocusTouchObserver.focusPage(in: view)
+        XCTAssertEqual(view.asked, 1)
+    }
+
+    /// The page's content view lies inside the WebView: while it is first
+    /// responder (the page is focused, with or without its keyboard), a touch
+    /// asks nothing.
+    @MainActor
+    func testAViewWhoseDescendantIsFirstResponderIsLeftAlone() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let view = FirstResponderProbe()
+        let scroll = UIView()
+        let content = FirstResponderProbe()
+        content.first = true
+        scroll.addSubview(content)
+        view.addSubview(scroll)
+        window.addSubview(view)
+
+        PageFocusTouchObserver.focusPage(in: view)
+        XCTAssertEqual(view.asked, 0)
+        XCTAssertEqual(content.asked, 0)
+    }
+
+    @MainActor
+    func testAViewOutOfAWindowIsLeftAlone() {
+        let view = FirstResponderProbe()
+        PageFocusTouchObserver.focusPage(in: view)
+        XCTAssertEqual(view.asked, 0)
+    }
+}
+
 // MARK: The instance's last page from the cache (cold-start plan, step 2)
 
 private final class LockedFlag: @unchecked Sendable {

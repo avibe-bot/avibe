@@ -47,7 +47,9 @@ final class FixtureHoldViewController: UIViewController {
             )
         )
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        // As `WebViewController` sets its primary WebView up.
+        // As `WebViewFactory` sets every WebView up, and `WebViewController`
+        // its primary one.
+        webView.addGestureRecognizer(PageFocusTouchObserver())
         webView.addGestureRecognizer(NativeHoldTouchObserver())
         NativeHoldCapture.shared.watch(webView)
         // The fixture's own record of each touch as UIKit delivers it, beside
@@ -67,7 +69,12 @@ final class FixtureHoldViewController: UIViewController {
             MainActor.assumeIsolated { self?.publishEvidence() }
         }
 
-        webView.loadHTMLString(Self.page, baseURL: URL(string: "\(Self.origin)/hold.html")!)
+        // The control: the page names no surface, so the App's hold
+        // recognition follows nothing. The page treats its input as before.
+        let page = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_HOLD_NO_SURFACES"] == "1"
+            ? Self.page.replacingOccurrences(of: "const NO_SURFACES = false;", with: "const NO_SURFACES = true;")
+            : Self.page
+        webView.loadHTMLString(page, baseURL: URL(string: "\(Self.origin)/hold.html")!)
     }
 
     private let touchLog = FixtureHoldTouchLog()
@@ -117,6 +124,7 @@ final class FixtureHoldViewController: UIViewController {
       <p id="s-warm">warm=no</p>
       <p id="s-press">press=none</p>
       <p id="s-drag">drag=none</p>
+      <p id="s-tap">tap=none</p>
       <div id="row">
         <textarea id="input" class="holdable" aria-label="Message"></textarea>
         <button id="send" type="button">Send</button>
@@ -130,6 +138,8 @@ final class FixtureHoldViewController: UIViewController {
     <script>
     (() => {
       const HOLD_MS = 200, GRACE_MS = 100, SLOP = 10, CANCEL = 80, UNCANCEL = 60;
+      // The control (`AVIBE_FIXTURE_HOLD_NO_SURFACES`): the page names no surface.
+      const NO_SURFACES = false;
       const native = window.avibeNative;
       const input = document.getElementById("input");
       const plain = document.getElementById("plain");
@@ -154,7 +164,7 @@ final class FixtureHoldViewController: UIViewController {
           const box = element.getBoundingClientRect();
           return { id, x: box.left - dx, y: box.top - dy, width: box.width, height: box.height };
         };
-        const surfaces = sheet.classList.contains("open") ? [] : [
+        const surfaces = (NO_SURFACES || sheet.classList.contains("open")) ? [] : [
           ...(holdable() ? [rect("input", input)] : []),
           rect("plain", plain),
         ];
@@ -162,7 +172,7 @@ final class FixtureHoldViewController: UIViewController {
         if (next === last) return;
         last = next;
         native.call("voice.holdSurfaces", surfaces.length ? { surfaces, holdMs: HOLD_MS } : { surfaces }).then(
-          () => set("s-surfaces", "surfaces=" + (surfaces.length ? surfaces.map((surface) => surface.id).join("+") : "none")),
+          () => set("s-surfaces", "surfaces=" + (surfaces.length ? surfaces.map((surface) => surface.id).join("+") : NO_SURFACES ? "control" : "none")),
           (error) => {
             const why = error && error.code === "failed" ? error.message : "error";
             if (why !== "superseded") set("s-surfaces", "surfaces=" + why);
@@ -228,11 +238,24 @@ final class FixtureHoldViewController: UIViewController {
         state("pressing");
       });
       input.addEventListener("touchstart", (event) => { if (touchHeld) event.preventDefault(); }, { passive: false });
+      // What a tap on the input did, step by step: its touch start (`+pd` when the page
+      // prevented the default), its pointer up, its touch end (`+ask` when the page asked for
+      // the focus there), and then whether the input is the active element and whether the
+      // page has the focus, at once and 1.5 s later. A page without the focus gives no focus
+      // event and no keyboard, whatever the active element is.
+      const tapSeen = [];
+      const tap = (what) => { tapSeen.push(what); set("s-tap", "tap=" + tapSeen.join(",")); };
+      const focusFacts = () => "active=" + (document.activeElement === input ? "input" : "other") + "/docFocus=" + document.hasFocus();
+      input.addEventListener("touchstart", () => tap("ts" + (touchHeld ? "+pd" : "")));
+      input.addEventListener("touchcancel", () => tap("tc"));
       input.addEventListener("touchend", () => {
+        tap("te" + (tapFocus ? "+ask" : ""));
         touchHeld = false;
         if (!tapFocus) return;
         tapFocus = false;
         input.focus();
+        tap(focusFacts());
+        setTimeout(() => tap("later:" + focusFacts()), 1500);
       });
       input.addEventListener("pointermove", (event) => {
         if (!press || event.pointerId !== press.id) return;
@@ -247,6 +270,7 @@ final class FixtureHoldViewController: UIViewController {
       input.addEventListener("pointerup", (event) => {
         if (!press || event.pointerId !== press.id) return;
         pressed("up");
+        tap("pu");
         if (!press.recognised && !press.own) {
           // A tap: the input takes the focus.
           drop();

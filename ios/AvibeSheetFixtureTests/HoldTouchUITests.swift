@@ -52,20 +52,44 @@ final class HoldTouchUITests: XCTestCase {
     /// thread is busy from before the finger lifts until past the threshold.
     /// A tap all the same: no cue, nothing said to the page. (TestFlight
     /// 50.1 recognised a hold here.)
+    ///
+    /// And it focuses the input, though no ordinary tap has reached the
+    /// WebView yet. On iOS 27 a page has no focus until one has, and the
+    /// press on the input is not one (the page prevents its default): the
+    /// App gives the page the focus at touch-down (`PageFocusTouchObserver`).
+    /// Without that this tap raises no keyboard on iOS 27.
     func testTheFirstTapAfterAColdLaunchIsNoHold() {
-        for startsAtRecognition in [false, true] {
-            app = XCUIApplication()
-            app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
-            app.launchEnvironment["AVIBE_FIXTURE_HOLD"] = "1"
-            launch(startsAtRecognition: startsAtRecognition, warm: false)
-            input.tap()
-            XCTAssertTrue(waitFor("focus=yes"), "The first tap did not focus the input; \(facts())")
-            // Long enough for a late cue to have come.
-            Thread.sleep(forTimeInterval: 2)
-            print("[hold smoke] first tap, startsAtRecognition=\(startsAtRecognition): \(facts())")
-            requireFollowedWithNoCue("The first tap after a cold launch")
-            app.terminate()
-        }
+        firstTap(startsAtRecognition: false)
+    }
+
+    func testTheFirstTapAfterAColdLaunchIsNoHoldWhenTheMicrophoneStartsAtRecognition() {
+        firstTap(startsAtRecognition: true)
+    }
+
+    /// The control: the page names no surface, so the App's hold recognition
+    /// follows nothing, and the page treats its input as before (no default
+    /// on `touchstart`, the focus in `touchend`). The first tap focuses it
+    /// all the same: the focus does not depend on the hold's path.
+    func testTheFirstTapAfterAColdLaunchFocusesTheInputWithNoSurfaceNamed() {
+        app.launchEnvironment["AVIBE_FIXTURE_HOLD_NO_SURFACES"] = "1"
+        launch(warm: false, surfaces: "surfaces=control")
+        input.tap()
+        let focused = waitFor("focus=yes")
+        Thread.sleep(forTimeInterval: 2)
+        print("[hold smoke] first tap, no surface named, focused=\(focused): \(facts())")
+        XCTAssertTrue(focused, "The first tap did not focus the input; \(facts())")
+        XCTAssertEqual(kept(), "none", "The App followed a touch with no surface named; \(facts())")
+    }
+
+    private func firstTap(startsAtRecognition: Bool) {
+        launch(startsAtRecognition: startsAtRecognition, warm: false)
+        input.tap()
+        let focused = waitFor("focus=yes")
+        // Long enough for a late cue to have come, and for the page's later reading of its focus.
+        Thread.sleep(forTimeInterval: 2)
+        print("[hold smoke] first tap, startsAtRecognition=\(startsAtRecognition), focused=\(focused): \(facts())")
+        XCTAssertTrue(focused, "The first tap did not focus the input; \(facts())")
+        requireFollowedWithNoCue("The first tap after a cold launch")
     }
 
     private func tapTheInput(startsAtRecognition: Bool) {
@@ -270,7 +294,9 @@ final class HoldTouchUITests: XCTestCase {
     private var web: XCUIElement { app.webViews.firstMatch }
     private var input: XCUIElement { web.textViews["Message"] }
 
-    private func launch(startsAtRecognition: Bool = false, warm: Bool = true) {
+    private func launch(
+        startsAtRecognition: Bool = false, warm: Bool = true, surfaces: String = "surfaces=input+plain"
+    ) {
         if startsAtRecognition {
             // `NativeHoldQuietSwitch`, as its diagnostics link sets it.
             app.launchArguments += ["-avibe.voiceHold.startsAtRecognition", "YES"]
@@ -283,7 +309,7 @@ final class HoldTouchUITests: XCTestCase {
             waitFor("ready=yes", timeout: SheetFixtureReadiness.webContentLaunchSeconds),
             "The hold page did not load"
         )
-        XCTAssertTrue(waitFor("surfaces=input+plain"), "The App did not take the page's surfaces; \(facts())")
+        XCTAssertTrue(waitFor(surfaces), "The App did not take the page's surfaces; \(facts())")
         guard warm else { return }
         // The first touch after a launch is slow on a CI simulator, and can be lost on its way
         // to the page (the fixture's other tests warm up too): one on a line of text, which is
@@ -367,7 +393,7 @@ final class HoldTouchUITests: XCTestCase {
 
     /// Everything the page says of itself, for a failure's message.
     private func facts() -> String {
-        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag="]
+        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag=", "tap="]
         return "page: " + names.compactMap { label(beginning: $0) }.joined(separator: " ")
             + "; App: " + evidence()
     }

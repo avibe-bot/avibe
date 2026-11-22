@@ -104,6 +104,14 @@ and Web resizing cannot both run.
   This uses a private WebKit class, an App Review risk the owner accepted on
   2026-11-08 (`docs/plans/ios-app.md` section 5). Keyboard QuickType
   suggestions are unaffected. The bundled sign-in page keeps the default bar.
+- On iOS 27, a touch on an instance WebView (primary or child) makes it
+  first responder at touch-down, unless its content view already is
+  (`PageFocusTouchObserver`, a passive recogniser). A WebKit page has the
+  focus only while its content view is first responder, and on iOS 27 a
+  press the page takes for itself (the composer prevents the default on
+  `touchstart`) no longer makes it that, so a first tap on the composer
+  after a cold launch raised no keyboard. Nothing is done before a touch,
+  and nothing on iOS 26.
 - External application schemes from top-level browsing contexts use
   `UIApplication`.
 - JavaScript alerts, confirmations, and prompts use native alerts. Their

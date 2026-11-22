@@ -523,6 +523,8 @@ final class WebViewFactory {
         outerScrollLockControllers[ObjectIdentifier(webView)] =
             OuterScrollLockController(webView: webView)
         FormAccessoryBar.hide(in: webView)
+        // A touch on a WebView gives its page the focus (iOS 27).
+        webView.addGestureRecognizer(PageFocusTouchObserver())
         DirectWebViewRegistry.shared.register(webView)
         return webView
     }
