@@ -1,5 +1,6 @@
 import type {
   ApiContextType,
+  WebPushStatus,
   WebPushStatusPayload,
   WebPushSubscribeIntent,
   WebPushSubscriptionResult,
@@ -1068,14 +1069,49 @@ async function browserPushStatusPayload(
 }
 
 /**
- * Takes back, in this browser, the subscription that binding this Avibe to an
- * account stopped, once the instance has said it may
- * (`current_subscription_binding_retired`). Only while the browser already
- * allows notifications: it never asks. The live subscription is posted as it
- * is; a browser that lost its own subscribes again and names the endpoints it
- * remembers. A refusal is final (it was turned off meanwhile, or is not this
- * browser's): no other post follows, and a subscription made only for the
- * attempt is removed again. True when the instance accepted it.
+ * Whether binding this Avibe to an account stopped a subscription this browser
+ * may take back. Either the instance says so of the endpoint it was asked about
+ * (`current_subscription_binding_retired`), or the browser holds a subscription
+ * the instance does not know and one of the endpoints it remembers was stopped:
+ * the push service replaced the subscription meanwhile, or an earlier repair
+ * subscribed again and never heard the answer. The remembered endpoints are
+ * asked about only on the computer that runs Avibe, with notifications allowed.
+ */
+async function bindingRepairOffered(
+  api: ApiContextType,
+  status: WebPushStatus,
+  existing: PushSubscription | null,
+  rememberedEndpoints: string[],
+): Promise<boolean> {
+  if (status.current_subscription_binding_retired) return true;
+  if (
+    !existing
+    || status.current_subscription_enabled
+    || status.current_subscription_repairable
+    || !isLoopbackPage()
+    || typeof Notification === 'undefined'
+    || Notification.permission !== 'granted'
+  ) {
+    return false;
+  }
+  for (const endpoint of rememberedEndpoints) {
+    if (endpoint === existing.endpoint) continue;
+    const earlier = await api.getWebPushStatus({ endpoint }).catch(() => null);
+    if (earlier?.current_subscription_binding_retired) return true;
+  }
+  return false;
+}
+
+/**
+ * Takes back, in this browser, the subscription that binding stopped, once
+ * `bindingRepairOffered` says it may. Only while the browser already allows
+ * notifications: it never asks. The live subscription is posted as it is, with
+ * the other endpoints the browser remembers; a browser that lost its own
+ * subscribes again first. A refusal is final (it was turned off meanwhile, or
+ * is not this browser's): no other post follows, and a subscription made only
+ * for the attempt is removed again. When no answer arrives the instance may
+ * have recorded it: the subscription is kept, and the next foreground asks
+ * about it. True when the instance accepted it.
  */
 async function restoreBrowserPushAfterBinding(
   api: ApiContextType,
@@ -1090,25 +1126,28 @@ async function restoreBrowserPushAfterBinding(
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToArrayBuffer(publicKey),
     });
-  const madeForThis = !existing;
-  let accepted = false;
+  const json = subscription.toJSON();
+  const earlier = rememberedEndpoints.filter((endpoint) => endpoint !== subscription.endpoint);
+  let outcome: 'accepted' | 'refused' | 'unknown';
   try {
-    const json = subscription.toJSON();
-    accepted = (await api.subscribeWebPush(
+    const result = await api.subscribeWebPush(
       json,
       undefined,
       deviceId,
-      madeForThis ? rememberedEndpoints : undefined,
+      earlier.length ? earlier : undefined,
       undefined,
       'binding_repair',
-    )).accepted === true;
-    if (accepted) await rememberWebPushEndpoint(json.endpoint ?? undefined);
-  } finally {
-    // Refused, or the answer never came: without this the next open would ask
-    // about the new endpoint, which the instance has never seen, and stay off.
-    if (!accepted && madeForThis) await subscription.unsubscribe().catch(() => false);
+    );
+    outcome = result.accepted === true ? 'accepted' : 'refused';
+  } catch (error) {
+    // A 4xx is the instance answering that it recorded nothing. Anything else
+    // (no connection, a reply cut short, a 5xx) leaves that open.
+    const status = (error as { status?: unknown } | null)?.status;
+    outcome = typeof status === 'number' && status >= 400 && status < 500 ? 'refused' : 'unknown';
   }
-  return accepted;
+  if (outcome === 'accepted') await rememberWebPushEndpoint(json.endpoint ?? undefined);
+  if (outcome === 'refused' && !existing) await subscription.unsubscribe().catch(() => false);
+  return outcome === 'accepted';
 }
 
 let webPushLifecycleOperation: Promise<unknown> = Promise.resolve();
@@ -1587,7 +1626,7 @@ async function reconcileWebPushOnce(
     const serverStatus = await api
       .getWebPushStatus(await browserPushStatusPayload(existing, previousEndpoints))
       .catch(() => null);
-    if (serverStatus?.current_subscription_binding_retired) {
+    if (serverStatus && await bindingRepairOffered(api, serverStatus, existing, previousEndpoints)) {
       const restored = await restoreBrowserPushAfterBinding(
         api,
         existing,
@@ -1727,7 +1766,12 @@ export function restoreWebPushAfterBinding(api: ApiContextType): Promise<boolean
       const payload = await browserPushStatusPayload(existing, rememberedEndpoints);
       if (!payload) return false;
       const status = await api.getWebPushStatus(payload);
-      if (!status.current_subscription_binding_retired) return false;
+      if (existing && status.current_subscription_enabled) {
+        // Already on, as after a repair whose answer never arrived: only remember it.
+        if (rememberedEndpoints[0] !== existing.endpoint) await rememberWebPushEndpoint(existing.endpoint);
+        return true;
+      }
+      if (!(await bindingRepairOffered(api, status, existing, rememberedEndpoints))) return false;
       return await restoreBrowserPushAfterBinding(api, existing, status.public_key, rememberedEndpoints);
     } catch {
       // The next time the page comes to the foreground tries again.
@@ -1765,10 +1809,8 @@ export async function readWebPushDeviceState(api: ApiContextType): Promise<'on' 
       await browserPushStatusPayload(existing, await getRememberedWebPushEndpoints()),
     );
     if (!status?.ok || !status.configured) return 'unavailable';
-    if (status.current_subscription_binding_retired) {
-      return (await restoreWebPushAfterBinding(api)) ? 'on' : 'off';
-    }
-    return existing && status.current_subscription_enabled ? 'on' : 'off';
+    if (existing && status.current_subscription_enabled) return 'on';
+    return (await restoreWebPushAfterBinding(api)) ? 'on' : 'off';
   } catch {
     return 'unavailable';
   }

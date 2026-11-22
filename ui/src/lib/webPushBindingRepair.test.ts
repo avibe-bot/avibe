@@ -139,9 +139,9 @@ describe('a browser on the computer that runs Avibe, after binding', () => {
 
   it.each([
     ['the instance refuses (it was turned off at the same moment)', () => instance({ accepts: false })],
-    ['the answer never comes', () => {
+    ['the instance answers that the request is not allowed', () => {
       const made = instance();
-      made.subscribeWebPush.mockRejectedValue(new Error('offline'));
+      made.subscribeWebPush.mockRejectedValue(Object.assign(new Error('refused'), { status: 403 }));
       return made;
     }],
   ])('removes the subscription it made for the attempt when %s, and posts nothing else', async (_label, make) => {
@@ -154,6 +154,66 @@ describe('a browser on the computer that runs Avibe, after binding', () => {
     expect(subscribeWebPush).toHaveBeenCalledOnce();
     expect(subscribeWebPush.mock.calls[0][5]).toBe('binding_repair');
     expect(page.fresh.unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  describe('when the answer to a repair never arrives', () => {
+    // The instance may or may not have recorded it, and recording it uses up the old endpoint.
+    const lostAnswer = async (committed: boolean) => {
+      const page = browser({ live: false });
+      const made = instance();
+      let recorded = false;
+      made.subscribeWebPush.mockImplementationOnce(async () => {
+        recorded = committed;
+        throw new Error('offline');
+      });
+      made.getWebPushStatus.mockImplementation(async (payload?: { endpoint?: string }) => ({
+        ok: true,
+        configured: true,
+        public_key: 'AQIDBA',
+        subscription_count: 0,
+        current_subscription_enabled: recorded && payload?.endpoint === FRESH,
+        current_subscription_repairable: false,
+        current_subscription_binding_retired: !recorded && payload?.endpoint === OLD,
+      }));
+      const { restoreWebPushAfterBinding, getRememberedWebPushEndpoints } = await load();
+      await expect(restoreWebPushAfterBinding(made.api)).resolves.toBe(false);
+      // The new subscription is kept: it is the only thing left that can be on.
+      expect(page.fresh.unsubscribe).not.toHaveBeenCalled();
+      expect(made.subscribeWebPush).toHaveBeenCalledOnce();
+      return { page, ...made, restoreWebPushAfterBinding, getRememberedWebPushEndpoints };
+    };
+
+    it('finds it already on at the next foreground when the instance had recorded it', async () => {
+      const { page, api, subscribeWebPush, restoreWebPushAfterBinding, getRememberedWebPushEndpoints } = await lostAnswer(true);
+
+      await expect(restoreWebPushAfterBinding(api)).resolves.toBe(true);
+
+      expect(subscribeWebPush).toHaveBeenCalledOnce();
+      expect(page.fresh.unsubscribe).not.toHaveBeenCalled();
+      expect((await getRememberedWebPushEndpoints())[0]).toBe(FRESH);
+    });
+
+    it('repairs again with the same subscription when the instance had not', async () => {
+      const { page, api, subscribeWebPush, restoreWebPushAfterBinding } = await lostAnswer(false);
+
+      await expect(restoreWebPushAfterBinding(api)).resolves.toBe(true);
+
+      expect(page.pushManager.subscribe).toHaveBeenCalledOnce();
+      expect(subscribeWebPush.mock.calls[1]).toEqual(
+        [page.fresh.toJSON(), undefined, 'device-1', [OLD], undefined, 'binding_repair'],
+      );
+    });
+  });
+
+  it('asks nothing about remembered endpoints from a page that is not on this computer', async () => {
+    browser({ live: true, hostname: 'alex.avibe.bot', remembered: [FRESH, OLD] });
+    const { api, getWebPushStatus, subscribeWebPush } = instance({ retired: [FRESH] });
+    const { reconcileWebPush } = await load();
+
+    await expect(reconcileWebPush(api)).resolves.toMatchObject({ status: 'disabled' });
+
+    expect(getWebPushStatus).toHaveBeenCalledOnce();
+    expect(subscribeWebPush).not.toHaveBeenCalled();
   });
 
   it('leaves a live subscription alone when the instance refuses it', async () => {

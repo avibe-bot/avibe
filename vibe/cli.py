@@ -15943,12 +15943,7 @@ def cmd_start(
                 else f"Vibe service process pid={service_pid} exited before acquiring the service lock"
             )
 
-        from vibe.network_position import BindingState, binding_state
-        from vibe.desktop_runtime import desktop_origin
-
-        ui_url = (desktop_origin(config.ui.setup_host, config.ui.setup_port)
-                  if binding_state(config) is not BindingState.UNBOUND
-                  else "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port))
+        ui_url = _local_ui_url(config)
 
         # Always print Web UI access instructions.
         print("Web UI:")
@@ -17110,13 +17105,48 @@ def _read_cli_text_argument(
     return text
 
 
-def _ui_show_events_host(config: V2Config) -> str:
+def _bound_local_ui_host(setup_host: str) -> str:
+    """Where this computer's CLI reaches the UI of a bound Avibe: loopback only.
+
+    A saved host that is itself a loopback name or address is kept as written:
+    the listener is there, and ``localhost`` may resolve to IPv6 alone, where an
+    IPv4 literal would reach nothing. Any other host becomes the loopback
+    address of its family. Decided on the literal value; nothing is resolved.
+    """
+    import ipaddress
+
     from vibe.desktop_runtime import desktop_loopback_host
+
+    host = setup_host.strip()
+    bare = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    if bare.lower() == "localhost":
+        return "localhost"
+    try:
+        if ipaddress.ip_address(bare).is_loopback:
+            return bare
+    except ValueError:
+        pass
+    return desktop_loopback_host(host)
+
+
+def _local_ui_url(config: V2Config) -> str:
+    """The Web UI address ``vibe`` prints and opens on this computer."""
+    from vibe.network_position import BindingState, binding_state
+
+    host = config.ui.setup_host
+    if binding_state(config) is not BindingState.UNBOUND:
+        host = _bound_local_ui_host(host)
+        if ":" in host:
+            host = f"[{host}]"
+    return "http://{}:{}".format(host, config.ui.setup_port)
+
+
+def _ui_show_events_host(config: V2Config) -> str:
     from vibe.network_position import BindingState, binding_state
 
     host = (getattr(config.ui, "setup_host", "") or "").strip() or "127.0.0.1"
     if binding_state(config) is not BindingState.UNBOUND:
-        host = desktop_loopback_host(host)
+        host = _bound_local_ui_host(host)
     if host in {"0.0.0.0", "*"}:
         return "127.0.0.1"
     if host == "::":

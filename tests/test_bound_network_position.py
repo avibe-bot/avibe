@@ -353,16 +353,62 @@ def test_persisted_bound_lan_liveness_docker_and_canonical(monkeypatch, tmp_path
     assert "Secure" in public.headers.get("Set-Cookie", "")
 
 
-@pytest.mark.parametrize(("address", "expected"), [("192.168.2.3", "127.0.0.1"), ("fd00::4", "[::1]")])
-def test_cli_bound_ui_target_uses_same_family_loopback(monkeypatch, tmp_path, address, expected):
-    from vibe.cli import _ui_show_events_host
+@pytest.mark.parametrize(
+    ("saved", "unbound", "bound"),
+    [
+        # A network address or a bind to every address: the loopback address of its family.
+        ("192.168.2.3", "192.168.2.3", "127.0.0.1"),
+        ("fd00::4", "[fd00::4]", "[::1]"),
+        ("0.0.0.0", "127.0.0.1", "127.0.0.1"),
+        ("::", "[::1]", "[::1]"),
+        # Already a loopback name or address: kept as written, where the listener is.
+        ("localhost", "localhost", "localhost"),
+        ("127.0.0.1", "127.0.0.1", "127.0.0.1"),
+        ("[::1]", "[::1]", "[::1]"),
+        ("::1", "[::1]", "[::1]"),
+    ],
+)
+def test_cli_bound_ui_target_is_loopback_where_the_listener_is(monkeypatch, tmp_path, saved, unbound, bound):
+    from vibe.cli import _local_ui_url, _ui_show_events_host
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _unbound()
-    config.ui.setup_host = address
-    assert _ui_show_events_host(config) == (f"[{address}]" if ":" in address else address)
+    config.ui.setup_host = saved
+    assert _ui_show_events_host(config) == unbound
     _bind(config)
-    assert _ui_show_events_host(config) == expected
+    # Show events, prewarm and session activity all build their address from this host.
+    assert _ui_show_events_host(config) == bound
+    assert _local_ui_url(config) == f"http://{bound}:{config.ui.setup_port}"
+
+
+def test_cli_follows_a_localhost_that_resolves_to_ipv6_only(monkeypatch, tmp_path):
+    """Bound, remote access on, host saved as ``localhost``: the UI listens on ``::1`` alone."""
+    from vibe import runtime
+    from vibe.cli import _local_ui_url, _ui_show_events_host
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _bind(_unbound())
+    config.ui.setup_host = "localhost"
+    config.remote_access.vibe_cloud.enabled = True
+    monkeypatch.setattr(runtime, "resolve_localhost_family", lambda: "inet6")
+    assert runtime.effective_ui_bind_host(config) == "::1"
+    # The name reaches that listener; an IPv4 literal would reach nothing. No
+    # name is resolved to decide this: only the saved value is read.
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: pytest.fail("resolved a name"))
+    assert _ui_show_events_host(config) == "localhost"
+    assert _local_ui_url(config) == f"http://localhost:{config.ui.setup_port}"
+
+
+@pytest.mark.parametrize("saved", ["localhost.example.test", "127.0.0.1.example.test", "printer.local", "8.8.8.8"])
+def test_cli_never_keeps_a_bound_host_that_is_not_literally_loopback(monkeypatch, tmp_path, saved):
+    from vibe.cli import _local_ui_url, _ui_show_events_host
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _bind(_unbound())
+    config.ui.setup_host = saved
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: pytest.fail("resolved a name"))
+    assert _ui_show_events_host(config) == "127.0.0.1"
+    assert _local_ui_url(config) == f"http://127.0.0.1:{config.ui.setup_port}"
 
 
 def test_missing_partial_reset_block_position(monkeypatch, tmp_path):
