@@ -380,6 +380,126 @@ self.addEventListener('fetch', (event) => {
         let _ = up.join();
     }
 
+    // MARK: A listener that hears who asks
+
+    /// The windows of one instance share one listener. Whether it could
+    /// tell them apart by the credential each presents is what
+    /// `each-window-presents-its-own-credential` measures: this stand-in
+    /// takes each window's own name and password, and remembers for every
+    /// `CONNECT` its target and the name presented (`none` without a
+    /// credential, `unknown` for any other). It grants a tunnel and ends it.
+    pub const WINDOWS: [(&str, &str, u16); 2] = [
+        ("window-one", "password-one-4c1d", 18441),
+        ("window-two", "password-two-9e7a", 18442),
+    ];
+
+    pub struct Naming {
+        pub port: u16,
+        heard: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl Naming {
+        pub fn start() -> Self {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("naming port");
+            let port = listener.local_addr().expect("naming address").port();
+            let heard = Arc::new(Mutex::new(Vec::new()));
+            let log = heard.clone();
+            thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let log = log.clone();
+                    thread::spawn(move || serve_naming(stream, &log));
+                }
+            });
+            Self { port, heard }
+        }
+
+        /// The names presented for `target` so far, in order.
+        pub fn heard(&self, target: &str) -> Vec<String> {
+            self.heard
+                .lock()
+                .expect("heard")
+                .iter()
+                .filter(|(asked, _)| asked == target)
+                .map(|(_, name)| name.clone())
+                .collect()
+        }
+    }
+
+    fn serve_naming(mut browser: TcpStream, log: &Mutex<Vec<(String, String)>>) {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let _ = browser.set_read_timeout(Some(Duration::from_secs(10)));
+        let Some((head, _)) = read_head(&mut browser) else {
+            return;
+        };
+        let mut first = head.split("\r\n").next().unwrap_or("").split(' ');
+        let (method, target) = (first.next().unwrap_or(""), first.next().unwrap_or("").to_owned());
+        let name = match headers_of(&head).get("proxy-authorization") {
+            None => "none",
+            Some(value) => WINDOWS
+                .iter()
+                .find(|(name, password, _)| {
+                    *value == format!("Basic {}", STANDARD.encode(format!("{name}:{password}")))
+                })
+                .map_or("unknown", |(name, _, _)| name),
+        };
+        let answer = if method != "CONNECT" {
+            "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n"
+        } else {
+            log.lock().expect("heard").push((target, name.to_owned()));
+            if name == "none" || name == "unknown" {
+                "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Avibe Direct\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            } else {
+                "HTTP/1.1 200 Connection Established\r\n\r\n"
+            }
+        };
+        let _ = browser.write_all(answer.as_bytes());
+        let _ = browser.shutdown(Shutdown::Both);
+    }
+
+    /// The order in which the two windows ask, by index into `WINDOWS`.
+    pub const ASKING: [usize; 6] = [0, 1, 1, 0, 0, 1];
+
+    /// Whether each window presented its own name and no other, at every
+    /// one of its turns; and what was heard, for the report. `turns` holds
+    /// how many `CONNECT`s the listener had heard for the asking window's
+    /// target before and after each turn in `ASKING`.
+    pub fn each_presented_its_own(
+        naming: &Naming,
+        target: impl Fn(u16) -> String,
+        turns: &[(usize, usize)],
+    ) -> (bool, serde_json::Value) {
+        let heard: Vec<Vec<String>> = WINDOWS
+            .iter()
+            .map(|(_, _, port)| naming.heard(&target(*port)))
+            .collect();
+        // Never another window's name, or a credential that is no window's,
+        // on any connection, in a turn or after it.
+        let mut own = turns.len() == ASKING.len()
+            && WINDOWS
+                .iter()
+                .zip(&heard)
+                .all(|((name, _, _), heard)| heard.iter().all(|presented| presented == "none" || presented == name));
+        // And its own at every turn: an earlier turn's retries do not stand
+        // in for a later turn that presented nothing.
+        let mut by_turn = Vec::new();
+        for (window, (before, after)) in ASKING.iter().zip(turns) {
+            let name = WINDOWS[*window].0;
+            let turn = heard[*window].get(*before..*after).unwrap_or_default();
+            own &= turn.iter().any(|presented| presented == name);
+            by_turn.push(json!({ "window": name, "heard": turn }));
+        }
+        (own, json!(by_turn))
+    }
+
+    /// Whether `target` has heard `name` since its first `before` `CONNECT`s.
+    pub fn presented_since(naming: &Naming, target: &str, before: usize, name: &str) -> bool {
+        naming
+            .heard(target)
+            .iter()
+            .skip(before)
+            .any(|presented| presented == name)
+    }
+
     /// What a page needs before it registers the product's push worker
     /// (`ui/src/lib/webPush.ts`): the three APIs, and a permission that is
     /// granted when it asks. Read in the page's own world.
@@ -710,6 +830,45 @@ mod macos_probe {
             ok,
             json!({ "document": state, "reply": format!("{reply:?}").chars().take(40).collect::<String>(), "reached_instance": reached }),
         );
+
+        // The windows of one instance each have browsing data of their own
+        // and are routed to one listener. Each is given a credential of its
+        // own here; they ask in turn, for a target of their own so that
+        // what is heard is theirs beyond doubt.
+        let naming = Naming::start();
+        let named: Vec<Retained<WKWebView>> = WINDOWS
+            .iter()
+            .map(|(name, password, _)| {
+                let view = new_webview(mtm);
+                install_route(
+                    &view,
+                    mtm,
+                    ROUTED,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, naming.port),
+                    name,
+                    password,
+                );
+                view
+            })
+            .collect();
+        let mut turns = Vec::new();
+        for (step, window) in ASKING.iter().enumerate() {
+            let (name, _, port) = WINDOWS[*window];
+            let target = format!("{ROUTED}:{port}");
+            let before = naming.heard(&target).len();
+            // SAFETY: Main thread; one of this probe's own URLs.
+            unsafe {
+                if let Some(url) = NSURL::URLWithString(&NSString::from_str(&format!("http://{target}/{step}"))) {
+                    named[*window].loadRequest(&NSURLRequest::requestWithURL(&url));
+                }
+            }
+            // Until this turn's own connection has presented the name.
+            pump_until(WAIT, || presented_since(&naming, &target, before, name));
+            pump_until(Duration::from_millis(300), || false);
+            turns.push((before, naming.heard(&target).len()));
+        }
+        let (own, heard) = each_presented_its_own(&naming, |port| format!("{ROUTED}:{port}"), &turns);
+        report.case("each-window-presents-its-own-credential", own, heard);
 
         // 7. The route: only the instance's host goes to the listener, with
         //    its credential; the credential never reaches the instance.
@@ -1216,6 +1375,51 @@ mod windows_probe {
                 "challenges": challenges.borrow().iter().map(|heard| heard.replace(&proxy.port.to_string(), "PORT")).collect::<Vec<_>>(),
             }),
         );
+
+        // The windows of one instance, as the app makes them: each an
+        // InPrivate WebView on a user-data folder of its own, routed to one
+        // listener. Each answers the listener's challenge with a credential
+        // of its own here; they ask in turn, for a target of their own so
+        // that what is heard is theirs beyond doubt.
+        let naming = Naming::start();
+        let naming_listener = SocketAddrV4::new(Ipv4Addr::LOCALHOST, naming.port);
+        let mut named = Vec::new();
+        let mut made = route_argument(ROUTED, naming_listener).is_some();
+        for (name, password, _) in WINDOWS {
+            let folder = std::env::temp_dir().join(format!("avibe-direct-webview-probe-{name}-{}", std::process::id()));
+            let argument = route_argument(ROUTED, naming_listener).unwrap_or_default();
+            match new_webview(&folder, argument, true) {
+                Ok((controller, view)) => {
+                    made &= answer_listener_challenge(&view, naming_listener, name, password).is_ok();
+                    named.push((controller, view, folder));
+                }
+                Err(_) => made = false,
+            }
+        }
+        let mut turns = Vec::new();
+        if named.len() == WINDOWS.len() {
+            for (step, window) in ASKING.iter().enumerate() {
+                let (name, _, port) = WINDOWS[*window];
+                let target = format!("{ROUTED}:{port}");
+                let before = naming.heard(&target).len();
+                navigate(&named[*window].1, &format!("https://{target}/{step}"));
+                // Until this turn's own connection has presented the name.
+                pump_until(WAIT, || presented_since(&naming, &target, before, name));
+                pump_until(Duration::from_millis(300), || false);
+                turns.push((before, naming.heard(&target).len()));
+            }
+        }
+        let (own, heard) = each_presented_its_own(&naming, |port| format!("{ROUTED}:{port}"), &turns);
+        report.case(
+            "each-window-presents-its-own-credential",
+            made && own,
+            json!({ "made": made, "heard": heard }),
+        );
+        for (controller, _, folder) in named {
+            // SAFETY: A single-threaded apartment; done with this WebView.
+            let _ = unsafe { controller.Close() };
+            let _ = std::fs::remove_dir_all(&folder);
+        }
 
         // 9. Any other host, a child host, and plain `http` to the
         //    instance's host are not routed: the listener is not asked.
