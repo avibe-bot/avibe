@@ -290,6 +290,60 @@ async def test_image_suffix_uses_ordinary_even_when_wire_is_tiny(nested):
     assert (send.mode, send.reason) == ("full", "image_delta") and send.wire.body == wire.body
 
 
+async def test_gateway_ttl_refusal_is_shared_by_live_and_inert_thread_plans(monkeypatch):
+    import time
+    from types import SimpleNamespace
+    from core.agent_core.ai import anthropic, message_threads as threads
+    from core.agent_core.ai.preview import preview_wire_request
+    from tests.agent_core.ai.test_anthropic_prompt_cache import ANTHROPIC_REJECTION
+
+    clock = [time.monotonic()]
+    fake = SimpleNamespace(monotonic=lambda: clock[0])
+    monkeypatch.setattr(anthropic, "time", fake)
+    monkeypatch.setattr(threads, "time", fake)
+    session = "ttl-preview"
+    first = UserMessage((TextBlock("old context " * 6000),))
+    req = _request(messages=(first,), source_id="src_ttlcheck01")
+    ep = replace(req.endpoint, source_identity="ttl-account", via_hub=True)
+    req = replace(req, endpoint=ep, thread_observation=ThreadObservation(session))
+    inert = replace(ep, base_url="http://request-preview.invalid/vibey/v1", token="auth-unbound")
+    good = SUCCESS.replace('"usage":{"input_tokens":1}', '"id":"msg_demo","usage":{"cache_read_input_tokens":22000}')
+    served = {
+        "x-avibe-served-hop": json.dumps(
+            {"provider": ep.provider, "api": "anthropic", "source": ep.source_id, "model": ep.model_id}
+        )
+    }
+    sent = []
+
+    def handle(wire):
+        sent.append(wire.content)
+        if b'"ttl":"1h"' in wire.content:
+            return httpx.Response(400, json=ANTHROPIC_REJECTION)
+        return httpx.Response(200, headers=served, text=good)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client, gateway=True)
+
+        async def send(request):
+            events = [e async for e in adapter.stream(request, CancelToken())]
+            assert isinstance(events[-1], Done)
+            return events[-1].message
+
+        await send(req)
+        assert [b'"ttl":"1h"' in wire for wire in sent] == [True, True, False]
+        assert anthropic.cache_ttl_s(replace(req, endpoint=inert)) == 300
+        assert anthropic.cache_ttl_s(replace(req, endpoint=replace(inert, source_identity="other"))) == 3600
+        assert anthropic.cache_ttl_s(replace(req, endpoint=replace(ep, via_hub=False))) == 3600
+        clock[0] += threads.COOLDOWN_SECONDS + 1
+        answer = await send(req)
+        assert json.loads(sent[-1])["thread"] == {"type": "create"}
+        follow = replace(req, messages=(first, answer, UserMessage((TextBlock("next"),))))
+        preview = await preview_wire_request(replace(follow, endpoint=inert), gateway=True, session_id=session)
+        assert len(sent) == 4 and preview.wire.body["thread"] == {"type": "continue", "previous_message_id": "msg_demo"}
+        await send(follow)
+        assert len(sent) == 5 and sent[-1] == preview.body
+
+
 async def test_speculative_create_pin_does_not_authorize_unpinned_pause_followup():
     from tests.agent_core.ai import test_hosted_pause_turn as pause
     from core.agent_core.ai.provider import ProviderError

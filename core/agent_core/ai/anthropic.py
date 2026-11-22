@@ -91,7 +91,7 @@ _MAX_CACHE_BREAKPOINTS = 4
 # longer lifetime precedes every shorter one because Anthropic evaluates breakpoints as tools, system, messages.
 _PREFIX_TTL = "1h"
 # Routes whose endpoint rejected the field. They keep the default lifetime for the rest of the process.
-_TTL_REJECTED_ROUTES: set[tuple[str, str | None, str, str]] = set()
+_TTL_REJECTED_ROUTES: set[tuple[str, str | None, str | None, str, str]] = set()
 _TTL_REJECTION = re.compile(r"cache_control|\bttl\b", re.IGNORECASE)
 _LEGACY_THINKING_BUDGETS = {
     "minimal": 1024,
@@ -938,7 +938,7 @@ class AnthropicAdapter(ProviderAdapter):
             first_sent: tuple[tuple[Any, ...], Mapping[str, LoadedImage]] | None = None
             while True:
                 # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
-                prefix_ttl = _prefix_ttl(sending)
+                prefix_ttl = _prefix_ttl(sending, gateway=self._gateway)
                 wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
                 full_wire = wire
                 if observation is not None:
@@ -1150,7 +1150,7 @@ class AnthropicAdapter(ProviderAdapter):
                     # send once more with the default lifetime, which this route keeps from now on.
                     # Later ordinary TTL/paused sends have their own ordinary baseline.
                     replacement = False
-                    _remember_ttl_rejection(sending.endpoint)
+                    _remember_ttl_rejection(sending.endpoint, gateway=self._gateway)
                     continue
                 else:
                     return
@@ -1357,7 +1357,9 @@ def wire_request(
 ) -> WireRequest:
     """The Messages request for already prepared ``messages``, as the adapter sends it."""
 
-    payload = build_messages_payload(request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request))
+    payload = build_messages_payload(
+        request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request, gateway=gateway)
+    )
     headers = auth_headers(request.endpoint, provider="anthropic", gateway=gateway)
     headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
     headers.update(hosted_pin(request, messages))
@@ -1469,10 +1471,10 @@ def cache_ttl_s(request: ModelRequest) -> float:
     default.
     """
 
-    return 3_600.0 if _prefix_ttl(request) == _PREFIX_TTL else 300.0
+    return 3_600.0 if _prefix_ttl(request, gateway=request.endpoint.via_hub) == _PREFIX_TTL else 300.0
 
 
-def _prefix_ttl(request: ModelRequest) -> str | None:
+def _prefix_ttl(request: ModelRequest, *, gateway: bool) -> str | None:
     """The static prefix's lifetime: an hour where the field is known to work, else the default (``None``).
 
     Known means a Claude model on the Anthropic vendor, read from the hop: the vendor id exactly, and a model id that
@@ -1485,16 +1487,18 @@ def _prefix_ttl(request: ModelRequest) -> str | None:
         or not (request.tools or request.system)
         or endpoint.provider != "anthropic"
         or not endpoint.model_id.startswith("claude-")
-        or _ttl_route(endpoint) in _TTL_REJECTED_ROUTES
+        or _ttl_route(endpoint, gateway=gateway) in _TTL_REJECTED_ROUTES
     ):
         return None
     return _PREFIX_TTL
 
 
-def _ttl_route(endpoint: ModelEndpoint) -> tuple[str, str | None, str, str]:
-    """The route a TTL rejection is remembered for. Every Vibey hop shares the one gateway URL, so the Source behind
-    it is part of the route: one relay's rejection never changes what another Source is sent."""
-    return (endpoint.base_url, endpoint.source_id, endpoint.provider, endpoint.model_id)
+def _ttl_route(endpoint: ModelEndpoint, *, gateway: bool) -> tuple[str, str | None, str | None, str, str]:
+    # Hub previews intentionally have no bound URL or token; both launches name the same Source/account.
+    # An unbound hop has no such identity. Keep the transport address there, as for a direct endpoint.
+    if gateway and endpoint.source_id and endpoint.source_identity:
+        return ("hub", endpoint.source_identity, endpoint.source_id, endpoint.provider, endpoint.model_id)
+    return ("url", endpoint.base_url, endpoint.source_id, endpoint.provider, endpoint.model_id)
 
 
 def _rejects_ttl(event: Any) -> bool:
@@ -1512,8 +1516,8 @@ def _rejects_ttl(event: Any) -> bool:
     )
 
 
-def _remember_ttl_rejection(endpoint: ModelEndpoint) -> None:
-    route = _ttl_route(endpoint)
+def _remember_ttl_rejection(endpoint: ModelEndpoint, *, gateway: bool) -> None:
+    route = _ttl_route(endpoint, gateway=gateway)
     if route in _TTL_REJECTED_ROUTES:
         return
     _TTL_REJECTED_ROUTES.add(route)

@@ -133,6 +133,8 @@ class ModelEndpoint:
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
     #: The models ``image_generate`` may call; None when the tool is off or no model is available.
     image_models: Optional[ImageModels] = None
+    #: A Model Hub launch (including a read-only description); its gateway URL is not a provider route identity.
+    via_hub: bool = False
 
 
 @dataclass(frozen=True)
