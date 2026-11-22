@@ -109,8 +109,11 @@ document.getElementById('show').addEventListener('load', () => {
 
         let mut app = tauri::Builder::default().build(tauri::generate_context!()).unwrap();
         let focus = std::env::var_os("AVIBE_SHOW_SHARE_PROBE_FOCUS").is_some();
-        if !focus {
+        let fullscreen = std::env::var_os("AVIBE_SHOW_CONTROLS_FULLSCREEN").is_some();
+        if !focus && !fullscreen {
             app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+        } else if fullscreen {
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
         let mut ready_rx = Some(ready_rx);
         app.run(move |app, event| {
@@ -161,6 +164,9 @@ document.getElementById('show').addEventListener('load', () => {
                 std::thread::sleep(Duration::from_millis(500));
                 steps(&window, &origin, focus);
                 title_bar(&window, &ready, action_rx);
+                if fullscreen {
+                    full_screen(&window);
+                }
                 released(&handle, &origin);
                 named(&handle, &origin);
                 println!("{}", json!({ "done": true }));
@@ -363,6 +369,21 @@ document.getElementById('show').addEventListener('load', () => {
             geometry,
             json!(geometry),
         );
+        let content = on_main(window, |webview, _, tx| {
+            use objc2_foundation::NSPoint;
+            let window = webview.window().unwrap();
+            let low = webview.convertPoint_toView(NSPoint::new(0.0, 0.0), None).y;
+            let high = webview
+                .convertPoint_toView(NSPoint::new(0.0, webview.bounds().size.height), None)
+                .y;
+            let layout = window.contentLayoutRect();
+            let _ = tx.send((low.max(high), layout.origin.y + layout.size.height));
+        });
+        check(
+            "webview-begins-at-the-native-content-boundary",
+            (content.0 - content.1).abs() < 0.5,
+            json!(content),
+        );
         for (index, expected) in [
             (1, crate::macos_show_titlebar::Action::Chat),
             (3, crate::macos_show_titlebar::Action::Browser),
@@ -500,6 +521,33 @@ document.getElementById('show').addEventListener('load', () => {
         );
     }
 
+    /// Opt-in: enters a real full-screen Space and returns to the window.
+    fn full_screen(window: &tauri::WebviewWindow) {
+        window.set_position(tauri::LogicalPosition::new(120.0, 120.0)).unwrap();
+        window.set_focus().unwrap();
+        window.set_fullscreen(true).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        check("show-enters-full-screen", window.is_fullscreen().unwrap(), json!(true));
+        window.set_fullscreen(false).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let restored = on_main(window, |webview, _, tx| {
+            use objc2_foundation::NSPoint;
+            let window = webview.window().unwrap();
+            let a = webview.convertPoint_toView(NSPoint::new(0.0, 0.0), None).y;
+            let b = webview
+                .convertPoint_toView(NSPoint::new(0.0, webview.bounds().size.height), None)
+                .y;
+            let layout = window.contentLayoutRect();
+            let _ =
+                tx.send(title_bar::controls(&window) && (a.max(b) - layout.origin.y - layout.size.height).abs() < 0.5);
+        });
+        check(
+            "full-screen-exit-restores-controls-and-content-boundary",
+            !window.is_fullscreen().unwrap() && restored,
+            json!(restored),
+        );
+    }
+
     /// What a closed window leaves behind, after `destroy`, as the shell
     /// retires a Show window: whether the window is still referenced, by how
     /// many, and how many of the title-bar views are still alive.
@@ -516,6 +564,12 @@ document.getElementById('show').addEventListener('load', () => {
         .incognito(true)
         .build()
         .unwrap();
+        if !titled {
+            let plain = on_main(&window, |webview, _, tx| {
+                let _ = tx.send(webview.window().unwrap().toolbar().is_none());
+            });
+            check("other-native-windows-do-not-acquire-a-toolbar", plain, json!(plain));
+        }
         if titled {
             crate::macos_show_titlebar::install(
                 &window,
@@ -711,15 +765,32 @@ document.getElementById('show').addEventListener('load', () => {
                 .iter()
                 .filter_map(|view| view.downcast::<NSButton>().ok())
                 .collect();
-            buttons.len() == 4
+            let height = window.frame().size.height - window.contentLayoutRect().size.height;
+            let middle = window.frame().size.height - height / 2.0;
+            let centered = |view: &NSView| {
+                let bounds = view.bounds();
+                let point = view.convertPoint_toView(
+                    objc2_foundation::NSPoint::new(bounds.size.width / 2.0, bounds.size.height / 2.0),
+                    None,
+                );
+                (point.y - middle).abs() <= 0.5
+            };
+            window.toolbarStyle() == objc2_app_kit::NSWindowToolbarStyle::UnifiedCompact
+                && window.toolbar().is_some()
+                && window
+                    .standardWindowButton(NSWindowButton::CloseButton)
+                    .is_some_and(|button| centered(&button))
+                && buttons.len() == 4
                 && buttons.iter().enumerate().all(|(index, button)| {
                     let frame = button.frame();
                     button.tag() == index as isize
                         && frame.size.width == 28.0
                         && frame.size.height == 28.0
                         && frame.origin.x == 4.0 + index as f64 * 32.0
+                        && centered(button)
                 })
                 && host.frame().size.width == 137.0
+                && host.frame().size.height == height
         }
 
         /// Capture this offscreen window's real system title-bar appearance, without pretending a

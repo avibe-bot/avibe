@@ -23,8 +23,9 @@ use objc2::{
 use objc2_app_kit::{
     NSAccessibility, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSButtonType, NSCellImagePosition, NSColor,
     NSEvent, NSFont, NSFontWeightMedium, NSImage, NSImageSymbolConfiguration, NSLayoutAttribute, NSLineBreakMode,
-    NSObjectNSKeyValueBindingCreation, NSTextField, NSTitlebarAccessoryViewController, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowTitleVisibility, NSWindowWillCloseNotification,
+    NSObjectNSKeyValueBindingCreation, NSTextField, NSTitlebarAccessoryViewController, NSToolbar, NSToolbarDisplayMode,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWindowToolbarStyle, NSWindowWillCloseNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
 
@@ -291,6 +292,14 @@ impl TitlebarButton {
 
 /// Install the four controls. Labels are localized by the caller; presses stay native.
 pub fn install_on(window: &NSWindow, mtm: MainThreadMarker, labels: &[String; 4], press: Box<dyn Fn(Action)>) -> bool {
+    // Use AppKit's compact title/toolbar row (40 pt on the current macOS).
+    // AppKit positions the traffic lights and owns the content boundary,
+    // including full-screen transitions; no controls are moved by hand.
+    window.setToolbarStyle(NSWindowToolbarStyle::UnifiedCompact);
+    let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &NSString::from_str("AvibeShowControls"));
+    toolbar.setDisplayMode(NSToolbarDisplayMode::IconOnly);
+    toolbar.setAllowsUserCustomization(false);
+    window.setToolbar(Some(&toolbar));
     let height = window.frame().size.height - window.contentLayoutRect().size.height;
     let host = Host::new(mtm, height, press);
     for (index, symbol_name) in SYMBOLS.iter().enumerate() {
@@ -336,6 +345,11 @@ pub fn install_on(window: &NSWindow, mtm: MainThreadMarker, labels: &[String; 4]
             *host.ivars().title.borrow_mut() = Some(Weak::from_retained(&title));
         }
     }
+    // Unlike the main Workbench's overlay, the Show WebView starts below the
+    // native row. Tauri/AppKit may have enabled a full-size content view.
+    let mut style = window.styleMask();
+    style.remove(NSWindowStyleMask::FullSizeContentView);
+    window.setStyleMask(style);
     // SAFETY: The host implements `windowWillClose:`; the center holds it
     // weakly, and it removes itself there. The window is only matched.
     unsafe {
