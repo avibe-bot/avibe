@@ -32,13 +32,24 @@ pub fn ask(
     });
 }
 
-pub fn install(app: &AppHandle, window: String, host: String, material: Material) {
+/// `still` is asked on the main thread, at this work's turn: a route queued
+/// for a session that has ended meanwhile is not installed.
+pub fn install(
+    app: &AppHandle,
+    window: String,
+    host: String,
+    material: Material,
+    still: impl Fn() -> bool + Send + 'static,
+) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(view) = handle.get_webview(&window) else {
             return;
         };
         with(&view, move |webview, main| {
+            if !still() {
+                return;
+            }
             let _ = webview_macos::install_route(
                 webview,
                 main,
@@ -52,7 +63,10 @@ pub fn install(app: &AppHandle, window: String, host: String, material: Material
 }
 
 /// Routing here is live: nothing is answered per window.
-pub fn answer(_: &AppHandle, _: String, _: Material) {}
+pub fn answer(_: &AppHandle, _: String, _: Material, _: impl Fn() -> bool + Send + 'static) {}
+
+/// Routing here is live: nothing is kept per window.
+pub fn forget_closed(_: impl Fn(&str) -> bool) {}
 
 /// Routing here is live: a window is created without arguments.
 pub fn arguments(_: &str, _: &Material) -> Option<String> {

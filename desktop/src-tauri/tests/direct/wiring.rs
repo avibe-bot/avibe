@@ -863,3 +863,84 @@ fn a_session_that_starts_later_routes_the_app_windows_already_open() {
         [retire(session, &["main-runtime-2", "show-3"])]
     );
 }
+
+/// A route or a challenge answer that was queued for a window is put on it
+/// only if the session still routes that window when its turn comes.
+#[test]
+fn work_queued_for_a_window_is_for_a_session_that_still_routes_it() {
+    let now = Instant::now();
+    let mut wiring = live();
+    let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+    // Not before the session's first answer: nothing is routed yet.
+    assert!(!wiring.routes(session, "main-runtime-1"));
+    assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE, None), []);
+    wiring.probed(session, true);
+    assert!(wiring.routes(session, "main-runtime-1") && wiring.routes(session, "show-1"));
+    assert!(!wiring.routes(session, "show-2") && !wiring.routes(session + 1, "show-1"));
+    // A window that closed is no longer routed, once the shell has looked.
+    assert_eq!(
+        wiring.reconcile(Some(&shown(ONE, "main-runtime-1")), |window| window != "show-1", now),
+        []
+    );
+    assert!(!wiring.routes(session, "show-1"));
+    // The session ended: whatever is still queued for its windows is dropped.
+    assert_eq!(
+        wiring.choose(ACCOUNT, ONE, Mode::Tunnel),
+        [retire(session, &["main-runtime-1"])]
+    );
+    assert!(!wiring.routes(session, "main-runtime-1"));
+
+    // The same where a route is given at creation: a window is routed from
+    // the moment it is registered, and no longer once its session ended.
+    let mut choices = Choices::unsaved();
+    choices.remember(ACCOUNT, ONE);
+    let mut wiring = Wiring::new(Routing::AtCreation, false, choices);
+    let session = wiring.open(target(ONE), material(4100), None, now);
+    assert!(!wiring.routes(session, "main-runtime-2"));
+    wiring.window_created(session, "main-runtime-2");
+    assert!(wiring.routes(session, "main-runtime-2"));
+    wiring.listener_ended(session, now);
+    assert!(!wiring.routes(session, "main-runtime-2"));
+}
+
+/// A session that the system's proxy settings have just ruled out still
+/// exists until the shell's next look. A window made in that moment does
+/// not join it, so it never gets a route that the look would take off; it
+/// is remembered, and the session that starts once the settings allow it
+/// takes it along.
+#[test]
+fn a_window_does_not_join_a_session_that_is_about_to_end() {
+    let now = Instant::now();
+    let published = shown(ONE, "main-runtime-1");
+    let mut wiring = live();
+    let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+    wiring.probed(session, true);
+    // The settings are read when the window is about to be made.
+    wiring.system_proxy(true);
+    assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE, None), []);
+    assert!(!wiring.routes(session, "show-1"));
+    // The look ends the session; only the instance view had a route.
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, now),
+        [retire(session, &["main-runtime-1"])]
+    );
+    // The settings clear: a new session, and the window with it.
+    wiring.system_proxy(false);
+    assert_eq!(
+        wiring.reconcile(Some(&published), |_| true, now),
+        [open("main-runtime-1")]
+    );
+    let next = wiring.open(target(ONE), material(4200), Some("main-runtime-1"), now);
+    assert_eq!(
+        wiring.probed(next, true),
+        [install(next, "main-runtime-1"), install(next, "show-1")]
+    );
+
+    // The same for a choice that is about to end the session's instance:
+    // choosing ends it at once, so there is nothing left to join.
+    assert_eq!(
+        wiring.choose(ACCOUNT, ONE, Mode::Tunnel),
+        [retire(next, &["main-runtime-1", "show-1"])]
+    );
+    assert_eq!(wiring.app_window_created("show-2", ACCOUNT, ONE, None), []);
+}

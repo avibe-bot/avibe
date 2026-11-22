@@ -238,22 +238,36 @@ async fn look(app: &AppHandle, state: &Arc<Direct>) {
     for effect in effects {
         perform(app, state, effect).await;
     }
+    // What was kept for a window that has closed went with it.
+    native::forget_closed(|window| app.get_webview(window).is_some());
     refresh_menu(app, state);
 }
 
 /// Routes one window. It only hands the work to the main thread, in order,
 /// so a window routed here is routed before anything asked of it later.
+///
+/// The session may end between this call and the main thread's turn. Taking
+/// a session's route off is main-thread work too, queued when the session
+/// ends, so the work handed over here asks `still` there, at its turn: if
+/// the session has ended it does nothing, and if it has not, the taking-off
+/// that may follow is queued behind it.
 fn route_window(app: &AppHandle, state: &Arc<Direct>, effect: Effect) -> Option<Effect> {
+    let still = |session: u64, window: &str| {
+        let (state, window) = (state.clone(), window.to_owned());
+        move || lock(&state.wiring).routes(session, &window)
+    };
     match effect {
         Effect::Install { session, window } => {
             if let Some((host, material)) = route(state, session) {
-                native::install(app, window, host, material);
+                let still = still(session, &window);
+                native::install(app, window, host, material, still);
             }
             None
         }
         Effect::Answer { session, window } => {
             if let Some((_, material)) = route(state, session) {
-                native::answer(app, window, material);
+                let still = still(session, &window);
+                native::answer(app, window, material, still);
             }
             None
         }
