@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
+import { routeableCatalogModelIds } from '../components/settings/models/backendCatalogIds';
 import type { EffortMenu, PickerAgentCatalog } from '../components/settings/models/types';
 import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
