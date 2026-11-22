@@ -55,6 +55,30 @@ enum WebKitReadiness {
             + afterWebContentLaunch.requestMilliseconds
     ) + .seconds(5)
 
+    /// The App's own clock, with account transports whose control-plane page
+    /// may take a web content launch's time on the CI simulator
+    /// (`afterWebContentLaunch`): the timing an App fixture passes so that a
+    /// slow launch is not the App's readiness timeout. A fixture that passes
+    /// it bounds its waits on that App with `launchedTransportOperation`.
+    /// It rides on the App's existing timing injection (#3973).
+    @MainActor
+    final class LaunchTolerantTiming: RuntimeOpenTiming {
+        private let clock = ContinuousRuntimeOpenTiming()
+
+        var now: Duration { clock.now }
+
+        var accountTransportDeadlines: MobileAuthTransportDeadlines {
+            WebKitReadiness.afterWebContentLaunch
+        }
+
+        func schedule(
+            after delay: Duration,
+            _ action: @escaping @MainActor () -> Void
+        ) -> any RuntimeOpenTimer {
+            clock.schedule(after: delay, action)
+        }
+    }
+
     /// `launchedTransportOperation` for `XCTestCase.fulfillment(of:timeout:)`.
     static var launchedTransportOperationSeconds: TimeInterval {
         let components = launchedTransportOperation.components
