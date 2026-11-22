@@ -1,5 +1,5 @@
-//! Explicit mail send after a hosted proof challenge. No bridge command, no
-//! credential publication, and no path from this phase directly to an arm.
+//! An explicit mail action follows a qualified hosted proof challenge. Its
+//! issuer result cannot publish a credential or arm the machine.
 mod factor;
 mod submission;
 use super::super::claim_binding::BindingId;

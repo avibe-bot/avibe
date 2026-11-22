@@ -981,7 +981,24 @@ async fn check_cut(cut: &'static str) {
         assert_eq!(hosted.grants.load(Ordering::SeqCst), 0);
         return;
     }
-    let confirm = |receipt| c.confirm_claim(&caller, generation, receipt, revision);
+    let host = output::host();
+    let dispatch = |action| {
+        c.claim_review(
+            &host,
+            &caller,
+            "en",
+            ClaimRequest {
+                expected_generation: generation,
+                action,
+            },
+        )
+    };
+    let confirm = |r: Uuid| {
+        dispatch(ClaimAction::Confirm {
+            receipt: r.to_string(),
+            revision: revision.to_string(),
+        })
+    };
     assert!(confirm(receipt).await.is_err()); // generated but not released
     assert!(read_reply.deliver().unwrap().is_some());
     assert!(confirm(Uuid::new_v4()).await.is_err());
@@ -1024,12 +1041,15 @@ async fn check_cut(cut: &'static str) {
     }
     reply.send(()).unwrap();
     if hosted.require_proof {
-        let DecisionOutcome::ProofOffered(pending_offer) = decision.await.unwrap() else {
-            panic!("a proof refusal armed the helper");
-        };
+        let pending_offer = decision.await.unwrap();
         assert!(caller.monitoring());
         peer.assert_unarmed();
-        let send = |id| c.send_proof_code(&caller, generation, receipt, id);
+        let send = |id: Uuid| {
+            dispatch(ClaimAction::SendProofCode {
+                receipt: receipt.to_string(),
+                offer: id.to_string(),
+            })
+        };
         assert!(send(revision).await.is_err());
         assert!(confirm(receipt).await.is_err());
         assert!(hosted.config.lock().unwrap().is_some());
@@ -1073,7 +1093,12 @@ async fn check_cut(cut: &'static str) {
             assert!(hosted.config.lock().unwrap().is_some() && hosted.mails.load(Ordering::SeqCst) == 0);
             return;
         }
-        let offer = pending_offer.deliver().unwrap();
+        let offered = pending_offer.deliver().unwrap().unwrap();
+        let offer = opaque(offered["offer"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            offered,
+            json!({"state":"confirmation_required", "offer":offer.to_string()})
+        );
         assert_ne!(offer, revision);
         assert!(hosted.config.lock().unwrap().is_some() && hosted.mails.load(Ordering::SeqCst) == 0);
         if cut == "proof_offer_refreshed" {
@@ -1150,7 +1175,12 @@ async fn check_cut(cut: &'static str) {
                 assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
                 return;
             }
-            let delivery = mail.deliver().unwrap();
+            let accepted = mail.deliver().unwrap().unwrap();
+            let delivery = opaque(accepted["delivery"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                accepted,
+                json!({"state":"mail_accepted", "delivery":delivery.to_string()})
+            );
             assert_ne!(delivery, offer);
             assert!(send(offer).await.is_err());
             assert!(send(delivery).await.is_err());
@@ -1292,21 +1322,19 @@ async fn check_cut(cut: &'static str) {
         return;
     }
     if cut.starts_with("grant_denied_") {
-        let DecisionOutcome::Terminal(pending) = decision.await.unwrap() else {
-            panic!("hosted refusal became an offer")
-        };
+        let pending = decision.await.unwrap();
         assert!(peer.arm().await.is_err());
         assert!(caller.monitoring());
         if cut == "grant_denied_replaced" {
             caller.retire();
             let next = c.claim_document(generation).unwrap();
             let successor = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
-            assert_eq!(pending.deliver(&c).unwrap_err().code, "stale_generation");
+            assert_eq!(pending.deliver().unwrap_err().code, "stale_generation");
             assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
             drop(next);
         } else {
             assert_eq!(
-                pending.deliver(&c).unwrap_err().code,
+                pending.deliver().unwrap_err().code,
                 "paired_installation_loopback_required"
             );
         }
@@ -1322,22 +1350,20 @@ async fn check_cut(cut: &'static str) {
     }
     if cut.starts_with("decline_") {
         peer.finish.send(Ok(MachineOutcome::Declined)).ok().unwrap();
-        let DecisionOutcome::Terminal(pending) = decision.await.unwrap() else {
-            panic!("decline became an offer")
-        };
+        let pending = decision.await.unwrap();
         assert!(caller.monitoring());
         if cut == "decline_replaced" {
             caller.retire();
             let next = c.claim_document(generation).unwrap();
             let successor = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
-            assert_eq!(pending.deliver(&c).unwrap_err().code, "stale_generation");
+            assert_eq!(pending.deliver().unwrap_err().code, "stale_generation");
             assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
             drop(next);
         } else if cut == "decline_changed_jar" {
             replace_credential();
-            assert_eq!(pending.deliver(&c).unwrap_err().code, "stale_generation");
+            assert_eq!(pending.deliver().unwrap_err().code, "stale_generation");
         } else {
-            assert!(!pending.deliver(&c).unwrap());
+            assert_eq!(pending.deliver().unwrap().unwrap(), json!({"state":"declined"}));
         }
         assert_eq!(hosted.owner_reads.load(Ordering::SeqCst), 0);
         assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
@@ -1365,9 +1391,7 @@ async fn check_cut(cut: &'static str) {
         if cut == "publication_read_changed" {
             assert_eq!(outcome.err().unwrap().code, "stale_generation");
         } else {
-            let DecisionOutcome::Terminal(pending) = outcome.unwrap() else {
-                panic!("unexpected proof")
-            };
+            let pending = outcome.unwrap();
             if cut == "publication_error_replaced" {
                 caller.retire();
             }
@@ -1376,7 +1400,7 @@ async fn check_cut(cut: &'static str) {
                 "publication_offline" => "account_observation_unavailable",
                 _ => "binding_owner_unconfirmed",
             };
-            assert_eq!(pending.deliver(&c).unwrap_err().code, expected);
+            assert_eq!(pending.deliver().unwrap_err().code, expected);
         }
         assert!(nonce.await.is_err()); // not even a readback dispatched on ineligible account evidence
         assert_eq!(hosted.owner_reads.load(Ordering::SeqCst), 1);
@@ -1401,9 +1425,7 @@ async fn check_cut(cut: &'static str) {
         if matches!(cut, "publication_cancel" | "publication_changed_jar") {
             assert!(result.is_err());
         } else {
-            let DecisionOutcome::Terminal(reply) = result.unwrap() else {
-                panic!("not the original publication")
-            };
+            let reply = result.unwrap();
             if cut == "delivery_expired" {
                 tokio::time::advance(Duration::from_secs(41)).await;
                 assert!(!caller.monitoring()); // even retaining the reply cannot keep an expired claim active
@@ -1412,7 +1434,7 @@ async fn check_cut(cut: &'static str) {
                 caller.retire();
                 let next = c.claim_document(generation).unwrap();
                 let next_receipt = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
-                assert!(reply.deliver(&c).is_err());
+                assert!(reply.deliver().is_err());
                 assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, next_receipt);
                 drop(next);
                 return;
@@ -1427,9 +1449,9 @@ async fn check_cut(cut: &'static str) {
                 drop(reply);
             } else {
                 if cut == "complete" {
-                    assert!(reply.deliver(&c).unwrap());
+                    assert_eq!(reply.deliver().unwrap().unwrap(), json!({"state":"bound"}));
                 } else {
-                    assert!(reply.deliver(&c).is_err());
+                    assert!(reply.deliver().is_err());
                 }
             }
         }

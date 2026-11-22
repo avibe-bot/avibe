@@ -59,6 +59,8 @@ pub enum ClaimAction {
     Open {},
     Read { receipt: String },
     Check { revision: String, prefix: String },
+    Confirm { receipt: String, revision: String },
+    SendProofCode { receipt: String, offer: String },
     Cancel { receipt: String },
 }
 impl ClaimAction {
@@ -311,6 +313,8 @@ pub struct ClaimReply<'a> {
     caller: ClaimCaller,
 }
 enum ReplyBody<'a> {
+    Decision(&'a Coordinator, Box<decision::DecisionOutcome<'a>>),
+    Mail(Box<proof::PendingMail<'a>>),
     // Even a sanitized rejection can disclose account or ticket state. Keep the
     // original read receipt (not the machine) revocable through shell delivery.
     ReadFailed(ClientError, Borrow<'a>),
@@ -324,7 +328,27 @@ impl ClaimReply<'_> {
     pub fn deliver(self) -> Result<Option<Value>> {
         // Never wait on an account transaction while the shell holds its document lock.
         // Read the current account before taking the claim lock (the writer's lock order).
-        let current = match &self.body {
+        // These owners revalidate the receipt, account, credential and document
+        // themselves. Never hold the claim mutex across their final check or Drop.
+        let body = match self.body {
+            ReplyBody::Decision(c, decision) => {
+                return Ok(Some(match *decision {
+                    decision::DecisionOutcome::Terminal(reply) => {
+                        json!({"state": if reply.deliver(c)? { "bound" } else { "declined" }})
+                    }
+                    decision::DecisionOutcome::ProofOffered(reply) => {
+                        json!({"state":"confirmation_required", "offer":reply.deliver()?.to_string()})
+                    }
+                }))
+            }
+            ReplyBody::Mail(mail) => {
+                return Ok(Some(
+                    json!({"state":"mail_accepted", "delivery":mail.deliver()?.to_string()}),
+                ))
+            }
+            body => body,
+        };
+        let current = match &body {
             ReplyBody::Conflict(_, _, inner) => Some(inner.upgrade().ok_or_else(stale)?),
             _ => None,
         };
@@ -337,7 +361,7 @@ impl ClaimReply<'_> {
         self.caller.check()?;
         owner.expire();
         self.caller.check()?;
-        match self.body {
+        match body {
             ReplyBody::Reserved(receipt)
                 if owner
                     .active
@@ -452,8 +476,8 @@ impl Coordinator {
             caller: caller.clone(),
         })
     }
-    /// A private direct reply, never `ClientState` or a broadcast. No grant, OTP,
-    /// reset or publication action is exposed by this non-granting boundary.
+    /// Private direct replies, never `ClientState` or broadcast events. Neither
+    /// a proof offer nor mail acceptance is a confirmation, grant or retry.
     pub async fn claim_review(
         &self,
         host: &RuntimeHost,
@@ -469,6 +493,26 @@ impl Coordinator {
         caller.check()?;
         match &r.action {
             ClaimAction::Open {} => return self.reserve_claim(caller, epoch),
+            ClaimAction::Confirm { receipt, revision } => {
+                let decision = self
+                    .confirm_claim(caller, r.expected_generation, opaque(receipt)?, opaque(revision)?)
+                    .await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Decision(self, Box::new(decision)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
+            ClaimAction::SendProofCode { receipt, offer } => {
+                let mail = self
+                    .send_proof_code(caller, r.expected_generation, opaque(receipt)?, opaque(offer)?)
+                    .await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Mail(Box::new(mail)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
             ClaimAction::Cancel { receipt } => {
                 // Before operation/inner/credential locks. The receipt stays valid for
                 // cancellation while a first read, edit, or its direct reply is in flight.

@@ -17,6 +17,14 @@ impl RuntimeLauncher for NoPlatform {
     }
 }
 
+pub(super) fn host() -> RuntimeHost {
+    RuntimeHost::new(
+        Arc::new(NoPlatform),
+        Arc::new(NoPlatform),
+        RuntimeHostSettings::default(),
+    )
+}
+
 #[tokio::test]
 async fn a_hosted_check_refusal_is_private_until_delivered_to_its_original_document() {
     for cut in [
@@ -39,11 +47,7 @@ pub(super) async fn check(
     revision: Uuid,
     cut: &str,
 ) {
-    let host = RuntimeHost::new(
-        Arc::new(NoPlatform),
-        Arc::new(NoPlatform),
-        RuntimeHostSettings::default(),
-    );
+    let host = host();
     let pending = c
         .claim_review(
             &host,

@@ -103,6 +103,8 @@ fn the_direct_review_command_has_separate_receipt_and_decision_inputs() {
         json!({"type":"read","receipt":"opaque"}),
         json!({"type":"cancel","receipt":"opaque"}),
         json!({"type":"check","revision":"opaque","prefix":"fixture"}),
+        json!({"type":"confirm","receipt":"x","revision":"y"}),
+        json!({"type":"send_proof_code","receipt":"x","offer":"y"}),
     ] {
         assert!(serde_json::from_value::<ClaimRequest>(body(action)).is_ok());
     }
@@ -113,7 +115,9 @@ fn the_direct_review_command_has_separate_receipt_and_decision_inputs() {
         body(json!({"type":"check","receipt":"x","prefix":"fixture"})),
         body(json!({"type":"check","revision":"x","prefix":"fixture","existing_instance_id":"other"})),
         body(json!({"type":"grant"})),
-        body(json!({"type":"confirm","receipt":"x","revision":"y"})),
+        body(json!({"type":"confirm","receipt":"x","revision":"y","hostname":"another"})),
+        body(json!({"type":"send_proof_code","receipt":"x","offer":"y","email":"other@example.test"})),
+        body(json!({"type":"send_proof_code","receipt":"x","revision":"y"})),
         body(json!({"type":"send_claim_code","revision":"y"})),
         body(json!({"type":"cancel","revision":"x"})),
         body(json!({"type":"cancel","receipt":"x","account":"other"})),

@@ -1160,10 +1160,10 @@ pub(crate) async fn desktop_claim_review(
     let reply = client
         .coordinator
         .claim_review(&shell.host, &caller, &locale, request)
-        .await?;
+        .await;
     // Open has now reserved native state (no helper or HTTP). Arm monitoring
     // before handing off the receipt, even if the renderer never receives it.
-    if opened {
+    if opened && reply.is_ok() {
         watch_claim_visibility(physical.clone(), caller.clone());
     }
     // This read cannot carry a reply through a replacement or into a hidden window.
@@ -1198,7 +1198,9 @@ pub(crate) async fn desktop_claim_review(
         caller.retire();
         return Err(deny());
     }
-    reply.deliver()
+    // Only an admitted, qualified private reply can carry account-specific
+    // errors or retry information. Admission failures carry no such facts.
+    reply.map_err(|_| deny())?.deliver()
 }
 // Native close/replacement/reload revoke synchronously. OS-level Hide/Minimize need
 // not generate a Tauri visibility event on either desktop. While this one attempt
