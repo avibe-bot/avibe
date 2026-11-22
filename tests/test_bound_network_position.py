@@ -45,8 +45,52 @@ def _payload(device):
     }
 
 
+@pytest.fixture
+def serving_ui_writer():
+    # Exercise the real publication transaction without opening any listener.
+    with cutover.listener_publications():
+        yield
+
+
+@pytest.mark.parametrize('already_bound', [False, True], ids=['first-bind', 'replacement'])
+def test_cli_publication_waits_for_listener_policy_without_erasing_grants(monkeypatch, tmp_path, already_bound):
+    import os
+
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, 'https://desk.example.test')
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.10')
+    config = _unbound()
+    if already_bound:
+        _bind(config).save()
+        with cutover.listener_publications():
+            cutover.reconcile_startup(config)
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        anon = push.upsert_subscription(conn, user_key='local', payload=_payload('anon'))
+        signed = push.upsert_subscription(conn, user_key='remote:member', payload=_payload('member'))
+    assert cutover.may_dispatch(engine, anon)
+    # The independent config writer has no serving sockets and neither declaration.
+    child_env = {k: v for k, v in os.environ.items() if k not in (ui_server.TRUSTED_PROXY_IPS_ENV, ui_server.TRUSTED_PUBLIC_ORIGINS_ENV)}
+    subprocess.run([sys.executable, '-c', 'from vibe.api import save_config; save_config({"remote_access":{"vibe_cloud":{"instance_id":"replacement","instance_secret":"fixture"}}})'],
+                   env=child_env, check=True, timeout=15)
+    assert not cutover.may_dispatch(engine, anon)
+    assert cutover.may_dispatch(engine, signed)
+    with engine.connect() as conn:
+        assert push.get_enabled_by_endpoint(conn, endpoint=anon['endpoint'], user_key='local')['id'] == anon['id']
+    cutover.reconcile_startup(V2Config.load())  # Another non-listener cannot release the pause either.
+    assert not cutover.may_dispatch(engine, anon)
+    with cutover.listener_publications():
+        cutover.reconcile_startup(V2Config.load())
+    # A sender with no declarations follows the committed listener receipt, not its environment.
+    monkeypatch.delenv(ui_server.TRUSTED_PROXY_IPS_ENV)
+    monkeypatch.delenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV)
+    assert cutover.may_dispatch(engine, anon)
+    assert cutover.may_dispatch(engine, signed)
+
+
 @pytest.mark.parametrize("first_start", [True, False], ids=["persisted-upgrade", "publish"])
-def test_retirement_and_opt_out(monkeypatch, tmp_path, first_start):
+def test_retirement_and_opt_out(monkeypatch, tmp_path, first_start, serving_ui_writer):
     from vibe import api
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -165,7 +209,158 @@ def test_registration_admitted_before_publish_is_fenced_at_write(monkeypatch, tm
         assert push.get_by_endpoint(conn, endpoint=_payload("late")["endpoint"]) is None
 
 
-def test_host_push_grant_survives_remote_off_and_cookie_rotation(monkeypatch, tmp_path):
+@pytest.mark.parametrize('change', ['settings', 'file', 'listener-environment', 'remote-on'])
+def test_bound_proxy_withdrawal_retires_mixed_grants_not_signed_or_opt_out(monkeypatch, tmp_path, serving_ui_writer, change):
+    from vibe import api
+
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    saved = 'https://desk.example.test'
+    remaining = 'https://remaining.example.test'
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.0/24,127.0.0.1')
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, remaining)
+    config = _bind(_unbound())
+    config.ui.trusted_public_origins = [saved]
+    config.save()
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        rows = {key: push.upsert_subscription(conn, user_key='remote:member' if key == 'signed' else 'local',
+                     payload=_payload(key), device_id=key) for key in ('host', 'proxy', 'off', 'signed')}
+        push.disable_subscription(conn, endpoint=rows['off']['endpoint'], user_key='local')
+    cutover.reconcile_startup(config)
+    assert cutover.may_dispatch(engine, rows['host']) and cutover.may_dispatch(engine, rows['proxy'])
+    if change == 'settings':
+        # Removal at save, not at the next timer or process start.
+        api.save_config({'ui': {'trusted_public_origins': []}})
+    elif change == 'file':
+        config.ui.trusted_public_origins = []
+        config.save()
+        assert not cutover.may_dispatch(engine, rows['host'])
+        with engine.connect() as conn:
+            assert push.get_enabled_by_endpoint(conn, endpoint=rows['host']['endpoint'], user_key='local')
+        cutover.reconcile_startup(config)
+    elif change == 'listener-environment':
+        monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.10')
+        assert cutover.may_dispatch(engine, rows['host'])  # The sender cannot attest an env change.
+        cutover.reconcile_startup(config)
+    else:
+        api.save_config({'remote_access': {'vibe_cloud': {'enabled': True}}})
+    for key in ('host', 'proxy'):
+        assert not cutover.may_dispatch(engine, rows[key])
+    assert cutover.may_dispatch(engine, rows['signed'])
+    with engine.connect() as conn:
+        assert all(push.is_binding_retired(conn, rows[k]['endpoint']) for k in ('host', 'proxy'))
+        assert not push.is_binding_retired(conn, rows['off']['endpoint'])
+        assert push.get_enabled_by_endpoint(conn, endpoint=rows['signed']['endpoint'], user_key='remote:member')
+    # Expanding the declaration never undoes the cutover. A remaining proxy
+    # can explicitly grant again, but cannot consume the host's prompt-free repair.
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.0/24,127.0.0.1')
+    api.save_config({'ui': {'trusted_public_origins': [saved]}})
+    cutover.reconcile_startup(V2Config.load())
+    client = ui_server.app.test_client()
+    headers = csrf_headers(client, HOST)
+
+    def enroll(key, *, via_proxy=False, **flags):
+        request_headers = dict(headers)
+        peer = '127.0.0.1'
+        if via_proxy:
+            peer = '192.0.2.10'
+            request_headers.update({'Origin': remaining, 'X-Forwarded-Host': 'remaining.example.test', 'X-Forwarded-Proto': 'https'})
+        response = client.post('/api/web-push/subscriptions', base_url=HOST, headers=request_headers,
+                               environ_base={'REMOTE_ADDR': peer}, json={'subscription': _payload(key), 'device_id': key, **flags})
+        assert response.status_code == 200, response.get_json()
+        return response.get_json()
+
+    assert not enroll('proxy', via_proxy=True, binding_repair=True)['accepted']
+    assert not enroll('off', binding_repair=True)['accepted']
+    assert not enroll('proxy', via_proxy=True)['accepted']
+    host = enroll('host', binding_repair=True)['subscription']
+    new_proxy = enroll('proxy', via_proxy=True, explicit_enable=True)['subscription']
+    for old, fresh in [(rows['host'], host), (rows['proxy'], new_proxy)]:
+        assert old['id'] != fresh['id'] and not cutover.may_dispatch(engine, old)
+        assert cutover.may_dispatch(engine, fresh)
+
+
+def test_listener_started_without_config_picks_up_later_binding_and_retries(monkeypatch, tmp_path):
+    import threading
+
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.10')
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, 'https://desk.example.test')
+    assert 0 < cutover._POLICY_CHECK_INTERVAL <= 1
+    monkeypatch.setattr(cutover, '_POLICY_CHECK_INTERVAL', 0.05)
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as conn:
+        anon = push.upsert_subscription(conn, user_key='local', payload=_payload('anon'))
+    attempted, committed = threading.Event(), threading.Event()
+    original = cutover.reconcile_startup
+
+    def one_transient_failure(config):
+        if binding_state(config) is BindingState.BOUND and not attempted.is_set():
+            attempted.set()
+            raise RuntimeError('test: temporary storage failure')
+        original(config)
+        if attempted.is_set() and cutover.may_dispatch(engine, anon):
+            committed.set()
+
+    monkeypatch.setattr(cutover, 'reconcile_startup', one_transient_failure)
+    # Only the production checker runs here; no sockets, sender or UI service.
+    with cutover.serving_listener():
+        _bind(_unbound()).save()
+        assert attempted.wait(5) and committed.wait(5)
+    assert cutover.may_dispatch(engine, anon)
+
+
+@pytest.mark.parametrize('unreadable', ['not-json', 'null', '{"version": 99}'])
+def test_only_listener_recovers_unreadable_receipt_by_retiring_mixed_grants(monkeypatch, tmp_path, unreadable):
+    from sqlalchemy import update
+    from storage.models import state_meta
+    from vibe import api
+
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.10')
+    monkeypatch.delenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, raising=False)
+    config = _bind(_unbound())
+    config.ui.trusted_public_origins = ['https://work.example.test']
+    config.save()
+    engine = get_cached_sqlite_engine()
+    with cutover.listener_publications():
+        cutover.reconcile_startup(config)
+    with engine.begin() as conn:
+        anon = push.upsert_subscription(conn, user_key='local', payload=_payload('anon'))
+        off = push.upsert_subscription(conn, user_key='local', payload=_payload('off'))
+        push.disable_subscription(conn, user_key='local', endpoint=off['endpoint'])
+        signed = push.upsert_subscription(conn, user_key='remote:member', payload=_payload('signed'))
+        conn.execute(update(state_meta).where(state_meta.c.key == 'web_push.local_binding.v1').values(value_json=unreadable))
+    # The sender and a config-only publisher leave the unreadable history alone.
+    config = api.save_config({'ui': {'trusted_public_origins': ['https://desk.example.test']}})
+    cutover.reconcile_startup(config)
+    assert not cutover.may_dispatch(engine, anon) and cutover.may_dispatch(engine, signed)
+    with engine.connect() as conn:
+        assert push.get_enabled_by_endpoint(conn, endpoint=anon['endpoint'], user_key='local')
+        assert not cutover.receipt_current(conn, config)
+
+    # Even with a complete active proxy declaration, the listener cannot infer
+    # where the old rows came from. Publish a current receipt and retire in one commit.
+    with cutover.serving_listener():
+        with engine.connect() as conn:
+            assert cutover.receipt_current(conn, config)
+            assert push.is_binding_retired(conn, anon['endpoint'])
+            assert not push.is_binding_retired(conn, off['endpoint'])
+            assert not push.get_enabled_by_endpoint(conn, endpoint=off['endpoint'], user_key='local')
+            assert push.get_enabled_by_endpoint(conn, endpoint=signed['endpoint'], user_key='remote:member')
+        client = ui_server.app.test_client()
+        response = client.post('/api/web-push/subscriptions', base_url=HOST, headers=csrf_headers(client, HOST),
+                               json={'subscription': _payload('anon'), 'binding_repair': True})
+        assert response.status_code == 200 and response.get_json()['accepted']
+        fresh = response.get_json()['subscription']
+        cutover.reconcile_startup(config)
+    assert fresh['id'] != anon['id'] and cutover.may_dispatch(engine, fresh)
+    assert not cutover.may_dispatch(engine, anon) and cutover.may_dispatch(engine, signed)
+
+
+def test_host_push_grant_survives_remote_off_and_cookie_rotation(monkeypatch, tmp_path, serving_ui_writer):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _bind(_unbound())
     config.remote_access.vibe_cloud.enabled = True
@@ -203,7 +398,7 @@ def test_host_push_grant_survives_remote_off_and_cookie_rotation(monkeypatch, tm
     assert not cutover.may_dispatch(engine, host)
 
 
-def test_published_file_with_rolled_back_receipt_blocks_delivery_until_reconciled(monkeypatch, tmp_path):
+def test_published_file_with_rolled_back_receipt_blocks_delivery_until_reconciled(monkeypatch, tmp_path, serving_ui_writer):
     from config.v2_config import config_file_lock
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -213,7 +408,11 @@ def test_published_file_with_rolled_back_receipt_blocks_delivery_until_reconcile
     with engine.begin() as conn:
         stale = push.upsert_subscription(conn, user_key="local", payload=_payload("browser"))
     after = _bind(V2Config.load())
-    with pytest.raises(RuntimeError, match="interrupted"), config_file_lock(), cutover.publishing(before, after):
+    with pytest.raises(RuntimeError, match="before replace"), config_file_lock(), cutover.publishing(before, after):
+        raise RuntimeError("interrupted before replace")
+    assert binding_state(V2Config.load()) is BindingState.UNBOUND
+    assert cutover.may_dispatch(engine, stale)
+    with pytest.raises(RuntimeError, match="after atomic replace"), config_file_lock(), cutover.publishing(before, after):
         after.save()
         raise RuntimeError("interrupted after atomic replace")
     # Rollback really left an enabled row. A queued preview must not send it.
@@ -234,7 +433,7 @@ def test_published_file_with_rolled_back_receipt_blocks_delivery_until_reconcile
     assert not cutover.may_dispatch(engine, stale)
 
 
-def test_rotated_foreground_grant_cannot_consume_an_opt_out_or_signed_endpoint(monkeypatch, tmp_path):
+def test_rotated_foreground_grant_cannot_consume_an_opt_out_or_signed_endpoint(monkeypatch, tmp_path, serving_ui_writer):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _unbound()
     ensure_sqlite_state()
@@ -275,6 +474,45 @@ def test_rotated_foreground_grant_cannot_consume_an_opt_out_or_signed_endpoint(m
         assert push.get_enabled_by_endpoint(conn, endpoint=_payload("member")["endpoint"], user_key="remote:member")
 
 
+def test_declared_ingress_uses_the_same_transport_policy_for_http_and_websocket(monkeypatch, tmp_path):
+    from starlette.requests import HTTPConnection
+
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.0/28,2001:db8::10,127.0.0.1')
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, 'https://work.example.test:8443')
+    config = _bind(_unbound())
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    config.ui.trusted_public_origins = [cloud.public_url, 'https://old-app.avibe.bot']
+    config.save()
+
+    def decisions(current, *, peer='192.0.2.10', host='localhost', origin_host='work.example.test:8443', direct=False):
+        # Exercise both consumers' peer/authority extraction, not two calls to
+        # the shared predicate. These scopes never open a connection or run a route.
+        headers = {'host': host, 'x-forwarded-host': origin_host, 'x-forwarded-proto': 'https'}
+        with ui_server.app.test_request_context('/', base_url='http://' + host, headers=headers) as req:
+            scope = req._request.scope
+            scope['client'] = (peer, 1234) if peer is not None else None
+            if direct:
+                scope[ui_server.DIRECT_INGRESS_SCOPE_KEY] = {}
+            ws = HTTPConnection({**scope, 'type': 'websocket'})
+            return (ui_server._trusted_public_origin_local_request(current),
+                    ui_server._websocket_trusted_public_origin_local_request(ws, current))
+
+    for peer in ('192.0.2.10', '192.0.2.11', '2001:db8::10'):
+        assert decisions(config, peer=peer) == (True, True)
+    for facts in ({'peer': None}, {'peer': '192.0.2.16'}, {'peer': '127.0.0.1'}, {'peer': '::ffff:127.0.0.1'},
+                  {'peer': '::ffff:127.0.0.1', 'host': 'fixture.example.test'},
+                  {'direct': True}, {'host': 'fixture.example.test'}, {'origin_host': 'fixture.example.test'},
+                  {'origin_host': 'old-app.avibe.bot'}, {'origin_host': 'work.example.test'}, {'origin_host': config.ui.setup_host}):
+        assert decisions(config, **facts) == (False, False), facts
+    assert decisions(None) == (False, False)
+    # The very same declarations remain on disk; lack of binding evidence is not permission.
+    (paths.get_state_dir() / 'remote-binding-reset.json').write_text('{}')
+    assert decisions(config) == (False, False)
+    assert ui_server._owner_proxy_fields() == {}
+
+
 def test_declared_origin_navigation_shares_private_notice_without_granting_access(monkeypatch, tmp_path):
     from starlette.testclient import TestClient
     from starlette.websockets import WebSocketDisconnect
@@ -282,6 +520,9 @@ def test_declared_origin_navigation_shares_private_notice_without_granting_acces
     monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
     config = _bind(_unbound())
     origin = 'https://home.example.test:9443'
+    # When remote access is enabled, the listener's loopback connector is
+    # ineligible even if its network and the custom origin were declared.
+    config.remote_access.vibe_cloud.enabled = True
     config.ui.trusted_public_origins = [origin]
     config.save()
     client = ui_server.app.test_client()
@@ -430,7 +671,7 @@ def test_missing_partial_reset_block_position(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('publication', ['binding', 'settings-save'])
+@pytest.mark.parametrize('publication', ['binding', 'settings-save', 'proxy-withdrawal'])
 async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path, publication):
     # Real persisted config and actual ASGI middleware. Only the consumers are
     # stand-ins: no PTY, Vite server, network sockets or user's processes.
@@ -440,7 +681,14 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path,
     from vibe import setup_network_stream
 
     monkeypatch.setattr(setup_network_stream, "CHECK_INTERVAL_SECONDS", 60.0)
-    _unbound()
+    config = _unbound()
+    proxy = publication == 'proxy-withdrawal'
+    if proxy:
+        _bind(config)
+        config.ui.trusted_public_origins = ['https://workbench.example.test']
+        config.save()
+        monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.10')
+        monkeypatch.delenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, raising=False)
     inbox = asyncio.Queue()
     release_output = asyncio.Event()
     events = {k: [] for k in ("terminal", "hmr", "sse", "host")}
@@ -479,13 +727,18 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path,
             await inbox.get()
             return {"type": "websocket.receive", "text": "first"}
 
+        address = '127.0.0.1' if host else '192.168.2.4'
+        headers = [(b'host', b'localhost' if host else b'192.168.2.3')]
+        if proxy and not host:
+            address = '192.0.2.10'
+            headers += [(b'x-forwarded-host', b'workbench.example.test'), (b'x-forwarded-proto', b'https')]
         await gate(
             {
                 "type": "http" if name == "sse" else "websocket",
                 "path": "/" + name,
                 "method": "GET",
-                "client": ("127.0.0.1" if host else "192.168.2.4", 42100),
-                "headers": [(b"host", b"localhost" if host else b"192.168.2.3")],
+                "client": (address, 42100),
+                "headers": headers,
             },
             receive,
             send,
@@ -501,8 +754,9 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path,
                 sys.executable,
                 "-c",
                 'import sys,json; from vibe.api import save_config; save_config(json.loads(sys.argv[1]))',
-                ('{"ui":{"setup_host":"127.0.0.1"}}' if publication == 'settings-save' else
-                 '{"remote_access":{"vibe_cloud":{"instance_id":"fixture","instance_secret":"bound","session_secret":"fixture-cookie"}}}'),
+                {'settings-save': '{"ui":{"setup_host":"127.0.0.1"}}',
+                 'proxy-withdrawal': '{"ui":{"trusted_public_origins":[]}}',
+                 'binding': '{"remote_access":{"vibe_cloud":{"instance_id":"fixture","instance_secret":"bound","session_secret":"fixture-cookie"}}}'}[publication],
             ],
             check=True,
             timeout=15,

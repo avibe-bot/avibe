@@ -218,7 +218,7 @@ def test_config_post_allows_trusted_public_origin_from_proxy_when_remote_access_
         agents=AgentsConfig(),
     )
     config.remote_access.vibe_cloud.enabled = False
-    config.remote_access.vibe_cloud.public_url = "https://avibe.example.com"
+    config.remote_access.vibe_cloud.public_url = "https://account.example.test"
     config.save()
     client = app.test_client()
     headers = csrf_headers(client, "http://127.0.0.1:15131")
@@ -280,7 +280,7 @@ def test_config_post_refuses_proxy_when_binding_state_is_unavailable(monkeypatch
     assert response.get_json()['error'] == 'remote_access_config_unavailable'
 
 
-def test_config_post_prefers_trusted_public_origin_over_disabled_public_url(monkeypatch, tmp_path):
+def test_config_post_keeps_account_hostname_reserved_even_at_other_proxy_port(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
     monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://avibe.example.com:8443")
@@ -318,8 +318,9 @@ def test_config_post_prefers_trusted_public_origin_over_disabled_public_url(monk
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
 
-    assert response.status_code == 200
-    assert response.get_json()["mode"] == "self_host"
+    assert response.status_code == 503
+    assert response.get_json()['error'] == 'remote_access_disabled'
+    assert V2Config.load().runtime.default_cwd == '.'
 
 
 def test_config_post_rejects_unlisted_public_origin_from_trusted_proxy(monkeypatch, tmp_path):

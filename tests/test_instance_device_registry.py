@@ -400,6 +400,43 @@ def test_local_device_administration_needs_pairing_and_direct_loopback(install, 
         assert local.get("/api/devices", base_url=loop, headers=headers).status_code in (403, 503)
 
 
+def test_declared_proxy_is_an_owner_disclosure_not_a_device_or_device_viewer(install, monkeypatch):
+    install.remote_access.vibe_cloud.instance_secret = 'paired-fixture'
+    install.remote_access.vibe_cloud.backend_url = 'https://backend.test'
+    install.ui.trusted_public_origins = [ORIGIN, 'https://desk.example.test:8443']
+    install.save()
+    remote_access._replace_authorization_revision(install, 1)
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.0/28')
+    monkeypatch.delenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, raising=False)
+    monkeypatch.setattr(ui_server, '_desktop_computer_use_supported', lambda: False)
+    monkeypatch.setattr(remote_access, '_refresh_authorization_context', lambda *a, **kw: pytest.fail('unexpected authorization refresh'))
+    field = 'unauthenticated_proxy_access'
+    facts = {'origins': ['https://desk.example.test:8443'], 'peer_scope': 'range'}
+    local = ui_server.app.test_client()
+    loop = 'http://127.0.0.1:5123'
+    owner, member = client(login(install, 'owner', 'owner')), client(login(install, 'member', 'member'))
+    before = listing(owner)
+    assert before[field] == listing(local, loop)[field] == facts
+    assert field not in listing(member)
+
+    def rows(payload):
+        return {(group, row['id']) for group in ('mine', 'others', 'unattributed') for row in payload[group]}
+
+    # A normal visit through the operator's declared ingress has Workbench
+    # access, but does not create an account session or a device-list principal.
+    visit = dict(base_url=loop, environ_base={'REMOTE_ADDR': '192.0.2.10'},
+                 headers={'X-Forwarded-Host': 'desk.example.test:8443', 'X-Forwarded-Proto': 'https'})
+    assert local.get('/api/session', **visit).status_code == 200
+    denied = local.get('/api/devices', **visit)
+    assert denied.status_code == 403 and denied.get_json() == {'error': 'device_access_forbidden'}
+    direct_only = local.get('/api/desktop/local-instance', **visit)
+    assert direct_only.status_code == 403 and direct_only.get_json()['error'] == 'direct_loopback_required'
+    after = listing(owner)
+    assert rows(after) == rows(before)
+    assert not any(field in row for group in ('mine', 'others', 'unattributed') for row in after[group])
+    assert '192.0.2.' not in json.dumps(after)
+
+
 def test_demotion_is_not_overridden_by_registry_login_role(install):
     previous = client(login(install, "former-owner", "owner"))
     other = client(login(install, "other", "owner"))

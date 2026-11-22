@@ -90,7 +90,7 @@ from modules.agents.catalog import (
     supports_runtime_refresh,
 )
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
-from vibe import ui_network_access
+from vibe import declared_proxy, ui_network_access
 from vibe.network_position import BindingState, binding_state, position_snapshot
 from vibe.setup_network_stream import serve_setup_connection
 from vibe.http_request_diagnostics import RequestCounterMiddleware, RequestCounters
@@ -367,8 +367,8 @@ REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS = 300
 REMOTE_OAUTH_DEVICE_COOKIE_NAME = "__Host-vibe_oauth_device"
 REMOTE_OAUTH_DEVICE_TTL_SECONDS = 180 * 24 * 60 * 60
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-TRUSTED_PROXY_IPS_ENV = "VIBE_UI_TRUSTED_PROXY_IPS"
-TRUSTED_PUBLIC_ORIGINS_ENV = "VIBE_UI_TRUSTED_PUBLIC_ORIGINS"
+TRUSTED_PROXY_IPS_ENV = declared_proxy.PEERS_ENV
+TRUSTED_PUBLIC_ORIGINS_ENV = declared_proxy.ORIGINS_ENV
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
     ("ui", _UI_LOG_FILENAME, lambda: paths.get_logs_dir() / _UI_LOG_FILENAME),
@@ -642,14 +642,7 @@ def _forwarded_host_has_explicit_port(value: str) -> bool:
 
 
 def _trusted_public_origin_entries(config: V2Config | None) -> list[str]:
-    values: list[str] = []
-    configured = getattr(getattr(config, "ui", None), "trusted_public_origins", None)
-    if isinstance(configured, str):
-        values.extend(configured.split(","))
-    elif isinstance(configured, (list, tuple, set)):
-        values.extend(str(value) for value in configured)
-    values.extend(os.environ.get(TRUSTED_PUBLIC_ORIGINS_ENV, "").split(","))
-    return [value.strip() for value in values if value and value.strip()]
+    return list(declared_proxy.origin_entries(config, os.environ.get(TRUSTED_PUBLIC_ORIGINS_ENV, '')))
 
 
 def _trusted_public_origin_entry_matches(
@@ -699,34 +692,21 @@ def _trusted_public_origin_matches(
     )
 
 
-def _trusted_public_origin_allowed_for_peer(
-    config: V2Config | None,
-    peer_address: ipaddress._BaseAddress | None,
-) -> bool:
-    if binding_state(config) is not BindingState.UNBOUND:
+def _declared_proxy_admits(config, headers, peer, *, direct_ingress, websocket=False):
+    if direct_ingress or peer is None or not headers.get('x-forwarded-host'):
         return False
-    cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
-    if not getattr(cloud, "enabled", False):
-        return True
-    if peer_address is not None and not peer_address.is_loopback:
-        return True
-    logger.warning(
-        "Ignoring %s for loopback trusted proxy while remote access is enabled; "
-        "use a non-loopback proxy peer, disable remote access, or enforce authentication before the proxy.",
-        TRUSTED_PUBLIC_ORIGINS_ENV,
-    )
-    return False
+    origin = declared_proxy.forwarded_origin(headers, websocket=websocket)
+    host = _normalized_host(headers.get('host'))
+    if not origin or not host or instance_address.is_managed_name(host):
+        return False
+    if not config or _remote_access_host_allowed(config, host):
+        return False
+    policy = declared_proxy.listener_policy(config)
+    return policy is not None and policy.admits(peer, origin)
 
 
 def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
-    if not _has_trusted_forwarded_metadata():
-        return False
-    if not _trusted_public_origin_matches(config, _trusted_forwarded_origin_identity()):
-        return False
-    return _trusted_public_origin_allowed_for_peer(
-        config,
-        _request_peer_address(),
-    )
+    return _declared_proxy_admits(config, request.headers, _request_peer_address(), direct_ingress=_is_direct_ingress_request())
 
 
 def _is_mutation_guard_exempt() -> bool:
@@ -2595,9 +2575,6 @@ def enforce_remote_access_cookie():
             return jsonify({"ok": False, "error": "remote_access_host_mismatch"}), 503
         g.authorization_context = instance_owner_context()
         return None
-    if _trusted_public_origin_local_request(config):
-        g.authorization_context = instance_owner_context()
-        return None
     if _remote_auth_exempt_path():
         return None
     from vibe import remote_access
@@ -3715,6 +3692,14 @@ class _SetupNetworkMiddleware:
         if state is not BindingState.UNAVAILABLE and _websocket_is_trusted_docker_loopback_request(conn):
             await self.app(scope, receive, send)
             return
+        if await asyncio.to_thread(_websocket_trusted_public_origin_local_request, conn, config):
+            # The lease belongs to this pair even across binding publication. A
+            # subsequent withdrawal must not fall through to another old grant.
+            def same_proxy(current, current_state):
+                return current_state is not BindingState.UNAVAILABLE and _websocket_trusted_public_origin_local_request(conn, current)
+
+            await serve_setup_connection(self.app, scope, receive, send, same_proxy)
+            return
         if state is BindingState.UNBOUND:
             # A private-IP stream must keep its own admission. Classify the
             # origin, not the result of a second, fallible interface lookup:
@@ -3726,8 +3711,8 @@ class _SetupNetworkMiddleware:
             except ValueError:
                 private_origin = False
 
-            def still_admitted(current):
-                return not private_origin or _websocket_is_local_request(conn, current)
+            def still_admitted(current, current_state):
+                return current_state is BindingState.UNBOUND and (not private_origin or _websocket_is_local_request(conn, current))
 
             await serve_setup_connection(self.app, scope, receive, send, still_admitted)
             return
@@ -5202,14 +5187,10 @@ def _websocket_is_private_peer_address(address: ipaddress._BaseAddress | None) -
 
 
 def _websocket_trusted_public_origin_local_request(websocket: Any, config: V2Config | None) -> bool:
-    if not _websocket_has_trusted_forwarded_metadata(websocket):
-        return False
-    if not _trusted_public_origin_matches(config, _websocket_trusted_forwarded_origin_identity(websocket)):
-        return False
-    return _trusted_public_origin_allowed_for_peer(
-        config,
-        _websocket_peer_address(websocket),
-    )
+    scope = getattr(websocket, 'scope', {}) or {}
+    return _declared_proxy_admits(config, websocket.headers, _websocket_peer_address(websocket),
+                                  direct_ingress=scope.get(DIRECT_INGRESS_SCOPE_KEY) is not None,
+                                  websocket=scope.get('type') == 'websocket')
 
 
 def _websocket_peer_shares_setup_host_network(
@@ -8101,7 +8082,8 @@ def _local_push_registration_state(conn) -> BindingState | None:
     config, state = position_snapshot()
     if state is BindingState.UNBOUND or (
         state is BindingState.BOUND and receipt_current(conn, config)
-        and (_is_direct_loopback_connection() or _is_trusted_docker_loopback_request())
+        and (_is_direct_loopback_connection() or _is_trusted_docker_loopback_request()
+             or _trusted_public_origin_local_request(config))
     ):
         return state
     return None
@@ -8268,7 +8250,9 @@ def web_push_subscribe():
                 return jsonify({'error': 'session_revoked'}), 401
             if payload.get('binding_repair') is True:
                 row = None
-                if not background_rotation and local_state is BindingState.BOUND:
+                if (not background_rotation and payload.get('explicit_enable') is not True
+                        and local_state is BindingState.BOUND
+                        and (_is_direct_loopback_connection() or _is_trusted_docker_loopback_request())):
                     row = web_push_service.resume_retired_host_subscription(
                         conn, payload=subscription, previous_endpoints=previous_endpoints, device_id=device_id,
                         user_agent=user_agent, device_label=device_label,
@@ -8724,14 +8708,15 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
 
 
 def _save_config_and_runtime_decisions(
-    payload: dict, *, user_context: Any = None,
+    payload: dict, *, user_context: Any = None, direct_origin_writer: bool = False,
 ) -> tuple[V2Config, bool, bool, bool, list[str]]:
     from vibe import api
     from vibe import remote_access
 
     with CONFIG_LOCK:
         previous_config = _load_remote_access_config()
-        config = api.save_config(payload, generic_remote_access=True, user_context=user_context)
+        config = api.save_config(payload, generic_remote_access=True, user_context=user_context,
+                                 direct_origin_writer=direct_origin_writer)
         previous_cloud = previous_config.remote_access.vibe_cloud if previous_config is not None else None
         current_cloud = config.remote_access.vibe_cloud
         old_instance_id = str(previous_cloud.instance_id or "") if previous_cloud is not None else ""
@@ -8907,7 +8892,10 @@ async def config_post():
             _save_config_and_runtime_decisions,
             payload,
             user_context=authorization_context,
+            direct_origin_writer=_is_direct_loopback_connection(),
         )
+    except api.NetworkSettingsForbidden as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 403
     except ValueError as exc:
         # Same chokepoint as the allowlist rejection above: a non-owner write
         # answers with a stable code whichever layer refused it, including
@@ -9716,6 +9704,12 @@ async def restrict_host_network(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+def _owner_proxy_fields():
+    config, _ = position_snapshot()
+    policy = declared_proxy.listener_policy(config)
+    return policy.projection() if policy is not None else {}
+
+
 @app.route('/api/devices', methods=['GET'])
 async def device_list():
     from storage import device_catalog
@@ -9732,7 +9726,9 @@ async def device_list():
     if viewer is None:
         config = _load_remote_access_config()
         if config and binding_state(config) is BindingState.UNBOUND and _is_setup_host_request(config):
-            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': []})
+            context = _request_authorization_context()
+            fields = await asyncio.to_thread(_owner_proxy_fields) if context and context.is_instance_owner else {}
+            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': [], **fields})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
@@ -9766,7 +9762,8 @@ async def device_list():
         if effective=='ready' and await internal_client.health_identity() is None:
             effective = 'unavailable'
         host['functions'] = [{'kind':'computerUse','fixed':True,'can_change':False,'on':status.enabled,'status':effective}]
-    return jsonify({**groups, 'unlinked_health':unlinked, 'recent_sign_outs':history, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+    fields = await asyncio.to_thread(_owner_proxy_fields) if owner else {}
+    return jsonify({**groups, **fields, 'unlinked_health':unlinked, 'recent_sign_outs':history, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
 
 
 @app.route('/api/devices/<device_id>/notifications', methods=['PUT'])
@@ -10222,7 +10219,19 @@ def _clear_remote_browser_cookie(response):
 
 
 @app.route("/api/ui/reload", methods=["POST"])
-def ui_reload():
+async def ui_reload():
+    from starlette.concurrency import run_in_threadpool
+
+    context = _request_authorization_context()
+    owner = bool(context and context.is_instance_owner)
+    # asyncio's listener objects belong to this loop. Pass immutable observed
+    # endpoints to the worker; disk/config locks and subprocess I/O stay off it.
+    server = _server
+    listeners = () if owner else ui_network_access.active_listeners(server)
+    return await run_in_threadpool(_dispatch_ui_reload, owner, server, listeners)
+
+
+def _dispatch_ui_reload(owner, server, listeners):
     from vibe import runtime
 
     from vibe.desktop_runtime import normalize_desktop_port
@@ -10262,24 +10271,12 @@ def ui_reload():
     except ValueError:
         return jsonify({"error": "invalid_port"}), 400
 
-    status = runtime.read_status()
+    from core.services import settings as settings_service
+    from config import paths as config_paths
+    import sys
 
-    try:
-        from core.services import settings as settings_service
-
-        current_config = settings_service.load_config()
-    except Exception:
-        current_config = None
-    if current_config is not None:
-        bind_host = runtime.effective_ui_bind_host(current_config, requested_host=host)
-    else:
-        bind_host = host
-
-    def _restart():
-        global _server
-        import sys
-        import time
-        from config import paths as config_paths
+    def spawn(bind_host):
+        status = runtime.read_status()
         pid = runtime.spawn_background(
             runtime.ui_server_argv(sys.executable, bind_host, port),
             config_paths.get_runtime_ui_pid_path(),
@@ -10287,23 +10284,49 @@ def ui_reload():
             "ui_stderr.log",
         )
         runtime.write_status(
-            status.get("state", "running"),
-            status.get("detail"),
-            status.get("service_pid"),
-            pid,
+            status.get("state", "running"), status.get("detail"), status.get("service_pid"), pid,
         )
+
+    def retire_old_server():
         time.sleep(0.2)
-        # Shutdown the old server to release the port
-        if _server:
-            if hasattr(_server, "should_exit"):
-                _server.should_exit = True
+        if server is not None:
+            if hasattr(server, "should_exit"):
+                server.should_exit = True
             else:
-                shutdown = getattr(_server, "shutdown", None)
+                shutdown = getattr(server, "shutdown", None)
                 if callable(shutdown):
                     shutdown()
 
-    # Schedule restart after response is sent
-    threading.Thread(target=_restart).start()
+    if owner:
+        try:
+            current_config = settings_service.load_config()
+        except Exception:
+            current_config = None
+        bind_host = runtime.effective_ui_bind_host(current_config, requested_host=host) if current_config is not None else host
+
+        def restart():
+            spawn(bind_host)
+            retire_old_server()
+
+        threading.Thread(target=restart).start()
+    else:
+        from config.v2_config import config_file_lock, config_recovery_refusal
+
+        refused = jsonify({"ok": False, "error": "listener_change_requires_owner"}), 403
+        with config_file_lock():
+            try:
+                current_config = settings_service.load_config()
+                if config_recovery_refusal(current_config, 'ui', 'remote_access'):
+                    return refused
+                target = ui_network_access.matching_reload_target(listeners, current_config, host, port)
+            except (ValueError, TypeError, AttributeError, OSError):
+                return refused
+            if target is None or server is not _server or getattr(server, 'should_exit', True):
+                return refused
+            # No delayed task may substitute a later config/DNS result. Launch
+            # only with the verified literal while the saved target is locked.
+            spawn(target)
+        threading.Thread(target=retire_old_server).start()
     return jsonify({"ok": True, "host": host, "port": port})
 
 
@@ -21219,9 +21242,6 @@ def run_ui_server(host: str, port: int) -> None:
         if config_load_error is not None:
             logger.warning("Skipping UI startup reconciliation because config load failed: %s", config_load_error)
         if config is not None:
-            from storage.web_push_cutover import reconcile_startup
-
-            reconcile_startup(config)
             try:
                 _start_remote_monitors(config, startup=True)
             except Exception:
@@ -21269,11 +21289,14 @@ def run_ui_server(host: str, port: int) -> None:
                     daemon=True,
                     name="remote-access-reconcile-on-start",
                 ).start()
-                _UI_RUNTIME_ACTIVE = True
-                try:
-                    _server.run(sockets=bound_sockets)
-                finally:
-                    _UI_RUNTIME_ACTIVE = False
+                from storage.web_push_cutover import serving_listener
+
+                with serving_listener():
+                    _UI_RUNTIME_ACTIVE = True
+                    try:
+                        _server.run(sockets=bound_sockets)
+                    finally:
+                        _UI_RUNTIME_ACTIVE = False
                 break
             except OSError as e:
                 for bound_socket in bound_sockets:
