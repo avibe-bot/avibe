@@ -30,7 +30,7 @@ Object.defineProperty(window, '__AVIBE_DESKTOP_COMPOSE__', {
   get: () => (window as unknown as { __APP_LOCK_COMPOSE_PAUSED__?: boolean }).__APP_LOCK_COMPOSE_PAUSED__ ? undefined : receiver,
   set: (value: Receiver) => { receiver = value; observed.mounted = true; },
 });
-function Fixture() {
+export function Fixture() {
   const location = useLocation();
   useEffect(() => { observed.route = location.pathname; }, [location.pathname]);
   return (

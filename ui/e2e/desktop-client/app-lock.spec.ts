@@ -302,7 +302,8 @@ test('Quit confirmation is usable while every content window remains locked', as
   expect(cancelled.locked).toBe(true);
 });
 
-test('the native main cover can be captured without exposing content', async ({}, testInfo) => {
+test('the native main cover can be captured without exposing content', async () => {
+  const testInfo = test.info();
   await peer.send('reset', { policy: 'immediately' });
   for (const dark of [false, true]) {
     await peer.send('appearance', { dark });
