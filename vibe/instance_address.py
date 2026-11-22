@@ -422,6 +422,11 @@ _inflight: dict[str, int] = {}
 _last_read_started: float | None = None
 _last_read_failed: float | None = None
 _read_refused = False  # the last read got a definitive refusal from avibe.bot
+# avibe.bot's answer that it will not tell this pairing the address state, nor
+# act on its renames, until remote access is bound again: (pairing, code). While
+# it stands for the pairing in use nothing asks again by itself.
+_STANDING_REFUSALS = frozenset({"rebind_required"})
+_standing_refusal: tuple[tuple[str, str], str] | None = None
 _known_cleanup: tuple[str, frozenset[str]] | None = None
 _read_lock = threading.Lock()
 _retired_at_flip: dict[str, str] = {}  # old host -> new origin, for streams open at the switch
@@ -464,6 +469,22 @@ def _drop_authority() -> None:
     with _LOCK:
         _authority = None
         _authority_epoch += 1
+
+
+def _note_standing_refusal(binding: Binding, code: str) -> None:
+    """avibe.bot named a refusal that only a new binding of remote access ends."""
+
+    global _standing_refusal
+
+    # No permission is given, so none is held, and no reply still on its way restores one.
+    _drop_authority()
+    with _LOCK:
+        _standing_refusal = (binding.pairing, code)
+
+
+def _standing_refusal_for(binding: Binding | None) -> str | None:
+    standing = _standing_refusal
+    return standing[1] if standing is not None and binding is not None and standing[0] == binding.pairing else None
 
 
 def _cleanup_allowed_locked(host: str, binding: Binding) -> bool:
@@ -694,13 +715,20 @@ def _read_is_stale_locked(read: _StateRead) -> bool:
     return isinstance(stored_generation, int) and read.state["generation"] < stored_generation
 
 
-def _read_state_once(binding: Binding) -> _StateRead | None:
-    """One read of ``hostname-state``. ``None`` when it gave no usable state."""
+def _read_state_once(binding: Binding, *, again: bool = False) -> _StateRead | None:
+    """One read of ``hostname-state``. ``None`` when it gave no usable state.
 
-    global _read_refused
+    While a standing refusal holds for this pairing no request is made: the
+    answer would be the same until remote access is bound again, which makes
+    another pairing. ``again`` is for a person who asks now.
+    """
+
+    global _read_refused, _standing_refusal
 
     from vibe import remote_access
 
+    if not again and _standing_refusal_for(binding) is not None:
+        return None
     with _LOCK:
         epoch = _authority_epoch
     started_monotonic, started_wall = _monotonic(), _wall()
@@ -714,11 +742,21 @@ def _read_state_once(binding: Binding) -> _StateRead | None:
         # A definitive answer (not a throttle, not a server fault): asking again
         # soon would get the same one.
         _read_refused = 400 <= exc.status < 500 and exc.status != 429
+        code = exc.payload.get("error") if isinstance(exc.payload, dict) else None
+        if exc.status == 409 and code in _STANDING_REFUSALS:
+            _note_standing_refusal(binding, code)
+        elif _read_refused:
+            # Another definitive answer takes its place; a throttle or a server
+            # fault says nothing about it.
+            with _LOCK:
+                _standing_refusal = None
         return None
     except Exception:
         _read_refused = False
-        return None
+        return None  # no answer says nothing about a refusal that stands
     _read_refused = False
+    with _LOCK:
+        _standing_refusal = None
     state = _validated_state(binding, payload)
     with _LOCK:
         if state is None or epoch != _authority_epoch or current_binding() != binding:
@@ -726,12 +764,13 @@ def _read_state_once(binding: Binding) -> _StateRead | None:
     return _StateRead(binding, state, started_monotonic, started_wall, epoch)
 
 
-def refresh_state(*, force: bool = False, wait: bool = True) -> bool:
+def refresh_state(*, force: bool = False, wait: bool = True, again: bool = False) -> bool:
     """Read the state unless one was read in the last few seconds; apply it.
 
     One read at a time. ``wait=False`` returns at once when a read is in flight
     instead of queueing behind it. After a failed read the interval runs from
-    the failure's end, so slow failures are not retried back to back.
+    the failure's end, so slow failures are not retried back to back. ``again``
+    asks even while a standing refusal holds (see ``_read_state_once``).
     """
 
     global _last_read_started, _last_read_failed
@@ -746,7 +785,7 @@ def refresh_state(*, force: bool = False, wait: bool = True) -> bool:
             if not force and _read_too_recent():
                 return False
             _last_read_started = _monotonic()
-        read = _read_state_once(binding)
+        read = _read_state_once(binding, again=True) if again else _read_state_once(binding)
         if read is None:
             with _LOCK:
                 _last_read_failed = _monotonic()
@@ -951,7 +990,11 @@ def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
         raise AddressError(409, "same_address")
     if isinstance(_load_state(binding.instance_id).get("journal"), dict):
         raise AddressError(409, "operation_in_progress")
-    refresh_state(force=True)
+    # The Owner asks now: one read, also when avibe.bot's last word was a standing refusal.
+    refresh_state(force=True, again=True)
+    refusal = _standing_refusal_for(binding)
+    if refusal is not None:
+        raise AddressError(409, refusal)
     state = _load_state(binding.instance_id)
     generation = state.get("generation")
     read_at = state.get("state_read_at")
@@ -1052,7 +1095,7 @@ def describe() -> dict[str, Any]:
     reason = _eligibility(binding)
     if binding is None:
         return {"ok": True, "hostname": None, "public_url": None, "eligible": False, "ineligible_reason": reason,
-                "hold_days": None, "release_at_if_changed_now": None, "operation": None,
+                "hold_days": None, "release_at_if_changed_now": None, "operation": None, "state_error": None,
                 "unrecognized_change": None, "cleanup": [], "health": {"connected": False, "cleanup": "none"}}
     state = _load_state(binding.instance_id)
     read_at = state.get("state_read_at")
@@ -1110,6 +1153,9 @@ def describe() -> dict[str, Any]:
         "hold_days": _hold_days(state),
         "release_at_if_changed_now": state.get("active_release_at_if_renamed_now"),
         "operation": operation,
+        # A standing refusal of the address state: what is shown is as last
+        # read, and no old name is cleaned, until remote access is bound again.
+        "state_error": _standing_refusal_for(binding),
         "unrecognized_change": state.get("unrecognized_change"),
         "cleanup": cleanup,
         "health": {"connected": _health_connected(), "cleanup": "pending" if health_pending else "none"},
@@ -1246,6 +1292,10 @@ _PAGE_ERRORS: dict[str, tuple[int, str]] = {
     # really is. Definitive for this operation: it is settled here and not sent
     # again; the way out is to bind remote access again, then try again.
     "remote_access_configuration_mismatch": (409, "remote_access_configuration_mismatch"),
+    # This computer's credential is valid, but avibe.bot holds more than one
+    # pairing for the instance and will not choose one. Definitive in the same
+    # way, with the same way out; the cause is another, so is the code.
+    "rebind_required": (409, "rebind_required"),
 }
 _LIMIT_FIELDS = ("limit", "held_count", "earliest_release_at")
 
@@ -1280,6 +1330,9 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
             # read after this refusal manages to learn.
             _drop_authority()
             page_status, page_code = 409, "pairing_invalid"
+        elif status == 409 and code in _STANDING_REFUSALS:
+            # The same answer stands for the state read, which is not asked again.
+            _note_standing_refusal(binding, code)
         failure = {"operation_id": journal["operation_id"], "state": "failed", "hostname": target,
                    "error": page_code, "status": page_status}
         if page_code == "name_holding_limit_reached":
