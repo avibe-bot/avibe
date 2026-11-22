@@ -2,33 +2,40 @@
 //! Replace the sidecar's advertised interface with loopback in this test's
 //! private offer. The production answer parser never admits loopback.
 use super::{
+    clock::Clock,
     connect::Authority,
-    listener::Listener,
     offer::Offer,
+    rendezvous::Reply,
     transport::{self, Link},
+    Client, RefreshOutcome,
 };
 use serde_json::{json, Value};
 use std::{
     net::{Ipv4Addr, SocketAddr},
     process::Stdio,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     process::Command,
-    sync::watch,
-    time::{timeout, Instant},
+    time::timeout,
 };
 
 #[tokio::test]
 #[ignore = "requires verified pinned release fixture; required in desktop-shell CI"]
 async fn desktop_direct_real_sidecar() {
-    timeout(Duration::from_secs(30), run())
-        .await
-        .expect("loopback interop timed out");
+    for changed_selection in [false, true] {
+        timeout(Duration::from_secs(30), run(changed_selection))
+            .await
+            .expect("loopback interop timed out");
+    }
 }
-async fn run() {
+async fn run(changed_selection: bool) {
     let exe = std::env::var_os("AVIBE_TEST_DIRECT_SIDECAR").expect("missing verified fixture");
     let ingress = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let mut child = Command::new(exe)
@@ -53,9 +60,31 @@ async fn run() {
         .find(|s| s.is_ipv4())
         .expect("IPv4 fixture")
         .port();
-    let key = iroh::SecretKey::generate();
-    let who = key.public();
-    let ep = transport::bind(key).await.unwrap();
+    let mut client = Client::new("desktop-test-app.avibe.bot", "fixture".into())
+        .await
+        .unwrap();
+    let elapsed = Arc::new(AtomicU64::new(0));
+    let ticks = elapsed.clone();
+    client.clock = Clock(Arc::new(move || Duration::from_secs(ticks.load(Ordering::SeqCst))));
+    let who = client.key.public();
+    // The offer below deliberately replaces the advertised interface with loopback.
+    // A wildcard client lets iroh migrate to that real interface mid-refresh;
+    // the production monitor then correctly retires the unoffered path (#4149).
+    let ep = transport::endpoint_builder(client.key.clone())
+        .clear_ip_transports()
+        .bind_addr_with_opts(
+            (Ipv4Addr::LOCALHOST, 0),
+            iroh::endpoint::BindOpts::default()
+                .set_prefix_len(32)
+                .set_is_default_route(false),
+        )
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let sockets = ep.bound_sockets();
+    assert_eq!(sockets.len(), 1, "fixture must not have a wildcard or IPv6 socket");
+    assert_eq!(sockets[0].ip(), Ipv4Addr::LOCALHOST);
     assert!(ep.id() == who);
     let admit = json!({"type":"admission","endpoint_id":who.to_string(),"ttl_seconds":30});
     control.write_all(format!("{admit}\n").as_bytes()).await.unwrap();
@@ -77,6 +106,9 @@ async fn run() {
                 r.read_exact(&mut data).await.unwrap();
                 assert_eq!(&data, b"opaque");
                 r.get_mut().write_all(b"answer").await.unwrap();
+                // Hold the ingress end open: only client retirement may end the stream.
+                let mut end = [0];
+                assert_retired_read(r.read(&mut end).await);
             }
         }
     });
@@ -86,16 +118,16 @@ async fn run() {
             generation: "ci".into(),
             id: peer,
             candidates: vec![(Ipv4Addr::LOCALHOST, port).into()],
-            until: Instant::now() + Duration::from_secs(20),
+            until: client.clock.now() + Duration::from_secs(20),
         };
-        if let Some(l) = Link::dial(&ep, offer, &host).await {
+        if let Some(l) = Link::dial(&ep, offer, &host, client.clock.clone()).await {
             break l;
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
     };
     // A fresh grant for this exact endpoint, generation and candidates keeps
     // the existing authenticated connection. A changed generation must redial.
-    let renewed_until = Instant::now() + Duration::from_secs(25);
+    let renewed_until = client.clock.now() + Duration::from_secs(25);
     let mut renewal = Offer {
         generation: "ci".into(),
         id: peer,
@@ -109,18 +141,18 @@ async fn run() {
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
-    let (_tx, rx) = watch::channel(Some(link.clone()));
-    let listener = Listener::bind(host, rx).await.unwrap();
+    client.endpoint = Some(ep);
+    client.publish(link.clone());
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let (user, pass) = listener.credential.native_login();
+    let (user, pass) = client.listener.credential.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
-    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, listener.port)).await.unwrap();
+    let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, client.listener.port))
+        .await
+        .unwrap();
     socket
         .write_all(
-            format!(
-                "CONNECT desktop-test-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\nopaque"
-            )
-            .as_bytes(),
+            format!("CONNECT desktop-test-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n")
+                .as_bytes(),
         )
         .await
         .unwrap();
@@ -131,14 +163,65 @@ async fn run() {
     line.clear();
     r.read_line(&mut line).await.unwrap();
     assert_eq!(line, "\r\n");
+    elapsed.store(23, Ordering::SeqCst);
+    let retained = RefreshOutcome::Retained {
+        retry_before: Duration::from_secs(1),
+    };
+    for reply in [Reply::NotReady, Reply::Failed, Reply::Refused(503)] {
+        assert_eq!(client.refresh_reply(|_| async { reply }).await, retained);
+        assert!(!deadlines.has_changed().unwrap());
+    }
+    if !changed_selection {
+        assert_eq!(client.refresh_reply(|_| std::future::pending()).await, retained);
+    }
+    assert_eq!(*deadlines.borrow(), renewed_until);
+    // Same established stream, after the failed renewals; no CONNECT replay.
+    r.get_mut().write_all(b"opaque").await.unwrap();
     let mut answer = [0; 6];
     r.read_exact(&mut answer).await.unwrap();
     assert_eq!(&answer, b"answer");
+    let mut changes = client.links.subscribe();
+    if changed_selection {
+        // Same live grant, still before expiry. A known lost binding is final.
+        assert_eq!(
+            client.refresh_reply(|_| async { Reply::SelectionChanged }).await,
+            RefreshOutcome::Retired
+        );
+    } else {
+        // Simulate suspend while the Tokio timer has not elapsed. No refresh
+        // or path event is required to retire the idle connection on resume.
+        elapsed.store(30, Ordering::SeqCst);
+        assert!(!link.usable());
+        assert!(!link.renew(&Offer {
+            until: Duration::from_secs(60),
+            generation: "ci".into(),
+            id: peer,
+            candidates: link.offer.candidates.clone()
+        }));
+    }
+    timeout(Duration::from_secs(1), changes.wait_for(Option::is_none))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        client.refresh_reply(|_| async { Reply::Failed }).await,
+        RefreshOutcome::Retired
+    );
+    let mut end = [0];
+    assert_retired_read(r.read(&mut end).await);
     ingress_task.await.unwrap();
-    drop(r);
-    drop(listener);
-    link.retire();
+    drop(client);
     control.write_all(b"{\"type\":\"stop\"}\n").await.unwrap();
     assert!(child.wait().await.unwrap().success());
-    ep.close().await;
+}
+
+fn assert_retired_read(read: std::io::Result<usize>) {
+    // Only after the complete payload exchange and explicit retirement: a closed
+    // TCP leg may surface as EOF or a reset/abort (including Winsock 10054).
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionReset};
+    match read {
+        Ok(0) => (),
+        Err(e) if matches!(e.kind(), ConnectionReset | ConnectionAborted) => (),
+        other => panic!("expected EOF or connection shutdown after retirement, got {other:?}"),
+    }
 }

@@ -54,7 +54,7 @@ final class SystemTurnActivity: TurnActivityHandle {
 
 /// One owner for requests, token rotation, dismissal and account boundaries.
 /// The ledger detects a card removed while the process was away; it never
-/// recreates an Activity. Only an explicit, admitted bridge start can do that.
+/// recreates an Activity. Only an admitted scene departure can create one.
 @MainActor
 final class TurnActivityCoordinator {
     struct Target: Codable, Equatable {
@@ -74,7 +74,38 @@ final class TurnActivityCoordinator {
     }
     private struct Ledger: Codable {
         var records: [String: Record] = [:]
+        var shownTurns: [String: Int] = [:]
+        enum CodingKeys: CodingKey { case records, shownTurns }
+        init() {}
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            records = try values.decode([String: Record].self, forKey: .records)
+            shownTurns = try values.decodeIfPresent([String: Int].self, forKey: .shownTurns) ?? [:]
+            // An older build's surviving cards count as already shown, too.
+            for record in records.values { shownTurns[record.turnID] = record.requestedAt }
+        }
     }
+    struct Observation: Equatable {
+        let sessionID: String
+        let agentName: String
+        let sessionTitle: String?
+        let running: Bool
+        let target: Target
+    }
+    private struct PrefetchedTurn {
+        let id: String
+        let content: TurnActivityAttributes.ContentState
+    }
+    typealias BackgroundTask = @MainActor (@escaping @MainActor () -> Void) -> (@MainActor () -> Void)
+    private var observation: Observation?
+    private var prefetched: PrefetchedTurn?
+    private var observationRevision = 0
+    private var departureTask: Task<Void, Never>?
+    private let beginBackgroundTask: BackgroundTask
+    private let isActive: @MainActor () -> Bool
+    private static let settingKey = "avibe.liveActivities.enabled"
+    var deviceEnabled: Bool { defaults.bool(forKey: Self.settingKey) }
+
     typealias Request = @MainActor (Target, String, String, [String: Any]?) async throws -> VoiceCaptureInstanceClient.Response
     typealias Create = @MainActor (TurnActivityAttributes, TurnActivityAttributes.ContentState) throws -> any TurnActivityHandle
 
@@ -97,7 +128,6 @@ final class TurnActivityCoordinator {
     private var locallyEnding: Set<String> = []
     private var epoch = 0
     private var starting = false
-    private var startingSessionID: String?
     private var selectedTarget: Target?
     private var authorizationTask: Task<Void, Never>?
     private var mutations: [String: Task<Bool, Error>] = [:]
@@ -111,7 +141,14 @@ final class TurnActivityCoordinator {
              SystemTurnActivity(try Activity.request(attributes: attributes,
                  content: ActivityContent(state: state, staleDate: state.staleDate), pushType: .token))
          }, request: Request? = nil,
-         mayRequest: @escaping @MainActor (Target) -> Bool) {
+         mayRequest: @escaping @MainActor (Target) -> Bool,
+         isActive: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active },
+         beginBackgroundTask: @escaping BackgroundTask = { expiration in
+             let lease = TurnActivityBackgroundLease(expiration: expiration)
+             return { lease.end() }
+         }) {
+        self.isActive = isActive
+        self.beginBackgroundTask = beginBackgroundTask
         self.defaults = defaults
         self.mayRequest = mayRequest
         self.now = now
@@ -140,101 +177,126 @@ final class TurnActivityCoordinator {
         stateTasks.values.forEach { $0.cancel() }
     }
 
-    func status(sessionID: String, target: Target) -> [String: Any] {
-        ["enabled": enabled(), "tracking": activities().contains {
-            $0.state != .dismissed && $0.attributes.sessionID == sessionID
-                && $0.attributes.accountID == target.accountID
-                && $0.attributes.instanceOrigin == target.instanceOrigin
-        }]
+    func setting() -> [String: Any] {
+        ["enabled": deviceEnabled, "systemEnabled": enabled()]
     }
 
-    func start(sessionID: String, agentName: String, sessionTitle: String?,
-               target: Target, registrationID: String?) async -> [String: Any] {
-        func failure(_ code: String) -> [String: Any] { ["ok": false, "code": code] }
-        guard enabled() else { return failure("disabled") }
-        guard let registrationID else { return failure("push_unavailable") }
-        guard !starting else { return failure("failed") }
-        starting = true
-        startingSessionID = sessionID
-        defer { starting = false; startingSessionID = nil }
-        let generation = epoch
-        var created: (any TurnActivityHandle)?
+    func setSetting(_ value: Bool) async {
+        defaults.set(value, forKey: Self.settingKey)
+        if !value { await endAll(reason: "disabled") }
+    }
+
+    func observe(_ value: Observation?) async {
+        guard value?.target == selectedTarget || value == nil else { return }
+        guard observation != value else { return }
+        observation = value
+        await refreshObservation()
+    }
+
+    private func clearObservation() {
+        observation = nil
+        prefetched = nil
+        observationRevision += 1
+    }
+
+    private func refreshObservation() async {
+        observationRevision += 1
+        let revision = observationRevision
+        prefetched = nil
+        guard let observation, observation.running, observation.target == selectedTarget else { return }
+        var query = URLComponents()
+        query.queryItems = [URLQueryItem(name: "session_id", value: observation.sessionID)]
         do {
-            var query = URLComponents()
-            query.queryItems = [URLQueryItem(name: "session_id", value: sessionID)]
-            let response = try await request(target, "GET", Self.base + "/turn?" + (query.percentEncodedQuery ?? ""), nil)
-            guard generation == epoch else { return failure("failed") }
-            if response.status == 409 || response.status == 404 { return failure("no_active_turn") }
-            guard response.status == 200, !response.redirected,
+            let response = try await request(observation.target, "GET", Self.base + "/turn?" + (query.percentEncodedQuery ?? ""), nil)
+            guard revision == observationRevision, response.status == 200, !response.redirected,
                   let turn = response.json?["turn"] as? [String: Any],
-                  let turnID = turn["turn_id"] as? String,
-                  let content = Self.content(turn), content.phase.isRunning else { return failure("failed") }
-            if activities().contains(where: {
-                $0.attributes.accountID == target.accountID && $0.attributes.instanceOrigin == target.instanceOrigin
-                    && $0.attributes.turnID == turnID && $0.attributes.sessionID == sessionID
-                    && ($0.state == .active || $0.state == .stale)
-            }) { return ["ok": true] }
-            // Replacement ends all cards, including a terminal card still on the Lock Screen.
-            await endAll(reason: "replaced", invalidate: false)
-            guard generation == epoch, enabled() else { return failure("failed") }
-            let attributes = TurnActivityAttributes(
-                agentName: TurnActivityAttributes.displayName(agentName, limit: 40),
-                sessionTitle: TurnActivityAttributes.displayTitle(sessionTitle, agentName: agentName),
-                accountID: target.accountID, instanceOrigin: target.instanceOrigin, sessionID: sessionID, turnID: turnID)
-            let requestedAt = Int(now().timeIntervalSince1970)
-            let activity = try create(attributes, content)
-            created = activity
-            let record = Record(id: activity.id, target: target, sessionID: sessionID,
-                                turnID: turnID, registrationID: registrationID, requestedAt: requestedAt)
-            ledger.records[record.id] = record
-            save()
-            observeState(activity, record: record)
-            // Bound the initial token wait; a silent APNs registration must not hang the bridge.
-            let token = await firstToken(activity)
-            guard generation == epoch else {
-                // The boundary owner already retires the row. Do not reopen its WebKit store.
-                await activity.end(nil, immediately: true)
-                return failure("failed")
-            }
-            guard !locallyEnding.contains(record.id), activity.state == .active || activity.state == .stale else {
-                await finish(activity, record: record, reason: "user_stopped")
-                return failure("failed")
-            }
-            guard let token else {
-                await finish(activity, record: record, reason: "user_stopped")
-                return failure("failed")
-            }
-            guard try await register(token, activity: activity, record: record, generation: generation) else {
-                return failure("no_active_turn")
-            }
-            observeTokens(activity, record: record)
-            return ["ok": true]
-        } catch {
-            // Once created, a missing PUT answer is recoverable on the next foreground.
-            if let created, generation == epoch, let record = ledger.records[created.id] {
-                if case Failure.unavailable = error {
-                    observeTokens(created, record: record)
-                    return ["ok": true]
-                }
-                await finish(created, record: record, reason: "user_stopped")
-            }
-            if case Failure.rejected(let code) = error { return failure(code) }
-            return failure("failed")
-        }
+                  let id = turn["turn_id"] as? String, !id.isEmpty,
+                  let content = Self.content(turn), content.phase.isRunning else { return }
+            prefetched = PrefetchedTurn(id: id, content: content)
+        } catch { /* A failed prefetch cannot authorize a departure start. */ }
     }
 
-    func stop(sessionID: String, target: Target) async {
-        let matching = activities().filter { $0.attributes.sessionID == sessionID
-            && $0.attributes.accountID == target.accountID && $0.attributes.instanceOrigin == target.instanceOrigin }
-        guard !matching.isEmpty || startingSessionID == sessionID && selectedTarget == target else { return }
-        epoch += 1
-        for activity in matching {
-            await finish(activity, record: ledger.records[activity.id], reason: "user_stopped")
+    func foreground(target: Target?) async {
+        guard target == selectedTarget else { return }
+        await refreshObservation()
+        await reconcile(target: target)
+    }
+
+    /// Called synchronously by UIScene.willDeactivateNotification. There is no
+    /// suspension before Activity.request: UIKit may leave active on return.
+    @discardableResult
+    func willDeactivate(registrationID: String?) -> Task<Void, Never>? {
+        guard !starting, isActive(), deviceEnabled, enabled() else { return nil }
+        guard let observation, observation.running, observation.target == selectedTarget,
+              mayRequest(observation.target) else { return nil }
+        ledger.shownTurns = ledger.shownTurns.filter { now().timeIntervalSince1970 - Double($0.value) < 30 * 86400 }
+        guard let turn = prefetched, ledger.shownTurns[turn.id] == nil else { return nil }
+        guard let registrationID else { return nil }
+        starting = true
+        let generation = epoch
+        let displaced = activities()
+        let oldRecords = Array(ledger.records.values)
+        let activity: any TurnActivityHandle
+        let requestedAt = Int(now().timeIntervalSince1970)
+        do {
+            activity = try create(TurnActivityAttributes(
+                agentName: TurnActivityAttributes.displayName(observation.agentName, limit: 40),
+                sessionTitle: TurnActivityAttributes.displayTitle(observation.sessionTitle, agentName: observation.agentName),
+                accountID: observation.target.accountID, instanceOrigin: observation.target.instanceOrigin,
+                sessionID: observation.sessionID, turnID: turn.id), turn.content)
+        } catch {
+            starting = false
+            return nil // The previous card and its observers remain untouched.
         }
+        for old in displaced {
+            locallyEnding.insert(old.id)
+            tokenTasks.removeValue(forKey: old.id)?.cancel()
+            stateTasks.removeValue(forKey: old.id)?.cancel()
+        }
+        // Persist retirement together with the replacement. Even if the process
+        // exits before end(), an old card cannot register or accept a suspended
+        // GET; its captured row is only used for best-effort DELETE.
+        ledger.records.removeAll()
+        let record = Record(id: activity.id, target: observation.target, sessionID: observation.sessionID,
+                            turnID: turn.id, registrationID: registrationID, requestedAt: requestedAt)
+        ledger.records[record.id] = record
+        ledger.shownTurns[turn.id] = requestedAt
+        save()
+        let endBackgroundTask = beginBackgroundTask { [weak self] in self?.departureTask?.cancel() }
+        let task = Task { @MainActor in
+            defer { endBackgroundTask(); self.starting = false; self.departureTask = nil }
+            for old in displaced { await old.end(nil, immediately: true) }
+            for old in oldRecords { await self.remove(old, reason: "replaced") }
+            guard generation == self.epoch, !Task.isCancelled else {
+                await activity.end(nil, immediately: true)
+                return
+            }
+            self.observeState(activity, record: record)
+            let token = await self.firstToken(activity)
+            guard generation == self.epoch, !Task.isCancelled, let token,
+                  !self.locallyEnding.contains(record.id),
+                  activity.state == .active || activity.state == .stale else {
+                await self.finish(activity, record: record, reason: "system_ended")
+                return
+            }
+            do {
+                if try await self.register(token, activity: activity, record: record, generation: generation) {
+                    self.observeTokens(activity, record: record)
+                }
+            } catch {
+                if case Failure.unavailable = error {
+                    self.observeTokens(activity, record: record)
+                } else {
+                    await self.finish(activity, record: record, reason: "system_ended")
+                }
+            }
+        }
+        departureTask = task
+        return task
     }
 
     func endAll(reason: String, invalidate: Bool = true) async {
-        if invalidate { epoch += 1 }
+        if invalidate { epoch += 1; departureTask?.cancel() }
         let current = activities()
         let missing = ledger.records.values.filter { record in !current.contains { $0.id == record.id } }
         for activity in current {
@@ -244,17 +306,18 @@ final class TurnActivityCoordinator {
         for record in missing { await remove(record, reason: reason) }
     }
 
-    /// Ends every Turn Live Activity on this phone at once and forgets the
-    /// ledger, telling no instance (the entry is withdrawn, 11-21). The
-    /// ledger goes first: a reconcile running meanwhile then finds no record
-    /// to register or DELETE, and only ends what it finds.
+    /// Startup with the device setting off retires old cards locally before
+    /// account reconciliation. Keep the shown-Turn history, never its tokens.
     func endAllLocally() async {
         epoch += 1
         tokenTasks.values.forEach { $0.cancel() }
         tokenTasks.removeAll()
         stateTasks.values.forEach { $0.cancel() }
         stateTasks.removeAll()
-        ledger = Ledger()
+        for activity in activities() {
+            ledger.shownTurns[activity.attributes.turnID] = ledger.shownTurns[activity.attributes.turnID] ?? Int(now().timeIntervalSince1970)
+        }
+        ledger.records.removeAll()
         save()
         for activity in activities() where activity.state != .dismissed {
             await activity.end(nil, immediately: true)
@@ -276,6 +339,7 @@ final class TurnActivityCoordinator {
     func selectTarget(_ target: Target?) {
         guard selectedTarget != target else { return }
         selectedTarget = target
+        clearObservation()
         epoch += 1
         tokenTasks.values.forEach { $0.cancel() }
         tokenTasks.removeAll()
@@ -283,6 +347,7 @@ final class TurnActivityCoordinator {
 
     func reconcile(target: Target?) async {
         guard target == selectedTarget else { return }
+        guard deviceEnabled else { return }
         guard enabled() else { await endAll(reason: "disabled"); return }
         let generation = epoch
         let current = activities()
@@ -339,6 +404,8 @@ final class TurnActivityCoordinator {
     /// Actual logout cleanup runs in the account coordinator's awaited push hook.
     func invalidateRequests() -> [WebsiteDataStoreReleaseBarrier] {
         selectedTarget = nil
+        clearObservation()
+        departureTask?.cancel()
         epoch += 1
         tokenTasks.values.forEach { $0.cancel() }
         tokenTasks.removeAll()
@@ -524,5 +591,21 @@ final class TurnActivityCoordinator {
         save()
         _ = try? await mutations[record.id]?.value
         _ = try? await request(record.target, "DELETE", Self.base + "/" + record.id, ["reason": reason])
+    }
+}
+
+/// Keeps UIKit's expiration handler and the normal completion on one owner.
+@MainActor
+private final class TurnActivityBackgroundLease {
+    private var identifier = UIBackgroundTaskIdentifier.invalid
+    init(expiration: @escaping @MainActor () -> Void) {
+        identifier = UIApplication.shared.beginBackgroundTask(withName: "TurnActivityRegistration") { [weak self] in
+            MainActor.assumeIsolated { expiration(); self?.end() }
+        }
+    }
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
     }
 }

@@ -380,6 +380,34 @@ self.addEventListener('fetch', (event) => {
         let _ = up.join();
     }
 
+    /// What a page needs before it registers the product's push worker
+    /// (`ui/src/lib/webPush.ts`): the three APIs, and a permission that is
+    /// granted when it asks. Read in the page's own world.
+    pub const PUSH_OFFER: &str = "window.__asked = 'pending'; \
+        try { Notification.requestPermission().then((value) => { window.__asked = String(value); }, () => { window.__asked = 'threw'; }); } \
+        catch (error) { window.__asked = 'absent'; } \
+        JSON.stringify({ serviceWorker: 'serviceWorker' in navigator, pushManager: 'PushManager' in window, \
+        notification: 'Notification' in window, permission: 'Notification' in window ? Notification.permission : 'absent' })";
+    pub const PUSH_ASKED: &str = "String(window.__asked)";
+
+    /// One of the three APIs, as `PUSH_OFFER` read it: `None` when the
+    /// reading itself is missing or is not what `PUSH_OFFER` answers.
+    pub fn offers(offered: Option<&str>, api: &str) -> Option<bool> {
+        offered
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())?
+            .get(api)?
+            .as_bool()
+    }
+
+    /// Whether a page that read `offered` (`PUSH_OFFER`) and was answered
+    /// `asked` (`PUSH_ASKED`) gets as far as registering its push worker.
+    pub fn registers_push_worker(offered: Option<&str>, asked: Option<&str>) -> bool {
+        ["serviceWorker", "pushManager", "notification"]
+            .iter()
+            .all(|api| offers(offered, api) == Some(true))
+            && asked == Some("granted")
+    }
+
     pub struct Report {
         pub failed: i32,
     }
@@ -543,6 +571,22 @@ mod macos_probe {
             }),
         );
 
+        // What this WebView offers a page that wants web push. WKWebView has
+        // no `PushManager`, so the page never registers its push worker, and
+        // an instance window is never controlled by it: the rendezvous is
+        // not refused for that reason. The case is the missing API alone,
+        // read successfully: it fails if a later WebKit adds it, whatever an
+        // unattended permission request answers (shown only for the record).
+        let offered = page_eval(&webview, PUSH_OFFER);
+        pump_until(Duration::from_secs(3), || false);
+        let asked = page_eval(&webview, PUSH_ASKED);
+        report.case(
+            "a-page-cannot-register-its-push-worker",
+            offers(offered.as_deref(), "serviceWorker").is_some()
+                && offers(offered.as_deref(), "pushManager") == Some(false),
+            json!({ "offered": offered, "asked": asked }),
+        );
+
         // 2. A page that replaced everything the script calls: the script
         //    used none of it, the answer is still the instance's, and the
         //    page's world gained nothing it could read.
@@ -573,7 +617,9 @@ mod macos_probe {
         let stale = fetch(&webview, mtm, &request, || false);
         report.case(
             "another-origin-or-a-stale-selection-asks-nothing",
-            wrong_origin == Some(Reply::NotReady) && stale == Some(Reply::NotReady) && instance.rendezvous_requests().is_empty(),
+            wrong_origin == Some(Reply::NotReady)
+                && stale == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().is_empty(),
             json!({ "wrong_origin": format!("{wrong_origin:?}"), "stale": format!("{stale:?}"), "requests": instance.rendezvous_requests().len() }),
         );
 
@@ -587,10 +633,21 @@ mod macos_probe {
             *counter.borrow_mut() += 1;
             *counter.borrow() == 1
         });
+        let requests = instance.rendezvous_requests().len();
+        // The same when the instance refused meanwhile: the selection's
+        // change is what is said, whatever the instance said.
+        *instance.answer.lock().expect("mode") = Answer::Forbidden;
+        let first = Rc::new(RefCell::new(true));
+        let refused = fetch(&webview, mtm, &request, move || first.replace(false));
+        *instance.answer.lock().expect("mode") = Answer::Ready;
         report.case(
             "an-answer-for-a-selection-that-changed-is-dropped",
-            loaded && changed == Some(Reply::Failed) && instance.rendezvous_requests().len() == 1 && *asked.borrow() == 2,
-            json!({ "reply": format!("{changed:?}"), "requests": instance.rendezvous_requests().len(), "asked": *asked.borrow() }),
+            loaded
+                && changed == Some(Reply::SelectionChanged)
+                && requests == 1
+                && *asked.borrow() == 2
+                && refused == Some(Reply::SelectionChanged),
+            json!({ "reply": format!("{changed:?}"), "requests": requests, "asked": *asked.borrow(), "refused": format!("{refused:?}") }),
         );
 
         // 5. A redirect is refused and not followed; a refusal and an answer
@@ -759,7 +816,7 @@ mod windows_probe {
         ExecuteScriptCompletedHandler,
         Microsoft::Web::WebView2::Win32::{
             CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment,
-            ICoreWebView2EnvironmentOptions, ICoreWebView2_10,
+            ICoreWebView2Environment10, ICoreWebView2EnvironmentOptions, ICoreWebView2_10,
         },
     };
     use windows::{
@@ -810,9 +867,11 @@ mod windows_probe {
 
     /// A WebView2 with no window, on a new user-data folder, made with
     /// `arguments`.
+    /// `private`: an InPrivate WebView, as the app's instance windows are.
     fn new_webview(
         folder: &std::path::Path,
         arguments: String,
+        private: bool,
     ) -> webview2_com::Result<(ICoreWebView2Controller, ICoreWebView2)> {
         let options = CoreWebView2EnvironmentOptions::default();
         // SAFETY: Set before the options are handed to WebView2.
@@ -839,8 +898,17 @@ mod windows_probe {
                 // `HWND_MESSAGE`: a message-only parent, so nothing is shown.
                 let parent = HWND(-3isize as *mut c_void);
                 // SAFETY: A single-threaded apartment.
-                unsafe { environment.CreateCoreWebView2Controller(parent, &handler) }
-                    .map_err(webview2_com::Error::WindowsError)
+                unsafe {
+                    if private {
+                        let environment = environment.cast::<ICoreWebView2Environment10>()?;
+                        let options = environment.CreateCoreWebView2ControllerOptions()?;
+                        options.SetIsInPrivateModeEnabled(true)?;
+                        environment.CreateCoreWebView2ControllerWithOptions(parent, &options, &handler)
+                    } else {
+                        environment.CreateCoreWebView2Controller(parent, &handler)
+                    }
+                }
+                .map_err(webview2_com::Error::WindowsError)
             }),
             Box::new(move |status, controller| {
                 status?;
@@ -929,7 +997,7 @@ mod windows_probe {
         let Some(argument) = argument else { return report.failed };
 
         let folder = std::env::temp_dir().join(format!("avibe-direct-webview-probe-{}", std::process::id()));
-        let (controller, view) = match new_webview(&folder, argument.clone()) {
+        let (controller, view) = match new_webview(&folder, argument.clone(), false) {
             Ok(made) => made,
             Err(error) => {
                 report.case(
@@ -1020,7 +1088,9 @@ mod windows_probe {
         let stale = fetch(&view, &request, || false);
         report.case(
             "another-origin-or-a-stale-selection-asks-nothing",
-            wrong_origin == Some(Reply::NotReady) && stale == Some(Reply::NotReady) && instance.rendezvous_requests().is_empty(),
+            wrong_origin == Some(Reply::NotReady)
+                && stale == Some(Reply::SelectionChanged)
+                && instance.rendezvous_requests().is_empty(),
             json!({ "wrong_origin": format!("{wrong_origin:?}"), "stale": format!("{stale:?}"), "requests": instance.rendezvous_requests().len() }),
         );
 
@@ -1033,10 +1103,26 @@ mod windows_probe {
             *counter.borrow_mut() += 1;
             *counter.borrow() == 1
         });
+        let requests = instance.rendezvous_requests().len();
+        // The same when the instance refused meanwhile, on the path that
+        // delivers at once: the selection's change is what is said,
+        // whatever the instance said.
+        *instance.answer.lock().expect("mode") = Answer::Forbidden;
+        let first = Rc::new(RefCell::new(true));
+        let refused = fetch(&view, &request, move || first.replace(false));
+        *instance.answer.lock().expect("mode") = Answer::Ready;
         report.case(
             "an-answer-for-a-selection-that-changed-is-dropped",
-            loaded && changed == Some(Reply::Failed) && instance.rendezvous_requests().len() == 1 && *asked.borrow() == 2,
-            json!({ "reply": format!("{changed:?}"), "requests": instance.rendezvous_requests().len(), "asked": *asked.borrow() }),
+            loaded
+                && changed == Some(Reply::SelectionChanged)
+                && requests == 1
+                // Asked before the request, when its ready answer arrived,
+                // and on delivery. Three, not two: the answer's arrival is
+                // where the change is seen, before anything more is asked
+                // of WebView2, so the change is never said late.
+                && *asked.borrow() == 3
+                && refused == Some(Reply::SelectionChanged),
+            json!({ "reply": format!("{changed:?}"), "requests": requests, "asked": *asked.borrow(), "refused": format!("{refused:?}") }),
         );
 
         // 5. A redirect, a refusal, an answer that is too large.
@@ -1166,10 +1252,58 @@ mod windows_probe {
             json!({ "challenged": challenged, "requests": basic.len(), "answered": basic.iter().any(|seen| seen.headers.contains_key("authorization")) }),
         );
 
+        // 11. What WebView2 offers a page that wants web push: in this
+        //     WebView, and in an InPrivate one, as the app's instance windows
+        //     are, where it is also seen whether a worker can take control.
+        let offer = |view: &ICoreWebView2, worker: bool| {
+            let loaded = load(view, &format!("{origin}/"), "plain");
+            let offered = page_eval(view, PUSH_OFFER);
+            pump_until(Duration::from_secs(3), || false);
+            let asked = page_eval(view, PUSH_ASKED);
+            let mut state = String::new();
+            if worker {
+                navigate(view, &format!("{origin}/worker-page"));
+                pump_until(WAIT, || {
+                    state = page_eval(view, "String(document.title)")
+                        .and_then(|title| title.as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    matches!(
+                        state.as_str(),
+                        "controlled" | "not-controlled" | "no-worker-container" | "worker-error"
+                    )
+                });
+            }
+            let text =
+                |value: &Option<serde_json::Value>| value.as_ref().and_then(|value| value.as_str().map(str::to_owned));
+            let (offered, asked) = (text(&offered), text(&asked));
+            let registers = registers_push_worker(offered.as_deref(), asked.as_deref());
+            json!({ "loaded": loaded, "offered": offered, "asked": asked, "registers": registers, "worker": state })
+        };
+        let here = offer(&view, false);
+        let private_folder =
+            std::env::temp_dir().join(format!("avibe-direct-webview-probe-private-{}", std::process::id()));
+        let private = match new_webview(&private_folder, String::new(), true) {
+            Ok((private_controller, private_view)) => {
+                let detail = offer(&private_view, true);
+                // SAFETY: A single-threaded apartment; done with this WebView.
+                let _ = unsafe { private_controller.Close() };
+                detail
+            }
+            Err(error) => json!({ "error": format!("{error:?}") }),
+        };
+        // A report, not yet a rule: whether WebView2 lets a page get as far
+        // as registering its push worker decides nothing by itself.
+        report.case(
+            "what-the-webview-offers-a-push-worker",
+            true,
+            json!({ "here": here, "private": private }),
+        );
+
         // SAFETY: A single-threaded apartment; the probe is done with the WebView.
         let _ = unsafe { controller.Close() };
         pump_until(Duration::from_millis(500), || false);
         let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(&private_folder);
         report.failed
     }
 }

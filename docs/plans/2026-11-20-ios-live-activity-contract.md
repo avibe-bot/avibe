@@ -2,14 +2,22 @@
 
 Status: **FROZEN** for implementation on 2026-11-20. Owner decisions (Max, 2026-11-20 10:16 UTC+08:00): track the Turn that is running in a session; the Lock Screen shows the Agent name **and the session title**; "needs you" lights the screen; switching instance ends the activity; the relay and Apple may see the phase and times in the clear; an ended activity stays for one hour. Field names, routes, status codes, and constants below are exact. A lane that needs a change asks the orchestrator for an amendment first; a lane never edits another lane's side of this file.
 
+**Amendment 1 (2026-11-22): automatic start behind a device setting.** Max withdrew the in-conversation entry on 2026-11-21 (#4125) after it stacked copies of itself in the conversation, and decided on 2026-11-22 01:39 UTC+08:00:
+- the conversation page shows no Lock Screen entry or hint;
+- a device-only setting in Settings › Notifications turns the feature on, off by default;
+- with it on, leaving the App while the open conversation's Turn runs shows that Turn;
+- a Turn dismissed from the Lock Screen is not shown again.
+
+This amendment replaces §1 steps 1–2, §2.2, the start rules of §2.3, and §4.3's Web-entry bullet. The Runtime is unchanged: §4.4 already keeps one `tracking` row per device (`push_registration_id`), and two devices tracking the same Turn each keep their own row. The relay (§3), the vectors, and every other rule are unchanged.
+
 Vectors shared byte for byte by every lane: `tests/fixtures/live_activity/contract_vectors.json`. Reference rules and the vector checks: `tests/test_live_activity_contract.py`. Design frames: `ui/design: ios/live-activity/*`.
 
 ## 1. The flow, once
 
 This walkthrough only shows the happy path. Sections 2–5 are normative; where this walkthrough says less than they do, they decide.
 
-1. Max opens the 首席安全官 session in the iOS App while a Turn runs and taps **Show on Lock Screen**. The Web UI calls `liveActivity.start({sessionId, agentName, sessionTitle})`.
-2. The App reads the running Turn (`GET /api/web-push/live-activities/turn`), starts an `Activity<TurnActivityAttributes>` with `pushType: .token`, waits for its first push token, and registers it (`PUT /api/web-push/live-activities/<activity_id>`) together with this device's relay registration id.
+1. Max has turned on Settings › Notifications › Show progress on the Lock Screen on his iPhone. He is reading the 首席安全官 session while its Turn runs, so the Web UI has told the App `liveActivity.observe({sessionId, agentName, sessionTitle, running: true})`, and the App has already read that Turn (`GET /api/web-push/live-activities/turn`).
+2. He locks the phone. As the App leaves the foreground, it starts an `Activity<TurnActivityAttributes>` with `pushType: .token`, waits for its first push token, and registers it (`PUT /api/web-push/live-activities/<activity_id>`) together with this device's relay registration id.
 3. The instance's controller watches that Turn. On each state change it POSTs a relay request to `https://avibe.bot/api/push/apns/<registration_id>/live-activity`. The relay turns that request into one APNs `liveactivity` push to the activity token. While the Turn keeps running, the controller also sends a low-priority heartbeat every 15 minutes.
 4. The Turn ends. The controller sends `event: end` with a dismissal date one hour later. Tracking stops once the relay accepts that end, or when a §4.3 stop rule applies; until then the end stays pending and is resent.
 
@@ -41,57 +49,65 @@ struct TurnActivityAttributes: ActivityAttributes {
 - `ContentState` decoding must accept every `content-state` in `relay_cases` (an iOS test decodes each `apns.body_utf8`). Adding a phase is a contract amendment, because an older App cannot decode an unknown case.
 - The session title is captured when tracking starts and is **not** updated afterwards; attributes are immutable. Following a rename would require the title to travel in `content-state` through the relay and APNs in the clear. That is out of scope.
 
-### 2.2 Bridge (Web ↔ App), capability `liveActivities: 1`
+### 2.2 Bridge (Web ↔ App), capability `lockScreenProgress: 1`
+
+The `liveActivities` capability and its methods (`status`, `start`, `stop`, and the in-conversation entry) are retired. **The App never announces `liveActivities` again, at any version.** An older instance's Web bundle still renders its entry whenever that capability is present at version 1 or higher, so announcing it would bring the entry back. The new behavior uses a capability of its own, `lockScreenProgress: 1`: the Web uses the methods below only when the shell announces it, and old bundles do not know it. The App answers `liveActivity.status`, `liveActivity.start`, and `liveActivity.stop` with `unsupported`, for any page that still calls them.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `liveActivity.status` | `{sessionId}` | `{enabled, tracking}`. `enabled` is `ActivityAuthorizationInfo().areActivitiesEnabled`; `tracking` is true when a local activity exists for this session. |
-| `liveActivity.start` | `{sessionId, agentName, sessionTitle}` (`sessionTitle` may be `null`) | `{ok: true}` or `{ok: false, code}`, where `code ∈ disabled \| no_active_turn \| push_unavailable \| failed` |
-| `liveActivity.stop` | `{sessionId}` | `{ok: true}`. Ends the activity `.immediate` and DELETEs with `user_stopped`. |
-| `liveActivity.openSettings` | `{}` | `{ok: true}`. Opens this App's page in Settings. |
+| `liveActivity.setting` | `{}` | `{enabled, systemEnabled}`. `enabled` is this device's setting, `false` until the person turns it on, stored in the App only (never sent to an instance). `systemEnabled` is `ActivityAuthorizationInfo().areActivitiesEnabled`. |
+| `liveActivity.setSetting` | `{enabled}` (a boolean) | the same shape after applying it. Turning it off ends every `TurnActivityAttributes` activity (§2.3 row "the device setting is turned off"). |
+| `liveActivity.observe` | `{sessionId, agentName, sessionTitle, running}`, or `{sessionId: null}` | `{ok: true}`. Reports the conversation that is on screen: `sessionTitle` may be `null` (a Bot's session), `running` is the page's `runtimeState.foreground === 'running'`. The App keeps only the latest observation. |
+| `liveActivity.openSettings` | `{}` | `{ok: true}`. Opens this App's page in the system Settings. |
 
-When `start` is refused, the Web shows the shipped toast:
-- `no_active_turn` (warning): 「这一轮已结束。」 / "This turn has ended."
-- `push_unavailable` (warning): 「开启通知后才能在锁屏上显示。」 / "Turn on notifications to show this on the Lock Screen."
-- `failed` (error): 「未能更新锁屏显示，请重试。」 / "Couldn't update the Lock Screen. Try again." (ASCII apostrophe)
-- `disabled` never shows a toast; the entry switches to its Settings state instead.
+Examples are the `bridge_v2` vectors. The `bridge` vectors are version 1 and are kept only as a record.
 
-These strings are drawn in `ui/design: ios/live-activity/app-start-refused`.
+**Web rules:**
+- Settings › Notifications shows one row when the shell announces `lockScreenProgress`: a switch bound to `setting` and `setSetting`. When `systemEnabled` is false, the switch is disabled and the row shows the existing system-off line with the existing Settings button (`openSettings`).
+- The conversation page renders no Lock Screen element of any kind. A hook with no DOM sends `observe` whenever `sessionId`, `agentName`, `sessionTitle`, or `running` changes, and `{sessionId: null}` when the conversation page goes away. It skips a call identical to the last one and does not depend on the setting.
+- The page passes the title it shows in the conversation header (`null` for a Bot's session).
+- ChatPage tests fail on any React duplicate-key warning: the stacked copies came from two siblings sharing `key={sessionId}`.
 
-The Web passes the title it already shows in the conversation header; for a Bot's session (no title) it passes `null`. The Web shows the entry only when the capability is present and the session's Turn is in flight. When `enabled` is false it shows the Settings entry and never calls `start`.
+**Words** (zh / en; reviewed 2026-11-22). The row's two strings are new; the other two are reused:
+- Title: 「在锁屏上显示进度」 / "Show progress on the Lock Screen"
+- Description: 「离开 Avibe 时，如果正在看的会话还在处理，就在锁屏和灵动岛上显示进度。」 / "When you leave Avibe while the conversation you are viewing is still working, its progress appears on the Lock Screen and in the Dynamic Island."
+- System off (reused): 「实时活动在系统设置里关着」 / "Live Activities are off in Settings", and 「去设置」 / "Settings"
+
+The version-1 toasts and the in-conversation frames (`app-offer`, `app-tracking`, `app-system-off`, `app-chips`, `app-start-refused`) are removed in this amendment. The setting row is drawn as `proposed` frames `ui/design: settings/live-activity/*` (off by default, on, and system off).
 
 ### 2.3 Lifecycle owned by the App
 
-- **start:** one activity at a time. Once the first three steps below have passed, and just before `Activity.request`, the App ends any other `TurnActivityAttributes` activity (the "displaces" row below). A start refused by `disabled`, `push_unavailable`, or `GET …/turn` leaves the current activity alone; a later failure leaves no activity. Every step has a defined outcome, and `start` answers with the first refusal it meets:
-
-| Step | Outcome | `start` answers |
-| --- | --- | --- |
-| Live Activities are off | stop | `disabled` |
-| no active relay registration for this instance in `NativePushCoordinator` | stop | `push_unavailable` |
-| `GET …/turn` | `200`: continue. `409 no_active_turn` or `404`: stop. `503` or no answer: stop | `no_active_turn`, `no_active_turn`, `failed` |
-| `Activity.request(attributes, content: (state from the turn, staleDate: confirmedAt + 2400), pushType: .token)` | throws: stop | `failed` |
-| first value of `pushTokenUpdates` | none within 10 s: end `.immediate` | `failed` |
-| `PUT` | `200`: registered; apply the state | `{ok: true}` |
-| | `409 turn_not_active`: end with the returned terminal state | `no_active_turn` |
-| | `403 registration_not_owned`: end `.immediate` | `push_unavailable` |
-| | `404`, `400`, `409 activity_conflict`: end `.immediate` | `failed` |
-| | `503` or no answer: keep it, unregistered | `{ok: true}` |
+- **Observation and prefetch:** while an observation reports `running: true`, the App reads that Turn with `GET …/turn` and keeps the answer: `turn_id`, `phase`, `started_at`, `confirmed_at`. It reads again when the observation changes and when the App comes to the foreground. A `409`, `404`, `503`, or no answer leaves no prefetched Turn. `running: false` or `{sessionId: null}` drops it.
+- **Ledger:** the App records, persisted on the device, every `turn_id` that has had an activity. **A Turn gets at most one activity, ever:** once recorded, no later start creates another for it, whatever ended the first one (dismissed, ended, replaced, or failed after `Activity.request` succeeded). An entry is kept until the App knows that Turn is over: a read for its session returns a terminal phase or a different `turn_id`, or its activity received a terminal state. It is not pruned on time alone, because a Turn can run past the 8-hour activity limit. An entry 30 days old may go regardless. Starts are serialized: at most one is in flight.
+- **start** happens only on `UIScene.willDeactivateNotification`, while the App is still active (ActivityKit refuses `Activity.request` from the background). That notification also fires when the person only pulls down Notification Center or Control Center; a start then is accepted (owner, 2026-11-22), and the ledger keeps it to one per Turn. Every condition below must hold, checked in order; if one fails, nothing happens, with no UI and no toast:
+  1. the device setting is on, and `areActivitiesEnabled` is true;
+  2. the latest observation has a `sessionId` and `running: true`, and its session belongs to the selected account and instance;
+  3. a prefetched Turn for that session exists, and its `turn_id` is not in the ledger;
+  4. `NativePushCoordinator` has an active relay registration for this instance.
+- Then, synchronously inside the notification callback, while the App is still active (nothing here awaits):
+  - call `Activity.request(attributes, content: (state from the prefetched Turn, staleDate: confirmedAt + 2400), pushType: .token)`. If it throws, stop here: nothing is recorded, any other activity is left exactly as it was, and the next departure may try again;
+  - on success, mark every other `TurnActivityAttributes` activity as displaced (its token and state observers stop at once, and it is never registered or updated again), record the new activity's `turn_id` in the ledger, and begin a background task.
+- Inside that background task, after the callback has returned:
+  - end each displaced activity and DELETE it with `replaced` (row "a new start displaces it"). The old card may stay visible next to the new one for a moment, but it is never restored;
+  - wait for the first value of `pushTokenUpdates` (none within 10 s: end `.immediate`);
+  - PUT, and handle the answer by R(PUT) below.
 
 After `start`, each local activity is in exactly one state, persisted on the device across launches together with its `requested_at` (the Unix second of its `Activity.request`, sent on every PUT):
 - **registered:** the instance holds its current token, because the last PUT was answered `200`;
 - **unregistered:** it has no PUT answered `200` since its last token.
 
-This table is the whole lifecycle. Every event has one row; "end" removes the activity from the device. The App never re-creates an ended activity on its own; only the person's explicit `start` makes a new one, for the same Turn as well.
+This table is the whole lifecycle. Every event has one row; "end" removes the activity from the device. Nothing re-creates an ended activity: the ledger allows one activity per Turn.
 
 | Event | Unregistered | Registered |
 | --- | --- | --- |
 | a new token from `pushTokenUpdates` | PUT → R(PUT) | becomes unregistered, then PUT → R(PUT) |
 | the App comes to the foreground | PUT → R(PUT) | GET → R(GET) |
 | unregistered for 28800 s since `Activity.request` | end `.immediate`, then DELETE `system_ended` | — |
-| `liveActivity.stop` | end `.immediate`, then DELETE `user_stopped` | same |
-| a new `start` displaces it | end `.immediate`, then DELETE `replaced` | same |
+| a new start displaces it | end `.immediate`, then DELETE `replaced` | same |
 | the person dismisses it, or the system ends it, with no App action behind it (`activityStateUpdates`) | DELETE `dismissed` or `system_ended` | same |
 | Live Activities are turned off (`activityEnablementUpdates` is false) | end `.immediate`, then DELETE `disabled` | same |
+| the device setting is turned off (`setSetting {enabled: false}`) | end `.immediate`, then DELETE `disabled` | same |
+| the App launches with the device setting off | end `.immediate` with no request (an earlier build's leftovers), and forget their ledger rows' tokens | same |
 | logout, account switch, instance switch, or instance removed | end `.immediate`, then DELETE `logout`, `account_switch`, or `instance_switch` | same |
 
 - **R(PUT):**
@@ -234,7 +250,7 @@ Columns: `activity_id` (primary key), `owner_user_key`, `session_id`, `turn_id`,
   - at `expires_at = requested_at + 28800`, the system's eight-hour limit, without a push.
 - **Restart:** tracking resumes from the table. A pending state is sent, and otherwise a send happens only if the phase differs from `last_phase`; the pending state is part of the row, so it survives a restart.
 - Sending reuses the VAPID signing of `send_badge_update` and posts the body of §3.2 exactly.
-- The Web entry and its zh/en copy are part of this lane (`ui/src/i18n`).
+- The Web side of this lane is the setting row and the observation hook of §2.2, with their zh/en copy in `ui/src/i18n`. The in-conversation entry is retired (Amendment 1).
 
 ### 4.4 Tracking row lifecycle
 
@@ -246,7 +262,7 @@ A row is `tracking`, `ended`, or `stopped`. This table is the whole row lifecycl
 | PUT at or after `requested_at + 28800` | `409 activity_expired` | becomes `stopped` (`expired`); `409 activity_expired` | `409 activity_expired` | same |
 | PUT, turn live | create `tracking`; `200` | store the token, keep `pending_state`; `200` | — | `stop_reason: token_gone` and a token different from the row's: back to `tracking` with the new token, keeping `pending_state`; `200`. Any other: `200` with `status: stopped`, unchanged |
 | PUT, turn terminal | create `ended`; `409 turn_not_active` | becomes `ended` (no end push is owed: the App ends the card from this answer); `409 turn_not_active` | `409 turn_not_active` | `200` with `status: stopped`, unchanged |
-| a new `activity_id` PUT on the same `push_registration_id` | — | becomes `stopped` (`replaced`) | — | — |
+| a PUT that creates or revives a `tracking` row for another `activity_id` on the same `push_registration_id` | — | becomes `stopped` (`replaced`) | — | — |
 | the publisher's send | — | §4.3 | — | — |
 | `now ≥ expires_at` | — | becomes `stopped` (`expired`), no push | — | — |
 | the row's source goes away: its push registration is no longer an enabled subscription of the owner, the owner can no longer read the session, or the Turn row is gone | — | becomes `stopped` (`registration_unavailable`, `session_unavailable`, or `turn_unavailable`), no push | — | — |
@@ -259,10 +275,13 @@ A row is `tracking`, `ended`, or `stopped`. This table is the whole row lifecycl
 - Through the relay and APNs, only the phase enum and Unix seconds travel in the clear; names and titles stay on the phone.
 - An activity token's death never affects the device's ordinary notifications.
 - A tracked Turn has exactly one terminal state. Once its end has been attempted, the publisher sends nothing but that same end again; on the wire it can arrive more than once, because a send whose answer is lost is resent (§4.3) and the relay keeps no idempotency state. Every copy carries the same `phase`, `started_at`, and `ended_at`. ActivityKit ignores a push to an activity that has already ended, so a duplicate changes nothing on the phone.
-- Without the person's explicit `start`, an ended activity is never re-created.
+- A Turn gets at most one activity on a device (the App ledger). A device has at most one `tracking` row (§4.4); two devices of one owner tracking the same Turn keep a row each.
+- The conversation page renders no Lock Screen element, and with the device setting off the App starts nothing.
 - Logout, account switch, and instance switch leave no `TurnActivityAttributes` activity on the phone.
 - Required end-to-end check: a real instance sends through the deployed relay to a TestFlight build with non-ASCII names (the vectors use `首席安全官` and `依赖审计 · avault 🔒`).
 
 ## 6. Out of scope
+
+Amendment 1 adds: any in-conversation entry, hint, or toast; starting a Turn the person is not viewing when they leave; following a Turn into another conversation.
 
 push-to-start, frequent updates (`NSSupportsLiveActivitiesFrequentUpdates`), several Turns at once, approving on the Lock Screen, step counts, percentages or ETAs, following a session rename, and tracking Tasks, Watches, or PRs.
