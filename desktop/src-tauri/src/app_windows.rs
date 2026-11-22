@@ -530,6 +530,9 @@ pub(crate) fn navigation(view: &Webview, url: &Url) -> Option<bool> {
     if url.scheme() != "avibe-app" {
         return None;
     }
+    if crate::direct::shell::page_request(view, url) {
+        return Some(false);
+    }
     if close_navigation(url) {
         request_close(view);
         return Some(false);
@@ -844,6 +847,9 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         .expect("app windows")
         .windows
         .insert(label.clone(), entry.clone());
+    // The direct session of the instance view this window was opened from,
+    // if it has one; its route here where that can only be given now.
+    let direct_route = crate::direct::shell::app_window_route(app, &source.runtime.origin).await;
     let app_for_nav = app.clone();
     let label_for_nav = label.clone();
     let doc_for_nav = doc.clone();
@@ -908,6 +914,20 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
     {
         builder = builder.proxy_url(proxy);
     }
+    if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
+        builder = builder.additional_browser_args(arguments);
+    }
+    // Its page is told this window's path, as its instance view's is.
+    if source.runtime.disposable {
+        if let Some(script) = crate::direct::shell::page_script(app, &label, &source.runtime.origin) {
+            builder = builder.initialization_script(script);
+        }
+    }
+    // As the instance view it was opened from: no notifications permission
+    // for another computer's instance on Windows.
+    if source.runtime.disposable && cfg!(windows) {
+        builder = builder.on_permission_request(|_, kind| crate::direct::shell::remote_instance_permission(kind));
+    }
 
     let window = match builder.build() {
         Ok(window) => window,
@@ -930,6 +950,9 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
         }
     };
     entry.document.bind(window.as_ref());
+    if source.runtime.disposable {
+        crate::direct::shell::app_window_created(app, &label, &source.runtime.origin, direct_route);
+    }
     // ui/design: show-pages/desktop-native-controls/group-*. The shell owns the
     // four native buttons; existing web controls own annotation and sharing.
     #[cfg(target_os = "macos")]
@@ -1016,6 +1039,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
             // Destruction is not evidence of cookie erasure. Keep the receipt
             // and directory until the existing retirement operation completes.
             cleanup_entry.retired.store(true, Ordering::SeqCst);
+            crate::direct::shell::poke(&cleanup_app);
         }
     });
     let projected = if source.runtime.disposable {

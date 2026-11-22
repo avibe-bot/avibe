@@ -1,4 +1,4 @@
-import { emptyVoiceStream, nativeCaptureFactory } from './nativeVoiceCapture';
+import { adoptedCaptureFactory, emptyVoiceStream, nativeCaptureFactory } from './nativeVoiceCapture';
 import {
   finalizeVoiceDictation,
   VOICE_SEGMENT_MS,
@@ -60,8 +60,9 @@ export type ShowPageVoiceDictationInput = {
   /** How the take is recorded (lib/voiceRecording): through Web Audio, or without it (no live
    *  words, no level: its words come on release), or without it and getting no sound at all. */
   onCaptureState?: (state: VoiceCaptureState) => void;
-  /** The iOS App records the take (lib/nativeVoiceCapture) instead of getUserMedia and Web Audio. */
-  nativeCapture?: boolean;
+  /** The iOS App records the take (lib/nativeVoiceCapture) instead of getUserMedia and Web Audio.
+   *  `adopt`: the take is one the App began itself when it recognised the hold; this takes it. */
+  nativeCapture?: boolean | { adopt: string };
   /** When the press that started this take began (`Date.now()`), for the capture trace. */
   pressedAt?: number;
 };
@@ -251,7 +252,13 @@ export class ShowPageVoiceDictation {
       const pipeline = this.dependencies.createPipeline({
         stream,
         trace: this.trace,
-        ...(this.input.nativeCapture ? { createCapture: nativeCaptureFactory } : {}),
+        ...(this.input.nativeCapture
+          ? {
+              createCapture: typeof this.input.nativeCapture === 'object'
+                ? adoptedCaptureFactory(this.input.nativeCapture.adopt)
+                : nativeCaptureFactory,
+            }
+          : {}),
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: this.input.maxFileBytes,
         onSegment: (blob, metadata) => {

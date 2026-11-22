@@ -322,6 +322,40 @@ async fn native_cookie_jar_rejects_cross_authority_and_preserves_private_host_co
     );
 }
 
+#[tokio::test]
+async fn proof_and_inflight_ceremony_are_memory_only_on_save_and_restore() {
+    let transport = Arc::new(Responses {
+        cookie: Mutex::new(None),
+        received: Mutex::new(vec![]),
+    });
+    let origin: url::Url = "https://account.example/".parse().unwrap();
+    let mut session = NativeSession::new(origin.clone(), transport.clone());
+    let mut old_store = cookie_store::CookieStore::default();
+    for (name, value) in [
+        ("account", "ordinary"),
+        ("__Host-avibe-sign-in-proof", "proof-canary"),
+        ("__Host-avibe-sign-in-start", "start-canary"),
+    ] {
+        let header = format!("{name}={value}; Path=/; Secure; HttpOnly; Max-Age=3600");
+        old_store.parse(&header, &origin).unwrap();
+        *transport.cookie.lock().unwrap() = Some(header);
+        session.request(Method::GET, "/", None).await.unwrap();
+    }
+    let saved = session.persist().unwrap();
+    let text = std::str::from_utf8(&saved).unwrap();
+    assert!(!text.contains("proof-canary") && !text.contains("start-canary"));
+    assert!(session.cookie_value("__Host-avibe-sign-in-proof").is_some());
+    assert!(session.cookie_value("__Host-avibe-sign-in-start").is_some());
+    let mut legacy = vec![];
+    cookie_store::serde::json::save_incl_expired_and_nonpersistent(&old_store, &mut legacy).unwrap();
+    for bytes in [saved, legacy] {
+        let restarted = NativeSession::restore(origin.clone(), transport.clone(), &bytes).unwrap();
+        assert!(restarted.cookie_value("account").as_deref() == Some("ordinary"));
+        assert!(restarted.cookie_value("__Host-avibe-sign-in-proof").is_none());
+        assert!(restarted.cookie_value("__Host-avibe-sign-in-start").is_none());
+    }
+}
+
 #[test]
 fn unreadable_connection_record_is_preserved_instead_of_overwritten() {
     let root = tempfile::tempdir().unwrap();

@@ -98,3 +98,13 @@ system-owned.
   macOS 13–15 remains an explicit platform acceptance gap.
 - The same 56 focused frontend tests and native-control browser consumer pass.
   The compact row does not change web shell startup or Workbench first paint.
+
+## November 23 master integration
+
+The only textual conflict with master `e25383f159` was immediately after
+binding a new app window's document. Preserve master's direct-route window
+registration before installing this PR's four Show controls. These operations
+have separate responsibilities; the approved 40 pt title bar and button
+behavior are unchanged. Revalidate app-window lifecycle, direct-route wiring,
+the real native Show probe, frontend consumers and the UI build on the merged
+head, then require fresh exact-head review and CI before merging the PR.

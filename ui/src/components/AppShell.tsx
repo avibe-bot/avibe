@@ -170,10 +170,15 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
   );
 };
 
-/** The real sidebar footer layout, shared with design consumers. */
-export function AppShellFooter({ tools, children }: { tools: React.ReactNode; children: React.ReactNode }) {
+/** The real sidebar footer layout, shared with design consumers. `divided`: the desktop app's line between
+ *  the tools and the bottom row, across the whole sidebar, from its left edge to its right one, through the
+ *  sidebar's `px-4` (Max, 2026-11-22 13:00). It has twice the space above it that it has below, the room
+ *  the 28 px bottom row's 32 px slot leaves around its buttons, so the text sits as far below the line as
+ *  the Apps button sits above it. */
+export function AppShellFooter({ tools, divided = false, children }: { tools: React.ReactNode; divided?: boolean; children: React.ReactNode }) {
   return <div data-sidebar-footer className="relative flex shrink-0 flex-col gap-2">
     <div className="flex h-[39px] items-stretch gap-2">{tools}</div>
+    {divided && <div data-sidebar-footer-divider aria-hidden className="-mx-4 mt-2 border-t border-border" />}
     {children}
   </div>;
 }
@@ -625,7 +630,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
               version={capabilities.can_read_instance ? <VersionBadge openUpward /> : null}
             />
           );
-          return footer ? footer({ tools, defaultView }) : <AppShellFooter tools={tools}>{defaultView}</AppShellFooter>;
+          return footer ? footer({ tools, defaultView }) : <AppShellFooter tools={tools} divided={hasDesktopClient()}>{defaultView}</AppShellFooter>;
         })()}
 
         {/* Out of flow, so it neither joins the column nor takes any of its gap.

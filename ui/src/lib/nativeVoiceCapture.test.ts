@@ -2,7 +2,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { NativePcmCapture, nativeCaptureFactory } from './nativeVoiceCapture';
+import { noteAppVoice } from './appVoice';
+import {
+  adoptedCaptureFactory,
+  emptyVoiceStream,
+  isNativeHoldGone,
+  nativeCaptureAllowed,
+  NativePcmCapture,
+  nativeCaptureFactory,
+} from './nativeVoiceCapture';
 import { VoiceCaptureTrace } from './voiceCaptureTrace';
 import { VoiceRecordingPipeline } from './voiceRecording';
 
@@ -12,13 +20,20 @@ import { VoiceRecordingPipeline } from './voiceRecording';
 type Detail = { take: string; pcm?: string; ended?: boolean; reason?: string };
 
 let listeners: ((detail: Detail) => void)[] = [];
+/** What listens to the App's word about a hold it recognised (`voice.hold`). */
+let holdListeners: ((detail: Record<string, unknown>) => void)[] = [];
 let call: ReturnType<typeof vi.fn>;
 let startAnswer: () => Promise<unknown>;
+let adoptAnswer: () => Promise<unknown>;
+let permission: string;
 
-const install = () => {
+const install = (capabilities: Record<string, number> = { voice: 1, voiceCapture: 1, voiceHold: 2 }) => {
   listeners = [];
+  holdListeners = [];
   call = vi.fn(async (method: string) => {
     if (method === 'voice.captureStart') return startAnswer();
+    if (method === 'voice.holdAdopt') return adoptAnswer();
+    if (method === 'voice.permission') return { state: permission };
     return null;
   });
   Object.defineProperty(window, 'avibeNative', {
@@ -27,9 +42,16 @@ const install = () => {
       contract: 1,
       platform: 'ios',
       shellVersion: '1.0 (1)',
-      capabilities: { voice: 1, voiceCapture: 1 },
+      capabilities,
       call,
       on: (event: string, handler: (detail: Detail) => void) => {
+        if (event === 'voice.hold') {
+          const hold = handler as unknown as (detail: Record<string, unknown>) => void;
+          holdListeners.push(hold);
+          return () => {
+            holdListeners = holdListeners.filter((listener) => listener !== hold);
+          };
+        }
         expect(event).toBe('voice.capture');
         listeners.push(handler);
         return () => {
@@ -64,6 +86,8 @@ const handlers = () => ({
 beforeEach(() => {
   install();
   startAnswer = async () => ({ sampleRate: 16_000, activateMs: 40, engineMs: 30 });
+  adoptAnswer = async () => ({ sampleRate: 16_000, timings: {} });
+  permission = 'granted';
 });
 afterEach(() => {
   delete (window as { avibeNative?: unknown }).avibeNative;
@@ -103,6 +127,108 @@ describe('NativePcmCapture', () => {
     const attempt = trace.toEvent('sent').attempts[0];
     expect(attempt).toMatchObject({ kind: 'native', mic: 'ok', sampleRate: 16_000, chunks: 2, levels: 1, end: 'rendered' });
     expect(attempt.firstFrameMs).toBeGreaterThanOrEqual(0);
+    // The App's own two steps of the start it was asked for: where a slow start went.
+    expect(attempt).toMatchObject({ holdActMs: 40, holdStartMs: 30 });
+    expect(attempt.hold).toBeUndefined();
+  });
+
+  it('takes a hold the App recognised itself: its take, its audio since touch-down, its timings', async () => {
+    const trace = new VoiceCaptureTrace('hold', 'take-1');
+    const on = handlers();
+    adoptAnswer = async () => ({
+      sampleRate: 16_000,
+      timings: { variant: 'early', route: 'Speaker', recognisedAt: 200, hapticAt: 200, liveAt: 61, firstBufferAt: 160, adoptedAt: 231, activateMs: 38, startMs: 21, cueToLive: -139 },
+    });
+    const capture = adoptedCaptureFactory('n0123456789abcdef')(emptyVoiceStream(), 16_000, 0, on, 5_000, trace) as NativePcmCapture;
+    const starting = capture.start();
+    // Its audio can come before the answer: listened for first.
+    expect(listeners).toHaveLength(1);
+    await starting;
+
+    // Taken, never started: the App has had the microphone open since the finger came down.
+    expect(call).toHaveBeenCalledWith('voice.holdAdopt', { take: 'n0123456789abcdef' });
+    expect(call.mock.calls.some(([method]) => method === 'voice.captureStart')).toBe(false);
+    expect(on.onCaptureState).toHaveBeenCalledWith('live');
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', pcm: pcm([5, 6, 7]) });
+    expect(Array.from(on.onSamples.mock.calls[0][0])).toEqual([5, 6, 7]);
+
+    capture.stop();
+    expect(call).toHaveBeenCalledWith('voice.captureStop', { take: 'n0123456789abcdef' });
+    // The App's last word on the hold comes before the take's end; another take's is not this one's.
+    for (const listener of [...holdListeners]) listener({ phase: 'timings', take: 'someone-else', timings: { releasedAt: 1 } });
+    for (const listener of [...holdListeners]) {
+      listener({ phase: 'timings', take: 'n0123456789abcdef', timings: { variant: 'early', recognisedAt: 200, liveAt: 61, firstBufferAt: 160, adoptedAt: 231, releasedAt: 2_480, end: 'stopped' } });
+    }
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', ended: true });
+    expect(on.onStopped).toHaveBeenCalledTimes(1);
+    expect(listeners).toHaveLength(0);
+    expect(holdListeners).toHaveLength(0);
+
+    // Numbers and the variant only: nothing else of what the App said is kept.
+    const attempt = trace.toEvent('sent').attempts[0];
+    expect(attempt).toMatchObject({
+      kind: 'native', mic: 'ok', end: 'rendered',
+      hold: 'early', holdRecMs: 200, holdLiveMs: 61, holdBufMs: 160, holdAdoptMs: 231, holdUpMs: 2_480, holdActMs: 38, holdStartMs: 21,
+    });
+    expect(Object.keys(attempt).filter((key) => key.startsWith('hold')).sort()).toEqual(
+      ['hold', 'holdActMs', 'holdAdoptMs', 'holdBufMs', 'holdLiveMs', 'holdRecMs', 'holdStartMs', 'holdUpMs'],
+    );
+  });
+
+  it('hands on what was recorded before the take was taken 100 ms at a time, in order', async () => {
+    const on = handlers();
+    const capture = new NativePcmCapture(on, 5_000, undefined, 'n0123456789abcdef');
+    await capture.start();
+    // 1.2 s since touch-down, in the one event the App sends first: live recognition takes
+    // frames, not one of any size.
+    const since = Array.from({ length: 19_200 }, (_, index) => index % 30_000);
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', pcm: pcm(since) });
+    expect(on.onSamples).toHaveBeenCalledTimes(12);
+    const handed = on.onSamples.mock.calls.flatMap(([samples]) => Array.from(samples as Int16Array));
+    expect(on.onSamples.mock.calls.every(([samples]) => (samples as Int16Array).length === 1_600)).toBe(true);
+    expect(handed).toEqual(since);
+    capture.stop();
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', ended: true });
+  });
+
+  it('says so when the App no longer has the take it was to take', async () => {
+    const trace = new VoiceCaptureTrace('hold');
+    const on = handlers();
+    adoptAnswer = async () => {
+      throw { code: 'failed', message: 'gone' };
+    };
+    const capture = new NativePcmCapture(on, 5_000, trace, 'n0123456789abcdef');
+    const failure = await capture.start().then(() => null, (error: unknown) => error);
+    expect(isNativeHoldGone(failure)).toBe(true);
+    expect(isNativeHoldGone(new Error('other'))).toBe(false);
+    expect(on.onCaptureState).not.toHaveBeenCalled();
+    expect(listeners).toHaveLength(0);
+    expect(holdListeners).toHaveLength(0);
+    expect(trace.toEvent('failed').attempts[0]).toMatchObject({ kind: 'native', end: 'error' });
+  });
+
+  it('records through the App only where it can and its microphone is allowed', async () => {
+    expect(await nativeCaptureAllowed()).toBe(true);
+    // The first answer to the microphone question is WebKit's.
+    permission = 'prompt';
+    expect(await nativeCaptureAllowed()).toBe(false);
+    permission = 'denied';
+    expect(await nativeCaptureAllowed()).toBe(false);
+    permission = 'granted';
+    install({ voice: 1 });
+    expect(await nativeCaptureAllowed()).toBe(false);
+    delete (window as { avibeNative?: unknown }).avibeNative;
+    expect(await nativeCaptureAllowed()).toBe(false);
+
+    // The instance's off switch: tap and Show Page takes are the page's again.
+    install();
+    try {
+      noteAppVoice({ app_hold: false });
+      expect(await nativeCaptureAllowed()).toBe(false);
+    } finally {
+      noteAppVoice({ app_hold: true });
+    }
+    expect(await nativeCaptureAllowed()).toBe(true);
   });
 
   it('reports a take the App ended on its own as a capture failure, keeping what came', async () => {

@@ -70,7 +70,7 @@ async fn run(changed_selection: bool) {
     // The offer below deliberately replaces the advertised interface with loopback.
     // A wildcard client lets iroh migrate to that real interface mid-refresh;
     // the production monitor then correctly retires the unoffered path (#4149).
-    let ep = transport::endpoint_builder(client.key.clone())
+    let ep = transport::endpoint_builder(client.key.clone(), None)
         .clear_ip_transports()
         .bind_addr_with_opts(
             (Ipv4Addr::LOCALHOST, 0),
@@ -91,7 +91,7 @@ async fn run(changed_selection: bool) {
     let host = Authority::managed("desktop-test-app.avibe.bot").unwrap();
     let bytes = host.direct_head();
     let ingress_task = tokio::spawn(async move {
-        for leg in 0..2 {
+        for leg in 0..3 {
             let (socket, _) = ingress.accept().await.unwrap();
             let mut r = BufReader::new(socket);
             let mut preface = String::new();
@@ -102,6 +102,13 @@ async fn run(changed_selection: bool) {
             assert!(req == bytes);
             r.get_mut().write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
             if leg == 1 {
+                let mut byte = [0];
+                r.read_exact(&mut byte).await.unwrap();
+                assert_eq!(&byte, b"w");
+                r.get_mut().write_all(&byte).await.unwrap();
+                assert_retired_read(r.read(&mut byte).await);
+            }
+            if leg == 2 {
                 let mut data = [0; 6];
                 r.read_exact(&mut data).await.unwrap();
                 assert_eq!(&data, b"opaque");
@@ -117,6 +124,7 @@ async fn run(changed_selection: bool) {
         let offer = Offer {
             generation: "ci".into(),
             id: peer,
+            relay: None,
             candidates: vec![(Ipv4Addr::LOCALHOST, port).into()],
             until: client.clock.now() + Duration::from_secs(20),
         };
@@ -131,6 +139,7 @@ async fn run(changed_selection: bool) {
     let mut renewal = Offer {
         generation: "ci".into(),
         id: peer,
+        relay: None,
         candidates: vec![(Ipv4Addr::LOCALHOST, port).into()],
         until: renewed_until,
     };
@@ -138,13 +147,71 @@ async fn run(changed_selection: bool) {
     assert!(link.renew(&renewal));
     deadlines.changed().await.unwrap();
     assert_eq!(*deadlines.borrow_and_update(), renewed_until);
+    renewal.relay = super::path::TrialRelay::offered("public-trial-v1", "https://aps1-1.relay.n0.iroh.link./");
+    assert!(renewal.relay.is_some());
+    assert!(
+        !link.renew(&renewal),
+        "changing relay authority cannot extend an old endpoint"
+    );
+    renewal.relay = None;
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
-    client.endpoint = Some(ep);
-    client.publish(link.clone());
+    let public = if !changed_selection {
+        let mut other = Client::new("other-app.avibe.bot", "other".into()).await.unwrap();
+        let a = super::handover_tests::public_browser(&mut client).await;
+        let b = super::handover_tests::public_browser(&mut other).await;
+        Some((a, b, other))
+    } else {
+        None
+    };
+    let handover = client.handover();
+    let retired = client.window_credential("second").unwrap();
+    let delayed = handover.close_quiet_public_for_window(host.host(), &retired);
+    client.revoke_window(&retired);
+    let pooled = if let Some((a, b, other)) = public {
+        let first = client.window_credential("first").unwrap();
+        let second = client.window_credential("second").unwrap();
+        let mut one = super::credential_tests::connect_as(&client, &first, 200).await;
+        let mut two = super::credential_tests::connect_as(&client, &second, 200).await;
+        super::credential_tests::echo(&mut one).await;
+        super::credential_tests::echo(&mut two).await;
+        Some((a, b, other, first, second, one, two))
+    } else {
+        None
+    };
+    let mut changes_status = client.path_changes();
+    assert_eq!(*changes_status.borrow_and_update(), super::PathStatus::default());
+    client.publish(link.clone(), super::EndpointDrain::new(ep));
+    assert_eq!(changes_status.borrow_and_update().sequence, 1);
+    assert_eq!(
+        handover.close_quiet_public("other-app.avibe.bot", || Some(())).await,
+        super::HandoverResult::NotUsable
+    );
+    assert_eq!(
+        handover.close_quiet_public(host.host(), || None::<()>).await,
+        super::HandoverResult::OtherDocuments
+    );
+    if pooled.is_none() {
+        assert_eq!(
+            handover.close_quiet_public(host.host(), || Some(())).await,
+            super::HandoverResult::Done { closed: 0, kept: 0 }
+        );
+    }
+    assert_eq!(
+        client.selected_path(),
+        None,
+        "the CONNECT probe is not a browser stream"
+    );
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let (user, pass) = client.listener.credential.native_login();
+    let credential = client.window_credential("to-close").unwrap();
+    let mut closing = super::credential_tests::connect_as(&client, &credential, 200).await;
+    super::credential_tests::echo(&mut closing).await;
+    client.revoke_window(&credential);
+    assert_retired_read(closing.read(&mut [0]).await);
+    drop(super::credential_tests::connect_as(&client, &credential, 407).await);
+    let active = client.window_credential("second").unwrap();
+    let (user, pass) = active.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, client.listener.port))
         .await
@@ -163,6 +230,10 @@ async fn run(changed_selection: bool) {
     line.clear();
     r.read_line(&mut line).await.unwrap();
     assert_eq!(line, "\r\n");
+    assert_eq!(
+        client.selected_path(),
+        Some(super::SelectedPath::Lan(super::AddressFamily::Ipv4))
+    );
     elapsed.store(23, Ordering::SeqCst);
     let retained = RefreshOutcome::Retained {
         retry_before: Duration::from_secs(1),
@@ -175,6 +246,56 @@ async fn run(changed_selection: bool) {
         assert_eq!(client.refresh_reply(|_| std::future::pending()).await, retained);
     }
     assert_eq!(*deadlines.borrow(), renewed_until);
+    if let Some((mut mine, mut foreign, _other, first, second, mut one, mut two)) = pooled {
+        assert_eq!(
+            handover.window_census(&first),
+            Some(super::PublicCensus { quiet: 1, busy: 0 })
+        );
+        assert_eq!(
+            handover.window_census(&second),
+            Some(super::PublicCensus { quiet: 1, busy: 0 })
+        );
+        // First poll is after label reuse, with a replacement leg eligible to close.
+        assert_eq!(delayed.await, super::HandoverResult::NotUsable);
+        assert_eq!(handover.window_census(&retired), None);
+        client.revoke_window(&retired);
+        assert_eq!(
+            handover.window_census(&second),
+            Some(super::PublicCensus { quiet: 1, busy: 0 })
+        );
+        assert_eq!(
+            handover.close_quiet_public_for_window(host.host(), &first).await,
+            super::HandoverResult::Done { closed: 1, kept: 0 }
+        );
+        assert_retired_read(one.read(&mut [0]).await);
+        super::credential_tests::echo(&mut two).await;
+        assert_eq!(
+            handover.close_quiet_public(host.host(), || Some(())).await,
+            super::HandoverResult::Done { closed: 1, kept: 0 }
+        );
+        assert_retired_read(mine.read(&mut [0]).await);
+        foreign.write_all(b"z").await.unwrap();
+        assert_eq!(foreign.read_u8().await.unwrap(), b'z');
+        assert!(
+            !changes_status.has_changed().unwrap(),
+            "intentional quiet handover is not an involuntary closure"
+        );
+    }
+    if changed_selection {
+        // A terminal accept error ends eligibility for *new* connections.
+        // The already-committed stream must survive, including a transient refresh.
+        client.listener.accept_fault.notify_one();
+        timeout(
+            Duration::from_secs(2),
+            changes_status.wait_for(|s| s.preferred == super::PreferredPath::Tunnel),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(changes_status.borrow().closure, 0);
+        assert!(client.route().is_none());
+        assert_eq!(client.refresh_reply(|_| async { Reply::Failed }).await, retained);
+    }
     // Same established stream, after the failed renewals; no CONNECT replay.
     r.get_mut().write_all(b"opaque").await.unwrap();
     let mut answer = [0; 6];
@@ -196,6 +317,7 @@ async fn run(changed_selection: bool) {
             until: Duration::from_secs(60),
             generation: "ci".into(),
             id: peer,
+            relay: None,
             candidates: link.offer.candidates.clone()
         }));
     }
@@ -209,6 +331,19 @@ async fn run(changed_selection: bool) {
     );
     let mut end = [0];
     assert_retired_read(r.read(&mut end).await);
+    assert_eq!(client.selected_path(), None);
+    assert_eq!(
+        *changes_status.borrow_and_update(),
+        super::PathStatus {
+            preferred: super::PreferredPath::Tunnel,
+            sequence: 2,
+            closure: u64::from(!changed_selection)
+        }
+    );
+    assert_eq!(
+        handover.close_quiet_public(host.host(), || Some(())).await,
+        super::HandoverResult::NotUsable
+    );
     ingress_task.await.unwrap();
     drop(client);
     control.write_all(b"{\"type\":\"stop\"}\n").await.unwrap();

@@ -24,7 +24,6 @@ import {
 } from '../../lib/agentGraph';
 import { searchGraph, type GraphSearchResult } from '../../lib/graphSearch';
 import { readGraphShowDisabled, writeGraphShowDisabled } from '../../lib/graphViewPrefs';
-import { readAgentGraphMode, writeAgentGraphMode } from '../../lib/agentsViewMemory';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { AgentGraphCanvas } from './AgentGraphCanvas';
 import { AgentGraphMobileList } from './AgentGraphMobileList';
@@ -114,16 +113,11 @@ export const AgentGraphTab: React.FC = () => {
   const [projects, setProjects] = useState<{ id: string; display_name: string }[]>([]);
 
   // Filters (spec: 活跃/含历史 · time window · project incl. 独立 · 显示后台会话).
-  // The 活跃/含历史 choice is remembered across visits (含历史 by default) so
-  // re-entering the Runs tab resumes the view the user was actually watching.
-  // Only an explicit segmented-control click persists — the filter widening the
-  // search-locate path performs below is transient, same ruling as the
-  // disabled-trigger reveal.
-  const [mode, setMode] = useState<'active' | 'history'>(readAgentGraphMode);
-  const setModePersisted = useCallback((next: 'active' | 'history') => {
-    setMode(next);
-    writeAgentGraphMode(next);
-  }, []);
+  // Every visit to the Runs tab opens on 活跃 (owner ruling): the 活跃/含历史
+  // choice lasts only while this tab stays mounted and is never stored, so a
+  // value an older build left in localStorage has no effect. The search-locate
+  // path below may widen it to 含历史 for the same mounted lifetime.
+  const [mode, setMode] = useState<'active' | 'history'>('active');
   const [windowSel, setWindowSel] = useState<GraphWindow>('24h');
   const [projectSel, setProjectSel] = useState<string>('all');
   const [showBackground, setShowBackground] = useState(true);
@@ -594,7 +588,7 @@ export const AgentGraphTab: React.FC = () => {
         />
         <SegmentedRadio
           value={mode}
-          onChange={setModePersisted}
+          onChange={setMode}
           ariaLabel={t('agents.graph.filters.modeLabel')}
           options={[
             { id: 'active', label: t('agents.graph.filters.active') },

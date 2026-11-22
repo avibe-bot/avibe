@@ -54,15 +54,19 @@ const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
 // A check or setting change the host has not answered by then is reported from its receipt as it stands.
 const CONTROL_REQUEST_TIMEOUT_MS = 2 * 60_000;
 
-function ShownInstanceVersion({ name, appUpdate }: { name: string; appUpdate: boolean }) {
+function ShownInstanceVersion({ name, appUpdate, size }: { name: string; appUpdate: boolean; size: 'chip' | 'row' }) {
   const present = usePresentDesktopClient();
-  return <InstanceVersionChip name={name} appUpdate={appUpdate} onPresent={() => present('updates')} />;
+  return <InstanceVersionChip name={name} appUpdate={appUpdate} size={size} onPresent={() => present('updates')} />;
 }
 
 /** The version of the Avibe this page belongs to, and its update panel. Inside the desktop app on another
  *  computer's instance the page shows that instance's version and leaves the panel to the shell, which draws
  *  it for the instance and for this computer's app together (ui/design: update/instance-and-app). */
-export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
+export const VersionBadge: React.FC<{
+  openUpward?: boolean;
+  /** `row`: in the desktop app's bottom row (`VersionChip`'s `row`). */
+  size?: 'chip' | 'row';
+}> = ({ openUpward = false, size = 'chip' }) => {
   const client = useDesktopClientProjection();
   const { t } = useTranslation();
   const api = useApi();
@@ -802,7 +806,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     // At desktop width the bottom row carries that chip; a badge kept mounted but hidden there (the Settings
     // header's) would only read the version a second time.
     if (isDesktop) return null;
-    return <ShownInstanceVersion name={client.connection.committed.name} appUpdate={client.desktop.update.phase === 'available'} />;
+    return <ShownInstanceVersion name={client.connection.committed.name} appUpdate={client.desktop.update.phase === 'available'} size={size} />;
   }
 
   return (
@@ -811,6 +815,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         {/* Version Badge trigger */}
         <PopoverTrigger asChild>
           <VersionChip
+            size={size}
             onClick={handleBadgeClick}
             // Fetch the panel's chunk as the pointer or focus arrives, before the click opens it.
             onPointerEnter={() => void UpdatePanel.preload()}

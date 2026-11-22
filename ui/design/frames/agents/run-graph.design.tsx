@@ -30,6 +30,8 @@ const designFrames = frames([
     status: 'shipped',
     route: '/agents?tab=running',
     fixtures,
+    // The tab opens on 活跃 every visit; this frame shows the 含历史 view.
+    click: ['role=radio[name="{t:agents.graph.filters.withHistory}"]'],
     render: consolePage(page),
   },
   {

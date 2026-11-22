@@ -161,7 +161,7 @@ const windowFixtures = (lang: SubjectLang) => workbenchFixtures({
 const appWindow = (row: ReactNode, popup?: { height: string; label: string; content: ReactNode }) => () => (
   <div className="relative h-full">
     <Routes>
-      <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}>{row}</AppShellFooter>} />}>
+      <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools} divided>{row}</AppShellFooter>} />}>
         <Route path="/" element={<Workbench />} />
       </Route>
     </Routes>

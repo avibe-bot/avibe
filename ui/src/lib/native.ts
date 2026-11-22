@@ -15,7 +15,8 @@ export type NativeCapability =
   | 'systemSchedule'
   | 'viewport'
   | 'voice'
-  | 'voiceCapture';
+  | 'voiceCapture'
+  | 'voiceHold';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';
@@ -132,7 +133,9 @@ export type NativeSystemScheduleReceipt = {
 
 interface AvibeNative {
   readonly contract: 1;
-  readonly platform: NativePlatform;
+  /** `desktop`: the desktop app, in a window of another computer's instance.
+   *  It answers `direct` only, and is not a native shell in any other sense. */
+  readonly platform: NativePlatform | 'desktop';
   readonly shellVersion: string;
   readonly capabilities: Readonly<Record<string, number>>;
   call<T>(method: string, params?: Record<string, unknown>): Promise<T>;
@@ -146,12 +149,12 @@ declare global {
   }
 }
 
-function bridge(): AvibeNative | null {
+function bridgeOn(platforms: readonly string[]): AvibeNative | null {
   if (typeof window === 'undefined') return null;
   const candidate = window.avibeNative;
   if (
     candidate?.contract !== 1
-    || (candidate.platform !== 'ios' && candidate.platform !== 'android')
+    || !platforms.includes(candidate.platform)
     || typeof candidate.call !== 'function'
     || typeof candidate.on !== 'function'
     || !candidate.capabilities
@@ -159,6 +162,13 @@ function bridge(): AvibeNative | null {
     return null;
   }
   return candidate;
+}
+
+const PHONE_PLATFORMS: readonly NativePlatform[] = ['ios', 'android'];
+
+/** The phone App's bridge. Everything that means "inside the App" asks this. */
+function bridge(): AvibeNative | null {
+  return bridgeOn(PHONE_PLATFORMS);
 }
 
 export function isNativeShell(): boolean {
@@ -626,6 +636,100 @@ export function onNativeVoiceCapture(handler: (event: NativeVoiceCaptureEvent) =
   });
 }
 
+/** The first `voiceHold` the page names surfaces for. The one build that announced 1
+ *  (TestFlight 50.1) could take a tap on the composer for a hold and give it the cue, when it
+ *  learnt late that the finger had lifted; from 2 on the App asks the touch itself first. */
+export const NATIVE_VOICE_HOLD_VERSION = 2;
+
+/** The App recognises a hold on the surfaces the page names (ios/Avibe/NativeHoldCapture.swift):
+ *  it gives the cue at the threshold and has the microphone open from touch-down. */
+export function hasNativeVoiceHold(): boolean {
+  return hasNativeCapability('voiceHold', NATIVE_VOICE_HOLD_VERSION) && hasNativeVoiceCapture();
+}
+
+/** A place where a hold may record now, in the WebView's own points. */
+export type NativeVoiceHoldSurface = {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** A touch here opens no microphone: the App starts its input when it recognises the hold.
+   *  Unsaid, the App's default (at touch-down). */
+  start?: 'recognition';
+};
+
+/** The App's answer to a list of surfaces: `ok` (it follows presses there), or why it does not.
+ *  `superseded` is a list overtaken by a later one, which stands instead. */
+export type NativeVoiceHoldSurfacesAnswer = 'ok' | 'consent' | 'unwatched' | 'superseded' | 'failed';
+
+/** Names the surfaces where a hold may record now (none: the App follows no press), and the
+ *  page's hold threshold. */
+export async function nativeVoiceHoldSurfaces(
+  surfaces: NativeVoiceHoldSurface[],
+  holdMs: number,
+): Promise<NativeVoiceHoldSurfacesAnswer> {
+  try {
+    const native = bridge();
+    if (!native || !hasNativeVoiceHold()) return 'failed';
+    await native.call('voice.holdSurfaces', surfaces.length > 0 ? { surfaces, holdMs } : { surfaces });
+    return 'ok';
+  } catch (error) {
+    const { code, message } = (error ?? {}) as Partial<NativeBridgeError>;
+    if (code === 'failed' && (message === 'consent' || message === 'unwatched' || message === 'superseded')) return message;
+    return 'failed';
+  }
+}
+
+/** The App's own timings of a hold (ms from touch-down unless a duration), numbers and states only. */
+export type NativeVoiceHoldTimings = Record<string, unknown>;
+
+/** What the App says of a press it follows: a hold was `recognised` (the cue was given, its take
+ *  waits to be taken), the microphone `failed` to start for it, or a taken take's `timings` at its end. */
+export type NativeVoiceHoldEvent = {
+  phase: 'recognised' | 'failed' | 'timings';
+  take: string;
+  surface?: string;
+  step?: string;
+  timings?: NativeVoiceHoldTimings;
+};
+
+/** Takes a recognised hold's take: its audio, from touch-down, then comes as capture events.
+ *  Rejects with the bridge's error when the take is gone. */
+export async function nativeVoiceHoldAdopt(take: string): Promise<{ sampleRate: number; timings?: NativeVoiceHoldTimings }> {
+  const adopted = await callNative<{ sampleRate: number; timings?: NativeVoiceHoldTimings }>('voiceHold', 'voice.holdAdopt', { take });
+  if (!adopted) throw { code: 'unavailable', message: 'The App cannot record.' } satisfies NativeBridgeError;
+  return adopted;
+}
+
+/** Refuses a hold the page does not see as its own: the App drops what it recorded. */
+export async function nativeVoiceHoldReject(take: string): Promise<void> {
+  try {
+    await callNative('voiceHold', 'voice.holdReject', { take });
+  } catch {
+    // The App drops a take nobody takes on its own.
+  }
+}
+
+/** Listens to the App's hold events; null without a native shell. */
+export function onNativeVoiceHold(handler: (event: NativeVoiceHoldEvent) => void): (() => void) | null {
+  const native = bridge();
+  if (!native) return null;
+  return native.on('voice.hold', (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const event = payload as Partial<NativeVoiceHoldEvent>;
+    if (typeof event.take !== 'string') return;
+    if (event.phase !== 'recognised' && event.phase !== 'failed' && event.phase !== 'timings') return;
+    handler({
+      phase: event.phase,
+      take: event.take,
+      ...(typeof event.surface === 'string' ? { surface: event.surface } : {}),
+      ...(typeof event.step === 'string' ? { step: event.step } : {}),
+      ...(event.timings && typeof event.timings === 'object' ? { timings: event.timings } : {}),
+    });
+  });
+}
+
 export async function nativePushStatus(
   vapidPublicKey?: string,
 ): Promise<NativePushStatus | null> {
@@ -951,9 +1055,23 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
   return tracker;
 }
 
+/**
+ * The shell that answers `direct`: the phone App, or the desktop app in a
+ * window of another computer's instance. Only the functions below ask it, so
+ * `isNativeShell()` and every other capability stay the phone App's alone.
+ */
 function directBridge(): AvibeNative | null {
-  const native = bridge();
+  const native = bridgeOn([...PHONE_PLATFORMS, 'desktop']);
   return native && (native.capabilities.direct ?? 0) >= 1 ? native : null;
+}
+
+function directVersion(): number {
+  return directBridge()?.capabilities.direct ?? 0;
+}
+
+/** This page runs in a shell with a direct path of its own (any `direct` version). */
+export function nativeDirectAvailable(): boolean {
+  return directVersion() >= 1;
 }
 
 /**
@@ -1038,12 +1156,12 @@ export function nativeDirectPathKind(): NativeDirectPathKind | null {
 
 /** The shell reports its path and its changes (`direct` version 3). */
 export function nativeDirectPathReported(): boolean {
-  return hasNativeCapability('direct', 3);
+  return directVersion() >= 3;
 }
 
 /** The shell answers `direct.handover` (`direct` version 2). */
 export function nativeDirectHandoverAvailable(): boolean {
-  return hasNativeCapability('direct', 2);
+  return directVersion() >= 2;
 }
 
 export type NativeDirectHandoverResult = { closed: number; kept: number; skipped?: string };
