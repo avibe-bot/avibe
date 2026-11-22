@@ -72,7 +72,9 @@ pub(super) async fn finish(
         if cut == "factor_enroll_unknown_late" {
             caller.retire();
         }
-        let err = reply.deliver().err().expect("no direct success or codes");
+        let Err(err) = reply.deliver() else {
+            panic!("unexpected enrollment success");
+        };
         if cut == "factor_enroll_unknown" {
             assert_eq!(err.code, "factor_delivery_unknown");
         } else {
