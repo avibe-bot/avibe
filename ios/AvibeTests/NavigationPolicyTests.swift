@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit.UIGestureRecognizerSubclass
 import XCTest
 import WebKit
 @testable import Avibe
@@ -4871,6 +4872,13 @@ private final class FirstResponderProbe: UIView {
     }
 }
 
+/// A touch that says which phase it is in.
+private final class TouchProbe: UITouch {
+    var phaseNow: UITouch.Phase = .began
+
+    override var phase: UITouch.Phase { phaseNow }
+}
+
 final class PageFocusKeeperTests: XCTestCase {
     private let instance = WebOrigin.parseConfigured("https://alice-app.avibe.bot")!
 
@@ -5047,6 +5055,74 @@ final class PageFocusKeeperTests: XCTestCase {
         view.removeFromSuperview()
         keeper.look()
         XCTAssertEqual(view.asked, 0)
+    }
+
+    /// Nothing is done while a finger is on the view, by the touch's own
+    /// word: for a press the page took for itself UIKit takes the gesture
+    /// back with the finger still down and reports no end. Taking first
+    /// responder then would hold the lift back from the page, which would
+    /// time a tap as a hold.
+    @MainActor
+    func testNothingIsDoneWhileAFingerIsDownWhateverUIKitSaysOfTheGesture() {
+        let (_, view, keeper) = makeKept()
+        let touch = TouchProbe()
+        keeper.touchesBegan([touch], with: UIEvent())
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+
+        // UIKit takes the gesture back; the finger has not lifted.
+        keeper.reset()
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+        touch.phaseNow = .stationary
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+        touch.phaseNow = .moved
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+
+        // It lifts: the next look gives the page the focus.
+        touch.phaseNow = .ended
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
+    }
+
+    /// A second finger down keeps it waiting after the first has lifted, and
+    /// a cancelled touch has lifted.
+    @MainActor
+    func testEveryFingerMustHaveLifted() {
+        let (_, view, keeper) = makeKept()
+        let first = TouchProbe()
+        let second = TouchProbe()
+        keeper.touchesBegan([first], with: UIEvent())
+        keeper.touchesBegan([second], with: UIEvent())
+        first.phaseNow = .ended
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+        second.phaseNow = .cancelled
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
+    }
+
+    /// The reader's touch makes the page's focus theirs: what the keeper
+    /// gave before it is no longer taken back.
+    @MainActor
+    func testAfterATouchTheGivenFocusIsTheReadersAndIsNotTakenBack() {
+        var shown = true
+        let (_, view, keeper) = makeKept(shown: { shown })
+        let content = FirstResponderProbe(frame: view.bounds)
+        view.addSubview(content)
+        view.content = content
+        keeper.look()
+        XCTAssertTrue(content.isFirstResponder)
+
+        let touch = TouchProbe()
+        keeper.touchesBegan([touch], with: UIEvent())
+        touch.phaseNow = .ended
+        shown = false
+        keeper.look()
+        XCTAssertEqual(view.ended, 0)
+        XCTAssertTrue(content.isFirstResponder)
     }
 
     /// Two views in front in one window (side by side): the one whose page

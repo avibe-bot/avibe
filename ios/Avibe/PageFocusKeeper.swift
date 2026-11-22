@@ -36,9 +36,10 @@ import UIKit.UIGestureRecognizerSubclass
 /// reader's, as on iOS 26 after a tap: taking that would close a keyboard
 /// under Control Center or a system alert.
 ///
-/// As a gesture recogniser it only notes whether a finger is on the
-/// WebView. It never recognises, cancels or delays anything: the page gets
-/// every touch exactly as before.
+/// As a gesture recogniser it only notes the fingers that come down on the
+/// WebView, and asks each touch itself whether it is still down. It never
+/// recognises, cancels or delays anything: the page gets every touch
+/// exactly as before.
 final class PageFocusKeeper: UIGestureRecognizer {
     /// No oftener than this is the WebView looked at.
     static let interval: TimeInterval = 0.1
@@ -48,7 +49,11 @@ final class PageFocusKeeper: UIGestureRecognizer {
 
     /// The App shows its pages: it is active, and App Lock covers nothing.
     private let appShowsPages: () -> Bool
-    private var touching = false
+    /// The touches that came down on the WebView. Each is asked itself
+    /// whether it is still down: for a press the page took for itself UIKit
+    /// takes the gesture back (`reset()`) with the finger still on the
+    /// glass, and sends this recogniser no end.
+    private let touches = NSHashTable<UITouch>.weakObjects()
     /// The page has the focus from here, and no finger has been on the
     /// WebView since.
     private var gaveUntouched = false
@@ -83,32 +88,29 @@ final class PageFocusKeeper: UIGestureRecognizer {
     // MARK: Whether a finger is on the WebView
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        touching = true
+        for touch in touches { self.touches.add(touch) }
         // The reader has touched the page: its focus is theirs from here.
         gaveUntouched = false
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        lifted(touches, of: event)
+        lifted()
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        lifted(touches, of: event)
+        lifted()
     }
 
-    private func lifted(_ touches: Set<UITouch>, of event: UIEvent) {
-        let down = (event.allTouches ?? touches).contains { $0.phase != .ended && $0.phase != .cancelled }
-        guard !down else { return }
-        touching = false
+    private func lifted() {
+        guard !touching else { return }
         // Never a gesture of its own: the next touch starts it afresh.
         state = .failed
     }
 
-    /// UIKit took the gesture back: every finger has lifted. For a press
-    /// the page took for itself this is the only word of its end.
-    override func reset() {
-        super.reset()
-        touching = false
+    /// A finger that came down on the WebView is still down, by the touch's
+    /// own word. A touch that is gone has lifted.
+    private var touching: Bool {
+        touches.allObjects.contains { $0.phase == .began || $0.phase == .moved || $0.phase == .stationary }
     }
 
     // MARK: The look
