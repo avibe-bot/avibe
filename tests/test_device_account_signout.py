@@ -228,3 +228,42 @@ def test_age_limit_is_unconfirmed_and_erases_ref(paired, monkeypatch):
     assert read()[0]['account_results'] == [{'status': 'unconfirmed', 'reason': 'retry_exhausted', 'count': 1}]
     with get_cached_sqlite_engine().connect() as conn:
         assert conn.scalar(select(jobs.c.reference)) is None
+
+
+@pytest.mark.no_sqlite_template
+def test_receipt_role_migration_round_trip_keeps_existing_receipts(tmp_path):
+    import sqlite3
+
+    from alembic import command
+
+    from storage import migrations
+
+    path = tmp_path / "registry.sqlite"
+    previous, head = "20261121_0097", "20261122_0098"
+    migrations.run_migrations(path, revision=previous)
+    row = ("receipt-1", "binding", "person", "device", "browser", "Chrome", 5, 50)
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO remote_signout_receipts(id,binding,subject,device_id,kind,display_name,created_at,expires_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)", row)
+        db.execute("INSERT INTO remote_signout_items(receipt,status,reason,count) VALUES ('receipt-1','accepted',NULL,1)")
+        before = db.execute("SELECT sql FROM sqlite_master WHERE name LIKE '%signout%' ORDER BY name").fetchall()
+    migrations.run_migrations(path, revision=head)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (head,)
+        # A receipt written before the column says nothing about the role, so it is never sorted.
+        assert db.execute("SELECT id,binding,subject,device_id,kind,display_name,created_at,expires_at,login_role "
+                          "FROM remote_signout_receipts").fetchall() == [(*row, None)]
+        db.execute("UPDATE remote_signout_receipts SET login_role='owner'")
+    command.downgrade(migrations.alembic_config(path), previous)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (previous,)
+        assert db.execute("SELECT * FROM remote_signout_receipts").fetchall() == [row]
+        assert db.execute("SELECT receipt,status,count FROM remote_signout_items").fetchall() == [("receipt-1", "accepted", 1)]
+        assert [name for _, name, *_ in db.execute("PRAGMA table_info(remote_signout_receipts)")] == [
+            "id", "binding", "subject", "device_id", "kind", "display_name", "created_at", "expires_at"]
+        after = db.execute("SELECT sql FROM sqlite_master WHERE name LIKE '%signout%' AND sql IS NOT NULL ORDER BY name").fetchall()
+        assert len(after) == len([s for s in before if s[0]])
+    migrations.run_migrations(path, revision=head)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT id, login_role FROM remote_signout_receipts").fetchall() == [("receipt-1", None)]
+

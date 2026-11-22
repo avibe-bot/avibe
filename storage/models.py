@@ -1603,6 +1603,9 @@ remote_signout_receipts = Table(
     Column("display_name", String),
     Column("created_at", Integer, nullable=False),
     Column("expires_at", Integer),  # Pending receipts survive downtime; TTL starts at last settlement.
+    # The role the device signed in with, as the registry knew it at sign-out.
+    # Null on a receipt written before this column and on an unattributed one.
+    Column("login_role", String),
     Index("ix_rsr_binding", "binding", "created_at", "id"),
     Index("ix_rsr_subject", "binding", "subject", "created_at", "id"),
     Index("ix_rsr_expiry", "expires_at"),
