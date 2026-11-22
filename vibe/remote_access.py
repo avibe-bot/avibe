@@ -6829,14 +6829,28 @@ def _persist_pairing_impl(
                 }
             try:
                 from vibe.instance_address import cleanup_publication_lock
-                with cleanup_publication_lock():
+                # Try, never wait in reverse lock order: a #4114 worker may
+                # own the lifecycle lock while reconciling an old connector.
+                # The receipt is already sealed; retry publication when it drains.
+                with _connector_lifecycle(timeout=0), cleanup_publication_lock():
                     if current_identity.get("instance_id"):
                         from storage import device_registry
                         predecessor = device_binding(current_config)
                         if record.get("source_registry_binding", predecessor) != predecessor:
                             return {"ok": False, "error": "local_binding_changed", "status": 409}
                         device_registry.retire_binding(predecessor, now=int(time.time()))
-                    config = api.save_config(_config_for_pairing_record(record))
+                    from vibe import connection_settings as cs
+                    version, pins = cs.journal.for_binding_cutover(current_config)
+                    if version is not None or 'connection_file' in record:
+                        record = {**record, 'connection_file': version}
+                        _write_pending_pairing_record(record)  # before the single config publication
+                    if current_config.remote_access.vibe_cloud.public_relay_trial:
+                        cs.adopt_host_enrollment()  # legacy adoption belongs only to the old credential
+                    payload = _config_for_pairing_record(record)
+                    payload['remote_access']['vibe_cloud'].update(pins)
+                    # #4114 can restore a previously saved outbound interface
+                    # even while it is offline. This is not a new network edit.
+                    config = api.save_config(payload, validate_remote_access_network=False) if pins else api.save_config(payload)
             except Exception as exc:
                 logger.warning("pairing save failed after the redeem", exc_info=True)
                 return {
@@ -6865,6 +6879,12 @@ def _persist_pairing_impl(
                 "detail": detail,
                 "pairing": {"ok": False, "reconciling": True},
             }
+        if record.get('connection_file'):
+            from vibe import connection_settings as cs
+            try:
+                cs.journal.retire_version(record['connection_file'])
+            except OSError:
+                return {'ok': False, 'error': 'pairing_retirement_failed', 'pairing': {'recoverable': True}}
         instance_kind = _normalized_instance_kind(record["pairing"].get("instance_kind"))
         try:
             transition = _transition_instance_binding(

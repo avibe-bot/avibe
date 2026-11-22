@@ -38,7 +38,9 @@ def _read():
         raise ClaimError('reset_repair_required')
     try:
         record = json.loads(path.read_text(encoding='utf-8'))
-        valid = (isinstance(record, dict) and set(record) == {'schema', 'operation', 'phase', 'source', 'target', 'instance', 'registry', 'identity_file', 'pairing_file'}
+        valid = (isinstance(record, dict) and set(record) - {'connection_file'} == {'schema', 'operation', 'phase', 'source', 'target', 'instance', 'registry', 'identity_file', 'pairing_file'}
+                 and (record.get('connection_file') is None or isinstance(record['connection_file'], str)
+                      and re.fullmatch('[0-9a-f]{64}', record['connection_file']))
                  and record['schema'] == 1 and record['phase'] in _PHASES
                  and all(isinstance(record[k], str) and re.fullmatch('[0-9a-f]{64}', record[k])
                          for k in ('source', 'target', 'registry'))
@@ -156,11 +158,23 @@ def _advance(record):
         for generation in generations | {record['registry']}:
             device_registry.retire_binding(generation, now=int(time.time()))
     elif phase == 'clear':
-        with config_file_lock():
+        with remote._connector_lifecycle(timeout=0), config_file_lock():
             cfg = local._config()
             _verify_stage(record, cfg)
-            cfg.remote_access.vibe_cloud = _blank(cfg.remote_access.vibe_cloud)
-            cfg.save()
+            from vibe.connection_settings import journal
+            # On replay of an already published config, never capture a newer
+            # journal. A reset of an already blank config uses the saved token.
+            if _stamp(cfg.remote_access.vibe_cloud) == record['source']:
+                version, pins = journal.for_binding_cutover(cfg)
+                if record['source'] != record['target'] or 'connection_file' not in record:
+                    record['connection_file'] = version
+                    _save(record)
+                cleared = _blank(cfg.remote_access.vibe_cloud)
+                for field, restored in pins.items():
+                    setattr(cleared, field, restored)
+                cfg.remote_access.vibe_cloud = cleared
+                cfg.save()
+            journal.retire_version(record.get('connection_file'))
     elif phase == 'artifacts':
         with config_file_lock():
             for path in (remote._pending_pairing_path(), personal_claims._marker(), personal_claims._marker(True),

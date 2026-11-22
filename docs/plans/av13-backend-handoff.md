@@ -37,6 +37,12 @@ The backend selection now includes the entire Desktop local enrollment, key-pair
 
 First complete key pairing enables and starts the connector even if the configuration contains an instance ID but no device secret. Once a device credential exists, replacement preserves Off. The publication journal retains this distinction through restart. Settings cannot erase a binding to turn it Off (the B8 amendment is in `instance-address-change.md`).
 
+## Connection settings at identity publication (#4114)
+
+An Owner may bind again while a tunnel change is still verifying. Both rebind and confirmed reset publish the new identity and any corroborated pin rollback in one config write under the config lock. Match the predecessor credential and the field's current value against the unfinished candidate; keep verified, independent, and uncorroborated values. A stopped-connector save is effective immediately. Old verification, repair debt and temporary routes have no authority on the new binding. Relay trial eligibility requires fresh enrollment from the host CLI.
+
+The existing pairing/reset intent records the old journal's file version before publishing. The version hashes device, inode, mode, size and nanosecond change/modification times; the settings writer uses atomic replacement. A crash before the config write leaves the old settings journal in place. After the write, replay under the same config lock unlinks only that exact version, even if unreadable; a newly written journal at the same path survives. No side copy is kept. A new binding can independently test retained pins after 180 seconds of observed zero registrations; elapsed time alone does not authorize returning a pin to automatic.
+
 ## Still gated
 
 Next writer: terminal interaction, command help and bilingual public docs. Preserve the separate destructive confirmation and subsequent ordinary account/hostname consent. Do not promise recovery of an old name, notify the old owner, or imply independent tunnel/model/Vault credentials were rotated. This Runtime cannot certify issuer deployment or revoke a copy of the whole config.

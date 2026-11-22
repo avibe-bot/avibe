@@ -252,6 +252,71 @@ def test_sealed_enrollment_needs_its_installation_to_protect_replay(cli_host, mo
     assert remote._read_pending_pairing_record() == (None, None) and not path.exists()
 
 
+@pytest.mark.parametrize('action', ['pair', 'reset'])
+@pytest.mark.parametrize('replacement_journal', [False, True])
+def test_tunnel_cutover_recovers_only_its_prepublication_journal(cli_host, monkeypatch, action, replacement_journal):
+    from vibe import connection_settings as cs
+    cfg = V2Config.load()
+    cloud = cfg.remote_access.vibe_cloud
+    cloud.transport_protocol = 'http2'
+    cloud.edge_ip_version = '6'
+    cloud.public_relay_trial = True
+    cfg.save()
+    cs.enroll_from_host(cfg)
+    op = cs.journal.begin(cfg, 'protocol', 'quic')
+    cloud.transport_protocol = 'quic'
+    cfg.save()
+    cs.journal.verifying(cfg, op['id'], 'test-generation')
+    version = cs.journal.file_version()
+    class PowerLoss(BaseException):
+        pass
+    with monkeypatch.context() as cut:
+        cut.setattr(cs.journal, 'retire_version', lambda _: (_ for _ in ()).throw(PowerLoss()))
+        with pytest.raises(PowerLoss):
+            if action == 'pair':
+                remote.pair('key_B', 'https://backend.test')
+            else:
+                reset.reset_interactively(confirm=lambda: True)
+    new = V2Config.load()
+    assert new.remote_access.vibe_cloud.instance_id == ('inst_B' if action == 'pair' else '')
+    assert cs.value(new, 'protocol') == 'http2' and cs.value(new, 'ipFamily') == '6'
+    assert not cs.relay_enrolled(new) and cs.journal.file_version() == version
+    if replacement_journal:
+        cs.journal.begin(new, 'protocol', 'quic')
+        replacement = cs.journal.path.read_bytes()
+    assert recovery.resume_interactively()['state'] == ('bound' if action == 'pair' else 'unpaired')
+    if replacement_journal:
+        assert cs.journal.path.read_bytes() == replacement
+    else:
+        assert not cs.journal.path.exists()
+
+
+@pytest.mark.parametrize('action', ['reset', 'pair'])
+def test_tunnel_cutover_before_config_write_preserves_old_authority(cli_host, monkeypatch, action):
+    from tests.test_pairing_recovery import _fail_config_publication_once
+    from vibe import connection_settings as cs
+    cfg = V2Config.load()
+    op = cs.journal.begin(cfg, 'ipFamily', '6')
+    cfg.remote_access.vibe_cloud.edge_ip_version = '6'
+    cfg.save()
+    cs.journal.verifying(cfg, op['id'], 'old-generation')
+    original = cs.journal.path.read_bytes()
+    with monkeypatch.context() as cut:
+        _fail_config_publication_once(cut)
+        if action == 'pair':
+            assert not remote.pair('key_B', 'https://backend.test')['ok']
+        else:
+            assert reset.reset_interactively(confirm=lambda: True)['state'] == 'resetting'
+    live = V2Config.load()
+    assert live.remote_access.vibe_cloud.instance_id == cfg.remote_access.vibe_cloud.instance_id
+    assert cs.value(live, 'ipFamily') == '6' and cs.journal.path.read_bytes() == original
+    # #4114 or an independent setting may complete before cutover is retried.
+    live.remote_access.vibe_cloud.edge_ip_version = 'auto'
+    live.save()
+    assert recovery.resume_interactively()['state'] == ('bound' if action == 'pair' else 'unpaired')
+    assert cs.value(V2Config.load(), 'ipFamily') == 'auto' and not cs.journal.path.exists()
+
+
 def _hold_admission(pipe):
     with gate.admitted('reset'):
         pipe.send('held')

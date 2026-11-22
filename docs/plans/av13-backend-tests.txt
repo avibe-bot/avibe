@@ -1,3 +1,4 @@
+tests/test_connection_settings.py
 tests/test_binding_recovery.py
 tests/test_member_management_parity.py::test_complete_registered_api_management_inventory
 tests/test_pairing_recovery.py::test_publication_preserves_real_connector_request
