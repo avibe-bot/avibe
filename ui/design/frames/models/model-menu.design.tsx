@@ -153,6 +153,8 @@ const designFrames = frames([
     height: 820,
     status: 'shipped',
     fixtures: { api },
+    // Scrolled to its end: clicking the last row's name brings it into view, and nothing else.
+    click: ['text=deepseek-v4-reasoner'],
     render: catalog('vibey'),
   },
   {
