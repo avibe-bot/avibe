@@ -1171,9 +1171,14 @@ pub(crate) async fn desktop_claim_review(
         .coordinator
         .claim_review(&shell.host, &caller, &locale, request)
         .await;
-    if opens_document && reply.is_err() {
-        caller.retire(); // release only this failed opening, never a successor
-    }
+    let reply = reply.map_err(|_| {
+        if opens_document {
+            caller.retire(); // this invocation owns its fresh opening lease
+        }
+        // An unadmitted action owns no result or ongoing operation. In particular,
+        // presentation contention cannot let it revoke another action's receipt.
+        deny()
+    })?;
     // This read cannot carry a reply through a replacement or into a hidden window.
     if !visible()
         || window.url().ok().as_ref() != Some(&receipt.destination)
@@ -1208,7 +1213,7 @@ pub(crate) async fn desktop_claim_review(
     }
     // Only an admitted, qualified private reply can carry account-specific
     // errors or retry information. Admission failures carry no such facts.
-    reply.map_err(|_| deny())?.deliver()
+    reply.deliver()
 }
 // Native close/replacement/reload revoke synchronously. OS-level Hide/Minimize need
 // not generate a Tauri visibility event on either desktop. While this one attempt
