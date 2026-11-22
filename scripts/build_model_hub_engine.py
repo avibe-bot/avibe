@@ -247,7 +247,7 @@ def _archive(
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as raw:
-        with gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
+        with gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0, compresslevel=9) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
                 for member_name in (binary_name, *DOCUMENT_MEMBERS):
                     path = source / member_name

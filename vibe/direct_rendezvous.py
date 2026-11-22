@@ -263,6 +263,11 @@ class DirectRendezvous:
             "client": {"endpoint_id": client_endpoint_id, "admitted_until": expires_at},
         }
 
+    def relay_connected(self) -> bool:
+        """Actual validated publication, not the policy selection or an offer/admission."""
+        with self._lock:
+            return bool(self._endpoint and self._endpoint.relay_policy == PUBLIC_TRIAL and self._endpoint.relay_origin)
+
     def is_admitted(self, client_endpoint_id: str) -> bool:
         """Whether a transport peer with this endpoint ID may open streams now."""
 

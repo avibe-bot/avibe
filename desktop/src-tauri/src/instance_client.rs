@@ -2204,11 +2204,19 @@ impl NativeView {
         let app = self.app.clone();
         let checked = epoch.clone();
         let created_label = label.clone();
+        let created_destination = destination.clone();
         self.app
             .run_on_main_thread(move || {
                 let result = checked.check().and_then(|_| {
-                    crate::build_main_child(&app, &created_label, disposable, path, checked.value)
-                        .ok_or_else(|| failure("create child"))
+                    crate::build_main_child(
+                        &app,
+                        &created_label,
+                        disposable,
+                        path,
+                        checked.value,
+                        &created_destination,
+                    )
+                    .ok_or_else(|| failure("create child"))
                 });
                 let _ = tx.send(result);
             })

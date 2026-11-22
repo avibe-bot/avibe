@@ -890,8 +890,8 @@ impl Coordinator {
         // (1) A task that never returns (a panic) is a failure before (2):
         // it rolls back like any other, with what it may have written unknown.
         let (mut saved, previous) = tokio::task::spawn_blocking(move || {
-            let previous = match &write_id {
-                Some(id) => match credentials.read(id) {
+            let mut previous = match &write_id {
+                Some(id) => match credentials.begin_write(id) {
                     Ok(previous) => Some(previous),
                     Err(error) => return (Err(error), None),
                 },
@@ -899,8 +899,8 @@ impl Coordinator {
             };
             let result = (|| {
                 checked.check()?;
-                if let Some(id) = &write_id {
-                    credentials.write(id, &bytes)?;
+                if let Some(write) = previous.as_mut() {
+                    write.publish(&bytes)?;
                 }
                 checked.check()?;
                 store.save(&record)
@@ -966,7 +966,10 @@ impl Coordinator {
                 None
             }
         };
+        let mut previous = previous;
         if rollback_record.is_none() {
+            // Another account's erase may take the same native store lock.
+            drop(previous.take());
             if let Some(old) = retired_id {
                 // (3) Still under credential_io: no sign-out, forget or other
                 // persist can touch a key until this ends.
@@ -1006,18 +1009,9 @@ impl Coordinator {
             // Keep credential_io through public commit or rollback. Escape
             // waits on this lock; cancellation cannot leave an unpublished
             // first credential or overwrite an existing committed jar.
-            let id = written_id;
-            let credentials = self.credentials.clone();
             let store = self.store.clone();
             let rollback = tokio::task::spawn_blocking(move || {
-                let erased = if let (Some(id), Some(previous)) = (id, previous) {
-                    match previous {
-                        Some(bytes) => credentials.write(&id, &bytes),
-                        None => credentials.erase(&id),
-                    }
-                } else {
-                    Ok(())
-                };
+                let erased = previous.map_or(Ok(()), |write| write.rollback());
                 // Restore metadata even when credential rollback fails.
                 store.save(&record).and(erased)
             })

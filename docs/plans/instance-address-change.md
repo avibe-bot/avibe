@@ -174,6 +174,7 @@ named below.
 | 409 | `name_holding_limit_reached` + `limit`, `held_count`, `earliest_release_at` (UTC string or null) | Approved sentence ("already holds N names, including those still waiting") with the real number and date, passed through from avibe.bot unchanged. The page does not hold the number. |
 | 409 | `address_changed` | The address changed meanwhile; reload. |
 | 409 | `pairing_invalid` | avibe.bot no longer accepts this binding: bind remote access again. |
+| 409 | `remote_access_configuration_mismatch` | This computer's tunnel configuration does not match avibe.bot's record of it, so avibe.bot will not change it. Nothing changed: the address, the sessions and the device stay as they were. Bind remote access again, then try again. |
 | 503 | `unavailable` | avibe.bot could not be reached or could not decide; nothing changed, or the operation stays pending. |
 
 The old address (not for the settings page): `410` cleaning response on every
@@ -251,6 +252,20 @@ The limit on names comes back as `409 name_holding_limit_reached` with
 A `429` or `5xx` from avibe.bot is not shown to the page: the same request is
 repeated and the operation stays `pending`.
 
+`409 remote_access_configuration_mismatch` is a final answer for that
+operation, whether it comes to the first request or to a repeat of one first
+answered `pending`. The instance settles it like every other refusal: the
+journal ends in the same write that records the failure, the request is never
+sent again, the state is read once, and nothing of the switch runs (no session
+ends, no name is cleaned, no Health data is touched). `GET
+/api/instance-address` then shows `operation: {state:"failed", hostname,
+error:"remote_access_configuration_mismatch"}`, and a `change` still waiting
+for its first answer gets the same code with `409`. The way out is to bind
+remote access again and start a new change, which is a new operation with a
+new id. Only that answer means this: a timeout, a reply cut short, a request
+still on its way, a `429` or `5xx`, and a refused credential (`401`, which is
+`pairing_invalid`) keep the handling they had.
+
 Settled with the direct lane (coordinator Session `ses8mgme5623t`): C3.
 
 Dates (settled 11:33): a waiting name has one date, `release_at`: 30 days
@@ -310,9 +325,13 @@ has actually returned to the pool.
   holds its page in memory. When that tab comes back it sees the marker, asks
   the instance, clears and leaves through the old address; a tab that is never
   brought back writes nothing.
-- **An iPhone App not opened during the whole waiting period** may open its
-  saved old address once before it refreshes its instance list; the App is not
-  changed in this work.
+- **An iPhone App not opened during the whole waiting period** does not open
+  its saved old address. Since avibe#4110 the App loads nothing of an instance
+  on a session avibe.bot has not confirmed within 14 days: it asks avibe.bot
+  first and opens only an instance the account still lists, and with no answer
+  it stops at the instance list. Within those 14 days it may still open the
+  saved address before it asks; the waiting period is longer, so that address
+  is still answered by this instance, with the cleaning response (E6).
 - **Direct path after a rename.** It is unavailable for a few minutes while
   the new certificate is issued; the tunnel works meanwhile. Changing back and
   forth more than twice in 7 days hits the certificate rotation limit, and the

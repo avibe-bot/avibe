@@ -1,5 +1,7 @@
 //! System credentials scoped to this application, profile and account.
-//! Tests inject the runtime-host Credentials trait and never instantiate this owner.
+//! Only the native Windows CI fixture uses the real adapter, with throwaway targets.
+#[cfg(windows)]
+mod windows;
 use avibe_runtime_host::instance_client::{protocol::ClientError, storage::Credentials};
 
 pub struct NativeCredentials {
@@ -19,7 +21,7 @@ impl NativeCredentials {
         keyring::Entry::new(&self.service, id).map_err(|_| ClientError::new("credentials_unavailable"))
     }
 }
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 impl Credentials for NativeCredentials {
     fn read(&self, id: &str) -> Result<Option<Vec<u8>>, ClientError> {
         match self.entry(id)?.get_secret() {
