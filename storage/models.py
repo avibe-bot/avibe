@@ -1156,6 +1156,13 @@ session_turn_replies = Table(
 # positive native acceptance the complete immutable Message candidate lives only
 # here. Acceptance moves one Delivery snapshot, or one ordered merged batch,
 # into ``messages`` and links every participating Delivery to that record.
+# The same literal predicate is needed in a read for SQLite to recognize the
+# partial index. Membership here includes claimed rows; the FSM, not the
+# index, decides which live rows are claimable or ordering fences.
+DELIVERY_SESSION_ORDER_PREDICATE = (
+    "state in ('reserved', 'queued', 'claimed', 'pending_steer', 'steering', 'reconciling_steer')"
+)
+
 message_deliveries = Table(
     "message_deliveries",
     metadata,
@@ -1292,10 +1299,7 @@ message_deliveries = Table(
         "session_id",
         "submitted_at",
         "id",
-        sqlite_where=text(
-            "state in ('reserved', 'queued', 'claimed', 'pending_steer', 'steering', "
-            "'reconciling_steer')"
-        ),
+        sqlite_where=text(DELIVERY_SESSION_ORDER_PREDICATE),
     ),
     Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
     Index(
