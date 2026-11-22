@@ -923,6 +923,42 @@ pub fn place_moved(
     (anchor, frame)
 }
 
+/// The pet window hidden across a change of its height (a drag starting or
+/// ending). A resized window shows its last picture, pinned to its top, until
+/// the page draws at the new size, so the strip's Vibey would flash above the
+/// real one. The shell hides the window, resizes it and shows it again once the
+/// page has drawn at that size (`drawn`), or when the wait runs out
+/// (`REVEAL_TIMEOUT`). Each hiding has a new token; only that hiding's answer
+/// or timer shows the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reveal {
+    token: u64,
+    pending: Option<u64>,
+}
+
+impl Reveal {
+    /// The window is hidden for a new resize; answers that resize's token.
+    pub fn hide(&mut self) -> u64 {
+        self.token += 1;
+        self.pending = Some(self.token);
+        self.token
+    }
+
+    /// The page drew at the size of `token`, or its wait ran out: whether the
+    /// window must be shown now. A token of an earlier resize changes nothing.
+    pub fn drawn(&mut self, token: u64) -> bool {
+        if self.pending == Some(token) {
+            self.pending = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
 /// The layout the page should draw, and its revision. The shell is its only
 /// source (spec §9.1): the page reads it from `pet_ready` and from the layout
 /// event, keeps only a newer revision, and acknowledges each one it draws.
@@ -1710,6 +1746,28 @@ mod tests {
             serde_json::to_value(PetLayout::default()).unwrap(),
             serde_json::json!({"panel_side": "left", "panel_edge": "bottom", "column_offset": 0})
         );
+    }
+
+    #[test]
+    fn a_resize_shows_the_window_only_for_its_own_answer() {
+        let mut reveal = Reveal::default();
+        assert!(!reveal.hidden());
+        let first = reveal.hide();
+        assert!(reveal.hidden());
+        // Another resize before the page drew the first: only its answer shows.
+        let second = reveal.hide();
+        assert!(
+            !reveal.drawn(first),
+            "an earlier resize's answer or timer changes nothing"
+        );
+        assert!(reveal.hidden());
+        assert!(reveal.drawn(second));
+        assert!(!reveal.hidden());
+        // The answer and the timer of one resize show the window once.
+        assert!(!reveal.drawn(second));
+        let third = reveal.hide();
+        assert_ne!(third, second);
+        assert!(reveal.drawn(third));
     }
 
     #[test]

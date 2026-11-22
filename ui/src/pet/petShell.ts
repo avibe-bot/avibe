@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
-import { onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent, type PetReady } from './petBridge';
+import { answerPetResizes, onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent, type PetReady } from './petBridge';
 import { petPanel } from './petPanel';
 import type { PetSurfaceEpoch } from './usePetSession';
 
@@ -52,6 +52,9 @@ const start = () => {
     // a display change).
     layout: drawSnapshot,
   });
+  // A drag's resizes are made while the window is hidden; it shows again once
+  // this page has drawn at the new height.
+  answerPetResizes();
   const liveSummonsAtRequest = liveSummons;
   // The page draws nothing until the shell's first layout; if that never
   // comes, it draws the default one after FIRST_LAYOUT_TIMEOUT.

@@ -3090,6 +3090,7 @@ pub fn run() {
             pet::pet_context_menu,
             pet::pet_set_expanded,
             pet::pet_drag,
+            pet::pet_frame_drawn,
             pet::pet_pointer,
             pet::pet_settle,
             pet::pet_hit_regions,
