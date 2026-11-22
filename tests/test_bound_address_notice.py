@@ -20,16 +20,15 @@ SAID = {
         "这个地址不再打开 Avibe",
         "这个 Avibe 已绑定账号，其他设备要先登录。在 avibe.bot 登录后，从你的列表里打开它。",
         "去 avibe.bot",
-        "也可以到运行 Avibe 的那台电脑上直接打开，远程访问的开关也在那里。"
-        "在那台电脑的浏览器里，把这个地址的 IP 换成 localhost。",
+        "也可以在运行 Avibe 的那台电脑上直接打开（把这个地址里的 IP 换成 localhost），远程访问的开关也在那里。",
     ),
     "en": (
         "This address no longer opens Avibe",
         "This Avibe is bound to an account, so other devices sign in first. "
         "Sign in at avibe.bot, then open it from your list.",
         "Go to avibe.bot",
-        "Or open it on the computer that runs Avibe; the switch for remote access is there too. "
-        "In a browser on that computer, replace the IP in this address with localhost.",
+        "Or open it on the computer that runs Avibe (replace the IP in this address with localhost); "
+        "the switch for remote access is there too.",
     ),
 }
 

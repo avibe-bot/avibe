@@ -1253,7 +1253,7 @@
       "title": "这个地址不再打开 Avibe",
       "body": "这个 Avibe 已绑定账号，其他设备要先登录。在 avibe.bot 登录后，从你的列表里打开它。",
       "account_action": "去 avibe.bot",
-      "local": "也可以到运行 Avibe 的那台电脑上直接打开，远程访问的开关也在那里。在那台电脑的浏览器里，把这个地址的 IP 换成 localhost。"
+      "local": "也可以在运行 Avibe 的那台电脑上直接打开（把这个地址里的 IP 换成 localhost），远程访问的开关也在那里。"
     },
     "oauth_error": {
       "sign_in_again": "重新登录",

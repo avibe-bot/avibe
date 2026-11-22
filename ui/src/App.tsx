@@ -134,6 +134,7 @@ import { isNativeAppWindow } from './lib/desktopShell';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
+import { AccessBlocked } from './components/AccessBlocked';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
 import { installNavigationMotion } from './lib/navigationMotion';
 import { VoiceInputFallbackNotice } from './components/voice/VoiceInputFallbackNotice';
@@ -229,30 +230,6 @@ const accessBlockedCode = (error: unknown): string | null => {
         if (error.status === 401 || error.status === 403) return error.code ?? 'forbidden';
     }
     return null;
-};
-
-// Shown when the server is up but refuses to open the control panel at this
-// entry point. Tells the user which URL to use instead of stranding them in
-// the setup wizard.
-const AccessBlocked = ({ code }: { code: string | null }) => {
-    const { t } = useTranslation();
-    return (
-        <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
-            <Card className="max-w-md w-full">
-                <CardHeader>
-                    <CardTitle>{t('accessBlocked.title')}</CardTitle>
-                    <CardDescription>{t('accessBlocked.body')}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <p className="text-sm text-muted">{t('accessBlocked.hint')}</p>
-                    {code ? (
-                        <p className="text-xs text-muted font-mono">{t('accessBlocked.codeLabel')}: {code}</p>
-                    ) : null}
-                    <Button onClick={() => window.location.reload()}>{t('accessBlocked.retry')}</Button>
-                </CardContent>
-            </Card>
-        </main>
-    );
 };
 
 type GuardStatus =

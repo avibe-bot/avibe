@@ -1253,7 +1253,7 @@
       "title": "This address no longer opens Avibe",
       "body": "This Avibe is bound to an account, so other devices sign in first. Sign in at avibe.bot, then open it from your list.",
       "account_action": "Go to avibe.bot",
-      "local": "Or open it on the computer that runs Avibe; the switch for remote access is there too. In a browser on that computer, replace the IP in this address with localhost."
+      "local": "Or open it on the computer that runs Avibe (replace the IP in this address with localhost); the switch for remote access is there too."
     },
     "oauth_error": {
       "sign_in_again": "Sign in again",

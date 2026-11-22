@@ -22,7 +22,7 @@ from vibe.i18n import t
 # The account's own list. Fixed: never an instance name, never built from the request.
 ACCOUNT_URL = "https://avibe.bot/app"
 
-# The look of the other server-rendered pages (``_render_oauth_error_html``).
+# The frame of the other server-rendered pages (``_render_oauth_error_html``).
 _STYLE = (
     ":root{color-scheme:light;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"
     '"Segoe UI",sans-serif;background:#f6f7f9;color:#172033}'
@@ -36,9 +36,11 @@ _STYLE = (
     "h1{margin:14px 0 0;font-size:clamp(24px,6vw,32px);line-height:1.2;letter-spacing:0}"
     "p{margin:14px 0 0;line-height:1.65;color:#526078}"
     ".action{margin-top:26px}"
-    ".action a{display:inline-block;height:44px;padding:0 24px;border-radius:12px;background:#0f172a;color:#fff;"
-    "font:700 15px/44px Inter,ui-sans-serif,system-ui;text-decoration:none}"
-    ".action a:hover{background:#1e293b}"
+    # The product's lead button in the light theme (``--primary`` and its pair in ``ui/src/index.css``).
+    ".action a{display:inline-block;height:44px;padding:0 24px;border-radius:12px;background:#10b981;color:#fff;"
+    "font:700 15px/44px Inter,ui-sans-serif,system-ui;text-decoration:none;"
+    "box-shadow:0 0 20px -4px rgba(91,255,160,.6)}"
+    ".action a:hover{background:#0ea372}"
     ".local{margin-top:26px;padding-top:20px;border-top:1px solid rgba(23,32,51,.10);font-size:14px}"
 )
 _STYLE_HASH = base64.b64encode(hashlib.sha256(_STYLE.encode("utf-8")).digest()).decode("ascii")

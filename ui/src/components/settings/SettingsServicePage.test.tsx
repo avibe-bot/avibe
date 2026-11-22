@@ -86,3 +86,16 @@ describe('service control refused by the server', () => {
     expect((start as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+describe('the console server host on an Avibe bound to an account', () => {
+  it.each([
+    ['bound', { instance_id: 'fixture-instance' }, true],
+    ['not bound', { instance_id: '' }, false],
+  ])('%s: says whether a network address still lets other devices in', async (_label, vibe_cloud, said) => {
+    api.getConfig.mockResolvedValue({ ui: { setup_host: '192.168.1.20' }, remote_access: { vibe_cloud } });
+    renderPage();
+
+    expect(await screen.findByText(en.settings.consoleServerHint)).toBeTruthy();
+    expect(Boolean(screen.queryByText(en.settings.consoleServerBound))).toBe(said);
+  });
+});

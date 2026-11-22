@@ -11,6 +11,7 @@ import { SettingsPageShell } from './SettingsPageShell';
 import { CompactField, SettingsPanel, SettingsRow } from './SettingsPrimitives';
 import { Button } from '@/components/ui/button';
 import { setConfigField } from '@/lib/configMutations';
+import { consoleOriginAfterSave } from '@/lib/consoleServerOrigin';
 import { applyAppTitle } from '@/lib/documentTitle';
 
 // ui/design: settings/service/default. Two cards:
@@ -41,6 +42,8 @@ export const SettingsServicePage: React.FC = () => {
   }, [api]);
 
   const isRunning = status.state === 'running';
+  // Bound to an account: only this computer opens Avibe without signing in, whatever the host.
+  const bound = Boolean(config?.remote_access?.vibe_cloud?.instance_id);
 
   const handleAction = async (action: string) => {
     setLoading(true);
@@ -84,54 +87,25 @@ export const SettingsServicePage: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host: uiPayload.setup_host, port: uiPayload.setup_port }),
       });
-      // If the UI server's bind host or port changed, the current page is on
-      // the old origin and may become unreachable. Redirect (or surface the
-      // new origin) so the user is not stranded.
-      // Normalize hosts for comparison (strip brackets), but keep an
-      // URL-authority form (bracketed for IPv6) for building newOrigin.
-      const stripBrackets = (host: string) =>
-        host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
-      const formatAuthorityHost = (host: string) =>
-        host.includes(':') ? `[${host}]` : host;
-      const currentHostname = stripBrackets(window.location.hostname);
-      const currentPort =
-        window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-      const targetPort = String(uiPayload.setup_port);
-      const normalizedSetupHost = stripBrackets(uiPayload.setup_host);
-      const isBindAll =
-        normalizedSetupHost === '0.0.0.0' ||
-        normalizedSetupHost === '::' ||
-        normalizedSetupHost === '';
-      const targetHostname = isBindAll ? currentHostname : normalizedSetupHost;
-      // The UI server (vibe/ui_server.run_ui_server) binds plain HTTP — any
-      // HTTPS access the user has goes through an external TLS proxy whose
-      // upstream is this HTTP bind. Always target http:// so the redirect or
-      // surfaced URL points at something the rebound server can actually
-      // serve, instead of inheriting the current page protocol.
-      const newOrigin = `http://${formatAuthorityHost(targetHostname)}:${targetPort}`;
-      const originChanged = targetHostname !== currentHostname || targetPort !== currentPort;
-      if (originChanged) {
-        // Only auto-redirect when the new hostname is something the current
-        // browser can reasonably reach. If the user changed the bind to a
-        // loopback-only host while accessing remotely, surface the new URL
-        // instead of bouncing them somewhere they cannot reach.
-        const targetIsLoopback =
-          targetHostname === '127.0.0.1' ||
-          targetHostname === '::1' ||
-          targetHostname === 'localhost';
-        const browserOnLoopback =
-          currentHostname === '127.0.0.1' ||
-          currentHostname === '::1' ||
-          currentHostname === 'localhost';
-        if (!targetIsLoopback || browserOnLoopback) {
-          setUiMessage(t('settings.consoleServerRedirecting', { origin: newOrigin }));
-          // Give the UI server a moment to actually rebind before we navigate.
-          window.setTimeout(() => {
-            window.location.replace(newOrigin);
-          }, 1500);
-          return;
-        }
-        setUiMessage(t('settings.consoleServerRelocated', { origin: newOrigin }));
+      // The page may now be at an address the server no longer answers: move it, or say where
+      // the console is. A page on the computer that runs Avibe stays on a loopback address.
+      const { origin, action } = consoleOriginAfterSave(
+        {
+          hostname: window.location.hostname,
+          port: window.location.port || (window.location.protocol === 'https:' ? '443' : '80'),
+        },
+        { host: uiPayload.setup_host, port: uiPayload.setup_port },
+      );
+      if (action === 'go') {
+        setUiMessage(t('settings.consoleServerRedirecting', { origin }));
+        // Give the UI server a moment to actually rebind before we navigate.
+        window.setTimeout(() => {
+          window.location.replace(origin);
+        }, 1500);
+        return;
+      }
+      if (action === 'tell') {
+        setUiMessage(t('settings.consoleServerRelocated', { origin }));
         return;
       }
       setUiMessage(t('dashboard.uiRestartMessage'));
@@ -261,7 +235,12 @@ export const SettingsServicePage: React.FC = () => {
               {t('settings.consoleServerTitle')}
             </span>
           }
-          description={uiMessage || t('settings.consoleServerHint')}
+          description={uiMessage || (
+            <>
+              {t('settings.consoleServerHint')}
+              {bound && <span className="block">{t('settings.consoleServerBound')}</span>}
+            </>
+          )}
           control={
             <div className="grid grid-cols-[120px_96px_auto] items-center gap-2">
               <CompactField
