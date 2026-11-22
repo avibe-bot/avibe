@@ -52,8 +52,12 @@ final class HoldTouchUITests: XCTestCase {
     /// thread is busy from before the finger lifts until past the threshold.
     /// A tap all the same: no cue, nothing said to the page. (TestFlight
     /// 50.1 recognised a hold here.) That claim does not depend on the
-    /// input's focus, which is checked after it.
+    /// input's focus, which is checked once both launches have run: an
+    /// expected failure ends the test like any other here
+    /// (`continueAfterFailure` is false), so checked in the loop it would
+    /// end it before the second launch.
     func testTheFirstTapAfterAColdLaunchIsNoHold() {
+        var unfocused: [String] = []
         for startsAtRecognition in [false, true] {
             app = XCUIApplication()
             app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
@@ -65,9 +69,13 @@ final class HoldTouchUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 2)
             print("[hold smoke] first tap, startsAtRecognition=\(startsAtRecognition), focused=\(focused): \(facts())")
             requireFollowedWithNoCue("The first tap after a cold launch")
-            requireTheColdFirstTapFocused(focused)
+            if !focused { unfocused.append("startsAtRecognition=\(startsAtRecognition): \(facts())") }
             app.terminate()
         }
+        requireTheColdFirstTapFocused(
+            unfocused.isEmpty,
+            "The first tap did not focus the input; " + unfocused.joined(separator: " | ")
+        )
     }
 
     /// The control for the focus of that tap: the page names no surface, so
@@ -83,7 +91,7 @@ final class HoldTouchUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 2)
         print("[hold smoke] first tap, no surface named, focused=\(focused): \(facts())")
         XCTAssertEqual(kept(), "none", "The App followed a touch with no surface named; \(facts())")
-        requireTheColdFirstTapFocused(focused)
+        requireTheColdFirstTapFocused(focused, "The first tap did not focus the input; \(facts())")
     }
 
     /// The first tap after a cold launch focuses the input. Expected to fail
@@ -105,9 +113,8 @@ final class HoldTouchUITests: XCTestCase {
     /// on which the tap focuses again fails here, and this mark is then
     /// removed.
     private func requireTheColdFirstTapFocused(
-        _ focused: Bool, file: StaticString = #filePath, line: UInt = #line
+        _ focused: Bool, _ message: String, file: StaticString = #filePath, line: UInt = #line
     ) {
-        let message = "The first tap did not focus the input; \(facts())"
         guard Self.isTheIOS27Simulator else {
             XCTAssertTrue(focused, message, file: file, line: line)
             return
