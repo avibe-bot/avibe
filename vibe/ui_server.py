@@ -8599,10 +8599,13 @@ def _start_remote_monitors(config, *, startup=False):
                 config = V2Config.load()  # storage may have been repaired
             except (OSError, ValueError, connection_settings.ConnectionError):
                 logger.warning('Could not read connection recovery state during UI startup')
-        connection_runtime.start()
     finally:
-        # An optional settings artifact must not disable heartbeat or auth polling.
-        remote_access.start_runtime_monitoring(config)
+        # An optional settings artifact must not disable the recovery worker,
+        # heartbeat or auth polling. The worker guards each tick itself.
+        try:
+            connection_runtime.start()
+        finally:
+            remote_access.start_runtime_monitoring(config)
 
 
 @app.route("/api/control", methods=["POST"])

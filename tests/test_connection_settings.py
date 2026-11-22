@@ -435,7 +435,10 @@ def test_unreadable_settings_disable_only_new_feature(rig, monkeypatch):
     {'pinRoute': 'fixture'}, {'pinRoute': {'attempt': 'fixture'}},
     {'pinRoute': {'attempt': {'id': 'a', 'boot': 'b', 'pins': {}}, 'generation': 'g', 'phase': 'comparing',
                   'relaxed': ['protocol'], 'protocol': 'http2', 'remember': False, 'previous': 7}},
-    {'pinAttempt': {'id': 'a', 'boot': 'b'}}, {'outcome': 'fixture'}, {'returnedToAutomatic': {'changes': 'x'}},
+    {'pinAttempt': {'id': 'a', 'boot': 'b'}}, {'pinAttempt': {'id': 'a', 'boot': 'b', 'pins': {}}},
+    {'pinRoute': {'attempt': {'id': 'a', 'boot': 'b', 'pins': {}, 'request': None}, 'generation': 'g',
+                  'phase': 'comparing', 'relaxed': ['protocol'], 'protocol': 'http2', 'remember': False}},
+    {'outcome': 'fixture'}, {'returnedToAutomatic': {'changes': 'x'}},
     {'verifiedPreference': []}])
 def test_malformed_journal_records_degrade_and_monitoring_still_starts(rig, monkeypatch, damage):
     from vibe import ui_server
@@ -453,7 +456,7 @@ def test_malformed_journal_records_degrade_and_monitoring_still_starts(rig, monk
     assert starts == ['worker', 'monitor']
 
 
-def test_unexpected_recovery_error_still_starts_ordinary_monitoring(rig, monkeypatch):
+def test_unexpected_recovery_error_still_starts_worker_and_monitoring(rig, monkeypatch):
     from vibe import ui_server
     starts = []
     monkeypatch.setattr(cs, 'adopt_host_enrollment', lambda: None)
@@ -462,7 +465,15 @@ def test_unexpected_recovery_error_still_starts_ordinary_monitoring(rig, monkeyp
     monkeypatch.setattr(ra, 'start_runtime_monitoring', lambda config: starts.append('monitor'))
     with pytest.raises(AttributeError):
         ui_server._start_remote_monitors(rig.cfg, startup=True)
-    assert starts == ['monitor']
+    assert starts == ['worker', 'monitor']
+
+
+def test_temporary_route_lookup_error_never_breaks_tunnel_start(rig, monkeypatch):
+    cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
+    cs.journal.path.write_text(json.dumps({'version': 1, 'binding': cs.relay_pairing(rig.cfg), 'operation': None,
+                                           'outcome': None, 'returnedToAutomatic': None}))
+    monkeypatch.setattr(cr, '_active_pin_route', lambda *a: (_ for _ in ()).throw(KeyError('request')))
+    assert cr.keep_temporary_connector(rig.cfg, 'fixture-binary', {'provider': 'fixture'}) is False
 
 
 def test_candidate_not_ready_does_not_restore_untouched_connector(rig, monkeypatch):

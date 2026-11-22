@@ -161,14 +161,14 @@ class PinFailureWindow:
 
 def _valid_pin_attempt(attempt) -> bool:
     return (isinstance(attempt, dict) and all(isinstance(attempt.get(k), str) and attempt[k] for k in ('id', 'boot'))
-            and isinstance(attempt.get('pins'), dict) and set(attempt['pins']) <= AUTOMATIC.keys())
+            and isinstance(attempt.get('pins'), dict) and set(attempt['pins']) <= AUTOMATIC.keys() and 'request' in attempt)
 
 
 def _valid_pin_route(route) -> bool:
     """Every field the recovery and startup paths index, so a damaged record degrades instead of raising."""
     return (isinstance(route, dict) and _valid_pin_attempt(route.get('attempt'))
             and isinstance(route.get('generation'), (str, type(None))) and isinstance(route.get('phase'), str)
-            and isinstance(route.get('relaxed'), list) and set(route['relaxed']) <= AUTOMATIC.keys()
+            and isinstance(route.get('relaxed'), list) and set(route['relaxed']) <= route['attempt']['pins'].keys()
             and isinstance(route.get('protocol'), (str, type(None))) and 'remember' in route)
 
 

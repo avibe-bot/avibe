@@ -752,8 +752,10 @@ def keep_temporary_connector(config, binary, running_signature):
     with config_file_lock():
         try:
             route = _active_pin_route(config, cs.journal.load(config))
-        except cs.ConnectionError:
-            # A damaged, optional record is not a blanket signature exemption.
+        except Exception:
+            # A damaged, optional record is not a blanket signature exemption,
+            # and must never make an ordinary tunnel start raise.
+            log.warning('Ignoring unreadable temporary-route record during tunnel start', exc_info=True)
             return False
         if not route:
             return False
