@@ -4,6 +4,12 @@
 mod clock;
 mod connect;
 #[cfg(test)]
+#[path = "../../tests/direct/cross_network.rs"]
+mod cross_network_tests;
+#[cfg(test)]
+#[path = "../../tests/direct/drain.rs"]
+mod drain_tests;
+#[cfg(test)]
 #[path = "../../tests/direct/sidecar.rs"]
 mod interop;
 #[cfg(test)]
@@ -14,6 +20,8 @@ mod offer;
 #[cfg(test)]
 #[path = "../../tests/direct/offer.rs"]
 mod offer_tests;
+mod path;
+pub use path::{AddressFamily, SelectedPath};
 mod public;
 pub mod rendezvous;
 #[cfg(test)]
@@ -29,7 +37,7 @@ pub mod webview_windows;
 use clock::Clock;
 use connect::Authority;
 use futures_util::StreamExt;
-use iroh::{Endpoint, SecretKey, TransportAddr};
+use iroh::{Endpoint, SecretKey};
 use listener::Listener;
 use offer::Offer;
 use std::{sync::Arc, time::Duration};
@@ -56,12 +64,33 @@ pub enum RefreshOutcome {
     Retired,
 }
 
+/// Once bind succeeds, cancellation must still drain queued QUIC close frames.
+/// The worker owns a separate endpoint handle and outlives a cancelled probe,
+/// monitor or close waiter. Dropping the sender (including in Drop) starts it.
+struct EndpointDrain {
+    stop: tokio::sync::oneshot::Sender<()>,
+    done: JoinHandle<()>,
+}
+impl EndpointDrain {
+    fn new(endpoint: Endpoint) -> Self {
+        let (stop, rx) = tokio::sync::oneshot::channel();
+        let done = tokio::spawn(async move {
+            let _ = rx.await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), endpoint.close()).await;
+        });
+        Self { stop, done }
+    }
+    async fn close(self) {
+        drop(self.stop);
+        let _ = self.done.await;
+    }
+}
+
 pub struct Client {
     clock: Clock,
     host: Authority,
     instance: String,
     key: SecretKey,
-    endpoint: Option<Endpoint>,
     links: watch::Sender<Option<Arc<Link>>>,
     listener: Listener,
     monitor: Option<JoinHandle<()>>,
@@ -82,7 +111,6 @@ impl Client {
             host,
             instance,
             key: SecretKey::generate(),
-            endpoint: None,
             links,
             listener,
             monitor: None,
@@ -129,7 +157,7 @@ impl Client {
                     .map(|l| l.remaining())
                     .unwrap_or_default();
                 if remaining.is_zero() {
-                    self.retire();
+                    self.retire().await;
                     RefreshOutcome::Retired
                 } else {
                     RefreshOutcome::Retained {
@@ -167,12 +195,27 @@ impl Client {
         self.listener.health()
     }
 
-    fn retire(&mut self) {
-        if let Some(t) = self.monitor.take() {
-            t.abort()
+    /// A verified direct CONNECT stream is live on this link. An idle probe,
+    /// public fallback alone, a withdrawn grant or an unavailable path is None.
+    pub fn selected_path(&self) -> Option<SelectedPath> {
+        let slot = self.links.borrow();
+        let link = slot.as_ref()?;
+        if !self.listener.is_alive() || !link.has_stream() {
+            return None;
         }
+        link.selected_path()
+    }
+
+    fn withdraw(&mut self) -> Option<JoinHandle<()>> {
         if let Some(l) = self.links.send_replace(None) {
+            // Withdraw immediately; a zero deadline also wakes the monitor.
             l.retire()
+        }
+        self.monitor.take()
+    }
+    async fn retire(&mut self) {
+        if let Some(task) = self.withdraw() {
+            let _ = task.await;
         }
     }
     /// Only the native isolated-world adapter may supply a completion. No
@@ -188,10 +231,7 @@ impl Client {
                 self.clock.now(),
             )
         }) else {
-            self.retire();
-            if let Some(endpoint) = self.endpoint.take() {
-                endpoint.close().await;
-            }
+            self.retire().await;
             return false;
         };
         if self.links.borrow().as_ref().is_some_and(|link| link.renew(&offer)) {
@@ -199,33 +239,39 @@ impl Client {
         }
         // Retire previous authority before starting a replacement. Never use a
         // stale result to make a new stream while waiting for the next probe.
-        self.retire();
+        self.retire().await;
         if !self.listener.is_alive() || self.clock.now() >= offer.until {
             return false;
         }
-        if self.endpoint.is_none() {
-            self.endpoint = tokio::time::timeout(
-                offer.until.saturating_sub(self.clock.now()),
-                transport::bind(self.key.clone()),
-            )
-            .await
-            .ok()
-            .flatten();
-        }
-        let Some(endpoint) = self.endpoint.as_ref() else {
+        // A non-renewable grant gets a fresh endpoint. In particular an old
+        // relay map or iroh peer-address cache cannot cross a policy change.
+        let Ok(Ok(endpoint)) = tokio::time::timeout(
+            offer.until.saturating_sub(self.clock.now()),
+            transport::endpoint_builder(self.key.clone(), offer.relay.as_ref()).bind(),
+        )
+        .await
+        else {
             return false;
         };
-        let Some(link) = Link::dial(endpoint, offer, &self.host, self.clock.clone()).await else {
+        self.probe(endpoint, offer).await
+    }
+
+    async fn probe(&mut self, endpoint: Endpoint, offer: Offer) -> bool {
+        let drain = EndpointDrain::new(endpoint.clone());
+        let Some(link) = Link::dial(&endpoint, offer, &self.host, self.clock.clone()).await else {
+            drain.close().await;
             return false;
         };
         if !self.listener.is_alive() || !link.usable() {
+            link.retire();
+            drain.close().await;
             return false;
         }
-        self.publish(link);
+        self.publish(link, drain);
         true
     }
 
-    fn publish(&mut self, link: Arc<Link>) {
+    fn publish(&mut self, link: Arc<Link>, drain: EndpointDrain) {
         self.links.send_replace(Some(link.clone()));
         let tx = self.links.clone();
         self.monitor = Some(tokio::spawn(async move {
@@ -243,7 +289,7 @@ impl Client {
                     biased;
                     _=deadlines.changed()=>continue,
                     _=tokio::time::sleep(remaining.min(Duration::from_millis(250)))=>continue,
-                    next=paths.next()=>{let Some(snapshot)=next else{break};if !snapshot.iter().any(|p|p.is_selected()&&matches!(p.remote_addr(),TransportAddr::Ip(a) if link.offer.candidates.contains(a))){break}}
+                    next=paths.next()=>{let Some(snapshot)=next else{break};if link.selected_in(snapshot).is_none(){break}}
                 }
             }
             // The old watcher can finish while a new link is being published.
@@ -256,11 +302,13 @@ impl Client {
                 }
             });
             link.retire();
+            drain.close().await;
         }));
     }
 }
 impl Drop for Client {
     fn drop(&mut self) {
-        self.retire()
+        // Detach rather than abort: the signalled monitor and drain own shutdown.
+        drop(self.withdraw());
     }
 }

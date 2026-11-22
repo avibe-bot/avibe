@@ -4,11 +4,12 @@ use super::{
     clock::Clock,
     connect::Authority,
     offer::{Offer, ALPN},
+    path::{SelectedPath, TrialRelay},
     selection::Selection,
 };
 use iroh::{
     endpoint::{presets, Connection, PortmapperConfig, QuicTransportConfig, VarInt},
-    Endpoint, EndpointAddr, NetReportConfig, RelayMode, TransportAddr,
+    Endpoint, NetReportConfig,
 };
 use std::{
     io,
@@ -30,6 +31,7 @@ pub(super) type Stream = Box<dyn Duplex>;
 // before polling an existing direct stream, not just before opening a new one.
 struct AdmittedStream<S> {
     inner: S,
+    _live_stream: Arc<()>,
     clock: Clock,
     deadline: tokio::sync::watch::Receiver<Duration>,
 }
@@ -62,11 +64,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for AdmittedStream<S> {
     }
 }
 
-pub(super) async fn bind(key: iroh::SecretKey) -> Option<Endpoint> {
-    endpoint_builder(key).bind().await.ok()
-}
-
-pub(super) fn endpoint_builder(key: iroh::SecretKey) -> iroh::endpoint::Builder {
+pub(super) fn endpoint_builder(key: iroh::SecretKey, relay: Option<&TrialRelay>) -> iroh::endpoint::Builder {
     let keep_alive = Duration::from_millis(1500);
     let config = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(0))
@@ -79,14 +77,17 @@ pub(super) fn endpoint_builder(key: iroh::SecretKey) -> iroh::endpoint::Builder 
         .keep_alive_interval(keep_alive)
         .default_path_keep_alive_interval(keep_alive)
         .send_observed_address_reports(false)
+        .max_remote_nat_traversal_addresses(8)
         .receive_observed_address_reports(false)
         .build();
+    let mut report = NetReportConfig::minimal();
+    report.https_probes = relay.is_some();
     Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(TrialRelay::mode(relay))
         .clear_address_lookup()
         .portmapper_config(PortmapperConfig::Disabled)
-        .net_report_config(NetReportConfig::minimal())
+        .net_report_config(report)
         .transport_config(config)
 }
 
@@ -94,6 +95,7 @@ pub(super) struct Link {
     pub conn: Connection,
     pub offer: Offer,
     pub plan: Selection,
+    live_streams: Arc<()>,
     pub(super) clock: Clock,
     deadline: tokio::sync::watch::Sender<Duration>,
 }
@@ -116,6 +118,7 @@ impl Link {
     pub(super) fn renew(&self, next: &Offer) -> bool {
         if self.offer.id != next.id
             || self.offer.generation != next.generation
+            || self.offer.relay != next.relay
             || self.offer.candidates != next.candidates
             || self.clock.now() >= next.until
             || !self.usable()
@@ -125,22 +128,30 @@ impl Link {
         self.deadline.send_replace(next.until);
         true
     }
+    pub(super) fn has_stream(&self) -> bool {
+        Arc::strong_count(&self.live_streams) > 1
+    }
     pub(super) fn usable(&self) -> bool {
-        !self.remaining().is_zero()
-            && self.conn.close_reason().is_none()
-            && self.conn.paths().iter().any(|p| {
-                p.is_selected() && matches!(p.remote_addr(),TransportAddr::Ip(a) if self.offer.candidates.contains(a))
-            })
+        self.selected_path().is_some()
+    }
+    pub(super) fn selected_in(&self, paths: iroh::endpoint::PathList<'_>) -> Option<SelectedPath> {
+        paths
+            .iter()
+            .find(|p| p.is_selected())
+            .and_then(|p| self.offer.selected(self.conn.remote_id(), p.remote_addr()))
+    }
+    pub(super) fn selected_path(&self) -> Option<SelectedPath> {
+        if self.remaining().is_zero() || self.conn.close_reason().is_some() {
+            return None;
+        }
+        self.selected_in(self.conn.paths())
     }
     pub(super) async fn dial(ep: &Endpoint, offer: Offer, host: &Authority, clock: Clock) -> Option<Arc<Self>> {
         let remaining = offer.until.saturating_sub(clock.now());
         if remaining.is_zero() {
             return None;
         }
-        let addr = offer
-            .candidates
-            .iter()
-            .fold(EndpointAddr::new(offer.id), |a, s| a.with_ip_addr(*s));
+        let addr = offer.bootstrap();
         let until = Instant::now() + remaining.min(Duration::from_secs(5));
         let conn = timeout_at(until, ep.connect(addr, ALPN)).await.ok()?.ok()?;
         let link = Arc::new(Self {
@@ -149,6 +160,7 @@ impl Link {
             conn,
             offer,
             plan: Selection::default(),
+            live_streams: Arc::new(()),
         });
         let _probe = timeout_at(until, link.open(host)).await.ok()??;
         Some(link)
@@ -184,6 +196,7 @@ impl Link {
                 }
                 return Some(Box::new(AdmittedStream {
                     inner: tokio::io::join(recv, send),
+                    _live_stream: self.live_streams.clone(),
                     clock: self.clock.clone(),
                     deadline: self.deadlines(),
                 }));
