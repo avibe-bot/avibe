@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ipaddress
-import socket
 
 
 @dataclass(frozen=True)
@@ -21,9 +20,9 @@ def active_listeners(ui_server) -> tuple[Listener, ...]:
     try:
         for server in ui_server.servers:
             if server.is_serving():
+                # asyncio owns acceptance on this event loop. SO_ACCEPTCONN is
+                # not a portable getsockopt (Darwin may return ENOPROTOOPT).
                 for sock in server.sockets:
-                    if not sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
-                        return ()
                     host, port = sock.getsockname()[:2]
                     listeners.append(Listener(ipaddress.ip_address(host), port, server))
     except (AttributeError, OSError, ValueError):

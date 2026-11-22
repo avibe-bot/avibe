@@ -10211,7 +10211,19 @@ def ui_reload():
             else:
                 host = str(ipaddress.ip_address(host))
         except ValueError:
-            return jsonify({"error": "invalid_host"}), 400
+            # A configured local DNS name is also a bind target. Validate
+            # labels without resolving them or using them for authorization.
+            try:
+                ascii_host = host.encode('idna').decode('ascii')
+            except UnicodeError:
+                return jsonify({"error": "invalid_host"}), 400
+            name = ascii_host.removesuffix('.')
+            labels = name.split('.')
+            if (not name or len(name) > 253 or labels[-1].isdigit()
+                    or any(not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label)
+                           for label in labels)):
+                return jsonify({"error": "invalid_host"}), 400
+            host = ascii_host
     try:
         port = normalize_desktop_port(payload['port'])
     except ValueError:

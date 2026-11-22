@@ -109,6 +109,8 @@ _RETAINED_OWNER_ROUTES = {
     ("PUT", "/api/permissions/resources/{resource_kind}/{resource_id}/access"),
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
+    # An unbound setup Owner may restrict which devices can open this host.
+    ("POST", "/api/devices/host/network-access"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
     ("POST", "/api/remote-access/claims"),
     ("GET", "/api/remote-access/claims/{claim_id}"),
@@ -198,7 +200,8 @@ def test_complete_registered_api_management_inventory():
     # + 3 personal installation claim methods (Owner; browser return is not an API route).
     # + 8 device function, activity and Health ticket methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
-    assert len(endpoints) == 372
+    # + 1 host network restriction (Owner, separately limited to unbound installations).
+    assert len(endpoints) == 373
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),

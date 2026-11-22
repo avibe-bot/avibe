@@ -32,9 +32,6 @@ class Acceptor:
     def getsockname(self):
         return self.host, self.port
 
-    def getsockopt(self, *args):
-        return int(self.open)
-
     def is_serving(self):
         return self.open
 
@@ -150,7 +147,7 @@ def test_no_write_when_not_avibe_controlled_or_not_unbound(installation, monkeyp
 
 def test_restriction_guards_and_storage_failure_leave_old_access(installation, monkeypatch):
     client, servers = installation
-    assert http_authorization_policy('POST', ACTION) == http_authorization_policy('POST', '/api/ui/reload')
+    assert http_authorization_policy('POST', ACTION).minimum_role == 'owner'
     assert client.post(ACTION, base_url=HOST, headers={'Origin': HOST}, json=MODE).status_code == 403
     assert restrict(client, headers={**csrf_headers(client, HOST), 'Origin': 'http://other.example.test'}).status_code == 403
     assert restrict(client, json={**MODE, 'host': 'localhost'}).status_code == 400
