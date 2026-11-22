@@ -10,6 +10,10 @@ mod cross_network_tests;
 #[cfg(test)]
 #[path = "../../tests/direct/drain.rs"]
 mod drain_tests;
+mod handover;
+#[cfg(test)]
+#[path = "../../tests/direct/handover.rs"]
+mod handover_tests;
 #[cfg(test)]
 #[path = "../../tests/direct/sidecar.rs"]
 mod interop;
@@ -17,6 +21,8 @@ mod interop;
 #[path = "../../tests/direct/lifecycle.rs"]
 mod lifecycle_tests;
 mod listener;
+mod quiet;
+pub use handover::{Handover, HandoverResult, PathStatus, PreferredPath};
 mod offer;
 #[cfg(test)]
 #[path = "../../tests/direct/offer.rs"]
@@ -103,6 +109,7 @@ pub struct Client {
     key: SecretKey,
     links: watch::Sender<Option<Arc<Link>>>,
     listener: Listener,
+    status: watch::Sender<PathStatus>,
     monitor: Option<JoinHandle<()>>,
 }
 impl Client {
@@ -123,6 +130,7 @@ impl Client {
             key: SecretKey::generate(),
             links,
             listener,
+            status: watch::channel(PathStatus::default()).0,
             monitor: None,
         })
     }
@@ -175,7 +183,13 @@ impl Client {
                     }
                 }
             }
-            Ok(Reply::Refused(_) | Reply::Controlled | Reply::SelectionChanged) => {
+            Ok(Reply::SelectionChanged) => {
+                if let Some(task) = self.withdraw(false) {
+                    let _ = task.await;
+                }
+                RefreshOutcome::Retired
+            }
+            Ok(Reply::Refused(_) | Reply::Controlled) => {
                 self.apply(None, sent).await;
                 RefreshOutcome::Retired
             }
@@ -216,15 +230,29 @@ impl Client {
         link.selected_path()
     }
 
-    fn withdraw(&mut self) -> Option<JoinHandle<()>> {
+    pub fn path_changes(&self) -> watch::Receiver<PathStatus> {
+        self.status.subscribe()
+    }
+    pub fn handover(&self) -> Handover {
+        Handover {
+            host: self.host.clone(),
+            links: self.links.subscribe(),
+            health: self.listener.health(),
+            public: self.listener.public_legs.clone(),
+        }
+    }
+
+    fn withdraw(&mut self, involuntary: bool) -> Option<JoinHandle<()>> {
         if let Some(l) = self.links.send_replace(None) {
             // Withdraw immediately; a zero deadline also wakes the monitor.
-            l.retire()
+            let closed = l.claim_loss();
+            l.retire();
+            PathStatus::publish(&self.status, None, involuntary && closed);
         }
         self.monitor.take()
     }
     async fn retire(&mut self) {
-        if let Some(task) = self.withdraw() {
+        if let Some(task) = self.withdraw(true) {
             let _ = task.await;
         }
     }
@@ -283,6 +311,9 @@ impl Client {
 
     fn publish(&mut self, link: Arc<Link>, drain: EndpointDrain) {
         self.links.send_replace(Some(link.clone()));
+        PathStatus::publish(&self.status, link.selected_path(), false);
+        let status = self.status.clone();
+        let mut health = self.listener.health();
         let tx = self.links.clone();
         self.monitor = Some(tokio::spawn(async move {
             let mut paths = link.conn.paths_stream();
@@ -299,13 +330,21 @@ impl Client {
                     biased;
                     _=deadlines.changed()=>continue,
                     _=tokio::time::sleep(remaining.min(Duration::from_millis(250)))=>continue,
-                    next=paths.next()=>{let Some(snapshot)=next else{break};if link.selected_in(snapshot).is_none(){break}}
+                    _=health.changed()=>break,
+                    next=paths.next()=>{
+                        let Some(path)=next.and_then(|snapshot|link.selected_in(snapshot)) else{break};
+                        let slot=tx.borrow();
+                        if !slot.as_ref().is_some_and(|current|Arc::ptr_eq(current,&link)) {break;}
+                        PathStatus::publish(&status,Some(path),false);
+                    }
                 }
             }
             // The old watcher can finish while a new link is being published.
             tx.send_if_modified(|value| {
                 if value.as_ref().is_some_and(|v| Arc::ptr_eq(v, &link)) {
+                    let closed = link.claim_loss();
                     *value = None;
+                    PathStatus::publish(&status, None, closed);
                     true
                 } else {
                     false
@@ -319,6 +358,6 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         // Detach rather than abort: the signalled monitor and drain own shutdown.
-        drop(self.withdraw());
+        drop(self.withdraw(false));
     }
 }

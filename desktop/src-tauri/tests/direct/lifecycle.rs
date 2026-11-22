@@ -33,7 +33,7 @@ async fn no_transport_for_unavailable_missing_malformed_or_ineligible_offer() {
         assert_eq!(client.route().unwrap().proxy, port);
     }
 }
-async fn connect(route: Route<'_>) -> TcpStream {
+pub(super) async fn connect(route: Route<'_>) -> TcpStream {
     let auth = STANDARD.encode(format!("{}:{}", route.username, route.password));
     let head = format!(
         "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n",

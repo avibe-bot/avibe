@@ -150,7 +150,33 @@ async fn run(changed_selection: bool) {
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
+    let pooled = if !changed_selection {
+        let mut other = Client::new("other-app.avibe.bot", "other".into()).await.unwrap();
+        let a = super::handover_tests::public_browser(&mut client).await;
+        let b = super::handover_tests::public_browser(&mut other).await;
+        Some((a, b, other))
+    } else {
+        None
+    };
+    let mut changes_status = client.path_changes();
+    let handover = client.handover();
+    assert_eq!(*changes_status.borrow_and_update(), super::PathStatus::default());
     client.publish(link.clone(), super::EndpointDrain::new(ep));
+    assert_eq!(changes_status.borrow_and_update().sequence, 1);
+    assert_eq!(
+        handover.close_quiet_public("other-app.avibe.bot", || Some(())).await,
+        super::HandoverResult::NotUsable
+    );
+    assert_eq!(
+        handover.close_quiet_public(host.host(), || None::<()>).await,
+        super::HandoverResult::OtherDocuments
+    );
+    if pooled.is_none() {
+        assert_eq!(
+            handover.close_quiet_public(host.host(), || Some(())).await,
+            super::HandoverResult::Done { closed: 0, kept: 0 }
+        );
+    }
     assert_eq!(
         client.selected_path(),
         None,
@@ -192,6 +218,19 @@ async fn run(changed_selection: bool) {
         assert_eq!(client.refresh_reply(|_| std::future::pending()).await, retained);
     }
     assert_eq!(*deadlines.borrow(), renewed_until);
+    if let Some((mut mine, mut foreign, _other)) = pooled {
+        assert_eq!(
+            handover.close_quiet_public(host.host(), || Some(())).await,
+            super::HandoverResult::Done { closed: 1, kept: 0 }
+        );
+        assert_retired_read(mine.read(&mut [0]).await);
+        foreign.write_all(b"z").await.unwrap();
+        assert_eq!(foreign.read_u8().await.unwrap(), b'z');
+        assert!(
+            !changes_status.has_changed().unwrap(),
+            "intentional quiet handover is not an involuntary closure"
+        );
+    }
     // Same established stream, after the failed renewals; no CONNECT replay.
     r.get_mut().write_all(b"opaque").await.unwrap();
     let mut answer = [0; 6];
@@ -228,6 +267,18 @@ async fn run(changed_selection: bool) {
     let mut end = [0];
     assert_retired_read(r.read(&mut end).await);
     assert_eq!(client.selected_path(), None);
+    assert_eq!(
+        *changes_status.borrow_and_update(),
+        super::PathStatus {
+            preferred: super::PreferredPath::Tunnel,
+            sequence: 2,
+            closure: u64::from(!changed_selection)
+        }
+    );
+    assert_eq!(
+        handover.close_quiet_public(host.host(), || Some(())).await,
+        super::HandoverResult::NotUsable
+    );
     ingress_task.await.unwrap();
     drop(client);
     control.write_all(b"{\"type\":\"stop\"}\n").await.unwrap();

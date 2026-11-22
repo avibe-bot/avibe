@@ -4,6 +4,7 @@
 use super::{
     connect::{parse_connect, Authority, Head},
     public,
+    quiet::PublicLegs,
     transport::{Link, Stream},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -34,6 +35,7 @@ impl Credential {
     }
 }
 pub(super) struct Listener {
+    pub public_legs: PublicLegs,
     pub port: u16,
     pub credential: Arc<Credential>,
     // Retain the bound port until the native owner detaches, even if the
@@ -91,6 +93,8 @@ impl Listener {
         let (live, health) = watch::channel(());
         let port = socket.local_addr().ok()?.port();
         let key = credential.clone();
+        let public_legs = PublicLegs::default();
+        let legs = public_legs.clone();
         let task = tokio::spawn(async move {
             let _live = live;
             let mut clients = JoinSet::new();
@@ -103,12 +107,20 @@ impl Listener {
                 let key = key.clone();
                 let links = links.clone();
                 let dial = open_public.clone();
+                let legs = legs.clone();
                 clients.spawn(async move {
-                    serve(socket, &h, &key.header, || async {
+                    serve(socket, &h, &key.header, &legs, || async {
                         let link = links.borrow().clone();
-                        let fallback = dial(h.clone(), port);
+                        let fallback = async { dial(h.clone(), port).await.map(Backend::Public) };
                         match link {
-                            Some(l) if l.usable() => l.plan.choose(l.open(&h), fallback).await,
+                            Some(l) if l.usable() => {
+                                l.plan
+                                    .choose(
+                                        async { l.open(&h).await.map(|s| Backend::Direct(s, l.clone())) },
+                                        fallback,
+                                    )
+                                    .await
+                            }
                             _ => timeout(Duration::from_secs(8), fallback).await.ok()?.ok(),
                         }
                     })
@@ -120,6 +132,7 @@ impl Listener {
             while clients.join_next().await.is_some() {}
         });
         Some(Self {
+            public_legs,
             port,
             credential,
             task,
@@ -151,10 +164,15 @@ async fn accept_with_retry<T, F: Future<Output = std::io::Result<T>>>(
         }
     }
 }
-async fn serve<F: Future<Output = Option<Stream>>>(
+enum Backend {
+    Direct(Stream, Arc<Link>),
+    Public(Stream),
+}
+async fn serve<F: Future<Output = Option<Backend>>>(
     mut browser: TcpStream,
     host: &Authority,
     key: &str,
+    public: &PublicLegs,
     open: impl FnOnce() -> F,
 ) {
     let mut data = Vec::with_capacity(1024);
@@ -186,11 +204,23 @@ async fn serve<F: Future<Output = Option<Stream>>>(
             return;
         }
     };
-    let Some(mut stream) = open().await else {
+    let Some(backend) = open().await else {
         let _ = browser
             .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
             .await;
         return;
+    };
+    let (mut stream, committed) = match backend {
+        Backend::Direct(s, link) => {
+            let Some(guard) = link.commit_stream() else {
+                let _ = browser
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                    .await;
+                return;
+            };
+            (s, Some(guard))
+        }
+        Backend::Public(s) => (s, None),
     };
     if browser
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -200,7 +230,11 @@ async fn serve<F: Future<Output = Option<Stream>>>(
     {
         return;
     }
-    let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
+    if committed.is_some() {
+        let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
+    } else {
+        public.copy(browser, stream).await;
+    }
 }
 
 #[cfg(test)]
@@ -238,12 +272,12 @@ mod tests {
         let (accepted, _) = socket.accept().await.unwrap();
         let (release, waiting) = tokio::sync::oneshot::channel();
         let worker = tokio::spawn(async move {
-            serve(accepted, &host, "Basic fixture", || async {
+            serve(accepted, &host, "Basic fixture", &PublicLegs::default(), || async {
                 Selection::default()
                     .choose(
                         async {
                             waiting.await.unwrap();
-                            Some(Box::new(tokio::io::duplex(16).0) as Stream)
+                            Some(Backend::Public(Box::new(tokio::io::duplex(16).0)))
                         },
                         async {
                             // A LAN success is available if selection polls it again.
