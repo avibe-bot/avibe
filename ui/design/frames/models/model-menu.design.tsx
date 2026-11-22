@@ -29,7 +29,12 @@ const catalog = (backend: AgentBackend) => () => (
 
 // Claude Code's menu: the built-in models with their reasoning efforts, plus one a provider added.
 const claudeEfforts = ['low', 'medium', 'high', 'max'];
-const menuAgents: AgentSpec[] = demoAgents.map((spec) => spec.backend !== 'claude' ? spec : {
+// Vibey with a list longer than the dialog: eleven models, so the list scrolls under the footer.
+const vibeyLong = ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5', 'claude-opus-4-8', 'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'deepseek-v4', 'deepseek-v4-reasoner'];
+const menuAgents: AgentSpec[] = demoAgents.map((spec) => spec.backend === 'vibey' ? {
+  ...spec,
+  catalog: vibeyLong.map((id) => backendModel(id, { origin: 'provider' })),
+} : spec.backend !== 'claude' ? spec : {
   ...spec,
   catalog: [
     backendModel('default', { display_name: 'Default', locked: true, routeable: false }),
@@ -140,6 +145,15 @@ const designFrames = frames([
     status: 'shipped',
     fixtures: { api },
     render: catalog('opencode'),
+  },
+  {
+    name: 'long-list',
+    title: '管理模型 · 列表比窗口长（Vibey，11 个模型）',
+    width: 1000,
+    height: 820,
+    status: 'shipped',
+    fixtures: { api },
+    render: catalog('vibey'),
   },
   {
     name: 'phone',

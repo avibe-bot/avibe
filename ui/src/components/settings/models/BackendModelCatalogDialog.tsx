@@ -801,7 +801,7 @@ export const BackendModelCatalogDialog: React.FC<{
               </div>
             )}
 
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="model-hub-catalog-scroll min-h-0 flex-1 overflow-y-auto">
               {!ready ? (
                 <div className="flex flex-col items-center gap-3 px-4 py-12 text-center text-[12.5px] text-muted">
                   {readState === 'loading' ? (
