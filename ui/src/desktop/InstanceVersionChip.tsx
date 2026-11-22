@@ -8,7 +8,7 @@ import { VersionChip } from '../components/VersionChip';
 import { useFollowedVersion } from '../components/update/useFollowedVersion';
 import { normalizeVersion } from '../components/update/versions';
 
-export function InstanceVersionChipView({ name, version, attention = false, updating = false, onClick }: {
+export function InstanceVersionChipView({ name, version, attention = false, updating = false, size = 'chip', onClick }: {
   name: string;
   /** None until the instance's version has been read. */
   version: string | null;
@@ -16,6 +16,8 @@ export function InstanceVersionChipView({ name, version, attention = false, upda
   attention?: boolean;
   /** The instance is installing an update or restarting into it. */
   updating?: boolean;
+  /** `row`: in the desktop app's bottom row (`VersionChip`'s `row`). */
+  size?: 'chip' | 'row';
   onClick?: () => void;
 }) {
   const { t } = useTranslation();
@@ -23,17 +25,18 @@ export function InstanceVersionChipView({ name, version, attention = false, upda
   const shown = `${t('dashboard.versionPrefix')}${version}`;
   const label = t('desktopClient.instanceVersion', { name, version: shown });
   return (
-    <VersionChip attention={attention && !updating} updateDot={attention && !updating} title={label} aria-label={label} onClick={onClick}>
+    <VersionChip attention={attention && !updating} updateDot={attention && !updating} size={size} title={label} aria-label={label} onClick={onClick}>
       {updating && <RefreshCw size={12} aria-hidden="true" className="animate-spin" />}
       {shown}
     </VersionChip>
   );
 }
 
-export function InstanceVersionChip({ name, appUpdate, onPresent }: {
+export function InstanceVersionChip({ name, appUpdate, size = 'chip', onPresent }: {
   name: string;
   /** This computer's desktop app has an update, from the shell's projection. */
   appUpdate: boolean;
+  size?: 'chip' | 'row';
   onPresent: () => void;
 }) {
   const { info, updating, watch } = useFollowedVersion();
@@ -45,6 +48,7 @@ export function InstanceVersionChip({ name, appUpdate, onPresent }: {
       version={version}
       attention={appUpdate || info?.has_update === true}
       updating={updating}
+      size={size}
       onClick={() => { watch(); onPresent(); }}
     />
   );
