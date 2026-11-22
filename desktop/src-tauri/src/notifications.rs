@@ -570,6 +570,16 @@ pub fn stop(app: &AppHandle) {
     clear_badge(app);
 }
 
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_answer(
+    app: &tauri::AppHandle,
+    question: serde_json::Value,
+    action: &str,
+    typed: Option<String>,
+) -> Result<Option<String>, String> {
+    macos::e2e_answer(app, question, action, typed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

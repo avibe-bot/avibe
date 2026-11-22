@@ -130,10 +130,10 @@ AppKit sizes follow that kit; shared copy remains the embedded en/zh catalogs.
 
 ## Current local evidence
 
-The integrated implementation passes 284 Desktop library tests (15 App Lock
+The combined RC preparation passes 314 Desktop library tests (one existing ignored; 15 App Lock
 scenario groups, including the core event matrix across all three policies),
-264 runtime-host tests (three pre-existing ignored), 29 desktop-client e2e cases,
-and 43 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
+273 runtime-host tests (three pre-existing ignored), 31 desktop-client e2e cases,
+54 shell-boundary tests and 56 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
 warnings denied. Rust formatting, desktop-client TypeScript, and UI build pass.
 Design typecheck passed for the native baseline; the integration does not change
 design files. The release guard compiles the normal release and proves that a
@@ -253,3 +253,35 @@ consuming test now asserts the actual NSAlert parent and preserved main-window
 visibility/minimization, with both Cancel and Discard, and repeats unlocked
 Cancel with main hidden. This does not change the effective-policy boundary,
 generic copy, exact sheet exemption, or Machine timing rules.
+
+
+## RC preparation on 2026-11-22
+
+The master-only lane rebases onto `ba2a136e975d15b8a6f5397e775519540cd0b28f`.
+It includes integration fix `bde21e8e` for the capability inventory and fixes
+both new fixture lint violations without changing the lint baseline. The
+four-button signature fix `3722f16f` applies only after #4108; the master-only
+branch still uses the older title-bar API.
+
+A separate local combined worktree rehearses #4108 at `e15705dab2` and #4105
+at `dd65a36a06` before this lane's semantic integration. Main owns the merge
+order: both dependencies first, then rebase App Lock and apply the prepared
+integration commit. No dependency branches are edited or pushed by this lane.
+
+All four native Show actions enter the existing Command defer gate before any
+page eval or native callback. Replay rechecks the window's registered origin
+and route. The source-compiled rendering probe supplies an explicit lock-free
+adapter; the App Lock peer consumes the production gate and actual buttons.
+Native notification answers also enter Command defer before `answer::submit`.
+The operation ID is allocated at the original action, retained with revision
+and payload, and supplied unchanged after unlock. The transport deadline starts
+only then. Pure Action cannot replace any occupied slot, including Command;
+a later explicit Command/Content/Navigation replaces it. Cancellation retains
+memory-only intent, process exit discards it, and no answer text is rendered.
+
+These additions implement main's 08:17 and 08:22 decisions. They do not change
+Machine's timing/verification model, D2a's Runtime idempotency/outcome rules,
+notification preview policy, or create new copy. Native tests consume actual
+NSButtons and the native notification admission path; the latter reaches the
+shipped WebView answer receiver with only its final Runtime POST substituted.
+Real notification-center UI and authentication remain local-package checks.

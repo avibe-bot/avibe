@@ -191,6 +191,49 @@ test('W1 physical App/Show windows inherit covers before and after locking, incl
   await peer.send('closeAppWindows');
 });
 
+test('all four native Show buttons wait for unlock before page events or owner actions', async () => {
+  await peer.send('appWindow', { label: 'app-show-lock-fixture' });
+  await expect.poll(() => peer.send('appWindowLoads')).toEqual(['app-show-lock-fixture']);
+  const events: string[] = [];
+  for (const [tag, action] of [[0, 'Annotate'], [1, 'Chat'], [2, 'Share'], [3, 'Browser']] as const) {
+    await peer.send('reset', { policy: 'immediately' });
+    await peer.send('outcome', { value: 'cancelled' });
+    const pressed = await peer.send('showPress', { tag });
+    expect(pressed.locked).toBe(true);
+    expect(pressed.executed).toEqual([]);
+    expect(await peer.send('showRead')).toEqual(events);
+    expect(await peer.send('appWindowTitles')).toEqual([null, 'Avibe is locked']);
+    expect(pressed.pending).toBe(true);
+    await peer.send('outcome', { value: 'success' });
+    const unlocked = await peer.send('unlock');
+    if (action === 'Annotate' || action === 'Share') {
+      events.push(action === 'Annotate' ? 'avibe:show-annotate-open' : 'avibe:show-share-open');
+      expect(unlocked.executed).toEqual([]);
+    } else {
+      expect(unlocked.executed).toEqual([`show:${action}`]);
+    }
+    await expect.poll(() => peer.send('showRead')).toEqual(events);
+    expect((await peer.send('tick', { time: 3 })).executed).toEqual(unlocked.executed);
+    expect(await peer.send('showRead')).toEqual(events);
+  }
+  // Cancelled verification retains one slot: a later explicit command replaces
+  // the earlier Browser request, so only Chat reaches the native owner.
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: 'cancelled' });
+  await peer.send('showPress', { tag: 3 });
+  await peer.send('showPress', { tag: 1 });
+  expect((await peer.send('snapshot')).executed).toEqual([]);
+  await peer.send('outcome', { value: 'success' });
+  expect((await peer.send('unlock')).executed).toEqual(['show:Chat']);
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: 'cancelled' });
+  await peer.send('showPress', { tag: 3 });
+  await peer.send('showRoute');
+  await peer.send('outcome', { value: 'success' });
+  expect((await peer.send('unlock')).executed).toEqual([]);
+  await peer.send('closeAppWindows');
+});
+
 test('W1 unsaved close/quit guard stays answerable while locked without revealing the page confirmation', async () => {
   await peer.send('appWindow', { label: 'app-editor-lock-fixture' });
   await expect.poll(() => peer.send('appWindowLoads')).toEqual(['app-editor-lock-fixture']);
@@ -613,4 +656,50 @@ test('E30 Ask Vibey defers its real queue and file reads, then delivers through 
     '"The selected contract clause."', 'https://example.com/contract', '"Queued before departure."',
   ]);
   await expect.poll(() => peer.send('composeQueue')).toEqual({ admitted: baseline.admitted + 4, queued: 0 });
+});
+
+test('native notification choice and Reply wait for unlock and preserve the original operation ID', async () => {
+  await peer.send('composePage');
+  type Answers = { answers: { path: string; body: Record<string, unknown> }[] };
+  await expect.poll(() => peer.send<Answers | null>('composeRead')).toMatchObject({ answers: [] });
+  const expected: Answers['answers'] = [];
+  const revision = 'a'.repeat(64);
+  for (const [kind, action, text] of [
+    ['choice', 'avibe.choice.0', '✅ Merge private fixture'],
+    ['text', 'avibe.reply', 'Private typed answer'],
+  ] as const) {
+    await peer.send('reset', { policy: 'immediately' });
+    await peer.send('outcome', { value: 'cancelled' });
+    const admitted = await peer.send<{ operationId: string; after: Snapshot }>('notificationAnswer', {
+      question: { sessionId: 'ses_main', messageId: 'msg_fixture', revision, options: ['✅ Merge private fixture'], source: 'Fixture' },
+      action, text,
+    });
+    expect(admitted.operationId).toMatch(/^desktop-answer-/);
+    expect(admitted.after.locked).toBe(true);
+    expect(admitted.after.pending).toBe(true);
+    expect(admitted.after.windows.every((window) => window.pendingLabel === '')).toBe(true);
+    expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);
+    await peer.send('source', { value: 'dock' });
+    await peer.send('tick', { time: 3600 });
+    expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);
+    await peer.send('outcome', { value: 'success' });
+    await peer.send('unlock');
+    expected.push({ path: '/api/sessions/ses_main/messages', body: {
+      text, operation_id: admitted.operationId, revision,
+      ...(kind === 'choice' ? { metadata: { quick_reply_for: 'msg_fixture' } } : { in_reply_to: 'msg_fixture' }),
+    } });
+    await expect.poll(async () => (await peer.send<Answers>('composeRead')).answers).toEqual(expected);
+    await peer.send('source', { value: 'dock' });
+    expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);
+  }
+  await peer.send('reset');
+  const off = await peer.send<{ operationId: string; after: Snapshot }>('notificationAnswer', {
+    question: { sessionId: 'ses_main', messageId: 'msg_fixture', revision, options: ['Off answer'], source: 'Fixture' },
+    action: 'avibe.choice.0',
+  });
+  expected.push({ path: '/api/sessions/ses_main/messages', body: {
+    text: 'Off answer', operation_id: off.operationId, revision, metadata: { quick_reply_for: 'msg_fixture' },
+  } });
+  await expect.poll(async () => (await peer.send<Answers>('composeRead')).answers).toEqual(expected);
+  expect(off.after.authCalls).toBe(0);
 });

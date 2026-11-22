@@ -422,6 +422,15 @@ fn handle(app: &AppHandle, request: Value) {
                 .map_err(|e| e.to_string())?;
                 Ok(Value::Null)
             }
+            "notificationAnswer" => {
+                let id = crate::notifications::e2e_answer(
+                    app,
+                    request["question"].clone(),
+                    request["action"].as_str().ok_or("action required")?,
+                    request["text"].as_str().map(str::to_owned),
+                )?;
+                Ok(json!({"operationId": id, "after": snapshot(app)}))
+            }
             "composeQueue" => Ok(crate::compose::e2e_queue_state(app)),
             "appWindow" => {
                 // Exercise the physical W1 boundary (real WebviewWindow,
@@ -456,20 +465,69 @@ fn handle(app: &AppHandle, request: Value) {
                     .build()
                     .map_err(|e| e.to_string())?;
                 if label == "app-show-lock-fixture" {
-                    // The title-bar accessory (#4108: four labelled buttons
-                    // bound to the window's destination); the peer only
-                    // exercises covering, so the buttons do nothing here.
+                    // Real native controls and document dispatch. Only the
+                    // final Chat/Browser owner effect is recorded, keeping
+                    // external browsers and Runtime navigation out of the peer.
                     crate::macos_show_titlebar::install(
                         &window,
                         ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
                         "http://127.0.0.1:5267/e2e/desktop-client/app-lock-window.html"
                             .parse()
                             .unwrap(),
-                        |_| {},
+                        |action| {
+                            PEER.with_borrow_mut(|p| p.as_mut().unwrap().executed.push(format!("show:{action:?}")))
+                        },
                     );
                 }
                 window.show().map_err(|e| e.to_string())?;
                 Ok(snapshot(app))
+            }
+            "showPress" => {
+                let window = app
+                    .get_webview_window("app-show-lock-fixture")
+                    .ok_or("Show fixture required")?;
+                let native =
+                    unsafe { Retained::retain(window.ns_window().map_err(|e| e.to_string())?.cast::<NSWindow>()) }
+                        .ok_or("native window required")?;
+                let tag = request["tag"].as_i64().ok_or("tag required")? as isize;
+                let button = native
+                    .titlebarAccessoryViewControllers()
+                    .iter()
+                    .flat_map(|controller| controller.view().subviews().to_vec())
+                    .find_map(|view| view.downcast::<NSButton>().ok().filter(|button| button.tag() == tag))
+                    .ok_or("Show button required")?;
+                unsafe { button.performClick(None) };
+                Ok(snapshot(app))
+            }
+            "showRoute" => {
+                let window = app
+                    .get_webview_window("app-show-lock-fixture")
+                    .ok_or("Show fixture required")?;
+                let id = id.clone();
+                window
+                    .as_ref()
+                    .eval_with_callback("history.pushState({}, '', '/fixture-moved'); 'moved'", move |_| {
+                        output(id.clone(), Ok(json!(true)))
+                    })
+                    .map_err(|e| e.to_string())?;
+                Ok(Value::Null)
+            }
+            "showRead" => {
+                let window = app
+                    .get_webview_window("app-show-lock-fixture")
+                    .ok_or("Show fixture required")?;
+                let id = id.clone();
+                window
+                    .as_ref()
+                    .eval_with_callback("JSON.stringify(window.__APP_LOCK_SHOW_EVENTS__)", move |raw| {
+                        let value = serde_json::from_str::<String>(&raw)
+                            .ok()
+                            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                            .unwrap_or(Value::Null);
+                        output(id.clone(), Ok(value));
+                    })
+                    .map_err(|e| e.to_string())?;
+                Ok(Value::Null)
             }
             "appWindowTitles" => Ok(json!(["app-editor-lock-fixture", "app-show-lock-fixture"]
                 .map(|label| { app.get_webview_window(label).map(|window| window.title().unwrap()) }))),
@@ -742,7 +800,11 @@ fn handle(app: &AppHandle, request: Value) {
             _ => Err(format!("unknown fixture operation: {op}")),
         }
     })();
-    if !matches!(op, "setPolicy" | "quitAlert" | "chrome" | "composeRead" | "closeGuard") || result.is_err() {
+    if !matches!(
+        op,
+        "setPolicy" | "quitAlert" | "chrome" | "composeRead" | "closeGuard" | "showRead" | "showRoute"
+    ) || result.is_err()
+    {
         output(id, result);
     }
 }

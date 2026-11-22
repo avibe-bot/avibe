@@ -477,6 +477,37 @@ fn picked(question: &Question, action: &str, typed: Option<String>) -> Option<Pi
     question.options.get(index).cloned().map(Picked::Choice)
 }
 
+/// Admit one native answer before starting its transport deadline. The same
+/// operation ID and question revision survive cancellation and deferred replay.
+fn receive_answer(
+    app: &tauri::AppHandle,
+    question: Question,
+    action: &str,
+    typed: Option<String>,
+    opens: Option<String>,
+) -> Option<String> {
+    let picked = picked(&question, action, typed)?;
+    let id = super::answer::operation_id();
+    let pending = (id.clone(), question.clone(), picked.clone(), opens.clone());
+    if !crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Command, move |app| {
+        super::answer::submit(app, pending.0, pending.1, pending.2, pending.3);
+    }) {
+        super::answer::submit(app, id.clone(), question, picked, opens);
+    }
+    Some(id)
+}
+
+#[cfg(feature = "app-lock-e2e")]
+pub(super) fn e2e_answer(
+    app: &tauri::AppHandle,
+    question: serde_json::Value,
+    action: &str,
+    typed: Option<String>,
+) -> Result<Option<String>, String> {
+    let question = serde_json::from_value(question).map_err(|e| e.to_string())?;
+    Ok(receive_answer(app, question, action, typed, None))
+}
+
 fn typed(response: &UNNotificationResponse) -> Option<String> {
     if !response.respondsToSelector(sel!(userText)) {
         return None;
@@ -531,9 +562,13 @@ define_class!(
             } else if let Some(question) =
                 carried(response, QUESTION_KEY).and_then(|question| serde_json::from_str::<Question>(&question).ok())
             {
-                if let Some(picked) = picked(&question, &action.to_string(), typed(response)) {
-                    super::answer::submit(app, question, picked, carried(response, OPENS_KEY));
-                }
+                let _ = receive_answer(
+                    app,
+                    question,
+                    &action.to_string(),
+                    typed(response),
+                    carried(response, OPENS_KEY),
+                );
             }
             completion.call(());
         }

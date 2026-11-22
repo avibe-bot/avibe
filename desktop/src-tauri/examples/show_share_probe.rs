@@ -45,6 +45,18 @@ mod show_window_title;
 #[path = "../src/macos_show_titlebar.rs"]
 mod macos_show_titlebar;
 
+// This standalone share/rendering probe has no App Lock owner. The dedicated
+// app-lock-e2e peer tests the real command gate with these native controls.
+#[cfg(target_os = "macos")]
+mod app_lock {
+    pub enum EntryKind {
+        Command,
+    }
+    pub fn defer_kind(_: &tauri::AppHandle, _: EntryKind, _: impl FnOnce(&tauri::AppHandle) + Send + 'static) -> bool {
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod probe {
     use std::{

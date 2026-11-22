@@ -2,6 +2,10 @@
 <html><head><meta charset="UTF-8"><title>PRIVATE DOCUMENT TITLE</title></head>
 <body><textarea aria-label="Private input">PRIVATE APP CONTENT</textarea>
 <script>
+window.__APP_LOCK_SHOW_EVENTS__ = [];
+for (const name of ['avibe:show-annotate-open', 'avibe:show-share-open']) {
+  window.addEventListener(name, () => window.__APP_LOCK_SHOW_EVENTS__.push(name));
+}
 window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ = () => ({
   message: 'PRIVATE unsaved fixture details',
   confirm: 'PRIVATE discard button',

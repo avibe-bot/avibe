@@ -91,7 +91,7 @@ fn request(id: &str, question: &Question, picked: &Picked) -> String {
 }
 
 /// One operation ID per click, unique across launches.
-fn operation_id() -> String {
+pub(super) fn operation_id() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -180,10 +180,9 @@ async fn deliver(app: &AppHandle, id: &str, request: &str) -> Option<Settled> {
 }
 
 /// Delivers one pick and tells the user only when it did not go through.
-pub(super) fn submit(app: &AppHandle, question: Question, picked: Picked, opens: Option<String>) {
+pub(super) fn submit(app: &AppHandle, id: String, question: Question, picked: Picked, opens: Option<String>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let id = operation_id();
         let settled = deliver(&app, &id, &request(&id, &question, &picked)).await;
         let catalog = crate::native_catalog_for_locales(sys_locale::get_locales()).notifications;
         let (subtitle, body) = match told(settled.as_ref(), &catalog.answer) {
