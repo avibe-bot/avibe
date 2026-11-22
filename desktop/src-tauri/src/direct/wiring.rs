@@ -330,24 +330,43 @@ impl Wiring {
 
     /// An app window that shows the instance of `account` at `origin` now
     /// exists. It is remembered until it closes, with or without a session.
-    /// Where a route can be put on an open window it also joins the session
-    /// that instance has right now, whenever that session started: also one
-    /// that started while the window was being made.
-    pub fn app_window_created(&mut self, window: &str, account: &str, origin: &str) -> Vec<Effect> {
-        if self.app_windows.iter().all(|open| open.window != window) {
-            self.app_windows.push(AppWindow {
-                window: window.to_owned(),
-                account: account.to_owned(),
-                origin: origin.to_owned(),
-            });
+    ///
+    /// The window is a new one, whatever its label: an app window's label
+    /// is used again once its window has closed, so anything still known
+    /// under it belonged to a window that is gone, and is forgotten first.
+    ///
+    /// Then it joins a session. Where a route can be put on an open window,
+    /// the one its instance has right now, whenever that started: also one
+    /// that started while the window was being made. Where a route is given
+    /// only at creation, the session it was `created_for`, if any: only that
+    /// one's listener is in the window's route.
+    pub fn app_window_created(
+        &mut self,
+        window: &str,
+        account: &str,
+        origin: &str,
+        created_for: Option<u64>,
+    ) -> Vec<Effect> {
+        self.app_windows.retain(|open| open.window != window);
+        for session in &mut self.sessions {
+            session.windows.retain(|label| label != window);
+            session.routed.retain(|label| label != window);
         }
-        match self.shared(account, origin) {
-            Some(session) if self.routing == Routing::Live => self.window_created(session, window),
-            _ => Vec::new(),
-        }
+        self.app_windows.push(AppWindow {
+            window: window.to_owned(),
+            account: account.to_owned(),
+            origin: origin.to_owned(),
+        });
+        let session = match self.routing {
+            Routing::Live => self.shared(account, origin),
+            Routing::AtCreation => created_for,
+            Routing::Unsupported => None,
+        };
+        session.map_or_else(Vec::new, |session| self.window_created(session, window))
     }
 
-    /// A window that shows the session's instance now exists.
+    /// A window that shows the session's instance now exists: its instance
+    /// view, whose label is never used twice.
     pub fn window_created(&mut self, session: u64, window: &str) -> Vec<Effect> {
         let routing = self.routing;
         let Some(found) = self.sessions.iter_mut().find(|candidate| candidate.id == session) else {

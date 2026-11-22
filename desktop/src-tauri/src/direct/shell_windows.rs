@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview};
 use tokio::sync::oneshot;
 
-/// The challenge answers that are registered, by window label. A label is
-/// used once in a run of the app.
+/// The challenge answers that are registered, by window label: at most one
+/// for a label, the newest window's.
 static ANSWERING: Mutex<Vec<(String, i64)>> = Mutex::new(Vec::new());
 
 pub fn ask(
@@ -51,6 +51,9 @@ pub fn answer(app: &AppHandle, window: String, material: Material) {
                 &material.password,
             );
             if let (Ok(registration), Ok(mut answering)) = (registered, ANSWERING.lock()) {
+                // An app window's label is used again after its window
+                // closed: what was kept under it was that window's.
+                answering.retain(|(label, _)| *label != window);
                 answering.push((window, registration));
             }
         });

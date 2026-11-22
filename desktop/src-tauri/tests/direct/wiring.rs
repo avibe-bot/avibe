@@ -751,10 +751,9 @@ fn a_session_that_starts_later_routes_the_app_windows_already_open() {
     let first = opened(&mut wiring, ONE, "main-runtime-1", now);
     // A Show window, opened with the session and registered with it; an
     // Editor window of another instance and one of another account.
-    assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE), []);
-    assert_eq!(wiring.window_created(first, "show-1"), []);
-    assert_eq!(wiring.app_window_created("editor-2", ACCOUNT, TWO), []);
-    assert_eq!(wiring.app_window_created("editor-3", "account-2", ONE), []);
+    assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE, Some(first)), []);
+    assert_eq!(wiring.app_window_created("editor-2", ACCOUNT, TWO, None), []);
+    assert_eq!(wiring.app_window_created("editor-3", "account-2", ONE, None), []);
     wiring.probed(first, true);
 
     // The listener ends: both of the session's windows lose their route.
@@ -765,7 +764,7 @@ fn a_session_that_starts_later_routes_the_app_windows_already_open() {
     // After the pause a new session starts for the same view, and takes the
     // Show window that is still open with it; a second one, opened while no
     // session existed, too. Not the windows of another instance or account.
-    wiring.app_window_created("show-2", ACCOUNT, ONE);
+    wiring.app_window_created("show-2", ACCOUNT, ONE, None);
     let later = now + Duration::from_secs(60);
     assert_eq!(
         wiring.reconcile(Some(&published), |_| true, later),
@@ -785,16 +784,26 @@ fn a_session_that_starts_later_routes_the_app_windows_already_open() {
     // the session started while it was being made, joins it when it exists:
     // routed at once, since the session has its answer. And only once.
     assert_eq!(
-        wiring.app_window_created("show-3", ACCOUNT, ONE),
+        wiring.app_window_created("show-3", ACCOUNT, ONE, None),
         [install(second, "show-3")]
     );
-    assert_eq!(wiring.app_window_created("show-3", ACCOUNT, ONE), []);
-    assert_eq!(wiring.window_created(second, "show-3"), []);
+    // An app window's label is used again once its window has closed. The
+    // window that now has it is a new one and is routed as one, also when
+    // the shell has not yet looked and seen the old one gone.
+    assert_eq!(
+        wiring.app_window_created("show-3", ACCOUNT, ONE, None),
+        [install(second, "show-3")]
+    );
+    // And it is the session's window once, not twice: one route to take off.
+    assert_eq!(
+        wiring.listener_ended(second, later),
+        [retire(second, &["main-runtime-1", "show-1", "show-2", "show-3"])]
+    );
     // Before the session's first answer it joins without a route yet, and
     // gets one with the others.
     let mut early = live();
     let session = opened(&mut early, ONE, "main-runtime-1", now);
-    assert_eq!(early.app_window_created("show-1", ACCOUNT, ONE), []);
+    assert_eq!(early.app_window_created("show-1", ACCOUNT, ONE, None), []);
     assert_eq!(
         early.probed(session, true),
         [install(session, "main-runtime-1"), install(session, "show-1")]
@@ -802,8 +811,8 @@ fn a_session_that_starts_later_routes_the_app_windows_already_open() {
 
     // An app window that closed meanwhile is not waited for.
     let mut wiring = live();
-    wiring.app_window_created("show-1", ACCOUNT, ONE);
-    wiring.app_window_created("show-2", ACCOUNT, ONE);
+    wiring.app_window_created("show-1", ACCOUNT, ONE, None);
+    wiring.app_window_created("show-2", ACCOUNT, ONE, None);
     assert_eq!(
         wiring.reconcile(Some(&published), |window| window != "show-1", now),
         [open("main-runtime-1")]
@@ -819,7 +828,7 @@ fn a_session_that_starts_later_routes_the_app_windows_already_open() {
     let mut choices = Choices::unsaved();
     choices.remember(ACCOUNT, ONE);
     let mut wiring = Wiring::new(Routing::AtCreation, false, choices);
-    assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE), []);
+    assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE, None), []);
     let session = wiring.open(target(ONE), material(4100), None, now);
     assert_eq!(
         wiring.window_created(session, "main-runtime-2"),
@@ -832,9 +841,25 @@ fn a_session_that_starts_later_routes_the_app_windows_already_open() {
     assert_eq!(wiring.probed(session, true), []);
     // Nor does a window join a session there by being registered: only the
     // route it was created with makes it the session's.
-    assert_eq!(wiring.app_window_created("show-2", ACCOUNT, ONE), []);
+    assert_eq!(wiring.app_window_created("show-2", ACCOUNT, ONE, None), []);
+    let answer = |window: &str| Effect::Answer {
+        session,
+        window: window.to_owned(),
+    };
+    assert_eq!(
+        wiring.app_window_created("show-3", ACCOUNT, ONE, Some(session)),
+        [answer("show-3")]
+    );
+    // A label used again for a new window: its listener's challenge is
+    // answered in the new window too, or WebView2 would ask the person.
+    assert_eq!(
+        wiring.app_window_created("show-3", ACCOUNT, ONE, Some(session)),
+        [answer("show-3")]
+    );
+    // A window created for a session that has ended meanwhile joins nothing.
+    assert_eq!(wiring.app_window_created("show-4", ACCOUNT, ONE, Some(session + 7)), []);
     assert_eq!(
         wiring.listener_ended(session, now),
-        [retire(session, &["main-runtime-2"])]
+        [retire(session, &["main-runtime-2", "show-3"])]
     );
 }

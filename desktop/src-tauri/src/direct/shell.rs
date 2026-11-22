@@ -589,26 +589,21 @@ pub(crate) fn window_created(app: &AppHandle, window: &str, route: AtCreation) {
 }
 
 /// An app window opened from the instance view at `origin` now exists, with
-/// the `route` it was created for if it had one. Called before the window
-/// is sent to its instance. It is remembered with or without a session: one
-/// that starts later (after a listener ended, a change of the choice, or the
-/// system's proxy settings clearing) routes the app windows that are already
-/// open; and where a route can be put on an open window, it joins the
-/// session its instance has now, even one that started while it was made.
+/// the `route` it was created for if it had one. Called once for every app
+/// window of another computer's instance, before the window is sent to its
+/// instance. The wiring remembers it with or without a session and decides
+/// which session it joins (`Wiring::app_window_created`).
 pub(crate) fn app_window_created(app: &AppHandle, window: &str, origin: &url::Url, route: Option<AtCreation>) {
     let Some(state) = direct(app) else { return };
     let account = app
         .try_state::<instance_client::Client>()
         .and_then(|client| client.coordinator.state().account.identity)
         .map(|identity| identity.id);
-    let mut effects = Vec::new();
-    if let (Some(account), Some(origin)) = (account, origin_of(origin.as_str())) {
-        effects.extend(lock(&state.wiring).app_window_created(window, &account, &origin));
-    }
-    // Where its route was given at creation, the session it was created for.
-    if let Some(route) = route {
-        effects.extend(lock(&state.wiring).window_created(route.session, window));
-    }
+    let (Some(account), Some(origin)) = (account, origin_of(origin.as_str())) else {
+        return;
+    };
+    let created_for = route.map(|route| route.session);
+    let effects = lock(&state.wiring).app_window_created(window, &account, &origin, created_for);
     route_windows(app, &state, effects);
 }
 
