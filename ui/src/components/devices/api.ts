@@ -192,6 +192,19 @@ export const devicesApi = {
   },
 
   rebind: async (): Promise<RebindState> => rebindFromWire(await get('/api/remote-access/rebind')),
+  /**
+   * Whether this instance has binding again at all (a build before it answers 404). True only on
+   * the instance's own word, an overview or one of its refusals; no such route, an answer that is
+   * not its JSON, or no answer, is not that word, so nothing is said that points there.
+   */
+  rebindOffered: async (): Promise<boolean> => {
+    try {
+      await get('/api/remote-access/rebind');
+      return true;
+    } catch (error) {
+      return error instanceof DevicesApiError && error.status !== 404;
+    }
+  },
   startRebind: async (locale: string) => claimForm(await post('/api/remote-access/rebind/claims', { locale })),
   rebindClaim: async (id: string) => claimState(await get(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}`)),
   cancelRebind: async (id: string) => { await post(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}/cancel`); },

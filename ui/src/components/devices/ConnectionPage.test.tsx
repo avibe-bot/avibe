@@ -200,10 +200,52 @@ describe('ConnectionPage · settings', () => {
   });
 
   it('lets a remote session see that binding again is done at the computer, not the control', async () => {
+    // The instance has binding again and refuses its overview away from the computer.
+    vi.spyOn(devicesApi, 'rebind').mockRejectedValue(new DevicesApiError(403, 'direct_loopback_required', {}));
     mount('/settings/remote-access/connection', true);
     expect(await screen.findByText(said('重新绑定远程访问要在运行 Avibe 的那台电脑上做'))).toBeTruthy();
     expect(screen.queryByRole('button', { name: '重新绑定' })).toBeNull();
-    expect(devicesApi.rebind).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['no such route', () => new DevicesApiError(404, 'not_found', {}), false],
+    ['no such route, seen from afar', () => new DevicesApiError(404, 'not_found', {}), true],
+    ['an answer that is not the instance\'s JSON', () => new LostAnswer(), false],
+  ] as const)('shows no bind-again row and says nothing on an instance without it (%s)', async (_name, refusal, away) => {
+    vi.spyOn(devicesApi, 'rebind').mockRejectedValue(refusal());
+    // Opened at the row's own anchor, as the Devices page's notice would.
+    mount('/settings/remote-access/connection#rebind', away);
+    expect(await screen.findByText('域名')).toBeTruthy();
+    await waitFor(() => expect(devicesApi.rebind).toHaveBeenCalled());
+    expect(screen.queryByText('重新绑定远程访问')).toBeNull();
+    expect(screen.queryByRole('button', { name: '重新绑定' })).toBeNull();
+    expect(document.body.textContent).not.toContain('重新绑定');
+    expect(document.body.textContent).not.toContain('vibe remote');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection');
+  });
+
+  it('shows only the domain where this Avibe\'s name cannot be changed here, whatever the reason given', async () => {
+    // A reason this page has never heard of (an instance that has not read its name's state yet).
+    vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ eligible: false, ineligibleReason: 'name_state_never_read', retired: [] }));
+    vi.spyOn(devicesApi, 'rebind').mockRejectedValue(new DevicesApiError(404, 'not_found', {}));
+    mount();
+    expect(await screen.findByText('域名')).toBeTruthy();
+    expect(screen.getByText(host)).toBeTruthy();
+    await waitFor(() => expect(devicesApi.address).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: '更改域名' })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('button', { name: '清理情况' })).toBeNull();
+    expect(document.body.textContent).not.toContain('name_state_never_read');
+    expect(document.body.textContent).not.toContain('改名');
+  });
+
+  it('opens no rename dialog at the rename\'s own address where the name cannot be changed here', async () => {
+    vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ eligible: false, ineligibleReason: 'name_state_never_read' }));
+    mount('/settings/remote-access/connection/address');
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('textbox', { name: '新名称' })).toBeNull();
   });
 });
 
@@ -570,11 +612,27 @@ describe('ConnectionPageView', () => {
 
   it('has one status line for a changed tunnel setting and no keep button', () => {
     expect(line({ setting: 'protocol', state: 'applied' })).toBe('已生效');
+    // Stored while no tunnel was running: saved, never said to be in effect.
+    expect(line({ setting: 'protocol', state: 'applied', saved: true })).toBe('已保存');
     expect(line({ setting: 'protocol', state: 'restored', reason: 'verification_failed', from: 'auto' })).toBe('没连上，已改回「自动」');
     expect(line({ setting: 'outbound', state: 'restoring', from: '' })).toBe('正在改回「跟随系统」');
     view({ connection: connection({ change: { setting: 'protocol', state: 'verifying' } }) });
     expect(screen.queryByRole('button', { name: /保留/ })).toBeNull();
     expect(screen.getByRole('radio', { name: 'QUIC' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('says more than one binding record at avibe.bot in its own sentence, and points to binding again only where that exists', () => {
+    const refused = view({ address: address(), rename: { step: 'form', name: 'maxwell', refusal: { code: 'rebind_required' } }, rebind: { state: 'ready' } });
+    expect(screen.getByText(said('没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。先重新绑定远程访问，再改一次。'))).toBeTruthy();
+    refused.unmount();
+
+    // Found while reading the name's state: said in the domain's row, beside the way out.
+    const read = view({ address: address({ eligible: false, stateError: 'rebind_required' }), rebind: { state: 'ready' } });
+    expect(screen.getByText(said('avibe.bot 上这台电脑有不止一条绑定记录，现在读不到域名的状态。先重新绑定远程访问。'))).toBeTruthy();
+    read.unmount();
+    // Without binding again on this instance, nothing sends anyone there.
+    view({ address: address({ eligible: false, stateError: 'rebind_required' }) });
+    expect(document.body.textContent).not.toContain('重新绑定');
   });
 
   it('says how the last connection\'s two paths raced where the App recorded it, and an expired certificate has no date', () => {

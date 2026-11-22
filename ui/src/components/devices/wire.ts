@@ -244,8 +244,9 @@ function tunnelChange(operation: unknown, outcome: unknown): TunnelChange | unde
   const to = 'to' in last ? value(last.to) : undefined;
   switch (last.result) {
     case 'applied':
+      return { setting: done, state: 'applied', to, saved: last.reason === 'saved_without_connector' || undefined };
     case 'superseded':
-      return { setting: done, state: last.result, to };
+      return { setting: done, state: 'superseded', to };
     case 'restored':
       return {
         setting: done, state: 'restored', from, to,
@@ -322,7 +323,7 @@ export function connectionFromWire(raw: unknown, interfaces: ConnectionState['in
 
 const RENAME_CODES = new Set([
   'taken', 'invalid_prefix', 'same_address', 'confirmation_expired', 'operation_in_progress', 'address_changed',
-  'pairing_invalid', 'remote_access_configuration_mismatch', 'unavailable', 'owner_required', 'rename_ineligible',
+  'pairing_invalid', 'remote_access_configuration_mismatch', 'rebind_required', 'unavailable', 'owner_required', 'rename_ineligible',
 ]);
 
 export function renameRefusal(body: unknown): RenameRefusal {
@@ -373,6 +374,7 @@ export function addressFromWire(raw: unknown): AddressState | null {
     hostname,
     eligible: body.eligible === true,
     ineligibleReason: text(body.ineligible_reason),
+    stateError: body.state_error === 'rebind_required' ? 'rebind_required' : undefined,
     holdDays: typeof body.hold_days === 'number' ? body.hold_days : undefined,
     releaseAtIfChangedNow: instant(body.release_at_if_changed_now),
     operation: operationState && text(operation.hostname) ? {

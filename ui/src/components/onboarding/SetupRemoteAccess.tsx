@@ -9,6 +9,7 @@ import { devicesApi } from '../devices/api';
 import { DEVICES_PATH } from '../devices/paths';
 import type { ClaimProblem } from '../devices/types';
 import { useClaimFlow, type ClaimEnd } from '../devices/useClaimFlow';
+import { useRebindOffered } from '../devices/useRebindOffered';
 import { claimProblem } from '../devices/wire';
 import { SetupRemoteAccessView } from './SetupRemoteAccessView';
 
@@ -16,6 +17,7 @@ export function SetupRemoteAccess() {
   const { i18n } = useTranslation();
   const navigate = useNavigate();
   const [problem, setProblem] = useState<ClaimProblem | undefined>();
+  const terminal = useRebindOffered();
 
   const onEnd = useCallback((end: ClaimEnd) => {
     // Bound (here, or already): the Devices page shows it and offers the phone.
@@ -46,6 +48,7 @@ export function SetupRemoteAccess() {
       surface="browser"
       busy={flow.phase !== 'idle'}
       problem={problem}
+      terminal={terminal}
       onTurnOn={() => { setProblem(undefined); void flow.start(); }}
       onSkip={() => navigate('/', { replace: true })}
     />

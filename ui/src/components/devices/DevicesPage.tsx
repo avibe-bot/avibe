@@ -25,6 +25,7 @@ import type {
 import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
 import { useNow } from './useNow';
 import { useOptimizeRoute } from './useOptimizeRoute';
+import { useRebindOffered } from './useRebindOffered';
 import { claimProblem, tunnelFromStatus, type DevicesSnapshot } from './wire';
 
 const REFRESH_MS = 30_000;
@@ -78,6 +79,7 @@ export function DevicesPage() {
   const location = useLocation();
   const { showToast } = useToast();
   const { remote, capabilities, instanceKind } = useInstanceAuthorization();
+  const rebindOffered = useRebindOffered();
   // The instance's owner, not everyone who may operate it: only the owner is answered on what
   // this page shows about the instance itself.
   const owner = capabilities.is_instance_owner;
@@ -390,6 +392,7 @@ export function DevicesPage() {
       signedOut={snapshot.signedOut}
       signOutNotice={notice}
       unrecognizedChange={unrecognizedChange}
+      rebindOffered={rebindOffered}
       problem={problem}
       detail={detail}
       confirm={confirm}

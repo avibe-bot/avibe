@@ -107,6 +107,9 @@ export type DevicesPageViewProps = DevicesPageActions & {
   signOutNotice?: SignOutNotice;
   /** The address was changed somewhere else, with this computer's device key. */
   unrecognizedChange?: { hostname: string };
+  /** This instance has binding again (the row on 「连接方式」 and `vibe remote rebind`). On a build
+   *  before it, no sentence points there. */
+  rebindOffered?: boolean;
   /** Something this page asked for did not happen, or its answer never arrived. `offFromAfar`:
    *  remote access was turned off from this remote device and no answer came back, which is what
    *  turning it off does. */
@@ -140,8 +143,10 @@ const healthSyncedKeys = {
 } as const satisfies Record<NonNullable<ReturnType<typeof timeParts>>['day'], TranslationKey>;
 
 /** Layer 1: how this Avibe is reached. Set once, so it is compact once it is on. */
-function ReachCard({ reach, operate = false, optimize, actions }: {
+function ReachCard({ reach, operate = false, optimize, terminal = true, actions }: {
   reach: Reach;
+  /** The terminal's way of binding exists on this instance. */
+  terminal?: boolean;
   /** A member who may operate the instance: the switch and 「优化线路」, nothing of the owner's. */
   operate?: boolean;
   optimize?: OptimizeState;
@@ -201,7 +206,7 @@ function ReachCard({ reach, operate = false, optimize, actions }: {
         {problem && (
           <div role="alert" className="flex flex-col gap-2 border-t border-border px-5 py-3 md:flex-row md:items-center md:justify-between">
             <p className={`text-[12px] leading-relaxed ${noAction ? 'text-foreground' : 'text-destructive-ink'}`}>
-              <KeptTail text={claimProblemText(t, problem)} />
+              <KeptTail text={claimProblemText(t, problem, terminal)} />
             </p>
             {problem.code === 'claim_in_progress' && problem.claimId && (
               <Button variant="secondary" size="xs" className="shrink-0" onClick={() => actions.onCancelClaim?.(problem.claimId)}>
@@ -588,7 +593,7 @@ const leading = (results: AccountResult[]): AccountResult => (
 
 /** Devices signed out lately. Each is out of this Avibe; the lines say what avibe.bot did about
  *  the account sign-in, and never call an accepted request an ended sign-in. */
-function SignedOutPanel({ rows }: { rows: SignedOutDevice[] }) {
+function SignedOutPanel({ rows, rebindOffered }: { rows: SignedOutDevice[]; rebindOffered: boolean }) {
   const { t } = useTranslation();
   return (
     <SettingsPanel title={t('devices.signedOut.title')}>
@@ -603,7 +608,7 @@ function SignedOutPanel({ rows }: { rows: SignedOutDevice[] }) {
                 <span className="text-[13px] font-medium text-foreground">{row.device ?? t('devices.signedOut.unnamed')}</span>
                 <span className="text-[11px] text-muted">{t('devices.signedOut.here')}</span>
               </div>
-              {accountResultTexts(t, row).map((line) => (
+              {accountResultTexts(t, row, rebindOffered).map((line) => (
                 <div key={line} className="mt-0.5 text-[12px] leading-relaxed text-foreground"><KeptTail text={line} /></div>
               ))}
             </div>
@@ -616,14 +621,14 @@ function SignedOutPanel({ rows }: { rows: SignedOutDevice[] }) {
 
 /** Right after a sign-out: what avibe.bot was asked or not asked, and Health only here, because
  *  only this answer says anything about it. */
-function SignOutNoticeCard({ notice, onDismiss }: { notice: SignOutNotice; onDismiss?: () => void }) {
+function SignOutNoticeCard({ notice, rebindOffered, onDismiss }: { notice: SignOutNotice; rebindOffered: boolean; onDismiss?: () => void }) {
   const { t } = useTranslation();
   return (
     <Notice tone="plain" action={<Button variant="ghost" size="xs" onClick={onDismiss}>{t('devices.notice.dismiss')}</Button>}>
       <div className="font-medium">
         {notice.device ? t('devices.signedOut.justNow', { device: notice.device }) : t('devices.signedOut.justNowMany')}
       </div>
-      {accountResultTexts(t, notice).map((line) => <div key={line}><KeptTail text={line} /></div>)}
+      {accountResultTexts(t, notice, rebindOffered).map((line) => <div key={line}><KeptTail text={line} /></div>)}
       {notice.healthCleanupPending && (
         <div className="text-muted"><KeptTail text={t(notice.hadHealth ? 'devices.signedOut.healthPending' : 'devices.signedOut.healthPendingIfAny')} /></div>
       )}
@@ -633,7 +638,7 @@ function SignOutNoticeCard({ notice, onDismiss }: { notice: SignOutNotice; onDis
 
 export function DevicesPageView({
   reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
-  signOutNotice, unrecognizedChange, problem, detail, confirm, busy, view = 'page', add, ...actions
+  signOutNotice, unrecognizedChange, rebindOffered = true, problem, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
   // Each device says which list it belongs to; nothing is inferred from an absent account.
@@ -723,9 +728,9 @@ export function DevicesPageView({
       )}
       {/* After turning remote access off from afar, not reading its state is the expected result:
           the notice below says so, and the card does not add "cannot be read" to it. */}
-      {owner && !(problem === 'offFromAfar' && reach.state === 'unknown') && <ReachCard reach={reach} actions={actions} />}
+      {owner && !(problem === 'offFromAfar' && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
-      {signOutNotice && <SignOutNoticeCard notice={signOutNotice} onDismiss={actions.onDismissNotice} />}
+      {signOutNotice && <SignOutNoticeCard notice={signOutNotice} rebindOffered={rebindOffered} onDismiss={actions.onDismissNotice} />}
       {problem && (
         <Notice action={<Button variant="ghost" size="xs" onClick={actions.onDismissNotice}>{t('devices.notice.dismiss')}</Button>}>
           <KeptTail text={t(problemKeys[problem])} />
@@ -777,7 +782,7 @@ export function DevicesPageView({
       )}
 
       {unlinkedHealth.length > 0 && <UnlinkedHealthPanel items={unlinkedHealth} onDisconnect={actions.onDisconnectHealth} />}
-      {signedOut.length > 0 && <SignedOutPanel rows={signedOut} />}
+      {signedOut.length > 0 && <SignedOutPanel rows={signedOut} rebindOffered={rebindOffered} />}
 
       {owner && latest.length > 0 && (
         <SettingsPanel

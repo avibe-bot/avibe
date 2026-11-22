@@ -8080,7 +8080,8 @@
         "activeElsewhere": "avibe.bot 拒绝了：那个 Avibe 正在另一台电脑上运行，它在最近 15 分钟内还活跃。什么都没有绑定。想让它改到这台电脑上：在那台电脑上退出 Avibe，等 15 分钟后再试。那台电脑已经不在你手里的话：在 avibe.bot 上删除那个 Avibe 再重新绑定；它的访问名单会丢失，名字会为你的账号保留 30 天。",
         "bindingChanged": "这台电脑的绑定刚刚变了，这里没有再做任何事。",
         "inProgress": "这台电脑已经有一个绑定请求在进行。先完成或取消那一个。",
-        "unknown": "avibe.bot 没有完成这次请求，什么都没有绑定。（代码：{{code}}）"
+        "unknown": "avibe.bot 没有完成这次请求，什么都没有绑定。（代码：{{code}}）",
+        "linkRequiredHere": "从这个地址开不了远程访问。请在运行 Avibe 的那台电脑上打开 Avibe 再开启。"
       }
     },
     "list": {
@@ -8307,7 +8308,8 @@
         "failedBusy": "没有改：另一项更改还在进行，仍是「{{from}}」。",
         "failedNotApplied": "没有改：设置没能应用，仍是「{{from}}」。",
         "failedUnknown": "这次更改没有完成。",
-        "unknown": "没收到结果。重新连上后会自动读取结果，不会重复这次更改。"
+        "unknown": "没收到结果。重新连上后会自动读取结果，不会重复这次更改。",
+        "saved": "已保存"
       },
       "returnedToAutomatic": "{{time}}，Cloudflare 隧道连续 3 分钟连不上，固定的设置已改回自动：{{settings}}。",
       "returnedSetting": "{{setting}}（原来是「{{from}}」）",
@@ -8397,9 +8399,11 @@
         "limit_other": "这个账号已持有 {{count}} 个名字（包括冷却中的），已到上限。",
         "limitPlainDated": "这个账号持有的名字（包括冷却中的）已到上限。最早的一个在 {{date}}释放，之后可以再改。",
         "limitPlain": "这个账号持有的名字（包括冷却中的）已到上限。",
-        "unknown": "这次更改没有完成。（代码：{{code}}）"
+        "unknown": "这次更改没有完成。（代码：{{code}}）",
+        "rebindRequired": "没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。先重新绑定远程访问，再改一次。"
       },
-      "howOther": "在那台设备上退出登录。"
+      "howOther": "在那台设备上退出登录。",
+      "stateRebindRequired": "avibe.bot 上这台电脑有不止一条绑定记录，现在读不到域名的状态。先重新绑定远程访问。"
     },
     "setup": {
       "title": "在手机和其他电脑上打开它",
@@ -8451,7 +8455,8 @@
       "unconfirmed": "多次重试后，仍不确定它的账号登录有没有结束。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。",
       "unknown": "不清楚 avibe.bot 那边的结果。",
       "healthPending": "它同步过的健康数据，清理尚未确认。",
-      "healthPendingIfAny": "如果它同步过健康数据，清理尚未确认。"
+      "healthPendingIfAny": "如果它同步过健康数据，清理尚未确认。",
+      "refusedCredentialPlain": "avibe.bot 不再接受这台电脑的绑定，所以没有结束它的账号登录。"
     },
     "problem": {
       "functionNeedsDevice": "要先在那台设备上打开这一项。",

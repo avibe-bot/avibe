@@ -13,7 +13,7 @@ import { SetupHeader } from '../Wizard';
 
 export type SetupRemoteAccessViewProps = (
   /** A plain browser on a standalone Runtime: the first claim passes avibe.bot once. */
-  | { surface: 'browser'; busy?: boolean; problem?: ClaimProblem }
+  | { surface: 'browser'; busy?: boolean; problem?: ClaimProblem; /** `vibe remote rebind` exists on this instance. */ terminal?: boolean }
   /** The Desktop App: its own sign-in, then the name here (not wired to a page yet). */
   | { surface: 'desktop'; account: string | null; name: string; nameState?: NameState }
 ) & {
@@ -52,7 +52,7 @@ export function SetupRemoteAccessView(props: SetupRemoteAccessViewProps) {
                   )}
                   {browser?.problem && (
                     <p role="alert" className={`border-t border-border px-5 py-3 text-[12px] leading-relaxed ${noAction ? 'text-foreground' : 'text-destructive-ink'}`}>
-                      <KeptTail text={claimProblemText(t, browser.problem)} />
+                      <KeptTail text={claimProblemText(t, browser.problem, browser.terminal ?? true)} />
                     </p>
                   )}
                 </div>

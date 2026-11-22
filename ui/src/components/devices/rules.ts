@@ -114,8 +114,10 @@ const accountKeys = {
  * result. Never "ended": accepted is accepted. Where only this Avibe's sign-in ended, the advice
  * depends on whose device it was; where that is not known, both halves are said.
  */
-export function accountResultTexts(t: TFunction, device: Pick<SignedOutDevice, 'owner' | 'results'>): string[] {
+export function accountResultTexts(t: TFunction, device: Pick<SignedOutDevice, 'owner' | 'results'>, rebindOffered = true): string[] {
   return [...new Set(device.results)].map((result) => {
+    // Where this instance has no way to bind again, the sentence does not send anyone there.
+    if (result === 'refusedCredential' && !rebindOffered) return t('devices.signedOut.refusedCredentialPlain');
     if (result !== 'localOnly') return t(accountKeys[result]);
     if (device.owner === 'mine') return t('devices.signedOut.localOnlyMine');
     if (device.owner === 'others') return t('devices.signedOut.localOnlyOthers');

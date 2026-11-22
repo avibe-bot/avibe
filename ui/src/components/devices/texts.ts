@@ -24,9 +24,14 @@ const problemKeys = {
   claim_in_progress: 'devices.claim.problem.inProgress',
 } as const satisfies Record<Exclude<ClaimProblem['code'], 'rate_limited' | 'unknown'>, TranslationKey>;
 
-/** Why remote access was not turned on, in one sentence. An unknown code is said with its code. */
-export function claimProblemText(t: TFunction, problem: ClaimProblem): string {
+/**
+ * Why remote access was not turned on, in one sentence. An unknown code is said with its code.
+ * `terminal`: this instance has the terminal's way of binding (`vibe remote rebind`); without it
+ * the sentence does not send anyone to a command that is not there.
+ */
+export function claimProblemText(t: TFunction, problem: ClaimProblem, terminal = true): string {
   if (problem.code === 'unknown') return t('devices.claim.problem.unknown', { code: problem.raw });
+  if (problem.code === 'link_required' && !terminal) return t('devices.claim.problem.linkRequiredHere');
   if (problem.code === 'rate_limited') {
     return problem.seconds
       ? t('devices.claim.problem.rateLimited', { count: problem.seconds })
@@ -44,6 +49,7 @@ const refusalKeys = {
   address_changed: 'devices.rename.refused.addressChanged',
   pairing_invalid: 'devices.rename.refused.pairingInvalid',
   remote_access_configuration_mismatch: 'devices.rename.refused.configurationMismatch',
+  rebind_required: 'devices.rename.refused.rebindRequired',
   unavailable: 'devices.rename.refused.unavailable',
   owner_required: 'devices.rename.refused.ownerRequired',
   rename_ineligible: 'devices.rename.refused.ineligible',

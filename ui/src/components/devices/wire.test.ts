@@ -189,6 +189,10 @@ describe('connectionFromWire', () => {
       .toEqual({ setting: 'protocol', state: 'verifying', to: 'http2' });
     expect(read({ operation: { setting: 'protocol', from: 'auto', state: 'restoring' } })?.change).toEqual({ setting: 'protocol', state: 'restoring', from: 'auto' });
     expect(read({ outcome: { setting: 'protocol', from: 'auto', result: 'applied' } })?.change).toEqual({ setting: 'protocol', state: 'applied' });
+    expect(read({ outcome: { setting: 'protocol', from: 'auto', result: 'applied', reason: 'verified' } })?.change).toEqual({ setting: 'protocol', state: 'applied' });
+    // Stored with no tunnel running: saved, which is not the same as in effect.
+    expect(read({ outcome: { setting: 'protocol', from: 'auto', to: 'http2', result: 'applied', reason: 'saved_without_connector' } })?.change)
+      .toEqual({ setting: 'protocol', state: 'applied', to: 'http2', saved: true });
     expect(read({ outcome: { setting: 'protocol', from: 'auto', result: 'restored', reason: 'verification_failed' } })?.change)
       .toEqual({ setting: 'protocol', state: 'restored', reason: 'verification_failed', from: 'auto' });
     expect(read({ outcome: { setting: 'outbound', from: '', result: 'failed', reason: 'storage_restore_failed' } })?.change)
@@ -234,6 +238,17 @@ describe('connectionFromWire', () => {
 });
 
 describe('addressFromWire', () => {
+  it('reads more than one binding record at avibe.bot as its own refusal and its own state', () => {
+    expect(renameRefusal({ error: 'rebind_required' })).toEqual({ code: 'rebind_required' });
+    expect(renameRefusal({ error: 'remote_access_configuration_mismatch' })).toEqual({ code: 'remote_access_configuration_mismatch' });
+    const base = { hostname: 'max-app.avibe.bot', eligible: false, cleanup: [] };
+    expect(addressFromWire({ ...base, state_error: 'rebind_required' })?.stateError).toBe('rebind_required');
+    expect(addressFromWire({ ...base, state_error: null })?.stateError).toBeUndefined();
+    expect(addressFromWire({ ...base, state_error: 'something_new' })?.stateError).toBeUndefined();
+    expect(addressFromWire({ ...base, operation: { state: 'failed', hostname: 'maxim-app.avibe.bot', error: 'rebind_required' } })?.operation?.error)
+      .toEqual({ code: 'rebind_required' });
+  });
+
   it('passes the real release days through and reads a refused change with its numbers', () => {
     const state = addressFromWire({
       hostname: 'max-app.avibe.bot', eligible: true, hold_days: 30, release_at_if_changed_now: '2026-12-23T00:00:00Z',

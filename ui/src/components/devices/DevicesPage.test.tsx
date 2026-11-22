@@ -78,6 +78,8 @@ beforeEach(async () => {
   vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook]));
   vi.spyOn(devicesApi, 'status').mockResolvedValue(unpaired as never);
   vi.spyOn(devicesApi, 'activity').mockResolvedValue({ items: [], nextCursor: null });
+  // The build these pages ship in first has no binding again; a test that needs it says so.
+  vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(false);
   vi.spyOn(devicesApi, 'address').mockResolvedValue(null);
 });
 afterEach(() => {
@@ -559,6 +561,36 @@ describe('DevicesPage · devices', () => {
     expect(screen.getByText(said('如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。'))).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '去重新绑定' }));
     expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
+  });
+});
+
+describe('DevicesPage · an instance without binding again', () => {
+  it('sends nobody to an entry or a command that is not there', async () => {
+    vi.spyOn(devicesApi, 'startClaim').mockRejectedValue(new DevicesApiError(409, 'link_required', { state: 'error', code: 'link_required' }));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '开启远程访问' }));
+    expect(await screen.findByText(said('从这个地址开不了远程访问。请在运行 Avibe 的那台电脑上打开 Avibe 再开启。'))).toBeTruthy();
+    expect(document.body.textContent).not.toContain('vibe remote');
+    expect(document.body.textContent).not.toContain('重新绑定');
+  });
+
+  it('says the same refusals with their way out once the instance has it', async () => {
+    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(true);
+    vi.spyOn(devicesApi, 'startClaim').mockRejectedValue(new DevicesApiError(409, 'link_required', { state: 'error', code: 'link_required' }));
+    mount();
+    await waitFor(() => expect(devicesApi.rebindOffered).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: '开启远程访问' }));
+    expect(await screen.findByText(said('服务器上没有浏览器的话，在它的终端运行 vibe remote rebind。'))).toBeTruthy();
+  });
+
+  it('says a refused credential without pointing to binding again, in the list and in the notice', () => {
+    const row = { id: 'o1', device: 'Chrome', kind: 'browser' as const, owner: 'mine' as const, results: ['refusedCredential' as const] };
+    const without = render(<DevicesPageView reach={on} devices={[macbook]} signedOut={[row]} rebindOffered={false} />);
+    expect(screen.getByText(said('avibe.bot 不再接受这台电脑的绑定，所以没有结束它的账号登录。'))).toBeTruthy();
+    expect(document.body.textContent).not.toContain('重新绑定');
+    without.unmount();
+    render(<DevicesPageView reach={on} devices={[macbook]} signedOut={[row]} />);
+    expect(screen.getByText(said('avibe.bot 不再接受这台电脑的绑定，所以没有结束它的账号登录。先重新绑定远程访问。'))).toBeTruthy();
   });
 });
 

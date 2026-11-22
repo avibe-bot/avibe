@@ -167,7 +167,9 @@ export type ConnectionSetting = TunnelSetting | 'direct' | 'relay' | 'autoRecove
 export type TunnelChange = { /** The value it was changed to, as the instance stores it, when it says. */ to?: string } & (
   | { setting: TunnelSetting; state: 'applying' | 'verifying' }
   | { setting: TunnelSetting; state: 'restoring'; from: string }
-  | { setting: TunnelSetting; state: 'applied' | 'superseded' }
+  /** `saved`: stored while no tunnel was running, so it was not tried: saved, not yet in effect. */
+  | { setting: TunnelSetting; state: 'applied'; saved?: boolean }
+  | { setting: TunnelSetting; state: 'superseded' }
   | { setting: TunnelSetting; state: 'restored'; reason: 'verification_failed' | 'verification_unavailable' | 'unknown'; from: string }
   | {
     setting: TunnelSetting; state: 'failed'; from: string;
@@ -252,8 +254,8 @@ export type RetiredName = { hostname: string; releaseAt?: string; devices: Renam
 
 export type RenameRefusal =
   | { code: 'taken' | 'invalid_prefix' | 'same_address' | 'confirmation_expired' | 'operation_in_progress'
-      | 'address_changed' | 'pairing_invalid' | 'remote_access_configuration_mismatch' | 'unavailable' | 'owner_required'
-      | 'rename_ineligible' }
+      | 'address_changed' | 'pairing_invalid' | 'remote_access_configuration_mismatch' | 'rebind_required' | 'unavailable'
+      | 'owner_required' | 'rename_ineligible' }
   /** The account holds as many names as it may: the instance passes the numbers through. */
   | { code: 'name_holding_limit_reached'; held?: number; earliestReleaseAt?: string }
   | { code: 'unknown'; raw: string };
@@ -278,6 +280,9 @@ export type AddressState = {
   hostname: string;
   eligible: boolean;
   ineligibleReason?: string;
+  /** avibe.bot holds more than one binding record for this computer and cannot tell which to use:
+   *  the name's state cannot be read until this computer is bound again. */
+  stateError?: 'rebind_required';
   holdDays?: number;
   /** The real day the current name would be released if it were changed now. */
   releaseAtIfChangedNow?: string;

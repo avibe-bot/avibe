@@ -26,6 +26,35 @@ describe('devicesApi', () => {
     await expect(devicesApi.changeConnection('protocol', 'http2')).rejects.toBeInstanceOf(LostAnswer);
   });
 
+  it('says binding again is offered only on the instance\'s own word', async () => {
+    // The instance has it: an overview, or its own refusal away from the computer.
+    fetched.mockResolvedValue(answer(200, { binding_state: 'bound' }));
+    await expect(devicesApi.rebindOffered()).resolves.toBe(true);
+    fetched.mockResolvedValue(answer(403, { error: 'direct_loopback_required' }));
+    await expect(devicesApi.rebindOffered()).resolves.toBe(true);
+    // A build before it: no such route. Nor is a page of HTML, an empty answer or no answer its word.
+    fetched.mockResolvedValue(answer(404, { error: 'not_found' }));
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
+    fetched.mockResolvedValue({ ok: false, status: 404, json: async () => { throw new SyntaxError('<html>'); } } as unknown as Response);
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
+    fetched.mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('<!doctype html>'); } } as unknown as Response);
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
+    fetched.mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } } as unknown as Response);
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
+    fetched.mockRejectedValue(new TypeError('network'));
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
+  });
+
+  it('names the change the instance took on for a switch, and none where it answered at once', async () => {
+    fetched.mockResolvedValue(answer(202, { operation: { id: 'op-1', setting: 'direct', from: true, to: false, state: 'applying' } }));
+    await expect(devicesApi.changeConnection('direct', false)).resolves.toEqual({ operationId: 'op-1' });
+    fetched.mockResolvedValue(answer(200, { operation: null }));
+    await expect(devicesApi.changeConnection('profile', 'stable')).resolves.toEqual({ operationId: null });
+    // Another setting's running change is not this one's.
+    fetched.mockResolvedValue(answer(200, { operation: { id: 'op-9', setting: 'protocol', state: 'verifying' } }));
+    await expect(devicesApi.changeConnection('direct', true)).resolves.toEqual({ operationId: null });
+  });
+
   it('keeps the activity cursor, and asks for the next page with it', async () => {
     fetched.mockResolvedValue(answer(200, { items: [{ id: 'e1', at: '2026-11-21T01:00:00Z', kind: 'signedIn', device_id: 'd1' }], next_cursor: 'c/2 ' }));
     const page = await devicesApi.activity(() => 'Chrome', 'c 1');

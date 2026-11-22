@@ -132,7 +132,10 @@ function changeLine(t: TFunction, change: TunnelChange): { icon: typeof Check; t
     case 'restoring':
       return { icon: LoaderCircle, tone: 'text-muted', text: t('devices.connection.change.restoring', { from }), busy: true };
     case 'applied':
-      return { icon: Check, tone: 'text-mint-ink', text: t('devices.connection.change.applied') };
+      // Stored with no tunnel running: saved, and not said to be in effect.
+      return change.saved
+        ? { icon: Check, tone: 'text-muted', text: t('devices.connection.change.saved') }
+        : { icon: Check, tone: 'text-mint-ink', text: t('devices.connection.change.applied') };
     case 'superseded':
       return { icon: History, tone: 'text-muted', text: t('devices.connection.change.superseded') };
     case 'restored':
@@ -293,6 +296,10 @@ export function ConnectionPageView({
             <div className="mt-0.5 break-all font-mono text-[11px] text-muted">{host}</div>
             {address?.operation && address.operation.state !== 'failed' && (
               <div role="status" className="mt-1 text-[11px] leading-relaxed text-muted">{t('devices.rename.pendingTitle', { host: address.operation.hostname })}</div>
+            )}
+            {/* Said only where the way out exists on this instance: the row below. */}
+            {address?.stateError === 'rebind_required' && rebind && (
+              <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink"><KeptTail text={t('devices.rename.stateRebindRequired')} /></div>
             )}
             {address?.operation?.state === 'failed' && (
               <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink">

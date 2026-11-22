@@ -8080,7 +8080,8 @@
         "activeElsewhere": "avibe.bot refused: that Avibe is running on another computer that was active in the last 15 minutes. Nothing was bound. To move it to this computer: quit Avibe on that computer, wait 15 minutes and try again. If that computer is no longer yours to reach: delete that Avibe on avibe.bot and bind again; its access list is lost, and its name is kept for your account for 30 days.",
         "bindingChanged": "This computer's binding has just changed. Nothing more was done here.",
         "inProgress": "Another request to bind this computer is already open. Finish or cancel that one first.",
-        "unknown": "avibe.bot did not complete this request. Nothing was bound. (code: {{code}})"
+        "unknown": "avibe.bot did not complete this request. Nothing was bound. (code: {{code}})",
+        "linkRequiredHere": "Remote access cannot be turned on from this address. Open Avibe on the computer that runs it and turn it on there."
       }
     },
     "list": {
@@ -8307,7 +8308,8 @@
         "failedBusy": "Not changed: another change is in progress; it is still {{from}}.",
         "failedNotApplied": "Not changed: the setting could not be applied; it is still {{from}}.",
         "failedUnknown": "This change did not complete.",
-        "unknown": "No result received. Once reconnected, Avibe reads the result again and does not repeat the change."
+        "unknown": "No result received. Once reconnected, Avibe reads the result again and does not repeat the change.",
+        "saved": "Saved"
       },
       "returnedToAutomatic": "{{time}}: the Cloudflare tunnel could not connect for 3 minutes, so fixed settings went back to Automatic: {{settings}}.",
       "returnedSetting": "{{setting}} (was {{from}})",
@@ -8397,9 +8399,11 @@
         "limit_other": "This account already holds {{count}} names, including those still waiting, which is the limit.",
         "limitPlainDated": "This account already holds as many names as it may, including those still waiting. The earliest is released on {{date}}; you can rename after that.",
         "limitPlain": "This account already holds as many names as it may, including those still waiting.",
-        "unknown": "This change did not complete. (code: {{code}})"
+        "unknown": "This change did not complete. (code: {{code}})",
+        "rebindRequired": "Not changed: avibe.bot holds more than one binding record for this computer and cannot tell which to use. Bind remote access again, then try again."
       },
-      "howOther": "Sign out on that device."
+      "howOther": "Sign out on that device.",
+      "stateRebindRequired": "avibe.bot holds more than one binding record for this computer, so the domain's state cannot be read. Bind remote access again first."
     },
     "setup": {
       "title": "Open it from your phone and other computers",
@@ -8451,7 +8455,8 @@
       "unconfirmed": "After many tries, it is still unclear whether its account sign-in ended. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.",
       "unknown": "The result at avibe.bot is not known.",
       "healthPending": "Clearing the Health data it synced is not confirmed yet.",
-      "healthPendingIfAny": "If it synced Health data, clearing it is not confirmed yet."
+      "healthPendingIfAny": "If it synced Health data, clearing it is not confirmed yet.",
+      "refusedCredentialPlain": "avibe.bot no longer accepts this computer's binding, so its account sign-in was not ended."
     },
     "problem": {
       "functionNeedsDevice": "Turn this on on that device first.",

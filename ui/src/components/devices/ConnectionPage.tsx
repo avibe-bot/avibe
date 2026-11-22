@@ -10,10 +10,11 @@ import type { RemoteAccessStatus, TunnelConnectivityDiagnostics, TunnelNetworkIn
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { hasDesktopClient } from '@/desktop/bridge';
 import { liveStreamVia, subscribeLiveStreamVia } from '@/lib/liveStreamVia';
+import { nativeDirectPathReported } from '@/lib/native';
 import {
-  nativeDirectChoiceAvailable, nativeDirectPathReported, onNativeDirectChoiceChanged, readNativeDirectChoice, setNativeDirectChoice,
+  nativeDirectChoiceAvailable, onNativeDirectChoiceChanged, readNativeDirectChoice, setNativeDirectChoice,
   type NativeDirectChoice,
-} from '@/lib/native';
+} from '@/lib/nativeDirectChoice';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { deviceUsing, directCertificateDate, lastConnectionLegs } from '@/lib/remoteAccessDirect';
@@ -168,6 +169,7 @@ export function ConnectionPage() {
   /** The address a change this page sent is heading for, until the page has seen how it ended. */
   const [tracking, setTracking] = useState<string | null>(null);
   const [rebind, setRebind] = useState<RebindState | undefined>();
+  const rebindRef = useRef<RebindState | undefined>(undefined);
   // A bind-again whose return from avibe.bot was refused lands here with the callback's one
   // allowlisted word (the Devices page hands it on): read once, said, and removed.
   const [returned] = useState(() => returnRefusal(location.search));
@@ -193,16 +195,20 @@ export function ConnectionPage() {
     }
   }, []);
 
-  const readRebind = useCallback(async (): Promise<RebindState> => {
-    let next: RebindState;
-    if (remote) next = { state: 'remote' };
-    else {
-      try {
-        next = await api.rebind();
-      } catch (error) {
-        next = rebindUnavailable(error instanceof DevicesApiError ? error.code : '');
-      }
+  // The row exists only on the instance's own word. A build without binding again answers 404
+  // (or something that is not its JSON): no row, and nothing said about it. No answer at all
+  // leaves what was known before.
+  const readRebind = useCallback(async (): Promise<RebindState | undefined> => {
+    let next: RebindState | undefined;
+    try {
+      next = await api.rebind();
+    } catch (error) {
+      if (!(error instanceof DevicesApiError)) return rebindRef.current;
+      next = error.status === 404 ? undefined : rebindUnavailable(error.code);
     }
+    // Anywhere but this computer the instance refuses the overview: said as where it is done.
+    if (next && remote) next = { state: 'remote' };
+    rebindRef.current = next;
     if (alive.current) setRebind(next);
     return next;
   }, [remote]);
@@ -218,7 +224,7 @@ export function ConnectionPage() {
         return;
       }
       // Only its starter may confirm a reset: the marker stays while that is offered.
-      if (next.state !== 'asNewOffered') clearClaimMarker();
+      if (next?.state !== 'asNewOffered') clearClaimMarker();
       // A claim this instance no longer knows says nothing; the overview speaks for itself.
       if (end.code === 'claim_unavailable' || end.code === 'installation_unverified') setRebindRefused(undefined);
       else setRebindRefused(rebindRefusal(end.code === 'no_answer' ? undefined : end.code, end.seconds));
@@ -410,12 +416,19 @@ export function ConnectionPage() {
       return addressOpen || step?.step === 'pending' ? { step: 'pending', hostname: operation.hostname } : undefined;
     }
     if (step) return step;
-    if (!addressOpen || !address) return undefined;
+    // Where this Avibe's name cannot be changed here there is no dialog, whatever the address says.
+    if (!addressOpen || !address || !address.eligible) return undefined;
     // Reopened: a change that was refused meanwhile is said first.
     return operation?.state === 'failed'
       ? { step: 'form', name: '', refusal: operation.error ?? { code: 'unknown', raw: 'unknown' }, earlier: true }
       : { step: 'form', name: '' };
   }, [address, addressOpen, operation, step]);
+
+  // The rename's own address on an Avibe whose name cannot be changed here is the connection page.
+  const noRename = addressOpen && address !== undefined && address !== null && !address.eligible && !operation && !step;
+  useEffect(() => {
+    if (noRename) navigate(CONNECTION_PATH, { replace: true, state: location.state });
+  }, [location.state, navigate, noRename]);
 
   const refusalOf = (error: unknown): RenameRefusal => (
     error instanceof DevicesApiError ? renameRefusal({ ...error.body, error: error.code }) : { code: 'unknown', raw: 'no_answer' }

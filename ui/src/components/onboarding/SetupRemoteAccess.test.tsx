@@ -28,6 +28,7 @@ beforeEach(async () => {
   await i18n.changeLanguage('zh');
   window.sessionStorage.clear();
   vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: false, paired: false, running: false } as never);
+  vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(false);
 });
 afterEach(() => {
   cleanup();
@@ -89,6 +90,23 @@ describe('Setup · remote access', () => {
     mount();
     fireEvent.click(screen.getByRole('button', { name: '以后再说，进入工作台' }));
     expect(await screen.findByText('workbench')).toBeTruthy();
+  });
+
+  it('names the terminal\'s way only on an instance that has it', async () => {
+    vi.spyOn(devicesApi, 'startClaim').mockRejectedValue(new DevicesApiError(409, 'link_required', { state: 'error', code: 'link_required' }));
+    // A build before binding again: there is no `vibe remote rebind` to send anyone to.
+    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(false);
+    const before = mount();
+    fireEvent.click(screen.getByRole('button', { name: '开启远程访问' }));
+    expect(await screen.findByText(said('从这个地址开不了远程访问。请在运行 Avibe 的那台电脑上打开 Avibe 再开启。'))).toBeTruthy();
+    expect(document.body.textContent).not.toContain('vibe remote');
+    before.unmount();
+
+    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(true);
+    mount();
+    await waitFor(() => expect(devicesApi.rebindOffered).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: '开启远程访问' }));
+    expect(await screen.findByText(said('服务器上没有浏览器的话，在它的终端运行 vibe remote rebind。'))).toBeTruthy();
   });
 
   it('says in one sentence when this address cannot turn it on, and then only goes on', async () => {

@@ -200,6 +200,8 @@ const designFrames = frames([
     { reach: { state: 'off', surface: 'browser', busy: true }, devices: onlyHost }),
   frame('off-link-required', '未开启 · 从隧道或代理地址打开：这里开不了，一句话说去哪开', at(700),
     { reach: { state: 'off', surface: 'browser', problem: { code: 'link_required' } }, devices: onlyHost }),
+  frame('off-link-required-no-terminal', '未开启 · 同上，在还没有 vibe remote rebind 的版本上：不提终端命令', at(700),
+    { reach: { state: 'off', surface: 'browser', problem: { code: 'link_required' } }, devices: onlyHost, rebindOffered: false }),
   frame('off-claim-in-progress', '未开启 · 另一个标签页已有请求：先完成或取消那一个', at(700),
     { reach: { state: 'off', surface: 'browser', problem: { code: 'claim_in_progress', claimId: 'c1' } }, devices: onlyHost }),
   frame('off-invalid-return', '未开启 · 从 avibe.bot 回来的这一步没有通过验证', at(700),
