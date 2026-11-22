@@ -33,7 +33,12 @@ fn credentials(inner: &Inner, a: &Account) -> Result<FactorCookies> {
     }
     flow.session.factor_cookies().ok_or_else(changed)
 }
+pub(in crate::instance_client::coordinator::claims) use finish::EnrolledReply;
+
 impl IssuedTotp {
+    pub(in crate::instance_client::coordinator::claims::proof) fn material_delivered(&self) -> bool {
+        self.material.is_none()
+    }
     async fn fetch(mut jar: NativeSession, cookies: FactorCookies, account: &Account) -> Result<Self> {
         let invalid = || ClientError::new("invalid_response");
         let r = jar
@@ -94,7 +99,7 @@ pub(in crate::instance_client::coordinator) struct TotpSetupReply<'a> {
     borrow: Borrow<'a>,
 }
 impl TotpSetupReply<'_> {
-    pub(in crate::instance_client::coordinator) fn deliver(mut self) -> Result<TotpMaterial> {
+    pub(in crate::instance_client::coordinator) fn deliver(mut self) -> Result<(Uuid, TotpMaterial)> {
         let mut claims = self.owner.caller.owner.lock().expect("claim owner");
         Epoch::new(self.c.generation.clone(), self.owner.generation).check()?;
         claims.expire();
@@ -123,7 +128,7 @@ impl TotpSetupReply<'_> {
         }
         let material = setup.material.take().ok_or_else(changed)?;
         self.borrow.returned = true;
-        Ok(material)
+        Ok((step.release(self.owner.predecessor), material))
     }
 }
 impl Coordinator {

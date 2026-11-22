@@ -487,7 +487,7 @@ impl Transport for Hosted {
                 if owed && n == 2 {
                     return Err(ClientError::new("network_unavailable"));
                 }
-                if n == 2 && self.review == Some("mfa") {
+                if n == 2 && matches!(self.review, Some("mfa" | "mfa_late_credential" | "mfa_late_successor")) {
                     return Ok(Response {
                         status: 403,
                         headers,
@@ -567,6 +567,8 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_review_refused",
         "proof_start_review_subject",
         "proof_start_review_mfa",
+        "proof_start_review_mfa_late_credential",
+        "proof_start_review_mfa_late_successor",
         "proof_start_review_target",
         "proof_start_review_close",
         "proof_start_review_replaced",
@@ -865,7 +867,7 @@ async fn check_cut(cut: &'static str) {
         receipt,
         returned: false,
     };
-    let read_reply = c.finish_claim_review(&caller, epoch, claim, flow, &mut borrow);
+    let read_reply = c.finish_claim_review(&caller, epoch, claim, flow, &mut borrow, None);
     drop(borrow);
     if cut == "conflict_changed_before_finish" {
         assert!(read_reply.is_err());
@@ -1187,7 +1189,30 @@ async fn check_cut(cut: &'static str) {
             assert!(confirm(receipt).await.is_err());
             peer.assert_unarmed();
             if cut.starts_with("proof_start_") {
-                let submit = |code| c.prepare_proof_code(&caller, generation, receipt, delivery, code);
+                if matches!(cut, "proof_start_drop" | "proof_start_no_owner") {
+                    let preparing = c.prepare_proof_code(&caller, generation, receipt, delivery, "000001");
+                    tokio::pin!(preparing);
+                    tokio::select! { _ = &mut preparing => panic!("start was held"), _ = hosted.starting.notified() => () }
+                    start_reply.send(()).unwrap();
+                    let prepared = preparing.await.unwrap();
+                    if cut == "proof_start_no_owner" {
+                        c.inner.lock().unwrap().account.resumes = None;
+                        assert!(c.forward_proof_code(prepared).await.is_err());
+                    } else {
+                        drop(prepared);
+                    }
+                    assert!(hosted.forward.lock().unwrap().is_some());
+                    assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
+                    assert!(peer.arm().await.is_err());
+                    return;
+                }
+                let submit = |code: &str| {
+                    dispatch(ClaimAction::SubmitProofCode {
+                        receipt: receipt.to_string(),
+                        delivery: delivery.to_string(),
+                        code: code.to_owned(),
+                    })
+                };
                 assert_eq!(submit("０００００１").await.err().unwrap().code, "invalid_or_expired");
                 let start = submit("000001");
                 tokio::pin!(start);
@@ -1211,98 +1236,99 @@ async fn check_cut(cut: &'static str) {
                     }
                     _ => {
                         start_reply.send(()).unwrap();
-                        let prepared = start.await.unwrap();
                         assert!(confirm(receipt).await.is_err());
-                        match cut {
-                            "proof_start_drop" => drop(prepared),
-                            "proof_start_no_owner" => {
-                                // An offer had the right owner at delivery. The
-                                // ordinary credential handoff must still recheck it.
-                                c.inner.lock().unwrap().account.resumes = None;
-                                assert!(c.forward_proof_code(prepared).await.is_err());
-                                assert!(hosted.forward.lock().unwrap().is_some());
-                            }
-                            _ => {
-                                let f = c.forward_proof_code(prepared);
-                                tokio::pin!(f);
-                                tokio::select! { _ = &mut f => panic!("code response was held"), _ = hosted.forwarding.notified() => () }
-                                unlocked();
-                                let late_failure = cut.starts_with("proof_start_unknown_");
-                                let after_save = cut.starts_with("proof_start_auto_save_direct");
-                                if review.is_none() && !late_failure && !after_save {
-                                    caller.retire();
-                                } // sheet closure cannot cancel a dispatched account transaction
-                                if cut == "proof_start_retired" {
-                                    let _inner = c.inner.lock().unwrap();
-                                    c.supersede_binding(); // same account, same generation, different transaction
-                                }
-                                if cut == "proof_start_auto_save_refused" {
-                                    memory.refuse_one_save();
-                                } else if cut.starts_with("proof_start_auto_save") {
-                                    memory.allow_one_save();
-                                }
-                                forward_reply.send(()).unwrap();
-                                let direct = f.await.unwrap();
-                                if adopting {
-                                    if after_save {
-                                        recovery::auto(&c, &hosted, &memory, false).await;
-                                        if cut.ends_with("_changed") {
-                                            replace_credential();
-                                            assert_eq!(direct.deliver().unwrap_err().code, "stale_generation");
-                                        } else {
-                                            direct.deliver().unwrap(); // its own publication, not the old jar
-                                        }
-                                        assert!(submit("000001").await.is_err());
-                                        return;
-                                    }
-                                    let projected = direct.deliver();
-                                    if review.is_some() {
-                                        projected.unwrap();
-                                    } else {
-                                        assert_eq!(projected.unwrap_err().code, "stale_generation");
-                                    }
-                                    if cut.starts_with("proof_start_auto_save") {
-                                        recovery::auto(&c, &hosted, &memory, cut.ends_with("_refused")).await;
-                                        assert!(peer.arm().await.is_err());
-                                        return;
-                                    }
-                                    let saved_stage = recovery::read_once(&c).await;
-                                    assert_eq!(saved_stage["state"], "available");
-                                    assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
-                                    if let Some(cut) = review {
-                                        review::exercise(&c, &memory, &hosted, peer, &caller, (receipt, revision), cut)
-                                            .await;
-                                        return;
-                                    }
-                                    save::exercise(&c, &memory, cut).await;
-                                    assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
+                        tokio::select! { _ = &mut start => panic!("code response was held"), _ = hosted.forwarding.notified() => () }
+                        unlocked();
+                        let late_failure = cut.starts_with("proof_start_unknown_");
+                        let after_save = cut.starts_with("proof_start_auto_save_direct");
+                        if review.is_none() && !late_failure && !after_save {
+                            caller.retire();
+                        } // sheet closure cannot cancel a dispatched account transaction
+                        if cut == "proof_start_retired" {
+                            let _inner = c.inner.lock().unwrap();
+                            c.supersede_binding(); // same account, same generation, different transaction
+                        }
+                        if cut == "proof_start_auto_save_refused" {
+                            memory.refuse_one_save();
+                        } else if cut.starts_with("proof_start_auto_save") {
+                            memory.allow_one_save();
+                        }
+                        forward_reply.send(()).unwrap();
+                        let direct = start.await.unwrap();
+                        assert!(dispatch(ClaimAction::ReviewAfterProof {
+                            receipt: receipt.to_string(),
+                            submission: delivery.to_string()
+                        })
+                        .await
+                        .is_err());
+                        if adopting {
+                            if after_save {
+                                recovery::auto(&c, &hosted, &memory, false).await;
+                                if cut.ends_with("_changed") {
+                                    replace_credential();
+                                    assert_eq!(direct.deliver().unwrap_err().code, "stale_generation");
                                 } else {
-                                    if cut.ends_with("_credential") {
-                                        replace_credential();
-                                    }
-                                    let next = (cut == "proof_start_unknown_successor").then(|| {
-                                        caller.retire();
-                                        let doc = c.claim_document(generation).unwrap();
-                                        let next = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
-                                        (doc, next)
-                                    });
-                                    let error = direct.deliver().unwrap_err();
-                                    assert_eq!(
-                                        error.code,
-                                        if cut == "proof_start_unknown_live" {
-                                            "code_delivery_unknown"
-                                        } else {
-                                            "stale_generation"
-                                        }
-                                    );
-                                    if let Some((_doc, next)) = next {
-                                        assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, next);
-                                    }
-                                    assert!(submit("000001").await.is_err());
-                                    assert!(!c.binding.lock().unwrap().occupied());
-                                    assert_eq!(hosted.reads.load(Ordering::SeqCst), 0);
+                                    output::submission(direct.deliver().unwrap());
+                                    // its own publication, not the old jar
                                 }
+                                assert!(submit("000001").await.is_err());
+                                return;
                             }
+                            let projected = direct.deliver();
+                            let submitted = if review.is_some() {
+                                Some(output::submission(projected.unwrap()))
+                            } else {
+                                assert_eq!(projected.unwrap_err().code, "stale_generation");
+                                None
+                            };
+                            if cut.starts_with("proof_start_auto_save") {
+                                recovery::auto(&c, &hosted, &memory, cut.ends_with("_refused")).await;
+                                assert!(peer.arm().await.is_err());
+                                return;
+                            }
+                            let saved_stage = recovery::read_once(&c).await;
+                            assert_eq!(saved_stage["state"], "available");
+                            assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
+                            if let Some(cut) = review {
+                                review::exercise(
+                                    &c,
+                                    &memory,
+                                    &hosted,
+                                    peer,
+                                    &caller,
+                                    (receipt, revision, submitted.unwrap()),
+                                    cut,
+                                )
+                                .await;
+                                return;
+                            }
+                            save::exercise(&c, &memory, cut).await;
+                            assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
+                        } else {
+                            if cut.ends_with("_credential") {
+                                replace_credential();
+                            }
+                            let next = (cut == "proof_start_unknown_successor").then(|| {
+                                caller.retire();
+                                let doc = c.claim_document(generation).unwrap();
+                                let next = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
+                                (doc, next)
+                            });
+                            let error = direct.deliver().unwrap_err();
+                            assert_eq!(
+                                error.code,
+                                if cut == "proof_start_unknown_live" {
+                                    "code_delivery_unknown"
+                                } else {
+                                    "stale_generation"
+                                }
+                            );
+                            if let Some((_doc, next)) = next {
+                                assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, next);
+                            }
+                            assert!(submit("000001").await.is_err());
+                            assert!(!c.binding.lock().unwrap().occupied());
+                            assert_eq!(hosted.reads.load(Ordering::SeqCst), 0);
                         }
                     }
                 }

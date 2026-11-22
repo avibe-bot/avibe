@@ -1,7 +1,6 @@
 //! AUTH-SETUP-171. Setup material is direct, revocable and never itself a
 //! credential commit. Drive the real coordinator with a synthetic hosted reply.
 use super::*;
-use crate::instance_client::coordinator::claim_binding::BindingId;
 
 pub(super) const KEY: &str = "ABCD EFGH IJKL MNOP QRST UVWX YZ23 4567";
 
@@ -16,21 +15,35 @@ pub(super) async fn finish(
     caller: &ClaimCaller,
     hosted: &Hosted,
     receipt: Uuid,
-    predecessor: BindingId,
+    submission: Uuid,
     cut: &str,
-) -> bool {
-    use crate::instance_client::account::EnrolledCodes;
+) -> std::result::Result<Option<Uuid>, ()> {
     let generation = c.state().generation;
-    let submit =
-        |code: &'static str| c.finish_claim_totp_enrollment(caller, generation, receipt, predecessor, code.into());
-    let issue = c.prepare_claim_totp_setup(caller, generation, receipt, predecessor);
+    let finish = |handle: Uuid, code: &str| {
+        output::dispatch(
+            c,
+            caller,
+            generation,
+            json!({"type":"finish_totp_setup","receipt":receipt.to_string(),"setup":handle.to_string(),"code":code}),
+        )
+    };
+    let issue = output::dispatch(
+        c,
+        caller,
+        generation,
+        json!({"type":"prepare_totp_setup","receipt":receipt.to_string(),"submission":submission.to_string()}),
+    );
     tokio::pin!(issue);
     tokio::select! { _ = &mut issue => panic!("setup held"), _ = hosted.setup_entered.notified() => () }
     hosted.setup_release.notify_one();
     let setup = issue.await.unwrap();
-    assert!(submit("000002").await.is_err());
+    assert!(finish(submission, "000002").await.is_err());
     assert_eq!(hosted.factors.load(Ordering::SeqCst), 0);
-    let _ = setup.deliver().unwrap();
+    let model = setup.deliver().unwrap().unwrap();
+    let handle = opaque(model["setup"].as_str().unwrap()).unwrap();
+    assert_ne!(submission, handle);
+    assert!(finish(submission, "000002").await.is_err());
+    let submit = |code: &'static str| finish(handle, code);
     assert!(submit("０００００２").await.is_err());
     let mut wait = Box::pin(submit("000002"));
     tokio::select! { _ = &mut wait => panic!("final enrollment held"), _ = hosted.factor_entered.notified() => () }
@@ -42,7 +55,7 @@ pub(super) async fn finish(
         // The suite bounds this scenario. Wait for the owning worker, not a sleep.
         recovery::offer(c).await;
         assert!(submit("000002").await.is_err());
-        return true;
+        return Ok(None);
     }
     if cut == "factor_enroll_replaced" {
         let _inner = c.inner.lock().unwrap();
@@ -60,7 +73,6 @@ pub(super) async fn finish(
             caller.retire();
         }
         let err = reply.deliver().err().expect("no direct success or codes");
-        drop(reply);
         if cut == "factor_enroll_unknown" {
             assert_eq!(err.code, "factor_delivery_unknown");
         } else {
@@ -68,25 +80,32 @@ pub(super) async fn finish(
         }
         assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
         assert!(submit("000002").await.is_err());
-        return false;
+        return Err(());
     }
     recovery::offer(c).await; // ordinary recovery became available independently of this reply
     assert!(!serde_json::to_string(&c.state()).unwrap().contains("aaaaa-bbbb"));
-    if cut == "factor_enroll_close" {
+    let next = if cut == "factor_enroll_close" {
         assert!(reply.deliver().is_err());
+        None
     } else {
         let held = c.inner.lock().unwrap();
-        match (cut, reply.deliver().unwrap()) {
-            ("factor_enroll_absent", EnrolledCodes::NotIssued)
-            | ("factor_enroll_bad_codes", EnrolledCodes::Unavailable) => (),
-            ("factor_enroll_ok", EnrolledCodes::Codes(got)) => assert_eq!(got, codes()),
-            _ => panic!("incorrect one-time result"),
-        }
-        assert!(reply.deliver().is_err());
+        let value = reply.deliver().unwrap().unwrap();
         drop(held);
-    }
+        let token = opaque(value["submission"].as_str().unwrap()).unwrap();
+        let expected = match cut {
+            "factor_enroll_absent" => json!({"state":"not_issued"}),
+            "factor_enroll_bad_codes" => json!({"state":"unavailable"}),
+            "factor_enroll_ok" => json!({"state":"issued","codes":codes()}),
+            _ => panic!("unexpected enrollment result"),
+        };
+        assert_eq!(
+            value,
+            json!({"state":"enrollment_accepted","submission":token.to_string(),"recovery":expected})
+        );
+        Some(token)
+    };
     assert!(submit("000002").await.is_err());
-    true
+    Ok(next)
 }
 
 pub(super) async fn setup(
@@ -94,11 +113,18 @@ pub(super) async fn setup(
     caller: &ClaimCaller,
     hosted: &Hosted,
     receipt: Uuid,
-    predecessor: BindingId,
+    submission: Uuid,
     cut: &str,
 ) {
     let generation = c.state().generation;
-    let issue = || c.prepare_claim_totp_setup(caller, generation, receipt, predecessor);
+    let issue = || {
+        output::dispatch(
+            c,
+            caller,
+            generation,
+            json!({"type":"prepare_totp_setup","receipt":receipt.to_string(),"submission":submission.to_string()}),
+        )
+    };
     let mut request = Box::pin(issue());
     if cut == "factor_setup_path" {
         assert_eq!(request.await.err().unwrap().code, "invalid_action");
@@ -140,10 +166,14 @@ pub(super) async fn setup(
             // Delivery under the shell's role lock cannot block on inner or
             // accidentally prefer the server-supplied URI/SVG over the seed.
             let held = c.inner.lock().unwrap();
-            let direct = receipt.deliver().unwrap();
+            let direct = receipt.deliver().unwrap().unwrap();
             drop(held);
-            assert_eq!(direct.manual_key, KEY);
-            assert_eq!(direct.qr_payload, "otpauth://totp/avibe.bot%3Afixture%40example.test?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=avibe.bot&algorithm=SHA1&digits=6&period=30");
+            let setup = opaque(direct["setup"].as_str().unwrap()).unwrap();
+            assert_ne!(setup, submission);
+            assert_eq!(
+                direct,
+                json!({"state":"totp_setup", "setup":setup.to_string(), "manual_key":KEY, "qr_payload":"otpauth://totp/avibe.bot%3Afixture%40example.test?secret=ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&issuer=avibe.bot&algorithm=SHA1&digits=6&period=30"})
+            );
         }
         _ => panic!("unknown setup cut"),
     }

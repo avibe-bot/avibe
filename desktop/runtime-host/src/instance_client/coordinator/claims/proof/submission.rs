@@ -34,10 +34,13 @@ impl SubmittedReply {
             result,
         }
     }
-    pub(in crate::instance_client::coordinator::claims) fn deliver(self) -> Result<()> {
-        self.check()
+    pub(in crate::instance_client::coordinator::claims) fn deliver(self) -> Result<Uuid> {
+        self.with_result(|step| Ok(step.release(self.id)))
     }
     pub(super) fn check(&self) -> Result<()> {
+        self.with_result(|_| Ok(()))
+    }
+    fn with_result<T>(&self, release: impl FnOnce(&mut StepUp) -> Result<T>) -> Result<T> {
         let c = &self.coordinator;
         // Never wait on account discovery, credential I/O or OS authentication
         // with the shell's physical document lock held.
@@ -48,10 +51,10 @@ impl SubmittedReply {
         self.caller.check()?;
         let active = claims
             .active
-            .as_ref()
+            .as_mut()
             .filter(|a| a.receipt == self.receipt)
             .ok_or_else(stale)?;
-        let Stage::Proof(step) = &active.stage else {
+        let Stage::Proof(step) = &mut active.stage else {
             return Err(stale());
         };
         if !matches!(step.phase, Phase::Submitted(id) if id == self.id) {
@@ -61,7 +64,7 @@ impl SubmittedReply {
         // Publication changes the ordinary jar by design. Only the positive
         // receipt of this very transaction may witness that replacement.
         if self.result.is_ok() && slot.published_for(self.id, &inner, &active.account) {
-            return Ok(());
+            return release(step);
         }
         let original = inner.record.account_id.as_ref() == Some(&active.account.id)
             && [BindingBase::SignedIn, BindingBase::OwedFactor]
@@ -76,7 +79,8 @@ impl SubmittedReply {
         if !original || !matching {
             return Err(stale());
         }
-        self.result.clone()
+        self.result.clone()?;
+        release(step)
     }
 }
 impl Drop for SubmittedReply {

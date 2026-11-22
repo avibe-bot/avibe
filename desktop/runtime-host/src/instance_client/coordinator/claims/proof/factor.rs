@@ -1,5 +1,5 @@
 //! A challenge response starts a NEW ordinary transaction. The sheet can
-//! nominate neither the account nor its saved credential. No JS entry point.
+//! nominate neither the account nor its saved credential.
 mod enroll;
 use super::*;
 use crate::instance_client::{
@@ -8,6 +8,7 @@ use crate::instance_client::{
     protocol::CodeMethod,
 };
 pub(super) use enroll::IssuedTotp;
+pub(in crate::instance_client::coordinator::claims) use enroll::{EnrolledReply, TotpSetupReply};
 
 #[derive(Clone, Copy)]
 enum At {

@@ -9,12 +9,15 @@ use crate::instance_client::{
     machine::hosted::ProofNeeded,
     transport::FactorCookies,
 };
+pub(super) use factor::{EnrolledReply, TotpSetupReply};
 pub(super) use submission::SubmittedReply;
 
 pub(super) struct StepUp {
     proof: ProofNeeded,
     initial_credential: FactorCookies,
     correlation: Uuid,
+    // Opaque document handle issued at delivery, never the ordinary BindingId.
+    released: Option<(Uuid, BindingId)>,
     phase: Phase,
     // Only the original final POST's native reply can take this; retirement
     // of the document drops any still-undelivered recovery codes.
@@ -154,6 +157,19 @@ pub(super) struct ClaimStart<'a> {
     delivery: Uuid,
 }
 impl StepUp {
+    fn release(&mut self, id: BindingId) -> Uuid {
+        let handle = Uuid::new_v4();
+        self.released = Some((handle, id));
+        handle
+    }
+    fn predecessor(&self, handle: Uuid, setup: bool) -> Result<BindingId> {
+        let id = match (&self.phase, setup) {
+            (Phase::Submitted(id), false) => *id,
+            (Phase::TotpSetup { predecessor, setup, .. }, true) if setup.material_delivered() => *predecessor,
+            _ => return Err(changed()),
+        };
+        (self.released == Some((handle, id))).then_some(id).ok_or_else(changed)
+    }
     pub(super) fn live(&self, account: &Account) -> bool {
         self.proof.check(account).is_ok()
             && match &self.phase {
@@ -196,6 +212,7 @@ impl Claims {
             proof,
             initial_credential: cookies,
             correlation: revision,
+            released: None,
             phase: Phase::Offer {
                 state: OfferState::Unreleased,
             },
@@ -204,7 +221,82 @@ impl Claims {
         Ok(())
     }
 }
+pub(super) struct RereadOrigin {
+    id: BindingId,
+    until: Instant,
+    adoption: tokio::sync::watch::Receiver<bool>,
+}
+impl RereadOrigin {
+    pub(super) fn check(&self, c: &Coordinator, inner: &super::super::Inner, account: &Account) -> Result<()> {
+        if Instant::now() >= self.until
+            || !*self.adoption.borrow()
+            || !matches!(self.adoption.has_changed(), Ok(false))
+            || !c
+                .binding
+                .try_lock()
+                .map_err(|_| stale())?
+                .published_for(self.id, inner, account)
+        {
+            return Err(stale());
+        }
+        Ok(())
+    }
+}
+pub(super) struct RereadFailed<'a> {
+    c: &'a Coordinator,
+    origin: RereadOrigin,
+    borrow: Borrow<'a>,
+    error: ClientError,
+}
+impl RereadFailed<'_> {
+    pub(super) fn deliver(self, epoch: &Epoch, caller: &ClaimCaller) -> Result<Option<Value>> {
+        let inner = self.c.inner.try_lock().map_err(|_| stale())?;
+        let owner = self.c.claims.lock().expect("claim owner");
+        epoch.check()?;
+        caller.check()?;
+        let active = owner
+            .active
+            .as_ref()
+            .filter(|a| {
+                a.receipt == self.borrow.receipt
+                    && matches!(
+                        &a.stage,
+                        Stage::Reading {
+                            interrupt: Some(_),
+                            idle: None,
+                            delivery: Delivery::Unreleased
+                        }
+                    )
+            })
+            .ok_or_else(stale)?;
+        self.origin.check(self.c, &inner, &active.account)?;
+        Err(self.error)
+    }
+}
+
 impl Coordinator {
+    // Resolve only a handle already delivered for the originating operation. Each
+    // factor worker must still re-admit this exact predecessor before sending.
+    pub(super) fn factor_predecessor(
+        &self,
+        caller: &ClaimCaller,
+        receipt: Uuid,
+        handle: Uuid,
+        setup: bool,
+    ) -> Result<BindingId> {
+        let mut owner = self.claims.lock().expect("claim owner");
+        owner.expire();
+        caller.check()?;
+        let a = owner
+            .active
+            .as_ref()
+            .filter(|a| a.receipt == receipt)
+            .ok_or_else(stale)?;
+        let Stage::Proof(step) = &a.stage else {
+            return Err(changed());
+        };
+        step.predecessor(handle, setup)
+    }
     // All transitions share the retirement lock, but none waits there for HTTP.
     fn with_proof<T>(
         &self,
@@ -351,13 +443,14 @@ impl Coordinator {
         caller: &ClaimCaller,
         generation: u64,
         receipt: Uuid,
-    ) -> Result<ClaimReply<'static>> {
+        submitted: Uuid,
+    ) -> Result<ClaimReply<'_>> {
         if !Arc::ptr_eq(&self.claims, &caller.owner) {
             return Err(stale());
         }
         let epoch = Epoch::new(self.generation.clone(), generation);
         let (wake, mut interrupted) = oneshot::channel();
-        let (proof, mut flow, state) = {
+        let (proof, origin, mut flow, state) = {
             let _operation = self.operation.try_lock().map_err(|_| busy())?;
             self.check_claim_admission()?;
             let inner = self.inner.lock().expect("client state");
@@ -382,14 +475,12 @@ impl Coordinator {
             let Stage::Proof(step) = &active.stage else {
                 return Err(changed());
             };
-            let Phase::Submitted(id) = &step.phase else {
-                return Err(changed());
-            };
+            let id = step.predecessor(submitted, false)?;
             if !self
                 .binding
                 .lock()
                 .expect("ordinary binding")
-                .published_for(*id, &inner, account)
+                .published_for(id, &inner, account)
             {
                 return Err(changed());
             }
@@ -404,8 +495,14 @@ impl Coordinator {
             ) else {
                 unreachable!()
             };
+            let origin = RereadOrigin {
+                id,
+                until: step.proof.deadline(),
+                adoption: step.proof.adoption(),
+            };
             (
                 step.proof,
+                origin,
                 inner.account.for_claim(epoch.clone()),
                 inner.state.account.clone(),
             )
@@ -418,10 +515,24 @@ impl Coordinator {
         let deadline = proof.deadline();
         let claim = tokio::select! { biased;
             _ = &mut interrupted => return Err(stale()),
-            _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
-            result = proof.reread(&mut flow, &state) => result?,
+            _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+            result = proof.reread(&mut flow, &state) => result,
         };
-        self.finish_claim_review(caller, epoch, claim, flow, &mut borrow)
+        match claim
+            .and_then(|claim| self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, Some(&origin)))
+        {
+            Ok(review) => Ok(review),
+            Err(error) => Ok(ClaimReply {
+                body: ReplyBody::RereadFailed(Box::new(RereadFailed {
+                    c: self,
+                    origin,
+                    borrow,
+                    error,
+                })),
+                account: epoch,
+                caller: caller.clone(),
+            }),
+        }
     }
 
     /// Native only. There is no parameter for an email, subject, target or URL.

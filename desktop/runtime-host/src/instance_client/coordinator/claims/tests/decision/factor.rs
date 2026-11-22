@@ -8,50 +8,65 @@ pub(super) async fn challenge(
     memory: &save::Memory,
     hosted: &Hosted,
     caller: &ClaimCaller,
-    receipt: Uuid,
+    handles: (Uuid, Uuid),
     cut: &str,
-) -> bool {
+) -> Option<Uuid> {
+    let (receipt, first_token) = handles;
     let generation = c.state().generation;
     let predecessor = c.binding.lock().unwrap().committed().unwrap();
     let first = memory.read("fixture-a").unwrap().unwrap();
     assert_eq!(c.state().account.status, AccountStatus::SecondFactorRequired);
     assert!(c.state().account.identity.is_none());
-    assert!(c.reread_after_proof(caller, generation, receipt).await.is_err());
-    let submit = |method, code: &'static str| {
-        c.submit_claim_factor_code(caller, generation, receipt, predecessor, method, code.into())
+    let again = |token: Uuid| {
+        output::dispatch(
+            c,
+            caller,
+            generation,
+            json!({"type":"review_after_proof","receipt":receipt.to_string(),"submission":token.to_string()}),
+        )
+    };
+    let submit = |method: CodeMethod, code: &'static str| {
+        output::dispatch(
+            c,
+            caller,
+            generation,
+            json!({"type":"submit_factor_code","receipt":receipt.to_string(),"submission":first_token.to_string(),"method":method,"code":code}),
+        )
     };
     assert!(submit(CodeMethod::Totp, "bad").await.is_err());
+    assert!(again(first_token).await.is_err());
     if cut.starts_with("factor_setup_") {
         assert!(submit(CodeMethod::Totp, "000002").await.is_err());
-        enroll::setup(c, caller, hosted, receipt, predecessor, cut).await;
+        enroll::setup(c, caller, hosted, receipt, first_token, cut).await;
         assert_eq!(hosted.factors.load(Ordering::SeqCst), 0);
         assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
         assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
-        return false;
+        return None;
     }
     if cut == "factor_path" {
         assert!(submit(CodeMethod::Totp, "000002").await.is_err());
         assert_eq!(hosted.factors.load(Ordering::SeqCst), 0);
-        return false;
+        return None;
     }
-    if cut.starts_with("factor_enroll_") {
-        if !enroll::finish(c, caller, hosted, receipt, predecessor, cut).await {
+    let next = if cut.starts_with("factor_enroll_") {
+        let Ok(token) = enroll::finish(c, caller, hosted, receipt, first_token, cut).await else {
             assert_eq!(hosted.factors.load(Ordering::SeqCst), 1);
             assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
             assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
-            return false;
-        }
+            return None;
+        };
+        token
     } else {
         let recovery = cut == "factor_recovery";
         if recovery {
             assert!(submit(CodeMethod::Totp, "000002").await.is_err());
         }
         let verify: passkey::Verify<'_> = if cut.starts_with("factor_pk_") {
-            let Some(verify) = passkey::prepare(c, caller, hosted, receipt, predecessor, cut).await else {
+            let Some(verify) = passkey::prepare(c, caller, hosted, receipt, first_token, cut).await else {
                 assert_eq!(hosted.factors.load(Ordering::SeqCst), 0);
                 assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
                 assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
-                return false;
+                return None;
             };
             verify
         } else if recovery {
@@ -87,22 +102,23 @@ pub(super) async fn challenge(
             assert_eq!(hosted.factors.load(Ordering::SeqCst), 1);
             assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
             assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
-            return false;
+            return None;
         }
         if matches!(cut, "factor_close" | "factor_pk_close") {
             assert_eq!(outcome.unwrap_err().code, "stale_generation");
+            None
         } else {
-            outcome.unwrap();
+            Some(output::submission(outcome.unwrap()))
         }
-    }
+    };
     let found = recovery::read_once(c).await;
     if cut == "factor_subject" {
         assert_eq!(found, json!({"state":"unavailable"}));
         assert!(!caller.monitoring(), "terminal discovery must release this ticket");
         assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
         assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
-        assert!(c.reread_after_proof(caller, generation, receipt).await.is_err());
-        return false;
+        assert!(again(next.unwrap_or(first_token)).await.is_err());
+        return None;
     }
     let save = found["receipt"].as_str().expect("successful GET owes only Save");
     memory.refuse_one_save();
@@ -111,7 +127,7 @@ pub(super) async fn challenge(
     assert_ne!(refused["receipt"], save);
     assert!(recovery::resume(c, save).await.is_err());
     assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
-    assert!(c.reread_after_proof(caller, generation, receipt).await.is_err());
+    assert!(again(next.unwrap_or(first_token)).await.is_err());
     memory.allow_one_save();
     assert_eq!(
         recovery::resume(c, refused["receipt"].as_str().unwrap()).await.unwrap(),
@@ -132,8 +148,8 @@ pub(super) async fn challenge(
     assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
     assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
     if matches!(cut, "factor_close" | "factor_pk_close" | "factor_enroll_close") {
-        assert!(c.reread_after_proof(caller, generation, receipt).await.is_err());
-        return false;
+        assert!(again(next.unwrap_or(first_token)).await.is_err());
+        return None;
     }
-    true
+    next
 }

@@ -2,7 +2,6 @@
 //! assertion and verification separately: neither later hop inherits permission
 //! just because an earlier one returned. Only synthetic bytes cross these hops.
 use super::*;
-use crate::instance_client::coordinator::claim_binding::BindingId;
 use std::{future::Future, pin::Pin};
 
 #[derive(Default)]
@@ -38,18 +37,25 @@ impl Passkeys for Hosted {
     }
 }
 
-pub(super) type Verify<'a> = Pin<Box<dyn Future<Output = Result<proof::SubmittedReply>> + 'a>>;
+pub(super) type Verify<'a> = Pin<Box<dyn Future<Output = Result<ClaimReply<'a>>> + 'a>>;
 
 pub(super) async fn prepare<'a>(
     c: &'a Arc<Coordinator>,
     caller: &'a ClaimCaller,
     hosted: &Hosted,
     receipt: Uuid,
-    predecessor: BindingId,
+    submission: Uuid,
     cut: &str,
 ) -> Option<Verify<'a>> {
     let generation = c.state().generation;
-    let submit = || c.submit_claim_factor_passkey(caller, generation, receipt, predecessor);
+    let submit = || {
+        output::dispatch(
+            c,
+            caller,
+            generation,
+            json!({"type":"submit_factor_passkey","receipt":receipt.to_string(),"submission":submission.to_string()}),
+        )
+    };
     let mut run = Box::pin(submit());
     let platform = &hosted.platform;
     if cut == "factor_pk_path" {

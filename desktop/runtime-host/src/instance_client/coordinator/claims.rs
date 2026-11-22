@@ -57,11 +57,52 @@ pub struct ClaimRequest {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClaimAction {
     Open {},
-    Read { receipt: String },
-    Check { revision: String, prefix: String },
-    Confirm { receipt: String, revision: String },
-    SendProofCode { receipt: String, offer: String },
-    Cancel { receipt: String },
+    Read {
+        receipt: String,
+    },
+    Check {
+        revision: String,
+        prefix: String,
+    },
+    Confirm {
+        receipt: String,
+        revision: String,
+    },
+    SendProofCode {
+        receipt: String,
+        offer: String,
+    },
+    SubmitProofCode {
+        receipt: String,
+        delivery: String,
+        code: String,
+    },
+    ReviewAfterProof {
+        receipt: String,
+        submission: String,
+    },
+    SubmitFactorCode {
+        receipt: String,
+        submission: String,
+        method: crate::instance_client::protocol::CodeMethod,
+        code: String,
+    },
+    SubmitFactorPasskey {
+        receipt: String,
+        submission: String,
+    },
+    PrepareTotpSetup {
+        receipt: String,
+        submission: String,
+    },
+    FinishTotpSetup {
+        receipt: String,
+        setup: String,
+        code: String,
+    },
+    Cancel {
+        receipt: String,
+    },
 }
 impl ClaimAction {
     pub fn opens(&self) -> bool {
@@ -315,6 +356,10 @@ pub struct ClaimReply<'a> {
 enum ReplyBody<'a> {
     Decision(&'a Coordinator, Box<decision::DecisionOutcome<'a>>),
     Mail(Box<proof::PendingMail<'a>>),
+    Submission(Box<proof::SubmittedReply>),
+    Setup(Box<proof::TotpSetupReply<'a>>),
+    Enrolled(Box<proof::EnrolledReply>),
+    RereadFailed(Box<proof::RereadFailed<'a>>),
     // Even a sanitized rejection can disclose account or ticket state. Keep the
     // original read receipt (not the machine) revocable through shell delivery.
     ReadFailed(ClientError, Borrow<'a>),
@@ -346,6 +391,30 @@ impl ClaimReply<'_> {
                     json!({"state":"mail_accepted", "delivery":mail.deliver()?.to_string()}),
                 ))
             }
+            ReplyBody::Submission(s) => {
+                return Ok(Some(
+                    json!({"state":"verification_accepted", "submission":s.deliver()?.to_string()}),
+                ))
+            }
+            ReplyBody::Setup(s) => {
+                let (setup, material) = s.deliver()?;
+                return Ok(Some(
+                    json!({"state":"totp_setup", "setup":setup.to_string(), "manual_key":material.manual_key, "qr_payload":material.qr_payload}),
+                ));
+            }
+            ReplyBody::Enrolled(s) => {
+                use crate::instance_client::account::EnrolledCodes;
+                let (id, codes) = s.deliver()?;
+                let recovery = match codes {
+                    EnrolledCodes::Codes(codes) => json!({"state":"issued", "codes":codes}),
+                    EnrolledCodes::NotIssued => json!({"state":"not_issued"}),
+                    EnrolledCodes::Unavailable => json!({"state":"unavailable"}),
+                };
+                return Ok(Some(
+                    json!({"state":"enrollment_accepted", "submission":id.to_string(), "recovery":recovery}),
+                ));
+            }
+            ReplyBody::RereadFailed(f) => return f.deliver(&self.account, &self.caller),
             body => body,
         };
         let current = match &body {
@@ -479,7 +548,7 @@ impl Coordinator {
     /// Private direct replies, never `ClientState` or broadcast events. Neither
     /// a proof offer nor mail acceptance is a confirmation, grant or retry.
     pub async fn claim_review(
-        &self,
+        self: &Arc<Self>,
         host: &RuntimeHost,
         caller: &ClaimCaller,
         locale: &str,
@@ -509,6 +578,79 @@ impl Coordinator {
                     .await?;
                 return Ok(ClaimReply {
                     body: ReplyBody::Mail(Box::new(mail)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
+            ClaimAction::SubmitProofCode {
+                receipt,
+                delivery,
+                code,
+            } => {
+                let start = self
+                    .prepare_proof_code(caller, r.expected_generation, opaque(receipt)?, opaque(delivery)?, code)
+                    .await?;
+                let reply = self.forward_proof_code(start).await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Submission(Box::new(reply)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
+            ClaimAction::ReviewAfterProof { receipt, submission } => {
+                return self
+                    .reread_after_proof(caller, r.expected_generation, opaque(receipt)?, opaque(submission)?)
+                    .await;
+            }
+            ClaimAction::SubmitFactorCode {
+                receipt,
+                submission,
+                method,
+                code,
+            } => {
+                let receipt = opaque(receipt)?;
+                let id = self.factor_predecessor(caller, receipt, opaque(submission)?, false)?;
+                let reply = self
+                    .submit_claim_factor_code(caller, r.expected_generation, receipt, id, method.clone(), code.clone())
+                    .await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Submission(Box::new(reply)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
+            ClaimAction::SubmitFactorPasskey { receipt, submission } => {
+                let receipt = opaque(receipt)?;
+                let id = self.factor_predecessor(caller, receipt, opaque(submission)?, false)?;
+                let reply = self
+                    .submit_claim_factor_passkey(caller, r.expected_generation, receipt, id)
+                    .await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Submission(Box::new(reply)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
+            ClaimAction::PrepareTotpSetup { receipt, submission } => {
+                let receipt = opaque(receipt)?;
+                let id = self.factor_predecessor(caller, receipt, opaque(submission)?, false)?;
+                let reply = self
+                    .prepare_claim_totp_setup(caller, r.expected_generation, receipt, id)
+                    .await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Setup(Box::new(reply)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
+            ClaimAction::FinishTotpSetup { receipt, setup, code } => {
+                let receipt = opaque(receipt)?;
+                let id = self.factor_predecessor(caller, receipt, opaque(setup)?, true)?;
+                let reply = self
+                    .finish_claim_totp_enrollment(caller, r.expected_generation, receipt, id, code.clone())
+                    .await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Enrolled(Box::new(reply)),
                     account: epoch,
                     caller: caller.clone(),
                 });
@@ -581,7 +723,7 @@ impl Coordinator {
             Ok(claim)
         };
         let read = tokio::select! {biased; _=&mut interrupted=>return Err(stale()), result=read=>result};
-        match read.and_then(|claim| self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow)) {
+        match read.and_then(|claim| self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, None)) {
             Ok(review) => Ok(review),
             // Pre-admission and cancellation failures are generic. A helper or
             // hosted refusal acquired inside this read goes through the same
@@ -601,6 +743,7 @@ impl Coordinator {
         claim: HostedClaim,
         flow: AccountFlow,
         borrow: &mut Borrow<'_>,
+        reread: Option<&proof::RereadOrigin>,
     ) -> Result<ClaimReply<'static>> {
         // No operation lock over HTTP. A concurrent ordinary transaction either owns
         // this lock or has retired the document at commit; never overwrite its jar.
@@ -610,6 +753,18 @@ impl Coordinator {
         let mut owner = self.claims.lock().expect("claim owner");
         epoch.check()?;
         caller.check()?;
+        if let Some(origin) = reread {
+            origin.check(
+                self,
+                &inner,
+                &owner
+                    .active
+                    .as_ref()
+                    .filter(|a| a.receipt == borrow.receipt)
+                    .ok_or_else(stale)?
+                    .account,
+            )?;
+        }
         let conflict = claim.is_owner_conflict();
         if conflict {
             check_conflict_owner(&claim, &inner)?;

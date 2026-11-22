@@ -140,6 +140,9 @@ impl ProofNeeded {
     pub(crate) fn refused_revision(&self) -> Uuid {
         self.refused_revision
     }
+    pub(in crate::instance_client) fn adoption(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.machine.adoption.clone()
+    }
     pub(crate) fn deadline(&self) -> tokio::time::Instant {
         self.machine.ticket.deadline
     }

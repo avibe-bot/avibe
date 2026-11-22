@@ -35,7 +35,7 @@ impl EnrolledReply {
     // Called only under the original physical view-role admission. A receipt
     // contains no codes: closing the document destroys them, even if the reply
     // waits elsewhere. No ordinary I/O, lock on Inner or second chance here.
-    pub(in crate::instance_client::coordinator) fn deliver(&self) -> Result<EnrolledCodes> {
+    pub(in crate::instance_client::coordinator) fn deliver(&self) -> Result<(Uuid, EnrolledCodes)> {
         if let Some(refused) = &self.refusal {
             refused.check()?;
         }
@@ -45,7 +45,8 @@ impl EnrolledReply {
             if !slot.accepted(self.id) {
                 return Err(stale());
             }
-            step.enrolled.take().ok_or_else(changed)
+            let codes = step.enrolled.take().ok_or_else(changed)?;
+            Ok((step.release(self.id), codes))
         })
     }
 }

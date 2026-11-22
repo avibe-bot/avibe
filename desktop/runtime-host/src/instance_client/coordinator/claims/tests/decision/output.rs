@@ -25,6 +25,26 @@ pub(super) fn host() -> RuntimeHost {
     )
 }
 
+pub(super) async fn dispatch<'a>(
+    c: &'a Arc<Coordinator>,
+    caller: &ClaimCaller,
+    generation: u64,
+    action: Value,
+) -> Result<ClaimReply<'a>> {
+    let request = serde_json::from_value(json!({"expected_generation":generation, "action":action})).unwrap();
+    c.claim_review(&host(), caller, "en", request).await
+}
+
+pub(super) fn submission(result: Option<Value>) -> Uuid {
+    let value = result.unwrap();
+    let token = opaque(value["submission"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        value,
+        json!({"state":"verification_accepted", "submission":token.to_string()})
+    );
+    token
+}
+
 #[tokio::test]
 async fn a_hosted_check_refusal_is_private_until_delivered_to_its_original_document() {
     for cut in [
@@ -40,7 +60,7 @@ async fn a_hosted_check_refusal_is_private_until_delivered_to_its_original_docum
 }
 
 pub(super) async fn check(
-    c: &Coordinator,
+    c: &Arc<Coordinator>,
     caller: &ClaimCaller,
     generation: u64,
     receipt: Uuid,
