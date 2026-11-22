@@ -459,19 +459,45 @@ self.addEventListener('fetch', (event) => {
     /// The order in which the two windows ask, by index into `WINDOWS`.
     pub const ASKING: [usize; 6] = [0, 1, 1, 0, 0, 1];
 
-    /// Whether each window presented its own name and no other, every time
-    /// it asked; and what was heard, for the report.
-    pub fn each_presented_its_own(naming: &Naming, target: impl Fn(u16) -> String) -> (bool, serde_json::Value) {
-        let mut own = true;
-        let mut detail = serde_json::Map::new();
-        for (index, (name, _, port)) in WINDOWS.iter().enumerate() {
-            let heard = naming.heard(&target(*port));
-            let asked = ASKING.iter().filter(|window| **window == index).count();
-            own &= heard.iter().all(|presented| presented == "none" || presented == name)
-                && heard.iter().filter(|presented| presented == name).count() >= asked;
-            detail.insert((*name).to_owned(), json!(heard));
+    /// Whether each window presented its own name and no other, at every
+    /// one of its turns; and what was heard, for the report. `turns` holds
+    /// how many `CONNECT`s the listener had heard for the asking window's
+    /// target before and after each turn in `ASKING`.
+    pub fn each_presented_its_own(
+        naming: &Naming,
+        target: impl Fn(u16) -> String,
+        turns: &[(usize, usize)],
+    ) -> (bool, serde_json::Value) {
+        let heard: Vec<Vec<String>> = WINDOWS
+            .iter()
+            .map(|(_, _, port)| naming.heard(&target(*port)))
+            .collect();
+        // Never another window's name, or a credential that is no window's,
+        // on any connection, in a turn or after it.
+        let mut own = turns.len() == ASKING.len()
+            && WINDOWS
+                .iter()
+                .zip(&heard)
+                .all(|((name, _, _), heard)| heard.iter().all(|presented| presented == "none" || presented == name));
+        // And its own at every turn: an earlier turn's retries do not stand
+        // in for a later turn that presented nothing.
+        let mut by_turn = Vec::new();
+        for (window, (before, after)) in ASKING.iter().zip(turns) {
+            let name = WINDOWS[*window].0;
+            let turn = heard[*window].get(*before..*after).unwrap_or_default();
+            own &= turn.iter().any(|presented| presented == name);
+            by_turn.push(json!({ "window": name, "heard": turn }));
         }
-        (own, serde_json::Value::Object(detail))
+        (own, json!(by_turn))
+    }
+
+    /// Whether `target` has heard `name` since its first `before` `CONNECT`s.
+    pub fn presented_since(naming: &Naming, target: &str, before: usize, name: &str) -> bool {
+        naming
+            .heard(target)
+            .iter()
+            .skip(before)
+            .any(|presented| presented == name)
     }
 
     /// What a page needs before it registers the product's push worker
@@ -825,31 +851,23 @@ mod macos_probe {
                 view
             })
             .collect();
+        let mut turns = Vec::new();
         for (step, window) in ASKING.iter().enumerate() {
             let (name, _, port) = WINDOWS[*window];
             let target = format!("{ROUTED}:{port}");
-            let before = naming
-                .heard(&target)
-                .iter()
-                .filter(|presented| *presented == name)
-                .count();
+            let before = naming.heard(&target).len();
             // SAFETY: Main thread; one of this probe's own URLs.
             unsafe {
                 if let Some(url) = NSURL::URLWithString(&NSString::from_str(&format!("http://{target}/{step}"))) {
                     named[*window].loadRequest(&NSURLRequest::requestWithURL(&url));
                 }
             }
-            pump_until(WAIT, || {
-                naming
-                    .heard(&target)
-                    .iter()
-                    .filter(|presented| *presented == name)
-                    .count()
-                    > before
-            });
+            // Until this turn's own connection has presented the name.
+            pump_until(WAIT, || presented_since(&naming, &target, before, name));
             pump_until(Duration::from_millis(300), || false);
+            turns.push((before, naming.heard(&target).len()));
         }
-        let (own, heard) = each_presented_its_own(&naming, |port| format!("{ROUTED}:{port}"));
+        let (own, heard) = each_presented_its_own(&naming, |port| format!("{ROUTED}:{port}"), &turns);
         report.case("each-window-presents-its-own-credential", own, heard);
 
         // 7. The route: only the instance's host goes to the listener, with
@@ -1378,28 +1396,20 @@ mod windows_probe {
                 Err(_) => made = false,
             }
         }
+        let mut turns = Vec::new();
         if named.len() == WINDOWS.len() {
             for (step, window) in ASKING.iter().enumerate() {
                 let (name, _, port) = WINDOWS[*window];
                 let target = format!("{ROUTED}:{port}");
-                let before = naming
-                    .heard(&target)
-                    .iter()
-                    .filter(|presented| *presented == name)
-                    .count();
+                let before = naming.heard(&target).len();
                 navigate(&named[*window].1, &format!("https://{target}/{step}"));
-                pump_until(WAIT, || {
-                    naming
-                        .heard(&target)
-                        .iter()
-                        .filter(|presented| *presented == name)
-                        .count()
-                        > before
-                });
+                // Until this turn's own connection has presented the name.
+                pump_until(WAIT, || presented_since(&naming, &target, before, name));
                 pump_until(Duration::from_millis(300), || false);
+                turns.push((before, naming.heard(&target).len()));
             }
         }
-        let (own, heard) = each_presented_its_own(&naming, |port| format!("{ROUTED}:{port}"));
+        let (own, heard) = each_presented_its_own(&naming, |port| format!("{ROUTED}:{port}"), &turns);
         report.case(
             "each-window-presents-its-own-credential",
             made && own,
