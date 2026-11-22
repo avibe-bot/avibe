@@ -18797,7 +18797,8 @@ async def _show_page_runtime_response(
     request_started = time.monotonic()
     manager = get_show_runtime_manager()
     request_options: dict[str, float] = {}
-    if _is_show_page_api_handler_path(asset_path):
+    is_handler = _is_show_page_api_handler_path(asset_path)
+    if is_handler:
         from core.services import settings as settings_service
 
         config = await asyncio.to_thread(settings_service.load_config_or_default)
@@ -18841,6 +18842,9 @@ async def _show_page_runtime_response(
     )
     response_headers["X-Content-Type-Options"] = "nosniff"
     response_headers["Referrer-Policy"] = "no-referrer"
+    if is_handler:
+        # A handler supplies data, not an app entry document, regardless of MIME type.
+        response_headers["Content-Security-Policy"] = "sandbox"
     content = proxied.content
     if proxied.status_code == 200 and external_prefix:
         # Public `/p/<share>/` surface only: rewrite the runtime's internal
@@ -19471,12 +19475,19 @@ def _is_local_show_runtime_url(parsed) -> bool:
         return False
 
 
+def _add_show_frame_ancestors(response: Response, ancestors: str) -> None:
+    # Keep any instance-owned document sandbox when applying the route's framing policy.
+    policy = response.headers.get("Content-Security-Policy")
+    directive = f"frame-ancestors {ancestors}"
+    response.headers["Content-Security-Policy"] = f"{policy}; {directive}" if policy else directive
+
+
 def _with_show_event_write_cookie(response: Response, session_id: str, *, enabled: bool) -> Response:
     # 'self' (not 'none') so the workbench can frame a Show Page in the chat
     # view — same origin as the page — while cross-origin clickjacking stays
     # blocked. Direct navigation is unaffected (frame-ancestors only governs
     # framing).
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+    _add_show_frame_ancestors(response, "'self'")
     if enabled:
         response.set_cookie(
             SHOW_EVENT_WRITE_TOKEN_COOKIE,
@@ -19777,7 +19788,7 @@ def _with_limited_show_policy(response: Response) -> Response:
     response.headers["Vary"] = ", ".join(sorted(vary_values))
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    _add_show_frame_ancestors(response, "'none'")
     return response
 
 
