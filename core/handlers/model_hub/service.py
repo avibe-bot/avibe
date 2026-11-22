@@ -142,7 +142,7 @@ from .errors import ModelDiscoveryError
 from .evidence_rules import LearnedEvidence
 from .evidence_rules import learn as learn_from_rejection
 from .evidence_rules import wire_effort
-from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content
+from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content, thread_mode
 from .hosted_executor import (
     EXECUTOR_RESPONSE_MAX_BYTES,
     ExecutorCall,
@@ -11789,8 +11789,7 @@ class ModelHubService:
         thread_attempt = (
             pinned_hop is not None
             and getattr(request, "protocol", None) == "anthropic"
-            and isinstance(request.get("thread"), Mapping)
-            and request["thread"].get("type") in ("continue", "create")
+            and thread_mode(request) in ("continue", "create")
         )
         hosted = (
             # A walk of the whole history, so off the controller loop.

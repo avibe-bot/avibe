@@ -93,6 +93,11 @@ def _declaration_tools() -> Mapping[str, Mapping[str, str]]:
 THREAD_CALLS_HEADER: Final = "x-avibe-thread-declarations"
 
 
+def thread_mode(payload: Mapping[str, Any]) -> str | None:
+    thread = payload.get("thread")
+    return thread.get("type") if isinstance(thread, Mapping) else None
+
+
 def read_thread_calls(value: str) -> frozenset[tuple[str, str]]:
     """Only compact catalog declarations travel between Vibey and its local pinned Hub."""
     if len(value) > 2048:

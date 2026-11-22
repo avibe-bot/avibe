@@ -8,7 +8,7 @@ given, converts canonical messages with the cross-provider rules, and yields
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal, Mapping, Optional, Protocol, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Protocol, Union
 
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import AssistantMessage, HostedImage, Message, ProtocolName
@@ -178,6 +178,8 @@ class ThreadObservation:
 
     session_id: str | None
     attempts: list[dict[str, Any]] = field(default_factory=list)
+    settle_discard: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    ordinary_retry: bool = False
 
 
 @dataclass(frozen=True)
@@ -262,6 +264,7 @@ class ProviderError:
     #: narrow metadata grants Vibey one transcript-only recovery. The partial
     #: contains safe empty arguments for these calls; the loop must not execute them.
     malformed_tool_calls: tuple[MalformedToolCall, ...] = ()
+    silence_exhausted: bool = False
 
 
 @dataclass(frozen=True)

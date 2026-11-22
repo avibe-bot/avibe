@@ -72,6 +72,7 @@ from core.agent_core.messages import (
     ToolCallBlock,
     ToolResultMessage,
     Usage,
+    usage_to_dict,
     UserMessage,
 )
 
@@ -238,6 +239,7 @@ class AnthropicAdapter(ProviderAdapter):
         parent = threads.parents.pop(session, None) if session else None
         route = threads.route_key(request.endpoint, self._gateway)
         replay: str | None = None
+        replacement = False
         attempt: threads.Attempt | None = None
         response_id: str | None = None
         lossless = True
@@ -313,6 +315,15 @@ class AnthropicAdapter(ProviderAdapter):
             return None if index is None else index + offset
 
         try:
+
+            def served_as_pinned() -> bool:
+                return (
+                    assembler.verified_origin
+                    and assembler.origin == origin
+                    and assembler.source_id == sending.endpoint.source_id
+                    and assembler.source_identity == sending.endpoint.source_identity
+                )
+
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
                 nonlocal response_counts, refusal_detail, response_id, lossless
@@ -334,6 +345,7 @@ class AnthropicAdapter(ProviderAdapter):
                             yield terminal
                         return
                     if event.event is not None and event.event not in _KNOWN_STREAM_EVENTS:
+                        lossless = False
                         # Pi filters by the SSE event name before parsing its
                         # JSON payload, so unknown event names are ignored
                         # even when their data is malformed.
@@ -347,6 +359,7 @@ class AnthropicAdapter(ProviderAdapter):
                         # still ignored rather than misclassified as provider
                         # payload errors.
                         if event.event is None:
+                            lossless = False
                             continue
                         terminal = assembler.terminal(
                             assembler.error("Provider returned invalid Anthropic JSON", kind="invalid_request")
@@ -368,6 +381,7 @@ class AnthropicAdapter(ProviderAdapter):
                             yield terminal
                         return
                     if event_type is None:
+                        lossless = False
                         continue
                     shape_error = validate_wire_shape(
                         chunk,
@@ -381,6 +395,11 @@ class AnthropicAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
+                    if speculative and self._gateway and not served_as_pinned() and event_type != "message_start":
+                        yield assembler.error("thread_origin_mismatch", kind="invalid_request")
+                        return
+                    if speculative and lossless:
+                        lossless = shape.accepts(event_type, chunk)
                     if (
                         attempt
                         and attempt.mode == "continue"
@@ -436,6 +455,9 @@ class AnthropicAdapter(ProviderAdapter):
                         mid = message.get("id")
                         response_id = mid if isinstance(mid, str) and 0 < len(mid) <= 256 and mid.isascii() else None
                         assembler.set_usage(response_usage)
+                        if speculative and self._gateway and not served_as_pinned():
+                            yield assembler.error("thread_origin_mismatch", kind="invalid_request")
+                            return
                         if attempt and attempt.mode == "continue":
                             total = (
                                 (
@@ -446,13 +468,6 @@ class AnthropicAdapter(ProviderAdapter):
                                 if response_usage
                                 else 0
                             )
-                            if self._gateway and (
-                                not assembler.verified_origin
-                                or assembler.source_id != sending.endpoint.source_id
-                                or assembler.source_identity != sending.endpoint.source_identity
-                            ):
-                                yield assembler.error("thread_origin_mismatch", kind="invalid_request")
-                                return
                             if attempt.prior is None or total * 100 < attempt.prior.tokens * threads.MIN_USAGE_PERCENT:
                                 yield assembler.error("thread_usage_mismatch", kind="invalid_request")
                                 return
@@ -927,21 +942,22 @@ class AnthropicAdapter(ProviderAdapter):
                 wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
                 full_wire = wire
                 if observation is not None:
-                    ordinary = replay
-                    if not ordinary:
-                        if continuations or not session:
-                            ordinary = "side_or_pause"
-                        elif self._gateway and (not sending.endpoint.source_id or sending.endpoint.portable):
-                            ordinary = "unbound_source"
-                        elif threads.failed_routes.get(route, 0) > time.monotonic():
-                            ordinary = "route_cooldown"
-                    attempt = await asyncio.to_thread(
-                        threads.prepare, wire, sending.endpoint, self._gateway, parent, route, ordinary
+                    attempt = await threads.plan_send(
+                        wire,
+                        sending.endpoint,
+                        gateway=self._gateway,
+                        session=None if continuations else session,
+                        parent=parent,
+                        repair=observation.ordinary_retry or bool(prepared.hosted_render_omitted),
+                        ordinary=replay,
                     )
                     wire = attempt.wire
 
                 def record_send(size: int) -> None:
                     attempt.record["body_bytes"] = size
+                    attempt.record["ordinary_baseline_bytes"] = (
+                        0 if replacement else (attempt.record["full_bytes"] or size)
+                    )
                     if attempt.mode == "full":
                         attempt.record["full_bytes"] = size
                     observation.attempts.append(attempt.record)
@@ -949,6 +965,7 @@ class AnthropicAdapter(ProviderAdapter):
                 speculative = bool(attempt and attempt.mode != "full")
                 response_id = None
                 lossless = True
+                shape = threads.ReplayShape()
                 visible = False
                 failed = None
                 driver = drive_sse_stream(
@@ -985,14 +1002,14 @@ class AnthropicAdapter(ProviderAdapter):
                             rejected = True
                             break
                         if isinstance(event, ProviderError):
-                            if speculative and not cancel.cancelled and not (visible or assembler.streamed):
+                            if (
+                                speculative
+                                and not event.silence_exhausted
+                                and not cancel.cancelled
+                                and not (visible or assembler.streamed)
+                            ):
                                 if response_usage:
-                                    attempt.record["discarded_usage"] = {
-                                        "input_tokens": response_usage.input_tokens,
-                                        "output_tokens": response_usage.output_tokens,
-                                        "cache_read_tokens": response_usage.cache_read_tokens,
-                                        "cache_write_tokens": response_usage.cache_write_tokens,
-                                    }
+                                    attempt.record["discarded_usage"] = usage_to_dict(response_usage)
                                 failed = (
                                     event.message
                                     if event.message.startswith("thread_")
@@ -1027,14 +1044,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 and message_stopped
                                 and lossless
                                 and message.stop_reason in ("stop", "tool_use")
-                                and (
-                                    not self._gateway
-                                    or (
-                                        assembler.verified_origin
-                                        and assembler.source_id == sending.endpoint.source_id
-                                        and assembler.source_identity == sending.endpoint.source_identity
-                                    )
-                                )
+                                and (not self._gateway or served_as_pinned())
                             ):
                                 assistant_hash = await asyncio.to_thread(_replayable_digest, message)
                                 if assistant_hash is None:
@@ -1063,6 +1073,26 @@ class AnthropicAdapter(ProviderAdapter):
                 if failed is not None:
                     threads.remember(threads.failed_routes, route, time.monotonic() + threads.COOLDOWN_SECONDS)
                     attempt.record["failure"] = replay = failed
+                    replacement = True
+                    if (
+                        observation.settle_discard
+                        and observation.attempts
+                        and observation.attempts[-1] is attempt.record
+                    ):
+                        if response_usage:
+                            attempt.record["writes_by_ttl"] = dict(response_usage.cache_writes_by_ttl or {})
+                            attempt.record["cache_write_basis"] = (
+                                "incomplete_total"
+                                if not response_usage.cache_write_total_reported
+                                else "none"
+                                if not response_usage.cache_write_tokens
+                                else "reported"
+                                if response_usage.cache_writes_by_ttl is not None
+                                else "unknown"
+                            )
+                        # Settle before handing the replay to HTTPX: Stop during the replacement cannot erase this send.
+                        await observation.settle_discard(attempt.record)
+                        observation.attempts.pop()
                     assembler = new_assembler()
                     assembler.hosted_render_omitted = prepared.hosted_render_omitted
                     response_usage = None
@@ -1108,6 +1138,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if first_sent is None:
                         first_sent = (transformed_messages, loaded_images)
                     continuations += 1
+                    replacement = False
                     response_usage = None
                     carried_counts, response_counts = _summed(carried_counts, response_counts), {}
                     offset = next_index
@@ -1115,6 +1146,8 @@ class AnthropicAdapter(ProviderAdapter):
                 elif rejected:
                     # The endpoint refused the lifetime before answering, so nothing reached the consumer: the same
                     # send once more with the default lifetime, which this route keeps from now on.
+                    # Later ordinary TTL/paused sends have their own ordinary baseline.
+                    replacement = False
                     _remember_ttl_rejection(sending.endpoint)
                     continue
                 else:

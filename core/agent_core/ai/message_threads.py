@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -10,7 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from config.paths import get_state_dir
-from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest
+from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
 from core.agent_core.ai.provider import ModelEndpoint
 
 BETA = "message-threads-2026-08-12"
@@ -92,6 +93,77 @@ def route_key(ep: ModelEndpoint, gateway: bool) -> bytes:
 
 
 @dataclass
+class ReplayShape:
+    """Only bind a response whose block stream the ordinary renderer consumed in order."""
+
+    started: bool = False
+    index: int = -1
+    block: str | None = None
+    has_delta: bool = False
+
+    def accepts(self, kind, chunk):
+        if kind == "ping":
+            return True
+        if kind == "message_start":
+            ok = not self.started and isinstance(chunk.get("message"), dict) and not chunk["message"].get("content")
+            self.started = True
+            return ok
+        if not self.started:
+            return False
+        if kind == "content_block_start":
+            block = chunk["content_block"]
+            allowed = {
+                "text": {"type", "text", "citations"},
+                "thinking": {"type", "thinking", "signature"},
+                "redacted_thinking": {"type", "data"},
+                "tool_use": {"type", "name", "id", "input"},
+            }
+            tag = block["type"]
+            if (
+                self.has_delta
+                or self.block is not None
+                or chunk["index"] != self.index + 1
+                or tag not in allowed
+                or set(block) - allowed[tag]
+            ):
+                return False
+            self.index += 1
+            self.block = tag
+            return True
+        if kind == "content_block_stop":
+            if self.block is None or self.index != chunk["index"]:
+                return False
+            self.block = None
+            return True
+        if kind == "content_block_delta":
+            delta = chunk["delta"]
+            expected = {
+                "text_delta": ("text", "text"),
+                "thinking_delta": ("thinking", "thinking"),
+                "signature_delta": ("thinking", "signature"),
+                "input_json_delta": ("tool_use", "partial_json"),
+            }.get(delta.get("type"))
+            return bool(
+                expected
+                and self.index == chunk["index"]
+                and self.block == expected[0]
+                and set(delta) == {"type", expected[1]}
+            )
+        if kind == "message_delta":
+            if self.has_delta:
+                return False
+            self.has_delta = True
+            usage = chunk.get("usage") or {}
+            iterations = usage.get("iterations") or []
+            return (
+                self.block is None
+                and isinstance(iterations, list)
+                and all(isinstance(i, dict) and i.get("type") != "fallback_message" for i in iterations)
+            )
+        return kind == "message_stop" and self.has_delta and self.block is None
+
+
+@dataclass
 class Attempt:
     wire: WireRequest
     mode: str
@@ -127,6 +199,29 @@ def _cache_plan(full: dict) -> tuple[str | None, int | None]:
     if len(marks) != 2 or marks[-1][0] - marks[0][0] >= 20:
         return "preserve_cache_breakpoints", None
     return None, marks[0][1]
+
+
+async def plan_send(
+    wire,
+    ep,
+    *,
+    gateway: bool,
+    session: str | None,
+    parent: Parent | None,
+    repair: bool = False,
+    ordinary: str | None = None,
+) -> Attempt:
+    route = route_key(ep, gateway)
+    if not ordinary:
+        if not session:
+            ordinary = "side_or_pause"
+        elif gateway and (not ep.source_id or ep.portable):
+            ordinary = "unbound_source"
+        elif repair:
+            ordinary = "history_repair"
+        elif failed_routes.get(route, 0) > time.monotonic():
+            ordinary = "route_cooldown"
+    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary)
 
 
 def prepare(
@@ -181,6 +276,15 @@ def prepare(
                 mode = "continue"
                 body = {k: v for k, v in full.items() if k not in ("system", "tools")}
                 body.update(messages=suffix, thread={"type": "continue", "previous_message_id": parent.message_id})
+    # The older mark can look back *before* its own position. On create only
+    # remove it if the newest mark also searches the entire message prefix;
+    # a fork or resume has no evidence of which earlier block is warm.
+    if (
+        mode == "create"
+        and omitted_mark is not None
+        and sum(len(m["content"]) if isinstance(m["content"], list) else 1 for m in msgs) > 20
+    ):
+        mode, reason = "full", "preserve_cache_breakpoints"
     if mode == "create":
         body = {**full, "thread": {"type": "create"}}
         if omitted_mark is not None:
@@ -192,7 +296,8 @@ def prepare(
         betas.append(BETA)
         if gateway:
             headers[PIN_SOURCE_HEADER] = ep.source_id
-            headers.setdefault(PIN_MODEL_HEADER, ep.model_id)
+            if _header_value(ep.model_id):
+                headers.setdefault(PIN_MODEL_HEADER, ep.model_id)
             if mode == "continue":
                 headers["x-avibe-thread-declarations"] = encoded(
                     [[tool["name"], tool["type"]] for tool in full.get("tools", ()) if tool.get("type")]

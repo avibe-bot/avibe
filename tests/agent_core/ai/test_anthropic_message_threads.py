@@ -75,6 +75,10 @@ async def test_create_rejection_replays_once_and_remembers_route():
         "oversize_id",
         "duplicate_start",
         "citation",
+        "late_delta",
+        "unclosed",
+        "initial_content",
+        "upstream_fallback",
     ],
 )
 async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_path):
@@ -102,6 +106,22 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
                 text = start + "\n\n" + extra + "\n\n" + tail
             if case == "citation":
                 text = good.replace('"text":""', '"text":"","citations":[{"type":"page_location"}]')
+        if len(seen) == 1:
+            end = 'data: {"type":"content_block_stop","index":0}\n\n'
+            if case == "late_delta":
+                text = good.replace(
+                    end,
+                    end
+                    + 'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}\n\n',
+                )
+            elif case == "unclosed":
+                text = good.replace(end, "")
+            elif case == "initial_content":
+                text = good.replace(
+                    '"id":"msg_parent"', '"id":"msg_parent","content":[{"type":"text","text":"ignored"}]'
+                )
+            elif case == "upstream_fallback":
+                text = good.replace('"output_tokens":1', '"output_tokens":1,"iterations":[{"type":"fallback_message"}]')
         if len(seen) == 1 and case == "small_parent":
             text = good.replace("22000", "500")
         if body.get("thread", {}).get("type") == "continue":
@@ -148,7 +168,15 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
             messages=(latest if case == "edit" else first, initial[-1].message, latest),
             thread_observation=obs,
         )
+        if case == "ok":
+            from core.agent_core.ai.preview import preview_wire_request
+
+            before = await preview_wire_request(request, session_id=obs.session_id)
+            again = await preview_wire_request(request, session_id=obs.session_id)
+            assert before.body == again.body and len(seen) == 1 and not obs.attempts
         result = [e async for e in adapter.stream(request, CancelToken())]
+        if case == "ok":
+            assert json.loads(before.body) == seen[1]
     assert isinstance(result[-1], Done)
     assert "LOST" not in repr(result) and "lost" not in repr(result)
     if case in ("ok", "breakdown_only", "low", "missing", "early_tool", "unknown"):
@@ -173,3 +201,51 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
         if case != "edit"
         else obs.attempts[0]["full_bytes"] > 0
     )
+
+
+async def test_resume_preserves_overlapping_lookup_windows():
+    # Last two marks are close, but only the earlier lookup can reach the warmed first user block.
+    from core.agent_core.messages import AssistantMessage, Origin
+
+    def blocks(n):
+        return AssistantMessage(
+            tuple(TextBlock("item") for _ in range(n)), Origin("anthropic", "anthropic", "claude-test"), "stop"
+        )
+
+    user = UserMessage((TextBlock("old history " * 4000),))
+    request = replace(
+        _request(messages=(user, blocks(14), user, blocks(9), user)), thread_observation=ThreadObservation("resume")
+    )
+    sent = []
+
+    def handle(wire):
+        sent.append(json.loads(wire.content))
+        return httpx.Response(200, text=SUCCESS)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        events = [e async for e in AnthropicAdapter(client).stream(request, CancelToken())]
+    assert isinstance(events[-1], Done)
+    assert len(sent) == 1 and "thread" not in sent[0] and len(_breakpoints(sent[0])) == 4
+    assert request.thread_observation.attempts[0]["reason"] == "preserve_cache_breakpoints"
+
+
+async def test_silence_outlasts_speculative_send_without_replay(monkeypatch):
+    import time
+    from types import SimpleNamespace
+    from core.agent_core.ai import _common
+    from core.agent_core.ai.provider import ProviderError
+
+    now = [time.monotonic()]
+    monkeypatch.setattr(_common, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    seen = []
+
+    def handle(wire):
+        seen.append(json.loads(wire.content))
+        now[0] += 601
+        return httpx.Response(502, json={"error": {"message": "upstream timed out"}})
+
+    request = replace(_request(), thread_observation=ThreadObservation("silent"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        events = [e async for e in AnthropicAdapter(client).stream(request, CancelToken())]
+    assert len(seen) == 1 and seen[0]["thread"] == {"type": "create"}
+    assert isinstance(events[-1], ProviderError) and events[-1].silence_exhausted

@@ -87,8 +87,9 @@ async def test_omitted_hosted_declaration_uses_normal_admission_and_stays_local(
 
 
 @pytest.mark.asyncio
-async def test_two_vibey_turns_use_same_parent_through_real_hub(tmp_path):
-    primary = _source("src_primary01", "Claude", vendor="anthropic", protocol="anthropic", model_id="claude-test")
+@pytest.mark.parametrize("model_id", ["claude-test", "claude-模型"])
+async def test_two_vibey_turns_use_same_parent_through_real_hub(tmp_path, model_id):
+    primary = _source("src_primary01", "Claude", vendor="anthropic", protocol="anthropic", model_id=model_id)
     stream = SUCCESS.replace(
         '"usage":{"input_tokens":1}', '"id":"msg_wire","usage":{"input_tokens":3,"cache_read_input_tokens":23000}'
     )

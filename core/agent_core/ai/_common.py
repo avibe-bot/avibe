@@ -2073,7 +2073,7 @@ async def drive_sse_stream(
                 # bound without output. Sent again it would most likely wait as
                 # long again, so the failure ends the turn: neither replayed nor
                 # continued.
-                candidate = replace(candidate, retryable=False, continuable=False)
+                candidate = replace(candidate, retryable=False, continuable=False, silence_exhausted=True)
             # Decided before the artifact's write is awaited: diagnostic storage never counts as provider silence.
             if attempt is not None:
                 await _await_artifact(

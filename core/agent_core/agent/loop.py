@@ -572,7 +572,7 @@ class Agent:
             )
             if transition is not None:
                 return RequestPreview(snapshot, "needs_context_transition", transition=transition, **facts)
-        wire = await preview_wire_request(prepared.request, gateway=gateway, media_loader=media_loader)
+        wire = await preview_wire_request(prepared.request, gateway=gateway, media_loader=media_loader, session_id=self.session_id)
         if isinstance(wire, ProviderError):
             return RequestPreview(snapshot, "preparation_error", error=wire, **facts)
         return RequestPreview(snapshot, "ready", wire=wire, **facts)
@@ -1074,10 +1074,34 @@ class Agent:
                     ))
                     cache.update(prompt_pending=self.prompt_pending, prompt_notice=self.prompt_notice)
                 if request.endpoint.protocol == "anthropic":
-                    observation = ThreadObservation(self.session_id if purpose == "conversation" else None)
+                    observation = ThreadObservation(
+                        self.session_id if purpose == "conversation" else None,
+                        ordinary_retry=len(self._attempts) > first,
+                    )
                     request = replace(request, thread_observation=observation)
                     if cache is not None:
                         cache["thread_attempts"] = observation.attempts
+                    if purpose == "conversation":
+
+                        async def settle_discard(wire_attempt: dict) -> None:
+                            # A rejected send is a non-context attempt, not part of the replacement's context size.
+                            usage = wire_attempt.get("discarded_usage")
+                            if cache is None and usage is None:
+                                return
+                            payload = {"version": 1, "error": wire_attempt["failure"]}
+                            if usage is not None:
+                                payload["usage"] = usage
+                            if cache is not None:
+                                facts = {k: v for k, v in cache.items() if k not in ("prefix", "thread_attempts")}
+                                facts.update(
+                                    thread_attempts=[wire_attempt],
+                                    writes_by_ttl=wire_attempt.get("writes_by_ttl", {}),
+                                    cache_write_basis=wire_attempt.get("cache_write_basis", "unknown"),
+                                )
+                                payload["cache"] = facts
+                            await self._audit("attempt", payload)
+
+                        observation.settle_discard = settle_discard
                 stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
                 streamed = False
                 terminal = None
