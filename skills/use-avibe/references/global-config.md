@@ -293,10 +293,13 @@ whole ms from 0 to 500, use `POST /api/config`:
 }
 ```
 
-Send `null` to go back to the App's own default. If the orange dot ever shows on a plain tap even
-so, `"app_hold_prepare_at_touch": false` makes the App prepare nothing before the start (each hold
-then starts a little later). No restart and no new App build are needed for either: it takes
-effect the next time the user opens a conversation or the App.
+Send `null` to go back to the App's own default. If the orange dot shows on plain taps, raise
+`app_hold_start_ms` first: the dot comes with the microphone's start, and a tap that has lifted by
+the start opens nothing. `"app_hold_prepare_at_touch": false` is only a safety valve, in case
+preparing the microphone at touch-down ever shows the indicator by itself on some device (it does
+not on an iPhone 17 Pro with iOS 27.2.1): the App then prepares nothing before the start, and
+every hold starts a little later. No restart and no new App build are needed for either: it
+takes effect the next time the user opens a conversation or the App.
 
 ### Switch primary platform
 

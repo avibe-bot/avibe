@@ -613,6 +613,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const current = press.current;
     if (!current || current.reached) return;
     current.reached = true;
+    // A press the App was following, and whose word did not come by now: the page's own take.
+    if (current.followed && !current.taken && !current.miss) current.miss = 'unanswered';
     cancelAnimationFrame(current.frame);
     if (current.unfollow) {
       // A hold now: the pointer is the element's until the press ends, wherever it goes. If the

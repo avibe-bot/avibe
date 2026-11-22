@@ -14626,7 +14626,7 @@ def asr_telemetry():
         # (ui/src/lib/nativeVoiceHold.ts, `holdMissReason`).
         "holdMiss": {
             "off", "viewport", "unlisted", "closed", "hidden", "covered", "limit",
-            "pending", "refused", "outside", "failed", "gone",
+            "pending", "refused", "outside", "failed", "gone", "unanswered",
         },
     }
     outcome = payload.get("outcome")

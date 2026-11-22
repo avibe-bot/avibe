@@ -396,6 +396,10 @@ def test_voice_telemetry_keeps_why_the_ios_app_did_not_follow_a_hold(caplog):
     _, metric = _logged_metric(caplog)
     assert metric["holdMiss"] == "covered"
     response = client.post(
+        "/api/asr/telemetry", json=_capture_trace(holdMiss="unanswered"), headers=csrf_headers(client)
+    )
+    assert response.status_code == 200
+    response = client.post(
         "/api/asr/telemetry", json=_capture_trace(holdMiss="the page said so"), headers=csrf_headers(client)
     )
     assert response.status_code == 400

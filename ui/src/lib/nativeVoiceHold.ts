@@ -50,10 +50,11 @@ const MAX_PARTS = 2;
  *    for the threshold or the number of boxes;
  *  - `pending`: named, and the App had not answered yet; `refused`: the App refused the list;
  *    `outside`: followed, and the finger was outside its boxes;
- *  - `failed`, `gone`: the App followed it and could not record (set by the gesture). */
+ *  - `failed`, `gone`: the App followed it and could not record; `unanswered`: the App was
+ *    following it and its word did not come by the page's own threshold (set by the gesture). */
 export type HoldMiss =
   | 'off' | 'viewport' | 'unlisted' | 'closed' | 'hidden' | 'covered' | 'limit'
-  | 'pending' | 'refused' | 'outside' | 'failed' | 'gone';
+  | 'pending' | 'refused' | 'outside' | 'failed' | 'gone' | 'unanswered';
 
 const surfaces = new Map<string, HoldSurface>();
 /** How each surface fared at the last measure: in the list, or why not. */

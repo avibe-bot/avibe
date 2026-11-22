@@ -1321,6 +1321,8 @@ describe('a hold the iOS App recognises', () => {
     expect(pipeline.takes).toHaveLength(1);
     // Its own start, as in an App that does not recognise holds.
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The trace says the App followed it and never answered.
+    expect(pipeline.takes[0].input.holdMiss).toBe('unanswered');
     expect(hold.phase).toBe('listening');
     expect(native.impact).toHaveBeenCalledWith('medium');
 
