@@ -45,7 +45,11 @@ def retire_binding(binding, *, now):
         conn.execute(insert(state_meta).values(key='remote_access.retired_registry.v1:' + binding,
                                                value_json='true', updated_at=str(now)))
         web_push_service.record_binding_retirement(conn, binding, now)
-        conn.execute(tracks.update().where(tracks.c.owner_user_key.like('remote:%'), tracks.c.status == 'tracking')
+        # A rotated phone token may revive a token_gone row, but never across
+        # retirement, even if the phone enrolls the same endpoint again.
+        revivable = (tracks.c.status == 'stopped') & (tracks.c.stop_reason == 'token_gone')
+        conn.execute(tracks.update().where(tracks.c.owner_user_key.like('remote:%'),
+                                           (tracks.c.status == 'tracking') | revivable)
                      .values(status='stopped', stop_reason='registration_unavailable', confirmed_at=now,
                              pending_state=None, updated_at=now))
         old_sids = select(sessions.c.session_id).where(sessions.c.binding == binding)

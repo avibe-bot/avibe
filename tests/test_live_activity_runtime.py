@@ -97,6 +97,62 @@ def test_public_http_register_rotate_end_and_owner_isolation(state, monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['update', 'end', 'retry', 'gone_before_retirement'])
+async def test_retirement_wins_over_live_activity_result(state, monkeypatch, outcome):
+    from types import SimpleNamespace
+    import httpx
+    from core import web_push_notifications as notifications
+    from storage import device_registry
+
+    owner = 'remote:reader'
+    with state.begin() as conn:
+        conn.execute(web_push_subscriptions.update().values(user_key=owner))
+    monkeypatch.setattr(notifications, '_resolve_owner_authorization_decisions', lambda *a, **kw: {
+        owner: SimpleNamespace(authorized=True, context=None)
+    })
+    service, now, sent = service_for(state)
+    assert (await service.handle('put', owner, 'old', BODY))['body']['activity']['status'] == 'tracking'
+    service.pending_question = lambda _: True
+    if outcome == 'end':
+        with state.begin() as conn:
+            message_deliveries.terminalize_turn(conn, TURN, outcome='completed', settled_by='terminal_result',
+                                              evidence_kind='test')
+
+    def retire():
+        device_registry.retire_binding('old-registry', now=now[0])
+        with state.begin() as conn:
+            web_push_service.upsert_subscription(conn, user_key=owner, payload={
+                'endpoint': f'https://avibe.bot/api/push/apns/{REGISTRATION}',
+                'keys': {'p256dh': 'test', 'auth': 'test'}})
+
+    def send(**kw):
+        sent.append(kw['body'])
+        if outcome == 'gone_before_retirement':
+            response = httpx.Response(410, json={'error': 'activity_token_gone'},
+                                      request=httpx.Request('POST', 'https://relay.invalid'))
+            raise httpx.HTTPStatusError('gone', request=response.request, response=response)
+        # The relay completed its IO. A separate connection publishes retirement
+        # before the controller can write this result, then the phone enrolls again.
+        retire()
+        if outcome == 'retry':
+            raise TimeoutError
+
+    service.sender = send
+    await service.tick()
+    if outcome == 'gone_before_retirement':
+        assert service._read('old')['stop_reason'] == 'token_gone'
+        retire()
+    row = service._read('old')
+    assert (row['status'], row['stop_reason'], row['retry_count']) == ('stopped', 'registration_unavailable', 0)
+    assert row['pending_state'] is None
+    rotated = await service.handle('put', owner, 'old', {**BODY, 'activity_token': 'cd' * 32})
+    assert rotated['body']['activity']['status'] == 'stopped'
+    now[0] += 1000
+    await service.tick()
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_publisher_phase_heartbeat_terminal_and_restart(state):
     service, now, sent = service_for(state)
     await service.handle("put", "local", "activity-1", BODY)
