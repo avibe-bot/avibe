@@ -20,7 +20,18 @@
 //!   window gets one only for an instance that answered a rendezvous in an
 //!   earlier session, and a window already open is never rebuilt. Until an
 //!   instance has answered once, its session only asks (a "scout"): it
-//!   routes nothing and ends with the first answer.
+//!   routes nothing and ends with the first answer;
+//! - where a route can be put on an open window (macOS 14 and later), an
+//!   instance that answered before still gets its client before its view is
+//!   created and its route before that view's first load. WebKit does not
+//!   use a route written while it has a connection to that host: not for
+//!   the next request, a reload or a new navigation, until every such
+//!   connection has closed (`examples/direct_webview_probe.rs` measures
+//!   it). So only a route that is there first carries the view, and only
+//!   then are its tunnel connections the listener's to hand over. An
+//!   instance that has not answered before is asked from its open view and
+//!   routed there; that view keeps the tunnel while its connections live,
+//!   and the windows opened from it later are routed as they are made.
 use super::{
     choices::{Choices, Mode},
     connect::Authority,
@@ -113,6 +124,10 @@ struct Session {
     ready: bool,
     /// It only learns whether the instance answers; it routes no window.
     scout: bool,
+    /// Started before its instance view was created, where a route can be
+    /// put on an open window: every window of it is routed as it is made,
+    /// before its first load, without waiting for an answer.
+    early: bool,
     opened: Instant,
 }
 
@@ -270,10 +285,12 @@ impl Wiring {
         self.routing == Routing::AtCreation
     }
 
-    /// Routing at creation: whether the instance view about to be created
-    /// for `target` gets a route, so that a client must exist before it does.
+    /// Whether the instance view about to be created for `target` gets a
+    /// route before its first load, so that a client must exist before it
+    /// does: wherever a window can be routed, for an instance that answered
+    /// before.
     pub fn starts_at_creation(&self, target: &Target) -> bool {
-        self.routing == Routing::AtCreation && self.permitted(target) && self.reached(target)
+        self.permitted(target) && self.reached(target)
     }
 
     /// A client exists for `target`. `runtime` is the published instance view
@@ -285,6 +302,7 @@ impl Wiring {
         // Where a route is given only at creation, a session started for a
         // view that is already open can route nothing.
         let scout = self.routing == Routing::AtCreation && runtime.is_some();
+        let early = self.routing == Routing::Live && runtime.is_none();
         let mut windows: Vec<String> = runtime.map(str::to_owned).into_iter().collect();
         // Where a route can be put on an open window, the app windows that
         // are already open for this instance belong to the session too: one
@@ -309,6 +327,7 @@ impl Wiring {
             away: None,
             ready: false,
             scout,
+            early,
             opened: now,
         });
         self.next
@@ -393,7 +412,9 @@ impl Wiring {
                     window: window.to_owned(),
                 }]
             }
-            Routing::Live if found.ready => {
+            // After the first answer, or at once for a session that was
+            // started so that its windows are routed before they load.
+            Routing::Live if found.ready || found.early => {
                 found.routed.push(window.to_owned());
                 vec![Effect::Install {
                     session,

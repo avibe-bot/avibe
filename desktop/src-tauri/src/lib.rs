@@ -2143,8 +2143,9 @@ fn build_main_child(
     if disposable && cfg!(windows) {
         builder = builder.on_permission_request(|_, kind| direct::shell::remote_instance_permission(kind));
     }
-    // Another computer's instance, where a route to its direct listener can
-    // only be given now (Windows). Never beside a configured proxy.
+    // Another computer's instance that has answered on the direct path
+    // before: its client starts now, so that the view's route is in place
+    // before its first load. Never beside a configured proxy.
     let direct_route = if disposable {
         direct::shell::instance_view_route(app, destination)
     } else {
