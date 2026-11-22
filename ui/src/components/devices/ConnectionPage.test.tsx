@@ -227,7 +227,7 @@ describe('ConnectionPage · settings', () => {
 
   it('shows only the domain where this Avibe\'s name cannot be changed here, whatever the reason given', async () => {
     // A reason this page has never heard of (an instance that has not read its name's state yet).
-    vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ eligible: false, ineligibleReason: 'name_state_never_read', retired: [] }));
+    vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ eligible: false, ineligibleReason: 'address_state_unknown', retired: [] }));
     vi.spyOn(devicesApi, 'rebind').mockRejectedValue(new DevicesApiError(404, 'not_found', {}));
     mount();
     expect(await screen.findByText('域名')).toBeTruthy();
@@ -236,12 +236,12 @@ describe('ConnectionPage · settings', () => {
     expect(screen.queryByRole('button', { name: '更改域名' })).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByRole('button', { name: '清理情况' })).toBeNull();
-    expect(document.body.textContent).not.toContain('name_state_never_read');
+    expect(document.body.textContent).not.toContain('address_state_unknown');
     expect(document.body.textContent).not.toContain('改名');
   });
 
   it('opens no rename dialog at the rename\'s own address where the name cannot be changed here', async () => {
-    vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ eligible: false, ineligibleReason: 'name_state_never_read' }));
+    vi.spyOn(devicesApi, 'address').mockResolvedValue(address({ eligible: false, ineligibleReason: 'address_state_unknown' }));
     mount('/settings/remote-access/connection/address');
     await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection'));
     expect(screen.queryByRole('dialog')).toBeNull();

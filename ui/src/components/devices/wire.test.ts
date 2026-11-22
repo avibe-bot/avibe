@@ -245,6 +245,10 @@ describe('addressFromWire', () => {
     expect(addressFromWire({ ...base, state_error: 'rebind_required' })?.stateError).toBe('rebind_required');
     expect(addressFromWire({ ...base, state_error: null })?.stateError).toBeUndefined();
     expect(addressFromWire({ ...base, state_error: 'something_new' })?.stateError).toBeUndefined();
+    // An instance avibe.bot has never answered about its name: not eligible, by a reason of its own.
+    expect(addressFromWire({ ...base, ineligible_reason: 'address_state_unknown', state_error: null }))
+      .toMatchObject({ eligible: false, ineligibleReason: 'address_state_unknown', retired: [] });
+    expect(renameRefusal({ error: 'rename_ineligible', reason: 'address_state_unknown' })).toEqual({ code: 'rename_ineligible' });
     expect(addressFromWire({ ...base, operation: { state: 'failed', hostname: 'maxim-app.avibe.bot', error: 'rebind_required' } })?.operation?.error)
       .toEqual({ code: 'rebind_required' });
   });

@@ -74,9 +74,9 @@ const designFrames = frames([
   // A build before renaming and binding again are live: the instance says the name cannot be
   // changed here and has no bind-again overview, so the last panel is the domain and nothing else.
   frame('local-domain-only', '连接方式 · 改名和重新绑定还没有上线的版本：最下面只有域名一行，没有按钮、没有说明', WIDE,
-    { address: { ...address, eligible: false, ineligibleReason: 'name_state_never_read' }, rebind: undefined }),
+    { address: { ...address, eligible: false, ineligibleReason: 'address_state_unknown' }, rebind: undefined }),
   frame('remote-domain-only', '连接方式 · 同一个版本从远处看：也只有域名一行，不提重新绑定', WIDE,
-    { ...remote, address: { ...address, eligible: false, ineligibleReason: 'name_state_never_read' }, rebind: undefined }),
+    { ...remote, address: { ...address, eligible: false, ineligibleReason: 'address_state_unknown' }, rebind: undefined }),
   frame('remote-browser', '连接方式 · 浏览器远程打开：走的是 Cloudflare 隧道；重新绑定要回到那台电脑上做', WIDE, remote),
   frame('app', '连接方式 · Avibe App：「这台设备」只有 自动 / 仅 Cloudflare 隧道，自动在前', { ...IPHONE_17_PRO, height: 2300 },
     { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'automatic', reverted: null } }, { app: true }),
