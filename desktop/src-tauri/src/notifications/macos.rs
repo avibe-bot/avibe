@@ -212,6 +212,20 @@ impl Outcome {
 /// Posts one notification once macOS allows it and it is still wanted. The
 /// legacy center posted silently; so does this.
 fn post(identifier: String, copy: NotificationCopy, extra: Extra, outcome: Outcome) {
+    #[cfg(feature = "app-lock-e2e")]
+    if TEST_NOTICES.with_borrow_mut(|sink| {
+        let Some(sink) = sink else { return false };
+        let content = content(&copy, &extra);
+        sink.push(serde_json::json!({
+            "title": content.title().to_string(),
+            "body": content.body().to_string(),
+            "opens": extra.opens,
+        }));
+        true
+    }) {
+        (outcome.posted)();
+        return;
+    }
     let outcome = Arc::new(outcome);
     authorized(move |granted| {
         if !granted || !(outcome.still_wanted)() {
@@ -477,6 +491,59 @@ fn picked(question: &Question, action: &str, typed: Option<String>) -> Option<Pi
     question.options.get(index).cloned().map(Picked::Choice)
 }
 
+/// Admit one native answer before starting its transport deadline. The same
+/// operation ID and question revision survive cancellation and deferred replay.
+fn receive_answer(
+    app: &tauri::AppHandle,
+    question: Question,
+    action: &str,
+    typed: Option<String>,
+    opens: Option<String>,
+) -> Option<String> {
+    let picked = picked(&question, action, typed)?;
+    let id = super::answer::operation_id();
+    let pending = (id.clone(), question.clone(), picked.clone(), opens.clone());
+    let replaced_opens = opens.clone();
+    if !crate::app_lock::defer_with_replacement(
+        app,
+        move |app| {
+            super::answer::submit(app, pending.0, pending.1, pending.2, pending.3);
+        },
+        move |app| super::answer::replaced(app, replaced_opens),
+    ) {
+        super::answer::submit(app, id.clone(), question, picked, opens);
+    }
+    Some(id)
+}
+
+#[cfg(feature = "app-lock-e2e")]
+thread_local! {
+    static TEST_NOTICES: std::cell::RefCell<Option<Vec<serde_json::Value>>> = const { std::cell::RefCell::new(None) };
+}
+/// Only the standalone peer arms this final OS sink; no permission prompt or
+/// notification-center writes occur. Production admission and copy still run.
+#[cfg(feature = "app-lock-e2e")]
+pub(crate) fn e2e_notices(reset: bool) -> serde_json::Value {
+    TEST_NOTICES.with_borrow_mut(|sink| {
+        if reset {
+            *sink = Some(Vec::new());
+        }
+        serde_json::json!(sink)
+    })
+}
+
+#[cfg(feature = "app-lock-e2e")]
+pub(super) fn e2e_answer(
+    app: &tauri::AppHandle,
+    question: serde_json::Value,
+    action: &str,
+    typed: Option<String>,
+    opens: Option<String>,
+) -> Result<Option<String>, String> {
+    let question = serde_json::from_value(question).map_err(|e| e.to_string())?;
+    Ok(receive_answer(app, question, action, typed, opens))
+}
+
 fn typed(response: &UNNotificationResponse) -> Option<String> {
     if !response.respondsToSelector(sel!(userText)) {
         return None;
@@ -531,9 +598,13 @@ define_class!(
             } else if let Some(question) =
                 carried(response, QUESTION_KEY).and_then(|question| serde_json::from_str::<Question>(&question).ok())
             {
-                if let Some(picked) = picked(&question, &action.to_string(), typed(response)) {
-                    super::answer::submit(app, question, picked, carried(response, OPENS_KEY));
-                }
+                let _ = receive_answer(
+                    app,
+                    question,
+                    &action.to_string(),
+                    typed(response),
+                    carried(response, OPENS_KEY),
+                );
             }
             completion.call(());
         }
@@ -587,6 +658,7 @@ pub(super) mod tests {
             placeholder: "Reply to this conversation".into(),
             not_sent: String::new(),
             not_delivered: String::new(),
+            answer_again: String::new(),
             already_choice: String::new(),
             already_text: String::new(),
             stale: String::new(),

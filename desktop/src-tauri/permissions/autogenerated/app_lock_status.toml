@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-lock-status"
+description = "Enables the app_lock_status command without any pre-configured scope."
+commands.allow = ["app_lock_status"]
+
+[[permission]]
+identifier = "deny-app-lock-status"
+description = "Denies the app_lock_status command without any pre-configured scope."
+commands.deny = ["app_lock_status"]

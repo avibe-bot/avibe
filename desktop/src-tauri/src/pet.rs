@@ -109,6 +109,7 @@ pub struct Pet {
     registered_shortcuts: Mutex<Vec<String>>,
     voice_shortcut_state: Mutex<VoiceShortcutState>,
     toggle_shortcut_down: Mutex<bool>,
+    voice_suppressed_until_release: Mutex<bool>,
     move_generation: Arc<AtomicU64>,
     /// Advances with every drag and every new window, so a stale drag's steps
     /// change nothing.
@@ -135,6 +136,7 @@ impl Pet {
             registered_shortcuts: Mutex::new(Vec::new()),
             voice_shortcut_state: Mutex::new(VoiceShortcutState::default()),
             toggle_shortcut_down: Mutex::new(false),
+            voice_suppressed_until_release: Mutex::new(false),
             move_generation: Arc::new(AtomicU64::new(0)),
             drag_generation: AtomicU64::new(0),
             hit_regions: Mutex::new(Vec::new()),
@@ -244,7 +246,7 @@ pub(crate) fn set_native_available(app: &AppHandle, available: bool) {
     }
 }
 
-fn refresh_menu(app: &AppHandle) {
+pub(crate) fn refresh_menu(app: &AppHandle) {
     let Some(menus) = app.try_state::<PetMenus>() else {
         return;
     };
@@ -524,13 +526,75 @@ fn shortcut_action(pet: &Pet, shortcut: &Shortcut, event: ShortcutState) -> Opti
         .map(ShortcutAction::Voice)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_voice_for_app_lock(app: &AppHandle) {
+    if let Some(pet) = app.try_state::<Pet>() {
+        pet.reset_voice_shortcut_state();
+    }
+}
+
+fn shortcut_lifetime_current(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState, epoch: u64) -> bool {
+    if !crate::app_lock::is_locked(app) && crate::app_lock::voice_epoch(app) == epoch {
+        return true;
+    }
+    // A press queued before lock may not yet have reached shortcut_action.
+    // Still remember its physical hold so an OS repeat after unlock is not new input.
+    if let Some(pet) = app.try_state::<Pet>() {
+        if parse_shortcut(pet.store().shortcut()).is_ok_and(|key| key == *shortcut) {
+            *lock(&pet.voice_suppressed_until_release) = event == ShortcutState::Pressed;
+        }
+        if event == ShortcutState::Released {
+            let _ = shortcut_action(&pet, shortcut, event);
+        }
+    }
+    false
+}
+
 pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
+    if let Some(pet) = app.try_state::<Pet>() {
+        let voice_key = parse_shortcut(pet.store().shortcut()).is_ok_and(|key| key == *shortcut);
+        if voice_key {
+            let mut suppressed = lock(&pet.voice_suppressed_until_release);
+            if *suppressed {
+                if event == ShortcutState::Released {
+                    *suppressed = false;
+                    let _ = shortcut_action(&pet, shortcut, event);
+                }
+                return;
+            }
+            if crate::app_lock::is_locked(app) && event == ShortcutState::Pressed {
+                *suppressed = true;
+                pet.reset_voice_shortcut_state();
+                drop(suppressed);
+                crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Action, |_| {});
+                return;
+            }
+        }
+    }
+    if crate::app_lock::is_locked(app) {
+        if event == ShortcutState::Pressed {
+            let shortcut = *shortcut;
+            crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Command, move |app| {
+                handle_shortcut(app, &shortcut, ShortcutState::Pressed);
+                handle_shortcut(app, &shortcut, ShortcutState::Released);
+            });
+        } else if let Some(pet) = app.try_state::<Pet>() {
+            // Key-up still ends an admitted physical press. Drain only the
+            // latch; do not reconcile/show a window or dispatch page actions.
+            let _ = shortcut_action(&pet, shortcut, ShortcutState::Released);
+        }
+        return;
+    }
     if !crate::instance_client::local_selected(app) {
         return;
     }
     let handle = app.clone();
     let shortcut = *shortcut;
+    let epoch = crate::app_lock::voice_epoch(app);
     let _ = app.run_on_main_thread(move || {
+        if !shortcut_lifetime_current(&handle, &shortcut, event, epoch) {
+            return;
+        }
         // Build/replace the window before starting its conversation state.
         // Otherwise page_loading would erase the press that created it.
         let window = reconcile_now(&handle);
@@ -540,6 +604,63 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutStat
             None => {}
         }
     });
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_shortcut_cycle(app: &AppHandle, kind: &str, step: &str) -> Result<serde_json::Value, String> {
+    let pet = app.state::<Pet>();
+    if step == "prepare" {
+        pet.set_enabled(true)?;
+        pet.store()
+            .try_set_voice_mode(if kind == "voiceToggle" {
+                VoiceMode::Toggle
+            } else {
+                VoiceMode::Hold
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    let key = {
+        let store = pet.store();
+        parse_shortcut(if kind == "mini" {
+            store.toggle_shortcut()
+        } else {
+            store.shortcut()
+        })?
+    };
+    if step == "suppressed" {
+        return Ok(serde_json::json!(*lock(&pet.voice_suppressed_until_release)));
+    }
+    let action = match step {
+        "stalePress" => {
+            assert!(!shortcut_lifetime_current(
+                app,
+                &key,
+                ShortcutState::Pressed,
+                crate::app_lock::voice_epoch(app).saturating_sub(1)
+            ));
+            None
+        }
+        "nativePress" => {
+            handle_shortcut(app, &key, ShortcutState::Pressed);
+            None
+        }
+        "prepare" => {
+            *lock(&pet.voice_shortcut_state) = VoiceShortcutState::default();
+            *lock(&pet.toggle_shortcut_down) = false;
+            shortcut_action(&pet, &key, ShortcutState::Pressed)
+        }
+        "cancelVoice" => {
+            pet.reset_voice_shortcut_state();
+            None
+        }
+        "release" => {
+            handle_shortcut(app, &key, ShortcutState::Released);
+            None
+        }
+        "next" => shortcut_action(&pet, &key, ShortcutState::Pressed),
+        _ => return Err("unknown shortcut fixture step".into()),
+    };
+    Ok(serde_json::json!(action.map(|action| format!("{action:?}"))))
 }
 
 /// Brings the window in line with the switch and the Runtime the Workbench
@@ -639,6 +760,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let builder = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::External(url))
         .initialization_script(DESKTOP_SHELL_MARKER)
         .initialization_script(PET_DRAG_MARKER)
+        .initialization_script(crate::app_lock::VOICE_MARKER)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Avibe")
         .inner_size(width, height)
@@ -690,8 +812,12 @@ fn initial_anchor(saved: Option<&PetAnchor>, areas: &[WorkArea]) -> PetAnchor {
 
 /// Every way to summon the pet. The hotkey listens; everything else shows.
 pub fn wake(app: &AppHandle, intent: PetIntent) {
+    let epoch = crate::app_lock::voice_epoch(app);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        if crate::app_lock::is_locked(&handle) || crate::app_lock::voice_epoch(&handle) != epoch {
+            return;
+        }
         let window = reconcile_now(&handle);
         deliver_summon(&handle, window, intent);
     });

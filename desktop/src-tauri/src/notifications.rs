@@ -50,6 +50,7 @@ pub(crate) struct AnswerCatalog {
     pub placeholder: String,
     pub not_sent: String,
     pub not_delivered: String,
+    pub answer_again: String,
     pub already_choice: String,
     pub already_text: String,
     pub stale: String,
@@ -488,7 +489,7 @@ pub(crate) fn reconcile(app: &AppHandle) {
     }
 }
 
-fn sync_native_menu(app: &AppHandle, enabled: bool) {
+pub(crate) fn sync_native_menu(app: &AppHandle, enabled: bool) {
     if let Some(menus) = app.try_state::<crate::NativeMenus>() {
         if menus.notifications.set_checked(enabled).is_err() {
             eprintln!("failed to refresh the desktop notification menu");
@@ -568,6 +569,17 @@ pub fn desktop_notifications_open_settings(window: Webview, app: AppHandle) -> R
 pub fn stop(app: &AppHandle) {
     app.state::<Notifications>().stop();
     clear_badge(app);
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_answer(
+    app: &tauri::AppHandle,
+    question: serde_json::Value,
+    action: &str,
+    typed: Option<String>,
+    opens: Option<String>,
+) -> Result<Option<String>, String> {
+    macos::e2e_answer(app, question, action, typed, opens)
 }
 
 #[cfg(test)]

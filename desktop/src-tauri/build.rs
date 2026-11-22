@@ -1,4 +1,10 @@
 fn main() {
+    // Packaging cannot enable the native authentication test peer, including a
+    // release profile that happens to retain debug assertions.
+    if std::env::var_os("CARGO_FEATURE_APP_LOCK_E2E").is_some() && std::env::var("PROFILE").as_deref() == Ok("release")
+    {
+        panic!("app-lock-e2e authentication substitutes must never ship in release builds");
+    }
     println!("cargo:rerun-if-env-changed=AVIBE_DESKTOP_UPDATER_PUBLIC_KEY");
     // Application commands are ungated by default in Tauri v2: any page loaded in
     // any window could invoke them. Declaring them here makes `tauri-build`
@@ -12,6 +18,8 @@ fn main() {
     // update popup fit its own height, and `show-share.json` gives the
     // Workbench and Show app windows the one Show share command.
     let manifest = tauri_build::AppManifest::new().commands(&[
+        "app_lock_status",
+        "app_lock_set_policy",
         "desktop_client_request",
         "update_popover_fit",
         "bootstrap_status",

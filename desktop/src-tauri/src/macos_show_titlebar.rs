@@ -11,9 +11,12 @@
 //! that does not fit. The window's `title` itself is untouched, so the Window
 //! menu, Mission Control and VoiceOver still name it in full.
 //!
-//! It names no crate item, so a probe can compile it from its source file.
+//! The standalone rendering probe supplies an explicit lock-free entry adapter.
 
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 
 use objc2::{
     define_class, msg_send,
@@ -28,6 +31,7 @@ use objc2_app_kit::{
     NSWindowTitleVisibility, NSWindowToolbarStyle, NSWindowWillCloseNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
+use tauri::Manager;
 
 /// The open event, dispatched only while the top document is still on
 /// `route`, the path the window was opened at; the path is JSON-quoted.
@@ -390,7 +394,7 @@ pub fn install(
     window: &tauri::WebviewWindow,
     labels: [String; 4],
     destination: tauri::Url,
-    action: impl Fn(Action) + Send + 'static,
+    action: impl Fn(Action) + Send + Sync + 'static,
 ) {
     let owned = window.clone();
     let _ = window.run_on_main_thread(move || {
@@ -405,25 +409,47 @@ pub fn install(
         // Bind to its registered destination, never the provisional document.
         let origin = destination.origin();
         let route = destination.path().to_owned();
+        // Keep the document check inside the replayed operation: a window may
+        // navigate while authentication is pending. One entry guards all four
+        // actions before either page eval or the native owner callback runs.
+        let perform = Arc::new(move |pressed, replayed| {
+            if !page
+                .url()
+                .is_ok_and(|url| url.origin() == origin && url.path() == route)
+            {
+                return;
+            }
+            if replayed && matches!(pressed, Action::Annotate | Action::Share) {
+                let _ = page.unminimize();
+                let _ = page.show();
+                let _ = page.set_focus();
+            }
+            match pressed {
+                Action::Annotate => {
+                    let _ = page.eval(open_script(&route, "avibe:show-annotate-open"));
+                }
+                Action::Share => {
+                    let _ = page.eval(open_script(&route, "avibe:show-share-open"));
+                }
+                Action::Chat | Action::Browser => action(pressed),
+            }
+        });
         install_on(
             &ns_window,
             mtm,
             &labels,
             Box::new(move |pressed| {
-                if !page
+                if !owned
                     .url()
-                    .is_ok_and(|url| url.origin() == origin && url.path() == route)
+                    .is_ok_and(|url| url.origin() == destination.origin() && url.path() == destination.path())
                 {
                     return;
                 }
-                match pressed {
-                    Action::Annotate => {
-                        let _ = page.eval(open_script(&route, "avibe:show-annotate-open"));
-                    }
-                    Action::Share => {
-                        let _ = page.eval(open_script(&route, "avibe:show-share-open"));
-                    }
-                    Action::Chat | Action::Browser => action(pressed),
+                let pending = perform.clone();
+                if !crate::app_lock::defer_kind(owned.app_handle(), crate::app_lock::EntryKind::Command, move |_| {
+                    pending(pressed, true)
+                }) {
+                    perform(pressed, false);
                 }
             }),
         );

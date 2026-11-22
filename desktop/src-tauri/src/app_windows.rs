@@ -17,7 +17,7 @@ const WINDOW_PREFIX: &str = "avibe-app-";
 const NEW_WINDOW_MARKER: &str = "--new-";
 const MAX_REQUEST: usize = 32768;
 const SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-const NATIVE_APP_WINDOW_MARKER: &str =
+pub(crate) const NATIVE_APP_WINDOW_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true });";
 /// Asks the page whether a close would discard its unsaved state. The answer is
 /// a JSON string so the WebKit bridge never has to serialize a page object.
@@ -873,6 +873,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
             .focused(false)
             .incognito(source.runtime.disposable)
             .initialization_script(NATIVE_APP_WINDOW_MARKER)
+            .initialization_script(crate::app_lock::VOICE_MARKER)
             .initialization_script(PROTOCOL_SCRIPT)
             // Only a Show window learns it can share and export; `show_share` checks again.
             .initialization_script(if matches!(target, AppWindowTarget::ShowPage(_)) {
@@ -1168,12 +1169,18 @@ async fn close_confirmation(window: &WebviewWindow) -> Option<CloseConfirmation>
 /// Whether this window's page state may be discarded. A page with unsaved
 /// state gets a native dialog in front of its own window; only its confirm
 /// button discards. No answer, or nothing unsaved, discards as before.
-async fn confirm_discard(app: &AppHandle, window: &WebviewWindow) -> bool {
+pub(crate) async fn confirm_discard(app: &AppHandle, window: &WebviewWindow) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     let Some(confirmation) = close_confirmation(window).await else {
         return true;
     };
+    let (tx, rx) = tokio::sync::oneshot::channel();
     activate(window);
+    if crate::app_lock::show_discard_question(app, window, move |confirmed| {
+        let _ = tx.send(confirmed);
+    }) {
+        return rx.await.unwrap_or(false);
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .message(confirmation.message)
