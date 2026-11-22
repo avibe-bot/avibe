@@ -169,6 +169,7 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-desktop-notifications",
             "main-instance-client",
             "main-window-focus",
+            "show-share",
             "update-popover"
         ])
     );
@@ -180,7 +181,11 @@ fn the_shell_enables_only_its_declared_capabilities() {
     assert!(popover.get("remote").is_none());
     assert_eq!(
         popover["permissions"],
-        serde_json::json!(["allow-desktop-client-request", "core:window:allow-close"])
+        serde_json::json!([
+            "allow-desktop-client-request",
+            "allow-update-popover-fit",
+            "core:window:allow-close"
+        ])
     );
     let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
     assert!(
@@ -217,6 +222,28 @@ fn native_app_windows_are_main_only_and_loopback_scoped() {
 }
 
 #[test]
+fn show_share_is_one_command_for_the_workbench_and_show_windows_on_loopback() {
+    let grant = read_json(crate_dir().join("capabilities/show-share.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW, "avibe-app-show-*"]));
+    assert!(grant.get("webviews").is_none());
+    assert_eq!(grant["local"], false);
+    assert_eq!(grant["permissions"], serde_json::json!(["allow-desktop-show-share"]));
+    let patterns = loopback_patterns(&grant);
+    for (url, allowed) in [
+        ("http://127.0.0.1:5123/apps/show/ses-1?standalone=1", true),
+        ("http://[::1]:6174/", true),
+        ("https://studio-app.avibe.bot/apps/show/ses-1", false),
+        ("http://127.0.0.1.evil.example/", false),
+        ("tauri://localhost/index.html", false),
+    ] {
+        let url = url::Url::parse(url).unwrap();
+        assert_eq!(patterns.iter().any(|pattern| pattern.test(&url)), allowed, "{url}");
+    }
+}
+
+/// A Show app window may share its own Show (`show-share`) and do nothing else;
+/// every other native app window gets no IPC at all.
+#[test]
 fn no_capability_grants_ipc_to_native_app_windows() {
     use std::collections::BTreeMap;
     use tauri::utils::acl::{capability::Capability, manifest::Manifest, resolved::Resolved};
@@ -238,8 +265,16 @@ fn no_capability_grants_ipc_to_native_app_windows() {
     for target in [Target::MacOS, Target::Windows] {
         let resolved = Resolved::resolve(&manifests, capabilities.clone(), target).expect("valid permissions");
         assert!(!resolved.allowed_commands.is_empty());
+        let mut show_commands = std::collections::BTreeSet::new();
         for (command, grants) in resolved.allowed_commands {
             for grant in grants {
+                let reaches = |label: &str| {
+                    grant
+                        .windows
+                        .iter()
+                        .chain(&grant.webviews)
+                        .any(|pattern| pattern.matches(label))
+                };
                 for label in [
                     "avibe-app-files",
                     "avibe-app-files--new-1",
@@ -247,20 +282,26 @@ fn no_capability_grants_ipc_to_native_app_windows() {
                     "avibe-app-terminal--new-2",
                     "avibe-app-editor",
                     "avibe-app-editor--new-3",
+                    "avibe-app-preview",
+                    "avibe-app-library",
+                ] {
+                    assert!(!reaches(label), "{command} must not grant IPC to {label}");
+                }
+                for label in [
                     "avibe-app-show-73657373696f6e2d31",
                     "avibe-app-show-73657373696f6e2d31--new-4",
                 ] {
-                    assert!(
-                        !grant
-                            .windows
-                            .iter()
-                            .chain(&grant.webviews)
-                            .any(|pattern| pattern.matches(label)),
-                        "{command} must not grant IPC to {label}"
-                    );
+                    if reaches(label) {
+                        show_commands.insert(command.clone());
+                    }
                 }
             }
         }
+        assert_eq!(
+            show_commands.into_iter().collect::<Vec<_>>(),
+            vec!["desktop_show_share".to_owned()],
+            "a Show window may only share its own Show"
+        );
     }
 }
 
@@ -478,7 +519,6 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
         "install(move |raw| crate::receive_native_deep_link(&app, [raw]))",
         "paramDescriptorForKeyword: DIRECT_OBJECT",
         "descriptor?.stringValue()",
-        "setEventHandler: &*handler",
         "forEventClass: GET_URL_EVENT",
         "andEventID: GET_URL_EVENT",
         "RunEvent::Exit",
@@ -486,6 +526,13 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
     ] {
         assert!(native.contains(required), "raw native delivery must retain {required}");
     }
+    // Cross-boundary constants only: the Apple Event macOS sends for a URL and
+    // the launch notification that reclaims it before the first delivery. The
+    // cold-launch ordering itself is AppKit runtime behaviour, checked on a
+    // packaged build (see the PR's TEST RC checks), not by source text.
+    assert!(native.contains("const GET_URL_EVENT: u32 = u32::from_be_bytes(*b\"GURL\");"));
+    assert!(native.contains("const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b\"----\");"));
+    assert!(native.contains("Some(NSApplicationWillFinishLaunchingNotification)"));
     for forbidden in [
         "Url::",
         "currentAppleEvent",
@@ -659,6 +706,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
+        "pet_pointer",
         "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
@@ -666,6 +714,8 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_unbind",
         "pet_open",
         "focus_main_window",
+        "update_popover_fit",
+        "desktop_show_share",
     ];
     let declared: Vec<&str> = commands
         .into_iter()
@@ -1651,6 +1701,7 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
             "allow-pet-context-menu",
             "allow-pet-set-expanded",
             "allow-pet-drag",
+            "allow-pet-pointer",
             "allow-pet-settle",
             "allow-pet-hit-regions",
             "allow-pet-set-dismissed",
@@ -1823,4 +1874,14 @@ fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() 
     ] {
         assert!(!command.contains(forbidden), "the focus command must not {forbidden}");
     }
+}
+
+#[test]
+fn the_shell_asks_the_same_close_guard_key_the_app_pages_register() {
+    // The key is a cross-language byte contract; the close and quit behaviour
+    // itself is owned and tested in `app_windows`.
+    let windows = shipping_source("src/app_windows.rs");
+    let guard = read_to_string(&crate_dir().join("../../ui/src/apps/nativeWindowCloseGuard.ts"));
+    assert!(windows.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__"));
+    assert!(guard.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ ="));
 }

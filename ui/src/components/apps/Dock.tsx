@@ -11,8 +11,7 @@ import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useDock } from '../../context/DockContext';
 import { dockIdToSession } from '../../context/dockDoc';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { tryOpenDesktopAppWindow } from '../../lib/desktopShell';
-import { openLinkInNewContext } from '../../lib/pwaNavigation';
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { useShowPageInventory } from '../useShowPages';
 import { isDragRelease } from './dragClick';
@@ -104,44 +103,15 @@ export const Dock: React.FC = () => {
       ? windows.filter((w) => w.appId === item.id)
       : windows.filter((w) => w.appId === 'showpage' && w.params?.sessionId === item.sessionId);
 
-  const focusWindowDom = (id: string) =>
-    (document.querySelector(`[data-window-id="${id}"]`) as HTMLElement | null)?.focus?.({ preventScroll: true });
-
-  const nativeTargetFor = (item: ResidentItem, newWindow: boolean) => {
-    const target = item.kind === 'builtin'
-      ? { appId: item.id, sessionId: null, title: t(item.def.titleKey) }
-      : { appId: 'showpage', sessionId: item.sessionId, title: item.title };
-    if (!appTabHref({ appId: target.appId, sessionId: target.sessionId })) return null;
-    return { ...target, newWindow };
-  };
-
-  const openNew = async (item: ResidentItem) => {
+  const launchApp = useAppLaunch('dock');
+  const launchItem = (item: ResidentItem, mode: 'activate' | 'newWindow' | 'newTab') => {
     setMenu(null);
-    const nativeTarget = nativeTargetFor(item, true);
-    if (nativeTarget && await tryOpenDesktopAppWindow(nativeTarget)) return;
-    if (item.kind === 'builtin') wm.openApp(item.id as AppId);
-    else wm.openApp('showpage', { title: item.title, params: { sessionId: item.sessionId, title: item.title } });
+    return launchApp(item.kind === 'builtin'
+      ? { appId: item.id as AppId, title: t(item.def.titleKey) }
+      : { appId: 'showpage', sessionId: item.sessionId, title: item.title }, mode);
   };
-
-  // Click a tile: focus its front window, else un-minimize its top window, else
-  // launch one — matched per Show Page by session id (multi-window like built-ins).
-  const activate = async (item: ResidentItem) => {
-    setMenu(null);
-    const nativeTarget = nativeTargetFor(item, false);
-    if (nativeTarget && await tryOpenDesktopAppWindow(nativeTarget)) return;
-    const own = windowsFor(item);
-    const visible = own.filter((w) => !w.minimized);
-    if (visible.length > 0) {
-      const top = visible.reduce((a, b) => (b.z > a.z ? b : a));
-      wm.focus(top.id);
-      focusWindowDom(top.id);
-    } else if (own.length > 0) {
-      wm.restore(own.reduce((a, b) => (b.z > a.z ? b : a)).id);
-    } else {
-      if (item.kind === 'builtin') wm.openApp(item.id as AppId);
-      else wm.openApp('showpage', { title: item.title, params: { sessionId: item.sessionId, title: item.title } });
-    }
-  };
+  const openNew = (item: ResidentItem) => launchItem(item, 'newWindow');
+  const activate = (item: ResidentItem) => launchItem(item, 'activate');
 
   const showAll = (item: ResidentItem) => {
     const own = windowsFor(item);
@@ -166,7 +136,7 @@ export const Dock: React.FC = () => {
     const href = tabHrefFor(item);
     setMenu(null);
     if (!href) return false;
-    openLinkInNewContext(href, 'noopener,noreferrer');
+    void launchItem(item, 'newTab');
     return true;
   };
 
@@ -327,7 +297,7 @@ export const Dock: React.FC = () => {
           <button
             type="button"
             onClick={() => {
-              wm.openApp('library');
+              void launchApp({ appId: 'library' });
               setMenu(null);
             }}
             className="flex items-center gap-2 rounded-xl border border-dashed border-border px-3 py-2.5 text-[12px] font-medium text-muted transition-colors hover:border-cyan/60 hover:text-foreground"

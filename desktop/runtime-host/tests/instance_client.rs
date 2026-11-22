@@ -25,10 +25,43 @@ fn shared_protocol_fixtures_roundtrip_and_keep_private_results_out_of_state() {
         let _: ClientRequest = serde_json::from_value(request.clone()).unwrap();
     }
     let states: Value = serde_json::from_str(include_str!("../../contracts/instance-client-v1/states.json")).unwrap();
-    for state in states.as_object().unwrap().values() {
-        let state: ClientState = serde_json::from_value(state.clone()).unwrap();
+    for sample in states.as_object().unwrap().values() {
+        let state: ClientState = serde_json::from_value(sample.clone()).unwrap();
+        let full = serde_json::to_value(&state).unwrap();
+        assert_eq!(&full["instance_update"], &sample["instance_update"]);
+        assert!(full.get("instance_update").is_some());
+        // The sample is exactly what the shell's validator produces from it.
+        if let Some(snapshot) = sample["instance_update"]["snapshot"].as_object() {
+            let snapshot = Value::Object(snapshot.clone());
+            assert_eq!(
+                avibe_runtime_host::instance_client::instance_update::snapshot(&snapshot).unwrap(),
+                snapshot
+            );
+        }
+        // The shell's own facts about its request are full-state only, and
+        // `installed_from` is a version or null.
+        if let Some(request) = sample["instance_update"]["request"].as_object() {
+            assert!(request["following"].is_boolean());
+            let from = &request["installed_from"];
+            assert!(
+                from.is_null()
+                    || from
+                        .as_str()
+                        .is_some_and(avibe_runtime_host::instance_client::instance_update::is_version)
+            );
+        }
         let projection = state.runtime_projection();
-        for private in ["catalog", "consent", "enrollment", "current_instance"] {
+        let projected = projection.to_string();
+        for private in ["following", "installed_from"] {
+            assert!(!projected.contains(private), "{private}");
+        }
+        for private in [
+            "catalog",
+            "consent",
+            "enrollment",
+            "current_instance",
+            "instance_update",
+        ] {
             assert!(projection.get(private).is_none());
         }
     }
@@ -287,6 +320,40 @@ async fn native_cookie_jar_rejects_cross_authority_and_preserves_private_host_co
             .code,
         "invalid_cookie_scope"
     );
+}
+
+#[tokio::test]
+async fn proof_and_inflight_ceremony_are_memory_only_on_save_and_restore() {
+    let transport = Arc::new(Responses {
+        cookie: Mutex::new(None),
+        received: Mutex::new(vec![]),
+    });
+    let origin: url::Url = "https://account.example/".parse().unwrap();
+    let mut session = NativeSession::new(origin.clone(), transport.clone());
+    let mut old_store = cookie_store::CookieStore::default();
+    for (name, value) in [
+        ("account", "ordinary"),
+        ("__Host-avibe-sign-in-proof", "proof-canary"),
+        ("__Host-avibe-sign-in-start", "start-canary"),
+    ] {
+        let header = format!("{name}={value}; Path=/; Secure; HttpOnly; Max-Age=3600");
+        old_store.parse(&header, &origin).unwrap();
+        *transport.cookie.lock().unwrap() = Some(header);
+        session.request(Method::GET, "/", None).await.unwrap();
+    }
+    let saved = session.persist().unwrap();
+    let text = std::str::from_utf8(&saved).unwrap();
+    assert!(!text.contains("proof-canary") && !text.contains("start-canary"));
+    assert!(session.cookie_value("__Host-avibe-sign-in-proof").is_some());
+    assert!(session.cookie_value("__Host-avibe-sign-in-start").is_some());
+    let mut legacy = vec![];
+    cookie_store::serde::json::save_incl_expired_and_nonpersistent(&old_store, &mut legacy).unwrap();
+    for bytes in [saved, legacy] {
+        let restarted = NativeSession::restore(origin.clone(), transport.clone(), &bytes).unwrap();
+        assert!(restarted.cookie_value("account").as_deref() == Some("ordinary"));
+        assert!(restarted.cookie_value("__Host-avibe-sign-in-proof").is_none());
+        assert!(restarted.cookie_value("__Host-avibe-sign-in-start").is_none());
+    }
 }
 
 #[test]

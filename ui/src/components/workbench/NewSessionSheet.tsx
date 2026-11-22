@@ -6,7 +6,10 @@ import { useNewSession } from '../../lib/useNewSession';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { Dialog, DialogContent, DialogTitle } from '../ui/dialog';
 import { Composer } from './Composer';
-import { NewProjectDialog } from './NewProjectDialog';
+import { LazyNewProjectDialog } from './LazyNewProjectDialog';
+
+/** Start fetching the new-project dialog ahead of the press that opens it. */
+const preloadNewProjectDialog = () => { void LazyNewProjectDialog.preload().catch(() => {}); };
 import { ProjectPicker } from './ProjectPicker';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
@@ -83,6 +86,9 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
     else navigateToSession();
     onClose();
   }, [navigate, onClose, open, pendingNavigation, surfaceActive]);
+
+  // The sheet offers the new-project dialog: have its code in by the time it is asked for.
+  useEffect(() => { if (open) preloadNewProjectDialog(); }, [open]);
 
   // Close the sheet before opening a sibling project dialog so the old modal
   // cannot trap pointer/focus over the new folder picker.
@@ -189,7 +195,7 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
           so the parent modal's focus trap can't make the folder picker / confirm
           step unreachable on mobile. */}
       {newProjectOpen && (
-        <NewProjectDialog
+        <LazyNewProjectDialog
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project) => {
             setNewProjectOpen(false);

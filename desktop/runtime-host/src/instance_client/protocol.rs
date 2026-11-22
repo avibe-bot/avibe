@@ -167,8 +167,20 @@ pub struct ClientState {
     pub current_instance: Option<Instance>,
     pub local: LocalState,
     pub desktop: DesktopState,
+    #[serde(default)]
+    pub instance_update: Option<super::instance_update::InstanceUpdate>,
     pub consent: Option<ConsentState>,
     pub remote_auxiliary: RemoteAuxiliary,
+    /// The ways in avibe.bot's public configuration switches on; empty until read.
+    #[serde(default)]
+    pub sign_in: SignInMethodsState,
+}
+/// avibe.bot's public sign-in switches as native last read them (`/api/config/auth`).
+/// A switch that is missing or false offers nothing.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SignInMethodsState {
+    pub providers: Vec<SignInProvider>,
+    pub passkey: bool,
 }
 impl ClientState {
     pub fn new(name: String, version: String, update: serde_json::Value) -> Self {
@@ -208,9 +220,11 @@ impl ClientState {
                 remote_access: RemoteAccessState::Off,
             },
             desktop: DesktopState { version, update },
+            instance_update: None,
             current_instance: None,
             consent: None,
             remote_auxiliary: RemoteAuxiliary::Local,
+            sign_in: SignInMethodsState::default(),
         }
     }
     /// Runtime pages receive no catalog, enrollment or consent transaction.
@@ -251,6 +265,19 @@ pub enum ClientAction {
         code: String,
     },
     VerifyPasskey,
+    /// Google, GitHub or Apple in the system browser, back through loopback PKCE.
+    /// `locale` is the page's language: the browser's last page speaks it.
+    SignInWithProvider {
+        provider: SignInProvider,
+        #[serde(default)]
+        locale: UiLocale,
+    },
+    /// Passkey sign-in with no email first (not the second-factor passkey).
+    SignInWithPasskey,
+    /// Ends an unfinished sign-in attempt without leaving the account window.
+    AbortSignIn,
+    /// Reads avibe.bot's public sign-in switches into `sign_in`.
+    RefreshSignInMethods,
     BeginTotpEnrollment,
     FinishTotpEnrollment {
         code: String,
@@ -263,6 +290,17 @@ pub enum ClientAction {
     },
     DecideConsent {
         approve: bool,
+    },
+    InstanceUpdateRefresh {},
+    InstanceUpdateCheck {},
+    InstanceUpdateSetPrereleases {
+        enabled: bool,
+    },
+    InstanceUpdateSetAutoUpdate {
+        enabled: bool,
+    },
+    InstanceUpdateInstall {
+        target_version: String,
     },
     UpdateCheck {},
     UpdateSetPrereleases {
@@ -291,6 +329,10 @@ impl std::fmt::Debug for ClientAction {
             Self::VerifyOtp { .. } => "VerifyOtp",
             Self::VerifySecondFactor { .. } => "VerifySecondFactor",
             Self::VerifyPasskey => "VerifyPasskey",
+            Self::SignInWithProvider { .. } => "SignInWithProvider",
+            Self::SignInWithPasskey => "SignInWithPasskey",
+            Self::AbortSignIn => "AbortSignIn",
+            Self::RefreshSignInMethods => "RefreshSignInMethods",
             Self::BeginTotpEnrollment => "BeginTotpEnrollment",
             Self::FinishTotpEnrollment { .. } => "FinishTotpEnrollment",
             Self::RefreshInstances => "RefreshInstances",
@@ -298,6 +340,11 @@ impl std::fmt::Debug for ClientAction {
             Self::RetryLocalRemoteAccess => "RetryLocalRemoteAccess",
             Self::SelectInstance { .. } => "SelectInstance",
             Self::DecideConsent { .. } => "DecideConsent",
+            Self::InstanceUpdateRefresh {} => "InstanceUpdateRefresh",
+            Self::InstanceUpdateCheck {} => "InstanceUpdateCheck",
+            Self::InstanceUpdateSetPrereleases { .. } => "InstanceUpdateSetPrereleases",
+            Self::InstanceUpdateSetAutoUpdate { .. } => "InstanceUpdateSetAutoUpdate",
+            Self::InstanceUpdateInstall { .. } => "InstanceUpdateInstall",
             Self::UpdateCheck { .. } => "UpdateCheck",
             Self::UpdateSetPrereleases { .. } => "UpdateSetPrereleases",
             Self::UpdateSetAutoUpdate { .. } => "UpdateSetAutoUpdate",
@@ -310,6 +357,16 @@ impl std::fmt::Debug for ClientAction {
     }
 }
 impl ClientAction {
+    pub fn is_instance_update(&self) -> bool {
+        matches!(
+            self,
+            Self::InstanceUpdateRefresh {}
+                | Self::InstanceUpdateCheck {}
+                | Self::InstanceUpdateSetPrereleases { .. }
+                | Self::InstanceUpdateSetAutoUpdate { .. }
+                | Self::InstanceUpdateInstall { .. }
+        )
+    }
     pub fn is_desktop_update(&self) -> bool {
         matches!(
             self,
@@ -326,6 +383,42 @@ pub enum CodeMethod {
     Totp,
     Recovery,
 }
+/// The language of the page that asked; the product's two catalogs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLocale {
+    #[default]
+    En,
+    Zh,
+}
+
+/// The other accounts Desktop signs in with, as avibe.bot's login card lists them.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SignInProvider {
+    Google,
+    Github,
+    Apple,
+}
+impl SignInProvider {
+    /// Supabase's provider name.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Github => "github",
+            Self::Apple => "apple",
+        }
+    }
+    /// avibe.bot's public `/api/config/auth` switch for this provider.
+    pub fn enabled_flag(self) -> &'static str {
+        match self {
+            Self::Google => "google_login_enabled",
+            Self::Github => "github_login_enabled",
+            Self::Apple => "apple_login_enabled",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientError {
     pub code: String,

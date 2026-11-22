@@ -415,7 +415,51 @@ instance (a card from a remote HTTPS Workbench, the passkey sheet, and passkey
 PRF from the sandbox frame there); the shell's own `instance_store::retire`
 with a card up; signing out with a card up; and the account screen opened
 while a card is up.
+## Standalone App windows
 
+Files, Terminal, Editor, Preview, Show Page and Library share the native
+`app_windows` owner. Activation reuses the canonical window (or a surviving
+duplicate) and delivers new launch metadata without navigating its document.
+An explicit new-window request creates an independent window. File paths and
+working directories travel as bounded metadata, never in a native URL or shell
+command. The bodies remain the existing Workbench Apps.
+
+The version-1 `avibe-app://launch` navigation protocol is advertised only on
+supported Runtime and App documents. It gives children no shell IPC capability.
+The owner derives authority from the actual published A5 Runtime and its source
+document, and checks that receipt around deferred work. Payload origins and
+page markers cannot select a Runtime. Account, candidate and retired documents
+cannot launch Apps. Legacy `open_app_window({request})` callers retain their
+existing request shape. Concurrent requests capture their current source before
+waiting for the existing App/A5 serialization, then revalidate it after waiting;
+lock contention alone does not retire a document. App completion wakes the
+existing pending deep-link owner after releasing its locks. Show fallback
+deposit also releases its guard and commits its exact delivery before waking
+a successor.
+
+Initial scripts publish `__AVIBE_APP_LAUNCH__` before the body mounts. Repeated
+launches update the same snapshot before `avibe:app-launch`; results use
+`avibe:app-launch-result`. `opened` includes an owned window whose OS focus or
+show request was refused. `fallback` permits Workbench presentation only after
+the native result is absent; `stale` never replays into a successor document.
+Show deep links enter this same owner after normal readiness and A5 guard
+admission. They do not navigate a retained Workbench. A genuine native failure
+can deposit a terminal Show fallback snapshot into the exact surviving main
+document, with native callback confirmation of that deposit. UI consumption
+and its document-lifetime request deduplication are separate evidence.
+
+Remote Apps use individual disposable stores, projecting only the current
+Runtime's same-origin session cookies before navigation. Native completion and
+cookie erasure precede directory release. A failed close retains its cleanup
+receipt and blocks parent Runtime retirement; it never silently reuses that
+store. The finite instance-chain fixture substitutes incognito stores for the
+product's local default store, prohibits process activation before the event
+loop starts, and keeps physical main/App windows hidden from creation. Physical
+show, unminimize and focus effects are suppressed; child WebView role changes
+remain real. Parented popup construction is excluded before parent attachment.
+The fixture can verify native admission, metadata, projection and retirement,
+but does not prove production default-store isolation, installed acceptance,
+popup presentation, window visibility, minimization or OS foreground behavior.
 ## Product packages
 
 The consumer DMG/NSIS build is self-contained. It embeds target-specific
@@ -934,6 +978,36 @@ offers through the top-level `__AVIBE_DESKTOP_PET__` marker. The shell talks
 back with two DOM events, `avibe:pet-summon` and `avibe:pet-bound`, so the
 pet has no event permission. `ui/src/pet/petBridge.ts` is the page contract.
 
+## Ask Vibey (macOS Services)
+
+The macOS Service "Ask Vibey" (zh-Hans 「问 Vibey」) receives only the content
+selected for that Service invocation. The provider does not read the general
+clipboard, monitor selection, or accept paths from a page.
+
+- **Where it goes:** the main window comes to the front and opens the main Bot
+  conversation (`ses_main`) of the instance the window shows. The selection
+  goes into that composer and is never sent.
+- **Formatting:** text is quoted, a link stays bare, and files become composer
+  attachments within the composer's 100 MiB per-file limit.
+- **Order:** each share is appended on its own line.
+- **Not connected yet:** while no Workbench is current (sign-in, account page,
+  unreachable, switching), shares wait in memory in order and one notice says
+  so.
+- **No Vibey conversation:** if the instance can't open Vibey's conversation,
+  a notice says nothing was added.
+- **Delivery channel:** fenced `eval` into the shown Workbench document
+  (`src-tauri/src/compose.rs` ↔ `ui/src/desktop/desktopComposeReceiver.ts`).
+  - Every call is fenced to the current Runtime origin and to the identity of
+    the receiver that document installed.
+  - It adds no Tauri command or capability.
+- **Files:** they follow `selection::ordinary_open` (no final symlink,
+  ordinary files only). At delivery each file must still be the file that was
+  selected.
+- **Menu title and localizations:** the title comes from
+  `src-tauri/macos/{en,zh-Hans}.lproj/ServicesMenu.strings`.
+  `CFBundleLocalizations` is `[en, zh-Hans]`, so English systems keep English
+  system UI strings.
+
 ## Microphone
 
 Workbench voice input records through `getUserMedia` inside the WebView. On
@@ -945,6 +1019,20 @@ description macOS denies access with no prompt; without the entitlement a
 Developer ID–signed build is denied the same way. The first recording shows the
 standard macOS prompt; a later denial is changed in System Settings → Privacy &
 Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
+
+## Local network
+
+The direct path to another computer's instance dials it on the same network.
+macOS (15 and later) asks for Local Network access the first time, and shows
+`NSLocalNetworkUsageDescription`: `src-tauri/Info.plist` has the English
+sentence, `src-tauri/macos/{en,zh-Hans}.lproj/InfoPlist.strings` both
+localizations. They are the iPhone App's sentences
+(`ios/Avibe/Resources/InfoPlist.xcstrings`), and
+`tests/notarization_preflight.rs` holds them equal. A denial is changed in
+System Settings → Privacy & Security → Local Network. The app works either
+way: without the access a same-network path is not found and the instance is
+reached as before. The direct core cannot yet tell a denial from a peer that
+is not reachable, so the app does not say which it is.
 
 ## CI
 

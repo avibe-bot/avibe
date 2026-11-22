@@ -175,6 +175,18 @@ def _schedule(operation_id: str = "wake-up") -> dict:
     return claim
 
 
+def test_first_schedule_claim_requires_originating_session_read_access(isolated_state):
+    from vibe.authorization import AuthorizationContext
+
+    _create()
+    # The standalone Session is not in a Project this remote editor can read.
+    denied = AuthorizationContext(instance_role="editor", subject="guest", is_remote=True)
+    owner = AuthorizationContext(instance_role="owner", subject="owner", is_remote=True)
+    assert claim_next(instance_id="instance-a", device_id="guest-phone", claimant=denied, now=NOW) is None
+    allowed = claim_next(instance_id="instance-a", device_id="owner-phone", claimant=owner, now=NOW)
+    assert allowed["request"]["operationId"] == "wake-up"
+
+
 def test_create_is_canonical_session_bound_idempotent_and_conflict_safe(isolated_state):
     created = _create()
     retried = _create()
@@ -293,7 +305,7 @@ def test_unclaimed_create_expires_but_claimed_create_awaits_device(isolated_stat
     waiting = _get("claimed", now=NOW + timedelta(seconds=31))
     assert waiting["state"] == "awaiting_device"
     assert waiting["status_message"] == (
-        "Waiting for your iPhone to return the result."
+        "Waiting for your device to return the result."
     )
     assert waiting["create"]["terminal_state"] is None
     assert claim_next(
@@ -323,6 +335,7 @@ def test_device_binding_is_sticky_and_exclusions_allow_cancel_to_pass_create(
         device_id="device-a",
         exclude_lease_tokens=[create_claim["leaseToken"]],
         allow_create=False,
+        kinds=[],
         now=NOW,
     ) is None
 
@@ -338,6 +351,7 @@ def test_device_binding_is_sticky_and_exclusions_allow_cancel_to_pass_create(
         device_id="device-a",
         exclude_lease_tokens=[create_claim["leaseToken"]],
         allow_create=False,
+        kinds=[],
         now=NOW + timedelta(seconds=1),
     )
     assert cancel_claim["action"] == "cancel"
@@ -918,3 +932,74 @@ def test_attempt_rows_keep_every_cancel_generation(isolated_state):
         (1, "failed", '["wake-up","cancel",1]'),
         (2, "failed", '["wake-up","cancel",2]'),
     ]
+
+
+@pytest.mark.parametrize("vector", json.loads(CONTRACT_VECTORS.read_text())["claimFilters"], ids=lambda vector: vector["name"])
+def test_claim_kinds_filter_only_unbound_creates(isolated_state, vector):
+    kinds, expected = vector["kinds"], vector["firstKind"]
+    for kind in ("reminder", "alarm"):
+        create_operation(
+            session_id="ses-schedule", instance_id="instance-a", operation_id=f"kind-{kind}",
+            kind=kind, title=kind, fire_at=FIRE_AT, time_zone="America/Los_Angeles", now=NOW - timedelta(seconds=1) if kind == "reminder" else NOW,
+        )
+    claim = claim_next(instance_id="instance-a", device_id="device-a", kinds=kinds, now=NOW)
+    assert (claim["request"]["kind"] if claim else None) == expected
+    if claim:
+        assert claim_next(instance_id="instance-a", device_id="device-a", kinds=[], now=NOW) == claim
+
+
+@pytest.mark.parametrize("kinds", ["alarm", ["calendar"], ["alarm", "alarm"], [None], {}])
+def test_claim_rejects_invalid_kinds(isolated_state, kinds):
+    with pytest.raises(SystemScheduleServiceError) as caught:
+        claim_next(instance_id="instance-a", device_id="device-a", kinds=kinds, now=NOW)
+    assert caught.value.code == "invalid_kinds"
+
+
+@pytest.mark.parametrize("capable_device_returns", [False, True])
+def test_filtered_kind_waits_for_another_device_until_default_expiry(isolated_state, capable_device_returns):
+    create_operation(
+        session_id="ses-schedule", instance_id="instance-a", operation_id="waiting",
+        kind="reminder", title="Reminder", fire_at=FIRE_AT,
+        time_zone="America/Los_Angeles", now=NOW,
+    )
+    assert claim_next(instance_id="instance-a", device_id="ios26", kinds=["alarm"], now=NOW) is None
+    waiting = _get("waiting", now=NOW + timedelta(seconds=299))
+    assert waiting["state"] == "pending"
+    assert waiting["expires_at"] == "2026-11-16T15:05:00.000Z"
+    # The current device cannot establish that no other device supports reminders.
+    if capable_device_returns:
+        claim = claim_next(
+            instance_id="instance-a", device_id="desktop", kinds=["reminder"],
+            now=NOW + timedelta(seconds=299),
+        )
+        assert claim["request"]["operationId"] == "waiting"
+        assert _get("waiting", now=NOW + timedelta(seconds=300))["state"] == "awaiting_device"
+    else:
+        assert _get("waiting", now=NOW + timedelta(seconds=300))["state"] == "expired"
+
+
+def test_kind_claim_checks_only_pending_candidates_by_operation_key(isolated_state):
+    from sqlalchemy.engine import Engine
+    from storage.models import system_schedule_operations
+
+    _create()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        history = dict(conn.execute(select(system_schedule_operations)).mappings().one())
+        conn.execute(system_schedule_operations.insert(), [
+            {**history, "operation_id": f"history-{number}"} for number in range(500)
+        ])
+    plans = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT system_schedule_attempts.") and "system_schedule_operations.kind" in statement:
+            plans.extend(row[3] for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters))
+
+    event.listen(Engine, "before_cursor_execute", capture)
+    try:
+        claim = claim_next(instance_id="instance-a", device_id="ios26", kinds=["alarm"], now=NOW)
+        assert claim["request"]["kind"] == "alarm"
+    finally:
+        event.remove(Engine, "before_cursor_execute", capture)
+    assert any("SEARCH system_schedule_operations" in plan and "(operation_id=?)" in plan for plan in plans), plans
+    assert not any("SCAN " in plan or "LIST SUBQUERY" in plan or "TEMP B-TREE" in plan for plan in plans), plans

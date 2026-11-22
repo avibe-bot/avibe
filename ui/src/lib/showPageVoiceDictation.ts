@@ -1,4 +1,4 @@
-import { emptyVoiceStream, nativeCaptureFactory } from './nativeVoiceCapture';
+import { adoptedCaptureFactory, emptyVoiceStream, nativeCaptureFactory } from './nativeVoiceCapture';
 import {
   finalizeVoiceDictation,
   VOICE_SEGMENT_MS,
@@ -19,6 +19,7 @@ import {
 import { createVoiceActivity, reportVoiceSilenceGate, VOICE_SPEECH_RMS } from './voiceActivity';
 import { VoiceCaptureTrace, type VoiceCaptureClass, type VoiceCaptureEntry } from './voiceCaptureTrace';
 import { VoiceTakeKeeper, type VoiceTakeKeep } from './voiceTakeKeeper';
+import { requestVoiceInputStream } from './voiceInput';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   VoiceRealtimeSession,
@@ -59,8 +60,9 @@ export type ShowPageVoiceDictationInput = {
   /** How the take is recorded (lib/voiceRecording): through Web Audio, or without it (no live
    *  words, no level: its words come on release), or without it and getting no sound at all. */
   onCaptureState?: (state: VoiceCaptureState) => void;
-  /** The iOS App records the take (lib/nativeVoiceCapture) instead of getUserMedia and Web Audio. */
-  nativeCapture?: boolean;
+  /** The iOS App records the take (lib/nativeVoiceCapture) instead of getUserMedia and Web Audio.
+   *  `adopt`: the take is one the App began itself when it recognised the hold; this takes it. */
+  nativeCapture?: boolean | { adopt: string };
   /** When the press that started this take began (`Date.now()`), for the capture trace. */
   pressedAt?: number;
 };
@@ -161,7 +163,7 @@ export class ShowPageVoiceDictation {
     this.cleanupContext = { before: input.before, after: input.after };
     this.dependencies = {
       getUserMedia: dependencies.getUserMedia
-        ?? (() => navigator.mediaDevices.getUserMedia({ audio: true })),
+        ?? (() => requestVoiceInputStream()),
       createPipeline: dependencies.createPipeline
         ?? ((options) => new VoiceRecordingPipeline(options)),
       createRealtime: dependencies.createRealtime
@@ -250,7 +252,13 @@ export class ShowPageVoiceDictation {
       const pipeline = this.dependencies.createPipeline({
         stream,
         trace: this.trace,
-        ...(this.input.nativeCapture ? { createCapture: nativeCaptureFactory } : {}),
+        ...(this.input.nativeCapture
+          ? {
+              createCapture: typeof this.input.nativeCapture === 'object'
+                ? adoptedCaptureFactory(this.input.nativeCapture.adopt)
+                : nativeCaptureFactory,
+            }
+          : {}),
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: this.input.maxFileBytes,
         onSegment: (blob, metadata) => {

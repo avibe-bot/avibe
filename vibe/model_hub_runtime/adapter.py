@@ -51,6 +51,7 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.oauth import oauth_failure_detail
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
+from core.handlers.model_hub import reset_cards
 from core.handlers.model_hub.quota import (
     CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
     QUOTA_FETCH_TIMEOUT_SECONDS,
@@ -60,6 +61,7 @@ from core.handlers.model_hub.quota import (
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.os_errors import local_os_errno
+from vibe.model_hub_runtime import card_use
 from vibe.model_hub_runtime.admission import EngineAdmission, engine_operation
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
@@ -954,6 +956,9 @@ class _AuthRecord:
     status: str = ""
     status_message: str = ""
     unavailable: bool = False
+    # The Google Cloud project an Antigravity grant is bound to; its quota report
+    # is read per project. Account data: kept out of every repr and log line.
+    project_id: str | None = field(default=None, repr=False)
 
 
 def _response_shape_proves_protocol(
@@ -1415,11 +1420,36 @@ def _oauth_account_call_headers(auth: _AuthRecord, normalized_vendor: str) -> di
 
 # The vendors' own quota reports: the same endpoints their CLIs read for
 # `/usage` and `/status`. Anthropic gates its report behind the OAuth beta.
-_SUBSCRIPTION_QUOTA_URLS = {
-    "anthropic": "https://api.anthropic.com/api/oauth/usage",
-    "openai": "https://chatgpt.com/backend-api/wham/usage",
-    "codex": "https://chatgpt.com/backend-api/wham/usage",
+# Antigravity meters consumer accounts on the daily host and is asked on prod
+# only when daily does not answer (404, 408, 5xx); the two can disagree, and
+# daily's reading is the one its own client shows.
+_SUBSCRIPTION_QUOTA_URLS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("https://api.anthropic.com/api/oauth/usage",),
+    "openai": ("https://chatgpt.com/backend-api/wham/usage",),
+    "codex": ("https://chatgpt.com/backend-api/wham/usage",),
+    "gemini": (
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    ),
+    "xai": ("https://cli-chat-proxy.grok.com/v1/billing?format=credits",),
 }
+
+# The client identity the pinned engine itself sends to each upstream (CLIProxyAPI
+# v8.0.63). Antigravity: `misc.AntigravityUserAgent()` at its fallback release
+# (`internal/misc/antigravity_version.go`). Grok: `applyXAIChatHeaders` for the
+# CLI chat proxy, at `helps.DefaultXAIFallbackClientVersion`
+# (`internal/runtime/executor/xai_executor_request.go`). `/api-call` sends the
+# headers it is given, so the read must name that identity itself.
+_ANTIGRAVITY_USER_AGENT = "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)"
+_GROK_CLI_VERSION = "1.0.46"
+_GROK_CLIENT_HEADERS = {
+    "X-XAI-Token-Auth": "xai-grok-cli",
+    "x-grok-client-version": _GROK_CLI_VERSION,
+    "User-Agent": f"xai-grok-workspace/{_GROK_CLI_VERSION}",
+    "x-grok-client-identifier": "grok-shell",
+}
+# Answers on Antigravity's daily host that send the read on to prod.
+_QUOTA_FALLBACK_STATUSES = frozenset({404, 408})
 
 
 def _retry_after_seconds(headers: object) -> float | None:
@@ -1452,22 +1482,38 @@ def _fetch_subscription_quota(
 ) -> dict[str, Any]:
     """Read one grant's quota report and keep only the parsed windows."""
 
-    url = _SUBSCRIPTION_QUOTA_URLS[vendor]
-    headers = _oauth_account_call_headers(auth, vendor)
-    if vendor == "anthropic":
-        headers["anthropic-beta"] = "oauth-2025-04-20"
-    payload = client.management_request(
-        "POST",
-        "/api-call",
-        payload={
-            "auth_index": auth.auth_index,
-            "method": "GET",
-            "url": url,
-            "header": headers,
-        },
-        timeout=QUOTA_FETCH_TIMEOUT_SECONDS,
-    )
-    status = payload.get("status_code")
+    request: dict[str, Any] = {"auth_index": auth.auth_index, "method": "GET"}
+    if vendor == "gemini":
+        if not auth.project_id:
+            # The report is read per project; without one there is nothing to ask.
+            return {"plan": None, "windows": []}
+        request.update(
+            method="POST",
+            header={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer $TOKEN$",
+                "User-Agent": _ANTIGRAVITY_USER_AGENT,
+            },
+            data=json.dumps({"project": auth.project_id}, separators=(",", ":")),
+        )
+    elif vendor == "xai":
+        request["header"] = {"Accept": "application/json", "Authorization": "Bearer $TOKEN$", **_GROK_CLIENT_HEADERS}
+    else:
+        request["header"] = _oauth_account_call_headers(auth, vendor)
+        if vendor == "anthropic":
+            request["header"]["anthropic-beta"] = "oauth-2025-04-20"
+    urls = _SUBSCRIPTION_QUOTA_URLS[vendor]
+    for index, url in enumerate(urls):
+        payload = client.management_request(
+            "POST",
+            "/api-call",
+            payload={**request, "url": url},
+            timeout=QUOTA_FETCH_TIMEOUT_SECONDS,
+        )
+        status = payload.get("status_code")
+        last = index == len(urls) - 1
+        if last or not isinstance(status, int) or not (status in _QUOTA_FALLBACK_STATUSES or status >= 500):
+            break
     if status in {401, 403}:
         raise SubscriptionQuotaError("auth_expired")
     if status == 429:
@@ -1478,13 +1524,46 @@ def _fetch_subscription_quota(
     if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
         raise SubscriptionQuotaError("unavailable")
     parsed = parse_subscription_quota(vendor, payload.get("body"))
-    if vendor == "anthropic" and parsed.get("plan") is None:
-        parsed["plan"] = _fetch_claude_plan(client=client, auth=auth)
+    if vendor in reset_cards.VENDORS:
+        parsed["reset_cards"] = _read_reset_cards(client, request, vendor, payload.get("body"), auth.account_id)
+    if vendor == "anthropic":
+        # One profile read names both the plan and the account this reading was made under.
+        profile = _fetch_claude_profile(client=client, auth=auth)
+        if parsed.get("plan") is None:
+            parsed["plan"] = parse_claude_plan(profile) if profile is not None else None
+        parsed["reset_card_account"] = card_use.account_key_or_none(vendor, profile=profile)
+    elif vendor in reset_cards.VENDORS:
+        parsed["reset_card_account"] = card_use.account_key_or_none(vendor, account_id=auth.account_id)
     return parsed
 
 
-def _fetch_claude_plan(*, client: EngineClient, auth: _AuthRecord) -> str | None:
-    """Claude's usage report names no plan; read it from the profile, best effort."""
+def _read_reset_cards(client: EngineClient, request: dict, vendor: str, usage: object, account: object) -> dict:
+    # Read separately: an error on the opt-in endpoint must not blank windows. Nor
+    # does a ChatGPT usage answer that names another account than ``account``, the
+    # grant's: its cards are unread, its windows are shown as before.
+    try:
+        if vendor == "anthropic":
+            url = _SUBSCRIPTION_QUOTA_URLS[vendor][0] + "?cedar_ember=1&skip_spend=1"
+        else:
+            count = reset_cards.codex_count(usage, account)
+            if not count:
+                return reset_cards.codex_cards(0, None, datetime.now(timezone.utc))
+            url = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+        response = client.management_request(
+            "POST", "/api-call", payload={**request, "url": url}, timeout=QUOTA_FETCH_TIMEOUT_SECONDS
+        )
+        if not isinstance(response, dict) or response.get("status_code") != 200:
+            return reset_cards.unread()
+        body, now = response.get("body"), datetime.now(timezone.utc)
+        return (
+            reset_cards.claude_cards(body, now) if vendor == "anthropic" else reset_cards.codex_cards(count, body, now)
+        )
+    except (EngineClientError, OSError, SubscriptionQuotaError, RecursionError):
+        return reset_cards.unread()
+
+
+def _fetch_claude_profile(*, client: EngineClient, auth: _AuthRecord) -> object | None:
+    """Claude's usage report names neither plan nor account; read the profile, best effort."""
 
     try:
         payload = client.management_request(
@@ -1503,7 +1582,7 @@ def _fetch_claude_plan(*, client: EngineClient, auth: _AuthRecord) -> str | None
     status = payload.get("status_code")
     if not isinstance(status, int) or isinstance(status, bool) or status not in _SUCCESS_STATUSES:
         return None
-    return parse_claude_plan(payload.get("body"))
+    return payload.get("body")
 
 
 def _probe_oauth_control_plane_witness(
@@ -3694,6 +3773,78 @@ class CLIProxyEngineAdapter:
     async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
         """Read the bound grant's rate-limit windows without starting the engine."""
 
+        client, auth, normalized_vendor = await self._subscription_binding(source_id, vendor, credential_ref)
+        try:
+            return await run_owned_in_thread(
+                _fetch_subscription_quota,
+                client=client,
+                auth=auth,
+                vendor=normalized_vendor,
+            )
+        except (EngineClientError, OSError):
+            raise SubscriptionQuotaError("unavailable") from None
+
+    @engine_operation
+    async def reset_card_account_key(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        """Read, fresh, which vendor account this Source's grant belongs to; None when it cannot be read."""
+
+        try:
+            client, auth, normalized_vendor = await self._subscription_binding(source_id, vendor, credential_ref)
+            if normalized_vendor not in reset_cards.VENDORS:
+                return None
+            return await run_owned_in_thread(
+                card_use.account_key,
+                client=client,
+                auth=auth,
+                vendor=normalized_vendor,
+                headers=_oauth_account_call_headers(auth, normalized_vendor),
+            )
+        except Exception:  # noqa: BLE001 - no upstream or engine text may leave this boundary
+            return None
+
+    @engine_operation
+    async def use_reset_card(
+        self,
+        source_id: str,
+        vendor: str,
+        credential_ref: str,
+        kind: str,
+        request_id: str,
+        expected_key: str,
+        expected_count: int,
+    ) -> dict[str, Any]:
+        """Send the one use request for this press. Called once per press; nothing here repeats it."""
+
+        try:
+            client, auth, normalized_vendor = await self._subscription_binding(source_id, vendor, credential_ref)
+        except SubscriptionQuotaError:
+            # No engine or no grant to send with: nothing was sent.
+            return {"statement": card_use.NO_CARD}
+        if normalized_vendor not in reset_cards.VENDORS:
+            return {"statement": card_use.NO_CARD}
+        headers = _oauth_account_call_headers(auth, normalized_vendor)
+        if normalized_vendor == "anthropic":
+            headers["anthropic-beta"] = "oauth-2025-04-20"
+        return await run_owned_in_thread(
+            card_use.use_once,
+            client=client,
+            auth=auth,
+            vendor=normalized_vendor,
+            kind=kind,
+            request_id=request_id,
+            headers=headers,
+            expected_key=expected_key,
+            expected_count=expected_count,
+        )
+
+    async def _subscription_binding(
+        self,
+        source_id: str,
+        vendor: str,
+        credential_ref: str,
+    ) -> tuple[EngineClient, _AuthRecord, str]:
+        """The running engine's client and the one auth record bound to this Source's grant."""
+
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None or normalized_vendor not in _SUBSCRIPTION_QUOTA_URLS:
@@ -3727,15 +3878,7 @@ class CLIProxyEngineAdapter:
         ]
         if len(matches) != 1:
             raise SubscriptionQuotaError("unavailable")
-        try:
-            return await run_owned_in_thread(
-                _fetch_subscription_quota,
-                client=client,
-                auth=matches[0],
-                vendor=normalized_vendor,
-            )
-        except (EngineClientError, OSError):
-            raise SubscriptionQuotaError("unavailable") from None
+        return client, matches[0], normalized_vendor
 
     @engine_operation
     async def oauth_status(self, flow_id: str) -> OAuthFlowState:
@@ -4350,6 +4493,7 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
                 provider=provider,
                 fingerprint=fingerprint,
                 account_id=account_id,
+                project_id=str(item.get("project_id") or "").strip() or None,
                 status=str(item.get("status") or "").strip().lower(),
                 status_message=str(item.get("status_message") or "").strip(),
                 unavailable=bool(item.get("unavailable")),

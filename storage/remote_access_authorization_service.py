@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Mapping
 
-from sqlalchemy import Integer, and_, cast, delete, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 
@@ -30,10 +30,6 @@ INSTANCE_BINDING_LOCK_FILENAME = "remote-access-instance-binding.lock"
 # is the Unix time after which no cookie of that session can still be valid, so
 # the row can be dropped.
 REVOKED_BROWSER_SESSION_KEY_PREFIX = "remote_access.revoked_browser_session.v1:"
-# The first key after every prefixed one, so the prefix is an index range.
-_REVOKED_BROWSER_SESSION_KEY_END = REVOKED_BROWSER_SESSION_KEY_PREFIX[:-1] + chr(
-    ord(REVOKED_BROWSER_SESSION_KEY_PREFIX[-1]) + 1
-)
 
 
 def store(
@@ -328,36 +324,23 @@ def mark_matching_revision_checked(
     return int(result.rowcount or 0)
 
 
-def revoke_browser_session(session_id: str, *, expires_at: int, now: int) -> None:
-    """Record a browser sign-out that outlives the process, and drop lapsed ones."""
+def revoke_browser_session(session_id: str, *, expires_at: int, now: int) -> bool:
+    """Commit the session tombstone first; return whether scoped Health cleanup is deferred."""
+    from storage import device_registry, device_health_registry
 
     _ensure_sqlite_state()
-    key = REVOKED_BROWSER_SESSION_KEY_PREFIX + session_id
-    value = str(int(expires_at))
-    updated_at = str(int(now))
     engine = get_cached_sqlite_engine()
     with engine.begin() as conn:
-        conn.execute(
-            state_meta.delete()
-            .where(state_meta.c.key >= REVOKED_BROWSER_SESSION_KEY_PREFIX)
-            .where(state_meta.c.key < _REVOKED_BROWSER_SESSION_KEY_END)
-            .where(cast(state_meta.c.value_json, Integer) <= int(now))
-        )
-        statement = sqlite_insert(state_meta).values(
-            key=key,
-            value_json=value,
-            updated_at=updated_at,
-        )
-        conn.execute(
-            statement.on_conflict_do_update(
-                index_elements=[state_meta.c.key],
-                set_={"value_json": value, "updated_at": updated_at},
-                where=cast(state_meta.c.value_json, Integer) < int(expires_at),
-            )
-        )
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+        pending = device_registry.revoke_sid(conn, session_id, expires_at, now)
+        device_registry.prune(conn, now)
+    return device_health_registry.finish_pending(engine, pending)
 
 
-def browser_session_is_revoked(session_id: str, *, now: int) -> bool:
+def browser_session_is_revoked(session_id: str, *, now: int, binding: str = "",
+                               subject: str = "", auth_time: int = 0) -> bool:
+    from storage.device_registry import fenced
+
     engine = get_cached_sqlite_engine()
     try:
         with engine.connect() as conn:
@@ -366,9 +349,12 @@ def browser_session_is_revoked(session_id: str, *, now: int) -> bool:
                     state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + session_id
                 )
             ).scalar_one_or_none()
+            if raw is None and binding and subject:
+                return fenced(conn, binding, subject, session_id, auth_time, now)
     except OperationalError as exc:
-        # A database that predates state_meta has recorded no sign-out.
-        if "no such table" in str(exc).lower():
+        # Fresh storage before bootstrap predates every revocation. A missing
+        # registry table on a populated DB is NOT permission to bypass a fence.
+        if "no such table: state_meta" in str(exc).lower():
             return False
         raise
     if raw is None:

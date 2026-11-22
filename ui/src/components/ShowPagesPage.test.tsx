@@ -17,7 +17,8 @@ vi.mock('../context/DockContext', () => ({
   }),
 }));
 
-vi.mock('../context/WindowManagerContext', () => ({
+vi.mock('../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../context/WindowManagerContext')>()),
   useWindowManager: () => ({
     windows: [],
     setParams: vi.fn(),

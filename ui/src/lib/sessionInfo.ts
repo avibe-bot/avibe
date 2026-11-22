@@ -16,6 +16,8 @@ export type InstanceCapabilities = {
   can_use_terminal: boolean;
   can_use_files: boolean;
   can_use_system: boolean;
+  /** Spending a Model Hub subscription's reset cards: the Owner only. */
+  can_use_model_hub_reset_cards: boolean;
 };
 
 export type InstanceKind = 'personal' | 'organization';
@@ -72,6 +74,7 @@ export const DENIED_INSTANCE_CAPABILITIES: InstanceCapabilities = {
   can_use_terminal: false,
   can_use_files: false,
   can_use_system: false,
+  can_use_model_hub_reset_cards: false,
 };
 
 export const OWNER_INSTANCE_CAPABILITIES: InstanceCapabilities = Object.fromEntries(

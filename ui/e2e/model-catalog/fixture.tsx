@@ -16,6 +16,9 @@ import { RouteFixture } from './routeFixture';
 import { TokenScopeFixture } from './tokenScopeFixture';
 import { UsageFixture } from './usageFixture';
 import { ShellFixture } from './shellFixture';
+import { installResetCardsFixture } from './resetCardsFixture';
+import { InstanceAuthorizationContext } from '../../src/context/InstanceAuthorizationContext';
+import { OWNER_INSTANCE_CAPABILITIES } from '../../src/lib/sessionInfo';
 
 const params = new URLSearchParams(location.search);
 const backend = params.get('backend') as AgentBackend;
@@ -67,11 +70,17 @@ export function Fixture() {
   </I18nextProvider>;
 }
 
-if (params.get('view') === 'shell') {
+if (params.get('view') === 'shell' || params.get('view') === 'reset-cards') {
   document.documentElement.dataset.theme = params.get('theme') ?? 'dark';
 }
+if (params.get('view') === 'reset-cards') installResetCardsFixture(params.get('state') ?? 'both-kinds');
 
-createRoot(document.getElementById('root')!).render(params.get('view') === 'shell'
+createRoot(document.getElementById('root')!).render(params.get('view') === 'reset-cards'
+  // The Owner, the one reader who may spend cards.
+  ? <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}>
+    <I18nextProvider i18n={language}><ShellFixture /></I18nextProvider>
+  </InstanceAuthorizationContext.Provider>
+  : params.get('view') === 'shell'
   ? <I18nextProvider i18n={language}><ShellFixture /></I18nextProvider>
   : params.get('view') === 'gateway'
   ? <I18nextProvider i18n={language}><GatewayFixture /></I18nextProvider>

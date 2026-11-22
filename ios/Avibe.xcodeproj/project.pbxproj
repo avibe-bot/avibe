@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		8D1000000000000000000001 /* AppLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000011 /* AppLock.swift */; };
+		8D1000000000000000000002 /* AppLockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000012 /* AppLockView.swift */; };
+		8D1000000000000000000003 /* AppLockBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000013 /* AppLockBridge.swift */; };
+		8D1000000000000000000004 /* AppLockBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000013 /* AppLockBridge.swift */; };
+		8D1000000000000000000005 /* AppLockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000014 /* AppLockTests.swift */; };
 		8C1000000000000000000004 /* ShowShareForegroundTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000013 /* ShowShareForegroundTests.swift */; };
 		8C1000000000000000000001 /* ShowShareCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000011 /* ShowShareCoordinator.swift */; };
 		8C1000000000000000000002 /* ShowShareCoordinator.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000011 /* ShowShareCoordinator.swift */; };
@@ -23,10 +28,13 @@
 		1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F5 /* DirectPathAppTests.swift */; };
 		1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F6 /* DirectPublicBackend.swift */; };
 		1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F7 /* DirectPublicBackendTests.swift */; };
+		1000000000000000000000FA /* DeviceDescriptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000FA /* DeviceDescriptionTests.swift */; };
 		100000000000000000000003 /* NavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		100000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* RootView.swift */; };
 		100000000000000000000005 /* WebOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		3C0000000000000000000001 /* RuntimePageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C0000000000000000000002 /* RuntimePageCache.swift */; };
+		3D0000000000000000000001 /* DirectPathPreference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D0000000000000000000002 /* DirectPathPreference.swift */; };
+		3E0000000000000000000001 /* DepartedInstanceData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E0000000000000000000002 /* DepartedInstanceData.swift */; };
 		100000000000000000000006 /* WebViewContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* WebViewContainer.swift */; };
 		100000000000000000000007 /* WebViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* WebViewController.swift */; };
 		100000000000000000000008 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Localizable.xcstrings */; };
@@ -92,6 +100,8 @@
 			1000000000000000000000C1 /* native-subscription-key.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C1 /* native-subscription-key.json */; };
 		910000000000000000000001 /* SheetFixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000001 /* SheetFixtureApp.swift */; };
 		910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000002 /* FixtureKeyboardViewport.swift */; };
+		910000000000000000000155 /* FixtureHoldPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000007 /* FixtureHoldPage.swift */; };
+		910000000000000000000156 /* HoldTouchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000004 /* HoldTouchUITests.swift */; };
 		910000000000000000000003 /* MobileAccount.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
@@ -107,6 +117,7 @@
 		91000000000000000000000F /* NativeBadge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
 		91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000006 /* FixtureNativeBridgeSupport.swift */; };
+		3D0000000000000000000003 /* DirectPathPreference.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 3D0000000000000000000002 /* DirectPathPreference.swift */; };
 		91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
 		910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000001 /* InstanceSheetGestureUITests.swift */; };
 		100000000000000000000141 /* DirectIrohInteropWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000141 /* DirectIrohInteropWire.swift */; };
@@ -119,6 +130,7 @@
 		16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */; };
 		16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000005 /* VoiceCaptureRecorder.swift */; };
 		1B0000000000000000000034 /* NativeHoldCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000034 /* NativeHoldCapture.swift */; };
+		1B0000000000000000000036 /* VoiceCaptureOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000036 /* VoiceCaptureOutbox.swift */; };
 		16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
 		16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000001 /* VoiceCaptureActivity.swift */; };
 		16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000012 /* Localizable.xcstrings */; };
@@ -132,6 +144,7 @@
 		16000000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
 		16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000030 /* VoiceCaptureTests.swift */; };
 		1B0000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000035 /* NativeHoldCaptureTests.swift */; };
+		1B0000000000000000000037 /* VoiceCaptureOutboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000037 /* VoiceCaptureOutboxTests.swift */; };
 		16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000031 /* VoiceCaptureAlert.swift */; };
 		1A0000000000000000000000 /* HealthDataReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000000 /* HealthDataReader.swift */; };
 		1A0000000000000000000001 /* HealthDeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000001 /* HealthDeviceStore.swift */; };
@@ -142,6 +155,15 @@
 		1A0000000000000000000006 /* HealthSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000006 /* HealthSyncTests.swift */; };
 		16000000000000000000000032 /* VoiceCaptureFailureNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */; };
 		16000000000000000000000033 /* VoiceCaptureBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000033 /* VoiceCaptureBanner.swift */; };
+		A15B00000000000000000011 /* TurnActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000001 /* TurnActivityAttributes.swift */; };
+		A15B00000000000000000012 /* TurnActivityCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000002 /* TurnActivityCoordinator.swift */; };
+		A15B00000000000000000013 /* TurnLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* TurnLiveActivity.swift */; };
+		A15B00000000000000000014 /* TurnActivityAttributes.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000001 /* TurnActivityAttributes.swift */; };
+		A15B00000000000000000015 /* TurnLiveActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* TurnLiveActivity.swift */; };
+		A15B00000000000000000016 /* TurnActivity.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000004 /* TurnActivity.xcstrings */; };
+		A15B00000000000000000017 /* TurnActivity.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000004 /* TurnActivity.xcstrings */; };
+		A15B00000000000000000018 /* TurnActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000005 /* TurnActivityTests.swift */; };
+		A15B00000000000000000019 /* contract_vectors.json in Resources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000006 /* contract_vectors.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -190,6 +212,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		8D1000000000000000000011 /* AppLock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLock.swift; sourceTree = "<group>"; };
+		8D1000000000000000000012 /* AppLockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockView.swift; sourceTree = "<group>"; };
+		8D1000000000000000000013 /* AppLockBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockBridge.swift; sourceTree = "<group>"; };
+		8D1000000000000000000014 /* AppLockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockTests.swift; sourceTree = "<group>"; };
 		8C1000000000000000000013 /* ShowShareForegroundTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareForegroundTests.swift; sourceTree = "<group>"; };
 		8C1000000000000000000011 /* ShowShareCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareCoordinator.swift; sourceTree = "<group>"; };
 		8C1000000000000000000012 /* ShowShareTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareTests.swift; sourceTree = "<group>"; };
@@ -203,10 +229,13 @@
 		2000000000000000000000F5 /* DirectPathAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathAppTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000F6 /* DirectPublicBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackend.swift; sourceTree = "<group>"; };
 		2000000000000000000000F7 /* DirectPublicBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackendTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000FA /* DeviceDescriptionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDescriptionTests.swift; sourceTree = "<group>"; };
 		200000000000000000000003 /* NavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicy.swift; sourceTree = "<group>"; };
 		200000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		200000000000000000000005 /* WebOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebOrigin.swift; sourceTree = "<group>"; };
 		3C0000000000000000000002 /* RuntimePageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimePageCache.swift; sourceTree = "<group>"; };
+		3D0000000000000000000002 /* DirectPathPreference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathPreference.swift; sourceTree = "<group>"; };
+		3E0000000000000000000002 /* DepartedInstanceData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepartedInstanceData.swift; sourceTree = "<group>"; };
 		200000000000000000000006 /* WebViewContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewContainer.swift; sourceTree = "<group>"; };
 		200000000000000000000007 /* WebViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewController.swift; sourceTree = "<group>"; };
 		200000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -273,6 +302,8 @@
 			2000000000000000000000C1 /* native-subscription-key.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = native-subscription-key.json; sourceTree = "<group>"; };
 		920000000000000000000001 /* SheetFixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetFixtureApp.swift; sourceTree = "<group>"; };
 		920000000000000000000002 /* FixtureKeyboardViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureKeyboardViewport.swift; sourceTree = "<group>"; };
+		920000000000000000000007 /* FixtureHoldPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureHoldPage.swift; sourceTree = "<group>"; };
+		930000000000000000000004 /* HoldTouchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoldTouchUITests.swift; sourceTree = "<group>"; };
 		920000000000000000000003 /* FixtureMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; path = FixtureMobile; sourceTree = "<group>"; };
 		920000000000000000000004 /* AvibeSheetFixture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AvibeSheetFixture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		920000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -289,6 +320,7 @@
 		26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureInstanceClient.swift; sourceTree = "<group>"; };
 		26000000000000000000000005 /* VoiceCaptureRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureRecorder.swift; sourceTree = "<group>"; };
 		2B0000000000000000000034 /* NativeHoldCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCapture.swift; sourceTree = "<group>"; };
+		2B0000000000000000000036 /* VoiceCaptureOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureOutbox.swift; sourceTree = "<group>"; };
 		26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureLiveActivity.swift; sourceTree = "<group>"; };
 		26000000000000000000000011 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		26000000000000000000000012 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
@@ -299,6 +331,7 @@
 		26000000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		26000000000000000000000030 /* VoiceCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureTests.swift; sourceTree = "<group>"; };
 		2B0000000000000000000035 /* NativeHoldCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCaptureTests.swift; sourceTree = "<group>"; };
+		2B0000000000000000000037 /* VoiceCaptureOutboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureOutboxTests.swift; sourceTree = "<group>"; };
 		26000000000000000000000031 /* VoiceCaptureAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureAlert.swift; sourceTree = "<group>"; };
 		2A0000000000000000000000 /* HealthDataReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataReader.swift; sourceTree = "<group>"; };
 		2A0000000000000000000001 /* HealthDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDeviceStore.swift; sourceTree = "<group>"; };
@@ -309,6 +342,12 @@
 		2A0000000000000000000006 /* HealthSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthSyncTests.swift; sourceTree = "<group>"; };
 		26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureFailureNotification.swift; sourceTree = "<group>"; };
 		26000000000000000000000033 /* VoiceCaptureBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureBanner.swift; sourceTree = "<group>"; };
+		A15A00000000000000000001 /* TurnActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityAttributes.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000002 /* TurnActivityCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityCoordinator.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000003 /* TurnLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnLiveActivity.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000004 /* TurnActivity.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = "TurnActivity.xcstrings"; sourceTree = "<group>"; };
+		A15A00000000000000000005 /* TurnActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityTests.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000006 /* contract_vectors.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "../tests/fixtures/live_activity/contract_vectors.json"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -375,6 +414,7 @@
 			isa = PBXGroup;
 			children = (
 				700000000000000000000002 /* Avibe */,
+				A15A00000000000000000006 /* contract_vectors.json */,
 				700000000000000000000009 /* AvibeSheetFixture */,
 				70000000000000000000000A /* AvibeSheetFixtureTests */,
 				700000000000000000000004 /* AvibeTests */,
@@ -414,21 +454,29 @@
 				200000000000000000000145 /* SystemSchedule.swift */,
 				200000000000000000000010 /* NativeBridge.swift */,
 				8C1000000000000000000011 /* ShowShareCoordinator.swift */,
+				8D1000000000000000000011 /* AppLock.swift */,
+				8D1000000000000000000012 /* AppLockView.swift */,
+				8D1000000000000000000013 /* AppLockBridge.swift */,
 				2000000000000000000000A2 /* NativePushCoordinator.swift */,
 				200000000000000000000003 /* NavigationPolicy.swift */,
 				2000000000000000000000A3 /* PushCrypto.swift */,
 				2000000000000000000000A4 /* PushKeychainStore.swift */,
 				200000000000000000000004 /* RootView.swift */,
 				3C0000000000000000000002 /* RuntimePageCache.swift */,
+				3D0000000000000000000002 /* DirectPathPreference.swift */,
+				3E0000000000000000000002 /* DepartedInstanceData.swift */,
 				200000000000000000000005 /* WebOrigin.swift */,
 				200000000000000000000006 /* WebViewContainer.swift */,
 				200000000000000000000007 /* WebViewController.swift */,
 				26000000000000000000000001 /* VoiceCaptureActivity.swift */,
+				A15A00000000000000000002 /* TurnActivityCoordinator.swift */,
+				A15A00000000000000000001 /* TurnActivityAttributes.swift */,
 				26000000000000000000000002 /* VoiceCaptureIntent.swift */,
 				26000000000000000000000003 /* VoiceCaptureController.swift */,
 				26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */,
 				26000000000000000000000005 /* VoiceCaptureRecorder.swift */,
 				2B0000000000000000000034 /* NativeHoldCapture.swift */,
+				2B0000000000000000000036 /* VoiceCaptureOutbox.swift */,
 				26000000000000000000000031 /* VoiceCaptureAlert.swift */,
 				26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */,
 				26000000000000000000000033 /* VoiceCaptureBanner.swift */,
@@ -467,13 +515,17 @@
 				2000000000000000000000F5 /* DirectPathAppTests.swift */,
 				2000000000000000000000F4 /* DirectPathControllerTests.swift */,
 				2000000000000000000000F7 /* DirectPublicBackendTests.swift */,
+				2000000000000000000000FA /* DeviceDescriptionTests.swift */,
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
 				26000000000000000000000030 /* VoiceCaptureTests.swift */,
+				A15A00000000000000000005 /* TurnActivityTests.swift */,
 				2B0000000000000000000035 /* NativeHoldCaptureTests.swift */,
+				2B0000000000000000000037 /* VoiceCaptureOutboxTests.swift */,
 				8C1000000000000000000012 /* ShowShareTests.swift */,
+				8D1000000000000000000014 /* AppLockTests.swift */,
 				8C1000000000000000000013 /* ShowShareForegroundTests.swift */,
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
 				200000000000000000000146 /* SystemScheduleTests.swift */,
@@ -545,6 +597,7 @@
 			children = (
 				920000000000000000000001 /* SheetFixtureApp.swift */,
 				920000000000000000000002 /* FixtureKeyboardViewport.swift */,
+				920000000000000000000007 /* FixtureHoldPage.swift */,
 				920000000000000000000006 /* FixtureNativeBridgeSupport.swift */,
 				920000000000000000000003 /* FixtureMobile */,
 				920000000000000000000005 /* Info.plist */,
@@ -555,6 +608,7 @@
 		70000000000000000000000A /* AvibeSheetFixtureTests */ = {
 			isa = PBXGroup;
 			children = (
+				930000000000000000000004 /* HoldTouchUITests.swift */,
 				930000000000000000000001 /* InstanceSheetGestureUITests.swift */,
 				930000000000000000000003 /* RealBundleCaptureUITests.swift */,
 			);
@@ -571,6 +625,8 @@
 				26000000000000000000000013 /* PrivacyInfo.xcprivacy */,
 				26000000000000000000000015 /* VoiceCapture.xcstrings */,
 				26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */,
+				A15A00000000000000000004 /* TurnActivity.xcstrings */,
+				A15A00000000000000000003 /* TurnLiveActivity.swift */,
 			);
 			path = AvibeLiveActivity;
 			sourceTree = "<group>";
@@ -774,6 +830,7 @@
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
 				16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */,
 				16000000000000000000000019 /* Assets.xcassets in Resources */,
+				A15B00000000000000000017 /* TurnActivity.xcstrings in Resources */,
 				10000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */,
 				100000000000000000000012 /* MobileApp in Resources */,
 			);
@@ -785,6 +842,7 @@
 			files = (
 					1000000000000000000000C1 /* native-subscription-key.json in Resources */,
 				1000000000000000000000AB /* relay-apns-envelope.json in Resources */,
+				A15B00000000000000000019 /* contract_vectors.json in Resources */,
 				1000000000000000000000AC /* instance-webpush-receiver.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -822,6 +880,7 @@
 				16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */,
 				16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */,
 				16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */,
+				A15B00000000000000000016 /* TurnActivity.xcstrings in Live Activity Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -981,6 +1040,9 @@
 				100000000000000000000145 /* SystemSchedule.swift in Sources */,
 				10000000000000000000000D /* NativeBridge.swift in Sources */,
 				8C1000000000000000000001 /* ShowShareCoordinator.swift in Sources */,
+				8D1000000000000000000001 /* AppLock.swift in Sources */,
+				8D1000000000000000000002 /* AppLockView.swift in Sources */,
+				8D1000000000000000000003 /* AppLockBridge.swift in Sources */,
 				1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */,
 				100000000000000000000003 /* NavigationPolicy.swift in Sources */,
 				1000000000000000000000A3 /* PushCrypto.swift in Sources */,
@@ -989,19 +1051,25 @@
 				1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */,
 				100000000000000000000004 /* RootView.swift in Sources */,
 				3C0000000000000000000001 /* RuntimePageCache.swift in Sources */,
+				3D0000000000000000000001 /* DirectPathPreference.swift in Sources */,
+				3E0000000000000000000001 /* DepartedInstanceData.swift in Sources */,
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
 				100000000000000000000006 /* WebViewContainer.swift in Sources */,
 				100000000000000000000007 /* WebViewController.swift in Sources */,
 				16000000000000000000000001 /* VoiceCaptureActivity.swift in Sources */,
+				A15B00000000000000000012 /* TurnActivityCoordinator.swift in Sources */,
+				A15B00000000000000000011 /* TurnActivityAttributes.swift in Sources */,
 				16000000000000000000000002 /* VoiceCaptureIntent.swift in Sources */,
 				16000000000000000000000003 /* VoiceCaptureController.swift in Sources */,
 				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
 				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
 				1B0000000000000000000034 /* NativeHoldCapture.swift in Sources */,
+				1B0000000000000000000036 /* VoiceCaptureOutbox.swift in Sources */,
 				16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */,
 				16000000000000000000000032 /* VoiceCaptureFailureNotification.swift in Sources */,
 				16000000000000000000000033 /* VoiceCaptureBanner.swift in Sources */,
 				16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */,
+				A15B00000000000000000013 /* TurnLiveActivity.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
 				100000000000000000000136 /* DirectIrohBinding.swift in Sources */,
@@ -1021,13 +1089,17 @@
 				1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */,
 				1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */,
 				1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */,
+				1000000000000000000000FA /* DeviceDescriptionTests.swift in Sources */,
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
 				16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */,
+				A15B00000000000000000018 /* TurnActivityTests.swift in Sources */,
 				1B0000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */,
+				1B0000000000000000000037 /* VoiceCaptureOutboxTests.swift in Sources */,
 				8C1000000000000000000003 /* ShowShareTests.swift in Sources */,
+				8D1000000000000000000005 /* AppLockTests.swift in Sources */,
 				8C1000000000000000000004 /* ShowShareForegroundTests.swift in Sources */,
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
 				100000000000000000000146 /* SystemScheduleTests.swift in Sources */,
@@ -1075,9 +1147,12 @@
 				910000000000000000000153 /* NativeHoldCapture.swift in Fixture Sources */,
 				910000000000000000000154 /* NavigationPolicy.swift in Fixture Sources */,
 				8C1000000000000000000002 /* ShowShareCoordinator.swift in Fixture Sources */,
+				8D1000000000000000000004 /* AppLockBridge.swift in Fixture Sources */,
 				91000000000000000000000F /* NativeBadge.swift in Fixture Sources */,
 				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,
+				3D0000000000000000000003 /* DirectPathPreference.swift in Fixture Sources */,
 				910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */,
+				910000000000000000000155 /* FixtureHoldPage.swift in Sources */,
 				910000000000000000000003 /* MobileAccount.swift in Fixture Sources */,
 				910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */,
 				910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */,
@@ -1093,6 +1168,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				910000000000000000000156 /* HoldTouchUITests.swift in Sources */,
 				910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */,
 				91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */,
 			);
@@ -1103,7 +1179,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */,
+				A15B00000000000000000014 /* TurnActivityAttributes.swift in Live Activity Sources */,
 				16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */,
+				A15B00000000000000000015 /* TurnLiveActivity.swift in Live Activity Sources */,
 				16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

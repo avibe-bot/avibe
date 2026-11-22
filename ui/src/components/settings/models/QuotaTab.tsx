@@ -1,8 +1,10 @@
 // 订阅额度 — each logged-in subscription's own rate-limit windows
 // (`quota-summary.schema.json`).
 //
-// Like 用量 it is a report and only a report: nothing here feeds resolution,
-// admission, or cooldown. Beside the quota it states what the same use would
+// Like 用量 it is a report: nothing here feeds resolution or admission. The
+// refresh the user presses is the one exception, on the server: it resumes an
+// account paused for quota once the vendor reports quota again, so the page
+// reads its providers behind that refresh. Beside the quota it states what the same use would
 // cost at list API prices (the optional `value` block), against the plan's
 // monthly fee — a valuation to judge whether the plan pays for itself, never a
 // charge. A server that predates the block draws the quota alone.
@@ -17,6 +19,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { atLeast, formatCost, formatCount, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
+import { ResetCardsBlock, type ResetCardIntent, type ResetCardPhase } from './ResetCards';
 import type { PricedUsage, QuotaSummary, QuotaWindow, SourceQuota, SourceQuotaValue, UsagePricing } from './types';
 import { TimeHint } from './TimeHint';
 import { VendorGlyph } from './vendorGlyph';
@@ -107,12 +110,15 @@ const useQuotaText = (now: number) => {
   const windowLabel = React.useCallback((window: QuotaWindow) => {
     if (window.kind === 'session') return t('settings.models.quota.window.session') as string;
     if (window.kind === 'weekly') return t('settings.models.quota.window.weekly') as string;
-    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
+    if (window.kind === 'monthly') return t('settings.models.quota.window.monthly') as string;
+    const model = upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key));
+    if (window.kind === 'model_session') return t('settings.models.quota.window.modelSession', { model }) as string;
+    if (window.kind === 'model_weekly') return t('settings.models.quota.window.model', { model }) as string;
     return upstreamName(window.label, Boolean(window.label_is_key));
   }, [t, upstreamName]);
   const windowHint = React.useCallback((window: QuotaWindow) => {
-    if (window.kind === 'model_weekly') return t('settings.models.quota.hint.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
-    if (window.kind === 'session' || window.kind === 'weekly') return t('settings.models.quota.hint.shared') as string;
+    if (windowIsScoped(window)) return t('settings.models.quota.hint.model', { model: upstreamName(window.scope_model ?? window.label, Boolean(window.label_is_key)) }) as string;
+    if (window.kind === 'session' || window.kind === 'weekly' || window.kind === 'monthly') return t('settings.models.quota.hint.shared') as string;
     return null;
   }, [t, upstreamName]);
   const paceText = React.useCallback((pace: QuotaPace) => {
@@ -200,10 +206,14 @@ const WindowRow: React.FC<{ window: QuotaWindow; now: number; retained: boolean;
   );
 };
 
-/** The no-reading line: the known states have their own copy, a named failure its own reason. */
+/**
+ * The no-reading line: the known states have their own copy, a named failure its
+ * own reason. A provider that reports nothing for the account (no report at all,
+ * or a current report with no windows) says so, never that a read will retry.
+ */
 const unreadKey = (source: SourceQuota) => {
   if (source.state === 'auth_expired') return 'settings.models.quota.unread.auth_expired' as const;
-  if (source.state === 'unsupported') return 'settings.models.quota.unread.unsupported' as const;
+  if (source.state === 'unsupported' || source.state === 'ok') return 'settings.models.quota.unread.unsupported' as const;
   if (source.error_key === 'models.quota.error.rate_limited') return 'models.quota.error.rate_limited' as const;
   if (source.error_key === 'models.quota.error.malformed') return 'models.quota.error.malformed' as const;
   return 'settings.models.quota.unread.error' as const;
@@ -280,12 +290,21 @@ const AccountCard: React.FC<{
   /** The read is still running: a gap is loading, not a failure. */
   pending?: boolean;
   onRequestReauth?: (sourceId: string) => void;
-}> = ({ source, now, text, pending = false, onRequestReauth }) => {
+  /** A quota refresh is running; `spinning` when it is this account's own. */
+  refreshing: boolean;
+  spinning: boolean;
+  onRefresh?: () => void;
+  resetCardPhase: ResetCardPhase | null;
+  onResetCardIntent?: (intent: ResetCardIntent) => void;
+  canUseResetCards: boolean;
+}> = ({ source, now, text, pending = false, onRequestReauth, refreshing, spinning, onRefresh, resetCardPhase, onResetCardIntent, canUseResetCards }) => {
   const { t } = useTranslation();
   const retained = quotaIsRetained(source);
   const status = sourceStatus(source, now);
   const shared = source.windows.filter((window) => !windowIsScoped(window));
   const scoped = source.windows.filter(windowIsScoped);
+  // Only beside an account-wide weekly limit do the model limits also count toward one.
+  const sharedWeekly = shared.some((window) => window.kind === 'weekly');
   const statusTone: QuotaTone = status.kind === 'ok' ? 'ok' : status.kind === 'exhausted' ? 'danger' : 'stale';
   const statusText = status.kind === 'exhausted'
     ? t('settings.models.quota.status.exhausted', { label: text.windowLabel(status.window) })
@@ -298,7 +317,7 @@ const AccountCard: React.FC<{
       aria-label={source.display_name}
       data-quota-source={source.source_id}
     >
-      <header className="flex items-center gap-2.5">
+      <header className="model-hub-quota-head">
         <VendorGlyph vendor={source.vendor} className="size-7 shrink-0" />
         <div className="min-w-0 flex-1">
           <strong className="model-hub-quota-account flex min-w-0 items-center gap-2 font-semibold text-foreground">
@@ -310,6 +329,18 @@ const AccountCard: React.FC<{
         <span className={cn('model-hub-quota-status flex shrink-0 items-center gap-1.5', toneClass(statusTone))}>
           <span className="model-hub-quota-dot" aria-hidden />{statusText}
         </span>
+        {/* ui/design: models/quota-reset-cards/refreshing — a press reads every account again
+            (the one forced read there is); the indicator shows on the pressed account. */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="model-hub-quota-account-refresh size-7 shrink-0 text-muted"
+          disabled={refreshing}
+          aria-label={t('settings.models.quota.refreshThisAccount') as string}
+          onClick={() => onRefresh?.()}
+        >
+          <RefreshCw className={cn('size-3.5', spinning && 'animate-spin')} aria-hidden />
+        </Button>
       </header>
       {retained && !Number.isNaN(fetchedAt) && (
         <div className="model-hub-quota-stale flex items-center gap-2" role="status">
@@ -354,12 +385,13 @@ const AccountCard: React.FC<{
                 <div className="model-hub-quota-scoped flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                   <Sparkles className="size-[11px]" aria-hidden />
                   {t('settings.models.quota.scoped.title')}
-                  <span>{t('settings.models.quota.scoped.note')}</span>
+                  {sharedWeekly && <span>{t('settings.models.quota.scoped.note')}</span>}
                 </div>
               )}
               {scoped.map((window) => <WindowRow key={window.id} window={window} now={now} retained={retained} nested text={text} />)}
             </div>
           )}
+      <ResetCardsBlock cards={source.reset_cards} phase={resetCardPhase} now={now} duration={text.duration} onIntent={onResetCardIntent} canUse={canUseResetCards} />
       {source.value && <ValueStrip value={source.value} text={text} />}
     </article>
   );
@@ -395,7 +427,18 @@ export const QuotaTab: React.FC<{
   onRequestReauth?: (sourceId: string) => void;
   /** Fixes the clock the projection reads; the tab ticks its own when absent. */
   now?: number;
-}> = ({ quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow }) => {
+  /** The account whose own refresh is running; the read covers every account. */
+  refreshingSourceId?: string | null;
+  onRefreshAccount?: (sourceId: string) => void;
+  /** Each account's reset-card step on this page (ui/design: models/quota-reset-cards/confirm, …). */
+  resetCardPhases?: Readonly<Record<string, ResetCardPhase>>;
+  onResetCardIntent?: (sourceId: string, intent: ResetCardIntent) => void;
+  /** The reader may spend reset cards (the Owner); others see the list with no use action. */
+  canUseResetCards?: boolean;
+}> = ({
+  quota: quotaRead, refreshing = false, onRefresh, onRetry, onRequestReauth, now: fixedNow,
+  refreshingSourceId = null, onRefreshAccount, resetCardPhases, onResetCardIntent, canUseResetCards = false,
+}) => {
   const { t } = useTranslation();
   const now = useNow(fixedNow);
   const text = useQuotaText(now);
@@ -429,8 +472,8 @@ export const QuotaTab: React.FC<{
           </p>
         </div>
         <Button variant="outline" size="sm" className="shrink-0 self-start sm:self-auto" disabled={refreshing} onClick={() => void onRefresh?.()}>
-          <RefreshCw className={cn('size-[13px]', refreshing && 'animate-spin')} aria-hidden />
-          {refreshing ? t('settings.models.quota.refreshing') : t('settings.models.quota.refresh')}
+          <RefreshCw className={cn('size-[13px]', refreshing && refreshingSourceId === null && 'animate-spin')} aria-hidden />
+          {refreshing && refreshingSourceId === null ? t('settings.models.quota.refreshing') : t('settings.models.quota.refresh')}
         </Button>
       </div>
       {regionFailed(quotaRead) && (
@@ -542,6 +585,12 @@ export const QuotaTab: React.FC<{
                     text={text}
                     pending={pending.has(source.source_id)}
                     onRequestReauth={onRequestReauth}
+                    refreshing={refreshing}
+                    spinning={refreshing && refreshingSourceId === source.source_id}
+                    onRefresh={onRefreshAccount && (() => onRefreshAccount(source.source_id))}
+                    resetCardPhase={resetCardPhases?.[source.source_id] ?? null}
+                    onResetCardIntent={onResetCardIntent && ((intent) => onResetCardIntent(source.source_id, intent))}
+                    canUseResetCards={canUseResetCards}
                   />
                 ))}
               </div>

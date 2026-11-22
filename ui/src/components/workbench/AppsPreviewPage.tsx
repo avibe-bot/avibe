@@ -1,9 +1,9 @@
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { useTranslation } from 'react-i18next';
 import { Download, Pencil } from 'lucide-react';
 
-import { useWindowManager } from '../../context/WindowManagerContext';
 import { previewKind } from '../../lib/filePreview';
-import { contentUrl, downloadFile, fileMeta } from '../../lib/filesApi';
+import { contentUrl, downloadFile, fileMeta, parentDir } from '../../lib/filesApi';
 import { Button } from '../ui/button';
 import { FilePreview } from '../ui/file-preview';
 
@@ -14,7 +14,7 @@ import { FilePreview } from '../ui/file-preview';
 // <FilePreview> renderer, which classifies the file and picks the right viewer.
 export const AppsPreviewPage: React.FC<{ windowId?: string; params?: Record<string, unknown> }> = ({ params }) => {
   const { t } = useTranslation();
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('file-browser');
   const path = typeof params?.path === 'string' ? params.path : '';
   const name = typeof params?.name === 'string' && params.name ? params.name : path.split(/[\\/]/).pop() || '';
   // Only editable text (Markdown, among the types routed here) offers "Open in Editor"; images and
@@ -32,7 +32,7 @@ export const AppsPreviewPage: React.FC<{ windowId?: string; params?: Record<stri
     } catch {
       mtime = undefined;
     }
-    wm.openApp('editor', { title: name, params: { path, filename: name, mtime } });
+    void launchApp({ appId: 'editor', title: name, params: { path, filename: name, mtime, rootDir: parentDir(path) } });
   };
 
   if (!path) {
@@ -65,7 +65,7 @@ export const AppsPreviewPage: React.FC<{ windowId?: string; params?: Record<stri
         </Button>
       </div>
       <div className="min-h-0 flex-1">
-        <FilePreview source={{ url: contentUrl(path), name }} />
+        <FilePreview source={{ url: contentUrl(path), name, mime: typeof params?.mime === 'string' ? params.mime : undefined }} />
       </div>
     </div>
   );

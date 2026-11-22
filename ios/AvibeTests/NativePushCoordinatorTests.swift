@@ -18,6 +18,24 @@ final class NativePushCoordinatorTests: XCTestCase {
     private static let vapidPublicKey =
         "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8"
 
+    func testLiveActivityRegistrationIsBoundToActiveAccountOriginAndGeneration() throws {
+        let store = makeInstallationStore(providerGeneration: 1, provider: nil, providerPatchPending: false)
+        for (id, state, pending, generation) in [
+            ("old-generation", PushKeyRecord.State.active, false, Int64(2)),
+            ("revoking", .active, true, 1), ("retiring", .retiring, false, 1),
+            ("current", .active, false, 1)
+        ] {
+            try store.saveRecord(makeRecord(kid: id, state: state, pendingRevoke: pending, bindGeneration: generation))
+        }
+        let account = Locked<MobileAccount?>(Self.accountA)
+        let coordinator = makeCoordinator(store: store, management: ManagementRecorder(), account: account)
+        XCTAssertEqual(coordinator.liveActivityRegistrationID(accountID: Self.accountA.id, instanceOrigin: Self.instanceOrigin), "current")
+        XCTAssertNil(coordinator.liveActivityRegistrationID(accountID: Self.accountA.id, instanceOrigin: "https://other.example"))
+        XCTAssertNil(coordinator.liveActivityRegistrationID(accountID: Self.accountB.id, instanceOrigin: Self.instanceOrigin))
+        account.value = Self.accountB
+        XCTAssertNil(coordinator.liveActivityRegistrationID(accountID: Self.accountA.id, instanceOrigin: Self.instanceOrigin))
+    }
+
     func testProviderPatchesAreSerializedAndUseLatestGeneration() async throws {
         let store = makeInstallationStore(
             providerGeneration: 0,
@@ -1769,6 +1787,43 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertNil(try store.loadRecord(kid: target.kid))
         XCTAssertNotNil(try store.loadRecord(kid: "a-other-account"))
         XCTAssertNotNil(try store.loadRecord(kid: "b-stale-generation"))
+    }
+
+    func testTheDeviceIdentifierIsDerivedFromThisInstallationOnly() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        let installation = try XCTUnwrap(store.installation)
+        let coordinator = makeCoordinator(store: store, management: ManagementRecorder())
+
+        // HMAC-SHA256 of the instance id under this installation's secret.
+        XCTAssertEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-1"),
+            "9e24a60986550cf6eb110b6137bfe1a8"
+        )
+        XCTAssertNotEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-2"),
+            coordinator.deviceIdentifier(forInstanceID: "instance-1")
+        )
+        // Neither the relay's installation id nor its secret is the answer.
+        XCTAssertNotEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-1"),
+            installation.installationID.uuidString.lowercased()
+        )
+
+        // A Keychain installation from before a reinstall is not this one.
+        let reinstalled = InMemoryPushInstallationMarkerStore()
+        reinstalled.installationID = UUID()
+        let afterReinstall = makeCoordinator(
+            store: store, management: ManagementRecorder(), marker: reinstalled
+        )
+        XCTAssertNil(afterReinstall.deviceIdentifier(forInstanceID: "instance-1"))
+
+        // No installation yet.
+        let empty = makeCoordinator(store: InMemoryPushKeychainStore(), management: ManagementRecorder())
+        XCTAssertNil(empty.deviceIdentifier(forInstanceID: "instance-1"))
     }
 
     /// The account's list no longer has some instances: their registrations

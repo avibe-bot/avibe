@@ -301,6 +301,9 @@ def test_vault_sandbox_canonical_json_escapes_lone_surrogates_like_js():
 def test_create_list_delete_roundtrip(monkeypatch):
     from unittest.mock import Mock
 
+    # Neither the stored value nor its last four characters may appear anywhere. The tail mixes
+    # case and uses letters outside a-f, so it cannot occur by chance in a timestamp, id or hex.
+    secret, tail = "sk-ant-abcdQZxw", "QZxw"
     seal = Mock(return_value=_sealed("api"))
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
 
@@ -309,8 +312,8 @@ def test_create_list_delete_roundtrip(monkeypatch):
     assert created["ok"] is True
     assert created["secret"]["name"] == "OPENAI_API_KEY"
     assert "preview" not in created["secret"]
-    assert "sk-ant-abcd1234" not in json.dumps(created)
-    assert "1234" not in json.dumps(created)
+    assert secret not in json.dumps(created)
+    assert tail not in json.dumps(created)
     seal.assert_called_once_with("OPENAI_API_KEY", blind_box)
     with api._vault_engine().connect() as conn:
         assert vault_service.get_envelope(conn, "OPENAI_API_KEY") == _sealed("api")
@@ -320,12 +323,12 @@ def test_create_list_delete_roundtrip(monkeypatch):
         public_meta = json.loads(public_meta_raw)
         assert public_meta == {"description": "key"}
         assert "preview" not in public_meta
-        assert "1234" not in json.dumps(vault_service.get_secret_meta(conn, "OPENAI_API_KEY"))
+        assert tail not in json.dumps(vault_service.get_secret_meta(conn, "OPENAI_API_KEY"))
 
     listed = api.get_vault_secrets()
     assert [s["name"] for s in listed["secrets"]] == ["OPENAI_API_KEY"]
-    assert "sk-ant-abcd1234" not in json.dumps(listed)
-    assert "1234" not in json.dumps(listed)
+    assert secret not in json.dumps(listed)
+    assert tail not in json.dumps(listed)
 
     removed = api.delete_vault_secret("OPENAI_API_KEY")
     assert removed == {"ok": True, "removed": True, "name": "OPENAI_API_KEY"}

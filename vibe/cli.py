@@ -16715,7 +16715,21 @@ def cmd_remote_direct(args):
             print("Run this command from the instance host shell.", file=sys.stderr)
             return 1
         enabled = args.trial_state == "on"
-        update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "public_relay_trial", enabled))
+        from vibe.connection_settings import ConnectionError, adopt_host_enrollment, enroll_from_host, journal as connection_journal
+        from config.v2_config import config_file_lock
+
+        with config_file_lock():
+            # Consume a released true *before* the first explicit off; neither
+            # CLI off nor a Web write can revoke or establish enrollment.
+            adopt_host_enrollment()
+            if enabled:
+                try:
+                    enroll_from_host(V2Config.load())
+                except ConnectionError as exc:
+                    print(exc.code, file=sys.stderr)
+                    return 1
+            config = update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "public_relay_trial", enabled))
+            connection_journal.legacy_supersede(config, {"public_relay_trial"})
         print(f"Public relay trial setting: {args.trial_state}. Direct-path permission and installation are unchanged.")
         return 0
     if action == "install":
@@ -16735,7 +16749,29 @@ def cmd_remote_direct(args):
         def apply(config) -> None:
             config.remote_access.vibe_cloud.direct = enabled
 
-        config = update_config_fields(apply)
+        from vibe.authorization import current_invocation_authority
+        from vibe.connection_settings import ConnectionError, journal as connection_journal
+        from config.v2_config import config_file_lock
+
+        authority = current_invocation_authority()
+        if authority is not None:
+            from vibe.connection_runtime import delegated_direct_change
+            try:
+                result = delegated_direct_change(authority, enabled)
+            except ConnectionError as exc:
+                print(exc.code, file=sys.stderr)
+                return 1
+            except (OSError, ValueError, KeyError, TimeoutError):
+                print('Connection change could not be confirmed. Read connection settings before retrying.', file=sys.stderr)
+                return 1
+            if getattr(args, 'json', False):
+                _print_cli_payload('remote_direct', **result)
+            else:
+                print('Direct setting accepted.' if result['accepted'] else 'Direct setting saved.')
+            return 0
+        with config_file_lock():
+            config = update_config_fields(apply)
+            connection_journal.legacy_supersede(config, {"direct"})
         result = remote_access.status(config)
         result["direct_setting_changed"] = enabled
     else:
@@ -18051,6 +18087,7 @@ def cmd_upgrade():
         get_safe_cwd,
         is_desktop_managed_runtime,
         launcher_is_current_process,
+        record_install_locked,
         restart_is_pending,
         should_skip_show_runtime_prepare,
         upgrade_download_help,
@@ -18113,6 +18150,7 @@ def cmd_upgrade():
             if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
                 print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
                 return 1
+            record_install_locked(info.get("latest"))
             result = execute_upgrade_plan(
                 plan,
                 run=subprocess.run,
@@ -21321,6 +21359,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         activation_block_reason,
         atomic_upgrade_lock,
         discard_atomic_uv_install_generation,
+        resume_deferred_install_locked,
     )
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -21365,6 +21404,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
                 discard_atomic_uv_install_generation(activation.candidate_launcher)
                 print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
                 return 1
+            resume_deferred_install_locked(activation.candidate_launcher)
             try:
                 activation_outcome = activate_upgrade_candidate(activation)
                 activated = True

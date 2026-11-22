@@ -74,6 +74,13 @@ struct MobilePasskeyRequest: Equatable {
     }
 }
 
+/// Passkey sign-in's start (avibe.bot's primary passkey): the opaque flow handle the binding
+/// cookie belongs to, and a discoverable request with no allow-list.
+struct MobilePrimaryPasskeyStart: Equatable {
+    let flow: String
+    let request: MobilePasskeyRequest
+}
+
 struct MobilePasskeyChallenge: Equatable {
     let request: MobilePasskeyRequest
     /// avibe.bot's signed challenge token, returned with the assertion.

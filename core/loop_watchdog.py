@@ -3,9 +3,11 @@
 The watchdog asks the loop to answer every second. After STALL_SECONDS without
 an answer it emits one structured warning per independent stall (not every
 poll of a prolonged stall), then logs recovery. Only the loop thread's innermost
-30 Python frames are inspected, and only fixed code-identity labels are emitted:
-no source, locals, arguments, absolute paths or arbitrary names. Unknown code is
-explicitly redacted. The JSON event is limited to 8 KiB. C calls themselves and
+30 Python frames are inspected, and only code-identity labels are emitted:
+no source, locals, arguments, absolute paths or arbitrary names. Labels come from
+a fixed vocabulary, or, for Avibe's own packages, from code reached by identity
+through the defining module's namespace at a stall (never from a frame's own
+filename or name). Unknown code is explicitly redacted. The JSON event is limited to 8 KiB. C calls themselves and
 unlisted or dynamically generated Python code are deliberate blind spots.
 
 GC-active at sampling and watchdog wake lateness are signals, not causality.
@@ -28,19 +30,26 @@ import asyncio
 import gc
 import json
 import logging
+import os
 import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from importlib.machinery import ModuleSpec
 from types import CodeType, FunctionType, ModuleType
 
+from core.warm_gc_baseline import can_freeze
 from core.loop_watchdog_events import (
     EVENT_MARKER,
     MAX_EVENT_BYTES,
     MAX_STACK_FRAMES,
+    OWN_PACKAGES,
+    PACKAGE_ROOT,
     REDACTED_LABEL,
     _CODE_TARGETS,
+    own_code_label,
+    shipped_vocabulary,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,16 +58,14 @@ STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 GC_SLOW_SECONDS = 0.2
 _MAX_GC_REPORTS = 64
+_MAX_OWN_CODES = 200_000
 # Written only at Vibey stream boundaries on the controller loop; sampled without a lock by GC.
 _active_requests = 0
-# Only protects in-memory publication and the final freeze instruction; never DB or IPC.
-transient_admission_lock = threading.Lock()
 
 
 def model_stream_opened() -> None:
     global _active_requests
-    with transient_admission_lock:
-        _active_requests += 1
+    _active_requests += 1
 
 
 def model_stream_closed() -> None:
@@ -91,6 +98,9 @@ class EventLoopWatchdog:
         # equal to static code. Retain code objects (never frames) to prevent id reuse.
         self._code_labels: dict[int, tuple[CodeType, tuple[str, str]]] = {}
         self._unresolved_targets = [(module, attribute) for module, attrs in _CODE_TARGETS for attribute in attrs]
+        self._indexed_modules: set[str] = set()
+        self._own_queue: list[str] = []
+        self._own_seen_count = 0
         self._gc_started_at: float | None = None
         self._gc_reports: deque[tuple[float, float, int, int, int, int, int, int, tuple[int, ...]]] = deque(maxlen=_MAX_GC_REPORTS)
         self._gc_callback = self._observe_gc
@@ -102,59 +112,53 @@ class EventLoopWatchdog:
         self._trigger_candidates = -1
         self._freeze_state = "off"
         self._freeze_lock = threading.Lock()
-        self._freeze_manager = None
         self._freeze_due = False
-        self._freeze_task = None
         self._freeze_since = float("inf")
         self._trigger_uptime = 0.0
 
-    def arm_warm_freeze(self, manager) -> str:
+    def arm_warm_freeze(self) -> str:
+        """Arm the one-shot freeze of the warmed heap; idempotent, never resets the warm-up.
+
+        It fires at the first natural full collection after two hours of uptime,
+        whatever is running or streaming then: on the owner's machine moments with no
+        open model stream were 2 in 1,827 slow collections, so any such condition is
+        no condition. Cost: objects frozen then are never collected by the cycle
+        collector until unfreeze or restart. Reference counting still frees an
+        acyclic object once its last reference goes, but an unreachable cycle that
+        passes through a frozen object keeps everything it references, including
+        buffers it held at freeze time and whatever it references later. That is not
+        bounded by the heap at freeze time; the field trial's memory guard and the
+        unfreeze command are the safeguard. The number of Vibey streams open at the
+        freeze is logged as context; it does not attribute what was retained.
+        """
         with self._freeze_lock:
-            if self._freeze_state == "off" and not gc.get_freeze_count():
-                self._freeze_manager = manager
+            if self._freeze_state == "off" and can_freeze():
                 self._freeze_since = max(self._watchdog_birth + 7200, self._monotonic())
                 self._freeze_state = "armed"
             return self._freeze_state
 
     def rollback_warm_freeze(self) -> str:
         with self._freeze_lock:
-            if self._freeze_state == "frozen":
+            was = self._freeze_state
+            if was == "frozen":
                 gc.unfreeze()  # restore normal collection; do not force a full sweep
-            if self._freeze_state in ("armed", "frozen"):
+            if was in ("armed", "frozen"):
                 self._freeze_state = "retired"
-                self._freeze_manager = None
-            return self._freeze_state
+        if was in ("armed", "frozen"):
+            # The boundary a field comparison needs; the freeze itself logs "frozen".
+            logger.warning("Warm GC trial retired: was=%s", was)
+        return self._freeze_state
 
-    def _try_warm_freeze(self, manager) -> asyncio.Future:
-        # The observer can cancel its receipt; only the executor completion
-        # releases the attempt slot. No cancelled Task owns a live DB worker.
-        receipt = self._loop.create_future()
-
-        def apply():
-            with self._freeze_lock, transient_admission_lock:
-                if (self._freeze_state == "armed" and not self._stopped.is_set()
-                        and not _active_requests and not manager.in_flight and not gc.get_freeze_count()
-                        and not receipt.cancelled()):
-                    gc.freeze()
-                    self._freeze_state = "frozen"
-                    self._freeze_manager = None
-
-        def finished(worker):
-            try:
-                worker.result()
-                if self._freeze_state == "frozen":
-                    logger.warning("Warm GC trial frozen: count=%d", gc.get_freeze_count())
-            except Exception:
-                logger.warning("Warm GC trial: quiescence unavailable; freeze skipped")
-            finally:
-                self._freeze_task = None
-                if not receipt.done():
-                    receipt.set_result(None)
-
-        worker = self._loop.run_in_executor(None, manager.with_idle_turn_ledger, apply)
-        self._freeze_task = receipt
-        worker.add_done_callback(finished)
-        return receipt
+    def _apply_warm_freeze(self) -> None:
+        # Recheck at the point of use: someone else can freeze after arming.
+        # Only our transition through gc.freeze() grants rollback ownership.
+        with self._freeze_lock:
+            if self._freeze_state != "armed" or self._stopped.is_set() or not can_freeze():
+                return
+            gc.freeze()
+            self._freeze_state = "frozen"
+            streams = _active_requests
+        logger.warning("Warm GC trial frozen: open_streams=%d", streams)
 
     def arm_warm_census(self, controller) -> bool:
         # Called on the controller loop; idempotent even after the sample fires.
@@ -181,9 +185,8 @@ class EventLoopWatchdog:
                 self._trigger_candidates = info.get('candidates', -1)
                 self._trigger_uptime = self._monotonic() - self._watchdog_birth
                 self._census_due = True  # scalar signal only; no object enumeration in a collector callback
-            if (self._freeze_state == "armed" and info['generation'] == 2 and started_at >= self._freeze_since
-                    and not _active_requests and self._freeze_manager is not None and not self._freeze_manager.in_flight):
-                self._freeze_due = True
+            if self._freeze_state == "armed" and info['generation'] == 2 and started_at >= self._freeze_since:
+                self._freeze_due = True  # scalar signal only; applied by the loop at its next answer
             duration = self._monotonic() - started_at
             if duration > GC_SLOW_SECONDS:
                 self._gc_reports.append((
@@ -225,9 +228,7 @@ class EventLoopWatchdog:
         self._loop_thread_id = threading.get_ident()
         if self._freeze_due:
             self._freeze_due = False
-            if (self._freeze_state == "armed" and self._freeze_task is None and not _active_requests
-                    and self._freeze_manager is not None and not self._freeze_manager.in_flight):
-                self._try_warm_freeze(self._freeze_manager)
+            self._apply_warm_freeze()
         self._answered_at = self._monotonic()
         self._asking = False
 
@@ -263,6 +264,8 @@ class EventLoopWatchdog:
                     self._census_due = False
                     census()
                     del census
+                if not self._stall_reported and now - answered_at < 2 * self._poll_seconds:
+                    self._index_own_step()  # healthy loop only; one module per poll
             except Exception:
                 # Diagnostics must not end the watchdog or echo exception text,
                 # which can contain private filenames or values.
@@ -294,6 +297,78 @@ class EventLoopWatchdog:
             else:
                 unresolved.append((module, attribute))
         self._unresolved_targets = unresolved
+
+    def _index_own_step(self) -> None:
+        """Index at most one newly loaded Avibe module per healthy watchdog poll.
+
+        Labels come by identity: code reached from the module's namespace (its
+        functions, methods of classes it defines, code nested in those), only when
+        the module's file is the shipped file for its name and the code was compiled
+        from that file. Names are the namespace path, not a frame's strings; each is
+        kept only if the installed build's shipped source defines that name on the
+code's first line (hash-checked RECORD file, parsed here, never at a stall). Paced to one module
+        per poll and skipped while the loop is late, so it never delays a stall sample.
+        """
+        if not self._own_queue:
+            count = len(sys.modules)
+            if count != self._own_seen_count:
+                self._own_seen_count = count
+                self._own_queue = [
+                    name for name in list(sys.modules)
+                    if type(name) is str and name not in self._indexed_modules and name.partition(".")[0] in OWN_PACKAGES
+                ]
+            return
+        name = self._own_queue.pop()
+        module = sys.modules.get(name)
+        if type(module) is not ModuleType:
+            return
+        namespace = ModuleType.__getattribute__(module, "__dict__")
+        spec = namespace.get("__spec__")
+        if type(spec) is ModuleSpec and object.__getattribute__(spec, "__dict__").get("_initializing"):
+            self._own_seen_count = -1  # still importing; look again later
+            return
+        self._indexed_modules.add(name)
+        source = namespace.get("__file__")
+        if type(source) is not str:
+            return
+        path = name.replace(".", "/") + ("/__init__.py" if os.path.basename(source) == "__init__.py" else ".py")
+        if os.path.realpath(source) != os.path.realpath(PACKAGE_ROOT / path):
+            return  # an alias or a module loaded from elsewhere is not shipped Avibe code
+        codes: list[tuple[CodeType, str]] = []
+        owners = [(value, key) for key, value in list(namespace.items()) if type(key) is str]
+        seen_classes: set[int] = set()
+        while owners:
+            owner, qualname = owners.pop()
+            kind = type(owner)
+            if kind in (staticmethod, classmethod):
+                owner = owner.__func__
+                kind = type(owner)
+            if kind is property:
+                owners.extend((part, qualname) for part in (owner.fget, owner.fset, owner.fdel) if part is not None)
+            elif kind is FunctionType:
+                code = owner.__code__
+                if code.co_filename == source and code.co_name == qualname.rpartition(".")[2]:
+                    codes.append((code, qualname))
+            elif issubclass(kind, type) and qualname.count(".") < 3 and id(owner) not in seen_classes:
+                seen_classes.add(id(owner))
+                attrs = type.__dict__["__dict__"].__get__(owner)
+                if attrs.get("__module__") == name:
+                    owners.extend((value, f"{qualname}.{key}") for key, value in list(attrs.items()) if type(key) is str)
+        if not shipped_vocabulary(path):
+            return  # not a file of the installed build, or modified since
+        while codes and len(self._code_labels) < _MAX_OWN_CODES:
+            code, qualname = codes.pop()
+            # Fixed labels keep precedence. The name must be defined in the shipped
+            # file, starting on this code's first line. This is source-location
+            # attribution: a label always names real shipped source, but in-process
+            # code that deliberately recompiles a method at the same file, name and
+            # line would be attributed to that method.
+            if id(code) not in self._code_labels and own_code_label(path, qualname, code.co_firstlineno):
+                self._code_labels[id(code)] = (code, (path, qualname))
+            codes.extend(
+                (const, f"{qualname}.<locals>.{const.co_name}")
+                for const in code.co_consts if type(const) is CodeType and const.co_filename == source
+            )
 
     def _loop_stack(self, loop_thread: int | None) -> tuple[list[dict], str, bool]:
         frame = all_frames = code = None

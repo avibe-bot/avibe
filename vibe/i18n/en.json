@@ -1,4 +1,8 @@
 {
+  "systemSchedule": {
+    "waitingForDevice": "Waiting for your device to return the result.",
+    "enableOnDevice": "No phone that can receive this has Alarms and reminders turned on. Ask the user to turn it on in Devices before proposing another."
+  },
   "storage": {
     "notice": {
       "epoch3BackupSkipped": "The disk is nearly full, so Avibe updated its database without keeping a backup copy. You can still go back to 3.2.6; 3.2.5 and older can no longer open this database. Freeing some disk space is recommended."
@@ -1242,6 +1246,9 @@
     }
   },
   "remote_access": {
+    "address_retired": {
+      "line": "This Avibe has a new address. People who can access it can open it after signing in at avibe.bot."
+    },
     "oauth_error": {
       "sign_in_again": "Sign in again",
       "diagnostics_summary": "Technical details",
@@ -1249,6 +1256,8 @@
       "cookie_hint": "Still stuck after trying again? Make sure your browser allows cookies for this site.",
       "default_title": "Let's sign you in again",
       "default_body": "Your sign-in didn't finish. Please try again.",
+      "account_session_signed_out_title": "This device was signed out",
+      "account_session_signed_out_body": "Please sign in again in a few minutes. If it still does not work, sign out at avibe.bot first, then come back and sign in.",
       "invalid_oauth_state_title": "Your sign-in session expired",
       "invalid_oauth_state_body": "The secure login link expired or couldn't be matched to this browser. This usually happens when a sign-in link sits unused for a few minutes, or is opened in a different tab or window. Start over and you'll be right back in.",
       "oauth_exchange_failed_title": "We couldn't finish signing you in",

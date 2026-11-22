@@ -49,6 +49,30 @@ and Web resizing cannot both run.
   older than that question) is refused with a native alert saying to update the
   instance. Any other page, such as a Show Page opened on its own under
   `/show/` or `/p/`, is refused without that alert.
+- A cold start opens the account's last instance before asking avibe.bot
+  (the session is checked behind it), but only while avibe.bot's last signed-in
+  answer for that session is at most 14 days old. Past that, with no record of
+  one, or with one dated in the future, nothing of an instance is loaded until
+  avibe.bot has answered: the App asks first and then opens, and with no answer
+  it stops at the instance list. The same holds for any open, for a page still
+  open when the App returns to the foreground, for the Action Button's
+  background take (past the limit it asks for the App instead), and for a Live
+  Activity's requests (sent only to an address the session lists, within the
+  limit). An App that keeps running renews the confirmation itself: from 7 days
+  on, a return to the foreground reads the session quietly behind the open
+  page. Reason: an instance address
+  that leaves an account cannot become another account's for 30 days, so within
+  14 days of a confirmation the address still leads to the instance avibe.bot
+  listed. The limit trusts the phone's clock.
+- The App records which instance addresses an account has opened. When
+  avibe.bot has answered, signed in, twice at least a day apart without listing
+  one of them, what that address left on the phone is removed: its site data in
+  the account's WebKit store (localStorage, IndexedDB, Cache Storage, cookies of
+  that host), its cached page, and this device's path choice for it. WebKit's
+  own removal works per registrable domain (all of `avibe.bot`), so the App
+  shows a page of its own at the address instead, without the network, and
+  deletes that origin's storage from it. Other instances and the avibe.bot
+  sign-in are untouched.
 - On a cold start the App may show the instance's last page from its own
   cache (stored per store, account and origin, at most a day old). A cached page
   whose bytes carry `<meta name="avibe-cached-shell" content="1">` comes from a
@@ -255,6 +279,8 @@ The native bridge method surface is fixed:
 | `accountPresentation: 2` | `app.setAccountActionAvailable({available})` | `null`; primary Workbench display hint used to suppress or restore the old-Web native fallback |
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
+| `appLock: 1` | `appLock.status()`, `appLock.setPolicy({policy})` | The contract in `ui/src/lib/appLockContract.ts`: `{policy, available, biometry, biometryState}`, and for a change `{ok, reason?, status}`. A change is saved only after one `.deviceOwnerAuthentication`; see App Lock below |
+| `device: 1` | `device.describe()` | `{kind: "iphone_app", display_name, installation_id?, aliases, app_version, system_version}` for the selected instance's main frame only, else `forbidden`; the page sends it to that instance's `POST /api/devices/self` once per load. `display_name` is the model ("iPhone 16 Pro"; "iPhone" for one the App doesn't know yet); `installation_id` is HMAC-SHA256(push installation secret, `avibe-device:v1:` + instance id), 16 bytes hex, so it is new after a reinstall and can't be linked across instances; `aliases` are `{source: "health", id}` (only to the instance Health is paired with) and `{source: "schedule", id}`. Display and grouping only. `device.describe({health_binding: true})`, used by the page's report alone, also asks the paired instance for a one-use Health binding ticket (`POST /api/mobile/device/v1/binding-ticket`, at most 3 seconds, one every 30 seconds, only for a description with an installation id; after a 404, a 405 or an older tunnel's code-less 401 that instance is not asked again in this process) and adds it as `health_binding_ticket` only in front, on the current account, while Health is paired with this instance; otherwise, and on any failure, the property is left out. The ticket is kept nowhere, and no answer to that request changes the Health connection |
 | `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
 | `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
 | `haptics: 1` | `haptics.selection()` | `null` |
@@ -265,6 +291,7 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `voiceCapture: 1` | `voice.capturePrepare()`, `voice.captureStart({take})`, `voice.captureStop({take})` | The in-App hold's microphone, instance document only (`NativeHoldCapture.swift`). Prepare sets the audio session's category and starts nothing; start activates it and answers `{sampleRate: 16000, activateMs, engineMs}` once the input runs, or fails `permission`, `busy` or with the step; `take` is 1–64 letters, digits, `-` or `_`. Audio arrives as `avibe:native:voice.capture` events `{take, pcm}` (base64 Int16 little-endian mono, the first at once, then about 100 ms each), and the take's end as `{take, ended: true, reason?}` after its last audio. The App ends a take itself when it goes to the background, its page goes, or the system interrupts or changes the input |
+| `voiceHold: 2` | `voice.holdSurfaces({surfaces, holdMs?})`, `voice.holdAdopt({take})`, `voice.holdReject({take})` | The App recognises a hold itself, so the cue never waits for the page or the microphone. The page names up to eight surfaces `{id, x, y, width, height, start?}` (the WebView's own points) where a hold may record now, and its hold threshold `holdMs` (100–500, default 200; any other is `invalid_argument`); an empty list ends it. Only a consent-marked document (as for `voice.captureStart`) names a surface: another gets `failed` `consent`. Only the instance's own WebView is watched: a popup gets `failed` `unwatched`, and the page goes on recognising its holds itself. One WebView's list at a time, and its calls count in the order the page made them: a list overtaken by a later call, or by its document going, gets `failed` `superseded`. A passive recogniser sees each touch (it cancels and delays nothing). On a surface, at touch-down the App starts the input off the main thread, into its own memory; when other audio plays or the route is Bluetooth it opens nothing until the hold is recognised. A surface named with `start: "recognition"` opens no microphone on a touch either: its input is only prepared at touch-down and starts when the hold is recognised (`start: "touch"`, or none, is the default; any other value is `invalid_argument`). At the threshold (10 pt slop), once it has handled every touch event that reached it (a lift it had not yet heard of ends the press as a tap, with no cue; the touch itself is asked, since UIKit does not report the lift of a press the page took for itself), it fires the haptic and dispatches `avibe:native:voice.hold` `{phase: "recognised", take, surface}`. When the input cannot start for a take no page has taken, the page gets `{phase: "failed", take, surface, step}` instead of audio: the App is not following that press, and the page goes on recognising it itself. The take's audio waits in memory until the page calls `voice.holdAdopt` (answer `{sampleRate, timings}`; the same consent-marked document), then arrives as `voice.capture` events, what was recorded since touch-down first; the page ends it with `voice.captureStop`, and gets `{phase: "timings", take, timings}`. The audio of a touch that ends as a tap or a scroll is dropped when the touch ends and never leaves the App's memory (a touch shorter than the threshold by its own timestamps is a tap, even if its end was handled late); so is a take the page rejects or does not adopt within 1 s of recognition (`end=unadopted` in its timings), or whose input has passed on 2 s of audio before the page adopted it (the input counts this itself, on the thread its audio arrives on, and stops there: the bound holds while the main thread is stalled), and one cut off by App Lock, the background, an Action Button take or a withdrawn surface. After recognition the finger's slides are the page's: it gives the cancel haptics and decides what a release does (the App is not told of moves on a surface whose page took the press for itself, so at the cue it also asks the touch where it is, and gives none to a finger past the slop). Each hold's timings (numbers only), and counts of the touches that were not holds by duration (25 ms steps), are kept for the next Action Button message's `capture_earlier`. `avibe-diagnostics://voice/hold-quiet?on=1` (TestFlight and development builds) only prepares the input at touch-down and starts it at recognition. Version 1 (TestFlight 50.1 only) could give a tap the cue when the lift reached the App late; the page names surfaces from version 2 |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 | `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
 
@@ -360,15 +387,51 @@ the main Bot acts on the user's computer.
   kept on the phone, unsent, and sent again by itself (after 2, 5, 10, 20
   and 30 s, then every minute, and when Avibe comes to the front; each send
   asks again first), its island saying 还没发出去，连上你的 Avibe 后会自动发送。
-  with Retry and Discard. After ten minutes it gets one last send and then
-  goes with its island. While it is sent again it stays kept, so a new
-  press, Discard or Retry is never swallowed; one send of a take runs at a
-  time, and a take given up meanwhile asks nothing more and makes no
-  request (only a POST already on its way cannot be taken back, and
-  `capture_earlier` then says `sentAfterEnd`). A take that could not be
-  turned into text, or one this process cannot send until Avibe is opened
-  again (`direct_fault`), waits for Retry instead. A new press still replaces a kept take (the ordered
-  outbox that ends this is a separate change). No
+  with Retry and Discard (in front, where no island is drawn, a banner says
+  the line). A take that could not be turned into text, or one this process
+  cannot send until Avibe is opened again (`direct_fault`), waits for Retry
+  instead.
+- Takes that are not sent yet are kept in order (`VoiceCaptureOutbox`): in
+  `Application Support/VoiceOutbox`, excluded from backup, each a record
+  (`<sequence>-<id>.json`: where it goes, when it was spoken, its
+  transcription id, its `capture_attempt` and `capture_timing`, its words
+  once transcribed, and whether its POST was begun) next to its audio. A
+  new press never discards one: the earlier take gives its island up and
+  goes on being sent. They are sent oldest first, one at a time, each as
+  its own message; a take that stops while an earlier one is on its way
+  waits behind it. While a take is sent again it stays kept, so a press,
+  Discard or Retry is never swallowed; one send of a take runs at a time,
+  and a take given up meanwhile makes no more requests (only a POST already
+  on its way cannot be taken back, and `capture_earlier` then says
+  `sentAfterEnd`). The order survives the App being ended: the next launch
+  reads the outbox, asking about voice input afresh; a take whose POST was
+  begun is never posted again (audio no record points at, from a write
+  the App did not live to finish, is removed then), and no POST is made
+  unless that marker
+  reached the disk first. An expired instance session destroys nothing: a
+  take found signed out waits for Retry, and one being recorded when that
+  is found is stopped at once and kept.
+- A take is sent without the user asking only within ten minutes of the
+  end of speaking (`automaticWindow`): the schedule above, and once more,
+  silently, when Avibe comes to the front. Then its island goes, and a
+  lasting notification says 没发出去 · 这条语音没能发出去，打开 Avibe 可以重试。
+  (scheduled when the take is kept, so it shows whether or not the App runs
+  then; removed once nothing is unsent). From then only Retry sends it, a
+  relaunch included (a send nobody asked for that outlasts the window, a
+  slow transcription say, posts nothing), and it no longer holds newer takes back; neither does
+  one that could not be turned into text. When Avibe comes to the front
+  and something is still unsent, one alert says 有一条 3 小时前的语音没能发出去。
+  (or 有 3 条语音没能发出去，最早的是 3 小时前。) with 重试 / 全部重试, which sends
+  all of them oldest first, and 放弃, which deletes them. An unsent take is
+  deleted after 24 hours, and at once on a sign-out or account change; a
+  voice consent "no" discards it. At most 20 are kept.
+- A take sent more than a minute after it was spoken tells the main Bot so:
+  its message begins with one line, （这条语音说于今天 08:44，刚刚才送达。） (another
+  day: （这条语音说于 11 月 19 日 23:10，刚刚才送达。）; in the phone's local time and
+  the App's language), then a line break and the words, and
+  `metadata.spoken_at` carries the time (ISO 8601). The model sees a
+  message's text and a few rendered header lines, not its metadata, so the
+  line is what tells it the instruction was not given just now. No
   sign-in, no microphone permission, or Live Activities turned off bring the
   App to the main Bot's conversation before anything records. A later
   `403 voice_consent_required` stops the take and keeps nothing. The take's
@@ -449,8 +512,9 @@ the main Bot acts on the user's computer.
   each at most 700 characters; `UserDefaults`): the time (UTC), what
   happened (`short:`, `cancel`, `start:<step> <code>`, `needsApp:`,
   `refused:`, `kept:<reason> {requests that did not reach the instance}`,
-  `expired`, `replaced`, `discarded`, `leftover`, `repeat`, `abandoned`,
-  `noFront`, `nothingHeard`, `sendUnknown`, `sentAfter {…}`), the press's
+  `expired`, `discarded`, `discardedAll <n>`, `overflow`, `leftover`,
+  `repeat`, `abandoned`, `noFront`, `nothingHeard`, `sendUnknown`,
+  `sentAfter {…}`, `sentAfterEnd`), the press's
   facts and its steps. No audio and no words. The next message that
   arrives carries them as `metadata.capture_earlier` and they are then
   dropped; they never go out on their own.
@@ -490,8 +554,10 @@ the main Bot acts on the user's computer.
   front a held gate (the listener closed or being bound again, right after
   Avibe comes forward) is waited for, up to 5 s, and a load that failed in
   that window is made once more; a fault fails as `direct_fault`. The gate
-  is asked for the take's own store and the last runtime's host, also when
-  no runtime is shown (the instance list). In the background the gate stays
+  is asked for the take's own store and host
+  (`DirectPathController.loadGate(forInstanceURL:)`), whatever instance is
+  shown, or none: a kept take of an instance that is no longer selected
+  still loads through the listener its host is routed to. In the background the gate stays
   held for as long as Avibe is there, so nothing waits: a background take's
   load rests on WebKit's own failover past the closed listener
   (`allowFailover`), a safety net rather than a guarantee, so a failure
@@ -687,7 +753,7 @@ Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
-`auth.signInWithProvider`, `session.refresh`,
+`auth.signInWithProvider`, `auth.signInWithPasskey`, `session.refresh`,
 `session.selectInstance`, `session.logout`, `app.returnToInstance`,
 `app.openPage`, and the closed `app.openExternal` allowlist (the two install
 guides and avibe.bot's Account security page). Instance documents, child
@@ -1038,8 +1104,22 @@ below.
   2 s carries that last list instead, so Welcome after sign-out or on a cold
   start shows the row at once. Welcome also asks `auth.providers` (no
   arguments; refused in sheets) when it appears and when the App returns to
-  the foreground on it, and replaces the row in place with the answer. So the App can ship before the broker
-  serves a provider, and each mark appears when avibe.bot enables it.
+  the foreground on it, and replaces the row in place with the answer. The
+  same read carries passkey sign-in (`passkey_login_enabled` exactly `true`;
+  every iOS the App runs on has the passkey sheet): it is kept with the list
+  and answered beside it as `passkey`, in signed-out answers and in
+  `auth.providers`. So the App can ship before the broker serves a provider,
+  and each way in appears when avibe.bot enables it.
+- Passkey sign-in with no email first is the closed `auth.signInWithPasskey`
+  (no arguments; the sheet forbids it), apart from the second-factor
+  `auth.verifyPasskey`. The coordinator runs avibe.bot's primary passkey
+  options, the system sheet with no allow-list and verify in one fresh
+  store, then reads the session as a request of its own. A closed sheet
+  cancels the flow and any attempt that does not sign in retires the store,
+  but a store that holds an accepted verify is kept until its session is
+  read (a `401` there retires it), so trying again reads it without a
+  second sheet or verify. `503` is passkey sign-in switched off
+  (`provider_unavailable`); a `403` is avibe.bot's HTTP boundary (`network`).
 - The bundled Welcome calls `auth.signInWithProvider({provider})`, with
   `provider` exactly `google`, `github` or `apple`; any other value or an extra key
   is `invalid_argument`, and the sheet forbids it like every auth method. It
@@ -1500,6 +1580,16 @@ an interrupted query without a durable payload is resumed. Redirects and cookies
 are disabled for device requests. Revocation or loss of instance eligibility
 clears the connection; invalid payloads and unsupported contracts suspend sync
 until a new explicit connection. Retry-After applies to device requests.
+When avibe.bot answers with the account's instance list, and before each
+device request (restoration and HealthKit delivery included), the list it last
+confirmed in this process must still list the paired instance at its origin.
+If it does not (the instance was renamed, or removed while no connection was
+loaded), the connection ends locally and nothing more is sent to that origin,
+not even a revoke; a later connect starts over. A removal seen in a nonempty
+list while the connection is loaded revokes it, as before. A confirmed empty
+list (the account has no instance left) ends it locally like a rename, with no
+revoke: a deleted instance's name can later belong to another account. A list
+avibe.bot has not confirmed in this process changes nothing.
 
 Both HealthKit entitlements and the localized read-purpose description belong
 only to the main app. The archive checker requires boolean grants and rejects
@@ -1511,6 +1601,32 @@ Changing Apple App ID capabilities or provisioning profiles, signing an archive,
 physical-device validation and TestFlight distribution require separate owner
 approval. Unsigned simulator builds and synthetic-data tests do not establish
 physical-device authorization, locked-device access, or background wake latency.
+
+## App Lock
+
+Settings › General › App Lock (Off by default, Immediately, After 1 minute, After
+5 minutes) is kept in this App's `UserDefaults` and owned by `AppLockController`
+(`AppLock.swift`); behavior and the shared contract: `docs/plans/app-lock.md`.
+
+- The lock is `AppLockWindow`, a second window of the scene above `.alert` that
+  never becomes key. It covers the WebView, the account pages, sheets, and alerts
+  the App presents; those keep presenting on the main window and show after unlock.
+- Going inactive covers the App Switcher snapshot with the logo. Time away starts at
+  `didEnterBackground` on a clock that counts sleep; a return at or past the
+  threshold, or a cold start, is locked. The App asks for Face ID once each time it
+  arrives in front, except while an Action Button take is recording; after a cancel
+  the button waits. Its own verification sheets never re-lock or cover.
+- Routing, notification taps, App Shortcuts, Health sync, reminders, push, and voice
+  capture are not gated: they run under the lock, and the target page is ready when
+  it lifts.
+- No passcode means the lock does not engage; the stored choice applies again once
+  one is set. `NSFaceIDUsageDescription` says only "Use Face ID to unlock Avibe."
+- The lock screen's words are the `appLock.lock.*` keys shared with the Web bundles
+  (`ui/src/i18n/appLockCopy.test.ts` keeps `Localizable.xcstrings` equal); its
+  visual spec is `ui/design: app-lock/lock/*`.
+- Tests: `AppLockTests.swift` (machine, capability decoding, controller with a
+  stand-in authenticator, and the real lock window in the test host). A physical
+  Face ID device, passcode fallback, and Touch ID iPhone remain device checks.
 
 ## Sharing a Show from the iPhone App
 
@@ -1599,3 +1715,55 @@ fixture document, including query strings. Both HTTP entrypoints reject every
 method except GET. The Vite proxy target is the process-owned fixture backend,
 and local `.env` files are disabled; no real account, running Avibe service, or
 production instance is used.
+
+
+## Turn Live Activities
+
+The shell always announces `lockScreenProgress: 1`: `liveActivity.setting`,
+`setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
+`stop` calls return `unsupported`. The shell never announces `liveActivities`,
+so older Web bundles do not activate the retired entry's bridge observers. The
+new Web requires `lockScreenProgress`, so older TestFlight builds never show the
+setting or a conversation entry.
+
+The device-only setting defaults off. On launch with it off, earlier cards end
+locally and their tokens are forgotten without contacting an instance. Turning
+it off explicitly ends cards and sends best-effort DELETE `disabled`.
+
+`TurnActivityCoordinator` keeps the latest visible conversation observation and
+prefetches its running Turn on observation changes and foreground entry. Only
+`UIScene.willDeactivateNotification` can create a card, while the App is active,
+with the device and system settings enabled, a matching prefetched Turn, and an
+active relay registration. Activity.request runs first; failure leaves the old
+card and its observers intact. On success, displaced observers stop and the
+replacement is persisted before the callback returns. A UIKit background task
+then ends the old card, sends DELETE `replaced`, waits up to ten
+seconds for the new token, and PUTs. No conversation control, toast, or hint is
+rendered. Agent names and titles stay in immutable phone-local attributes.
+
+The persisted shown-Turn ledger survives dismissal, replacement, timeout,
+logout, and relaunch. A Turn cannot create another card; entries are retained
+for up to 30 days, including Turns that outlive ActivityKit's eight-hour limit.
+The registration ledger separately tracks requested_at and whether the current
+token received a successful PUT. Token rotation and foreground reconciliation
+follow the shared contract. A 503 or lost PUT response leaves an unregistered
+card for a later foreground/token retry. Registered cards GET on foreground.
+Instance requests reuse the account-owned transport and its session authority
+checks. The normative contract and vectors are in
+`docs/plans/2026-11-20-ios-live-activity-contract.md` and
+`tests/fixtures/live_activity/contract_vectors.json`.
+
+`TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
+renders the reviewed `ios/live-activity/*` frames in English and Simplified
+Chinese. A stale running card stops its timer; terminal cards show total time and
+remain for one hour. The `avibe-app://live-activity/<activityID>` private scheme
+resolves only local ActivityKit activities and routes through the existing
+account/instance chat opener. Voice capture activities remain a separate type.
+
+Owning validation is `AvibeTests/TurnActivityTests`: relay-vector decoding, local
+privacy boundaries, dismissal/relaunch, token rotation, 503 recovery, cleanup,
+selection races, terminal retention, deep links, and card render attachments.
+Physical-device acceptance still needs the runtime publisher and deployed relay:
+lock the TestFlight device, observe needsYou -> working -> terminal APNs updates,
+verify screen lighting, tap back into the correct conversation, and verify stale
+and one-hour dismissal behavior. Simulator tests do not establish APNs delivery.

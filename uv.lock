@@ -422,6 +422,8 @@ dependencies = [
     { name = "trafilatura" },
     { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
+    { name = "yarl" },
 ]
 
 [package.dev-dependencies]
@@ -451,7 +453,7 @@ requires-dist = [
     { name = "idna", specifier = ">=3.4" },
     { name = "ijson", specifier = ">=3.5.1" },
     { name = "imagesize", specifier = ">=1.4.1" },
-    { name = "lark-oapi", specifier = ">=1.4.0" },
+    { name = "lark-oapi", specifier = ">=1.7.5" },
     { name = "markdown-it-py", specifier = ">=4.2.0" },
     { name = "markdown-to-mrkdwn", specifier = ">=0.2.0" },
     { name = "mcp", specifier = ">=2.3.0,<3" },
@@ -475,6 +477,8 @@ requires-dist = [
     { name = "trafilatura", specifier = ">=2.3.1" },
     { name = "typing-extensions", specifier = ">=4.12.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
+    { name = "websockets", specifier = ">=15" },
+    { name = "yarl", specifier = ">=1.9" },
 ]
 
 [package.metadata.requires-dev]

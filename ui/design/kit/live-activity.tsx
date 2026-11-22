@@ -6,11 +6,14 @@
 // name, one of five states, and times. Never message text, tool names, file paths, or the instance name.
 // The title and name are written on the phone when tracking starts; pushes carry only the state.
 import type { ReactNode } from 'react';
-import { AlertTriangle, Check, Clock3, Hand, LockKeyhole, Settings, Square, X, XCircle } from 'lucide-react';
+import { Check, Clock3, Hand, Square, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import logo from '@/assets/logo.png';
 import { Button } from '@/components/ui/button';
+import { SettingsPageShell } from '@/components/settings/SettingsPageShell';
+import { SettingsPanel, SettingsRow, ToggleSwitch } from '@/components/settings/SettingsPrimitives';
+import { useTranslation } from 'react-i18next';
 
 import { useDraft } from './draft';
 
@@ -188,62 +191,40 @@ export function IslandExpanded({ activity }: { activity: TurnActivity }) {
   );
 }
 
-export type TrackChipState = 'offer' | 'tracking' | 'systemOff';
+export type LockScreenSettingState = 'off' | 'on' | 'systemOff';
 
-/** The in-App entry, above the composer while a Turn runs (iOS App only, `liveActivities` capability). */
-export function TrackChip({ state }: { state: TrackChipState }) {
+/** The device-only setting in Settings › Notifications (contract Amendment 1, §2.2): shown only when
+ *  the shell announces `lockScreenProgress`; off until the person turns it on. */
+export function LockScreenProgressSetting({ state }: { state: LockScreenSettingState }) {
   const t = useDraft();
-  if (state === 'systemOff') {
-    return (
-      <div className="flex items-center gap-2 rounded-2xl border border-edge bg-surface/95 py-2 pr-2 pl-3 shadow-elevation-1">
-        <LockKeyhole className="size-4 shrink-0 text-muted" />
-        <span className="min-w-0 flex-1 text-sm leading-5 text-muted">{t('实时活动在系统设置里关着', 'Live Activities are off in Settings')}</span>
-        <Button variant="outline" size="sm" className="shrink-0 gap-1.5 rounded-full"><Settings className="size-3.5" />{t('去设置', 'Settings')}</Button>
-      </div>
-    );
-  }
-  if (state === 'tracking') {
-    return (
-      <div className="flex items-center gap-2 rounded-full border border-mint/30 bg-mint-soft py-1.5 pr-1.5 pl-3 shadow-elevation-1">
-        <LockKeyhole className="size-4 shrink-0 text-mint-ink" />
-        <span className="min-w-0 flex-1 text-sm font-medium text-mint-ink">{t('已在锁屏上显示', 'Showing on the Lock Screen')}</span>
-        <Button variant="ghost" size="sm" className="shrink-0 rounded-full">{t('停止显示', 'Stop')}</Button>
-      </div>
-    );
-  }
+  const title = t('在锁屏上显示进度', 'Show progress on the Lock Screen');
+  const description = t(
+    '离开 Avibe 时，如果正在看的会话还在处理，就在锁屏和灵动岛上显示进度。',
+    'When you leave Avibe while the conversation you are viewing is still working, its progress appears on the Lock Screen and in the Dynamic Island.',
+  );
   return (
-    <div className="flex justify-end">
-      <Button variant="outline" size="sm" className="gap-1.5 rounded-full bg-surface/95 shadow-elevation-1">
-        <LockKeyhole className="size-3.5" />
-        {t('在锁屏上显示进度', 'Show on Lock Screen')}
-      </Button>
-    </div>
+    <SettingsRow
+      title={title}
+      description={state === 'systemOff' ? t('实时活动在系统设置里关着', 'Live Activities are off in Settings') : description}
+      control={
+        <div className="flex items-center gap-3">
+          {state === 'systemOff' && <Button type="button" variant="outline" size="xs">{t('去设置', 'Settings')}</Button>}
+          <ToggleSwitch enabled={state === 'on'} disabled={state === 'systemOff'} onClick={() => {}} label={title} />
+        </div>
+      }
+    />
   );
 }
 
-export type StartRefusal = 'no_active_turn' | 'push_unavailable' | 'failed';
-
-/** What `liveActivity.start` answers when it cannot start, as the shipped toast shows it
- *  (ToastProvider's card, drawn statically: warning for the two the person can act on, error for a
- *  failure). `disabled` never reaches a toast: the entry shows its Settings state instead. */
-export function StartRefusalToast({ code }: { code: StartRefusal }) {
-  const t = useDraft();
-  const message = {
-    no_active_turn: t('这一轮已结束。', 'This turn has ended.'),
-    push_unavailable: t('开启通知后才能在锁屏上显示。', 'Turn on notifications to show this on the Lock Screen.'),
-    failed: t('未能更新锁屏显示，请重试。', "Couldn't update the Lock Screen. Try again."),
-  }[code];
-  const warning = code !== 'failed';
+/** The proposed row alone in the Notifications page shell, under the page's existing "this device"
+ *  panel title. The shipped panels and rows stay as they are and are not redrawn here. */
+export function NotificationsDevicePanel({ state }: { state: LockScreenSettingState }) {
+  const { t } = useTranslation();
   return (
-    <div
-      className={clsx(
-        'flex items-center gap-3 rounded-lg border border-edge bg-popover px-4 py-3 shadow-elevation-2',
-        warning ? 'bg-linear-to-r from-gold/10 to-gold/10 text-gold-ink' : 'bg-linear-to-r from-destructive/10 to-destructive/10 text-destructive-ink',
-      )}
-    >
-      {warning ? <AlertTriangle className="size-4.5 shrink-0" /> : <XCircle className="size-4.5 shrink-0" />}
-      <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{message}</span>
-      <X className="ml-2 size-3.5 shrink-0 opacity-60" />
-    </div>
+    <SettingsPageShell title={t('settings.sections.notifications')} subtitle={t('settings.notifications.subtitle')} activeTab="notifications">
+      <SettingsPanel title={t('settings.notifications.deviceTitle')}>
+        <LockScreenProgressSetting state={state} />
+      </SettingsPanel>
+    </SettingsPageShell>
   );
 }

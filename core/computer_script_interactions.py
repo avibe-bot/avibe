@@ -107,6 +107,13 @@ class ComputerScriptInteractionManager:
         self._pending: dict[str, _PendingConfirm] = {}
         self._pending_by_token: dict[str, str] = {}
 
+    def has_pending_question(self, session_id: str) -> bool:
+        """Whether the owner can currently answer a script confirmation for this Session."""
+        return any(
+            record.question.base_session_id == session_id and record.armed and not record.future.done()
+            for record in self._pending.values()
+        )
+
     async def notify(self, token: str, message: str) -> dict[str, Any]:
         binding = self._admit_message(token, message)
         context = routed_delivery_context(binding.turn.context)

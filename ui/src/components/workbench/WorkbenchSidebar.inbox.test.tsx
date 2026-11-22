@@ -5,7 +5,7 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 import type { VaultRequest } from '../../context/ApiContext';
 import { PendingVaultRequestsContext } from '../../context/PendingVaultRequestsContext';
@@ -62,7 +62,8 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
   },
   useWorkbenchProjectsActions: () => ({}),
 }));
-vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => ({ open: vi.fn() }) }));
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()), useWindowManager: () => ({ open: vi.fn() }) }));
 vi.mock('../../context/useUnsavedChangesActionGuard', () => ({
   useUnsavedChangesActionGuard: () => (run: () => void) => run,
 }));
@@ -76,7 +77,11 @@ vi.mock('./NewProjectDialog', () => ({
 }));
 
 import en from '../../i18n/en.json';
+import { LazyNewProjectDialog } from './LazyNewProjectDialog';
 import { WorkbenchSidebar } from './WorkbenchSidebar';
+
+// The dialog's code loads on demand; here it is already in, as after the idle prefetch.
+beforeAll(async () => { await LazyNewProjectDialog.preload(); });
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({

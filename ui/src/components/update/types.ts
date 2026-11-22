@@ -35,6 +35,12 @@ export type UpdateControlRequest = {
   updated_at: string;
 };
 
+export type UpdateInstallInProgress = {
+  phase: 'installing' | 'restarting';
+  target: string | null;
+  started_at: string;
+};
+
 /** What `/api/version` reports (vibe/api.py `get_version_info`). */
 export type UpdateSnapshot = {
   current: string;
@@ -52,6 +58,9 @@ export type UpdateSnapshot = {
   /** What this host's updater accepts from here; absent from a desktop app too old to accept any. */
   host_actions?: UpdateHostAction[];
   control_request?: UpdateControlRequest | null;
+  /** A standalone Runtime: an install running now, whoever started it (the Web, `vibe upgrade`, the automatic
+   *  update), and the restart that follows it. Absent from Runtimes that predate the report. */
+  install?: UpdateInstallInProgress | null;
   remote_install_allowed?: boolean;
   remote_request?: DesktopRemoteUpdateRequest | null;
   build?: {

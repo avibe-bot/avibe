@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef } from 'react';
 
 import type { AppId } from '../apps/registry';
 import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
@@ -29,6 +29,8 @@ export interface WindowInstance {
 }
 
 export interface OpenAppOptions {
+  /** Activate the deterministic existing App identity without replacing its body. */
+  reuse?: boolean;
   title?: string;
   bounds?: Partial<WindowBounds>;
   params?: Record<string, unknown>;
@@ -91,6 +93,8 @@ export interface WindowManagerValue {
   setGestureActive: (active: boolean) => void;
 }
 
+export const WindowLaunchLifetimeContext = createContext<{ controller: AbortController } | null>(null);
+
 export const WindowManagerContext = createContext<WindowManagerValue | null>(null);
 
 /**
@@ -119,8 +123,10 @@ function useWindowManagerContext(): WindowManagerValue {
 export function useWindowManager(): WindowManagerValue {
   const ctx = useWindowManagerContext();
   const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const announceIfLive = useCallback(() => {
-    if (surfaceActiveRef.current) ctx.announceForeground();
+    if (mounted.current && surfaceActiveRef.current) ctx.announceForeground();
   }, [ctx, surfaceActiveRef]);
   return useMemo(() => {
     const { openApp, focus, restore, toggleMaximize } = ctx;

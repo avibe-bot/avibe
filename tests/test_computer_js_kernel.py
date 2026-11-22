@@ -612,19 +612,40 @@ def test_invalidation_cancels_every_admitted_call(event, reason: str) -> None:
     assert slot is None
 
 
-def test_a_queued_call_keeps_its_full_budget_after_taking_the_lock() -> None:
-    async def scenario(h: _Harness) -> dict:
-        await h.js("1")
-        first = asyncio.create_task(h.js("await new Promise((r) => setTimeout(r, 600))"))
-        await asyncio.sleep(0.1)
-        second = await h.js(
-            "await new Promise((r) => setTimeout(r, 300)); 'finished'",
-            timeout_ms=400,
-        )
-        await first
-        return second
+def test_a_queued_call_keeps_its_full_budget_after_taking_the_lock(monkeypatch) -> None:
+    async def scenario(h: _Harness) -> None:
+        assert (await h.js("1"))["ok"]
+        slot = h.kernels._slots[SESSION]
+        loop = asyncio.get_running_loop()
+        clock, call_at = loop.time, loop.call_at
+        deadlines = []
+        budget_ms = 30_000
 
-    assert _run(scenario)["result"] == "finished"
+        # Hold the same lock as a running evaluation. Let evaluate() reach its
+        # first suspension (admitted, waiting for the lock), not just the HTTP client.
+        async with slot.lock:
+            queued = asyncio.create_task(h.kernels.evaluate(SESSION, "'finished'", budget_ms))
+            await asyncio.sleep(0)
+            assert len(slot.calls) == 1  # Admitted while we still own the lock.
+            # Model a minute in the queue without sleeping. Time keeps ticking
+            # normally after release, so even a wedged kernel still times out.
+            monkeypatch.setattr(loop, "time", lambda: clock() + 60)
+
+        released = loop.time()
+
+        def record_timer(when, callback, *args, **kwargs):
+            if asyncio.current_task() is queued:
+                deadlines.append(when)
+            return call_at(when, callback, *args, **kwargs)
+
+        monkeypatch.setattr(loop, "call_at", record_timer)
+        report = await queued
+        assert report.get("result") == "finished", report
+        # Inspect the earliest timer this evaluation actually armed, not the
+        # nominal timeout passed to the kernel or how quickly Node replied.
+        assert released + budget_ms / 1000 <= min(deadlines) <= loop.time() + budget_ms / 1000
+
+    _run(scenario)
 
 
 def test_the_session_queue_is_capped() -> None:

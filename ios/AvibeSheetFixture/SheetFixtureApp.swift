@@ -120,6 +120,16 @@ private final class SheetFixtureRootViewController: UIViewController,
         super.viewDidAppear(animated)
         guard !hasStarted else { return }
         hasStarted = true
+        if ProcessInfo.processInfo.environment["AVIBE_FIXTURE_HOLD"] == "1" {
+            // The hold-to-talk touch smoke (FixtureHoldPage.swift): no sheet, no account.
+            let hold = FixtureHoldViewController()
+            addChild(hold)
+            hold.view.frame = view.bounds
+            hold.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(hold.view)
+            hold.didMove(toParent: self)
+            return
+        }
         if let captureState {
             precondition(["default", "offline-open", "open-failed", "stale", "account", "first-run", "instances-named", "account-root", "page-switching"].contains(captureState))
             overrideUserInterfaceStyle = captureTheme == "dark" ? .dark : .light
@@ -725,9 +735,22 @@ private final class FixtureMobileAuthTransport: MobileAuthTransporting {
         return .signedIn(session)
     }
 
-    func advertisedProviders() async -> [MobileSignInProvider]? {
-        []
+    func signInMethods() async -> MobileSignInMethods? {
+        MobileSignInMethods(providers: [], passkey: false)
     }
+
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart {
+        throw MobileAccountError.providerUnavailable
+    }
+
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws {
+        throw MobileAccountError.network
+    }
+
+    func primaryPasskeyCancel(flow: String) async {}
 
     func providerStart(
         provider: MobileSignInProvider,

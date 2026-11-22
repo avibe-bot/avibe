@@ -13,6 +13,7 @@ import { showDockId } from '../../context/dockDoc';
 import { useToast } from '../../context/ToastContext';
 import {
   hasNativeShare,
+  hasNativeShareExport,
   isNativeShell,
   nativeSharePresent,
   type NativeShareKind,
@@ -21,7 +22,7 @@ import {
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
-import { copyTextToClipboard } from '../../lib/utils';
+import { cn, copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
 
@@ -80,6 +81,9 @@ export const ShowPageShareControl: React.FC<{
   onOpenChange?: (open: boolean) => void;
   compact?: boolean;
   ownerWindowId?: string;
+  /** The popover is opened by something else (a native Show window's title-bar button), so the
+   *  trigger stays out of sight, out of the tab order, and takes no focus back. */
+  anchorOnly?: boolean;
 }> = ({
   sessionId,
   initialAccess = null,
@@ -89,6 +93,7 @@ export const ShowPageShareControl: React.FC<{
   onOpenChange,
   compact = false,
   ownerWindowId,
+  anchorOnly = false,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -132,10 +137,12 @@ export const ShowPageShareControl: React.FC<{
   const link = payload && !offline ? copyHref(payload) ?? '' : '';
   const nativeShell = isNativeShell();
   const nativeShareAvailable = hasNativeShare();
+  const exportAvailable = hasNativeShareExport();
   const canWebShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   const canShareLink = nativeShareAvailable || canWebShare;
-  // PDF and image exist only in the App; a shell that predates them explains the update instead.
-  const showExport = nativeShell && !!payload && frameVisible;
+  // PDF and image exist only in a shell that exports: the phone app, or a desktop Show window. A
+  // phone app that predates them explains the update instead.
+  const showExport = (nativeShell || exportAvailable) && !!payload && frameVisible;
   const iosStandalone = isIosDevice() && isStandalonePwa();
   const showAddToHome = !nativeShell && !!link && (iosStandalone || isRealMobileSafari());
 
@@ -269,7 +276,7 @@ export const ShowPageShareControl: React.FC<{
     } finally {
       shareBusyRef.current = false;
       setShareBusy(null);
-      if (kind !== 'link') triggerRef.current?.focus({ preventScroll: true });
+      if (kind !== 'link' && !anchorOnly) triggerRef.current?.focus({ preventScroll: true });
     }
   };
 
@@ -314,10 +321,11 @@ export const ShowPageShareControl: React.FC<{
           type="button"
           variant="ghost"
           size="icon"
-          className={compact
+          className={cn(compact
             ? 'size-6 shrink-0 rounded-md text-muted hover:bg-wash hover:text-foreground'
-            : 'size-7 shrink-0'}
+            : 'size-7 shrink-0', anchorOnly && 'pointer-events-none opacity-0')}
           aria-label={t('chat.showPage.share')}
+          {...(anchorOnly ? { tabIndex: -1, 'aria-hidden': true } : {})}
         >
           <Share2 className="size-3.5" />
         </Button>
@@ -327,7 +335,7 @@ export const ShowPageShareControl: React.FC<{
         className="max-h-[var(--radix-popover-content-available-height)] w-[min(23rem,calc(100vw-1rem))] space-y-3 overflow-y-auto"
         data-window-owner-id={ownerWindowId}
         onCloseAutoFocus={(event) => {
-          if (exportConfirmRef.current) event.preventDefault();
+          if (exportConfirmRef.current || anchorOnly) event.preventDefault();
         }}
       >
         <div className="text-sm font-medium">{t('chat.showPage.shareTitle')}</div>
@@ -420,7 +428,7 @@ export const ShowPageShareControl: React.FC<{
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={!nativeShareAvailable || shareBusy !== null}
+                  disabled={!exportAvailable || shareBusy !== null}
                   onClick={() => requestExport(kind)}
                 >
                   {shareBusy === kind
@@ -430,7 +438,7 @@ export const ShowPageShareControl: React.FC<{
                 </Button>
               ))}
             </div>
-            {!nativeShareAvailable ? (
+            {!exportAvailable ? (
               <p className="mt-2 text-xs leading-relaxed text-muted">{t('chat.showPage.shareNeedsUpdate')}</p>
             ) : null}
           </div>
@@ -518,7 +526,7 @@ export const ShowPageShareControl: React.FC<{
           if (next) return;
           closeExportConfirm();
           // After the confirmation stops trapping focus, which it does once it has closed.
-          window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+          if (!anchorOnly) window.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
         }}
         title={t('chat.showPage.exportTitle')}
         description={t('chat.showPage.exportNotice')}

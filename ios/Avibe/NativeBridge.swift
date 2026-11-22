@@ -1,7 +1,10 @@
 import AVFAudio
+import CryptoKit
 import Foundation
 import UIKit
 import WebKit
+
+typealias LiveActivityAction = @MainActor (NativeBridgeRequest, WebOrigin) async throws -> [String: Any]
 
 typealias HealthConnectAction = @MainActor (String, String, WebOrigin) async -> String
 
@@ -21,18 +24,28 @@ struct NativeShellMetadata: Equatable {
     static let capabilities = [
         "accountPresentation": 2,
         "app": 1,
+        "appLock": 1,
         "badge": 1,
         "c1.share_draft": 1,
+        "device": 1,
         "haptics": 1,
         "health": 1,
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
+        "lockScreenProgress": 1,
         "push": 1,
         "systemSchedule": 1,
         "viewport": 1,
         "voice": 1,
         "voiceCapture": 1,
+        // The App recognises a hold on the page's surfaces itself
+        // (`voice.holdSurfaces`, `voice.holdAdopt`, `voice.holdReject`).
+        // 2: a tap is never taken for a hold, however late the App learns
+        // that the finger lifted. The page names surfaces only from 2 on;
+        // the one build that announced 1 (TestFlight 50.1) could give a tap
+        // on the composer the hold's cue.
+        "voiceHold": 2,
     ]
 
     let shellVersion: String
@@ -41,25 +54,35 @@ struct NativeShellMetadata: Equatable {
     let direct: Bool
     /// Whether it also answers `direct.handover`: `direct` version 2.
     let directHandover: Bool
+    /// Whether it answers `direct.preference` and `direct.setPreference`:
+    /// the `directPreference` capability.
+    let directPreference: Bool
 
     init(
         shellVersion: String,
         userAgentVersion: String,
         direct: Bool = false,
-        directHandover: Bool = false
+        directHandover: Bool = false,
+        directPreference: Bool = false
     ) {
         self.shellVersion = shellVersion
         self.userAgentVersion = userAgentVersion
         self.direct = direct
         self.directHandover = direct && directHandover
+        self.directPreference = direct && directPreference
     }
 
-    func withDirect(_ direct: Bool, handover: Bool = false) -> NativeShellMetadata {
+    func withDirect(
+        _ direct: Bool,
+        handover: Bool = false,
+        preference: Bool = false
+    ) -> NativeShellMetadata {
         NativeShellMetadata(
             shellVersion: shellVersion,
             userAgentVersion: userAgentVersion,
             direct: direct,
-            directHandover: handover
+            directHandover: handover,
+            directPreference: preference
         )
     }
 
@@ -69,6 +92,11 @@ struct NativeShellMetadata: Equatable {
             // Version 2 added `direct.handover`; version 3 reports the
             // kind of path (`path`) in the status and its events.
             capabilities["direct"] = directHandover ? 3 : 1
+        }
+        if directPreference {
+            // This device's path choice for the instance: automatic, or the
+            // Cloudflare tunnel only.
+            capabilities["directPreference"] = 1
         }
         return capabilities
     }
@@ -98,6 +126,95 @@ struct NativeShellMetadata: Equatable {
     }
 }
 
+/// What `device.describe` answers: who this iPhone is, for the instance's
+/// device list (the page sends it to `POST /api/devices/self`). Display and
+/// grouping only; it never authorizes anything. It goes nowhere but the
+/// instance the page belongs to.
+enum NativeDeviceDescription {
+    /// The instance's id for this App installation: derived from the push
+    /// installation's secret and the instance id, so two instances can't link
+    /// the same iPhone and the push relay's own name for it never leaves the
+    /// App. It is new after a reinstall, as the push installation is.
+    static func installationID(secret: Data, instanceID: String) -> String? {
+        guard !secret.isEmpty, !instanceID.isEmpty else { return nil }
+        let code = HMAC<SHA256>.authenticationCode(
+            for: Data(("avibe-device:v1:" + instanceID).utf8),
+            using: SymmetricKey(data: secret)
+        )
+        return code.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// `aliases` name identifiers this instance already has for the same
+    /// iPhone: Health's installation id (only from the instance Health is
+    /// paired with) and the alarm and reminder device id.
+    static func body(
+        displayName: String,
+        installationID: String?,
+        healthInstallationID: String?,
+        scheduleDeviceID: String?,
+        appVersion: String,
+        systemVersion: String
+    ) -> [String: Any] {
+        var aliases: [[String: String]] = []
+        if let id = healthInstallationID?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty {
+            aliases.append(["source": "health", "id": id])
+        }
+        if let id = scheduleDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty {
+            aliases.append(["source": "schedule", "id": id])
+        }
+        var body: [String: Any] = [
+            "kind": "iphone_app",
+            "display_name": displayName,
+            "aliases": aliases,
+            "app_version": appVersion,
+            "system_version": systemVersion,
+        ]
+        if let installationID { body["installation_id"] = installationID }
+        return body
+    }
+
+    /// This iPhone's hardware model identifier (`iPhone17,1`); the
+    /// simulator reports the one it simulates.
+    static var hardwareIdentifier: String {
+        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] {
+            return simulated
+        }
+        var system = utsname()
+        uname(&system)
+        return withUnsafeBytes(of: &system.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
+
+    /// The model's name ("iPhone 16 Pro"). The name the user gave the
+    /// iPhone needs an entitlement the App doesn't have; an identifier this
+    /// table doesn't know yet (a newer iPhone) is plainly "iPhone".
+    static func modelName(identifier: String) -> String {
+        models[identifier] ?? "iPhone"
+    }
+
+    private static let models: [String: String] = [
+        "iPhone11,2": "iPhone XS", "iPhone11,4": "iPhone XS Max", "iPhone11,6": "iPhone XS Max",
+        "iPhone11,8": "iPhone XR",
+        "iPhone12,1": "iPhone 11", "iPhone12,3": "iPhone 11 Pro", "iPhone12,5": "iPhone 11 Pro Max",
+        "iPhone12,8": "iPhone SE (2nd generation)",
+        "iPhone13,1": "iPhone 12 mini", "iPhone13,2": "iPhone 12", "iPhone13,3": "iPhone 12 Pro",
+        "iPhone13,4": "iPhone 12 Pro Max",
+        "iPhone14,4": "iPhone 13 mini", "iPhone14,5": "iPhone 13", "iPhone14,2": "iPhone 13 Pro",
+        "iPhone14,3": "iPhone 13 Pro Max", "iPhone14,6": "iPhone SE (3rd generation)",
+        "iPhone14,7": "iPhone 14", "iPhone14,8": "iPhone 14 Plus",
+        "iPhone15,2": "iPhone 14 Pro", "iPhone15,3": "iPhone 14 Pro Max",
+        "iPhone15,4": "iPhone 15", "iPhone15,5": "iPhone 15 Plus",
+        "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
+        "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
+        "iPhone17,3": "iPhone 16", "iPhone17,4": "iPhone 16 Plus", "iPhone17,5": "iPhone 16e",
+        "iPhone18,1": "iPhone 17 Pro", "iPhone18,2": "iPhone 17 Pro Max", "iPhone18,3": "iPhone 17",
+        "iPhone18,4": "iPhone Air", "iPhone18,5": "iPhone 17e",
+        "iPhone19,2": "iPhone 18 Pro", "iPhone19,3": "iPhone 18 Pro Max", "iPhone19,7": "iPhone 18 Pro Max",
+        "iPhone19,4": "iPhone Duo",
+    ]
+}
+
 /// The color scheme of what the primary instance document draws under the
 /// status bar, as the shell's bridge script reads it.
 enum PageColorScheme: String, Equatable {
@@ -108,13 +225,25 @@ enum PageColorScheme: String, Equatable {
 enum NativeBridgeMethod: String, CaseIterable {
     case appearanceColorSchemeChanged = "appearance.colorSchemeChanged"
     case appInfo = "app.info"
+    case appLockStatus = "appLock.status"
+    case appLockSetPolicy = "appLock.setPolicy"
     case appOpenExternal = "app.openExternal"
     case appSetAccountActionAvailable = "app.setAccountActionAvailable"
     case appShowAccount = "app.showAccount"
     case appShowInstances = "app.showInstances"
     case badgeSet = "badge.set"
+    case deviceDescribe = "device.describe"
     case directStatus = "direct.status"
     case directHandover = "direct.handover"
+    case directPreference = "direct.preference"
+    case directSetPreference = "direct.setPreference"
+    case liveActivitySetting = "liveActivity.setting"
+    case liveActivitySetSetting = "liveActivity.setSetting"
+    case liveActivityObserve = "liveActivity.observe"
+    case liveActivityStatus = "liveActivity.status"
+    case liveActivityStart = "liveActivity.start"
+    case liveActivityStop = "liveActivity.stop"
+    case liveActivityOpenSettings = "liveActivity.openSettings"
     case healthConnect = "health.connect"
     case hapticsImpact = "haptics.impact"
     case hapticsNotify = "haptics.notify"
@@ -133,6 +262,9 @@ enum NativeBridgeMethod: String, CaseIterable {
     case voiceCapturePrepare = "voice.capturePrepare"
     case voiceCaptureStart = "voice.captureStart"
     case voiceCaptureStop = "voice.captureStop"
+    case voiceHoldSurfaces = "voice.holdSurfaces"
+    case voiceHoldAdopt = "voice.holdAdopt"
+    case voiceHoldReject = "voice.holdReject"
     case shareCapabilities = "share.capabilities"
     case sharePresent = "share.present"
 }
@@ -277,10 +409,15 @@ enum NativeBridgeConfiguration {
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
+        healthBindingTicket: @escaping @MainActor () async -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        directPreference: DirectPreferenceProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         showShare: ShowShareCoordinator? = nil,
+        appLock: AppLockBridging? = nil,
         voiceCapture: NativeHoldCapture? = nil,
         pushStatus: @escaping @MainActor (
             String?,
@@ -342,7 +479,11 @@ enum NativeBridgeConfiguration {
     ) -> WKWebViewConfiguration {
         // `direct` exists only with a provider: a shell with no direct
         // transport neither advertises it nor answers `direct.status`.
-        let metadata = metadata.withDirect(directStatus != nil, handover: directHandover != nil)
+        let metadata = metadata.withDirect(
+            directStatus != nil,
+            handover: directHandover != nil,
+            preference: directPreference != nil
+        )
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
         let controller = WKUserContentController()
@@ -359,10 +500,15 @@ enum NativeBridgeConfiguration {
             instanceName: instanceName,
             instanceID: instanceID,
             deviceID: deviceID,
+            deviceDescription: deviceDescription,
+            healthBindingTicket: healthBindingTicket,
             directStatus: directStatus,
             directHandover: directHandover,
+            directPreference: directPreference,
+            liveActivity: liveActivity,
             healthConnect: healthConnect,
             showShare: showShare,
+            appLock: appLock,
             voiceCapture: voiceCapture,
             pushStatus: pushStatus,
             pushSubscribe: pushSubscribe,
@@ -633,12 +779,17 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let liveActivity: LiveActivityAction
     private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
+    private let deviceDescription: () -> [String: Any]?
+    private let healthBindingTicket: @MainActor () async -> String?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
+    private let directPreference: DirectPreferenceProvider?
     private let showShare: ShowShareCoordinator?
+    private let appLock: AppLockBridging?
     private let voiceCapture: NativeHoldCapture?
     private let pushStatus: @MainActor (
         String?,
@@ -693,10 +844,15 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         instanceName: @escaping () -> String?,
         instanceID: @escaping () -> String?,
         deviceID: @escaping () -> String?,
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
+        healthBindingTicket: @escaping @MainActor () async -> String? = { nil },
         directStatus: DirectStatusProvider?,
         directHandover: DirectHandoverProvider?,
+        directPreference: DirectPreferenceProvider?,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction,
         showShare: ShowShareCoordinator?,
+        appLock: AppLockBridging?,
         voiceCapture: NativeHoldCapture? = nil,
         pushStatus: @escaping @MainActor (
             String?,
@@ -750,10 +906,15 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
+        self.deviceDescription = deviceDescription
+        self.healthBindingTicket = healthBindingTicket
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.directPreference = directPreference
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.showShare = showShare
+        self.appLock = appLock
         self.voiceCapture = voiceCapture
         self.pushStatus = pushStatus
         self.pushSubscribe = pushSubscribe
@@ -1058,6 +1219,27 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
+        case .liveActivityStatus, .liveActivityStart, .liveActivityStop:
+            reply(replyHandler, error: .unsupported)
+        case .liveActivitySetting, .liveActivitySetSetting, .liveActivityObserve, .liveActivityOpenSettings:
+            let origin = policy.instanceOrigin
+            Task { @MainActor [weak self, weak sourceWebView] in
+                guard let self, let url = sourceWebView?.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                do {
+                    let result = try await self.liveActivity(request, origin)
+                    guard let url = sourceWebView?.url, WebOrigin(url: url, requiresHTTPS: false) == origin else {
+                        self.reply(replyHandler, error: .forbidden)
+                        return
+                    }
+                    self.reply(replyHandler, result: result)
+                } catch {
+                    self.reply(replyHandler, error: (error as? NativeBridgeError) ?? .failed("Live Activity request failed."))
+                }
+            }
         case .healthConnect:
             guard request.params.count == 2,
                   let requestID = request.params["requestId"] as? String, !requestID.isEmpty, requestID.count <= 256,
@@ -1095,6 +1277,36 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
             }
             (showShare ?? .shared).share(share, from: sourceWebView, origin: policy.instanceOrigin) { [weak self] result in
                 self?.reply(replyHandler, result: result.jsonObject)
+            }
+        case .appLockStatus:
+            guard request.params.isEmpty else {
+                reply(replyHandler, error: .invalidArgument("appLock.status takes no parameters."))
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let owner = self.appLock ?? AppLockBridge.current else {
+                    self.reply(replyHandler, error: .unsupported)
+                    return
+                }
+                self.reply(replyHandler, result: owner.status())
+            }
+        case .appLockSetPolicy:
+            guard request.params.count == 1,
+                  let raw = request.params["policy"] as? String,
+                  let policy = AppLockPolicy(rawValue: raw)
+            else {
+                reply(replyHandler, error: .invalidArgument("appLock.setPolicy requires policy: off, immediately, oneMinute or fiveMinutes."))
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let owner = self.appLock ?? AppLockBridge.current else {
+                    self.reply(replyHandler, error: .unsupported)
+                    return
+                }
+                let result = await owner.setPolicy(policy)
+                self.reply(replyHandler, result: result)
             }
         case .appearanceColorSchemeChanged:
             let rawScheme = request.params["scheme"]
@@ -1135,6 +1347,53 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 info["device"] = ["id": id]
             }
             reply(replyHandler, result: info)
+        case .deviceDescribe:
+            // `health_binding: true` (the page's report only) also asks the
+            // paired instance for a one-use Health binding ticket.
+            let healthBinding: Bool
+            if request.params.isEmpty {
+                healthBinding = false
+            } else if request.params.count == 1,
+                      let flag = request.params["health_binding"] as? NSNumber,
+                      CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue {
+                healthBinding = true
+            } else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument(
+                        "device.describe accepts only an optional health_binding: true."
+                    )
+                )
+                return
+            }
+            // The instance this WebView was made for; nil once it is no
+            // longer the selected one.
+            guard let description = deviceDescription() else {
+                reply(replyHandler, error: .forbidden)
+                return
+            }
+            // A description the page can't report yet (no installation id)
+            // asks for nothing: an unused ticket would hold the instance's
+            // 30-second slot from the report that follows.
+            guard healthBinding, description["installation_id"] != nil else {
+                reply(replyHandler, result: description)
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                let ticket = await self.healthBindingTicket()
+                // Described again after the wait: the same instance must
+                // still be the selected one, on the same account.
+                guard var fresh = self.deviceDescription() else {
+                    self.reply(replyHandler, error: .forbidden)
+                    return
+                }
+                if let ticket { fresh["health_binding_ticket"] = ticket }
+                self.reply(replyHandler, result: fresh)
+            }
         case .appOpenExternal:
             guard
                 let rawURL = request.params["url"] as? String,
@@ -1327,6 +1586,54 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     self?.reply(replyHandler, result: outcome.jsonObject)
                 }
             }
+        case .directPreference, .directSetPreference:
+            guard let directPreference else {
+                // No direct transport: nothing to choose between.
+                reply(replyHandler, error: .unsupported)
+                return
+            }
+            guard
+                let sourceWebView,
+                let url = sourceWebView.url,
+                WebOrigin(url: url, requiresHTTPS: false) == policy.instanceOrigin
+            else {
+                reply(replyHandler, error: .failed("The page is no longer this instance's."))
+                return
+            }
+            let preference: DirectPathPreference?
+            if request.method == .directPreference {
+                guard request.params.isEmpty else {
+                    reply(
+                        replyHandler,
+                        error: .invalidArgument("direct.preference does not accept parameters.")
+                    )
+                    return
+                }
+                preference = directPreference.read(policy.instanceOrigin)
+            } else {
+                guard
+                    request.params.count == 1,
+                    let name = request.params["mode"] as? String,
+                    let mode = DirectPathPreference.Mode(name: name)
+                else {
+                    reply(
+                        replyHandler,
+                        error: .invalidArgument(
+                            "direct.setPreference requires mode automatic or tunnel."
+                        )
+                    )
+                    return
+                }
+                preference = directPreference.write(policy.instanceOrigin, mode, url)
+            }
+            guard let preference else {
+                reply(
+                    replyHandler,
+                    error: .failed("The page is not the open instance's.")
+                )
+                return
+            }
+            reply(replyHandler, result: preference.jsonObject)
         case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck,
              .systemScheduleCapabilities, .systemScheduleRequest,
              .systemScheduleCancel:
@@ -1393,7 +1700,8 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 replyHandler,
                 result: ["state": microphonePermissionState()]
             )
-        case .voiceCapturePrepare, .voiceCaptureStart, .voiceCaptureStop:
+        case .voiceCapturePrepare, .voiceCaptureStart, .voiceCaptureStop,
+             .voiceHoldSurfaces, .voiceHoldAdopt, .voiceHoldReject:
             handleVoiceCapture(request, sourceWebView: sourceWebView, replyHandler: replyHandler)
         }
     }
@@ -1456,6 +1764,88 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     self.reply(replyHandler, error: .failed(step))
                 }
             }
+        case .voiceHoldSurfaces:
+            // Where a hold may record now, in this WebView's points, and the
+            // page's hold threshold; an empty list means the App follows no
+            // press.
+            let holdMs = NativeHoldCapture.holdMs(from: request.params["holdMs"])
+            guard request.params.count == (request.params["holdMs"] == nil ? 1 : 2),
+                  request.params["holdMs"] == nil || holdMs != nil,
+                  let surfaces = NativeHoldCapture.surfaces(from: request.params["surfaces"])
+            else {
+                reply(replyHandler, error: .invalidArgument("voice.holdSurfaces requires surfaces, and takes holdMs."))
+                return
+            }
+            // The page's calls take effect in the order it made them: a
+            // list whose consent answer comes back after a later call, or
+            // after its document went, is not applied.
+            let request = capture.surfacesRequested(by: sourceWebView)
+            guard !surfaces.isEmpty else {
+                capture.setSurfaces([], for: sourceWebView)
+                reply(replyHandler, result: NSNull())
+                return
+            }
+            // A surface makes the App open the microphone on a touch: the
+            // same document gate as `voice.captureStart`.
+            let origin = policy.instanceOrigin
+            sourceWebView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak sourceWebView] result, error in
+                guard let self, let sourceWebView, let url = sourceWebView.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin
+                else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                guard capture.isLatestSurfacesRequest(request, of: sourceWebView) else {
+                    self.reply(replyHandler, error: .failed("superseded"))
+                    return
+                }
+                guard error == nil, VoiceConsentMarker(result: result) == .marked else {
+                    self.reply(replyHandler, error: .failed("consent"))
+                    return
+                }
+                guard capture.setSurfaces(surfaces, holdMs: holdMs, for: sourceWebView) else {
+                    // A WebView whose touches the App does not see (a popup).
+                    self.reply(replyHandler, error: .failed("unwatched"))
+                    return
+                }
+                self.reply(replyHandler, result: NSNull())
+            }
+        case .voiceHoldAdopt:
+            guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
+                reply(replyHandler, error: .invalidArgument("voice.holdAdopt requires take."))
+                return
+            }
+            // The same document gate as `voice.captureStart`, asked before
+            // any of the take's audio reaches the page.
+            let origin = policy.instanceOrigin
+            sourceWebView.evaluateJavaScript(VoiceConsentMarker.script) { [weak self, weak sourceWebView] result, error in
+                guard let self, let sourceWebView, let url = sourceWebView.url,
+                      WebOrigin(url: url, requiresHTTPS: false) == origin
+                else {
+                    replyHandler(["ok": false, "error": NativeBridgeError.forbidden.jsonObject], nil)
+                    return
+                }
+                guard error == nil, VoiceConsentMarker(result: result) == .marked else {
+                    capture.reject(take: take, webView: sourceWebView)
+                    self.reply(replyHandler, error: .failed("consent"))
+                    return
+                }
+                switch capture.adopt(take: take, webView: sourceWebView) {
+                case .success(let timings):
+                    self.reply(replyHandler, result: ["sampleRate": 16_000, "timings": timings])
+                case .failure(.failed(let step)):
+                    self.reply(replyHandler, error: .failed(step))
+                case .failure:
+                    self.reply(replyHandler, error: .failed("gone"))
+                }
+            }
+        case .voiceHoldReject:
+            guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
+                reply(replyHandler, error: .invalidArgument("voice.holdReject requires take."))
+                return
+            }
+            capture.reject(take: take, webView: sourceWebView)
+            reply(replyHandler, result: NSNull())
         default:
             guard request.params.count == 1, let take = NativeHoldCapture.isValidTake(request.params["take"]) else {
                 reply(replyHandler, error: .invalidArgument("voice.captureStop requires take."))

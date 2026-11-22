@@ -42,9 +42,20 @@ const desktopInvoke = vi.hoisted(() => vi.fn(defaultDesktopInvoke));
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 const authorization = vi.hoisted(() => ({ remote: true, capabilities: { can_manage_instance: true, is_instance_owner: true } }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
-vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
+const viewport = vi.hoisted(() => ({ desktop: true }));
+vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));
+// The page's request to the shell to present a view, past the unsaved-changes guard.
+const presented = vi.hoisted(() => vi.fn());
+vi.mock('../context/useUnsavedChangesActionGuard', () => ({
+  useUnsavedChangesActionGuard: () => () => ({ runNavigation: (callback: () => void) => callback() }),
+}));
+vi.mock('../desktop/bridge', async (original) => ({
+  ...(await original<typeof import('../desktop/bridge')>()),
+  presentDesktopClient: presented,
+}));
 
 beforeEach(() => {
+  viewport.desktop = true;
   authorization.capabilities.can_manage_instance = true;
   authorization.capabilities.is_instance_owner = true;
   api.getVersion.mockReset().mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' });
@@ -1179,3 +1190,55 @@ describe('one panel on a desktop-managed host', () => {
     expect(api.requestUpdateControl).not.toHaveBeenCalled();
   });
 });
+
+// ui/design: update/instance-and-app. The owner updated this computer's desktop app while meaning to update
+// the instance whose name the version stood beside.
+describe("another computer's instance in the desktop app", () => {
+  const remote = { ...localCompletion, connection: { ...localCompletion.connection, status: 'remote_connected',
+    committed: { kind: 'remote', name: 'alex', instance_id: 'alex', canonical_origin: 'https://alex.example' } } };
+
+  it('draws nothing at desktop width, where the bottom row carries the chip and this badge is only kept mounted', async () => {
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', remote);
+    api.getVersion.mockResolvedValue({ current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true });
+    renderInShell('3.2.8-rc.4', '3.2.8rc2', null, true);
+    await act(async () => {});
+    expect(document.querySelector('[data-version-chip]')).toBeNull();
+  });
+
+  it("shows the instance's own version under its name and leaves the panel to the shell", async () => {
+    // A narrow window: the sidebar and its bottom row are gone, and the Settings header's badge is what is left.
+    viewport.desktop = false;
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', remote);
+    api.getVersion.mockResolvedValue({ current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true });
+    renderInShell('3.2.8-rc.4', '3.2.8rc2', null, true);
+    // Not the app's 3.2.8rc4, and named: no version is shown without saying whose it is.
+    const chip = await screen.findByRole('button', { name: i18n.t('desktopClient.instanceVersion', { name: 'alex', version: 'v3.2.8rc2' }) });
+    expect(screen.queryByText(/3\.2\.8-?rc\.?4/)).toBeNull();
+    fireEvent.click(chip);
+    // The page asks the shell for the panel and opens none of its own; it has no way to install anything here.
+    expect(presented).toHaveBeenCalledExactlyOnceWith('updates', undefined, expect.anything());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(desktopInvoke.mock.calls.filter(([command]) => String(command).startsWith('desktop_update_'))).toEqual([]);
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+    expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('an install the standalone Runtime reports', () => {
+  it.each([
+    ['installing', 'update.status.installing'],
+    ['restarting', 'update.status.restarting'],
+  ] as const)('shows a %s install started elsewhere as running, with no Update to click', async (phase, copy) => {
+    api.getVersion.mockResolvedValue({
+      current: '9.9.9', latest: '10.0.0', has_update: true,
+      install: { phase, target: '10.0.0', started_at: '2026-11-20T07:03:17Z' },
+    });
+    await openBrowserPopup('v9.9.9');
+    expect(await screen.findByText(i18n.t(copy))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: i18n.t('update.action.update') })).toBeNull();
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+});
+

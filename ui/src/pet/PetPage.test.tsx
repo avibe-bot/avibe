@@ -3544,6 +3544,26 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true });
   });
 
+  it('moves the column by the snapshot\'s column_offset, and keeps it centred for an older shell', async () => {
+    const offset = () => (document.querySelector('.pet-mini-stage') as HTMLElement | null)?.style.getPropertyValue('--pet-column-offset');
+    const invoke = recording((command, args) => command === 'pet_ready' ? ready(bottom, 1) : { revision: args?.revision ?? 1, layout: bottom });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    // An older shell's layout has no column_offset: centred on Vibey.
+    await waitFor(() => expect(offset()).toBe('0px'));
+    // Near the left side the shell moves the column right; the page draws it,
+    // then acknowledges that revision.
+    await publish(2, { ...bottom, column_offset: 89 } as typeof top);
+    await waitFor(() => expect(offset()).toBe('89px'));
+    await waitFor(() => expect(settles(invoke).map(([revision]) => revision)).toContain(2));
+    await publish(3, { ...bottom, column_offset: -89 } as typeof top);
+    await waitFor(() => expect(offset()).toBe('-89px'));
+    // Anything but a finite number is no move at all.
+    await publish(4, { ...bottom, column_offset: 'far' } as unknown as typeof top);
+    await waitFor(() => expect(offset()).toBe('0px'));
+  });
+
   it('draws nothing until the shell\'s first snapshot, whichever layout it is', async () => {
     const readyAnswer = deferred<unknown>();
     shell(vi.fn((command: string) => command === 'pet_ready' ? readyAnswer.promise : Promise.resolve({ revision: 2, layout: top })));
@@ -3596,6 +3616,58 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(called('pet_ready')).toBe(3);
     drag(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(called('pet_drag')).toBe(1));
+    // The shell keeps the pressed point of Vibey under the pointer.
+    expect(invoke).toHaveBeenCalledWith('pet_drag', { x: 10, y: 10 });
+  });
+
+  // A freshly shown window can deliver the press but none of the moves after
+  // it; the hold timer asks the shell where the pointer is before it holds.
+  for (const [name, pointer, expected] of [
+    ['a pointer that moved is a drag', { x: 40, y: 10, down: true }, 'drag'],
+    ['a released button is nothing', { x: 10, y: 10, down: false }, 'nothing'],
+    ['a pointer that stayed is a hold', { x: 11, y: 10, down: true }, 'hold'],
+  ] as const) {
+    it(`asks the shell before a hold: ${name}`, async () => {
+      const invoke = recording((command, args) => {
+        if (command === 'pet_ready') return ready();
+        if (command === 'pet_pointer') return pointer;
+        if (command === 'pet_drag') return new Promise(() => {});
+        return { revision: args?.revision ?? 1, layout: bottom };
+      });
+      shell(invoke);
+      mainSession('S'); render(<PetPage />);
+      const avatar = await screen.findByLabelText('pet.recentTurns');
+      await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending')).toBe(false));
+      fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_pointer'));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const dragged = invoke.mock.calls.some(([command]) => command === 'pet_drag');
+      expect(dragged).toBe(expected === 'drag');
+      if (expected === 'drag') expect(invoke).toHaveBeenCalledWith('pet_drag', { x: 10, y: 10 });
+      // Only a hold opens the hold's surface (the composer without voice).
+      expect(screen.queryByRole('textbox') !== null).toBe(expected === 'hold');
+    });
+  }
+
+  it('discards a pointer answer that arrives after its press was released and a new one began', async () => {
+    const answers: ReturnType<typeof deferred<unknown>>[] = [];
+    const invoke = recording((command, args) => {
+      if (command === 'pet_ready') return ready();
+      if (command === 'pet_pointer') { const answer = deferred<unknown>(); answers.push(answer); return answer.promise; }
+      if (command === 'pet_drag') return new Promise(() => {});
+      return { revision: args?.revision ?? 1, layout: bottom };
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending')).toBe(false));
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    await waitFor(() => expect(answers).toHaveLength(1));
+    fireEvent.pointerUp(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 2, clientX: 10, clientY: 10 });
+    // The first press's answer says "moved": it must not turn the new press into a drag.
+    await act(async () => answers[0].resolve({ x: 60, y: 10, down: true }));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_drag')).toBe(false);
   });
 
   it('draws a published snapshot before acknowledging it, and ignores an older one', async () => {

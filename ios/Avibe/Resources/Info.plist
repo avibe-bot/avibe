@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Avibe uses the camera when you choose to capture an attachment.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Use Face ID to unlock Avibe.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Avibe reads your steps, activity, workouts, and sleep to provide your personal daily and weekly status through your own Avibe instance. Access is read-only; Avibe never writes to Apple Health.</string>
 	<key>NSHealthUpdateUsageDescription</key>
@@ -44,6 +46,12 @@
 	<string>Avibe saves images to your photo library when you choose Save Image.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>bot.avibe.ios.live-activity</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>avibe-app</string></array>
+		</dict>
 		<dict>
 			<key>CFBundleURLName</key>
 			<string>bot.avibe.ios.diagnostics</string>

@@ -2,7 +2,7 @@ import { useCallback, useSyncExternalStore } from 'react';
 
 import { petBridge, type LayoutSnapshot, type PetLayout } from './petBridge';
 
-const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom' };
+const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom', column_offset: 0 };
 
 /**
  * The native frame's expansion, held once per document outside React so the
@@ -56,7 +56,8 @@ export const petPanel = {
   applySnapshot: (snapshot: LayoutSnapshot): boolean => {
     if (snapshot.revision <= layoutRevision) return false;
     layoutRevision = snapshot.revision;
-    if (snapshot.layout.panel_edge !== layout.panel_edge || snapshot.layout.panel_side !== layout.panel_side) {
+    if (snapshot.layout.panel_edge !== layout.panel_edge || snapshot.layout.panel_side !== layout.panel_side
+      || snapshot.layout.column_offset !== layout.column_offset) {
       layout = snapshot.layout;
     }
     // Every accepted revision: what subscribers read also depends on it

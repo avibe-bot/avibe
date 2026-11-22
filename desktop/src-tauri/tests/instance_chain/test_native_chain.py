@@ -857,10 +857,12 @@ def test_actual_remote_footer_opens_trusted_panel_and_fences_download_completion
     login(f)
     f["state"](lambda state: state["account"]["status"] == "signed_in")
     select_studio(f)
-    denied = f["js"]("try { await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
-                     "{version:1,request_id:'remote-update-denied',expected_generation:0,action:{type:'update_check'}}});"
-                     " return false; } catch { return true; }")
-    assert denied is True
+    for action in ("{type:'update_check'}", "{type:'instance_update_check'}",
+                   "{type:'instance_update_install',target_version:'0.0.0'}"):
+        denied = f["js"]("try { await window.__TAURI_INTERNALS__.invoke('desktop_client_request',{request:"
+                         "{version:1,request_id:'remote-update-denied',expected_generation:0,action:" + action + "}});"
+                         " return false; } catch { return true; }")
+        assert denied is True, action
     open_footer(f)
     assert not f["updater"]["requested"].is_set()
     assert trusted_action(f, {"type": "update_check"})["ok"]

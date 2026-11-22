@@ -2199,17 +2199,18 @@ class ManagedWatchService:
         self._runtime_state_dirty = True
         self._write_runtime_state()
 
-    def _owns_service_instance(self) -> bool:
+    def _owns_service_instance(self, *, lease_held: Optional[bool] = None) -> bool:
         # Shutdown keeps the service lease while other runtime owners drain, before
         # stop() cancels our tasks. A service-wide SIGTERM can already have ended a
         # waiter in that gap. Quiesce now: that result is an interrupted cycle, not
         # a waiter failure that may retire the durable Watch or queue a hook.
+        # ``lease_held`` is the lease check already made off the loop, if any.
         if getattr(self.controller, "shutdown_requested", False):
             self._begin_stop()
             return False
         if not self._requires_service_lease:
             return True
-        if runtime.current_process_owns_service_instance():
+        if lease_held if lease_held is not None else runtime.current_process_owns_service_instance():
             return True
         # Says what was established, not what was inferred from it: the check
         # re-opens the lock file and looks for a record naming this pid, so a
@@ -2482,7 +2483,16 @@ class ManagedWatchService:
         """
 
         while self._running:
-            if not self._owns_service_instance():
+            # File-system work stays off the loop every Session shares: the lease
+            # stat and, below, the job host's path resolution each took 2 s on the
+            # owner's controller when the disk was slow. A cancel (restart) during
+            # either only abandons a read; the next start re-attaches to the job.
+            lease_held = (
+                await asyncio.to_thread(runtime.current_process_owns_service_instance)
+                if self._requires_service_lease and not getattr(self.controller, "shutdown_requested", False)
+                else None
+            )
+            if not self._owns_service_instance(lease_held=lease_held):
                 return
             current = self.store.get_watch(watch.id)
             if current is None or not current.enabled or current.job_target is None:
@@ -2497,22 +2507,36 @@ class ManagedWatchService:
                     await self._commit_lifetime_timeout_async(watch)
                     return
             target = watch.job_target
+            failure: Exception | None = None
+            status = None
             try:
-                status = await _job_host(target).wait(target["job_id"], deadline_s=0)
+                host = await asyncio.to_thread(_job_host, target)
+                if getattr(self.controller, "shutdown_requested", False):
+                    # Before the look, which may enforce the job's deadline (a kill).
+                    self._begin_stop()
+                    return
+                status = await host.wait(target["job_id"], deadline_s=0)
             except KeyError:
                 status = None  # the job record is gone: report what is known
-            except ValueError as exc:
+            except Exception as exc:
+                failure = exc
+            # The look above awaited; a shutdown that began meanwhile leaves this Watch
+            # for the next start, whatever the look found.
+            if getattr(self.controller, "shutdown_requested", False):
+                self._begin_stop()
+                return
+            if isinstance(failure, ValueError):
                 # Unreadable state (its deadline, say): the Watch cannot keep its promises
                 # for this job, so it stops the command, and lets go only once the job
                 # host confirms nothing of it runs.
                 if await _stop_job(target, JOB_STOP_UNREADABLE):
                     await self._commit_job_result_async(watch)
                 else:
-                    await self._hold_unmanageable_job_async(watch, exc)
+                    await self._hold_unmanageable_job_async(watch, failure)
                 return
-            except Exception as exc:
+            if failure is not None:
                 # Possibly transient (I/O): keep the job, say so, and look again later.
-                await self._hold_unmanageable_job_async(watch, exc)
+                await self._hold_unmanageable_job_async(watch, failure)
                 return
             if status is None or status.state != "running":
                 await self._commit_job_result_async(watch)
@@ -3551,10 +3575,10 @@ async def hand_over_job(
     the job.
     """
 
+    # The default store loads every Watch from the database when it is built, so it
+    # is built on the worker too, never on the controller loop.
     return await asyncio.to_thread(
-        (store or ManagedWatchStore()).adopt_or_create_job_watch,
-        job,
-        **route,
+        lambda: (store or ManagedWatchStore()).adopt_or_create_job_watch(job, **route),
     )
 
 

@@ -1311,6 +1311,375 @@ final class HealthSyncTests: XCTestCase {
         fixture.reader.releaseQuery()
     }
 
+    // MARK: The account's instance list (synthetic data only)
+
+    @MainActor
+    func testAListedOriginOrAnUnknownListKeepsTheConnection() async throws {
+        let origin = WebOrigin.parseConfigured("https://health-fixture.invalid")!.serialized
+        // Listed at its origin; a list avibe.bot has not confirmed yet.
+        let lists: [[String: String]?] = [["instance-1": origin, "instance-2": "https://other.invalid"], nil]
+        for list in lists {
+            let fixture = try coordinatorFixture(savedIdentity: true)
+            fixture.coordinator.instancesProvider = { list }
+            await fixture.coordinator.resume(foreground: false)
+            XCTAssertNotNil(fixture.credentials.identity)
+            XCTAssertNotNil(fixture.reader.observer)
+            XCTAssertTrue(fixture.client.calls.contains { $0.path.hasSuffix("/manifest") })
+            XCTAssertTrue(fixture.client.calls.allSatisfy { $0.origin == origin })
+        }
+    }
+
+    @MainActor
+    func testAnOriginTheConfirmedListNoLongerHasIsDisconnectedWithoutAnyRequest() async throws {
+        let origin = WebOrigin.parseConfigured("https://health-fixture.invalid")!.serialized
+        // Renamed (the same instance at another origin), no longer listed,
+        // and an account avibe.bot confirms has no instance at all.
+        let lists: [[String: String]] = [["instance-1": "https://renamed.invalid"], ["instance-2": origin], [:]]
+        for list in lists {
+            let fixture = try coordinatorFixture(savedIdentity: true)
+            fixture.coordinator.instancesProvider = { list }
+            await fixture.coordinator.resume(foreground: true)
+            XCTAssertTrue(fixture.client.calls.isEmpty)
+            XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+            XCTAssertTrue(fixture.reader.days.isEmpty)
+            XCTAssertNil(fixture.reader.observer)
+            XCTAssertNil(fixture.credentials.identity)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.path))
+            XCTAssertNil(fixture.coordinator.notice)
+        }
+    }
+
+    @MainActor
+    func testAHealthKitWakeAfterTheOriginLeftTheListSendsNothing() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var list: [String: String]? = ["instance-1": fixture.origin.serialized]
+        fixture.coordinator.instancesProvider = { list }
+        await fixture.coordinator.resume(foreground: false)
+        let observer = try XCTUnwrap(fixture.reader.observer)
+        XCTAssertFalse(fixture.client.calls.isEmpty)
+        let calls = fixture.client.calls.count
+        let uploads = fixture.uploader.uploads.count
+        let queries = fixture.reader.days.count
+
+        list = ["instance-1": "https://renamed.invalid"]
+        await observer()
+        try await eventually { fixture.credentials.identity == nil }
+        // The background session's own wake after it.
+        await fixture.coordinator.resume(foreground: false)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.calls.count, calls)
+        XCTAssertEqual(fixture.uploader.uploads.count, uploads)
+        XCTAssertEqual(fixture.reader.days.count, queries)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    @MainActor
+    func testTheForegroundPollStopsOnceTheOriginLeftTheList() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var list: [String: String]? = ["instance-1": fixture.origin.serialized]
+        fixture.coordinator.instancesProvider = { list }
+        fixture.client.claims = []
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually {
+            fixture.client.pendingClaims.count == 1 && fixture.uploader.uploads.count == 1
+                && fixture.client.calls.contains { $0.path.hasSuffix("/manifest") }
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        let calls = fixture.client.calls.count
+
+        list = ["instance-1": "https://renamed.invalid"]
+        fixture.client.releasePending()
+        try await eventually { fixture.credentials.identity == nil }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.calls.count, calls)
+        XCTAssertTrue(fixture.client.pendingClaims.isEmpty)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    @MainActor
+    func testAnAccountLeftWithNoInstanceEndsAnIdleDeviceWithoutARevoke() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var list: [String: String]? = ["instance-1": fixture.origin.serialized]
+        fixture.coordinator.instancesProvider = { list }
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertNotNil(fixture.credentials.identity)
+        let calls = fixture.client.calls.count
+
+        // The paired instance was deleted and was the account's only one:
+        // avibe.bot answers an empty list, published after the event. Its
+        // name may later belong to someone else, so nothing more goes there.
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: []))
+        list = [:]
+        try await eventually { fixture.credentials.identity == nil }
+
+        fixture.coordinator.accountEvent(.signedOut(explicit: true))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.calls.count, calls)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    @MainActor
+    func testARenameAnsweredWhileIdleEndsTheDeviceBeforeASignOutCouldRevokeIt() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        var list: [String: String]? = ["instance-1": fixture.origin.serialized]
+        fixture.coordinator.instancesProvider = { list }
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertNotNil(fixture.credentials.identity)
+        let calls = fixture.client.calls.count
+
+        // avibe.bot answers with the instance renamed. Its list is published
+        // after the event, as MobileSessionCoordinator does; the converged,
+        // idle device has nothing else that would run the gate.
+        fixture.coordinator.accountEvent(.authenticated(accountID: "account-1", instanceIDs: ["instance-1"]))
+        list = ["instance-1": "https://renamed.invalid"]
+        try await eventually { fixture.credentials.identity == nil }
+
+        fixture.coordinator.accountEvent(.signedOut(explicit: true))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(fixture.client.calls.count, calls)
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    @MainActor
+    func testReconnectingReplacesADelistedDeviceWithoutRevokingItAtItsOldOrigin() async throws {
+        let fixture = try coordinatorFixture(savedIdentity: true)
+        let saved = try XCTUnwrap(fixture.credentials.identity)
+        fixture.credentials.identity = HealthDeviceIdentity(
+            installationID: saved.installationID, accountID: saved.accountID, instanceID: saved.instanceID,
+            instanceName: saved.instanceName, origin: "https://old-name.invalid", deviceID: saved.deviceID,
+            credential: saved.credential, websiteDataStoreID: saved.websiteDataStoreID
+        )
+        fixture.coordinator.instancesProvider = { ["instance-1": fixture.origin.serialized] }
+        let reconnecting = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let reply = await reconnecting.value
+        XCTAssertEqual(reply, "connected")
+        XCTAssertFalse(fixture.client.calls.isEmpty)
+        XCTAssertTrue(fixture.client.calls.allSatisfy { $0.origin == fixture.origin.serialized })
+        XCTAssertFalse(fixture.client.calls.contains { $0.method == "DELETE" })
+    }
+
+    // MARK: The binding ticket for the Devices page (synthetic data only)
+
+    /// A connected fixture in front: its poll is held, its first payload acknowledged.
+    @MainActor
+    private func connectedInFront(now: @escaping () -> Date = Date.init) async throws -> HealthCoordinatorFixture {
+        let directory = try temporaryDirectory()
+        let fixture = HealthCoordinatorFixture(directory: directory, savedIdentity: true, now: now)
+        addTeardownBlock { @MainActor in
+            await fixture.coordinator.logout()
+            fixture.client.releasePending()
+        }
+        fixture.client.claims = []
+        fixture.uploader.autoAcknowledge = true
+        _ = Task { await fixture.coordinator.resume(foreground: true) }
+        try await eventually { fixture.client.pendingClaims.count == 1 && fixture.uploader.uploads.count == 1 }
+        return fixture
+    }
+
+    @MainActor
+    private func ticket(_ fixture: HealthCoordinatorFixture, account: String = "account-1",
+                        instance: String = "instance-1", origin: String? = nil) async -> String? {
+        await fixture.coordinator.bindingTicket(
+            accountID: account, instanceID: instance, origin: origin ?? fixture.origin.serialized
+        )
+    }
+
+    @MainActor
+    func testABindingTicketComesOnlyFromTheConnectedPairingInFront() async throws {
+        // In the background: none, and nothing asked.
+        let background = try coordinatorFixture(savedIdentity: true)
+        await background.coordinator.resume(foreground: false)
+        let backgroundTicket = await ticket(background)
+        XCTAssertNil(backgroundTicket)
+        XCTAssertTrue(background.client.ticketCalls.isEmpty)
+
+        // Not connected: none.
+        let unpaired = try coordinatorFixture()
+        let unpairedTicket = await ticket(unpaired)
+        XCTAssertNil(unpairedTicket)
+        XCTAssertTrue(unpaired.client.ticketCalls.isEmpty)
+
+        let fixture = try await connectedInFront()
+        // Another account, instance or origin than the pairing's: none.
+        let otherAccount = await ticket(fixture, account: "account-2")
+        let otherInstance = await ticket(fixture, instance: "instance-2")
+        let otherOrigin = await ticket(fixture, origin: "https://other.invalid")
+        XCTAssertNil(otherAccount)
+        XCTAssertNil(otherInstance)
+        XCTAssertNil(otherOrigin)
+        XCTAssertTrue(fixture.client.ticketCalls.isEmpty)
+
+        let issued = await ticket(fixture)
+        XCTAssertEqual(issued, HealthFakeClient.ticket)
+        let call = try XCTUnwrap(fixture.client.ticketCalls.first)
+        XCTAssertEqual(call.method, "POST")
+        XCTAssertEqual(call.path, "/api/mobile/device/v1/binding-ticket")
+        XCTAssertEqual(call.origin, fixture.origin.serialized)
+        XCTAssertEqual(call.credential, "memory-only")
+        XCTAssertEqual(call.body?.isEmpty, true)
+        // At most one every 30 seconds.
+        let again = await ticket(fixture)
+        XCTAssertNil(again)
+        XCTAssertEqual(fixture.client.ticketCalls.count, 1)
+    }
+
+    @MainActor
+    func testNoTicketIsAskedForAPausedDelistedOrOtherAccountsPairing() async throws {
+        let changes: [(HealthCoordinatorFixture) -> Void] = [
+            // A second factor is owed: authority paused.
+            { $0.coordinator.accountEvent(.authorizationUnavailable) },
+            // The account's list has the instance at another origin.
+            { $0.coordinator.instancesProvider = { ["instance-1": "https://renamed.invalid"] } },
+            // Another account is current.
+            { $0.coordinator.accountIDProvider = { "account-2" } },
+        ]
+        for change in changes {
+            let fixture = try await connectedInFront()
+            change(fixture)
+            let none = await ticket(fixture)
+            XCTAssertNil(none)
+            XCTAssertTrue(fixture.client.ticketCalls.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testNoTicketAnswerChangesTheHealthConnection() async throws {
+        let failures: [Error] = [
+            HealthSyncError.http(401, "device_unauthorized", nil),
+            // An older tunneled instance's cookie gate: no code.
+            HealthSyncError.http(401, "internal", nil),
+            HealthSyncError.http(403, "device_revoked", nil),
+            HealthSyncError.http(403, "instance_not_eligible", nil),
+            HealthSyncError.http(404, "internal", nil),
+            HealthSyncError.http(405, "internal", nil),
+            HealthSyncError.http(413, "invalid_payload", nil),
+            HealthSyncError.http(422, "invalid_payload", nil),
+            HealthSyncError.http(426, "contract_unsupported", nil),
+            HealthSyncError.http(429, "binding_ticket_rate_limited", 30),
+            HealthSyncError.http(503, "private_storage_unavailable", 30),
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet),
+        ]
+        let malformed: [[String: Any]] = [
+            [:],
+            ["health_binding_ticket": "short", "expires_at": "2099-01-01T00:00:00Z"],
+            HealthFakeClient.issuedTicket(expires: Date().addingTimeInterval(-1)),
+        ]
+        let answers = failures.map { Result<[String: Any], Error>.failure($0) }
+            + malformed.map { Result<[String: Any], Error>.success($0) }
+        for answer in answers {
+            let fixture = try await connectedInFront()
+            fixture.client.ticketAnswers = [answer]
+            let none = await ticket(fixture)
+            XCTAssertNil(none)
+            XCTAssertEqual(fixture.client.ticketCalls.count, 1)
+            XCTAssertNotNil(fixture.credentials.identity)
+            XCTAssertFalse(try HealthDeviceStore(directory: fixture.directory).state.suspended)
+            XCTAssertNil(fixture.coordinator.notice)
+            // Sync is neither stopped nor delayed: a HealthKit delivery still uploads at once.
+            let uploads = fixture.uploader.uploads.count
+            await fixture.reader.observer?()
+            try await eventually { fixture.uploader.uploads.count == uploads + 1 }
+        }
+    }
+
+    @MainActor
+    func testAnOlderInstanceIsNotAskedAgainWhileOtherFailuresAreAfterTheirWait() async throws {
+        var clock = Date()
+        // 404, and an older tunneled instance's code-less 401: not asked again in this process.
+        for missing in [HealthSyncError.http(404, "internal", nil), HealthSyncError.http(401, "internal", nil)] {
+            let older = try await connectedInFront(now: { clock })
+            older.client.ticketAnswers = [.failure(missing)]
+            _ = await ticket(older)
+            clock = clock.addingTimeInterval(31)
+            let later = await ticket(older)
+            XCTAssertNil(later)
+            XCTAssertEqual(older.client.ticketCalls.count, 1)
+        }
+
+        // 503: asked again after 30 seconds.
+        let busy = try await connectedInFront(now: { clock })
+        busy.client.ticketAnswers = [.failure(HealthSyncError.http(503, "private_storage_unavailable", nil))]
+        _ = await ticket(busy)
+        clock = clock.addingTimeInterval(31)
+        let afterBusy = await ticket(busy)
+        XCTAssertEqual(afterBusy, HealthFakeClient.ticket)
+
+        // 429: not before its Retry-After.
+        let limited = try await connectedInFront(now: { clock })
+        limited.client.ticketAnswers = [.failure(HealthSyncError.http(429, "binding_ticket_rate_limited", 60))]
+        _ = await ticket(limited)
+        clock = clock.addingTimeInterval(31)
+        let tooSoon = await ticket(limited)
+        XCTAssertNil(tooSoon)
+        XCTAssertEqual(limited.client.ticketCalls.count, 1)
+        clock = clock.addingTimeInterval(30)
+        let afterLimit = await ticket(limited)
+        XCTAssertEqual(afterLimit, HealthFakeClient.ticket)
+    }
+
+    @MainActor
+    func testATicketIsDroppedWhenItIsLateOrTheConnectionChangedOnTheWay() async throws {
+        // Over the budget: the request is cancelled.
+        let slow = try await connectedInFront()
+        slow.coordinator.bindingTicketBudget = .milliseconds(100)
+        slow.client.holdTicket = true
+        let late = await ticket(slow)
+        XCTAssertNil(late)
+        XCTAssertNil(slow.client.ticketContinuation)
+        XCTAssertNotNil(slow.credentials.identity)
+
+        // Sent to the background, signed out, or the store changed while it was on its way.
+        var binding = UUID(uuidString: "10000000-0000-0000-0000-000000000002")
+        let changes: [(HealthCoordinatorFixture) -> Void] = [
+            { $0.coordinator.setBackground() },
+            { $0.coordinator.accountEvent(.signedOut(explicit: true)) },
+            { _ in binding = UUID() },
+            // The account's list now has the instance at another origin.
+            { $0.coordinator.instancesProvider = { ["instance-1": "https://renamed.invalid"] } },
+        ]
+        for change in changes {
+            let fixture = try await connectedInFront()
+            binding = UUID(uuidString: "10000000-0000-0000-0000-000000000002")
+            fixture.coordinator.websiteDataStoreIDProvider = { binding }
+            fixture.client.holdTicket = true
+            let pending = Task { await self.ticket(fixture) }
+            try await eventually { fixture.client.ticketContinuation != nil }
+            change(fixture)
+            fixture.client.releaseTicket()
+            let dropped = await pending.value
+            XCTAssertNil(dropped)
+        }
+    }
+
+    func testTheIssueAnswerMustCarryAWellFormedUnexpiredTicket() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2027-01-15T08:00:00Z"))
+        let valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6"
+        let later = "2027-01-15T08:02:00Z"
+        XCTAssertEqual(valid.count, 43)
+        XCTAssertEqual(HealthSyncCoordinator.bindingTicket(
+            from: ["health_binding_ticket": valid, "expires_at": later], now: now), valid)
+        XCTAssertEqual(HealthSyncCoordinator.bindingTicket(
+            from: ["health_binding_ticket": valid, "expires_at": "2027-01-15T08:01:00.123Z"], now: now), valid)
+        let broken: [[String: Any]] = [
+            ["health_binding_ticket": String(valid.dropLast()), "expires_at": later],
+            ["health_binding_ticket": valid + "A", "expires_at": later],
+            ["health_binding_ticket": String(valid.dropLast()) + "+", "expires_at": later],
+            ["health_binding_ticket": String(valid.dropLast()) + "=", "expires_at": later],
+            ["health_binding_ticket": String(valid.dropLast()) + "é", "expires_at": later],
+            ["health_binding_ticket": 7, "expires_at": later],
+            ["health_binding_ticket": valid],
+            ["health_binding_ticket": valid, "expires_at": "soon"],
+            ["health_binding_ticket": valid, "expires_at": "2027-01-15T08:00:00Z"],
+            ["health_binding_ticket": valid, "expires_at": "2027-01-15T07:59:59Z"],
+            ["expires_at": later],
+        ]
+        for answer in broken {
+            XCTAssertNil(HealthSyncCoordinator.bindingTicket(from: answer, now: now))
+        }
+    }
+
     @MainActor
     func testRevokedSuspendedPausedOrBackgroundContinuationsSendNothingFurther() async throws {
         let (revoked, _) = try await acknowledgedFirstOfTwo(
@@ -2048,6 +2417,7 @@ final class HealthFakeClient: HealthDeviceRequesting {
         let path: String
         let body: [String: Any]?
         let credential: String?
+        var origin = ""
     }
     private(set) var calls: [Call] = []
     var pairedDeviceID = "device-1"
@@ -2071,7 +2441,7 @@ final class HealthFakeClient: HealthDeviceRequesting {
     }
     func request(origin: String, credential: String?, method: String,
                  path: String, body: [String: Any]?) async throws -> [String: Any] {
-        calls.append(Call(method: method, path: path, body: body, credential: credential))
+        calls.append(Call(method: method, path: path, body: body, credential: credential, origin: origin))
         if path.hasSuffix("/result"), !resultErrors.isEmpty { throw resultErrors.removeFirst() }
         if path.hasSuffix("/result"), holdResults {
             return try await withCheckedThrowingContinuation { resultContinuation = $0 }
@@ -2094,12 +2464,44 @@ final class HealthFakeClient: HealthDeviceRequesting {
             }
             return pairResponse
         }
+        if path.hasSuffix("/binding-ticket") {
+            if holdTicket {
+                return try await withTaskCancellationHandler {
+                    try await withCheckedThrowingContinuation { ticketContinuation = $0 }
+                } onCancel: {
+                    Task { @MainActor [weak self] in self?.cancelHeldTicket() }
+                }
+            }
+            if !ticketAnswers.isEmpty { return try ticketAnswers.removeFirst().get() }
+            return Self.issuedTicket()
+        }
         if path.hasSuffix("/requests/claim") {
             if !claimErrors.isEmpty { throw claimErrors.removeFirst() }
             if !claims.isEmpty { return ["requests": claims.removeFirst()] }
             return try await withCheckedThrowingContinuation { pendingClaims.append($0) }
         }
         return [:]
+    }
+    /// Synthetic: 43 base64url characters. It lasts an hour here, so tests
+    /// that move the coordinator's clock past 30-second waits still find it
+    /// unexpired.
+    static let ticket = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-"
+    static func issuedTicket(expires: Date = Date().addingTimeInterval(3600)) -> [String: Any] {
+        ["health_binding_ticket": ticket, "expires_at": ISO8601DateFormatter().string(from: expires)]
+    }
+    var ticketAnswers: [Result<[String: Any], Error>] = []
+    var holdTicket = false
+    private(set) var ticketContinuation: CheckedContinuation<[String: Any], Error>?
+    var ticketCalls: [Call] { calls.filter { $0.path.hasSuffix("/binding-ticket") } }
+    func releaseTicket() {
+        let continuation = ticketContinuation
+        ticketContinuation = nil
+        continuation?.resume(returning: Self.issuedTicket())
+    }
+    func cancelHeldTicket() {
+        let continuation = ticketContinuation
+        ticketContinuation = nil
+        continuation?.resume(throwing: CancellationError())
     }
     func releasePair() {
         let continuation = pairContinuation
@@ -2117,6 +2519,7 @@ final class HealthFakeClient: HealthDeviceRequesting {
         continuation?.resume(throwing: CancellationError())
     }
     func releasePending() {
+        releaseTicket()
         releaseResult()
         releasePair()
         releaseManifest()
@@ -2143,9 +2546,11 @@ final class HealthCoordinatorFixture {
     let client = HealthFakeClient()
     let uploader = HealthFakeUploader()
     let coordinator: HealthSyncCoordinator
-    let origin = WebOrigin.parseConfigured("https://health-fixture.invalid")!
-    init(directory: URL, savedIdentity: Bool) {
+    let origin: WebOrigin
+    init(directory: URL, savedIdentity: Bool, origin originText: String = "https://health-fixture.invalid",
+         now: @escaping () -> Date = Date.init) {
         self.directory = directory
+        self.origin = WebOrigin.parseConfigured(originText)!
         if savedIdentity {
             credentials.identity = HealthDeviceIdentity(
                 installationID: "installation-1", accountID: "account-1", instanceID: "instance-1",
@@ -2153,7 +2558,7 @@ final class HealthCoordinatorFixture {
             )
         }
         coordinator = HealthSyncCoordinator(
-            credentials: credentials, reader: reader, client: client, uploader: uploader, directory: directory
+            credentials: credentials, reader: reader, client: client, uploader: uploader, directory: directory, now: now
         )
         let target = HealthConnectionTarget(
             accountID: "account-1", instanceID: "instance-1", name: "Fixture", origin: origin.serialized

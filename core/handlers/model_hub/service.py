@@ -223,6 +223,8 @@ from .pricing import (
     load_price_table,
     quota_values,
 )
+from . import card_action
+from .card_fences import CardFences
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -792,6 +794,21 @@ class UnavailableEngineAdapter:
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         return None
 
+    async def reset_card_account_key(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        return None
+
+    async def use_reset_card(
+        self,
+        source_id: str,
+        vendor: str,
+        credential_ref: str,
+        kind: str,
+        request_id: str,
+        expected_key: str,
+        expected_count: int,
+    ) -> dict[str, Any]:
+        return {"statement": "no_card"}
+
     async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
         raise SubscriptionQuotaError("unavailable")
 
@@ -912,6 +929,41 @@ def _pinned_hop(request: Any, backend: str) -> tuple[str, str | None] | None:
     """The exact (Source, model) a Vibey request is pinned to (``x-avibe-pin-source``), if any."""
 
     return getattr(request, "pinned_hop", None) if backend == "vibey" else None
+
+
+_QUOTA_PAUSE_REASONS: Final = frozenset({"quota_exhausted", "rate_limited"})
+# The windows a whole account stops on; a model's own limit never pauses it.
+_ACCOUNT_QUOTA_WINDOWS: Final = frozenset({"session", "weekly", "monthly"})
+
+
+def _paused_for_quota(source: ModelHubSourceConfig, live: SourceRecoveryAnnotation | None) -> bool:
+    """Whether requests are held from this Source for quota or rate, on disk or in the live deadline."""
+
+    if source.state.status == "cooldown":
+        return (source.state.detail_key or "").rsplit(".", 1)[-1] in _QUOTA_PAUSE_REASONS
+    return (
+        source.state.status in {"active", "standby"}
+        and live is not None
+        and live.retry_at is not None
+        and live.reason in _QUOTA_PAUSE_REASONS
+    )
+
+
+def _quota_used_up(reading: Mapping[str, Any], now: datetime) -> bool:
+    """Whether a current vendor reading still shows an account-wide window spent."""
+
+    if reading.get("state") != "ok":
+        return False
+    for window in reading.get("windows") or ():
+        if window.get("kind") not in _ACCOUNT_QUOTA_WINDOWS or window.get("used_pct", 0) < 100:
+            continue
+        resets_at = window.get("resets_at")
+        try:
+            if resets_at is None or parse_model_hub_timestamp(resets_at) > now:
+                return True
+        except ValueError:
+            return True
+    return False
 
 
 def _pin_unavailable(learned: LearnedEvidence | None = None, source_id: str = "") -> ModelHubError:
@@ -1740,7 +1792,16 @@ class ModelHubService:
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
-        self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
+        # Reset-card uses: the durable claim per account, and the presses being handled now.
+        # Elapsed time for the wait after an unknown outcome: never the wall clock, which can be set.
+        self.monotonic: Callable[[], float] = time.monotonic
+        self.card_fences = CardFences(
+            paths.get_state_dir() / "model_hub_card_fences", monotonic=lambda: self.monotonic()
+        )
+        self._card_presses: list[card_action.Press] = []
+        self.quota = SubscriptionQuotaCache(
+            self._fetch_subscription_quota, now=lambda: self.now(), monotonic=lambda: self.monotonic()
+        )
         # A cached copy only: the picker read must not wait on the network.
         self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
             lambda: _cached_models_dev_catalog()
@@ -3282,7 +3343,16 @@ class ModelHubService:
                 discovered,
                 allow_empty=True,
             )
-        source.state = ModelHubSourceStateConfig(status="standby")
+        listed = next((item for item in previous.sources if item.id == source.id), None)
+        if not (
+            listed is not None
+            and listed.state.status == "cooldown"
+            and source_identity(listed) == source_identity(source)
+        ):
+            # A listing proves the credential and endpoint, so it retires an
+            # error. It is not inference evidence: any pause of an unchanged
+            # Source (quota, rate, upstream) stays, as its live deadline does.
+            source.state = ModelHubSourceStateConfig(status="standby")
         removed_hops, interrupted = self._guard_inventory_mutation(
             previous,
             updated,
@@ -9069,16 +9139,46 @@ class ModelHubService:
             )
         return refs
 
-    async def quota_summary(self, *, force: bool = False) -> dict:
+    async def use_reset_card(self, source_id: object, payload: object) -> dict:
+        """Use one reset card of the kind in ``payload`` on this Source's account.
+
+        Reached only from the Web route, over the private controller route that
+        carries it: deliberately not an operation of ``dispatch_model_hub_rpc``,
+        so the `vibe` CLI and Agent tools cannot ask for it. The rules it keeps
+        are in ``card_action``.
+        """
+
+        return await card_action.use(self, source_id, payload)
+
+    async def quota_summary(self, *, force: bool = False, wait: bool = True) -> dict:
         """Report each hub-held subscription's rate-limit windows.
 
-        A report only, like usage metering: nothing in resolution reads it. The
-        cache re-reads a Source at most every five minutes, or every thirty
-        seconds when forced, and keeps the last good snapshot across failures.
+        A report, like usage metering: resolution never reads it. The cache
+        re-reads a Source at most every five minutes, or every thirty seconds
+        when forced, and keeps the last good snapshot across failures.
+
+        A forced read is the user's refresh, and it is the one place the report
+        is acted on: an account paused for quota or rate is resumed unless the
+        vendor's reading still shows the limit used up.
+
+        ``wait=False`` is for the answer to a reset-card use: what is known now,
+        without waiting for another account's reading.
         """
 
         sources = await asyncio.to_thread(self._quota_sources)
-        summary = await self.quota.summary(sources, force=force)
+        # A reset-card use whose outcome is unknown is answered only here, by the
+        # user's own refresh: once that account's wait is over, its Sources get a
+        # reading begun since (shared by concurrent refreshes, held back by a
+        # vendor's rate-limit cooldown), and a recognised reading of the same
+        # account lifts its lock. An earlier refresh reads as usual and leaves the
+        # lock. A read that is not forced asks no vendor on a lock's behalf.
+        unknown = await card_action.unknown_floors(self) if force else {}
+        summary = await self.quota.summary(sources, force=force, answering=unknown, wait=wait)
+        if unknown:
+            await card_action.lift_unknown(self, sources)
+        await card_action.overlay(self, sources, summary)
+        if force:
+            await self._resume_accounts_with_quota(summary)
         try:
             summary["value"] = await asyncio.to_thread(self._quota_values, summary["sources"])
         except Exception:  # noqa: BLE001 - the valuation is optional; the windows are not
@@ -9086,6 +9186,66 @@ class ModelHubService:
             for source in summary["sources"]:
                 source.pop("value", None)
         return summary
+
+    async def _resume_accounts_with_quota(self, summary: Mapping[str, Any]) -> None:
+        """Lift the quota or rate pause of each account the vendor no longer reports as used up.
+
+        The pause lasts until the reset time the vendor gave with its refusal and
+        is never probed early, so a reset on the vendor's side is invisible until
+        the user asks. Where the reading cannot be had, the next request asks the
+        vendor instead: a refusal there pauses the account again with the
+        vendor's own time. An expired sign-in and a read still running are left
+        as they are.
+        """
+
+        pending = set(summary.get("pending") or ())
+        readings = {
+            reading["source_id"]: reading
+            for reading in summary["sources"]
+            if reading["source_id"] not in pending and reading["state"] != "auth_expired"
+        }
+        if not readings:
+            return
+        async with self._mutation_lock:
+            config = await asyncio.to_thread(self.store.load)
+            annotations = self.recovery.annotations(config)
+            now = self.now()
+            updated = config
+            resumed: list[ModelHubSourceConfig] = []
+            for source in config.sources:
+                reading = readings.get(source.id)
+                if (
+                    reading is None
+                    or source.supply_channel != "hub"
+                    or not _paused_for_quota(source, annotations.get(source.id))
+                    or _quota_used_up(reading, now)
+                ):
+                    continue
+                # The same retirement a verified response makes, on the user's word.
+                # Like it, the refresh outranks every attempt admitted before it:
+                # a refusal the vendor gave before the reset must not pause the
+                # account again when it settles afterwards.
+                self._latest_source_attempt_generation[source.id] = self._mint_settlement_generation()
+                self.recovery.succeeded(source)
+                resumed.append(source)
+                if source.state.status == "cooldown":
+                    updated = self._replace_source(
+                        updated, replace(source, state=ModelHubSourceStateConfig(status="standby")),
+                    )
+            if updated is not config:
+                try:
+                    await self._save_runtime_config(config, updated)
+                except OSError:
+                    # The live deadline is already retired; the policy remembers
+                    # which saved pause must not be read back.
+                    logger.warning("Could not persist Model Hub resumed state")
+        for source in resumed:
+            # The event log is read and rewritten on disk: off the loop, outside the lock.
+            await asyncio.to_thread(
+                self._record_event,
+                agent="system", kind="recover", model_id=None, reason="recovery",
+                to_source=source.id, to_label=source.display_name, now=now,
+            )
 
     def _quota_values(self, sources: list[dict[str, Any]]) -> dict[str, Any]:
         config = self.store.load()

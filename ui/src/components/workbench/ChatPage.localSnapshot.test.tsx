@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
 import 'fake-indexeddb/auto';
+import './ChatPage.duplicateKeyGuard';
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
@@ -98,7 +99,8 @@ vi.mock('../../context/ComposerBridgeContext', () => ({
   useRegisterComposerTarget: vi.fn(),
 }));
 
-vi.mock('../../context/WindowManagerContext', () => ({
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()),
   useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
 }));
 
@@ -193,6 +195,8 @@ vi.mock('./Composer', async () => {
 });
 
 import { ChatPage } from './ChatPage';
+import { useRegisterComposerTarget } from '../../context/ComposerBridgeContext';
+import type { ComposeTarget } from '../../context/ComposerBridgeContext';
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (reason: unknown) => void };
 const deferred = <T,>(): Deferred<T> => {
@@ -462,6 +466,26 @@ describe('ChatPage conversation snapshot', () => {
     expect(screen.queryByText('cached answer')).toBeNull();
     expect(screen.getByText('live answer')).toBeTruthy();
     expect(composerState()).toBe('false');
+  });
+
+  // Ask Vibey must not append before the saved draft hydrates: an append marks
+  // the composer edited, and Composer would then skip the draft the bootstrap
+  // brings. ui/design: composer/ask-vibey/appended-zh
+  it('offers Ask Vibey a composer only once the bootstrap has reconciled the saved draft', async () => {
+    const latest = () => {
+      const calls = vi.mocked(useRegisterComposerTarget).mock.calls;
+      return calls.at(-1)?.[1] as ComposeTarget | null | undefined;
+    };
+    await seed([message('m1', 'cached question'), message('m2', 'cached answer')]);
+    mount();
+    await screen.findByText('cached answer');
+    // The snapshot is painted and the composer is usable, but not hydrated.
+    expect(latest()?.sessionId).toBe(sessionRow('x').id);
+    expect(latest()?.composerReady).toBe(false);
+
+    await act(async () => live.resolve(bootstrap([message('m2', 'live answer')], { draft: 'written on another device' })));
+    await screen.findByText('live answer');
+    await waitFor(() => expect(latest()?.composerReady).toBe(true));
   });
 
   it('keeps a row that arrived over the stream while the bootstrap was out', async () => {

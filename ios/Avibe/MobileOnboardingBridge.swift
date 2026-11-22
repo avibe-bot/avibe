@@ -122,6 +122,8 @@ enum MobileBridgeMethod: String, CaseIterable {
     case authVerifySecondFactor = "auth.verifySecondFactor"
     case authVerifyPasskey = "auth.verifyPasskey"
     case authSignInWithProvider = "auth.signInWithProvider"
+    /// Passkey sign-in with no email first; not the second-factor `auth.verifyPasskey`.
+    case authSignInWithPasskey = "auth.signInWithPasskey"
     case authProviders = "auth.providers"
     case sessionRefresh = "session.refresh"
     case sessionSelectInstance = "session.selectInstance"
@@ -324,6 +326,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                          .authVerifySecondFactor,
                          .authVerifyPasskey,
                          .authSignInWithProvider,
+                         .authSignInWithPasskey,
                          .authProviders:
                         throw MobileAccountError.forbidden
                     default:
@@ -387,8 +390,9 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     // Welcome asks when it appears and when the App returns to
                     // the foreground on it; the answer updates its row in place.
                     var result: [String: Any] = [:]
-                    if let providers = await coordinator.advertisedProviders(within: 10) {
-                        result["providers"] = providers.map(\.rawValue)
+                    if let methods = await coordinator.signInMethods(within: 10) {
+                        result["providers"] = methods.providers.map(\.rawValue)
+                        result["passkey"] = methods.passkey
                     }
                     reply(replyHandler, result: result)
                 case .authSignInWithProvider:
@@ -407,6 +411,21 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     }
                     let state = try await coordinator.signInWithProvider(
                         provider,
+                        presentationAnchor: window
+                    )
+                    reply(replyHandler, result: await self.sessionResult(state))
+                case .authSignInWithPasskey:
+                    // Closed: the page names no account, credential, origin or relying party.
+                    guard request.params.isEmpty else {
+                        throw MobileAccountError(
+                            code: "invalid_argument",
+                            message: "Passkey sign-in takes no arguments."
+                        )
+                    }
+                    guard let window = trustedWebView?.window else {
+                        throw MobileAccountError.passkeyUnavailable
+                    }
+                    let state = try await coordinator.signInWithPasskey(
                         presentationAnchor: window
                     )
                     reply(replyHandler, result: await self.sessionResult(state))
@@ -490,18 +509,19 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
 
     /// A session answer for the page. A signed-in account that this generation's provider
     /// sign-in created carries `new_account: true`, a hint for the empty state only. A
-    /// signed-out answer carries `providers`, the sign-ins avibe.bot offers the App: read now
-    /// when that answers within 2 s, otherwise the last list it advertised; Welcome shows only
-    /// those.
+    /// signed-out answer carries `providers` and `passkey`, the ways in avibe.bot offers the App:
+    /// read now when that answers within 2 s, otherwise the last ones it advertised; Welcome
+    /// shows only those.
     private func sessionResult(_ state: MobileSessionState) async -> Any {
         var object = state.jsonObject
         switch state {
         case .signedIn where coordinator.accountWasJustCreated:
             object["new_account"] = true
         case .signedOut:
-            // Only a list the server answered in time: otherwise the page keeps what it had.
-            if let providers = await coordinator.advertisedProviders(within: 2) {
-                object["providers"] = providers.map(\.rawValue)
+            // What the server answered in time, otherwise the last it advertised.
+            if let methods = await coordinator.signInMethods(within: 2) {
+                object["providers"] = methods.providers.map(\.rawValue)
+                object["passkey"] = methods.passkey
             }
         default:
             break

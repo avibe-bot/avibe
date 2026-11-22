@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router-dom';
 /** @vitest-environment jsdom */
 import { createInstance } from 'i18next';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -11,7 +12,7 @@ const windowManager = vi.hoisted(() => ({ openApp: vi.fn(), setGestureActive: vi
 const dock = vi.hoisted(() => ({ isPinned: vi.fn(() => false), dock: vi.fn(), pin: vi.fn() }));
 const showPageDrag = vi.hoisted(() => ({ begin: vi.fn(), end: vi.fn() }));
 
-vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => windowManager }));
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({ ...await importOriginal<typeof import('../../context/WindowManagerContext')>(), useWindowManager: () => windowManager }));
 vi.mock('../../context/DockContext', () => ({ useDock: () => dock }));
 vi.mock('../../context/showPageDrag', () => ({ useShowPageDrag: () => showPageDrag }));
 
@@ -34,7 +35,7 @@ afterEach(() => {
 /** Renders the control and opens its launch menu the way a keyboard user does. */
 const openLaunchMenu = () => {
   render(
-    <I18nextProvider i18n={i18n}>
+    <MemoryRouter><I18nextProvider i18n={i18n}>
       <ShowPageLaunchControl
         sessionId="ses-1"
         title="Plan"
@@ -43,7 +44,7 @@ const openLaunchMenu = () => {
         onToggle={vi.fn()}
         onPrepareLaunch={vi.fn(async () => true)}
       />
-    </I18nextProvider>,
+    </I18nextProvider></MemoryRouter>,
   );
   fireEvent.keyDown(screen.getByRole('button', { name: en.chat.showPage.open }), { key: 'ArrowDown' });
   return screen.getByRole('menu', { name: en.chat.showPage.launchMenu });

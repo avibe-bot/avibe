@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 _COMPUTER_SCRIPT_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# `{"source_id": ..., "selection": {"kind": ..., "count": ...}}`: a Source id, one short word and a number.
+_RESET_CARD_REQUEST_MAX_BYTES = 1024
 
 
 class _RequestBodyTooLarge(RuntimeError):
@@ -814,7 +816,7 @@ def create_app(
         watchdog = getattr(controller, "_loop_watchdog", None)
         if watchdog is None:
             raise HTTPException(status_code=503, detail="watchdog_unavailable")
-        return {"state": watchdog.arm_warm_freeze(manager), "controller_pid": os.getpid()}
+        return {"state": watchdog.arm_warm_freeze(), "controller_pid": os.getpid()}
 
     @app.post("/internal/diagnostics/warm-gc-unfreeze")
     async def _rollback_warm_gc_freeze():
@@ -1373,6 +1375,15 @@ def create_app(
                 content={"ok": False, "error": "show_access_internal_failure"},
             )
 
+    @app.post("/internal/live-activities")
+    async def _live_activities(request: Request) -> Any:
+        from core.live_activities import controller_service
+        payload = await _bounded_json_object(request, limit=4096)
+        return await controller_service(controller).handle(
+            payload["operation"], payload["owner"], payload["activity_id"], payload["payload"],
+            authorization=payload.get("authorization"),
+        )
+
     @app.get("/internal/turn-state/{session_id}")
     async def _turn_state(session_id: str) -> Any:
         """HTTP adapter: whether a turn is running, delegated to the turn owner
@@ -1841,6 +1852,37 @@ def create_app(
             return JSONResponse(status_code=503, content={"ok": False, "error": "session_archive_unavailable"})
         return {"ok": True, "session": session}
 
+    @app.post("/internal/model-hub-ui/reset-card")
+    async def _model_hub_ui_reset_card(request: Request) -> Any:
+        """Carry the Web route's reset-card use to the controller-owned service.
+
+        A route of its own, deliberately not an operation of ``/internal/model-hub``:
+        what the `vibe` CLI and Agent tools can ask of that dispatcher never
+        includes spending a card. The Web route has already checked the caller
+        and the body; the body is still read bounded and checked again here, so
+        nothing else is ever decoded on the controller's loop.
+        """
+
+        from config.v2_config import is_model_hub_enabled
+        from core.handlers.model_hub import ModelHubError
+
+        invalid = JSONResponse(status_code=400, content={"ok": False, "error": "invalid_parameter"})
+        try:
+            body = await _bounded_json_object(request, limit=_RESET_CARD_REQUEST_MAX_BYTES)
+        except _RequestBodyTooLarge:
+            return invalid
+        service = getattr(controller, "model_hub_service", None)
+        if not is_model_hub_enabled() or service is None:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "feature_disabled"})
+        if set(body) != {"source_id", "selection"}:
+            return invalid
+        try:
+            result = await service.use_reset_card(body["source_id"], body["selection"])
+        except ModelHubError as exc:
+            # A refusal carries the summary as it now is, and nothing else.
+            return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code, **exc.data})
+        return {"ok": True, "result": result}
+
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""
@@ -2122,11 +2164,20 @@ async def serve(
         )
         server = _create_controller_loop_server(config)
         bound = host.bind()
+        watchdog = getattr(controller, "_loop_watchdog", None)
         try:
             host.publish(bound)
             _write_internal_server_status("ready")
+            # Freeze the warmed controller heap once, by default. Armed only once this
+            # listener is published, so the unfreeze command is reachable for as long
+            # as the freeze can last. Stream count does not gate the natural full
+            # collection that triggers the freeze after two hours of uptime.
+            if watchdog is not None:
+                watchdog.arm_warm_freeze()
             await server.serve(sockets=[bound.listener])
         finally:
+            if watchdog is not None:
+                watchdog.rollback_warm_freeze()  # listener gone: never stay frozen unreachable
             host.cleanup(bound)
     finally:
         await skill_recorder.close()

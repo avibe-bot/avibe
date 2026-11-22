@@ -178,8 +178,7 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         let first = try await select("instance-1", in: app)
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app, since: listening)
         XCTAssertFalse(app.directFaultCovers(first))
         var shownWhileMarking: [Bool] = []
         // The App owns this spy; its observer must not retain the App back.
@@ -203,7 +202,7 @@ final class DirectPathAppTests: XCTestCase {
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -334,6 +333,48 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    /// The Action Button's hidden WebView asks the gate through the model
+    /// (`VoiceCaptureLoadGate.provider`), by its take's own host. A take
+    /// kept for an instance that is no longer the one shown still loads
+    /// through the listener that host is routed to, so its gate follows
+    /// that listener: held while the background has it closed, as the
+    /// page's own gate for that instance is. A host that was never opened
+    /// has no route, and a take on another store has none of ours: open.
+    @MainActor
+    func testTheVoiceGateSpeaksForATakesHostWhateverInstanceIsShown() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let first = try await select("instance-1", in: app)
+        let routed = try XCTUnwrap(WebOrigin(url: first.instance.url))
+        let neverOpened = try XCTUnwrap(
+            WebOrigin(url: try XCTUnwrap(URL(string: "https://never-opened.example")))
+        )
+        let store = app.websiteDataStore.identifier
+        let gate = try XCTUnwrap(VoiceCaptureLoadGate.provider)
+        XCTAssertEqual(gate(routed, store), .open)
+
+        // Another instance is the one shown now.
+        let second = try await select("instance-2", in: app)
+        let shown = try XCTUnwrap(WebOrigin(url: second.instance.url))
+        XCTAssertEqual(app.route, .browser(second))
+        XCTAssertEqual(gate(routed, store), .open, "its listener serves")
+
+        enterBackground()
+        XCTAssertEqual(
+            gate(routed, store), .held,
+            "not the instance shown, but still routed to the closed listener"
+        )
+        XCTAssertEqual(gate(routed, store), app.directLoadGate(for: first), "as the page's gate for it")
+        XCTAssertEqual(gate(shown, store), app.directLoadGate(for: second))
+        XCTAssertEqual(gate(neverOpened, store), .open, "no route: WebKit's normal path")
+        XCTAssertEqual(gate(routed, UUID()), .open, "another store has no route of ours")
+
+        // The return settles: the listener serves again, or failed.
+        enterForeground()
+        try await eventually { gate(routed, store) != .held }
+        XCTAssertEqual(gate(routed, store), app.directLoadGate(for: first))
+    }
+
     /// A held open belongs to the runtime identity it was made under: an
     /// open that replaces it, or a sign-out, ends it, and the return then
     /// creates nothing for it.
@@ -390,15 +431,14 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         _ = try await select("instance-1", in: app)
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app, since: listening)
 
         enterBackground()
         try await eventually { await !LoopbackClient.canConnect(to: port) }
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -432,15 +472,14 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         _ = try await select("instance-1", in: app)
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app, since: listening)
 
         enterBackground()
         try await eventually { await !LoopbackClient.canConnect(to: port) }
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -2020,77 +2059,83 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testBridgeFreezesAuthorityBeforeItsTaskForCreateAndCancel() async throws {
         for action in ["create", "cancel"] {
-            let now = Date(timeIntervalSince1970: 1_800_000_000)
-            let platform = RuntimeSystemSchedulePlatform()
-            let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
-                                        systemScheduleNow: { now })
-            let runtime = try await select("instance-1", in: app)
-            let originalIdentity = app.runtimeIdentity
-            var captures = 0
-            var capturedAdmission: SystemScheduleAdmission?
-            var deliveries = 0
-            let controller = try makeRuntimeController(app, runtime, afterScheduleAdmission: { admission in
-                captures += 1
-                capturedAdmission = admission
-                withUnsafeCurrentTask { XCTAssertNil($0, "admission must precede NativeBridge's Task") }
-                guard case .authorized(let context) = admission else {
-                    XCTFail("trusted primary source must be admitted")
-                    return
+            // The page's process has ended under this test on CI: see
+            // `onceMoreIfItsPageProcessEnded`.
+            try await onceMoreIfItsPageProcessEnded { shown in
+                let now = Date(timeIntervalSince1970: 1_800_000_000)
+                let platform = RuntimeSystemSchedulePlatform()
+                let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                                            systemScheduleNow: { now })
+                let runtime = try await select("instance-1", in: app)
+                let originalIdentity = app.runtimeIdentity
+                var captures = 0
+                var capturedAdmission: SystemScheduleAdmission?
+                var deliveries = 0
+                let controller = try makeRuntimeController(app, runtime, afterScheduleAdmission: { admission in
+                    captures += 1
+                    capturedAdmission = admission
+                    withUnsafeCurrentTask { XCTAssertNil($0, "admission must precede NativeBridge's Task") }
+                    guard case .authorized(let context) = admission else {
+                        XCTFail("trusted primary source must be admitted")
+                        return
+                    }
+                    XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                    app.openSelectedInstance(path: "/")
+                    XCTAssertNotEqual(app.runtimeIdentity, originalIdentity)
+                }, onScheduleDelivery: { admission in
+                    deliveries += 1
+                    guard case .authorized(let context) = admission else {
+                        XCTFail("delivery must carry the original admission")
+                        return
+                    }
+                    XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                    XCTAssertNotEqual(context.runtimeIdentity, app.runtimeIdentity)
+                })
+                app.registerRuntimeController(controller, for: runtime)
+                let page = try RuntimePage(controller: controller)
+                // Recorded before its first load, which is also the page's.
+                shown.page = page
+                defer { page.close() }
+                try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+                let params = scheduleParams(requestID: "old-\(action)", operationID: "target", now: now)
+                let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
+                let store = try XCTUnwrap(appScheduleStore)
+                let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+                if action == "cancel" {
+                    var record = cleanupPendingRecord(request: request, owner: owner,
+                        systemIdentifier: "must-remain", updatedAt: now)
+                    record.lifecycle = .managedScheduled
+                    record.createState = .scheduled
+                    XCTAssertTrue(store.save(record))
                 }
-                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
-                app.openSelectedInstance(path: "/")
-                XCTAssertNotEqual(app.runtimeIdentity, originalIdentity)
-            }, onScheduleDelivery: { admission in
-                deliveries += 1
-                guard case .authorized(let context) = admission else {
-                    XCTFail("delivery must carry the original admission")
-                    return
+                let payload: [String: Any] = action == "create" ? params : [
+                    "requestId": "old-cancel", "operationId": "target", "kind": "alarm", "purpose": "user"
+                ]
+                let bridgeResult = try jsonObject(try await page.systemScheduleOutcome(
+                    method: action == "create" ? "systemSchedule.request" : "systemSchedule.cancel", params: payload))
+                // Reopening retires the old factory as well. It may refuse delivery
+                // before AppModel, but may never resolve into the replacement owner.
+                if let receipt = bridgeResult["receipt"] as? [String: Any] {
+                    XCTAssertEqual(action, "create")
+                    XCTAssertEqual(receipt["state"] as? String, "stale_context")
+                } else {
+                    XCTAssertEqual(bridgeResult["errorCode"] as? String, "forbidden")
                 }
-                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
-                XCTAssertNotEqual(context.runtimeIdentity, app.runtimeIdentity)
-            })
-            app.registerRuntimeController(controller, for: runtime)
-            let page = try RuntimePage(controller: controller)
-            defer { page.close() }
-            try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
-            let params = scheduleParams(requestID: "old-\(action)", operationID: "target", now: now)
-            let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
-            let store = try XCTUnwrap(appScheduleStore)
-            let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
-            if action == "cancel" {
-                var record = cleanupPendingRecord(request: request, owner: owner,
-                    systemIdentifier: "must-remain", updatedAt: now)
-                record.lifecycle = .managedScheduled
-                record.createState = .scheduled
-                XCTAssertTrue(store.save(record))
-            }
-            let payload: [String: Any] = action == "create" ? params : [
-                "requestId": "old-cancel", "operationId": "target", "kind": "alarm", "purpose": "user"
-            ]
-            let bridgeResult = try jsonObject(try await page.systemScheduleOutcome(
-                method: action == "create" ? "systemSchedule.request" : "systemSchedule.cancel", params: payload))
-            // Reopening retires the old factory as well. It may refuse delivery
-            // before AppModel, but may never resolve into the replacement owner.
-            if let receipt = bridgeResult["receipt"] as? [String: Any] {
-                XCTAssertEqual(action, "create")
-                XCTAssertEqual(receipt["state"] as? String, "stale_context")
-            } else {
-                XCTAssertEqual(bridgeResult["errorCode"] as? String, "forbidden")
-            }
-            XCTAssertEqual(captures, 1)
-            XCTAssertLessThanOrEqual(deliveries, 1)
-            let originalAdmission = try XCTUnwrap(capturedAdmission)
-            let deliveredCreate = await app.requestSystemSchedule(request, admission: originalAdmission)
-            XCTAssertEqual(deliveredCreate["state"] as? String, "stale_context")
-            let deliveredCancel = await app.cancelSystemSchedule(.init(requestID: "old-cancel",
-                operationID: "target", kind: .alarm, purpose: .user), admission: originalAdmission)
-            XCTAssertNil(deliveredCancel)
-            XCTAssertEqual(platform.scheduleCalls, 0)
-            XCTAssertEqual(platform.cancelCalls, 0)
-            XCTAssertNil(app.systemScheduleConfirmation)
-            if action == "cancel" {
-                XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
-                               .managedScheduled)
+                XCTAssertEqual(captures, 1)
+                XCTAssertLessThanOrEqual(deliveries, 1)
+                let originalAdmission = try XCTUnwrap(capturedAdmission)
+                let deliveredCreate = await app.requestSystemSchedule(request, admission: originalAdmission)
+                XCTAssertEqual(deliveredCreate["state"] as? String, "stale_context")
+                let deliveredCancel = await app.cancelSystemSchedule(.init(requestID: "old-cancel",
+                    operationID: "target", kind: .alarm, purpose: .user), admission: originalAdmission)
+                XCTAssertNil(deliveredCancel)
+                XCTAssertEqual(platform.scheduleCalls, 0)
+                XCTAssertEqual(platform.cancelCalls, 0)
+                XCTAssertNil(app.systemScheduleConfirmation)
+                if action == "cancel" {
+                    XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
+                                   .managedScheduled)
+                }
             }
         }
     }
@@ -2115,6 +2160,37 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     func testSameOriginReturnDoesNotReviveARequestRevokedAtProvisionalStart() async throws {
+        try await onceMoreIfItsPageProcessEnded { record in
+            try await self.sameOriginReturnScenario(recording: record)
+        }
+    }
+
+    /// WebKit can end a page's WebContent process under a test (seen on CI
+    /// at its network process's request, run 44658571690). The page's load
+    /// or its bridge call in flight then fails, and the scenario cannot be
+    /// finished without its page. So `scenario` is run once more, from the
+    /// start, only when the fixture saw the page it recorded lose its
+    /// process; any other failure, and a second ended process, fails the
+    /// test. Only for a test with such a failure on record.
+    @MainActor
+    private func onceMoreIfItsPageProcessEnded(
+        _ scenario: @MainActor (RuntimePageRecord) async throws -> Void
+    ) async throws {
+        let first = RuntimePageRecord()
+        do {
+            try await scenario(first)
+            return
+        } catch where first.page?.webContentProcessTerminated == true {
+            print("[iOS fixture] stage=scenario run again, its page's process ended: \(error)")
+        }
+        // A page whose first load failed was never handed to the scenario,
+        // which closes the ones it gets. Closing twice is harmless.
+        first.page?.close()
+        try await scenario(RuntimePageRecord())
+    }
+
+    @MainActor
+    private func sameOriginReturnScenario(recording record: RuntimePageRecord) async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let platform = RuntimeSystemSchedulePlatform()
         let app = try await makeApp(
@@ -2123,7 +2199,7 @@ final class DirectPathAppTests: XCTestCase {
             systemScheduleNow: { now }
         )
         let runtime = try await select("instance-1", in: app)
-        let page = try await showRuntimePage(app, runtime)
+        let page = try await showRuntimePage(app, runtime, recording: record)
         defer { page.close() }
 
         let request = Task { @MainActor in
@@ -3077,17 +3153,28 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testContinuousRuntimeOpenTimerUsesTheScheduleCallAsItsDeadlineOrigin() async throws {
         let timing = ContinuousRuntimeOpenTiming()
-        var fired = false
-        let timer = timing.schedule(after: .milliseconds(80)) {
-            fired = true
+        var fired: [String] = []
+        let held = timing.schedule(after: .milliseconds(80)) {
+            fired.append("scheduled before the hold")
         }
+        // The main actor is held past that timer's deadline.
         let holdUntil = ContinuousClock.now.advanced(by: .milliseconds(120))
         while ContinuousClock.now < holdUntil {
             _ = 1 + 1
         }
-        try await Task.sleep(for: .milliseconds(20))
-        XCTAssertTrue(fired)
-        withExtendedLifetime(timer) {}
+        // A second timer, scheduled only now and for less than the first
+        // one's whole delay. Counted from its schedule call, the first
+        // timer's deadline is already past, so it fires first. Counted from
+        // when its task first ran, which is after the hold, it would be due
+        // 80 ms from here and fire after this one. The order holds however
+        // long a loaded simulator takes over either: no margin is waited.
+        let reference = timing.schedule(after: .milliseconds(60)) {
+            fired.append("scheduled after the hold")
+        }
+        try await eventually { fired.count == 2 }
+        XCTAssertEqual(fired, ["scheduled before the hold", "scheduled after the hold"])
+        withExtendedLifetime(held) {}
+        withExtendedLifetime(reference) {}
     }
 
     @MainActor
@@ -4478,6 +4565,17 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
         if let directTransport {
+            // The transport is selected only for a routed host. A listener
+            // fault, or a first bind slower than the App's listener wait,
+            // leaves the host on the public path with no selection at all;
+            // say which rather than fail below on a selection that was
+            // never made.
+            XCTAssertFalse(
+                app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+                whyNoHostIsRouted(by: app),
+                file: file,
+                line: line
+            )
             XCTAssertEqual(open.routes, [.loading, .browser(runtime)], file: file, line: line)
             let target = try XCTUnwrap(directTransport.selections.last, file: file, line: line)
             XCTAssertEqual(target.runtime, runtime, file: file, line: line)
@@ -4522,14 +4620,13 @@ final class DirectPathAppTests: XCTestCase {
 
         // The App's port is taken while it is in the background: the return
         // cannot bind it again, which is the listener fault.
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app, since: listening)
         enterBackground()
         try await eventually { await !LoopbackClient.canConnect(to: port) }
         let squatter = try ControlListener(
             family: AF_INET,
             address: "127.0.0.1",
-            port: socket.port,
+            port: port.rawValue,
             reuseAddress: true
         )
         defer { squatter.close() }
@@ -4745,6 +4842,350 @@ final class DirectPathAppTests: XCTestCase {
                 row.name
             )
         }
+    }
+
+    /// A session avibe.bot last confirmed more than its lifetime ago opens
+    /// nothing on a cold start: the App asks avibe.bot first, with no runtime
+    /// and no account restored meanwhile, and only then opens the instance
+    /// if the account still lists it. With no answer, or the instance gone
+    /// from the list, it stops at the instance list. (Within the lifetime
+    /// the instance opens before the answer:
+    /// `testAColdStartOpensTheLastInstanceBeforeTheAccountIsChecked`.)
+    @MainActor
+    func testAColdStartPastTheConfirmationsLifetimeAsksAvibeBotBeforeOpening() async throws {
+        let withoutInstanceOne = LocalHTTPResponse.json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-2","name":"Two","host":"instance-two.example",
+             "url":"https://instance-two.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true}]}
+            """)
+        let rows: [(name: String, answer: LocalHTTPResponse, opens: Bool)] = [
+            ("still listed", Self.signedInSessionAnswer, true),
+            ("no longer listed", withoutInstanceOne, false),
+            ("no answer", .status(500), false),
+        ]
+        for row in rows {
+            let first = try await makeApp(directTransport: nil)
+            _ = try await select("instance-1", in: first)
+            let defaults = try XCTUnwrap(appDefaults)
+            confirmSession(in: defaults, daysAgo: 15)
+
+            let session = SessionAnswerOverride()
+            let started = FixtureEvent(description: "session read: \(row.name)")
+            let release = DispatchSemaphore(value: 0)
+            session.hold(row.answer, started: started, release: release)
+            let next = try await makeApp(
+                directTransport: nil,
+                sessionResponse: { session.response },
+                reusingDefaults: defaults
+            )
+            await fulfillment(
+                of: [started.expectation],
+                timeout: WebKitReadiness.launchedTransportOperationSeconds
+            )
+            // avibe.bot is being asked, and nothing of the instance exists.
+            XCTAssertEqual(next.route, .loading, row.name)
+            XCTAssertNil(next.runtimeOpenAttempt, row.name)
+            XCTAssertNil(next.mobileSessionCoordinator.currentAccount, row.name)
+
+            release.signal()
+            if row.opens {
+                _ = try await waitForBrowser("instance-1", in: next)
+                XCTAssertTrue(next.mobileSessionCoordinator.sessionConfirmationIsCurrent, row.name)
+            } else {
+                try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                    next.route == .onboarding(.instances)
+                }
+                XCTAssertNil(next.runtimeOpenAttempt, row.name)
+            }
+        }
+    }
+
+    /// An App that stays alive past the confirmation's lifetime: on its
+    /// return to the foreground the page is closed and avibe.bot asked
+    /// before the instance opens again; an open made past the lifetime
+    /// (another instance chosen) waits for the answer the same way; with no
+    /// answer the App stops at the instance list. Within the lifetime a
+    /// return changes nothing.
+    @MainActor
+    func testAnAppAlivePastTheConfirmationsLifetimeClosesItsPageAndAsksFirst() async throws {
+        let center = NotificationCenter()
+        let session = SessionAnswerOverride()
+        let app = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { session.response },
+            runtimeOpenNotificationCenter: center
+        )
+        let defaults = try XCTUnwrap(appDefaults)
+        let returnToTheForeground = {
+            center.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        }
+        let runtime = try await select("instance-1", in: app)
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+
+        // Confirmed within a week: a return reads nothing.
+        let confirmedAtKey = "avibe.mobile.lastGoodSessionConfirmedAt"
+        let confirmedAtSignIn = defaults.double(forKey: confirmedAtKey)
+        returnToTheForeground()
+        try await Task.sleep(for: AppModel.sessionRenewalDelay + .milliseconds(1_500))
+        XCTAssertEqual(defaults.double(forKey: confirmedAtKey), confirmedAtSignIn)
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+
+        // More than a week old, still within the lifetime: the session is
+        // read quietly behind the open page, and the record renewed.
+        confirmSession(in: defaults, daysAgo: 8)
+        let quiet = FixtureEvent(description: "the quiet session read")
+        let releaseQuiet = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: quiet, release: releaseQuiet)
+        returnToTheForeground()
+        XCTAssertEqual(app.route, .browser(runtime))
+        await fulfillment(
+            of: [quiet.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+        releaseQuiet.signal()
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            Date().timeIntervalSince1970 - defaults.double(forKey: confirmedAtKey) < 60
+        }
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+
+        // Past the lifetime: closed at the return, opened after the answer.
+        confirmSession(in: defaults, daysAgo: 15)
+        let started = FixtureEvent(description: "session read after the return")
+        let release = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: started, release: release)
+        returnToTheForeground()
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        await fulfillment(
+            of: [started.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        release.signal()
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertGreaterThan(try XCTUnwrap(app.runtimeOpenAttempt).id, opened)
+        XCTAssertTrue(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
+
+        // An open made past the lifetime waits for the answer too.
+        confirmSession(in: defaults, daysAgo: 15)
+        let startedAgain = FixtureEvent(description: "session read before another instance opens")
+        let releaseAgain = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: startedAgain, release: releaseAgain)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        await fulfillment(
+            of: [startedAgain.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(app.route, .loading)
+        releaseAgain.signal()
+        _ = try await waitForBrowser("instance-2", in: app)
+
+        // A shortcut (or a notification tap) that arrives while avibe.bot
+        // is being asked waits for the answer, then opens what it names:
+        // its page is told the path.
+        confirmSession(in: defaults, daysAgo: 15)
+        let startedForAPath = FixtureEvent(description: "session read with a shortcut waiting")
+        let releaseForAPath = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: startedForAPath, release: releaseForAPath)
+        returnToTheForeground()
+        await fulfillment(
+            of: [startedForAPath.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        app.openSelectedInstance(path: "/chat/waited")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNil(app.runtimeOpenAttempt)
+        releaseForAPath.signal()
+        let reopened = try await waitForBrowser("instance-2", in: app)
+        let controller = try makeRuntimeController(app, reopened)
+        app.registerRuntimeController(controller, for: reopened)
+        let page = try RuntimePage(controller: controller)
+        defer { page.close() }
+        try await page.load(
+            """
+            <!doctype html><script>
+            window.changes = [];
+            window.addEventListener("avibe:native:push.opened", (event) => {
+              if (!window.changes.includes(event.detail.url)) {
+                window.changes.push(event.detail.url);
+              }
+            });
+            </script>
+            """,
+            baseURL: reopened.instance.url
+        )
+        app.didFinishRuntimeLoading()
+        try await eventually { try await page.changes() == #"["/chat/waited"]"# }
+
+        // No answer: the instance list, and what waited goes with it.
+        confirmSession(in: defaults, daysAgo: 15)
+        session.replace(with: .status(500))
+        returnToTheForeground()
+        XCTAssertEqual(app.route, .loading)
+        app.openSelectedInstance(path: "/chat/dropped")
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            app.route == .onboarding(.instances)
+        }
+        XCTAssertNil(app.runtimeOpenAttempt)
+        XCTAssertFalse(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
+        withExtendedLifetime(controller) {}
+    }
+
+    /// With a direct transport an open waits for its route before its
+    /// WebView exists. The confirmation's lifetime ending in that wait holds
+    /// the open too: no browser before avibe.bot has answered.
+    @MainActor
+    func testAnOpenWhoseRouteWasPreparedAcrossTheLifetimesEndAsksFirst() async throws {
+        let session = SessionAnswerOverride()
+        let app = try await makeApp(
+            directTransport: StandInDirectTransport(),
+            sessionResponse: { session.response }
+        )
+        let defaults = try XCTUnwrap(appDefaults)
+        var browsers: [String] = []
+        let opened = app.$route.sink { route in
+            if case .browser(let runtime) = route {
+                browsers.append(runtime.instance.id)
+            }
+        }
+        defer { opened.cancel() }
+        let started = FixtureEvent(description: "session read before the prepared open")
+        let release = DispatchSemaphore(value: 0)
+        session.hold(Self.signedInSessionAnswer, started: started, release: release)
+
+        // The open starts on a current confirmation and waits for its
+        // route; the lifetime ends before that wait does.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        XCTAssertEqual(app.route, .loading)
+        XCTAssertNotNil(app.runtimeOpenAttempt)
+        confirmSession(in: defaults, daysAgo: 15)
+
+        await fulfillment(
+            of: [started.expectation],
+            timeout: WebKitReadiness.launchedTransportOperationSeconds
+        )
+        XCTAssertEqual(browsers, [])
+        XCTAssertEqual(app.route, .loading)
+        release.signal()
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(browsers, ["instance-1"])
+    }
+
+    /// Dates avibe.bot's last confirmation of the stored session.
+    private func confirmSession(in defaults: UserDefaults, daysAgo days: Double) {
+        defaults.set(
+            Date().addingTimeInterval(-days * 24 * 60 * 60).timeIntervalSince1970,
+            forKey: "avibe.mobile.lastGoodSessionConfirmedAt"
+        )
+    }
+
+    /// Opening an instance records its address for the account. When
+    /// avibe.bot's answers have not listed it for a day, what the App keeps
+    /// for that address goes: its stored site data (the removal itself:
+    /// `NavigationPolicyTests.testOnlyTheDepartedAddressesStorageIsRemoved`),
+    /// its cached page, and this device's path choice. The other instance
+    /// keeps its own.
+    @MainActor
+    func testAnAddressTheAccountNoLongerListsLosesWhatTheAppKeptForIt() async throws {
+        let first = try await makeApp(directTransport: nil)
+        let one = try await select("instance-1", in: first)
+        let two = try await select("instance-2", in: first)
+        let defaults = try XCTUnwrap(appDefaults)
+        let ledgerKey = DepartedInstanceData.key
+        func recorded() throws -> [String: DepartedInstanceData.Entry] {
+            let data = try XCTUnwrap(defaults.data(forKey: ledgerKey))
+            return try XCTUnwrap(
+                JSONDecoder().decode([String: [String: DepartedInstanceData.Entry]].self, from: data)["account-1"]
+            )
+        }
+        let originOne = try XCTUnwrap(WebOrigin(url: one.instance.url)).serialized
+        let originTwo = try XCTUnwrap(WebOrigin(url: two.instance.url)).serialized
+        XCTAssertEqual(Set(try recorded().keys), [originOne, originTwo])
+        XCTAssertEqual(try recorded()[originOne]?.store, one.websiteDataStoreID)
+
+        // What the App keeps per address.
+        let page = RuntimeCachedPage(
+            url: one.instance.url,
+            headers: ["Content-Type": "text/html"],
+            body: Data("<!doctype html>".utf8),
+            capturedAt: Date()
+        )
+        for origin in [originOne, originTwo] {
+            first.runtimePageCache.store(page, accountID: "account-1", origin: origin)
+        }
+        defer { first.runtimePageCache.removeAll() }
+        let choices = DirectPathPreferenceStore(defaults: defaults)
+        choices.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: originOne)
+        choices.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: originTwo)
+
+        // avibe.bot has not listed instance-1 for more than a day, and its
+        // next answer still does not. (Past the confirmation's lifetime, so
+        // the launch asks first and opens nothing of instance-1.)
+        var ledger = try JSONDecoder().decode(
+            [String: [String: DepartedInstanceData.Entry]].self,
+            from: try XCTUnwrap(defaults.data(forKey: ledgerKey))
+        )
+        ledger["account-1"]?[originOne]?.missingSince = Date().addingTimeInterval(-25 * 60 * 60)
+        defaults.set(try JSONEncoder().encode(ledger), forKey: ledgerKey)
+        confirmSession(in: defaults, daysAgo: 15)
+        let withoutInstanceOne = LocalHTTPResponse.json("""
+            {"account":{"id":"account-1","email":"max@example.com"},"instances":[
+            {"id":"instance-2","name":"Two","host":"instance-two.example",
+             "url":"https://instance-two.example","relationship":"owner",
+             "owner_email":"max@example.com","available":true}]}
+            """)
+        let next = try await makeApp(
+            directTransport: nil,
+            sessionResponse: { withoutInstanceOne },
+            reusingDefaults: defaults
+        )
+        // The removal is one attempt for each signed-in answer. One that
+        // cannot finish in its bounds (its page has 10 s to load and each of
+        // its steps 8 s; a web content launch on the CI simulator can take
+        // longer) leaves everything in place and is made again at the next
+        // answer, by design. The launch gave one answer. So while the
+        // address is still recorded the App is asked again, through its own
+        // session check, as a later launch or refresh asks: one check at a
+        // time, 10 s after the last one ended. A newer answer waits for a
+        // running attempt, so this is a few attempts, not one per check.
+        let checks = SessionChecks()
+        let clock = ContinuousClock()
+        let began = clock.now
+        do {
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                let signedIn = next.mobileSessionCoordinator.currentAccount != nil
+                if signedIn, (try? recorded()[originOne]) == nil {
+                    return true
+                }
+                if signedIn {
+                    checks.askAgainIfDue(next, at: clock.now)
+                }
+                return false
+            }
+        } catch {
+            print("[iOS fixture] stage=departed address still recorded, after=\(began.duration(to: clock.now)), answers=\(1 + checks.asked)")
+            await checks.settle()
+            throw error
+        }
+        // A check still in flight ends before the fixture removes its store.
+        await checks.settle()
+        // How long the removal took and how many answers it needed: one
+        // answer and a few seconds when the first attempt succeeded.
+        print("[iOS fixture] stage=departed address removed, after=\(began.duration(to: clock.now)), answers=\(1 + checks.asked)")
+        XCTAssertNil(next.runtimePageCache.page(accountID: "account-1", origin: originOne))
+        XCTAssertEqual(choices.preference(accountID: "account-1", origin: originOne), .automatic)
+        // The listed instance keeps its own.
+        XCTAssertNotNil(try recorded()[originTwo])
+        XCTAssertNotNil(next.runtimePageCache.page(accountID: "account-1", origin: originTwo))
+        XCTAssertEqual(choices.preference(accountID: "account-1", origin: originTwo).mode, .tunnel)
     }
 
     /// The control plane's ordinary signed-in answer for account-1.
@@ -5173,10 +5614,24 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
+        // The transport is selected only for a routed host. A listener fault,
+        // or a first bind slower than the App's listener wait, leaves the
+        // host on the public path with no selection at all; say which rather
+        // than time out below.
+        XCTAssertFalse(
+            app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+            whyNoHostIsRouted(by: app)
+        )
         // The transport's selection follows the browser asynchronously: wait
         // for it rather than for a fixed time a loaded simulator may exceed.
-        try await eventually {
-            transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+        do {
+            try await eventually {
+                transport.selections.map(\.runtime.instance.id) == ["instance-2"]
+            }
+        } catch {
+            // Which way it went: none, or the replaced open's too.
+            XCTFail("The transport was selected for \(transport.selections.map(\.runtime.instance.id)).")
+            throw error
         }
         // The replaced open must never surface later either. A "never" cannot
         // be awaited, so a short window gives a late browser or selection for
@@ -5188,6 +5643,344 @@ final class DirectPathAppTests: XCTestCase {
             transport.selections.map(\.runtime.instance.id),
             ["instance-2"]
         )
+    }
+
+    // MARK: This device's path choice
+
+    /// "Cloudflare tunnel only" for an instance: its open prepares the route
+    /// (so a later Automatic takes effect on this store) but selects
+    /// nothing, so the transport never dials and nothing can hand over; its
+    /// pages are told the tunnel. Switched to Automatic in the same process,
+    /// it dials.
+    @MainActor
+    func testTunnelOnlyRoutesButNeverSelectsDialsOrHandsOver() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let defaults = try XCTUnwrap(appDefaults)
+        DirectPathPreferenceStore(defaults: defaults).set(
+            DirectPathPreference(mode: .tunnel),
+            accountID: "account-1",
+            origin: instance.serialized
+        )
+
+        let runtime = try await select("instance-1", in: app)
+        XCTAssertEqual(app.directPathPreference(for: runtime).mode, .tunnel)
+        XCTAssertFalse(app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty)
+        // The selection would have been made in the turn of the open.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(transport.selections.count, 0)
+        let status = await withCheckedContinuation { continuation in
+            app.directStatusProvider?(instance) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(status?.preferred, .tunnel)
+        let handover = await withCheckedContinuation { continuation in
+            app.directHandoverProvider?(instance, true) { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(handover, .skipped(.notUsable))
+
+        let page = try XCTUnwrap(URL(string: "https://instance-one.example/"))
+        XCTAssertEqual(try XCTUnwrap(app.directPreferenceProvider).write(instance, .automatic, page), .automatic)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.map(\.runtime.instance.id) == ["instance-1"]
+        }
+    }
+
+    /// The page sets the choice for its own instance: the answer comes
+    /// first, then the instance opens again at the page's URL, once, on the
+    /// new path; setting the same mode again reopens nothing. Unknown modes
+    /// are refused by the bridge (`testTheDirectPreferenceSurface...`).
+    @MainActor
+    func testSettingTheChoiceReopensTheInstanceWhereThePageWas() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.count == 1
+        }
+        let provider = try XCTUnwrap(app.directPreferenceProvider)
+        XCTAssertEqual(provider.read(instance), .automatic)
+        // Another origin's page is not the open instance's.
+        let other = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
+        XCTAssertNil(provider.read(other))
+
+        let page = try XCTUnwrap(URL(string: "https://instance-one.example/settings/devices/connection"))
+        let identity = try XCTUnwrap(app.runtimeOpenAttempt).id
+        let answer = provider.write(instance, .tunnel, page)
+        XCTAssertEqual(answer, DirectPathPreference(mode: .tunnel))
+        // Answered before anything was reopened.
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, identity)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > identity }
+        let reopenedRuntime = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(reopenedRuntime, runtime)
+        XCTAssertEqual(transport.deselectCount, 1)
+        XCTAssertEqual(app.takeRuntimeStartURL(for: runtime), page)
+        XCTAssertNil(app.takeRuntimeStartURL(for: runtime))
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(transport.selections.count, 1)
+
+        let reopened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        XCTAssertEqual(provider.write(instance, .tunnel, page), DirectPathPreference(mode: .tunnel))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, reopened)
+
+        // Back to automatic: it dials again.
+        XCTAssertEqual(provider.write(instance, .automatic, page), .automatic)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.count == 2
+        }
+    }
+
+    /// "Cloudflare tunnel only" and the instance cannot be reached on it (its
+    /// open runs out of time, or its document fails to load) while the
+    /// device has a network and avibe.bot lists it online: the choice goes
+    /// back to automatic, says so, and the instance opens again, automatic.
+    /// Once: an automatic open that then fails ends as any open. Without a
+    /// network nothing is changed.
+    @MainActor
+    func testTunnelOnlyGoesBackToAutomaticWhenTheInstanceCannotBeReached() async throws {
+        let network = StandInNetworkPath()
+        let timing = RuntimeOpenManualTiming()
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(
+            directTransport: transport,
+            runtimeOpenTiming: timing,
+            networkPath: network
+        )
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        let tunnelOnly = {
+            store.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: self.instance.serialized)
+        }
+
+        // Out of time, without a network: unchanged, and to the list.
+        tunnelOnly()
+        network.isSatisfied = false
+        _ = try await select("instance-1", in: app)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .tunnel)
+
+        // Out of time, with a network: automatic, reverted, opened again.
+        network.isSatisfied = true
+        _ = try await select("instance-1", in: app)
+        let timedOut = try XCTUnwrap(app.runtimeOpenAttempt).id
+        timing.advance(by: .seconds(60))
+        let reverted = store.preference(accountID: "account-1", origin: instance.serialized)
+        XCTAssertEqual(reverted.mode, .automatic)
+        XCTAssertEqual(reverted.reverted?.reason, .unreachable)
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .replaced)
+        XCTAssertGreaterThan(try XCTUnwrap(app.runtimeOpenAttempt).id, timedOut)
+        _ = try await waitForBrowser("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.map(\.runtime.instance.id) == ["instance-1"]
+        }
+        XCTAssertEqual(try XCTUnwrap(app.directPreferenceProvider).read(instance), reverted)
+
+        // Once: the automatic open running out of time ends as any open.
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.lastRuntimeOpenTermination?.reason, .timedOut)
+        XCTAssertEqual(app.route, .onboarding(.instances))
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized), reverted)
+
+        // The document failing to load counts the same.
+        tunnelOnly()
+        let again = try await select("instance-1", in: app)
+        let failed = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: failed.id,
+            runtime: again
+        )
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .automatic)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > failed.id }
+        _ = try await waitForBrowser("instance-1", in: app)
+
+        // Not the tunnel's doing: a sign-in page failing, and a cached page
+        // shown uncovered running out of time. Unchanged.
+        let two = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example"))
+        store.set(DirectPathPreference(mode: .tunnel), accountID: "account-1", origin: two.serialized)
+        let second = try await select("instance-2", in: app)
+        let signIn = try XCTUnwrap(app.runtimeOpenAttempt)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .started, destination: .authentication),
+            attemptID: signIn.id,
+            runtime: second
+        )
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .authentication),
+            attemptID: signIn.id,
+            runtime: second
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, signIn.id)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: two.serialized).mode, .tunnel)
+
+        _ = try await select("instance-1", in: app)
+        let cachedSecond = try await select("instance-2", in: app)
+        let cached = try XCTUnwrap(app.runtimeOpenAttempt)
+        for stage in [RuntimeNavigationStage.started, .committed, .finished] {
+            app.handleRuntimeNavigation(
+                RuntimeNavigationEvent(stage: stage, destination: .instance, fromCache: true),
+                attemptID: cached.id,
+                runtime: cachedSecond
+            )
+        }
+        app.runtimeCachedPageKeepsShell(attemptID: cached.id, runtime: cachedSecond)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive)
+        timing.advance(by: .seconds(60))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, cached.id)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: two.serialized).mode, .tunnel)
+    }
+
+    /// The bridge surface: `directPreference` 1 only with a provider; the
+    /// reading takes no parameters; the setting takes exactly a known mode
+    /// (a later mode is refused, not guessed); both answer the agreed shape;
+    /// the event reaches only a document on the instance's origin.
+    @MainActor
+    func testTheDirectPreferenceSurfaceTakesOnlyKnownModes() async throws {
+        var written: [(WebOrigin, DirectPathPreference.Mode, URL)] = []
+        let reverted = DirectPathPreference(
+            mode: .automatic,
+            reverted: .init(at: Date(timeIntervalSince1970: 1_700_000_000), reason: .unreachable)
+        )
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in
+                    reply(DirectPathStatus(preferred: .tunnel, sequence: 1, closure: 0))
+                },
+                directHandover: { _, _, reply in reply(.skipped(.notUsable)) },
+                directPreference: DirectPreferenceProvider(
+                    read: { _ in reverted },
+                    write: { origin, mode, url in
+                        written.append((origin, mode, url))
+                        return DirectPathPreference(mode: mode)
+                    }
+                )
+            )
+        )
+        let loader = PageLoader()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML(
+            "<!doctype html><title>instance</title>",
+            baseURL: instance.url,
+            in: webView
+        )
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const canon = (value) => JSON.stringify(value, (key, item) =>
+              item && typeof item === "object" && !Array.isArray(item)
+                ? Object.fromEntries(Object.entries(item).sort()) : item);
+            const refusals = [];
+            for (const params of [{mode: "relayOff"}, {}, {mode: "tunnel", extra: 1}, {mode: 1}]) {
+              try {
+                await window.avibeNative.call("direct.setPreference", params);
+                refusals.push("accepted");
+              } catch (error) {
+                refusals.push(error.code);
+              }
+            }
+            try {
+              await window.avibeNative.call("direct.preference", {mode: "tunnel"});
+              refusals.push("accepted");
+            } catch (error) {
+              refusals.push(error.code);
+            }
+            const read = await window.avibeNative.call("direct.preference");
+            const set = await window.avibeNative.call("direct.setPreference", {mode: "tunnel"});
+            return canon({
+              capability: window.avibeNative.capabilities.directPreference,
+              read, set, refusals
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(
+            result as? String,
+            #"{"capability":1,"read":{"mode":"automatic","reverted":{"at":1700000000000,"reason":"unreachable"}},"refusals":["invalid_argument","invalid_argument","invalid_argument","invalid_argument","invalid_argument"],"set":{"mode":"tunnel","reverted":null}}"#
+        )
+        XCTAssertEqual(written.count, 1)
+        XCTAssertEqual(written.first?.0, instance)
+        XCTAssertEqual(written.first?.1, .tunnel)
+        XCTAssertEqual(written.first?.2, webView.url)
+
+        // The event, on this origin only.
+        let script = try XCTUnwrap(reverted.eventScript(for: instance))
+        let heard = try await webView.callAsyncJavaScript(
+            """
+            const heard = new Promise((resolve) => {
+              window.addEventListener("avibe:native:direct.preferenceChanged",
+                (event) => resolve(JSON.stringify(event.detail, (key, item) =>
+                  item && typeof item === "object" && !Array.isArray(item)
+                    ? Object.fromEntries(Object.entries(item).sort()) : item)), {once: true});
+            });
+            eval(script);
+            return await heard;
+            """,
+            arguments: ["script": script],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(
+            heard as? String,
+            #"{"mode":"automatic","reverted":{"at":1700000000000,"reason":"unreachable"}}"#
+        )
+        let elsewhere = try XCTUnwrap(
+            reverted.eventScript(for: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example")))
+        )
+        XCTAssertTrue(elsewhere.contains("window.location.origin !== event.origin"))
+
+        // Without a provider there is no capability and no answer.
+        let bare = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in reply(nil) }
+            )
+        )
+        let bareLoader = PageLoader()
+        bare.navigationDelegate = bareLoader
+        try await bareLoader.loadHTML("<!doctype html>", baseURL: instance.url, in: bare)
+        let bareResult = try await bare.callAsyncJavaScript(
+            """
+            let code = "answered";
+            try { await window.avibeNative.call("direct.preference"); } catch (error) { code = error.code; }
+            return JSON.stringify({capability: window.avibeNative.capabilities.directPreference ?? null, code});
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(bareResult as? String, #"{"capability":null,"code":"unsupported"}"#)
+    }
+
+    /// The stored choices: per account and instance; a mode this build
+    /// does not know reads as automatic; automatic with nothing to say is
+    /// not kept.
+    @MainActor
+    func testTheStoredChoiceIsPerAccountAndInstanceAndAnUnknownModeReadsAutomatic() throws {
+        let suite = "DirectPathPreference.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = DirectPathPreferenceStore(defaults: defaults)
+        store.set(DirectPathPreference(mode: .tunnel), accountID: "a", origin: "https://one.example")
+        XCTAssertEqual(store.preference(accountID: "a", origin: "https://one.example").mode, .tunnel)
+        XCTAssertEqual(store.preference(accountID: "a", origin: "https://two.example"), .automatic)
+        XCTAssertEqual(store.preference(accountID: "b", origin: "https://one.example"), .automatic)
+        store.set(.automatic, accountID: "a", origin: "https://one.example")
+        XCTAssertNil(defaults.dictionary(forKey: DirectPathPreferenceStore.key)?["a https://one.example"])
+        defaults.set(
+            ["a https://one.example": Data(#"{"mode":"lanOnly"}"#.utf8)],
+            forKey: DirectPathPreferenceStore.key
+        )
+        XCTAssertEqual(store.preference(accountID: "a", origin: "https://one.example"), .automatic)
+        XCTAssertNil(DirectPathPreference.Mode(name: "lanOnly"))
     }
 
     // MARK: Account over the runtime while a push request runs
@@ -5952,7 +6745,7 @@ final class DirectPathAppTests: XCTestCase {
             NativeBridgeMethod.allCases
                 .map(\.rawValue)
                 .filter { $0.hasPrefix("direct.") },
-            ["direct.status", "direct.handover"]
+            ["direct.status", "direct.handover", "direct.preference", "direct.setPreference"]
         )
     }
 
@@ -6446,6 +7239,43 @@ final class DirectPathAppTests: XCTestCase {
         return answer
     }
 
+    /// Why the App routed no host, as far as the App itself says. Two things
+    /// leave a host on the public path with nothing selected and no listener
+    /// to find, both by design: the listener faulted (seen on CI after one
+    /// of the simulator's system services was interrupted, run 44934936305),
+    /// or its first bind and ownership check were slower than the App's
+    /// listener wait (1 s). The App reports only the first.
+    @MainActor
+    private func whyNoHostIsRouted(by app: AppModel) -> String {
+        app.directListenerFault
+            ? "The App routed no host: its listener faulted, so the host loads on the public path, nothing is selected and no listener serves."
+            : "The App routed no host and reports no listener fault: its first bind was slower than the listener wait, so the host loads on the public path, nothing is selected and no listener serves."
+    }
+
+    /// The App's direct listener, found from outside: the one new listening
+    /// socket on 127.0.0.1 since `baseline`. First, through WebKit's own
+    /// store, that the App routed its host at all: when it did not, there is
+    /// no listener to find, and the failure says why (`whyNoHostIsRouted`)
+    /// instead of reading as a scan that missed one.
+    @MainActor
+    private func directListenerPort(
+        of app: AppModel,
+        since baseline: Set<ListeningSocket>,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> NWEndpoint.Port {
+        XCTAssertFalse(
+            app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+            whyNoHostIsRouted(by: app),
+            file: file,
+            line: line
+        )
+        let loopback = try newListeners(since: baseline).filter { $0.address == "127.0.0.1" }
+        XCTAssertEqual(loopback.count, 1, "new loopback listeners: \(loopback)", file: file, line: line)
+        let socket = try XCTUnwrap(loopback.first, file: file, line: line)
+        return try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port), file: file, line: line)
+    }
+
     /// Bounds no test of the iroh transport should reach, so that a slow
     /// simulator does not turn a stand-in that answers at once into a
     /// timeout.
@@ -6490,31 +7320,50 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         source.appModel = app
-        // The probe's stream, then the relay's.
+        // The probe's stream, then the relay's. The dial waits for it: see
+        // below.
         let connection = DirectIrohFakeConnection(
             log: log,
             remote: DirectIrohFixtures.instanceEndpoint,
             answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.established]
         )
-        engine.prepare().connection.resolve(connection)
+        let endpoint = engine.prepare()
 
         let runtime = try await select("instance-1", in: app)
         let controller = try makeRuntimeController(app, runtime)
         app.registerRuntimeController(controller, for: runtime)
         let page = try RuntimePage(controller: controller)
         // A document of the instance's origin, loaded here before the path
-        // comes up: the runtime's own load of the instance would otherwise
-        // send WebKit's own CONNECT through the route, and could take the
-        // relay's stream below.
+        // comes up.
         try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+        // The runtime's own load of the instance sends WebKit's own CONNECT
+        // through the route. With no path up it ends on the public leg. Once
+        // the path is up it would be a direct relay and take the stream the
+        // CONNECT below is to get (seen on CI, run 44981277303: the path came
+        // up first, `504` here, and four streams). So the dial is held until
+        // the App has recorded that CONNECT's end; WebKit sends it once its
+        // processes are running.
+        guard !app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty else {
+            // Nothing of the runtime's goes through the listener then.
+            XCTFail(whyNoHostIsRouted(by: app))
+            throw DirectTestTimeout()
+        }
+        do {
+            try await eventually(timeout: WebKitReadiness.webContentLaunch) {
+                self.directStatus(app, self.instance)?.races.isEmpty == false
+            }
+        } catch {
+            XCTFail("WebKit's own CONNECT for the runtime's load never reached the App's listener.")
+            throw error
+        }
+        endpoint.connection.resolve(connection)
         try await eventually {
             // A request made before the WebView existed is asked again.
             scheduler.fire(Self.patientIrohTiming.pageRetrySeconds)
             return self.directStatus(app, self.instance)?.preferred == .direct
         }
 
-        let socket = try XCTUnwrap(try newListeners(since: listening).first)
-        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: socket.port))
+        let port = try directListenerPort(of: app, since: listening)
         let client = LoopbackClient(port: port)
         try await client.send(
             "CONNECT instance-one.example:443 HTTP/1.1\r\nHost: instance-one.example:443\r\n\r\n"
@@ -6565,6 +7414,7 @@ final class DirectPathAppTests: XCTestCase {
         pushNotificationCenter: PushNotificationCentering? = nil,
         runtimeOpenTiming: RuntimeOpenTiming? = nil,
         runtimeOpenNotificationCenter: NotificationCenter = .default,
+        networkPath: NetworkPathReading? = nil,
         systemSchedulePlatform: SystemSchedulePlatforming? = nil,
         systemScheduleNow: @escaping @MainActor () -> Date = Date.init,
         systemScheduleCheckpoint: ((FaultingSystemScheduleFileIO.Checkpoint) throws -> Void)? = nil,
@@ -6700,7 +7550,8 @@ final class DirectPathAppTests: XCTestCase {
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter()
+                badgeCenter: SilentBadgeCenter(),
+                networkPath: networkPath
             )
         } else if let directTransport {
             app = AppModel(
@@ -6719,7 +7570,8 @@ final class DirectPathAppTests: XCTestCase {
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter()
+                badgeCenter: SilentBadgeCenter(),
+                networkPath: networkPath
             )
         } else {
             app = AppModel(
@@ -6737,7 +7589,8 @@ final class DirectPathAppTests: XCTestCase {
                 systemScheduleNow: systemScheduleNow,
                 runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter()
+                badgeCenter: SilentBadgeCenter(),
+                networkPath: networkPath
             )
         }
         notifications?.app = app
@@ -6884,11 +7737,14 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     private func showRuntimePage(
         _ app: AppModel,
-        _ runtime: MobileRuntimeContext
+        _ runtime: MobileRuntimeContext,
+        recording record: RuntimePageRecord? = nil
     ) async throws -> RuntimePage {
         let controller = try makeRuntimeController(app, runtime)
         app.registerRuntimeController(controller, for: runtime)
         let page = try RuntimePage(controller: controller)
+        // Recorded before its first load, which is also the page's.
+        record?.page = page
         try await page.load(
             RuntimePage.recordingDocument,
             baseURL: runtime.instance.url
@@ -7379,6 +8235,46 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
     }
 }
 
+/// The App's own session checks, asked for by a test that waits for
+/// something the App does at each signed-in answer: one at a time, and not
+/// sooner than `spacing` after the last one ended.
+@MainActor
+private final class SessionChecks {
+    private static let spacing: Duration = .seconds(10)
+    private(set) var asked = 0
+    private var running: Task<Void, Never>?
+    private var lastEnded: ContinuousClock.Instant?
+
+    func askAgainIfDue(_ app: AppModel, at now: ContinuousClock.Instant) {
+        guard let since = lastEnded else {
+            // The launch's own answer has just been given.
+            lastEnded = now
+            return
+        }
+        guard running == nil, since.duration(to: now) >= Self.spacing else {
+            return
+        }
+        asked += 1
+        running = Task { @MainActor in
+            _ = try? await app.mobileSessionCoordinator.refresh()
+            self.lastEnded = ContinuousClock.now
+            self.running = nil
+        }
+    }
+
+    /// Returns once no check is in flight.
+    func settle() async {
+        await running?.value
+    }
+}
+
+/// The page a scenario showed, kept so its caller can ask afterwards
+/// whether WebKit ended that page's process.
+@MainActor
+private final class RuntimePageRecord {
+    var page: RuntimePage?
+}
+
 /// One runtime controller in a window, and its primary WebView.
 @MainActor
 private final class RuntimePage {
@@ -7431,6 +8327,12 @@ private final class RuntimePage {
         webView.navigationDelegate = loader
         self.window = window
         self.webView = webView
+    }
+
+    /// WebKit ended this page's WebContent process at some point: what the
+    /// page was doing then (a load, a bridge call in flight) is lost with it.
+    var webContentProcessTerminated: Bool {
+        loader.processTerminations > 0
     }
 
     func load(_ html: String, baseURL: URL, forwardingNativeNavigation: Bool = false) async throws {
@@ -7686,6 +8588,8 @@ final class PageLoaderTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? PageLoader.LoadError, .webContentProcessTerminated)
         }
+        // Each ended process is counted, whether or not a load was pending.
+        XCTAssertEqual(loader.processTerminations, 2)
 
         let nextNavigation = try view.makeNavigation()
         view.nextNavigation = nextNavigation
@@ -7780,6 +8684,9 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
     private var navigation: WKNavigation?
     private weak var loadingWebView: WKWebView?
     weak var forwardingDelegate: WKNavigationDelegate?
+    /// How many times WebKit ended a WebContent process of this loader's
+    /// WebViews, loading or not.
+    private(set) var processTerminations = 0
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation?) {
         forwardingDelegate?.webView?(webView, didStartProvisionalNavigation: navigation)
@@ -7829,6 +8736,7 @@ private final class PageLoader: NSObject, WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        processTerminations += 1
         // Evidence for a page WebKit ends under a test (for example at its
         // network process's request): which page, and whether it was loading.
         print(
@@ -8200,4 +9108,9 @@ private final class RootViewStandIn {
             Made(runtime: runtime, controller: controller, providerUpdateInFlight: inFlight)
         )
     }
+}
+
+@MainActor
+private final class StandInNetworkPath: NetworkPathReading {
+    var isSatisfied = true
 }

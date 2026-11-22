@@ -238,6 +238,45 @@ Use `POST /api/config`:
 
 Do not overwrite scope-level `custom_cwd` entries.
 
+### Turn the iPhone App's own hold-to-talk recognition off or on
+
+In the iPhone App, the App itself recognises a hold on the composer or the main Bot and records
+every voice take. If hold-to-talk or tap-to-talk misbehaves there (taps that do not focus the
+input, holds that do not record), turn that off with `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold": false
+  }
+}
+```
+
+The page then recognises holds and records as it did before, in the same App build. No restart
+is needed: it takes effect the next time the user opens a conversation or the App. Send
+`"app_hold": true` to turn it on again. Voice input itself stays on either way; this is not
+`audio_asr.enabled`.
+
+### Make a tap on the main Bot open no microphone in the iPhone App
+
+In the iPhone App, a touch on the main Bot's button in the tab bar opens the microphone at
+once, as a touch on the composer does, so a hold there loses no first word. A plain tap on that
+button therefore opens the microphone for a moment (nothing of it is kept or sent). To have that
+one button open the microphone only when the hold is recognised, use `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold_main_at_touch": false
+  }
+}
+```
+
+No restart and no new App build are needed: it takes effect the next time the user opens a
+conversation or the App. The composer is not changed by it. Send `"app_hold_main_at_touch": true`
+to go back. It needs the iPhone App from TestFlight 51.1 on. What it costs: a hold on that button
+then records from the cue, so what is said in the first moment of the press is not in the take.
+
 ### Switch primary platform
 
 Use `POST /api/config` and keep `platforms.enabled` complete:

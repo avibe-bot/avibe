@@ -1,4 +1,4 @@
-import type { DesktopRemoteUpdateRequest } from './types';
+import type { DesktopRemoteUpdateRequest, UpdateSnapshot } from './types';
 
 // Version helpers every update surface shares. The desktop app stamps SemVer
 // (`3.1.2-rc.3`) and the Runtime reports PEP 440 (`3.1.2rc3`); surfaces show
@@ -50,4 +50,13 @@ const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
 export function remoteRequestSettled(request: DesktopRemoteUpdateRequest | null | undefined, current: string): boolean {
   return Boolean(request && TERMINAL_REMOTE_PHASES.includes(request.phase)
     && (request.phase !== 'completed' || normalizeVersion(current) === normalizeVersion(request.target)));
+}
+
+/** An install or its restart is under way on this Avibe: a standalone Runtime reports it (`install`),
+ *  a desktop-managed host relays its desktop app's request (`remote_request`). */
+export function installRunning(info: UpdateSnapshot | null | undefined): boolean {
+  if (!info) return false;
+  if (info.install) return true;
+  // Every phase before the request settles, the host's check and its wait for someone there included.
+  return Boolean(info.remote_request && !remoteRequestSettled(info.remote_request, info.current));
 }

@@ -33,7 +33,7 @@ const designFrames = frames(['chinese', 'english', 'long-word', 'code', 'actions
     fixtures: { capabilities: owner, bots: [{ ...mainBot, display_name: '歪比' }] },
     render: () => <div className="pet-mini-stage">
       <div className="pet-mini-column">
-        {kind.startsWith('activity-') && <div className="pet-mini-cards max-w-79">
+        {kind.startsWith('activity-') && <div className="pet-mini-cards">
           {kind === 'activity-stack' ? <CollapsedCards cards={cards} edge="bottom" onOpen={noop} t={t} /> :
             <ExpandedCards natural={kind === 'activity-single'} cards={kind === 'activity-single' ? cards.slice(0, 1) : cards}
               leaving={[]} onReference={noop} onDismiss={noop} stops={{}} onStop={noop} t={t} />}

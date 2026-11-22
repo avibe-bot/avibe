@@ -29,16 +29,26 @@ import { useToast } from '../context/ToastContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { onPageReactivated } from '../lib/pageActivity';
 import { liveStreamVia, subscribeLiveStreamVia, type LiveStreamVia } from '../lib/liveStreamVia';
-import { deviceDirectLine, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
-import { onNativeDirectPreference, readNativeDirectPath, type NativeDirectPathSnapshot } from '../lib/native';
+import { deviceUsing, deviceUsingText, lastConnectionLegs, remoteAccessDirectLines } from '../lib/remoteAccessDirect';
+import {
+  nativeDirectAvailable,
+  nativeDirectPathReported,
+  onNativeDirectPreference,
+  readNativeDirectPath,
+  type NativeDirectPathSnapshot,
+} from '../lib/native';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { useDeadlineClock } from './settings/models/useDeadlineClock';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { SegmentedRadio } from './ui/segmented';
-import { Select } from './ui/select';
-import { Switch } from './ui/switch';
+import {
+  TunnelAutoRecoverySwitch,
+  TunnelIpFamilyControl,
+  TunnelOutboundSelect,
+  TunnelProfileControl,
+  TunnelProtocolControl,
+} from './remoteAccess/TunnelControls';
 
 const VIBE_CLOUD_URL = 'https://avibe.bot';
 const VIBE_CLOUD_APP_URL = 'https://avibe.bot/app';
@@ -319,6 +329,10 @@ export const RemoteAccess: React.FC = () => {
   const publicUrl = status?.public_url;
   const paired = Boolean(status?.paired);
   const running = Boolean(status?.running);
+  // While this page's own stream runs through the direct ingress, Cloudflare is the fallback, not the
+  // path in use: its quality and network path are labelled as the fallback, and the path is folded.
+  const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
+  const cloudflareIsFallback = pageVia === 'direct';
   const pendingPairing = canPair ? status?.pending_pairing : null;
   const showPairingForm = ((!paired || pendingPairing) && !pendingPairing?.can_resume) || (canPair && reconfiguring);
   const connectorState = status?.pid_state === 'unknown'
@@ -525,7 +539,9 @@ export const RemoteAccess: React.FC = () => {
           </a>
         </div>
         <div className="px-5 py-3.5">
-          <div className="text-[12px] text-muted">{t('remoteAccess.quality')}</div>
+          <div className="text-[12px] text-muted">
+            {t(cloudflareIsFallback ? 'remoteAccess.qualityFallback' : 'remoteAccess.quality')}
+          </div>
           <div className="mt-1 flex min-h-5 items-center gap-2">
             <Badge variant={qualityVariant}>{qualityLabel}</Badge>
             {qualityFresh && (requestLatency || quality?.rtt_ms) && (
@@ -544,14 +560,11 @@ export const RemoteAccess: React.FC = () => {
       <RemoteAccessDirectLines direct={status?.direct} />
 
       {running && networkPath && (
-        <div className="border-b border-border px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <Network className="size-4 shrink-0 text-cyan-ink" />
-              <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.networkPath')}</h3>
-            </div>
-            <Badge variant={routeVariant}>{routeLabel}</Badge>
-          </div>
+        <NetworkPathSection
+          fallback={cloudflareIsFallback}
+          title={t(cloudflareIsFallback ? 'remoteAccess.fallbackRoute' : 'remoteAccess.networkPath')}
+          badge={<Badge variant={routeVariant}>{routeLabel}</Badge>}
+        >
 
           <div className="mt-3 grid border-y border-border/70 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] md:items-stretch">
             <div className="min-w-0 py-3 md:pr-4">
@@ -635,7 +648,7 @@ export const RemoteAccess: React.FC = () => {
               )}
             </div>
           </details>
-        </div>
+        </NetworkPathSection>
       )}
 
       {paired && !showPairingForm && (
@@ -657,17 +670,10 @@ export const RemoteAccess: React.FC = () => {
                     <Badge variant="secondary">{protocolLabel}</Badge>
                   )}
                 </span>
-                <SegmentedRadio
+                <TunnelProtocolControl
                   value={settingsDraft.transport_protocol}
                   onChange={(value) => updateSetting('transport_protocol', value)}
-                  ariaLabel={t('remoteAccess.protocol')}
                   disabled={controlsDisabled}
-                  tone="cyan"
-                  options={[
-                    { id: 'auto', label: t('remoteAccess.protocolAuto') },
-                    { id: 'quic', label: 'QUIC' },
-                    { id: 'http2', label: 'HTTP/2' },
-                  ]}
                 />
               </div>
 
@@ -675,11 +681,9 @@ export const RemoteAccess: React.FC = () => {
                 <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.autoRecovery')}</span>
                 <div className="flex h-9 items-center justify-between border-y border-border/70 px-1">
                   <Activity className="size-4 text-muted" />
-                  <Switch
-                    size="sm"
-                    checked={settingsDraft.auto_recovery}
-                    onCheckedChange={(value) => updateSetting('auto_recovery', value)}
-                    label={t('remoteAccess.autoRecovery')}
+                  <TunnelAutoRecoverySwitch
+                    value={settingsDraft.auto_recovery}
+                    onChange={(value) => updateSetting('auto_recovery', value)}
                     disabled={controlsDisabled}
                   />
                 </div>
@@ -687,49 +691,30 @@ export const RemoteAccess: React.FC = () => {
 
               <div className="min-w-0 space-y-1.5">
                 <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.optimizationProfile')}</span>
-                <SegmentedRadio
+                <TunnelProfileControl
                   value={settingsDraft.optimization_profile}
                   onChange={(value) => updateSetting('optimization_profile', value)}
-                  ariaLabel={t('remoteAccess.optimizationProfile')}
                   disabled={controlsDisabled}
-                  options={[
-                    { id: 'stable', label: t('remoteAccess.profileStable') },
-                    { id: 'balanced', label: t('remoteAccess.profileBalanced') },
-                    { id: 'low_latency', label: t('remoteAccess.profileLowLatency') },
-                  ]}
                 />
               </div>
 
               <div className="min-w-0 space-y-1.5">
                 <span className="block min-h-5 text-[12px] font-medium text-foreground">{t('remoteAccess.ipFamily')}</span>
-                <SegmentedRadio
+                <TunnelIpFamilyControl
                   value={settingsDraft.edge_ip_version}
                   onChange={(value) => updateSetting('edge_ip_version', value)}
-                  ariaLabel={t('remoteAccess.ipFamily')}
                   disabled={controlsDisabled}
-                  options={[
-                    { id: '4', label: t('remoteAccess.ipV4') },
-                    { id: 'auto', label: t('remoteAccess.ipAuto') },
-                    { id: '6', label: t('remoteAccess.ipV6') },
-                  ]}
                 />
               </div>
 
               <label className="min-w-0 space-y-1.5 md:col-span-2">
                 <span className="block text-[12px] font-medium text-foreground">{t('remoteAccess.outboundInterface')}</span>
-                <Select
+                <TunnelOutboundSelect
                   value={settingsDraft.edge_bind_address}
-                  onChange={(event) => updateSetting('edge_bind_address', event.target.value)}
+                  onChange={(value) => updateSetting('edge_bind_address', value)}
                   disabled={controlsDisabled}
-                  className="font-mono text-[12px]"
-                >
-                  <option value="">{t('remoteAccess.outboundSystem')}</option>
-                  {networkInterfaces.map((networkInterface) => (
-                    <option key={networkInterface.id} value={networkInterface.address}>
-                      {networkInterface.name} · {networkInterface.address}
-                    </option>
-                  ))}
-                </Select>
+                  interfaces={networkInterfaces}
+                />
               </label>
             </div>
 
@@ -960,6 +945,46 @@ export const RemoteAccess: React.FC = () => {
   );
 };
 
+// Cloudflare's network path. While this page runs through the direct ingress it is the fallback route:
+// folded under that name, so it does not read as the path in use (ui/design:
+// settings/remote-access/direct-app-*).
+const NetworkPathSection: React.FC<{
+  fallback: boolean;
+  title: string;
+  badge: React.ReactNode;
+  children: React.ReactNode;
+}> = ({ fallback, title, badge, children }) => {
+  const heading = (
+    <div className="flex min-w-0 items-center gap-2">
+      <Network className={`size-4 shrink-0 ${fallback ? 'text-muted' : 'text-cyan-ink'}`} />
+      <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
+      {fallback && (
+        <ChevronDown className="size-4 shrink-0 text-muted transition-transform group-open/fallback:rotate-180" />
+      )}
+    </div>
+  );
+  if (!fallback) {
+    return (
+      <div className="border-b border-border px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {heading}
+          {badge}
+        </div>
+        {children}
+      </div>
+    );
+  }
+  return (
+    <details className="group/fallback border-b border-border px-5 py-4" data-testid="remote-access-fallback-route">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {heading}
+        {badge}
+      </summary>
+      {children}
+    </details>
+  );
+};
+
 // The direct ingress, as current facts only: the instance's own state and certificate, and how this
 // page's live stream came in (that stream's own handshake; hidden until one has answered). No drop
 // count and no fallback reason: neither the instance nor the page can know them truthfully today.
@@ -969,7 +994,7 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
   const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
   const [now] = useState(() => Date.now());
   const devicePath = useNativeDirectPath(pageVia);
-  const lines = remoteAccessDirectLines(direct, pageVia, now);
+  const lines = remoteAccessDirectLines(direct, pageVia, now, nativeDirectAvailable());
   if (!lines) return null;
   // Written like other Settings dates: the page's own locale.
   const certificate = lines.certificateDate
@@ -979,12 +1004,8 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
     })
     : null;
   const page = lines.pageKey ? t(lines.pageKey) : null;
-  const device = deviceDirectLine(devicePath, pageVia);
-  const deviceText = device
-    ? device.pathKey
-      ? t('remoteAccess.direct.deviceWithPath', { state: t(device.stateKey), path: t(device.pathKey) })
-      : t('remoteAccess.direct.device', { state: t(device.stateKey) })
-    : null;
+  const using = deviceUsing(devicePath, pageVia, nativeDirectPathReported());
+  const deviceText = using ? deviceUsingText(t, using) : null;
   const legs = lastConnectionLegs(devicePath);
   const legKeys = {
     none: 'remoteAccess.direct.legNone',
@@ -1015,21 +1036,37 @@ const RemoteAccessDirectLines: React.FC<{ direct: RemoteAccessStatus['direct'] }
   );
 };
 
-/** The App's own direct path, read for display; re-read when it changes. */
+// The path's class and round trip change with no event: a move between two addresses of one family
+// (a public and a private IPv4 address) is not a change of the path, and a new measurement is none.
+const DIRECT_PATH_REREAD_MS = 5_000;
+
+/**
+ * The App's own direct path, read for display; re-read when it changes, and, from an App that
+ * reports its path, every few seconds while the page is shown.
+ */
 function useNativeDirectPath(pageVia: LiveStreamVia): NativeDirectPathSnapshot | null {
   const [snapshot, setSnapshot] = useState<NativeDirectPathSnapshot | null>(null);
   useEffect(() => {
     let alive = true;
+    let latest = 0;
     const read = () => {
+      // Only the latest read is shown, whatever order the answers come back in.
+      const mine = ++latest;
       void readNativeDirectPath().then((next) => {
-        if (alive) setSnapshot(next);
+        if (alive && mine === latest) setSnapshot(next);
       });
     };
     read();
     const stop = onNativeDirectPreference(read);
+    const timer = nativeDirectPathReported()
+      ? window.setInterval(() => {
+        if (document.visibilityState === 'visible') read();
+      }, DIRECT_PATH_REREAD_MS)
+      : null;
     return () => {
       alive = false;
       stop();
+      if (timer !== null) window.clearInterval(timer);
     };
   }, [pageVia]);
   return snapshot;

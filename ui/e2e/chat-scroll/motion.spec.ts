@@ -702,7 +702,7 @@ type Disclosed = {
   /** WebKit samples an animation it has run before at the time of the read, and one started since the last frame
    *  was drawn at that frame's time: the two agree in a read taken within a millisecond of its frame's time, or
    *  where nothing in the transcript started since the last frame read (`onTime`). Chromium samples every
-   *  animation at its frame's time. */
+   *  animation at its frame's time. Never set before the first frame read: the clock is not drawn until then. */
   onTime: boolean;
   /** Read at an animation frame (not at a change in between): that frame's time, else null. */
   frame: number | null;
@@ -786,6 +786,10 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
     ticking.startTime = document.timeline.currentTime;
     const clockAt = () => clock.getBoundingClientRect().top;
     const clockStart = Number(ticking.startTime);
+    // The clock vouches for no read before the first frame read: until the timeline moves on it reads 0 at any
+    // moment, and so does the time since it started, however long the task that taps runs and whatever WebKit
+    // samples in it.
+    let framed = false;
     // The transcript's animations a frame read has already seen: drawn since, so WebKit samples them like the clock.
     const seen = new WeakSet<Animation>();
     const ours = () => document.getAnimations().filter((animation) => {
@@ -811,7 +815,8 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         value.at = (before + after) / 2;
         value.exact = before === after;
         const running = ours();
-        value.onTime = value.exact && (Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5 || running.every((animation) => seen.has(animation)));
+        framed ||= frame !== null;
+        value.onTime = framed && value.exact && (Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5 || running.every((animation) => seen.has(animation)));
         if (value.exact || attempt === 7) {
           out.push(value);
           // Seen once the frame's read is done (its retries run in the same frame, before anything is drawn).
@@ -1438,8 +1443,11 @@ test('a disclosure tapped on a row another opening still pushes down writes no s
   // The row itself only goes down, with the chip's edge, and comes to rest. (What follows it ends up below the
   // screen, where the motion does not move it: the other specs judge the rows below an edge.) Judged at every read
   // taken at one moment and on time, at a frame or as the document changed: a slow runner can draw most of the way
-  // before its next frame.
+  // before its next frame. No read before the first frame's is on time (the one before the tap, and those at the
+  // changes of the task that taps, can be sampled a few ms apart with no frame between them), so across the tap
+  // the row is only held to not having jumped up: by no more than those few ms of its way down.
   const tops = frames.filter(({ exact, onTime }) => exact && onTime).map(({ tapped }) => tapped);
+  expect(tops[0]).toBeGreaterThanOrEqual(frames[0].tapped - 4);
   const steps = tops.slice(1).map((top, index) => top - tops[index]).filter((step) => Math.abs(step) > 0.5);
   expect(steps.length).toBeGreaterThan(0);
   expect(steps.every((step) => step > 0)).toBe(true);

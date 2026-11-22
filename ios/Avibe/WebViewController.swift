@@ -331,12 +331,16 @@ final class WebViewFactory {
     private let showAccountRoot: () -> Void
     private let showInstances: () -> Void
     private let instanceName: () -> String?
+    private let liveActivity: LiveActivityAction
     private let healthConnect: HealthConnectAction
     private let showShare = ShowShareCoordinator.shared
     private let instanceID: () -> String?
     private let deviceID: () -> String?
+    private let deviceDescription: () -> [String: Any]?
+    private let healthBindingTicket: @MainActor () async -> String?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
+    private let directPreference: DirectPreferenceProvider?
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -377,8 +381,12 @@ final class WebViewFactory {
         instanceName: instanceName,
         instanceID: instanceID,
         deviceID: deviceID,
+        deviceDescription: deviceDescription,
+        healthBindingTicket: healthBindingTicket,
         directStatus: directStatus,
         directHandover: directHandover,
+        directPreference: directPreference,
+        liveActivity: liveActivity,
         healthConnect: healthConnect,
         showShare: showShare,
         pushStatus: { [weak self] vapidPublicKey, origin in
@@ -443,8 +451,12 @@ final class WebViewFactory {
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
+        healthBindingTicket: @escaping @MainActor () async -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        directPreference: DirectPreferenceProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
@@ -477,8 +489,12 @@ final class WebViewFactory {
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
+        self.deviceDescription = deviceDescription
+        self.healthBindingTicket = healthBindingTicket
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.directPreference = directPreference
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
@@ -634,6 +650,9 @@ final class WebViewController: UIViewController {
     /// The instance's last page (`RuntimePageCache`): shown at once on the
     /// first load, and refreshed after each live load.
     private let pageCache: RuntimePageCacheAccess?
+    /// A same-origin URL the first load goes to instead of the root (a
+    /// reopen where the page was); asked once, at that load.
+    private let startURL: () -> URL?
     /// A page shown from the cache reached its instance.
     private let cachedPageConnected: () -> Void
     private let cachedPageKeepsShell: () -> Void
@@ -648,6 +667,7 @@ final class WebViewController: UIViewController {
     /// The cache serves only a runtime's first load (not a reload after the
     /// web content process ended).
     private var hasUsedCache = false
+    private var hasAskedStartURL = false
     /// The page shown from the cache, to compare with the instance's own
     /// once it answers.
     private var shownCachedPage: RuntimeCachedPage?
@@ -672,11 +692,15 @@ final class WebViewController: UIViewController {
     /// The App's own sign-in screen, for a Google, GitHub or Apple sign-in tapped inside the page.
     private let showSignIn: () -> Void
     private let instanceName: () -> String?
+    private let liveActivity: LiveActivityAction
     private let healthConnect: HealthConnectAction
     private let instanceID: () -> String?
     private let deviceID: () -> String?
+    private let deviceDescription: () -> [String: Any]?
+    private let healthBindingTicket: @MainActor () async -> String?
     private let directStatus: DirectStatusProvider?
     private let directHandover: DirectHandoverProvider?
+    private let directPreference: DirectPreferenceProvider?
     /// Whether this runtime's WebView may be loaded now; `nil` without a
     /// direct transport, which loads as before.
     private let directLoadGate: DirectLoadGateProvider?
@@ -773,8 +797,21 @@ final class WebViewController: UIViewController {
                 guard let self, !self.isInvalidatedForAccountTransition else { return nil }
                 return self.deviceID()
             },
+            deviceDescription: { [weak self] in
+                guard let self, !self.isInvalidatedForAccountTransition else { return nil }
+                return self.deviceDescription()
+            },
+            healthBindingTicket: { [weak self] in
+                guard let self, !self.isInvalidatedForAccountTransition else { return nil }
+                return await self.healthBindingTicket()
+            },
             directStatus: directStatus,
             directHandover: directHandover,
+            directPreference: directPreference,
+            liveActivity: { [weak self] request, origin in
+                guard let self, !self.isInvalidatedForAccountTransition else { throw NativeBridgeError.forbidden }
+                return try await self.liveActivity(request, origin)
+            },
             healthConnect: { [weak self] requestID, pairingCode, origin in
                 guard let self, !self.isInvalidatedForAccountTransition else { return "failed" }
                 return await self.healthConnect(requestID, pairingCode, origin)
@@ -824,6 +861,8 @@ final class WebViewController: UIViewController {
         let created = makeWebViewFactory().makeWebView(delegate: self)
         retainedWebView = created
         observePrimaryNavigationState(created)
+        created.addGestureRecognizer(NativeHoldTouchObserver())
+        NativeHoldCapture.shared.watch(created)
         return created
     }
 
@@ -872,8 +911,12 @@ final class WebViewController: UIViewController {
         instanceName: @escaping () -> String? = { nil },
         instanceID: @escaping () -> String? = { nil },
         deviceID: @escaping () -> String? = { nil },
+        deviceDescription: @escaping () -> [String: Any]? = { nil },
+        healthBindingTicket: @escaping @MainActor () async -> String? = { nil },
         directStatus: DirectStatusProvider? = nil,
         directHandover: DirectHandoverProvider? = nil,
+        directPreference: DirectPreferenceProvider? = nil,
+        liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
@@ -895,6 +938,7 @@ final class WebViewController: UIViewController {
         pageColorSchemeChanged: @escaping (PageColorScheme?) -> Void = { _ in },
         runtimeNavigationChanged: @escaping (RuntimeNavigationEvent) -> Void = { _ in },
         pageCache: RuntimePageCacheAccess? = nil,
+        startURL: @escaping () -> URL? = { nil },
         cachedPageConnected: @escaping () -> Void = {},
         cachedPageKeepsShell: @escaping () -> Void = {},
         didStartLoading: @escaping () -> Void,
@@ -911,8 +955,12 @@ final class WebViewController: UIViewController {
         self.instanceName = instanceName
         self.instanceID = instanceID
         self.deviceID = deviceID
+        self.deviceDescription = deviceDescription
+        self.healthBindingTicket = healthBindingTicket
         self.directStatus = directStatus
         self.directHandover = directHandover
+        self.directPreference = directPreference
+        self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
         self.navigationPolicy = navigationPolicy
@@ -932,6 +980,7 @@ final class WebViewController: UIViewController {
         self.didFailLoading = didFailLoading
         self.runtimeNavigationChanged = runtimeNavigationChanged
         self.pageCache = pageCache
+        self.startURL = startURL
         self.cachedPageConnected = cachedPageConnected
         self.cachedPageKeepsShell = cachedPageKeepsShell
         super.init(nibName: nil, bundle: nil)
@@ -1071,15 +1120,32 @@ final class WebViewController: UIViewController {
         switch directLoadGate?() ?? .open {
         case .open:
             hasPendingAutoLoad = false
-            if !hasLoadedLive, !hasUsedCache, loadCachedPage() {
+            let start = takeStartURL()
+            if start == nil, !hasLoadedLive, !hasUsedCache, loadCachedPage() {
                 return
             }
-            retainedWebView?.load(URLRequest(url: instanceOrigin.url))
+            retainedWebView?.load(URLRequest(url: start ?? instanceOrigin.url))
         case .held:
             hasPendingAutoLoad = true
         case .fault:
             hasPendingAutoLoad = false
         }
+    }
+
+    /// The first load's own URL, once: a reopen where the page was (this
+    /// instance's origin only). Later loads (a restart) go to the root.
+    private func takeStartURL() -> URL? {
+        guard !hasAskedStartURL else { return nil }
+        hasAskedStartURL = true
+        guard
+            let url = startURL(),
+            WebOrigin(url: url, requiresHTTPS: false) == instanceOrigin
+        else {
+            return nil
+        }
+        // The first load is this one: the cache serves no later load.
+        hasUsedCache = true
+        return url
     }
 
     /// Shows the instance's last page from the cache, as the instance served
@@ -1390,6 +1456,26 @@ final class WebViewController: UIViewController {
             """
         )
     }
+
+    /// `direct.preferenceChanged` to this instance's documents: the App
+    /// changed this device's path choice itself.
+    func deliverDirectPreferenceChanged(_ preference: DirectPathPreference) {
+        guard
+            !isInvalidatedForAccountTransition,
+            let script = preference.eventScript(for: instanceOrigin)
+        else {
+            return
+        }
+        let webViews = [retainedWebView].compactMap { $0 }
+            + popupRecords.values.map(\.webView)
+        for webView in webViews
+        where webView.url.flatMap({
+            WebOrigin(url: $0, requiresHTTPS: false)
+        }) == instanceOrigin {
+            webView.evaluateJavaScript(script)
+        }
+    }
+
 
     /// Tells every instance-origin document this runtime shows, the primary
     /// and instance-origin child windows, the current `direct` state for this

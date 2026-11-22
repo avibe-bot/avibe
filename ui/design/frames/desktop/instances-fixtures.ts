@@ -4,7 +4,6 @@ import type { DesktopAccountRowViewProps } from '@/desktop/DesktopAccountRowView
 import type { InstanceSwitcherViewProps } from '@/desktop/InstanceSwitcherView';
 import type { AccountSecondFactorViewProps } from '@/desktop/AccountSecondFactorView';
 import type { AccountDetailsViewProps } from '@/desktop/AccountDetailsView';
-import type { AccountLoginViewProps } from '@/desktop/AccountLoginView';
 import type { FrameSpec } from '../../frame';
 import type { DesktopInstanceFixture, DesktopInstanceState } from '../../kit/desktop-instances';
 import { workbenchFixtures, homeFactsApi } from '../workbench/fixtures';
@@ -34,13 +33,7 @@ const states: [DesktopInstanceState, string][] = [
   ['empty', 'Signed in · no other instances'],
   ['loading', 'Instance list loading · local stays available'],
   ['list-error', 'Instance discovery failed'],
-  ['email', 'Email sign-in · registration disclosure'],
-  ['code', 'Verify email code'],
-  ['code-error', 'Invalid or expired code'],
-  ['password', 'Password sign-in · same email'],
-  ['password-help', 'Password recovery guidance'],
-  ['two-factor', 'Authenticator verification'],
-  ['recovery', 'Recovery code verification'],
+  ['enroll', 'Two-step verification required · add an authenticator'],
   ['consent', 'Instance authorization modal'],
   ['switch-error', 'Failed switch · retry on selected row'],
   ['upgrade-error', 'Selected instance requires upgrade'],
@@ -59,7 +52,7 @@ export const desktopInstanceFrames: (Omit<FrameSpec, 'render'> & { fixture: Desk
   name: `${state}-${lang}`,
   title: `${title} · ${lang}`,
   width: 1200, height: 800, themes: ['light', 'dark'], status: 'proposed', route: '/',
-  fixture: { state, lang, connection: ['signed-out', 'email', 'code', 'code-error', 'setup-entry'].includes(state) ? 'signed-out' : state === 'switching' ? 'switching' : state === 'offline' ? 'offline' : 'signed-in', updateAvailable: ['updates', 'offline'].includes(state) },
+  fixture: { state, lang, connection: ['signed-out', 'setup-entry'].includes(state) ? 'signed-out' : state === 'switching' ? 'switching' : state === 'offline' ? 'offline' : 'signed-in', updateAvailable: ['updates', 'offline'].includes(state) },
   fixtures: workbenchFixtures({
     ...agentsApi(),
     ...homeFactsApi({ model: true, push: true, computerUse: true, chatApps: true, paired: true }),
@@ -69,23 +62,6 @@ export const desktopInstanceFrames: (Omit<FrameSpec, 'render'> & { fixture: Desk
   }, { copy: copyFor(lang === 'en' ? en : zh) }),
 })));
 
-// Static props for the actual product card. Native lifecycle and credentials are
-// deliberately absent: embedded design documents cannot acquire Desktop IPC.
-export function loginViewProps(fixture: DesktopInstanceFixture): AccountLoginViewProps | null {
-  if (!['email', 'code', 'code-error', 'password', 'password-help'].includes(fixture.state)) return null;
-  const verify = fixture.state === 'code' || fixture.state === 'code-error';
-  const noAction = () => {};
-  return {
-    verify, email: 'max@example.test', value: verify ? '123456' : 'max@example.test', busy: false,
-    errorMessage: fixture.state === 'code-error' ? (fixture.lang === 'en' ? en : zh).desktopClient.errors.code : null,
-    password: { active: fixture.state === 'password', value: '', forgot: fixture.state === 'password-help', onChange: noAction, onToggle: noAction, onForgot: noAction },
-    onValueChange: noAction, onSubmit: noAction, onChangeEmail: noAction,
-    onResendCode: noAction, onContinueLocal: noAction,
-  };
-}
-
-// Only the shipped canonical footer states consume these display props. Native
-// hooks, navigation and updater IPC remain outside the design canvas.
 export function accountRowViewProps(fixture: DesktopInstanceFixture): Omit<DesktopAccountRowViewProps, 'localUpdater'> | null {
   if (fixture.state !== 'signed-out' && !fixture.state.startsWith('account')) return null;
   const signedIn = fixture.state !== 'signed-out';
@@ -120,7 +96,7 @@ export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwit
       { id: 'team', name: fixture.state === 'long-content' ? '跨时区产品研发团队 — Product design and research workstation' : 'Product team', host: 'team-app.avibe.bot', url: 'https://team-app.avibe.bot', relationship: 'shared', owner_email: 'zhou.min.design-and-research@example.test', available: true },
     ] },
     desktop: { version: '3.2.6rc19', update: { phase: 'current', latest: null, channel: 'test', skippedVersion: null, interactive: false } },
-    consent: null, remote_auxiliary: 'local',
+    instance_update: null, consent: null, remote_auxiliary: 'local',
   };
   if (['empty', 'loading', 'list-error'].includes(fixture.state)) { state.catalog.instances = []; state.local.slug = null; }
   if (fixture.state === 'loading') state.catalog.status = 'loading';
@@ -144,10 +120,9 @@ export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwit
 }
 
 export function factorViewProps(fixture: DesktopInstanceFixture): AccountSecondFactorViewProps | null {
-  if (!['two-factor', 'recovery'].includes(fixture.state)) return null;
+  if (fixture.state !== 'enroll') return null;
   const noop = () => {};
-  return { enroll: false, methods: ['totp'], method: fixture.state === 'recovery' ? 'recovery' : 'totp', code: '', busy: false, material: null, errorMessage: null,
-    onCodeChange: noop, onMethodChange: noop, onVerify: noop, onEnroll: noop, onPasskey: noop, onLocal: noop };
+  return { code: '', busy: false, material: null, errorMessage: null, onCodeChange: noop, onVerify: noop, onEnroll: noop, onLocal: noop };
 }
 
 export function profileViewProps(fixture: DesktopInstanceFixture): AccountDetailsViewProps | null {

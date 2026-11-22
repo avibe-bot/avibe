@@ -1067,14 +1067,16 @@ export const USAGE_DEFAULT_WINDOW: UsageWindowKey = '24h';
 /** `quota-summary.schema.json` — a subscription's own rate-limit windows, and
  *  what its metered usage would have cost at API prices. A report, like usage:
  *  nothing in routing reads it. */
-export type QuotaWindowKind = 'session' | 'weekly' | 'model_weekly' | 'other';
+/** `session`, `weekly` and `monthly` are the account's own; the `model_*` kinds
+ *  count only the model (or model group) `scope_model` names. */
+export type QuotaWindowKind = 'session' | 'weekly' | 'monthly' | 'model_session' | 'model_weekly' | 'other';
 
 export type QuotaWindow = {
   id: string;
   kind: QuotaWindowKind;
-  /** The upstream name. Views compose their own copy for `session`/`weekly`. */
+  /** The upstream name. Views compose their own copy for every kind but `other`. */
   label: string;
-  /** Present on `model_weekly`: the model the window alone counts. */
+  /** Present on `model_session` and `model_weekly`: the model or model group the window alone counts. */
   scope_model?: string;
   /** Present when `label` (and `scope_model`) is an upstream id, not display text. */
   label_is_key?: true;
@@ -1099,7 +1101,59 @@ export type SourceQuota = {
   windows: QuotaWindow[];
   /** Absent means "not reported", never zero. */
   value?: SourceQuotaValue;
+  /** Absent for a vendor without reset cards. */
+  reset_cards?: ResetCards;
 };
+
+/** What a card resets. `all`, `fable`, `session` and `weekly` are Anthropic's
+ *  kinds; `account` is ChatGPT's one kind. */
+export type ResetCardKind = 'all' | 'fable' | 'session' | 'weekly' | 'account';
+
+/** Why no card of a kind can be used now. */
+export type ResetCardBlock = 'needs_limit' | 'cooldown' | 'unavailable';
+
+export type ResetCard = {
+  kind: ResetCardKind;
+  /** Positive: a kind the account holds none of is not listed. */
+  count: number;
+  /** The first of these to expire (UTC), or null when the vendor names none. */
+  expires_at: string | null;
+  /** Whether the vendor's own statement of what this kind does applies. */
+  stated: boolean;
+  usable: boolean;
+  blocked: ResetCardBlock | null;
+  /** When a cooldown ends (UTC); null otherwise or when unknown. */
+  blocked_until: string | null;
+};
+
+/** One use in flight per account, held by the server so every open page agrees.
+ *  `unconfirmed`: the vendor's answer never arrived, so the card may be spent;
+ *  it holds until the account is read again. */
+export type ResetCardLock = {
+  reason: 'in_flight' | 'unconfirmed';
+  kind: ResetCardKind;
+  since: string;
+};
+
+/** `{state:'ok', cards:[]}` holds none; `unread` could not read them. */
+export type ResetCards = {
+  state: 'ok' | 'unread';
+  lock: ResetCardLock | null;
+  cards: ResetCard[];
+};
+
+export type ResetCardOutcome = 'used' | 'not_used' | 'unconfirmed';
+export type ResetCardRefusal = 'not_limited' | 'cooldown' | 'refused' | 'unavailable';
+
+/** `POST /api/models/sources/{id}/reset-cards/use`: what happened, beside the
+ *  account's reading taken after it. */
+export type ResetCardUse = {
+  kind: ResetCardKind;
+  outcome: ResetCardOutcome;
+  reason: ResetCardRefusal | null;
+  cleared: string[];
+};
+export type ResetCardUseResult = { quota: QuotaSummary; use: ResetCardUse };
 
 export type QuotaValuePeriod = PricedUsage & {
   /** billing_cycle from a configured renewal day, else the trailing 30 days. */

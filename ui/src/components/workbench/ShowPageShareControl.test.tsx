@@ -10,6 +10,7 @@ import en from '../../i18n/en.json';
 import { showDockId } from '../../context/dockDoc';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { ShowPageShareControl } from './ShowPageShareControl';
+import { NATIVE_SHOW_SHARE_OPEN_EVENT, NativeShowShareEntry } from '../apps/NativeShowShareEntry';
 
 const permissionsApi = vi.hoisted(() => ({
   getPermissions: vi.fn(),
@@ -72,6 +73,9 @@ const dock = vi.hoisted(() => ({
 }));
 
 vi.mock('../../context/DockContext', () => ({ useDock: () => dock }));
+vi.mock('../../context/InstanceAuthorizationContext', () => ({
+  useInstanceAuthorization: () => ({ capabilities: { can_use_show_pages: true, can_manage_instance: true, can_chat: true } }),
+}));
 
 const toast = vi.hoisted(() => vi.fn());
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: toast }) }));
@@ -1084,5 +1088,132 @@ describe('ShowPageShareControl native share and export', () => {
 
     expect(screen.queryByText('Export visible content')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+  });
+
+  describe('in the desktop app', () => {
+    const DESKTOP = [
+      '__AVIBE_DESKTOP_SHELL__', '__AVIBE_NATIVE_APP_WINDOW__', '__AVIBE_DESKTOP_SHOW_SHARE__',
+      '__AVIBE_DESKTOP_SHOW_EXPORT__', '__TAURI_INTERNALS__',
+    ];
+    const define = (name: string, value: unknown) => Object.defineProperty(window, name, { configurable: true, value });
+    /** The markers the shell injects: the Workbench shares links; a native Show window also exports. */
+    const installDesktop = (surface: 'workbench' | 'show-window' | 'none') => {
+      const invoke = vi.fn(async (_command: string, args?: { request?: Record<string, unknown> }) => {
+        const { method, ...params } = args?.request ?? {};
+        return method === 'share.capabilities' ? fullCapabilities : { ...params, status: 'cancelled' };
+      });
+      define(surface === 'show-window' ? '__AVIBE_NATIVE_APP_WINDOW__' : '__AVIBE_DESKTOP_SHELL__', true);
+      if (surface !== 'none') define('__AVIBE_DESKTOP_SHOW_SHARE__', 1);
+      if (surface === 'show-window') define('__AVIBE_DESKTOP_SHOW_EXPORT__', 1);
+      define('__TAURI_INTERNALS__', { invoke });
+      return invoke;
+    };
+    afterEach(() => DESKTOP.forEach((name) => Reflect.deleteProperty(window, name)));
+
+    it('shares only the link from the Workbench', async () => {
+      const invoke = installDesktop('workbench');
+      mountShowFrame();
+      await openControl();
+
+      expect(screen.queryByText('Export visible content')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Share PDF' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Share link' }));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_show_share', {
+        request: expect.objectContaining({ method: 'share.present', kind: 'link', sessionId: 'ses-1' }),
+      }));
+      expect(toast).not.toHaveBeenCalled();
+      expectNoWrites();
+    });
+
+    it('exports from a native Show window through the desktop share command', async () => {
+      const invoke = installDesktop('show-window');
+      mountShowFrame();
+      await openControl();
+
+      expect(screen.queryByText(/Update Avibe/)).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Share image' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Continue' }));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_show_share', {
+        request: expect.objectContaining({ method: 'share.present', kind: 'image', sessionId: 'ses-1' }),
+      }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBe(document.activeElement));
+      expect(toast).not.toHaveBeenCalled();
+      expectNoWrites();
+    });
+
+    it('keeps copying the link alone where the desktop app cannot share', async () => {
+      const invoke = installDesktop('none');
+      mountShowFrame();
+      await openControl();
+
+      expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Share link' })).toBeNull();
+      expect(screen.queryByText('Export visible content')).toBeNull();
+      expect(invoke).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// ui/design: show-pages/desktop-native-entry/titlebar-*
+describe('the native Show window share entry', () => {
+  const pressTitleBarButton = () => act(() => { window.dispatchEvent(new CustomEvent(NATIVE_SHOW_SHARE_OPEN_EVENT)); });
+  beforeEach(() => window.history.replaceState(null, '', '/apps/show/ses-1?standalone=1'));
+  afterEach(() => window.history.replaceState(null, '', '/'));
+  const mount = () => {
+    api.getShowPage.mockResolvedValue({
+      session_id: 'ses-1', visibility: 'private', active_url: '/show/ses-1/', share_id: null,
+      url_available: true, offline: false, title: null,
+    });
+    api.getShowPageAccess.mockResolvedValue(showPageAccess());
+    return render(
+      <I18nextProvider i18n={i18n}>
+        <div className="relative"><NativeShowShareEntry sessionId="ses-1" /></div>
+      </I18nextProvider>,
+    );
+  };
+
+  it('opens the share popover on the title-bar press and closes it on the next', async () => {
+    mount();
+    expect(screen.queryByText('Share this Show Page')).toBeNull();
+    pressTitleBarButton();
+    expect(await screen.findByText('Share this Show Page')).toBeTruthy();
+    expect(document.querySelector('[data-share-shield]')).toBeTruthy();
+    pressTitleBarButton();
+    await waitFor(() => expect(screen.queryByText('Share this Show Page')).toBeNull());
+    expect(document.querySelector('[data-share-shield]')).toBeNull();
+  });
+
+  it('closes on Escape and keeps its hidden anchor out of reach', async () => {
+    mount();
+    const anchor = document.querySelector('[data-native-share-anchor] button') as HTMLButtonElement;
+    expect(anchor.tabIndex).toBe(-1);
+    expect(anchor.getAttribute('aria-hidden')).toBe('true');
+    expect(anchor.className).toContain('opacity-0');
+    pressTitleBarButton();
+    expect(await screen.findByText('Share this Show Page')).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByText('Share this Show Page')).toBeNull());
+    expect(document.activeElement).not.toBe(anchor);
+  });
+
+  // Review 45533723, third P2: off its route, the window's entry does nothing; back on it, it works.
+  it('answers the title-bar press only on its own Show route', async () => {
+    window.history.replaceState(null, '', '/apps/show/ses-1?standalone=1');
+    mount();
+    window.history.pushState(null, '', '/chat/ses-2');
+    pressTitleBarButton();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText('Share this Show Page')).toBeNull();
+    window.history.pushState(null, '', '/apps/show/ses-1?standalone=1');
+    pressTitleBarButton();
+    expect(await screen.findByText('Share this Show Page')).toBeTruthy();
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('shares this window\'s Show, whoever dispatches the event', async () => {
+    mount();
+    pressTitleBarButton();
+    expect(await screen.findByDisplayValue(/\/show\/ses-1\//)).toBeTruthy();
+    expect(api.getShowPage).toHaveBeenCalledWith('ses-1');
   });
 });

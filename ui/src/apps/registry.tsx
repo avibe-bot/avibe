@@ -68,9 +68,9 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: Folder,
     accent: '--cyan',
     defaultSize: { width: 920, height: 600 },
-    Component: ({ windowId }) => (
+    Component: ({ windowId, params }) => (
       <Suspense fallback={<AppBodyLoading />}>
-        <FilesBody windowed windowId={windowId} />
+        <FilesBody windowed windowId={windowId} params={params} />
       </Suspense>
     ),
   },

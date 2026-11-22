@@ -1156,6 +1156,13 @@ session_turn_replies = Table(
 # positive native acceptance the complete immutable Message candidate lives only
 # here. Acceptance moves one Delivery snapshot, or one ordered merged batch,
 # into ``messages`` and links every participating Delivery to that record.
+# The same literal predicate is needed in a read for SQLite to recognize the
+# partial index. Membership here includes claimed rows; the FSM, not the
+# index, decides which live rows are claimable or ordering fences.
+DELIVERY_SESSION_ORDER_PREDICATE = (
+    "state in ('reserved', 'queued', 'claimed', 'pending_steer', 'steering', 'reconciling_steer')"
+)
+
 message_deliveries = Table(
     "message_deliveries",
     metadata,
@@ -1292,10 +1299,7 @@ message_deliveries = Table(
         "session_id",
         "submitted_at",
         "id",
-        sqlite_where=text(
-            "state in ('reserved', 'queued', 'claimed', 'pending_steer', 'steering', "
-            "'reconciling_steer')"
-        ),
+        sqlite_where=text(DELIVERY_SESSION_ORDER_PREDICATE),
     ),
     Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
     Index(
@@ -1407,6 +1411,223 @@ media_object_references = Table(
     Index("ix_media_object_references_session", "session_id"),
 )
 
+device_session_extensions = Table(
+    "device_session_extensions", metadata,
+    Column("session_id", String, primary_key=True),
+    Column("ticket_window", Integer), Column("ticket_attempts", Integer),
+    Column("schedule_principal", Text),
+)
+
+device_schedule_links = Table(
+    "device_schedule_links", metadata,
+    Column("operation_id", String, primary_key=True),
+    Column("registry_binding", String), Column("registry_subject", String), Column("registry_device", String),
+    Column("registry_activity_id", Integer, unique=True), Column("schedule_probe_binding", String),
+    Index("ix_dsl_scope", "registry_binding", "registry_subject", "registry_device"),
+)
+
+device_health_links = Table(
+    "device_health_links", metadata,
+    Column("mobile_id", String, primary_key=True),
+    Column("binding", String), Column("subject", String), Column("device_id", String),
+    Column("linked_at", String),
+    Column("ticket_hash", String, unique=True), Column("ticket_binding", String),
+    Column("issued_at", Integer), Column("expires_at", Integer),
+    Column("code_hash", String, unique=True), Column("issuer_sid", String),
+    Column("code_expires_at", Integer), Column("cleanup_pending", Integer),
+    Index("ix_dhl_device", "binding", "subject", "device_id"),
+)
+
+device_activity_events = Table(
+    "device_activity_events", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("at", Integer, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("binding", String, nullable=False),
+    Column("subject", String),
+    Column("device_id", String, nullable=False),
+    Column("actor_id", String),
+    Column("actor_subject", String),
+    Index("ix_dae_time", "at"),
+    Index("ix_dae_instance", "binding", "at"),
+    Index("ix_dae_person", "binding", "subject", "at"),
+    Index("ix_dae_device", "binding", "device_id", "at"),
+)
+
+device_function_settings = Table(
+    "device_function_settings", metadata,
+    Column("binding", String, primary_key=True),
+    Column("subject", String, primary_key=True),
+    Column("device_id", String, primary_key=True),
+    Column("schedule_on", Integer, nullable=False, server_default="1"),
+    Column("schedule_capable", Integer, nullable=False, server_default="0"),
+    Column("notifications_on", Integer, nullable=False, server_default="1"),
+)
+
+remote_device_push_links = Table(
+    "remote_device_push_links", metadata,
+    Column("subscription_id", String, primary_key=True),
+    Column("binding", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("email", String, nullable=False),
+    Column("login_role", String, nullable=False),
+    Column("push_id", String),
+    Column("session_id", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Index("ix_rdpl_device", "binding", "device_id"),
+    Index("ix_rdpl_subject", "binding", "subject"),
+    Index("ix_rdpl_session", "session_id"),
+)
+
+# Devices that held data under a retired instance address, snapshotted at the
+# switch. "Cleared" is set only by a receipt the clearing browser posts back
+# (docs/plans/instance-address-change.md F1-F4).
+instance_address_clearings = Table(
+    "instance_address_clearings", metadata,
+    # One row per (instance, retired name, device): the id is their digest.
+    Column("id", String, primary_key=True),
+    Column("instance_id", String, nullable=False),
+    Column("hostname", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("display_name", String),
+    Column("email", String),
+    Column("last_active_at", Integer),
+    Column("push_only", Integer, nullable=False),
+    Column("retired_at", Integer, nullable=False),
+    Column("cleared_at", Integer),
+    Index("ix_instance_address_clearings_hostname", "instance_id", "hostname"),
+)
+
+instance_address_clearing_receipts = Table(
+    "instance_address_clearing_receipts", metadata,
+    Column("receipt_hash", String, primary_key=True),
+    Column("clearing_id", String, nullable=False),
+    Index("ix_instance_address_clearing_receipts_clearing", "clearing_id"),
+)
+
+remote_device_deadlines = Table(
+    "remote_device_deadlines", metadata,
+    Column("key", String, primary_key=True),
+    Column("issued_at", Integer, nullable=False),
+    Column("expires_at", Integer, nullable=False),
+    Index("ix_rdd_expiry", "expires_at"),
+)
+
+remote_device_sessions = Table(
+    "remote_device_sessions", metadata,
+    Column("session_id", String, primary_key=True),
+    Column("binding", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("email", String, nullable=False),
+    Column("login_role", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Column("identity_source", String, nullable=False),
+    Column("described_at", Integer),
+    Column("health_alias_hash", String),
+    Column("schedule_alias", String),
+    Column("push_id", String),
+    Column("kind", String, nullable=False),
+    Column("display_name", String, nullable=True),
+    Column("app_version", String),
+    Column("system_version", String),
+    Column("signed_in_at", Integer, nullable=False),
+    Column("last_active_at", Integer, nullable=False),
+    Column("cookie_exp", Integer, nullable=False),
+    Column("expires_at", Integer, nullable=False),
+    Column("path_kind", String),
+    Column("path_family", String),
+    Column("path_rtt_ms", Integer),
+    Index("ix_rds_binding_live", "binding", "cookie_exp"),
+    Index("ix_rds_subject_live", "binding", "subject", "cookie_exp"),
+    Index("ix_rds_binding_expiry", "binding", "expires_at"),
+    Index("ix_rds_subject_expiry", "binding", "subject", "expires_at"),
+    Index("ix_rds_push_expiry", "binding", "subject", "push_id", "expires_at"),
+    Index("ix_rds_device_expiry", "binding", "device_id", "expires_at"),
+    Index("ix_rds_expiry", "expires_at"),
+)
+
+# Runtime-private authority; never attach these values to cookies or public device rows.
+remote_account_refs = Table(
+    "remote_account_refs", metadata,
+    Column("sid", String, primary_key=True),
+    Column("cookie_binding", String, nullable=False, index=True),
+    Column("epoch", String, nullable=False, index=True),
+    Column("expires_at", Integer, nullable=False, index=True),
+    Column("digest", String, nullable=False, index=True),
+    Column("reference", String),  # A live sibling needs only the known terminal outcome.
+    Column("status", String),
+    Column("reason", String),
+)
+
+remote_account_revocations = Table(
+    "remote_account_revocations", metadata,
+    Column("digest", String, primary_key=True),
+    Column("epoch", String, nullable=False, index=True),
+    Column("status", String, nullable=False),
+    Column("reason", String),
+    Column("reference", String),  # Null as soon as dispatch terminates.
+    Column("attempts", Integer, nullable=False),  # Lease serial/backoff, not proof the issuer answered.
+    Column("answers", Integer, nullable=False),
+    Column("created_at", Integer, nullable=False),
+    Column("next_at", Integer),  # Also the lease expiration, null for completed fences.
+    Column("forget_at", Integer),
+    Index("ix_rar_next", "epoch", "next_at"),
+    Index("ix_rar_forget", "forget_at"),
+)
+
+device_health_owner_checks = Table(
+    "device_health_owner_checks", metadata,
+    Column("mobile_id", String, primary_key=True),
+    Column("operation", String, nullable=False),
+    Column("epoch", String, nullable=False),
+    Column("binding", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("device_id", String, nullable=False),
+    Column("owner_email", String, nullable=False),
+    Column("linked_at", String, nullable=False),
+    Column("next_at", Integer, nullable=False, index=True),
+    Column("expires_at", Integer, nullable=False),
+)
+
+remote_account_pairings = Table(
+    "remote_account_pairings", metadata,
+    Column("epoch", String, primary_key=True),
+    Column("blocked_until", Integer, nullable=False),
+    Column("refused", Integer, nullable=False),
+)
+
+remote_signout_receipts = Table(
+    "remote_signout_receipts", metadata,
+    Column("id", String, primary_key=True),
+    Column("binding", String, nullable=False),
+    Column("subject", String),  # Null for unattributed push; owner-only.
+    Column("device_id", String, nullable=False),
+    Column("kind", String, nullable=False),
+    Column("display_name", String),
+    Column("created_at", Integer, nullable=False),
+    Column("expires_at", Integer),  # Pending receipts survive downtime; TTL starts at last settlement.
+    Index("ix_rsr_binding", "binding", "created_at", "id"),
+    Index("ix_rsr_subject", "binding", "subject", "created_at", "id"),
+    Index("ix_rsr_expiry", "expires_at"),
+)
+# The role a receipt's device signed in with, as the registry knew it at sign-out.
+# No row for a receipt written before this table or for a device with no proven account.
+remote_signout_receipt_roles = Table(
+    "remote_signout_receipt_roles", metadata,
+    Column("receipt", String, primary_key=True),
+    Column("login_role", String, nullable=False),
+)
+remote_signout_items = Table(
+    "remote_signout_items", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("receipt", String, nullable=False, index=True),
+    Column("job", String, index=True),  # Detached when complete; not a replayable credential.
+    Column("status", String, nullable=False),
+    Column("reason", String),
+    Column("count", Integer, nullable=False),
+)
+
 # Per-install browser Push API subscriptions for PWA Web Push. These are
 # runtime/device endpoints, not user-authored config: one user may install the
 # app on multiple devices, and endpoints can rotate or expire independently.
@@ -1430,7 +1651,9 @@ web_push_subscriptions = Table(
     Column("updated_at", String, nullable=False),
     UniqueConstraint("endpoint", name="uq_web_push_subscriptions_endpoint"),
     Index("ix_web_push_subscriptions_user_enabled", "user_key", "enabled"),
+    Index("ix_web_push_subscriptions_enabled", "enabled"),
     Index("ix_web_push_subscriptions_user_device", "user_key", "device_id"),
+    Index("ix_web_push_subscriptions_device_enabled", "user_key", "device_id", "enabled"),
 )
 
 # Resource ACLs are local enforcement state. The hosted control plane receives
@@ -1703,3 +1926,39 @@ imported_state_tables = [
     show_session_events,
     web_push_subscriptions,
 ]
+
+# Answer receipts bind client retries to one existing Delivery, never a second execution.
+message_answer_operations = Table(
+    "message_answer_operations", metadata,
+    Column("session_id", String, primary_key=True),
+    Column("principal", String, primary_key=True),
+    Column("operation_id", String, primary_key=True),
+    Column("request_id", String, nullable=False),
+    Column("fingerprint", Text, nullable=False),
+    Column("choice", Text, nullable=False),
+    Column("delivery_id", String, nullable=True),
+    Column("receipt_json", Text, nullable=True),
+    Index("ix_message_answer_operations_winner", "session_id", "request_id", "delivery_id"),
+)
+
+
+live_activity_trackings = Table(
+    "live_activity_trackings",
+    metadata,
+    Column("activity_id", String, primary_key=True),
+    *[Column(name, String, nullable=False) for name in (
+        "owner_user_key", "session_id", "turn_id", "push_registration_id",
+        "activity_token", "status", "last_phase",
+    )],
+    Column("stop_reason", String),
+    *[Column(name, Integer, nullable=False) for name in (
+        "last_timestamp", "confirmed_at", "requested_at", "created_at", "updated_at", "expires_at", "started_at",
+    )],
+    Column("ended_at", Integer),
+    Column("authorization_json", Text),
+    Column("pending_state", Text),
+    Column("retry_count", Integer, nullable=False, server_default="0"),
+    Column("retry_at", Integer, nullable=False, server_default="0"),
+    Index("ix_live_activity_status", "status", "expires_at"),
+    Index("ix_live_activity_registration", "push_registration_id", "status"),
+)

@@ -1,5 +1,40 @@
 {
+  "appLock": {
+    "lock": {
+      "lockedTitle": "Avibe 已锁定",
+      "unlockTouchID": "使用触控 ID 解锁",
+      "unlockPassword": "使用登录密码解锁",
+      "verifying": "正在验证…",
+      "verificationFailed": "没有验证成功，再试一次。",
+      "macNotEnrolled": "这台 Mac 没有录入指纹。",
+      "macLockout": "触控 ID 多次未识别，请用登录密码解锁。",
+      "macUnavailable": "触控 ID 现在不可用，例如笔记本合盖时。",
+      "restoreAllWindows": "解锁后，所有 Avibe 窗口一起恢复。",
+      "pendingContent": "收到一段要发给 Vibey 的内容。解锁后会放进输入框，由你确认再发送。",
+      "pendingLink": "收到一个 Avibe 链接。解锁后会打开它。",
+      "changeReason": "确认更改 App 锁",
+      "unlockReason": "解锁 Avibe",
+      "iphone": {
+        "unlockFaceID": "使用面容 ID 解锁",
+        "unlockPasscode": "使用设备密码解锁",
+        "faceIDNotEnrolled": "这台 iPhone 没有录入面容 ID。",
+        "faceIDDenied": "Avibe 没有使用面容 ID 的权限。可在 iOS 设置 › Avibe 中允许。",
+        "faceIDLockout": "面容 ID 多次未识别，请用设备密码解锁。",
+        "touchIDLockout": "触控 ID 多次未识别，请用设备密码解锁。"
+      }
+    }
+  },
+  "liveActivity": {
+    "title": "在锁屏上显示进度",
+    "description": "离开 Avibe 时，如果正在看的会话还在处理，就在锁屏和灵动岛上显示进度。",
+    "systemOff": "实时活动在系统设置里关着",
+    "settings": "去设置"
+  },
   "desktopBootstrap": {
+    "askVibey": {
+      "kept": "内容已留在本机，连上实例后会放进 Vibey 的输入框。",
+      "unavailable": "这个实例里打不开 Vibey 的对话，内容没有放进去。"
+    },
     "retry": "重试",
     "installationHelp": "安装帮助",
     "notRunningTitle": "Avibe — 未运行",
@@ -145,6 +180,10 @@
       "confirm": "发现新版本。现在下载并安装吗？应用将重新启动，会保留会话和设置。",
       "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
+    },
+    "providerCallback": {
+      "done": "可以关闭此页，回到 Avibe。",
+      "failed": "登录没有完成，请回到 Avibe 重试。"
     }
   },
   "installHint": {
@@ -671,6 +710,7 @@
       "platformConnections": "平台接入",
       "remoteAccess": "远程访问",
       "shortcuts": "快捷键",
+      "microphone": "麦克风",
       "computerUse": "电脑操作",
       "service": "服务",
       "dependencies": "依赖",
@@ -704,6 +744,24 @@
       "remoteInstallWarning": "远程安装可能在主机无人值守时重启 Avibe、中断正在运行的工作，并在更新失败时需要主机上的人修复。",
       "autosaved": "修改会自动保存",
       "languageSaveFailed": "语言已在本机切换，但未能保存到此实例",
+      "appLock": {
+        "title": "App 锁",
+        "descriptionFaceId": "打开 Avibe，或离开超过所选时间后回来，需要先用面容 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
+        "descriptionTouchIdPhone": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
+        "descriptionMac": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或 Mac 登录密码解锁。只对这台 Mac 生效，更改时需要验证一次。",
+        "off": "关闭",
+        "immediately": "立即",
+        "oneMinute": "1 分钟后",
+        "fiveMinutes": "5 分钟后",
+        "verifying": "正在验证…",
+        "failed": "没有验证成功，设置没有改变。",
+        "noPasscodePhone": "这台 iPhone 没有设置密码，App 锁无法使用。在 iOS 设置 › 面容 ID 与密码 中设置密码后即可开启。",
+        "noPasswordMac": "这个 Mac 用户没有登录密码，App 锁无法使用。在系统设置 › 用户与群组 中设置密码后即可开启。",
+        "faceIdDenied": "Avibe 没有使用面容 ID 的权限，会用设备密码解锁。可在 iOS 设置 › Avibe 中允许面容 ID。",
+        "passwordOnlyMac": "这台 Mac 现在没有可用的触控 ID，会用 Mac 登录密码解锁。",
+        "coversPhone": "App 锁只挡住 App 里的内容。通知预览由 iOS 设置 › 通知 决定；后台同步和提醒照常进行。",
+        "coversMac": "App 锁挡住 Avibe 的所有窗口。本机 Runtime 和 Agent 照常运行；通知预览由系统设置 › 通知 决定。"
+      },
       "desktopMini": {
         "title": "桌面迷你窗",
         "description": "在桌面上显示桌宠迷你窗。",
@@ -784,6 +842,50 @@
         "tab": "Tab"
       },
       "reset": "恢复默认"
+    },
+    "microphone": {
+      "title": "麦克风",
+      "subtitle": "选择语音输入使用的麦克风，并检查收声。",
+      "iosSubtitle": "检查麦克风是否正常收声",
+      "inputTitle": "输入设备",
+      "systemDefault": "系统默认",
+      "systemInput": "系统输入",
+      "followSystem": "跟随系统的输入选择",
+      "iosInputDescription": "由 iOS 选择当前输入",
+      "inputDevice": "可用输入设备",
+      "deviceFallback": "未命名麦克风",
+      "chooseInput": "选择输入设备",
+      "deviceList": "麦克风设备",
+      "chooseThenTest": "选择设备后，点击“开始测试”检查收声。",
+      "systemDefaultDescription": "系统更改输入时，下一次录音会跟随更改。",
+      "selectedDescription": "优先使用此设备；不可用时会提示你。",
+      "unavailable": "不可用",
+      "missingTitle": "所选麦克风当前不可用",
+      "missingDescription": "已保留你的选择。下一次测试或录音将使用系统输入；设备重新连接后可恢复使用。",
+      "recordingFallbackDescription": "这次录音改用系统输入。",
+      "notTested": "尚未测试",
+      "microphoneOff": "麦克风未开启",
+      "testingHeard": "正在测试 · 已收到声音",
+      "testingQuiet": "正在测试 · 暂未检测到声音",
+      "testingDescription": "说句话，看看音量条是否随声音变化。",
+      "quietDescription": "对着麦克风说句话。若音量条没有变化，请检查设备是否静音或连接正常。",
+      "startTest": "开始测试",
+      "stopTest": "停止测试",
+      "testStopped": "测试已停止",
+      "permissionPromptTitle": "先允许麦克风访问",
+      "permissionPromptDescription": "允许后即可开始收声测试。",
+      "permissionRequestingTitle": "等待你的授权",
+      "permissionRequestingDescription": "请在弹出的权限提示中选择允许。",
+      "permissionDeniedTitle": "麦克风权限未开启",
+      "permissionDeniedIos": "在 iPhone 的“设置”中允许 Avibe 使用麦克风，再返回重试。",
+      "permissionWaiting": "等待权限结果",
+      "allowPermission": "允许麦克风访问",
+      "recheckPermission": "重新检查权限",
+      "localOnly": "测试不转写、不保存、不上传。离开此页或切到后台即停止。",
+      "localPreference": "此偏好仅用于本机当前实例，不随账号同步。",
+      "iosManaged": "输入由这台 iPhone 的系统管理。",
+      "startFailed": "无法开始麦克风测试，请检查输入设备后重试。",
+      "saveFailed": "无法保存麦克风设置，请重试。"
     },
     "computerUse": {
       "title": "电脑操作",
@@ -1733,12 +1835,15 @@
         "autoRefresh": "每 5 分钟自动刷新",
         "refresh": "立即刷新",
         "refreshing": "刷新中…",
-        "empty": "还没有已登录的订阅账号。在「供应商与路由」里添加 Claude 或 ChatGPT 订阅后，这里会显示它们的额度。",
+        "refreshAccount": "刷新额度",
+        "empty": "还没有已登录的订阅账号。在「供应商与路由」里登录订阅账号后，这里会显示它们的额度。",
         "left": "剩余",
         "window": {
           "session": "5 小时额度",
           "weekly": "每周额度",
           "model": "{{model}} 每周额度",
+          "modelSession": "{{model}} 5 小时额度",
+          "monthly": "每月额度",
           "span": {
             "hours": "{{hours}} 小时",
             "days": "{{days}} 天"
@@ -1779,7 +1884,7 @@
         },
         "unread": {
           "auth_expired": "登录已过期，读不到额度",
-          "unsupported": "这个订阅不提供额度数据",
+          "unsupported": "供应商没有提供这个账号的额度数据",
           "error": "暂时读不到额度，稍后会自动重试"
         },
         "ago": {
@@ -1860,6 +1965,55 @@
             "max_20x": "Max 20x",
             "team": "Team",
             "enterprise": "Enterprise"
+          }
+        },
+        "refreshThisAccount": "刷新这个账号",
+        "resetCards": {
+          "title": "重置卡",
+          "kind": {
+            "all": "全部额度重置卡",
+            "fable": "Fable 重置卡",
+            "session": "5 小时重置卡",
+            "weekly": "每周重置卡",
+            "account": "重置卡"
+          },
+          "effect": {
+            "all": "5 小时额度和每周额度回满",
+            "fable": "退回本周用在 Fable 上的额度，其他模型用掉的不退；5 小时额度回满",
+            "session": "5 小时额度回满",
+            "weekly": "每周额度回满"
+          },
+          "count": "×{{number}}",
+          "expires": "最早 {{date}} 到期",
+          "use": "使用",
+          "useNamed": "使用 {{name}}",
+          "confirm": "确认使用",
+          "cancel": "取消",
+          "confirmNote": "用掉 1 张，不能撤销。",
+          "using": "使用中…",
+          "used": "用了 1 张。",
+          "usedDone": "用了 1 张。{{done}}。",
+          "done": {
+            "all": "5 小时额度和每周额度已回满",
+            "fable": "本周用在 Fable 上的额度已退回，5 小时额度已回满",
+            "session": "5 小时额度已回满",
+            "weekly": "每周额度已回满"
+          },
+          "notUsed": {
+            "not_limited": "没有用掉：这个账号现在没到限额。",
+            "cooldown": "没有用掉：刚用过一张，要等一会儿才能再用。",
+            "refused": "没有用掉：供应商拒绝了这次请求。",
+            "unavailable": "没有用掉：供应商现在不让用这张卡。",
+            "held": "没有用掉：这个账号现在不能用这种卡。",
+            "other": "没有用掉。"
+          },
+          "recounted": "张数变了，已刷新。",
+          "unconfirmed": "没收到供应商的结果，这张卡可能已经用掉。先别再用，一分钟后再刷新这个账号看张数。",
+          "blocked": {
+            "needs_limit": "到限额后才能用",
+            "cooldown": "{{duration}}后可用",
+            "cooldownUnknown": "过一会儿才能用",
+            "unavailable": "供应商现在不让用"
           }
         }
       },
@@ -3066,6 +3220,7 @@
     "ready": "已就绪",
     "stateNeedsAttention": "需要检查",
     "quality": "连接质量",
+    "qualityFallback": "备用路径质量",
     "qualityGood": "良好",
     "qualityFair": "一般",
     "qualityPoor": "较慢",
@@ -3085,6 +3240,7 @@
     "requestPathUnavailable": "远程请求不可用 · {{success}}/{{count}} 成功",
     "requestPathMeasuring": "正在测量远程请求 · {{count}} 个样本",
     "networkPath": "网络路径",
+    "fallbackRoute": "备用路径：Cloudflare 隧道",
     "networkBrowserIngress": "浏览器请求的 Cloudflare 入口",
     "networkProvider": "网络",
     "networkConnectorEdges": "Tunnel 边缘节点",
@@ -3147,20 +3303,24 @@
       "detail": "{{certificate}} · {{page}}",
       "pageDirect": "本页当前连接：直连",
       "pageOther": "本页当前连接：未走直连",
-      "device": "本设备直连：{{state}}",
-      "deviceWithPath": "本设备直连：{{state}} · {{path}}",
-      "deviceInUse": "使用中",
-      "deviceOn": "已开启",
-      "pathRelay": "中继",
-      "pathIpv4": "直连 IPv4",
-      "pathIpv6": "直连 IPv6",
+      "using": "本设备正在使用：{{path}}",
+      "usingTunnel": "Cloudflare 隧道",
+      "usingTunnelRelayUp": "Cloudflare 隧道（中继可用，但更慢）",
+      "usingRelay": "中继",
+      "usingLan": "局域网直连",
+      "usingPunched": "打洞直连",
+      "usingDirect": "直连",
+      "familyIpv4": "IPv4",
+      "familyIpv6": "IPv6",
+      "withDetail": "{{path}} · {{detail}}",
       "lastConnection": "最近一次连接：直连 {{direct}} / Cloudflare {{public}}",
       "legMs": "{{ms}} ms",
       "legNone": "—",
       "legFailed": "失败",
       "legCancelled": "未用上",
       "legTimeout": "超时"
-    }
+    },
+    "interfaceOption": "{{name}} · {{address}}"
   },
   "models": {
     "eligibility": {
@@ -3210,10 +3370,10 @@
     "quota": {
       "error": {
         "auth_expired": "登录已过期",
-        "rate_limited": "服务商暂时限制了额度查询",
-        "unsupported": "这个订阅不提供额度数据",
+        "rate_limited": "供应商暂时限制了额度查询",
+        "unsupported": "供应商没有提供这个账号的额度数据",
         "unavailable": "暂时读不到额度",
-        "malformed": "服务商返回的额度数据读不懂"
+        "malformed": "供应商返回的额度数据读不懂"
       }
     }
   },
@@ -3416,6 +3576,7 @@
       "openInWindow": "在编辑器窗口中打开",
       "saveBeforePopOut": "请先保存，再在新窗口中打开",
       "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
+      "discardAndClose": "放弃并关闭",
       "confirmDiscardSwitch": "放弃未保存的更改？",
       "conflict": {
         "message": "打开后该文件在磁盘上已被改动，可能是 agent 修改了它。",
@@ -3662,7 +3823,8 @@
     "signOut": "退出登录",
     "signingOut": "正在退出…",
     "resizeSidebar": "调整侧栏宽度",
-    "directTag": "直连"
+    "directTag": "直连",
+    "relayTag": "中继"
   },
   "workbench": {
     "eyebrow": "Agent OS",
@@ -7619,7 +7781,7 @@
     "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
     "signOut": "在此设备退出",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。本机登记、远程访问设置和正在运行的任务都会保留。",
-    "localVersion": "本机 Desktop 版本 {{version}}",
+    "instanceVersion": "{{name}} 的版本 {{version}}",
     "continueLocal": "继续使用本机",
     "loading": "正在加载…",
     "setupReady": "本机已准备好",
@@ -7648,8 +7810,10 @@
     "loginHeroBody": "登录一个账号，连接自己的电脑，也能访问与你共享的实例。",
     "checkInbox": "查看你的邮箱。",
     "loginTitle": "从一封邮件开始。",
+    "welcomeLine1": "电脑操作、读写文件、操作应用，",
+    "welcomeLine2": "让 Vibey 接管你的电脑。",
+    "previousStep": "上一步",
     "codeSent": "验证码已发送至 {{email}}",
-    "loginBody": "登录 / 注册你的 avibe.bot 账号",
     "emailCode": "6 位验证码",
     "email": "邮箱",
     "codeHelp": "输入邮件里的 6 位验证码，可直接粘贴。",
@@ -7763,6 +7927,9 @@
       "current": "已是最新版本",
       "available": "有新版本可以安装",
       "availableDetail": "更新后 Avibe 会重新启动，会话和设置都会保留。",
+      "availableInstanceDetail": "更新时 {{name}} 会重新启动，通常一两分钟，正在进行的工作可能中断。",
+      "availableAppDetail": "更新时这台电脑上的 Avibe 会重新启动，{{name}} 不受影响。",
+      "instanceUnauthorized": "这里读不到 {{name}} 的更新状态。",
       "notChecked": "还没有检查过更新",
       "disabled": "这个版本不能自动更新",
       "disabledDetail": "请下载并安装新版本。",
@@ -7778,7 +7945,9 @@
       "restartingHost": "运行 Avibe 的电脑正在重新启动 Avibe，稍后会自动重新连接…",
       "verifying": "正在确认新版本…",
       "updated": "更新已安装",
-      "updatedTo": "已更新到 {{version}}"
+      "updatedTo": "已更新到 {{version}}",
+      "updatedNamed": "{{name}} 已更新",
+      "updatedNamedTo": "{{name}} 已更新到 {{version}}"
     },
     "failure": {
       "failed": {
@@ -7834,7 +8003,9 @@
       "update": "更新",
       "retry": "重试",
       "check": "检查更新",
-      "refreshBuild": "刷新构建信息"
+      "refreshBuild": "刷新构建信息",
+      "updateNamed": "更新 {{name}}",
+      "updateApp": "更新桌面应用"
     },
     "setting": {
       "prereleases": "接收预览版",
@@ -7842,10 +8013,35 @@
       "autoUpdate": "自动更新",
       "autoUpdateHint": "发现新版本后，在 Avibe 空闲时自动安装，不再询问"
     },
+    "subject": {
+      "app": "这台电脑上的桌面应用"
+    },
     "legacyHost": "运行 Avibe 的电脑上的桌面应用版本较旧，不能从这里检查更新或更改设置。请先把那里的桌面应用更新到最新版本。",
     "trustedView": {
       "title": "这台电脑上的 Avibe 桌面应用",
       "body": "你正在使用另一台电脑上的 Avibe，这里更新的是这台电脑上的桌面应用。"
+    }
+  },
+  "signIn": {
+    "passkey": {
+      "use": "使用通行密钥登录",
+      "title": "通行密钥登录",
+      "lead": "用指纹、面容或屏幕锁确认，无需邮箱或密码。",
+      "waiting": "正在等待通行密钥…",
+      "waitingHint": "请在设备弹出的提示中完成确认。",
+      "retry": "再试一次",
+      "incomplete": "提示已关闭或超时，或者没有选到可用的通行密钥。可以再试一次，或换一种方式登录。",
+      "failed": "无法用这个通行密钥登录。请重试，或换一种方式登录。",
+      "unsupported": "这台设备无法在这里使用通行密钥，请换一种方式登录。"
+    },
+    "desktop": {
+      "passkeyHint": "用指纹、面容或屏幕锁确认。",
+      "newPasswordBody": "在浏览器中打开 avibe.bot 的「账号安全」，用邮件登录后，选择「设置或修改密码」。",
+      "openInBrowser": "在浏览器中打开",
+      "changeInBrowser": "在浏览器中修改"
+    },
+    "provider": {
+      "continueInBrowser": "请在浏览器中完成登录。"
     }
   },
   "health": {
@@ -7893,5 +8089,239 @@
     },
     "metricSeparator": "、",
     "waitingRefresh": "等待 iPhone 处理这个请求。"
+  },
+  "devices": {
+    "title": "设备",
+    "subtitle": "哪些设备能打开这个 Avibe，它们各自能做什么。",
+    "subtitleMember": "你登录了这个 Avibe 的设备。这个 Avibe 由 {{owner}} 管理。",
+    "listSeparator": "、",
+    "partSeparator": " · ",
+    "dot": "·",
+    "reach": {
+      "title": "远程访问",
+      "lead": "在手机和其他电脑上打开这个 Avibe。数据和 Agent 仍然留在这台电脑上。",
+      "off": "未开启",
+      "turnOn": "开启远程访问",
+      "firstTime": "只有第一次：去 avibe.bot 起个名字、领取域名，然后自动回到这里。以后开关都不再离开本页。",
+      "unreachable": "暂时连不上 avibe.bot。检查这台电脑的网络后再试。",
+      "signInAndTurnOn": "登录并开启",
+      "signInHint": "用这个 App 的 Avibe 账号登录一次，回到这里起个名字就能开启。",
+      "conflictTitle": "这台电脑已属于另一个账号",
+      "conflictBody": "{{host}} 登记在 {{owner}} 名下，原有的域名和访问设置都没有变。",
+      "signInAs": "改用 {{owner}} 登录",
+      "confirmedAs": "刚才确认的是 {{account}}。",
+      "starting": "正在开启…",
+      "paused": "已关闭，域名为你保留",
+      "down": "连不上 Cloudflare，其他设备暂时打不开",
+      "good": "连接良好",
+      "directOn": "直连已开启",
+      "copyAddress": "复制地址",
+      "openAddress": "打开",
+      "connection": "连接方式"
+    },
+    "claim": {
+      "account": "账号",
+      "signedInHere": "这个 App 已登录",
+      "name": "名称",
+      "suffix": "-app.avibe.bot",
+      "taken": "已被占用，换一个名称。",
+      "domain": "域名是 {{host}}。"
+    },
+    "list": {
+      "mine": "我的设备",
+      "others": "其他人的设备",
+      "othersHint": "谁可以访问、能做什么，在「访问」里管理。",
+      "add": "添加设备",
+      "empty": "还没有设备。",
+      "emptyOff": "开启远程访问后，登录的手机和电脑会出现在这里。",
+      "unrecognised": "有不认识的设备？",
+      "signOutOthers": "退出其他所有设备",
+      "thisDevice": "本设备",
+      "runsAvibe": "运行 Avibe",
+      "online": "在线",
+      "recentActivity": "最近活动",
+      "all": "全部"
+    },
+    "client": {
+      "versioned": "{{name}} {{version}}",
+      "runtime": "Avibe",
+      "app": "Avibe App",
+      "desktop": "Avibe Desktop",
+      "browser": "浏览器",
+      "homeScreen": "主屏幕 App"
+    },
+    "capability": {
+      "notifications": "通知",
+      "health": "健康",
+      "schedule": "闹钟与提醒",
+      "computerUse": "电脑操作",
+      "notificationsHost": "Vault 审批和后台任务完成时的系统通知。",
+      "notificationsPush": "伙伴和会话的消息会推送到这台设备。",
+      "healthSyncedToday": "{{data}} · 今天 {{time}} 同步",
+      "healthSyncedYesterday": "{{data}} · 昨天 {{time}} 同步",
+      "healthSyncedDated": "{{data}} · {{date}} {{time}} 同步",
+      "stateOn": "已开启",
+      "stateOff": "未开启",
+      "scheduleDetail": "由 Agent 提出，每次都由你在这台设备上确认。",
+      "computerUseHere": "Agent 可以查看并操作这台电脑。",
+      "computerUseFixedOn": "已就绪。在那台电脑的 Avibe 里开关。",
+      "computerUseFixedOff": "在那台电脑的 Avibe 里开关。"
+    },
+    "health": {
+      "steps": "步数",
+      "activity": "活动",
+      "workouts": "锻炼",
+      "sleep": "睡眠"
+    },
+    "detail": {
+      "connection": "连接",
+      "lastActive": "最近活跃",
+      "signedIn": "登录",
+      "functions": "功能",
+      "recent": "最近",
+      "signOut": "退出这台设备",
+      "signOutOwn": "这台设备会退出 {{account}}，不能再打开你的 Avibe；在它上面重新登录即可恢复。",
+      "signOutMember": "这台设备会退出 {{account}}，不能再打开这个 Avibe；在它上面重新登录即可恢复。",
+      "signOutPerson": "只结束这台设备的访问。{{person}} 仍在访问名单里，可以重新登录。"
+    },
+    "add": {
+      "title": "添加设备",
+      "which": "要添加的设备",
+      "iphone": "iPhone",
+      "android": "安卓手机",
+      "computer": "另一台电脑",
+      "iphoneScan": "用 iPhone 相机扫这个码，在 TestFlight 里安装 Avibe OS。",
+      "iphoneSignIn": "打开 App，用 {{account}} 登录。",
+      "appears": "它会出现在这个列表里。",
+      "androidScan": "用手机相机扫这个码，在浏览器里打开这个 Avibe。",
+      "androidSignIn": "用 {{account}} 登录，它会出现在这个列表里。",
+      "androidHomeScreen": "想像 App 一样用：在浏览器菜单里选「添加到主屏幕」。",
+      "computerInstall": "在那台电脑上下载并安装 Avibe Desktop（Mac、Windows）。",
+      "computerSignIn": "用 {{account}} 登录，在「实例」里选这个 Avibe。",
+      "computerBrowser": "不想安装：用浏览器打开 {{host}}。",
+      "iphoneNote": "Avibe App 是 TestFlight 测试版；没装过 TestFlight 的话，扫码后会先请你安装它。",
+      "androidNote": "没有安卓 App。",
+      "computerNote": "Linux 和服务器用浏览器打开即可。",
+      "downloads": "下载页",
+      "copyLink": "复制链接",
+      "downloadsFrom": "avibe.bot"
+    },
+    "confirm": {
+      "removeTitle": "退出 {{name}}？",
+      "removeBody": "这台设备同步到这个 Avibe 的健康数据会被删除。重新登录后要在它上面再授权一次。",
+      "removeAction": "退出并删除健康数据",
+      "turnOffTitle": "关闭远程访问？",
+      "turnOffFrom": "你正在用 {{device}} 远程打开它。",
+      "turnOffLocked_one": "关闭后这台设备和其他 {{count}} 台都打不开，只能回到 {{host}} 上重新开启。",
+      "turnOffLocked_other": "关闭后这台设备和其他 {{count}} 台都打不开，只能回到 {{host}} 上重新开启。",
+      "turnOffLockedAlone": "关闭后这台设备就打不开了，只能回到 {{host}} 上重新开启。",
+      "turnOffLockedHost_one": "关闭后这台设备和其他 {{count}} 台都打不开，只能回到运行 Avibe 的电脑上重新开启。",
+      "turnOffLockedHost_other": "关闭后这台设备和其他 {{count}} 台都打不开，只能回到运行 Avibe 的电脑上重新开启。",
+      "turnOffLockedAloneHost": "关闭后这台设备就打不开了，只能回到运行 Avibe 的电脑上重新开启。",
+      "turnOffKept": "域名会为你保留。",
+      "turnOffBodyFrom": "{{from}}{{locked}}{{kept}}",
+      "turnOffBodyPlain": "{{locked}}{{kept}}",
+      "turnOffAction": "关闭远程访问",
+      "healthOffTitle": "关闭健康？",
+      "healthOffBody": "已同步的健康数据会删除。要再用，在 iPhone 上重新连接健康。",
+      "healthOffAction": "关闭健康",
+      "removeOthersTitle": "退出其他所有设备？",
+      "removeOthersBody": "除了这台设备，其他 {{count}} 台都会退出 {{account}}。",
+      "removeOthersBodyHealth": "除了这台设备，其他 {{count}} 台都会退出 {{account}}。它们同步的健康数据会被删除。",
+      "removeOthersAction": "全部退出"
+    },
+    "activity": {
+      "title": "活动",
+      "empty": "还没有活动。",
+      "subtitle": "登录、退出，以及 Avibe 在各台设备上做过的事。保留 90 天。",
+      "signedIn": "{{device}} 登录",
+      "signedOut": "{{device}} 已被退出",
+      "healthRead_one": "Agent 读取了近 {{count}} 天的{{data}}",
+      "healthRead_other": "Agent 读取了近 {{count}} 天的{{data}}",
+      "healthReadFor_one": "Agent 读取了近 {{count}} 天的{{data}} ·「{{task}}」",
+      "healthReadFor_other": "Agent 读取了近 {{count}} 天的{{data}} ·「{{task}}」",
+      "healthConnected": "{{device}} 已连接健康：{{data}}",
+      "alarmCreated": "创建闹钟「{{label}}」",
+      "alarmConfirmed": "创建闹钟「{{label}}」，已在 {{device}} 上确认",
+      "directOn": "直连已开启",
+      "remoteAccessOn": "远程访问已开启：{{host}}"
+    },
+    "time": {
+      "today": "今天 {{time}}",
+      "yesterday": "昨天 {{time}}",
+      "dated": "{{date}} {{time}}"
+    },
+    "backToDevices": "返回设备",
+    "connection": {
+      "title": "连接方式",
+      "subtitle": "Avibe 会自动走最快的那条路，断了自动换。这里一般不用动。",
+      "thisDevice": "这台设备",
+      "noPath": "还没有报告路径",
+      "automatic": "自动",
+      "automaticHint": "哪条快走哪条，断了自动换。",
+      "tunnelOnly": "仅 Cloudflare 隧道",
+      "tunnelOnlyHint": "不尝试直连和中继。",
+      "choiceHint": "这个选择只管这台设备。选了之后连不上，App 会自己改回「自动」。",
+      "choiceRevertedUndated": "「仅 Cloudflare 隧道」连不上，App 已自己改回「自动」。",
+      "choiceRevertedToday": "「仅 Cloudflare 隧道」今天 {{time}} 连不上，App 已自己改回「自动」。",
+      "choiceRevertedYesterday": "「仅 Cloudflare 隧道」昨天 {{time}} 连不上，App 已自己改回「自动」。",
+      "choiceRevertedDated": "「仅 Cloudflare 隧道」{{date}} {{time}} 连不上，App 已自己改回「自动」。",
+      "offered": "这个 Avibe 提供的路径",
+      "offeredBrowser": "浏览器只走 Cloudflare 隧道；直连和中继由 Avibe App 使用。",
+      "inUse": "使用中",
+      "available": "可用",
+      "off": "未开启",
+      "stateAwaitingPermission": "等待授权",
+      "stateDenied": "未获准",
+      "stateAwaitingCertificate": "等待证书",
+      "stateNotRunning": "未运行",
+      "tunnelDetail": "所有设备都能走，也是其他路径的后备。不能关闭。",
+      "directDetail": "Avibe App 能直接连到这台电脑时就不绕路。关掉后都走 Cloudflare 隧道。",
+      "lanDetail": "和这台电脑在同一网络时。",
+      "punchedDetail": "不在同一网络时，两边直接相连。",
+      "relayDetail": "打洞不通时经中继转发，通常比 Cloudflare 隧道慢。",
+      "whyAwaitingPermission": "正在向 avibe.bot 申请为这个 Avibe 开放直连。",
+      "whyDenied": "直连还没有对这个 Avibe 开放。",
+      "whyAwaitingCertificate": "正在为这个域名申请证书，好了会自动开始。",
+      "whyNotRunning": "直连组件没有运行。重启 Avibe 后再看。",
+      "tunnelSettings": "Cloudflare 隧道设置",
+      "trialNote": "从远处更改会先试用：这台设备 {{seconds}} 秒内没有连回来确认，就自动改回去。",
+      "localNote": "在这台电脑上更改，立即生效。",
+      "protocolAutomatic": "自动 · 当前 {{protocol}}",
+      "protocolPinned": "固定后，网络变了不会自己换协议；连续 3 分钟连不上会改回自动。",
+      "diagnostics": "连接诊断与网络路径",
+      "domain": "域名",
+      "changeDomain": "更改域名",
+      "renamed": "域名已改为 {{host}}。所有设备都已退出，要在新地址重新登录；{{from}} 已作废。",
+      "valueOn": "开启",
+      "valueOff": "关闭",
+      "reverted": "{{setting}}改为 {{value}} 后，这台设备没有连回来，已自动改回「{{back}}」。",
+      "trialTitle": "保留这个更改？",
+      "trialBody": "{{setting}}已改为 {{value}}，这台设备连回来了。{{seconds}} 秒内不保留，会自动改回「{{back}}」。",
+      "putBack": "改回去",
+      "keep": "保留（{{seconds}}）"
+    },
+    "rename": {
+      "title": "更改域名",
+      "current": "现在是 {{host}}。",
+      "newName": "新名称",
+      "after": "更改后",
+      "void": "{{host}} 立即作废，{{days}} 天后别人可以领取，不会还给你。",
+      "signedOut": "所有设备都会退出，要在新地址重新登录。",
+      "links": "已经发出去的链接（展示页、文件）全部失效。",
+      "homeScreen": "主屏幕 App 要删掉重新添加；手机通知要重新连接。",
+      "health": "已同步的健康数据会删除，要在 iPhone 上重新连接健康。",
+      "direct": "直连要等新证书，这期间走 Cloudflare 隧道。",
+      "confirmTitle": "改成 {{host}}？",
+      "confirmBody": "这不能撤销。{{host}} 立即作废，所有设备都会退出，包括你现在用的这一台。",
+      "confirm": "更改域名",
+      "confirmCountdown": "更改域名（{{seconds}}）"
+    },
+    "setup": {
+      "title": "在手机和其他电脑上打开它",
+      "lead": "可选。领一个专属域名就能远程访问；数据和 Agent 仍然留在这台电脑上。",
+      "browserHint": "只有这一次：去 avibe.bot 起个名字、领取域名，然后自动回来，直接进入工作台。",
+      "skip": "以后再说，进入工作台"
+    }
   }
 }

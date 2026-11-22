@@ -1356,6 +1356,131 @@ scenarios:
       callback on a signed build, the real providers and Apple's sheet remain
       device checks after the backend exchange is deployed.
     owning_layer: iOS XCTest plus physical-device acceptance
+  - id: AUTH-SETUP-182
+    name: One sign-in flow gives the iPhone and Desktop apps the same steps, words and errors
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: shared
+    test:
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: signs in with an email code on the same steps"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: signs in with an email code on the same steps"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: drops a verification an account change ended while it ran"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: drops a verification an account change ended while it ran"
+    reason: >-
+      #3946 moved the sign-in steps into ui/src/sign-in, reached through one
+      adapter per app. The matrix runs every case against both adapters: the
+      iPhone's through the real avibeMobile bridge over a fake native
+      coordinator, the Desktop's through DesktopSignIn over a fake native
+      client that publishes state before replying, as the runtime host may.
+      Cases cover email code, wrong code, send cooldown, password with an
+      authenticator code, wrong password, a closed passkey prompt then a
+      recovery code, the second-factor wait, leaving for another account, a
+      late result after an account change, passkey sign-in with no email, a
+      refused resend or a wrong password after stepping back from a sent code
+      (native commits a first factor only when it succeeds, so a refusal
+      leaves the code already sent and the step as they were;
+      desktop/runtime-host tests/instance_coordinator.rs and
+      instance_sign_in.rs own that side, including escapes and a later first
+      factor winning), and one capability matrix: each app offers exactly the ways its native side
+      reports avibe.bot switched on (only Google, Apple off, all off, missing,
+      only passkey, every way). Fakes prove the wiring, not real accounts, providers
+      or devices; the existing MobileOnboarding cases still own the iPhone
+      shell.
+  - id: AUTH-SETUP-183
+    name: Desktop signs in with Google, GitHub or Apple through the default browser and loopback PKCE
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: desktop
+    missing_layer: hosted-auth-config-and-real-browser
+    reason: >-
+      Native runs Supabase PKCE in the default browser and returns through a
+      one-transaction listener on 127.0.0.1:0 (RFC 8252 7.3), then redeems the
+      code with its own verifier and reuses the email code's session endpoint
+      and two-step gate. Rust tests in desktop/runtime-host own the boundary:
+      loopback.rs (exact GET /callback with this Host and state, the fixed
+      Supabase callback grammar, bounds, single consumption, port release on
+      success, generation change and timeout) and tests/instance_sign_in.rs
+      (the forged callback is never redeemed, the verifier matches the
+      challenge, tokens never reach published state, each ending's code, abort
+      frees the port and cannot sign a signed-in account out). The browser's
+      last page speaks the asking page's language, from the product catalogs
+      (desktopBootstrap.providerCallback), one language at a time. The public
+      switches are avibe.bot's, not the account's: an account change during
+      the read does not drop them, a commit or rollback that began earlier
+      keeps them, and reads show in the order they started. "Use a different
+      account" forgets an account restored at launch that still owes its second
+      factor (record, then keychain entry); another sign-in keeps that stored
+      account until a different account signs in, then retires its key, and no
+      unfinished sign-in is saved under another account's key. The citation checker does not collect Rust
+      tests. The hosted project's actual
+      redirect handling, real providers, Apple's enablement and a signed
+      Desktop build remain acceptance checks.
+    owning_layer: Rust runtime-host tests plus signed-build acceptance
+    partial_evidence:
+      covers: the page side against a fake native client that holds the browser wait, Cancel sending abort_sign_in, and silence after the abort
+      test: "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-183 Desktop: ends a browser sign-in from the page and says nothing"
+  - id: AUTH-SETUP-184
+    name: Desktop signs in with a passkey and no email, apart from the passkey second factor
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: desktop
+    missing_layer: hosted-passkey-switch-and-real-authenticator
+    reason: >-
+      Native calls avibe.bot's primary passkey options and verify with the
+      boundary's own Accept and Origin, asks the system sheet for a
+      discoverable credential (no allow-list), keeps the binding cookie in the
+      native jar, cancels the flow when the sheet closes, and then discovers
+      the session. A verify avibe.bot accepted whose session read failed is
+      kept in that jar, so trying again reads it without a second sheet or
+      verify; a 401 there, or any other first factor, ends it (backend 884a13c
+      §6, as on the iPhone). It is offered, and runs, only where this system can: macOS
+      13 with the running signature's webcredentials:avibe.bot association
+      (the Developer ID build), Windows with webauthn.dll's API version 1, no
+      other platform; elsewhere native refuses before any request, and the
+      second factor offers no passkey step (no challenge is requested). Rust tests
+      (tests/instance_sign_in.rs, and the macOS rule in the shell's
+      instance_passkeys) own the wire, each ending's code, the refusal, a
+      late assertion dropped after an abort, and the accepted session read
+      again. An older macOS, Windows itself
+      and a signed build were not run. Whether
+      production enables primary passkeys for all accounts, and a real
+      authenticator on a signed build, remain acceptance checks.
+    owning_layer: Rust runtime-host tests plus signed-build acceptance
+    partial_evidence:
+      covers: the page side, from the first step's passkey link through the dedicated passkey step to the session, against a fake native client
+      test: "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-184 Desktop: signs in with a passkey and no email"
+  - id: AUTH-SETUP-185
+    name: iPhone signs in with a passkey and no email, apart from the passkey second factor
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: ios
+    missing_layer: hosted-passkey-switch-and-real-authenticator
+    reason: >-
+      auth.signInWithPasskey is a closed bridge method (no arguments, refused
+      in the instance sheet). The coordinator runs avibe.bot's primary passkey
+      options, the system sheet with no allow-list and verify in one fresh
+      store, then reads the session separately; a closed sheet cancels the
+      flow and a failed attempt retires the store, but a store that holds an
+      accepted verify is kept until its session is read (backend 884a13c §6),
+      so trying again reads it without a second sheet or verify; a sign-out
+      while that read is out publishes nothing and never reads the store again,
+      and a verify avibe.bot does not accept retires it. Welcome offers passkey
+      sign-in only when avibe.bot's latest answer carries passkey: true
+      (passkey_login_enabled, from the same read as mobile_providers and kept
+      with that last-known list, in signed-out answers and auth.providers). XCTest owns the native side
+      (MobileOnboardingTests, and the WebKit fixture-server tests for the
+      options, verify and cancel scripts in MobileAuthTransportIntegrationTests);
+      the catalog citation checker does not collect Swift XCTest. Production's
+      passkey switch, a real authenticator and a signed build remain device
+      checks.
+    owning_layer: iOS XCTest plus physical-device acceptance
+    partial_evidence:
+      covers: the page side, offering exactly the ways an answer names, email alone before any read, and the last ones kept when an answer names none
+      test: "ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-185 not read"
   - id: AUTH-SETUP-186
     name: A personal or shared organization instance owner pairs a fake health device with route-scoped credentials and local-only reads
     status: covered
@@ -1364,4 +1489,20 @@ scenarios:
     backend: mobile
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
     reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
+  - id: AUTH-SETUP-914
+    name: The initiating owner browser completes a personal installation claim without disclosing the pairing key
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_claim_redirect_through_pairing_journal
+    reason: Owner browser on loopback or an admitted private-network origin. Actual owner routes, browser cookie, return gate, guarded redemption, credentials publication and connector start. Only the control plane and connector are peers.
+  - id: AUTH-SETUP-915
+    name: Signing out a device revokes its Runtime cookie before the issuer accepts its account sign-out
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_device_account_signout_from_verified_exchange
+    reason: Two signed exchanges, real callbacks, local sign-out, pending fence and receipt; fake issuer wire response, not evidence of provider deletion.
 next_priority: []

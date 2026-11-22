@@ -10,6 +10,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind }
 import { adjustEditorFontSize, resetEditorFontSize } from '../../lib/editorFontSize';
 import { IS_APPLE } from '../../lib/platform';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
+import { isNativeAppWindow } from '../../lib/desktopShell';
 import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
@@ -350,14 +351,19 @@ export const EditorApp: React.FC<{
     });
   }, []);
 
-  // Open the launch file (from the File Browser) once on mount, OR — when the File Browser's
+  // Consume each launch file (from the File Browser), OR — when the File Browser's
   // "New File" launched us with a target dir — root the explorer there and start a fresh untitled
   // buffer (its first save lands in that dir).
+  const handledLaunch = useRef<unknown>(undefined);
   useEffect(() => {
+    const key = params?.launchRequestId ?? params ?? null;
+    if (handledLaunch.current === key) return;
+    const initial = handledLaunch.current === undefined;
+    handledLaunch.current = key;
     // Restore a persisted session (explorer root + saved tabs) when this window was rehydrated on
     // reload — re-reading each file from disk for a fresh mtime, dropping any that vanished. Takes
     // precedence over the launch-file path below; the persisted state fully describes what to open.
-    const restore = sanitizeEditorRestore(params?.[WINDOW_RESTORE_PARAM]);
+    const restore = initial ? sanitizeEditorRestore(params?.[WINDOW_RESTORE_PARAM]) : null;
     if (restore && (restore.root != null || restore.tabs.length > 0)) {
       if (restore.root != null) setRoot(restore.root);
       const infos = restore.tabs;
@@ -411,6 +417,11 @@ export const EditorApp: React.FC<{
       }
       return;
     }
+    const rootDir = typeof params?.rootDir === 'string' ? params.rootDir : null;
+    if (rootDir) {
+      setRoot(rootDir);
+      rememberRecentFolder(rootDir);
+    }
     const p = typeof params?.path === 'string' ? params.path : null;
     if (p) {
       const name = (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p;
@@ -441,15 +452,8 @@ export const EditorApp: React.FC<{
       newFile();
       return;
     }
-    // "Open in Editor" from a project (sidebar): root the explorer at the folder with NO tab open —
-    // just the file tree + the select-a-file hint, no untitled buffer.
-    const rootDir = typeof params?.rootDir === 'string' ? params.rootDir : null;
-    if (rootDir) {
-      setRoot(rootDir);
-      rememberRecentFolder(rootDir);
-    }
     // eslint-disable-next-line react-hooks-js/exhaustive-deps
-  }, []);
+  }, [params]);
 
   const anyDirty = Object.values(dirty).some(Boolean);
   useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);
@@ -579,11 +583,14 @@ export const EditorApp: React.FC<{
 
   // ⌘O Open Folder · ⌘N New File — only while THIS editor window holds focus (several windows can
   // be open). Capture phase + preventDefault so ⌘O doesn't fall through to the browser's open dialog.
+  // A native App window's Editor is the route body, without a manager window id: the native window
+  // is its window, so it holds these keys while no in-page window is on top of it.
+  const nativeRoute = !windowId && isNativeAppWindow();
   useRouteSurfaceWindowEvent('keydown', (event) => {
     if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
     // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
     // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
-    if (picker || wm.focusedId !== windowId) return;
+    if (picker || wm.focusedId !== (nativeRoute ? null : windowId)) return;
     const k = event.key.toLowerCase();
     // ⇧⌘F opens the cross-file Search view and focuses its query input. (Plain ⌘F is left to
     // Monaco's built-in in-file find widget when the editor has focus.)
@@ -599,7 +606,7 @@ export const EditorApp: React.FC<{
     event.preventDefault();
     if (k === 'o') openFolder();
     else newFile();
-  }, Boolean(windowId), true);
+  }, Boolean(windowId) || nativeRoute, true);
 
   // Claim browser-style zoom only for the focused Editor surface. A window additionally checks real
   // DOM focus so an Editor left open while the user works in the sidebar doesn't steal browser zoom.

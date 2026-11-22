@@ -78,12 +78,17 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
         ]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        // Before any scene draws: a locked App opens behind its lock (docs/plans/app-lock.md).
+        if !Self.isRunningTests {
+            MainActor.assumeIsolated { AppLockController.shared.start() }
+        }
         VoiceCaptureLaunch.markLaunched()
         // A Live Activity left by a process that is gone (killed while a
         // take ran) would otherwise show a timer no one can stop.
         Task { @MainActor in
             ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
+            await VoiceCaptureController.shared.restoreOutbox()
             if !Self.isRunningTests { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }
         return true
@@ -175,6 +180,9 @@ struct AvibeApp: App {
                 .onOpenURL { url in
                     // The hidden diagnostics switch (VoiceCaptureEndSwitch).
                     VoiceCaptureEndSwitch.handle(url)
+                    // And the hold's "start at recognition" variant (NativeHoldQuietSwitch).
+                    NativeHoldQuietSwitch.handle(url)
+                    appModel.openLiveActivity(url)
                 }
                 .task {
                     // App Shortcuts (AppShortcuts.swift) reach the model here.

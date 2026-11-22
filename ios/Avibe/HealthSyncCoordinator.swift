@@ -69,6 +69,9 @@ final class HealthSyncCoordinator: ObservableObject {
     private var retryAfter: Date?
     var targetProvider: (() -> HealthConnectionTarget?)?
     var accountIDProvider: (() -> String?)?
+    /// The account's instances as avibe.bot last confirmed them in this
+    /// process, instance id to origin; `nil` while that is unknown.
+    var instancesProvider: (() -> [String: String]?)?
     private var cleanupPending = false
 
     private var currentAccountID: String? {
@@ -76,12 +79,38 @@ final class HealthSyncCoordinator: ObservableObject {
         return targetProvider?()?.accountID
     }
 
-    private func requireAccount() throws {
+    /// The committed connection, while the current account and WebKit
+    /// store still own it; read without side effects.
+    private var authorizedIdentity: HealthDeviceIdentity? {
         guard let identity, currentAccountID == identity.accountID, !cleanupPending,
               !startupBindingUntrusted, bindingMatches(identity),
-              store?.state.committedDeviceID == identity.deviceID else {
+              store?.state.committedDeviceID == identity.deviceID else { return nil }
+        return identity
+    }
+
+    private func requireAccount() throws {
+        guard let identity = authorizedIdentity else {
             throw HealthSyncError.code("connection_changed")
         }
+        // Nothing more goes to an origin the account no longer lists for
+        // this instance: the device is disconnected here, without a revoke.
+        // A connect under way replaces it instead.
+        if delisted(identity) {
+            if connecting == nil { beginCleanup(unregister: false) }
+            throw HealthSyncError.code("connection_changed")
+        }
+    }
+
+    /// Whether a confirmed instance list no longer lists `candidate`'s
+    /// instance at its origin: gone from the list, or listed at another
+    /// origin (renamed). Only the current account's list decides, and an
+    /// unknown list decides nothing. A confirmed empty list (the account has
+    /// no instance left) does not list it either: a deleted instance's name
+    /// can later belong to another account.
+    private func delisted(_ candidate: HealthDeviceIdentity) -> Bool {
+        guard candidate.accountID == currentAccountID,
+              let listed = instancesProvider?() else { return false }
+        return listed[candidate.instanceID] != candidate.origin
     }
 
     init(credentials: HealthCredentialStoring = HealthCredentialStore(),
@@ -152,6 +181,13 @@ final class HealthSyncCoordinator: ObservableObject {
             } else if manifestDue || (foreground && pollTask == nil) {
                 // A converged identity triggers no network; an unconverged one finishes setup.
                 requestConvergence()
+            }
+            // The list this answer carries is published after this event, so
+            // the instance-list gate reads it on the next turn: a rename ends
+            // the device now, not at a later sign-out that would revoke it at
+            // the old origin.
+            if identity != nil {
+                Task { @MainActor [weak self] in _ = try? self?.requireAccount() }
             }
         }
     }
@@ -243,7 +279,10 @@ final class HealthSyncCoordinator: ObservableObject {
             try await reader.authorize()
             try requireCurrent(token)
             let installationID = try credentials.installationID()
-            operationEpoch = beginCleanup(unregister: true)
+            // The device being replaced is revoked, unless its origin is no
+            // longer listed for it: nothing more is sent there.
+            let replaced = identity ?? (try? credentials.load())
+            operationEpoch = beginCleanup(unregister: replaced.map { !delisted($0) } ?? true)
             connecting = connection
             await cleanupTask?.value
             // This connect still owns its generation after replacing the old device.
@@ -396,6 +435,10 @@ final class HealthSyncCoordinator: ObservableObject {
                 await stopLocal(unregister: true, capturedIdentity: saved)
                 return
             }
+            guard !delisted(saved) else {
+                await stopLocal(unregister: false, capturedIdentity: saved)
+                return
+            }
             guard store?.state.suspended != true else { return }
             identity = saved
             authorizationPaused = false
@@ -427,6 +470,80 @@ final class HealthSyncCoordinator: ObservableObject {
     }
 
     func logout() async { await stopLocal(unregister: true) }
+
+    // MARK: Binding ticket (the Devices page's proof)
+
+    /// How long `device.describe` waits for a ticket before it answers
+    /// without one.
+    var bindingTicketBudget: Duration = .seconds(3)
+    /// Origins whose instance has no ticket endpoint (an older server),
+    /// for this process.
+    private var bindingTicketUnsupported: Set<String> = []
+    /// No ticket is asked for before this: the instance issues at most one
+    /// every 30 seconds per pairing.
+    private var bindingTicketNotBefore: Date?
+
+    /// A one-use ticket from the paired instance proving this App's Health
+    /// pairing to the Devices page (`device.describe` with
+    /// `health_binding`). Only in front, only for the pairing of
+    /// `instanceID` at `origin` on `accountID`, while it is connected; nil
+    /// otherwise, on any failure and after the budget. It is handed out
+    /// once and kept nowhere.
+    ///
+    /// A side path: it never goes through `handle()`. No answer here
+    /// (a 401 or 404 from an older server, 422, 429 or 503 included)
+    /// disconnects, suspends or delays Health; sync's own requests
+    /// discover a revocation.
+    func bindingTicket(accountID: String, instanceID: String, origin: String) async -> String? {
+        guard foreground, !authorizationPaused, let identity = authorizedIdentity, !delisted(identity),
+              identity.accountID == accountID, identity.instanceID == instanceID, identity.origin == origin,
+              !bindingTicketUnsupported.contains(origin) else { return nil }
+        if let notBefore = bindingTicketNotBefore, notBefore > now() { return nil }
+        bindingTicketNotBefore = now().addingTimeInterval(30)
+        let token = epoch
+        let client = self.client
+        let budget = bindingTicketBudget
+        let response: [String: Any]?
+        do {
+            response = try await withThrowingTaskGroup(of: [String: Any]?.self) { group in
+                group.addTask {
+                    try await client.request(origin: identity.origin, credential: identity.credential,
+                        method: "POST", path: "/api/mobile/device/v1/binding-ticket", body: [:])
+                }
+                group.addTask {
+                    try await Task.sleep(for: budget)
+                    return nil
+                }
+                defer { group.cancelAll() }
+                return try await group.next() ?? nil
+            }
+        } catch HealthSyncError.http(let status, let code, let delay) {
+            if status == 404 || status == 405 || (status == 401 && code != "device_unauthorized") {
+                bindingTicketUnsupported.insert(origin)
+            } else if status == 429 {
+                bindingTicketNotBefore = now().addingTimeInterval(max(30, delay ?? 30))
+            }
+            return nil
+        } catch {
+            return nil
+        }
+        // The same connection, still in front, once the answer is back.
+        guard epoch == token, foreground, authorizedIdentity == identity, !delisted(identity),
+              let response else { return nil }
+        return Self.bindingTicket(from: response, now: now())
+    }
+
+    /// The ticket in an issue answer: 43 base64url characters (32 bytes,
+    /// unpadded), and not yet expired.
+    nonisolated static func bindingTicket(from response: [String: Any], now: Date) -> String? {
+        guard let ticket = response["health_binding_ticket"] as? String, ticket.utf8.count == 43,
+              ticket.unicodeScalars.allSatisfy({ ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "-" || $0 == "_" }),
+              let text = response["expires_at"] as? String,
+              let expires = ISO8601DateFormatter.healthTicket.date(from: text)
+                ?? ISO8601DateFormatter().date(from: text),
+              expires > now else { return nil }
+        return ticket
+    }
 
     private func registerObservers() async {
         let token = epoch
@@ -933,4 +1050,13 @@ final class HealthSyncCoordinator: ObservableObject {
     private static var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
+}
+
+private extension ISO8601DateFormatter {
+    /// RFC 3339 with fractional seconds; the plain form is tried after it.
+    static let healthTicket: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 }

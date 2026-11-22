@@ -32,6 +32,13 @@ struct DirectPathStatus: Equatable, Sendable {
     /// to an IPv4 or IPv6 address. Nil when not direct, or not known. A
     /// change of it advances `sequence`.
     var path: DirectPathKind? = nil
+    /// For display, with `path`: whether the path's far end is on a local
+    /// network, and its round-trip time. Read when the status is asked for;
+    /// a change of it is not a change of the status.
+    var selected: DirectSelectedPath? = nil
+    /// For diagnosis: how often the transport checked its path again, and
+    /// why, since the instance was selected. Counts only.
+    var counts: DirectPathCounts = .zero
     /// For diagnosis: the last few CONNECTs' races, oldest first.
     var races: [DirectRaceRecord] = []
     /// For diagnosis: the last few times committed direct relays were closed
@@ -61,14 +68,27 @@ struct DirectPathStatus: Equatable, Sendable {
         return object
     }
 
-    /// What `direct.status()` answers: the status, and the diagnostics if any.
+    /// What `direct.status()` answers: the status, the selected path's class
+    /// (`path_scope`, `local` or `global`) and round-trip time (`rtt_ms`)
+    /// when known, and the diagnostics if any.
     var jsonObject: [String: Any] {
         var object = eventObject
+        if let path, let selected, selected.kind == path {
+            if let local = selected.local {
+                object["path_scope"] = local ? "local" : "global"
+            }
+            if let rttMs = selected.rttMs {
+                object["rtt_ms"] = rttMs
+            }
+        }
         if let diagnostics {
             if path == nil {
                 object["path"] = NSNull()
             }
             object["attempts"] = diagnostics.attempts.map(\.jsonObject)
+        }
+        if counts != .zero {
+            object["counts"] = counts.jsonObject
         }
         if !races.isEmpty {
             object["connections"] = races.map(\.jsonObject)
@@ -517,8 +537,12 @@ final class DirectPathController {
     func currentStatus(for origin: WebOrigin) -> DirectPathStatus {
         let selected = origin.host == target?.authority.host
         var diagnostics: DirectPathDiagnostics?
+        var selectedPath: DirectSelectedPath?
+        var counts = DirectPathCounts.zero
         if selected {
             let read = transport.pathDiagnostics
+            selectedPath = read.selected
+            counts = transport.pathCounts
             // The current path only while new connections prefer it.
             let shown = DirectPathDiagnostics(
                 current: preferred == .direct ? currentPath : nil,
@@ -532,6 +556,8 @@ final class DirectPathController {
             closure: closures[origin.host] ?? 0,
             diagnostics: diagnostics,
             path: preferred == .direct && selected ? currentPath : nil,
+            selected: preferred == .direct && selected ? selectedPath : nil,
+            counts: counts,
             races: selected ? races : [],
             losses: selected ? losses : []
         )

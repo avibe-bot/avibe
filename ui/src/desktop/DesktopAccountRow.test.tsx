@@ -95,13 +95,17 @@ it('AUTH-SETUP-178 current version offers no install; account entry stays separa
   expect(mock.present).toHaveBeenCalledWith('instances');
 });
 
-it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local or remote update IPC', async () => {
+// ui/design: update/instance-and-app. The version beside another computer's name is that instance's, read by
+// its own page; the page's API mock has `getVersion` alone, so any install or updater call from here throws.
+it("AUTH-SETUP-178 remote Runtime shows the instance's own version and presents the shell's panel without update IPC", async () => {
   mock.remote = true;
+  mock.getVersion.mockResolvedValue({ current: '3.2.5', latest: '3.2.7', has_update: true });
   mount();
-  fireEvent.click(screen.getByRole('button', { name: 'Local Desktop version v3.2.6rc12' }));
+  // The app is on 3.2.6rc12: that version is no longer shown beside the instance's name.
+  fireEvent.click(await screen.findByRole('button', { name: 'Studio is on v3.2.5' }));
+  expect(screen.queryByText(/3\.2\.6rc12/)).toBeNull();
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
   expect(mock.invoke).not.toHaveBeenCalled();
-  expect(mock.getVersion).not.toHaveBeenCalled();
   expect(document.querySelector('[data-update-menu]')).toBeNull();
   mock.present.mockClear();
   const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
@@ -119,7 +123,7 @@ it('the bottom row reads the same locally and on another computer: status, then 
     const view = mount();
     const row = document.querySelector('[data-sidebar-status-row]')!;
     const version = remote
-      ? screen.getByRole('button', { name: 'Local Desktop version v3.2.6rc12' })
+      ? await screen.findByRole('button', { name: 'Studio is on v3.2.6rc12' })
       : await screen.findByTitle('v3.2.6rc12');
     expect(version.hasAttribute('data-version-chip')).toBe(true);
     expect(row.lastElementChild!.contains(version)).toBe(true);
@@ -166,5 +170,34 @@ it.each([
   mount();
   const trigger = document.querySelector('[data-account-trigger]')!;
   expect(trigger.textContent).toBe(label);
-  expect(trigger.getAttribute('title')).toBe(label);
+  // The label is the button's name; no hover tip (Max, 2026-11-20).
+  expect(trigger.hasAttribute('title')).toBe(false);
+});
+
+// The owner, 2026-11-21: 「在桌面端左下角的实例名称左边有大片空白」. The dot and the name had been centred in the
+// trigger, which is as wide as the row; they start at the trigger's left inset, the Apps button's own, in
+// every state (ui/design: chrome/bottom-row). jsdom lays nothing out, so this holds the classes that do it.
+it.each([
+  { remote: false, signedIn: true }, { remote: true, signedIn: true }, { remote: false, signedIn: false },
+])('the footer entry starts at the left of its row, not centred in it (remote=$remote, signedIn=$signedIn)', ({ remote, signedIn }) => {
+  mock.remote = remote; mock.signedIn = signedIn;
+  mount();
+  const classes = document.querySelector('[data-account-trigger]')!.className.split(/\s+/);
+  expect(classes).toContain('justify-start');
+  expect(classes).toContain('pl-4');
+  expect(classes).not.toContain('justify-center');
+});
+
+// Max, 2026-11-20: no hover tip in either state, not even for a name too long to show whole.
+it.each([
+  { signedIn: false, slug: undefined },
+  { signedIn: true, slug: 'a-very-long-instance-name-that-the-sidebar-cannot-show-whole' },
+])('the footer entry has no hover tip (signedIn=$signedIn)', ({ signedIn, slug }) => {
+  mock.signedIn = signedIn; mock.slug = slug;
+  mount();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  fireEvent.pointerEnter(trigger);
+  fireEvent.mouseOver(trigger);
+  expect(trigger.hasAttribute('title')).toBe(false);
+  expect(trigger.querySelector('[title]')).toBeNull();
 });

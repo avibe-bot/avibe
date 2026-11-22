@@ -225,6 +225,7 @@ enum AppRoute: Equatable {
 private enum PendingInstanceOpen {
     case pushTap(PushNotificationTap)
     case selectedInstance(path: String)
+    case liveActivity(URL)
 }
 
 private struct PendingPushOpened {
@@ -279,15 +280,7 @@ final class AppModel: ObservableObject {
         case invalid
     }
 
-    @Published private(set) var route: AppRoute = .loading {
-        didSet {
-            if let runtime = route.runtime { lastRoutedRuntime = runtime }
-        }
-    }
-    /// The last runtime the root kept alive. The store's route for its
-    /// host outlives the runtime (the instance list, Account), so the voice
-    /// take's load gate is still asked for it then.
-    private var lastRoutedRuntime: MobileRuntimeContext?
+    @Published private(set) var route: AppRoute = .loading
     /// Chosen once when the one runtime-preserving sheet opens. Repeated
     /// presentation requests never replace its document or change its mode.
     @Published private(set) var accountSheetStartScreen: MobileOnboardingStartScreen = .sheet
@@ -327,6 +320,14 @@ final class AppModel: ObservableObject {
     /// The next open of this runtime loads live, skipping the cache once
     /// (Retry over a cached page that could not connect).
     private var runtimeLoadsLiveOnce: MobileRuntimeContext?
+    /// This device's path choice per account and instance.
+    private let directPathPreferences: DirectPathPreferenceStore
+    /// Whether the device has a network: without one, an instance that
+    /// cannot be reached says nothing about its path.
+    private let networkPath: NetworkPathReading
+    /// Where the next open of this runtime starts: a reopen after this
+    /// device's path choice changed, at the page that changed it.
+    private var runtimeStartURL: (runtime: MobileRuntimeContext, identity: Int, url: URL)?
 
     private let defaults: UserDefaults
     private let controlPlane: MobileControlPlaneConfiguration
@@ -356,6 +357,15 @@ final class AppModel: ObservableObject {
     /// stop, or a sign-out clears it, and it is settled only for the
     /// identity it was made under.
     private var deferredOpen: (runtime: MobileRuntimeContext, identity: Int)?
+    /// The session check that an open is waiting for, because avibe.bot's
+    /// last confirmation of the session is past its lifetime
+    /// (`confirmSessionThenOpen`). One at a time.
+    private var sessionConfirmation: Task<Void, Never>?
+    /// The quiet session read that renews an ageing confirmation behind an
+    /// open page (`renewSessionConfirmationIfDue`), and whether its read is
+    /// in flight (it holds the account meanwhile).
+    private var sessionRenewal: Task<Void, Never>?
+    private var sessionRenewalIsReading = false
     /// The identity of a runtime opened while the listener fault covered
     /// it: it shows only the reopen message, and no WebView is made for it.
     /// (A runtime the fault reaches later keeps its WebView under the
@@ -376,6 +386,9 @@ final class AppModel: ObservableObject {
     /// UI sets through `badge.set` (and a push sets while the App is away).
     private let systemScheduleCoordinator: SystemScheduleCoordinator
     var systemScheduleDeviceID: String? { systemScheduleCoordinator.installationID }
+    /// Health's credential store, read here without side effects (`load()`
+    /// makes no id) for `device.describe`'s alias.
+    private let healthCredentials: HealthCredentialStoring
     private let systemScheduleNow: () -> Date
     private var pendingSystemSchedule: PendingSystemSchedule?
     private let nativeBadge: NativeBadge
@@ -434,15 +447,92 @@ final class AppModel: ObservableObject {
             // Signing out or another account: the badge counted this
             // account's Inbox. (A session refresh of the same account keeps it.)
             self?.nativeBadge.clear()
+            await self?.turnActivities.endAll(reason: reason == .accountChanged ? "account_switch" : "logout")
             await self?.nativePushCoordinator.prepareForLogout(reason: reason)
         },
         onReconcileInstancePush: { [weak self] liveOrigins, accountID in
             // Instances that left the account's list lose only their own
             // registrations; the account keeps the rest.
+            await self?.turnActivities.removeInstances(outside: liveOrigins, accountID: accountID)
             await self?.nativePushCoordinator.revokeRegistrations(
                 outside: liveOrigins,
                 accountID: accountID
             )
+            // And, once two answers a day apart agree, what such an
+            // address left in the account's WebKit store.
+            await self?.departedInstanceData.reconcile(live: liveOrigins, accountID: accountID)
+        }
+    )
+
+    /// The addresses this account opened here, and the removal of what one
+    /// left behind once it is no longer the account's.
+    private lazy var departedInstanceData = DepartedInstanceData(
+        defaults: defaults,
+        currentStore: { [weak self] in self?.websiteDataStore.identifier },
+        clean: { [weak self] origin, accountID in
+            await self?.removeDepartedInstanceData(origin: origin, accountID: accountID) ?? false
+        }
+    )
+
+    /// Removes what `origin` stored in the account's WebKit store, its
+    /// cached page, and this device's path choice for it. Only for an
+    /// address the signed-in account does not list and nothing shows.
+    private func removeDepartedInstanceData(origin: String, accountID: String) async -> Bool {
+        guard let address = WebOrigin.parseConfigured(origin) else {
+            return false
+        }
+        let store = websiteDataStore.identifier
+        // Asked now, and again right before each thing is deleted: the
+        // removal is prepared across suspensions, and the address may be
+        // listed again meanwhile.
+        let stillDeparted = { [weak self] () -> Bool in
+            guard let self else {
+                return false
+            }
+            // Not during a sign-out, a reset or a change of account: the
+            // store is about to go, with everything in it.
+            return self.sessionCoordinator.settledAccountID == accountID
+                && self.websiteDataStore.identifier == store
+                && !self.sessionCoordinator.currentInstances.contains(where: {
+                    WebOrigin(url: $0.url)?.serialized == origin
+                })
+                && self.route.runtime.flatMap({ WebOrigin(url: $0.instance.url)?.serialized }) != origin
+        }
+        guard stillDeparted() else {
+            return false
+        }
+        // Cookies belong to a host: kept while another address the account
+        // lists, or avibe.bot itself, is on that host.
+        let hostInUse = sessionCoordinator.controlPlaneURL.host == address.host
+            || sessionCoordinator.currentInstances.contains {
+                WebOrigin(url: $0.url)?.host == address.host
+            }
+        guard await InstanceSiteDataCleaner.clean(
+            origin: address,
+            in: websiteDataStore.dataStore,
+            removingCookies: !hostInUse,
+            willUse: { [weak self] webView in
+                // A store rotation waits for this WebView as for any other
+                // of the store.
+                self?.recordRuntimeReleaseBarrier(
+                    WebsiteDataStoreReleaseBarrier(webViews: [webView])
+                )
+            },
+            stillWanted: stillDeparted
+        ), stillDeparted() else {
+            return false
+        }
+        RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(store.uuidString, isDirectory: true))
+            .removePage(accountID: accountID, origin: origin)
+        directPathPreferences.set(.automatic, accountID: accountID, origin: origin)
+        return true
+    }
+
+    private lazy var turnActivities = TurnActivityCoordinator(
+        defaults: defaults,
+        mayRequest: { [weak self] target in
+            self?.sessionVouches(forAccount: target.accountID, origin: target.instanceOrigin) ?? false
         }
     )
 
@@ -524,6 +614,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Answers `direct.preference` and `direct.setPreference` for the
+    /// runtime's pages; `nil` without a direct transport, when there is
+    /// nothing to choose between.
+    var directPreferenceProvider: DirectPreferenceProvider? {
+        guard directPathController != nil else {
+            return nil
+        }
+        return DirectPreferenceProvider(
+            read: { [weak self] origin in
+                guard let self, let runtime = self.runtimeShowing(origin) else { return nil }
+                return self.directPathPreference(for: runtime)
+            },
+            write: { [weak self] origin, mode, url in
+                self?.setDirectPathPreference(mode, at: origin, reopeningAt: url)
+            }
+        )
+    }
+
     var pushCoordinator: NativePushCoordinator {
         nativePushCoordinator
     }
@@ -554,10 +662,15 @@ final class AppModel: ObservableObject {
         runtimeOpenLongWait: Duration = .seconds(8),
         runtimeOpenNotificationCenter: NotificationCenter = .default,
         badgeCenter: AppBadgeCentering? = nil,
-        healthSync: HealthSyncCoordinator? = nil
+        healthSync: HealthSyncCoordinator? = nil,
+        healthCredentials: HealthCredentialStoring = HealthCredentialStore(),
+        networkPath: NetworkPathReading? = nil
     ) {
         self.defaults = defaults
+        self.directPathPreferences = DirectPathPreferenceStore(defaults: defaults)
+        self.networkPath = networkPath ?? SystemNetworkPath()
         self.healthSync = healthSync
+        self.healthCredentials = healthCredentials
         self.controlPlane = controlPlane
         let directFaultMarker = directFaultMarker
             ?? UserDefaultsDirectFaultMarker(defaults: defaults)
@@ -606,26 +719,50 @@ final class AppModel: ObservableObject {
                   let origin = WebOrigin(url: instance.url) else { return nil }
             return HealthConnectionTarget(accountID: accountID, instanceID: instance.id, name: instance.name, origin: origin.serialized)
         }
+        // The list avibe.bot answered for the account (`healthAccountID` is
+        // set only by its answer in this process); unknown otherwise.
+        healthSync?.instancesProvider = { [weak self] in
+            guard let self, self.sessionCoordinator.healthAccountID != nil else { return nil }
+            var listed: [String: String] = [:]
+            for instance in self.sessionCoordinator.currentInstances {
+                if let origin = WebOrigin(url: instance.url) { listed[instance.id] = origin.serialized }
+            }
+            return listed
+        }
         _ = nativePushCoordinator
         _ = directPathController
         // The Action Button's hidden WebView loads through the same local
         // listener as the page, so it asks the same gate before its load.
         VoiceCaptureLoadGate.provider = { [weak self] origin, storeIdentifier in
-            // The gate answers for the model's current store: a take on
-            // another one (an account or store change since it began) has
-            // no route of ours.
-            guard let self, let controller = self.directPathController,
-                  storeIdentifier == self.websiteDataStore.identifier,
-                  let runtime = [self.route.runtime, self.deferredOpen?.runtime, self.lastRoutedRuntime]
-                      .compactMap({ $0 })
-                      .first(where: { WebOrigin(url: $0.instance.url) == origin })
-            else {
+            guard let self, let controller = self.directPathController else {
                 return .open
             }
-            controller.settleRecordedFault()
-            return controller.loadGate(for: runtime)
+            // Asked by the take's own host, with no runtime: a take kept
+            // for an instance that is no longer the one shown still goes
+            // through the listener its host is routed to.
+            return VoiceCaptureLoadGate.gate(
+                for: origin, store: storeIdentifier, currentStore: self.websiteDataStore.identifier
+            ) { url in
+                controller.settleRecordedFault()
+                return controller.loadGate(forInstanceURL: url)
+            }
         }
         runtimeOpenLifecycleObservers = [
+            runtimeOpenNotificationCenter.addObserver(
+                forName: UIScene.didActivateNotification, object: nil, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.hasCompletedBootstrap else { return }
+                    let target = self.liveActivityTarget
+                    self.turnActivities.selectTarget(target)
+                    Task { await self.turnActivities.foreground(target: target) }
+                }
+            },
+            runtimeOpenNotificationCenter.addObserver(
+                forName: UIScene.willDeactivateNotification, object: nil, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.liveActivityWillDeactivate() }
+            },
             runtimeOpenNotificationCenter.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification,
                 object: nil,
@@ -738,6 +875,71 @@ final class AppModel: ObservableObject {
     func connectHealth(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
         guard !route.coversRuntime, let healthSync else { return "failed" }
         return await healthSync.connect(requestID: requestID, pairingCode: pairingCode, origin: origin)
+    }
+
+    private var liveActivityTarget: TurnActivityCoordinator.Target? {
+        guard let account = sessionCoordinator.currentAccount,
+              let instance = sessionCoordinator.selectedInstance,
+              let origin = WebOrigin(url: instance.url) else { return nil }
+        return .init(accountID: account.id, instanceOrigin: origin.serialized, storeID: websiteDataStore.identifier)
+    }
+
+    func handleLiveActivity(_ request: NativeBridgeRequest, origin: WebOrigin) async throws -> [String: Any] {
+        guard let runtime = route.runtime, sessionCoordinator.isSelectedRuntime(runtime),
+              let target = liveActivityTarget, target.instanceOrigin == origin.serialized else {
+            throw NativeBridgeError.forbidden
+        }
+        switch request.method {
+        case .liveActivitySetting:
+            guard request.params.isEmpty else { throw NativeBridgeError.invalidRequest }
+            return turnActivities.setting()
+        case .liveActivitySetSetting:
+            guard request.params.count == 1,
+                  let value = request.params["enabled"] as? NSNumber,
+                  CFGetTypeID(value) == CFBooleanGetTypeID() else { throw NativeBridgeError.invalidRequest }
+            await turnActivities.setSetting(value.boolValue)
+            return turnActivities.setting()
+        case .liveActivityObserve:
+            if request.params.count == 1, request.params["sessionId"] is NSNull {
+                await turnActivities.observe(nil)
+            } else {
+                guard request.params.count == 4,
+                      let sessionID = request.params["sessionId"] as? String, !sessionID.isEmpty, sessionID.count <= 256,
+                      let name = request.params["agentName"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      request.params["sessionTitle"] is String || request.params["sessionTitle"] is NSNull,
+                      let running = request.params["running"] as? NSNumber,
+                      CFGetTypeID(running) == CFBooleanGetTypeID() else { throw NativeBridgeError.invalidRequest }
+                await turnActivities.observe(.init(sessionID: sessionID, agentName: name,
+                    sessionTitle: request.params["sessionTitle"] as? String, running: running.boolValue, target: target))
+            }
+            return ["ok": true]
+        case .liveActivityOpenSettings:
+            guard request.params.isEmpty else { throw NativeBridgeError.invalidRequest }
+            await UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+            return ["ok": true]
+        default: throw NativeBridgeError.unsupported
+        }
+    }
+
+    /// This callback must not enqueue a Task before Activity.request.
+    private func liveActivityWillDeactivate() {
+        guard hasCompletedBootstrap, !route.coversRuntime, let target = liveActivityTarget else { return }
+        turnActivities.willDeactivate(registrationID: nativePushCoordinator.liveActivityRegistrationID(
+            accountID: target.accountID, instanceOrigin: target.instanceOrigin))
+    }
+
+    func openLiveActivity(_ url: URL) {
+        guard TurnActivityAttributes.activityID(from: url) != nil else { return }
+        guard !holdsInstanceOpens else { pendingInstanceOpen = .liveActivity(url); return }
+        guard let attributes = turnActivities.attributes(for: url) else { return }
+        let pathComponent = attributes.sessionID.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        if let target = liveActivityTarget, target.accountID == attributes.accountID,
+           target.instanceOrigin == attributes.instanceOrigin {
+            openSelectedInstance(path: "/chat/" + pathComponent)
+        } else {
+            _ = openInstance(accountID: attributes.accountID, instanceOrigin: attributes.instanceOrigin,
+                             path: "/chat/" + pathComponent)
+        }
     }
 
     func selectedInstanceName() -> String? {
@@ -1322,6 +1524,8 @@ final class AppModel: ObservableObject {
     private func bootstrap() async {
         let launch = Self.coldStartSignposter.beginInterval("bootstrap")
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
+        // Retire earlier-build cards locally before any account cleanup can send.
+        if !turnActivities.deviceEnabled { await turnActivities.endAllLocally() }
         await websiteDataStore.sweepOrphans()
         // Open first: with the last session avibe.bot confirmed and its
         // selected instance on this device, open that instance now and check
@@ -1475,16 +1679,34 @@ final class AppModel: ObservableObject {
         hasCompletedBootstrap = true
         // Navigation requested before bootstrap is delivered before Health
         // restoration, which may wait on the network and HealthKit.
-        if let pendingInstanceOpen {
-            self.pendingInstanceOpen = nil
-            switch pendingInstanceOpen {
-            case .pushTap(let tap):
-                handlePushTap(tap)
-            case .selectedInstance(let path):
-                openSelectedInstance(path: path)
-            }
-        }
+        deliverPendingInstanceOpen()
+        if !AvibeAppDelegate.isRunningTests { turnActivities.observeAuthorization() }
+        turnActivities.selectTarget(liveActivityTarget)
+        await turnActivities.reconcile(target: liveActivityTarget)
         await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
+    }
+
+    /// A notification tap, a shortcut or a Live Activity open waits while
+    /// the bootstrap or a session check an open depends on is under way:
+    /// it opens against the answered session. Only the latest waits.
+    private var holdsInstanceOpens: Bool {
+        !hasCompletedBootstrap || sessionConfirmation != nil || sessionRenewalIsReading
+    }
+
+    /// Delivers the request that waited, once nothing holds it any more.
+    private func deliverPendingInstanceOpen() {
+        guard !holdsInstanceOpens, let pending = pendingInstanceOpen else {
+            return
+        }
+        pendingInstanceOpen = nil
+        switch pending {
+        case .pushTap(let tap):
+            handlePushTap(tap)
+        case .selectedInstance(let path):
+            openSelectedInstance(path: path)
+        case .liveActivity(let url):
+            openLiveActivity(url)
+        }
     }
 
     private func stopRuntime() {
@@ -1611,6 +1833,11 @@ final class AppModel: ObservableObject {
         }
         guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
             return false
+        }
+        if revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
+            // Opened again, automatic: this attempt is replaced.
+            openRuntime(attempt.runtime)
+            return true
         }
         if attempt.phase == .showingCachedLive {
             // The page stays; a banner says the instance is not reachable,
@@ -2115,12 +2342,148 @@ final class AppModel: ObservableObject {
             if attempt.phase == .documentLoaded {
                 setRuntimeOpenPhase(.failed, attemptID: attemptID)
             } else {
+                let revertible = !isAuthenticationDestination(event.destination)
+                    && attempt.phase != .authenticating
+                    && attempt.phase != .awaitingUser
                 finishRuntimeOpenAutomaticBudget(
                     phase: .failed,
                     attemptID: attemptID
                 )
+                if revertible, revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
+                    // Opened again, automatic, once this callback has
+                    // returned; the failed attempt waits for nothing else.
+                    let runtime = attempt.runtime
+                    Task { @MainActor [weak self] in
+                        guard
+                            let self,
+                            self.runtimeIdentity == attemptID,
+                            self.runtimeOpenAttempt?.id == attemptID,
+                            self.runtimeOpenAttempt?.phase == .failed
+                        else {
+                            return
+                        }
+                        self.openRuntime(runtime)
+                    }
+                }
             }
         }
+    }
+
+    // MARK: This device's path choice
+
+    private func preferenceOrigin(_ runtime: MobileRuntimeContext) -> String? {
+        WebOrigin(url: runtime.instance.url)?.serialized
+    }
+
+    func directPathPreference(for runtime: MobileRuntimeContext) -> DirectPathPreference {
+        guard let origin = preferenceOrigin(runtime) else {
+            return .automatic
+        }
+        return directPathPreferences.preference(accountID: runtime.account.id, origin: origin)
+    }
+
+    /// Whether opens of `runtime` may use the direct path.
+    private func allowsDirect(_ runtime: MobileRuntimeContext) -> Bool {
+        directPathPreference(for: runtime).mode == .automatic
+    }
+
+    /// The runtime on screen, if it is `origin`'s and still selected.
+    private func runtimeShowing(_ origin: WebOrigin) -> MobileRuntimeContext? {
+        guard
+            let runtime = route.runtime,
+            WebOrigin(url: runtime.instance.url) == origin,
+            sessionCoordinator.isSelectedRuntime(runtime)
+        else {
+            return nil
+        }
+        return runtime
+    }
+
+    /// The page chose a path for its instance. Kept, any earlier automatic
+    /// reversion cleared; a change of mode reopens the instance at `url`
+    /// after this answer, so every connection starts again on the new path.
+    private func setDirectPathPreference(
+        _ mode: DirectPathPreference.Mode,
+        at origin: WebOrigin,
+        reopeningAt url: URL
+    ) -> DirectPathPreference? {
+        guard
+            let runtime = runtimeShowing(origin),
+            let key = preferenceOrigin(runtime)
+        else {
+            return nil
+        }
+        let previous = directPathPreference(for: runtime)
+        let next = DirectPathPreference(mode: mode, reverted: nil)
+        directPathPreferences.set(next, accountID: runtime.account.id, origin: key)
+        guard previous.mode != mode else {
+            return next
+        }
+        let identity = runtimeIdentity
+        Task { @MainActor [weak self] in
+            guard
+                let self,
+                self.runtimeIdentity == identity,
+                self.route.runtime == runtime,
+                self.sessionCoordinator.isSelectedRuntime(runtime)
+            else {
+                return
+            }
+            // For this reopen's attempt only: an open that never reaches
+            // its first load leaves nothing for a later one.
+            if self.openRuntime(runtime) {
+                self.runtimeStartURL = (runtime, self.runtimeIdentity, url)
+            }
+        }
+        return next
+    }
+
+    /// The URL the new controller of `runtime` starts at, once.
+    func takeRuntimeStartURL(for runtime: MobileRuntimeContext) -> URL? {
+        guard
+            let start = runtimeStartURL,
+            start.runtime == runtime,
+            start.identity == runtimeIdentity
+        else {
+            return nil
+        }
+        runtimeStartURL = nil
+        return start.url
+    }
+
+    /// "Cloudflare tunnel only", and this open of the instance ran out of
+    /// time or its document failed to load, while the device has a network
+    /// and avibe.bot lists the instance online: the path is what fails, so
+    /// the choice goes back to automatic (once; it stays automatic until
+    /// chosen again), and the page is told. The caller opens it again.
+    /// Not while a sign-in page is in front (its host is not the tunnel),
+    /// nor over a cached page shown uncovered (it stays, with its banner).
+    private func revertTunnelOnlyIfUnreachable(attemptID: Int) -> Bool {
+        guard
+            directPathController != nil,
+            !directListenerFault,
+            runtimeIdentity == attemptID,
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            ![.authenticating, .awaitingUser, .showingCachedLive].contains(attempt.phase),
+            route.runtime == attempt.runtime,
+            // As the reopen requires.
+            sessionCoordinator.keepsSelectedRuntime(attempt.runtime),
+            networkPath.isSatisfied,
+            sessionCoordinator.currentInstances
+                .first(where: { $0.id == attempt.runtime.instance.id })?.available == true,
+            directPathPreference(for: attempt.runtime).mode == .tunnel,
+            let origin = preferenceOrigin(attempt.runtime)
+        else {
+            return false
+        }
+        let reverted = DirectPathPreference(
+            mode: .automatic,
+            reverted: .init(at: Date(), reason: .unreachable)
+        )
+        directPathPreferences.set(reverted, accountID: attempt.runtime.account.id, origin: origin)
+        runtimeController?.deliverDirectPreferenceChanged(reverted)
+        return true
     }
 
     private func isAuthenticationDestination(
@@ -2159,10 +2522,164 @@ final class AppModel: ObservableObject {
             runtimeOpenBackgroundTime += runtimeOpenTiming.now - backgroundedAt
             runtimeOpenBackgroundedAt = nil
         }
+        if route.runtime != nil || runtimeOpenAttempt != nil,
+           !sessionCoordinator.sessionConfirmationIsCurrent
+        {
+            // The App stayed alive past the confirmation's lifetime: as a
+            // cold start would, the page is closed and avibe.bot asked
+            // before anything of the instance is loaded again.
+            confirmSessionThenOpen(atTheReturn: true)
+            return
+        }
+        renewSessionConfirmationIfDue()
         guard let attemptID = runtimeOpenAttempt?.id else {
             return
         }
         scheduleRuntimeOpenTimers(attemptID: attemptID)
+    }
+
+    /// How long after a return the quiet read starts: what brought the App
+    /// back (a notification tap, a shortcut) is handled first.
+    static let sessionRenewalDelay: Duration = .seconds(2)
+
+    /// An App that keeps running reads its session only at launch, so its
+    /// confirmation would run out after `MobileSessionConfirmation.lifetime`
+    /// and the page be closed for a check. From `renewalAge` on, a return to
+    /// the foreground with an instance open reads the session quietly
+    /// behind the page instead. Its answer acts as any session read's does
+    /// (a signed-out or changed account, or an instance gone from the list,
+    /// closes the page); no answer changes nothing.
+    private func renewSessionConfirmationIfDue() {
+        guard
+            hasCompletedBootstrap,
+            sessionRenewal == nil,
+            sessionConfirmation == nil,
+            route.runtime != nil,
+            sessionCoordinator.sessionConfirmationIsDueForRenewal
+        else {
+            return
+        }
+        sessionRenewal = Task { [weak self] in
+            try? await Task.sleep(for: Self.sessionRenewalDelay)
+            guard let self else {
+                return
+            }
+            defer { self.sessionRenewal = nil }
+            await self.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            guard
+                self.sessionConfirmation == nil,
+                self.sessionCoordinator.sessionConfirmationIsDueForRenewal
+            else {
+                return
+            }
+            self.sessionRenewalIsReading = true
+            _ = try? await self.sessionCoordinator.refresh()
+            self.sessionRenewalIsReading = false
+            // Push work the read held off (the account was busy), while
+            // the answer left the account and its open instance in place.
+            if let runtime = self.route.runtime,
+               self.sessionCoordinator.isCurrentRuntime(runtime)
+            {
+                self.nativePushCoordinator.resumeAfterAccountActivation()
+            }
+            // A tap or shortcut that arrived during the read.
+            self.deliverPendingInstanceOpen()
+        }
+    }
+
+    /// Whether work that reaches an instance without its page (a Live
+    /// Activity's requests) may go to `origin` for `accountID`: the session
+    /// lists that address for that account, and avibe.bot confirmed the
+    /// session within its lifetime.
+    private func sessionVouches(forAccount accountID: String, origin: String) -> Bool {
+        sessionCoordinator.sessionConfirmationIsCurrent
+            && sessionCoordinator.currentAccount?.id == accountID
+            && sessionCoordinator.currentInstances.contains {
+                WebOrigin(url: $0.url)?.serialized == origin
+            }
+    }
+
+    /// avibe.bot's last confirmation of the session is past its lifetime
+    /// (`MobileSessionConfirmation.lifetime`), and an
+    /// instance is to open or is open: whatever is open is closed, avibe.bot
+    /// is asked, and then the account's selected instance opens, if it still
+    /// lists it. With no answer (offline, a failed read) the App stops at
+    /// the instance list; a signed-out or changed account, or an instance
+    /// that left the list, is handled as after any session read.
+    /// `atTheReturn`: nothing asked for an open (the App came back to the
+    /// foreground); under the account page only the runtime goes then.
+    private func confirmSessionThenOpen(atTheReturn: Bool = false) {
+        runtimeOpenNotice = nil
+        invalidatePendingSystemSchedule()
+        if let previous = runtimeOpenAttempt {
+            lastRuntimeOpenTermination = RuntimeOpenTermination(
+                attemptID: previous.id,
+                instanceName: previous.runtime.instance.name,
+                lastPhase: previous.phase,
+                reason: .replaced
+            )
+        }
+        runtimeOpenAttempt = nil
+        cancelRuntimeOpenTimers()
+        stopRuntime()
+        if atTheReturn, case .accountOverBrowser = route {
+            // The account page stays; only the runtime under it goes. An
+            // instance chosen there opens through this check.
+            route = .onboarding(.account)
+            return
+        }
+        route = .loading
+        guard sessionConfirmation == nil else {
+            // The check under way opens what is selected when it answers.
+            return
+        }
+        sessionConfirmation = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            await self.sessionCoordinator.waitForSelectionKeepingOperations(
+                atMost: Self.selectionKeepingWait
+            )
+            let checked = try? await self.sessionCoordinator.refresh()
+            self.sessionConfirmation = nil
+            guard self.route == .loading, self.runtimeOpenAttempt == nil else {
+                // Something else took the screen meanwhile (an account
+                // transition from the answer itself, the instance list). A
+                // tap or shortcut that waited is delivered against it, as
+                // after a bootstrap.
+                self.deliverPendingInstanceOpen()
+                return
+            }
+            guard
+                let checked,
+                self.sessionCoordinator.sessionConfirmationIsCurrent,
+                let runtime = self.sessionCoordinator.restorableRuntime(
+                    from: checked,
+                    opensOffline: self.hasUsableCachedPage(for:)
+                )
+            else {
+                // No answer, or nothing to open: what waited is dropped
+                // with it (it could only ask again).
+                if self.hasCompletedBootstrap {
+                    self.pendingInstanceOpen = nil
+                }
+                self.clearPendingPushOpened()
+                self.route = .onboarding(.instances)
+                return
+            }
+            // A tap or shortcut that waited opens what it names, against
+            // the answered session; otherwise the selected instance opens.
+            self.deliverPendingInstanceOpen()
+            if self.route == .loading,
+               self.runtimeOpenAttempt == nil,
+               self.sessionConfirmation == nil
+            {
+                self.openRuntime(runtime)
+                self.settleListedAvailability(runtime, checked: checked)
+            }
+        }
     }
 
     @discardableResult
@@ -2180,6 +2697,23 @@ final class AppModel: ObservableObject {
         {
             clearPendingPushOpened()
         }
+        // Nothing of an instance is loaded on a session avibe.bot has not
+        // confirmed within its lifetime: its address may no longer lead to
+        // that instance. The check comes first, then the open.
+        guard sessionCoordinator.sessionConfirmationIsCurrent else {
+            confirmSessionThenOpen()
+            return true
+        }
+        if let origin = WebOrigin(url: runtime.instance.url)?.serialized {
+            departedInstanceData.noteOpened(
+                accountID: runtime.account.id,
+                origin: origin,
+                store: runtime.websiteDataStoreID
+            )
+        }
+        let turnTarget = liveActivityTarget
+        turnActivities.selectTarget(turnTarget)
+        Task { await turnActivities.reconcile(target: turnTarget) }
         nativePushCoordinator.resumeAfterAccountActivation()
         if let previous = runtimeOpenAttempt {
             lastRuntimeOpenTermination = RuntimeOpenTermination(
@@ -2200,6 +2734,12 @@ final class AppModel: ObservableObject {
             route = .browser(runtime)
             return true
         }
+        // The route is prepared whatever this device's path choice: a host
+        // loaded once without one keeps WebKit's pooled public connections
+        // on this store, so a later Automatic could never take effect
+        // (remote-direct-ios.md section 2). Under "Cloudflare tunnel only"
+        // nothing is selected (`settleOpen`): the transport never dials and
+        // every plan has only the public candidate.
         // The route for the instance's host must be in place before the
         // runtime's first load (docs/plans/remote-direct-ios.md section 5).
         // Its wait consumes the same fixed attempt budget as Web navigation.
@@ -2249,6 +2789,12 @@ final class AppModel: ObservableObject {
         guard let directPathController else {
             return
         }
+        // An open held across the end of the confirmation's lifetime (in
+        // the background): no WebView before avibe.bot has answered.
+        guard sessionCoordinator.sessionConfirmationIsCurrent else {
+            confirmSessionThenOpen()
+            return
+        }
         // About to act on the gate: a failure already recorded is delivered
         // first, so the marker never lags behind what is shown.
         directPathController.settleRecordedFault()
@@ -2257,7 +2803,10 @@ final class AppModel: ObservableObject {
             deferredOpen = nil
             setRuntimeOpenPhase(.connecting, attemptID: identity)
             route = .browser(runtime)
-            directPathController.runtimeDidOpen(runtime)
+            // "Cloudflare tunnel only": routed, never selected.
+            if allowsDirect(runtime) {
+                directPathController.runtimeDidOpen(runtime)
+            }
         case .held:
             deferredOpen = (runtime, identity)
         case .fault:
@@ -2448,6 +2997,65 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// `device.describe` for the selected instance's page: nil for any
+    /// other instance, or when no account is signed in. Health's id is an
+    /// alias only for the instance Health is paired with, on this account.
+    /// A restored account counts before its check confirms it (a cold start
+    /// opens the instance first); nothing is answered while the account is
+    /// signing out, resetting or changing.
+    func describeDevice(instanceID: String) -> [String: Any]? {
+        guard
+            let accountID = sessionCoordinator.settledAccountID,
+            sessionCoordinator.selectedInstance?.id == instanceID
+        else {
+            return nil
+        }
+        let health = (try? healthCredentials.load()).flatMap {
+            $0.accountID == accountID && $0.instanceID == instanceID ? $0.installationID : nil
+        }
+        return NativeDeviceDescription.body(
+            displayName: NativeDeviceDescription.modelName(
+                identifier: NativeDeviceDescription.hardwareIdentifier
+            ),
+            installationID: nativePushCoordinator.deviceIdentifier(forInstanceID: instanceID),
+            healthInstallationID: health,
+            scheduleDeviceID: systemScheduleDeviceID,
+            appVersion: NativeShellMetadata().shellVersion,
+            systemVersion: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
+        )
+    }
+
+    /// A one-use Health binding ticket for the selected instance's page
+    /// (`device.describe` with `health_binding`): only in front, on the
+    /// settled account, and only from the pairing Health has with that
+    /// instance on that account. nil otherwise, and if any of that changed
+    /// while the ticket was on its way.
+    func healthBindingTicket(instanceID: String) async -> String? {
+        guard
+            UIApplication.shared.applicationState == .active,
+            let healthSync,
+            let accountID = sessionCoordinator.settledAccountID,
+            let instance = sessionCoordinator.selectedInstance,
+            instance.id == instanceID,
+            let origin = WebOrigin(url: instance.url)
+        else {
+            return nil
+        }
+        let ticket = await healthSync.bindingTicket(
+            accountID: accountID, instanceID: instanceID, origin: origin.serialized
+        )
+        guard
+            let ticket,
+            UIApplication.shared.applicationState == .active,
+            sessionCoordinator.settledAccountID == accountID,
+            sessionCoordinator.selectedInstance?.id == instanceID,
+            sessionCoordinator.selectedInstance?.url == instance.url
+        else {
+            return nil
+        }
+        return ticket
+    }
+
     @discardableResult
     func acknowledgePushOpened(id: String, origin: WebOrigin) -> Bool {
         guard
@@ -2529,7 +3137,7 @@ final class AppModel: ObservableObject {
     }
 
     private func handlePushTap(_ tap: PushNotificationTap) {
-        guard hasCompletedBootstrap else {
+        guard !holdsInstanceOpens else {
             pendingInstanceOpen = .pushTap(tap)
             return
         }
@@ -2559,7 +3167,7 @@ final class AppModel: ObservableObject {
     /// open was requested or the screen, the runtime, the account, or the
     /// selection changed: the user has moved on.
     func openSelectedInstance(path: String) {
-        guard hasCompletedBootstrap else {
+        guard !holdsInstanceOpens else {
             pendingInstanceOpen = .selectedInstance(path: path)
             return
         }
@@ -2698,6 +3306,7 @@ final class AppModel: ObservableObject {
         // separately and removed when it signs out or changes).
         runtimePageCache.removeAll()
         runtimeLoadsLiveOnce = nil
+        runtimeStartURL = nil
         // Any account invalidation ends a route-prepare or held open; neither
         // may leave the Native loading surface behind without an attempt.
         retireRuntimeOpenForAccountTransition()
@@ -2715,6 +3324,7 @@ final class AppModel: ObservableObject {
         }
         // A background voice take belongs to the account that is going.
         let barriers = pendingRuntimeReleaseBarriers
+            + turnActivities.invalidateRequests()
             + VoiceCaptureController.shared.cancelForAccountTransition()
         pendingRuntimeReleaseBarriers.removeAll()
         return barriers

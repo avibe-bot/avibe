@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-popover-fit"
+description = "Enables the update_popover_fit command without any pre-configured scope."
+commands.allow = ["update_popover_fit"]
+
+[[permission]]
+identifier = "deny-update-popover-fit"
+description = "Denies the update_popover_fit command without any pre-configured scope."
+commands.deny = ["update_popover_fit"]

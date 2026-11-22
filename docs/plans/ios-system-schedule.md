@@ -31,7 +31,7 @@ A receipt has contract version 1, request/operation/kind identity, `state`, the 
 - `expired`
 - `stale_context`
 
-`scheduled` is emitted only after the OS API accepts the item. `awaiting_device` is not a Native receipt state: it is the Agent/CLI operation state shown when a create was already claimed by its bound iPhone, its claim deadline has passed, and the matching terminal receipt has not arrived yet. The operation includes `status_message: "Waiting for your iPhone to return the result."`.
+`scheduled` is emitted only after the OS API accepts the item. `awaiting_device` is not a Native receipt state: it is the Agent/CLI operation state shown when a create was already claimed by its bound iPhone, its claim deadline has passed, and the matching terminal receipt has not arrived yet. The operation includes `status_message: "Waiting for your device to return the result."`.
 
 ## 06:24 simplification
 
@@ -160,3 +160,15 @@ The user can cancel or create the item. Submission remains visibly in progress w
 6. Focused XCTest, full owning XCTest, and unsigned simulator/device-architecture builds locally.
 7. Before Internal TestFlight: send main the exact new copy list, phone acceptance route, and Xcode 26.6/profile gate status.
 8. Because the signed TestFlight workflow is master-only, open and fully gate the PR first; after main merges it, dispatch the merge commit to Internal TestFlight and keep real-device behavior as a separate evidence layer.
+
+## D2 supported-kind claims
+
+The Runtime claim endpoint accepts optional `kinds` from `systemSchedule.capabilities.supportedKinds`.
+Only unbound new creates are filtered; device-bound recovery and cancellation remain reachable even
+with `kinds: []`. Clients omitting kinds retain unrestricted legacy claims. The forwarder is served
+by Runtime, and the native capabilities bridge already shipped in #3930: existing iPhones with that
+bridge begin filtering when Runtime is updated, without a new TestFlight package. Missing/malformed
+capabilities allow only bound recovery/cancel. Without an authoritative all-device capability registry,
+an unsupported kind waits for another device until expiry (default 300 seconds); previously an
+incapable device could claim it and immediately return unsupported. See [D2 Runtime contract](desktop-d2-runtime-contract.md) and the shared fixture
+`tests/fixtures/system_schedule_contract_vectors.json`.

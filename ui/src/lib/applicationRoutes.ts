@@ -20,6 +20,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/apps/files',
   '/apps/terminal',
   '/apps/editor',
+  '/apps/preview',
   '/apps/library',
   '/admin',
   '/admin/dashboard',
@@ -53,6 +54,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/settings/appearance',
   '/settings/account',
   '/settings/shortcuts',
+  '/settings/microphone',
   '/settings/computer-use',
   '/settings/service',
   '/settings/platforms',
@@ -92,7 +94,7 @@ const CHAT_ROUTE_PATTERN = APPLICATION_ROUTE_PATTERNS[
 ];
 
 function hrefPathname(href: string): string {
-  const rawPathname = href.split(/[?#]/, 1)[0];
+  const rawPathname = href.split(/[?#]/, 1)[0] ?? '';
   return rawPathname.replace(/\/+$/, '') || '/';
 }
 

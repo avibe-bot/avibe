@@ -484,12 +484,39 @@ describe('native direct closure watermark', () => {
       Promise.resolve({ preferred: 'direct', sequence: 1, closure: 0, path: 'ipv6', attempts: [] }),
     );
     let native = await load();
-    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: 'ipv6', lastConnection: null });
+    expect(await native.readNativeDirectPath()).toEqual({
+      preferred: 'direct', path: 'ipv6', scope: null, rttMs: null, lastConnection: null,
+    });
     shell.call.mockImplementation(() => Promise.resolve({ preferred: 'direct', sequence: 1, closure: 0, path: '10.0.0.1' }));
-    expect(await native.readNativeDirectPath()).toEqual({ preferred: 'direct', path: null, lastConnection: null });
+    expect(await native.readNativeDirectPath()).toEqual({
+      preferred: 'direct', path: null, scope: null, rttMs: null, lastConnection: null,
+    });
     Reflect.deleteProperty(window, 'avibeNative');
     native = await load();
     expect(await native.readNativeDirectPath()).toBeNull();
+  });
+
+  it("reads the path's class and round trip only for the path the status names", async () => {
+    const shell = installShell({ direct: 3 });
+    const answer = (extra: Record<string, unknown>) => shell.call.mockImplementation(() =>
+      Promise.resolve({ preferred: 'direct', sequence: 1, closure: 0, ...extra }));
+    const native = await load();
+    answer({ path: 'ipv6', path_scope: 'local', rtt_ms: 4 });
+    expect(await native.readNativeDirectPath()).toMatchObject({ path: 'ipv6', scope: 'local', rttMs: 4 });
+    answer({ path: 'ipv4', path_scope: 'global', rtt_ms: 85 });
+    expect(await native.readNativeDirectPath()).toMatchObject({ path: 'ipv4', scope: 'global', rttMs: 85 });
+    // The relay has a round trip and no class.
+    answer({ path: 'relay', path_scope: 'local', rtt_ms: 140 });
+    expect(await native.readNativeDirectPath()).toMatchObject({ path: 'relay', scope: null, rttMs: 140 });
+    // No path named: neither. Anything malformed, or zero, is not shown.
+    answer({ path_scope: 'local', rtt_ms: 9 });
+    expect(await native.readNativeDirectPath()).toMatchObject({ path: null, scope: null, rttMs: null });
+    answer({ path: 'ipv4', path_scope: 'lan', rtt_ms: -1 });
+    expect(await native.readNativeDirectPath()).toMatchObject({ scope: null, rttMs: null });
+    answer({ path: 'ipv4', rtt_ms: 0 });
+    expect(await native.readNativeDirectPath()).toMatchObject({ rttMs: null });
+    answer({ path: 'ipv4', rtt_ms: 1.5 });
+    expect(await native.readNativeDirectPath()).toMatchObject({ rttMs: null });
   });
 
   it('tells path changes with the preference, in sequence order', async () => {
@@ -523,7 +550,8 @@ describe('native direct closure watermark', () => {
     }));
     const native = await load();
     expect(await native.readNativeDirectPath()).toEqual({
-      preferred: 'direct', path: 'ipv4', lastConnection: { direct: 42, public: 'none', winner: 'direct' },
+      preferred: 'direct', path: 'ipv4', scope: null, rttMs: null,
+      lastConnection: { direct: 42, public: 'none', winner: 'direct' },
     });
     shell.call.mockImplementation(() => Promise.resolve({
       preferred: 'direct', sequence: 2, closure: 0, connections: [{ direct: '10.0.0.1', public: 3, winner: 'x' }],

@@ -1,3 +1,4 @@
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AppWindow,
@@ -52,7 +53,8 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
   onPrepareLaunch,
 }) => {
   const { t } = useTranslation();
-  const { openApp, setGestureActive } = useWindowManager();
+  const { setGestureActive } = useWindowManager();
+  const launchApp = useAppLaunch('show-control');
   const dock = useDock();
   const { begin: beginShowPageDrag, end: endShowPageDrag } = useShowPageDrag();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -108,13 +110,9 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
       clearHoverTimer();
       setMenuOpen(false);
       if (!(await prepare())) return;
-      openApp('showpage', {
-        title: windowTitle,
-        bounds: point ? showPageWindowOrigin(point) : undefined,
-        params: { sessionId, title: windowTitle },
-      });
+      await launchApp({ appId: 'showpage', title: windowTitle, sessionId }, 'newWindow', { bounds: point ? showPageWindowOrigin(point) : undefined });
     },
-    [clearHoverTimer, openApp, prepare, sessionId, windowTitle],
+    [clearHoverTimer, launchApp, prepare, sessionId, windowTitle],
   );
 
   const openLink = useCallback(async () => {

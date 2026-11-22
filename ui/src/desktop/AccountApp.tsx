@@ -6,14 +6,17 @@ import { Badge } from '../components/ui/badge';
 import { Skeleton } from '../components/ui/skeleton';
 import { cn } from '../lib/utils';
 import { AccountSecondFactorView } from './AccountSecondFactorView';
-import { AccountLoginView } from './AccountLoginView';
+import { DesktopSignIn } from './DesktopSignIn';
+import { openLinkInNewContext } from '../lib/pwaNavigation';
+import { ACCOUNT_SECURITY_URL } from '../sign-in/links';
 import { InstanceSwitcherView } from './InstanceSwitcherView';
 import { AccountSignOutView } from './AccountSignOutView';
 import { AccountDetailsView } from './AccountDetailsView';
 import { AddInstanceView } from './AddInstanceView';
 import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
-import { UpdatePanel } from '../components/update/UpdatePanel';
+import { UpdatePanel, UpdateSubjectsPanel } from '../components/update/UpdatePanel';
+import { instanceSection } from './instanceUpdateModel';
 import { modelFromDesktopState } from '../components/update/updatePanelModel';
 import { useAcceptedInstall } from '../components/update/useAcceptedInstall';
 
@@ -47,7 +50,8 @@ export function UpdatePopoverView({ label, onClose, panelRef, children }: {
 }) {
   return <div data-update-popover className="fixed inset-0" onClick={onClose}>
     {children && <div ref={panelRef} role="dialog" aria-label={label} tabIndex={-1} onClick={(event) => event.stopPropagation()}
-      className="absolute bottom-2 left-2 w-80 overflow-hidden rounded-xl border border-edge bg-popover text-popover-foreground shadow-elevation-2 outline-none">
+      // Both subjects' details open can be taller than a small window: the panel then scrolls inside it.
+      className="absolute bottom-2 left-2 max-h-[calc(100%-1rem)] w-80 overflow-x-hidden overflow-y-auto rounded-xl border border-edge bg-popover text-popover-foreground shadow-elevation-2 outline-none">
       {children}
     </div>}
   </div>;
@@ -100,29 +104,91 @@ export function DesktopUpdatePanel({ state, act, busy, install, close }: {
   />;
 }
 
+/** The panel while the app shows an instance on another computer (ui/design: update/instance-and-app): that
+ *  instance first, then this computer's desktop app, each with its own state and button. The shell reads and
+ *  updates the instance itself, with the app's sign-in; this page only asks it to. On this computer's own
+ *  instance there is one thing to update, and the panel is the single one. */
+export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>[0]) {
+  const { state, act, busy, install, close } = props;
+  // The time bounds how long an install the instance reported itself stands while it does not answer.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const committed = state.connection.committed;
+  const instance = state.instance_update;
+  if (committed.kind !== 'remote' || !instance) return <DesktopUpdatePanel {...props} />;
+  const shown = instanceSection(instance, now);
+  const update = state.desktop.update;
+  const appTarget = update.latest;
+  const accepts = (action: string) => update.hostActions?.includes(action) ?? false;
+  const appChecking = ['checking', 'downloading', 'installing'].includes(update.phase);
+  return <UpdateSubjectsPanel
+    instanceName={committed.name}
+    instance={{
+      model: shown.model,
+      unavailable: shown.unavailable,
+      actions: {
+        // Its own check only where the shell would take one, so the section offers no retry the shell refuses.
+        ...(shown.canCheck ? { check: { run: () => void act({ type: 'instance_update_check' }), disabled: busy || shown.busy } } : {}),
+        ...(shown.canUpdate && shown.target ? {
+          update: { run: () => void act({ type: 'instance_update_install', target_version: shown.target! }), disabled: busy },
+        } : {}),
+        ...(shown.canSet.prereleases ? { setPrereleases: (enabled: boolean) => void act({ type: 'instance_update_set_prereleases', enabled }) } : {}),
+        ...(shown.canSet.autoUpdate ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'instance_update_set_auto_update', enabled }) } : {}),
+        settingsBusy: busy || shown.busy,
+      },
+    }}
+    app={{
+      model: modelFromDesktopState(update, { current: state.desktop.version, installFailed: install.failed }),
+      actions: {
+        check: { run: () => void act({ type: 'update_check' }), disabled: busy || appChecking },
+        ...(update.phase === 'available' && appTarget ? {
+          // Only an accepted request can fail as an install; a rejected one installed nothing.
+          update: { run: () => void act({ type: 'update_install', target_version: appTarget }).then((ok) => { if (ok) install.accept(); }), disabled: busy },
+        } : {}),
+        ...(accepts('prereleases') ? { setPrereleases: (enabled: boolean) => void act({ type: 'update_set_prereleases', enabled }) } : {}),
+        ...(accepts('auto_update') ? { setAutoUpdate: (enabled: boolean) => void act({ type: 'update_set_auto_update', enabled }) } : {}),
+        settingsBusy: busy,
+      },
+    }}
+    // One check asks both updaters: this computer's, then the instance's. Where the shell would refuse the
+    // instance's check (a member, an instance that does not answer, a host too old to take one), it reads
+    // the instance again instead, which any reader may.
+    check={{
+      run: () => void act({ type: 'update_check' }).then(() => act({ type: shown.canCheck ? 'instance_update_check' : 'instance_update_refresh' })),
+      disabled: busy || appChecking || shown.busy,
+    }}
+    close={close}
+  />;
+}
+
 // Document-local replay suppression. Native owns one-time admission and consumption.
 const attemptedSignOutIntents = new Set<string>();
 
 export function AccountApp() {
   const { t, i18n } = useTranslation();
   const { state, error, send, signOutIntent } = useAccountClient();
+  // The shell projects the configured logical control origin before this document mounts. The back
+  // button's edge (its hover wash) starts there; its arrow keeps the button's own inset.
+  const [controlsLeft] = useState(() => getComputedStyle(document.documentElement).getPropertyValue('--shell-window-controls-left').trim());
   const [popover] = useState(() => new URLSearchParams(window.location.search).get('view') === UPDATE_POPOVER);
   const install = useAcceptedInstall(state?.desktop.update.phase);
   const [view, setView] = useState<DesktopClientView | 'profile' | 'add'>(() => {
     const initial = new URLSearchParams(window.location.search).get('view');
     return isDesktopClientView(initial) ? initial : 'account';
   });
-  const [email, setEmail] = useState('');
+  // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
-  const [password, setPassword] = useState('');
-  const [passwordMode, setPasswordMode] = useState(false);
-  const [passwordHelp, setPasswordHelp] = useState(false);
-  const [editEmail, setEditEmail] = useState(false);
-  const [method, setMethod] = useState<'totp' | 'recovery'>('totp');
   const [busy, setBusy] = useState(false);
+  // When the last action was one sent to the selected instance's updater: the time of that click.
+  const [instanceAction, setInstanceAction] = useState<number | null>(null);
   const [reviewChange, setReviewChange] = useState(false);
   const [selection, setSelection] = useState<{ id: string; generation: number; error: string | null } | null>(null);
   const [material, setMaterial] = useState<{ generation: number; result: DesktopClientDirectResult } | null>(null);
+  // "Use a different account" that could not forget the stored account: shown until the next step.
+  const [forgetFailure, setForgetFailure] = useState<{ code: string; generation: number } | null>(null);
   const epoch = useRef(0);
   const requestBusy = useRef(false);
   // Synchronous eligibility spans the request and direct result before React
@@ -134,7 +200,6 @@ export function AccountApp() {
   if (inputGeneration !== state?.generation) {
     setInputGeneration(state?.generation);
     setCode('');
-    setPassword('');
     if (material && material.generation !== state?.generation) setMaterial(null);
   }
   useLayoutEffect(() => {
@@ -159,6 +224,7 @@ export function AccountApp() {
   }, [i18n, popover]);
   const act = useCallback(async (action: DesktopClientAction): Promise<boolean> => {
     if (requestBusy.current) return false;
+    setInstanceAction(action.type.startsWith('instance_update_') ? Date.now() : null);
     requestBusy.current = true;
     setBusy(true);
     const ticket = epoch.current;
@@ -181,7 +247,6 @@ export function AccountApp() {
         return false;
       }
       setCode('');
-      if (action.type === 'request_otp') setEditEmail(false);
       if (action.type === 'begin_totp_enrollment' && reply.result?.type === 'totp_enrollment') {
         setMaterial({ generation: reply.state.generation, result: reply.result });
       } else if (action.type === 'finish_totp_enrollment' && reply.result?.type === 'totp_enrolled') {
@@ -202,7 +267,6 @@ export function AccountApp() {
     recoveryProtection.current = null;
     setMaterial(null);
     setCode('');
-    setPassword('');
     setSelection(null);
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
@@ -230,7 +294,6 @@ export function AccountApp() {
       recoveryProtection.current = null;
       setMaterial(null);
       setCode('');
-      setPassword('');
       void send({ type: 'sign_out', intent_id: signOutIntent.intent_id });
     });
     return () => { active = false; };
@@ -241,7 +304,14 @@ export function AccountApp() {
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
   };
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
-  const displayedError = error ?? (view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
+  // An install the instance refused or failed is told by its section (the shell's receipt says `failed`). Any
+  // other failed action there, a check or a switch, has no such place, and keeps this page's notice.
+  // A refusal that leaves no receipt (the shell busy, a selection under way, the offer changed) keeps it too.
+  const instanceRequest = state?.instance_update?.request;
+  const toldBySection = instanceAction !== null && instanceRequest?.action === 'install' && instanceRequest.phase === 'failed'
+    && Date.parse(instanceRequest.updated_at) >= instanceAction - 1000;
+  // The update views, the popup included, are not where an enrollment failure is told.
+  const displayedError = (toldBySection ? null : error) ?? (popover || view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
   const errorMessage = displayedError ? explainError(displayedError) : null;
   const activeSelection = selection?.generation === state?.generation ? selection : null;
   const failedPending = activeSelection?.error && activeSelection.id === state?.connection.pending?.instance_id;
@@ -258,7 +328,7 @@ export function AccountApp() {
     // Nothing is drawn until the state arrives; a failure to get it is still shown.
     return <UpdatePopover label={t('dashboard.versionAndUpdate')}>
       {(state || failure) && <>
-        {state && <DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />}
+        {state && <DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={closeUpdatePopover} />}
         {failure && <div className={state ? 'p-4 pt-0' : 'p-4'}>{failure}</div>}
       </>}
     </UpdatePopover>;
@@ -269,7 +339,9 @@ export function AccountApp() {
     content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
   } else if (view === 'updates') {
     // ui/design: update/panel/trusted-view
-    content = <div className="mx-auto w-full max-w-md pt-12"><Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading><div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanel state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
+    // With the instance's section beside the app's, the panel says whose each is; the heading only names the page.
+    const both = state.connection.committed.kind === 'remote' && Boolean(state.instance_update);
+    content = <div className="mx-auto w-full max-w-md pt-12">{both ? <Heading title={t('dashboard.versionAndUpdate')} /> : <Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading>}<div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
   } else if (view === 'sign-out') {
     content = <AccountSignOutView signingOut={!!signOutIntent} errorMessage={errorMessage} onRetry={() => leave('sign_out')} onBack={() => leave('cancel')} />;
   } else if (view === 'setup-complete') {
@@ -281,31 +353,22 @@ export function AccountApp() {
       if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
       else setView('account');
     }}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
-  } else if (state.account.status === 'second_factor_required') {
-    centerLogin = true;
-    content = <AccountSecondFactorView enroll={state.account.gate === 'enroll'} methods={state.account.methods}
-      method={method} code={code} busy={busy} material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
-      onCodeChange={setCode} onMethodChange={(method) => { setCode(''); setMethod(method); }}
-      onVerify={() => void act(direct?.type === 'totp_enrollment' ? { type: 'finish_totp_enrollment', code } : { type: 'verify_second_factor', method, code })}
-      onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onPasskey={() => void act({ type: 'verify_passkey' })} onLocal={() => leave('return_local')} />;
   } else if (state.account.status !== 'signed_in') {
+    // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
+    // "continue on this computer", Back to Workbench and the in-app authenticator setup below.
     centerLogin = true;
-    const verify = state.account.status === 'verifying' && !editEmail;
-    content = <AccountLoginView verify={verify} email={state.account.email ?? ''}
-      value={verify ? code : email} busy={busy} errorMessage={errorMessage}
-      onValueChange={verify ? setCode : setEmail}
-      password={{ active: passwordMode, value: password, forgot: passwordHelp, onChange: setPassword,
-        onToggle: () => { setPassword(''); setPasswordMode(!passwordMode); setPasswordHelp(false); },
-        onForgot: () => { setPassword(''); setPasswordMode(false); setPasswordHelp(true); } }}
-      onSubmit={() => {
-        const action: DesktopClientAction = verify ? { type: 'verify_otp', code } : passwordMode
-          ? { type: 'sign_in_password', email: email.trim(), password } : { type: 'request_otp', email: email.trim() };
-        setPassword('');
-        void act(action);
-      }}
-      onChangeEmail={() => { setCode(''); setEmail(state.account.email ?? ''); setEditEmail(true); }}
-      onResendCode={() => void act({ type: 'request_otp', email: state.account.email ?? email })}
-      onContinueLocal={() => leave('return_local')} />;
+    content = <><DesktopSignIn state={state} send={send}
+      onLocal={() => leave('return_local')}
+      onDifferentAccount={() => void send({ type: 'abort_sign_in' }).then((reply) => {
+        setForgetFailure(reply && 'ok' in reply && !reply.ok ? { code: reply.error.code, generation: reply.state.generation } : null);
+      })}
+      onOpenSecurity={() => { openLinkInNewContext(ACCOUNT_SECURITY_URL, 'noopener,noreferrer'); }}
+      renderEnroll={() => <AccountSecondFactorView code={code} busy={busy}
+        material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
+        onCodeChange={setCode}
+        onVerify={() => void act({ type: 'finish_totp_enrollment', code })}
+        onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onLocal={() => leave('return_local')} />} />
+      {forgetFailure?.generation === state.generation && <p role="alert" className="mx-auto mt-4 w-full max-w-md text-sm leading-6 text-destructive-ink">{explainError(forgetFailure.code)}</p>}</>;
   } else if (state.consent || (state.connection.status === 'switching' && !failedPending) || (state.connection.status === 'remote_unreachable' && view === 'instances')) {
     content = switcher;
   } else if (view === 'profile' || (view === 'account' && ['unknown', 'unpaired', 'paired_this_account'].includes(state.enrollment.status))) {
@@ -330,7 +393,7 @@ export function AccountApp() {
   }
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
-    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>}
+    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3" style={controlsLeft ? { paddingLeft: 'var(--shell-window-controls-left)' } : undefined}><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>}
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
   </div>;
 }

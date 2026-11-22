@@ -72,7 +72,9 @@ them imports `modelHubSurface.css` itself.
 `build-linux-artifacts` job (`npm run check:first-load`). It measures, gzip level
 6 as the UI server sends it, the JavaScript `index.html` loads plus the larger
 locale (home), and that plus a conversation's preloads (chat). Budgets: 600 KiB
-home, 900 KiB chat. Raise one only in the change that needs it, with the reason;
+home (608 for a few hours on 2026-11-20, back to 600 once the Ask Vibey receiver
+and the new-project dialog moved off the first screen; both reasons are in the
+script), 900 KiB chat. Raise one only in the change that needs it, with the reason;
 first move what the first screen does not draw off it.
 
 ## 5. Brotli

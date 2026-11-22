@@ -28,10 +28,14 @@ base64 = "0.23"
 avibe-runtime-host = { path = "../runtime-host" }
 cookie = "0.18"
 flate2 = "1"
+getrandom = "0.4"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle = { version = "=2.6.1", default-features = false }
 sys-locale.workspace = true
 tar = "0.4"
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "unstable"] }
@@ -60,11 +64,14 @@ tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Networking_WindowsWebServices", "Win32_Foundation", "Data_Xml_Dom", "UI_Notifications"] }
 keyring = { version = "3.6", features = ["windows-native"] }
+zeroize = "1"
 # Match Tauri's Known Folder lookup without initializing the GUI.
 dirs = "7"
 # The pet's drag: the primary button's state and a one-step window frame.
 uuid = { version = "1", features = ["v4"] }
 windows-sys = { version = "0.61", features = [
+  "Win32_Security_Credentials",
+  "Win32_Security_Cryptography",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   # Computer Use's inactive Windows x64 process-ownership foundation.
@@ -91,6 +98,7 @@ block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "block2",
+  "FoundationErrors",
   "NSAppleEventDescriptor",
   "NSAppleEventManager",
   "NSArray",
@@ -114,9 +122,28 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
+  "NSAccessibilityProtocols",
   "NSApplication",
+  "NSBitmapImageRep",
+  "NSButton",
+  "NSColor",
+  "NSControl",
+  "NSFont",
+  "NSFontDescriptor",
+  "NSImage",
+  "NSKeyValueBinding",
+  "NSParagraphStyle",
+  "NSTextField",
+  "NSImageRep",
+  "NSImageView",
+  "NSLayoutConstraint",
+  "NSSharingService",
+  "NSTitlebarAccessoryViewController",
+  "NSViewController",
   "NSEvent",
   "NSGraphics",
+  "NSPasteboard",
+  "NSPasteboardItem",
   "NSResponder",
   "NSView",
   "NSWindow",
@@ -125,6 +152,8 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "block2",
   "objc2-app-kit",
+  "objc2-core-foundation",
+  "WKContentWorld",
   "WKFrameInfo",
   "WKNavigation",
   "WKNavigationAction",
@@ -132,6 +161,7 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "WKNavigationResponse",
   "WKPreferences",
   "WKSecurityOrigin",
+  "WKSnapshotConfiguration",
   "WKUIDelegate",
   "WKURLSchemeHandler",
   "WKURLSchemeTask",

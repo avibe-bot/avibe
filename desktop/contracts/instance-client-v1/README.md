@@ -28,6 +28,26 @@ is selected; they neither use its session nor persist an account transaction.
 publishes progress through `state.desktop.update`; an update reply cannot
 replace that live projection with a saved account-state clone.
 
+The five `instance_update_*` actions act on the committed remote instance, not
+this computer: `refresh` reads its `/api/session` and `/api/version`; `check`,
+`set_prereleases`, `set_auto_update` and `install` send that instance's own
+update requests with the sign-in the app made when it opened the instance
+(kept in memory, never persisted), its `Origin` and CSRF double-submit. Only
+the bundled account page and the update popup may call them, never a
+Workbench. `install` requires the exact `snapshot.latest` on display.
+`state.instance_update` (null while the committed connection is local) is
+display data rebuilt from allow-listed fields with validated versions,
+enumerated phases and error codes; it is in the full state only, never the
+Runtime projection. Its `request` is the last action this shell sent. A
+standalone install answers when it ends; the shell follows `install` and
+`current` in later reads. `request.following` is exactly when the shell
+refuses another action for the instance because of that request (on its way,
+or an install still followed); it is republished when time alone ends it.
+`request.installed_from` is the version an install started from (null for
+other actions). A standalone Runtime still answering on that version, with no
+`install` report of its own, five minutes after accepting is no longer
+followed.
+
 Native menu/deep-link presentation dispatches `avibe:desktop-present` through
 that document's unsaved-work guard. Its optional `presentationToken` must be
 forwarded unchanged across asynchronous approval as

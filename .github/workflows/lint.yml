@@ -324,6 +324,8 @@ jobs:
               # The Workbench shell measured in a browser (sidebar, Settings frame, phone home).
               npm run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts
               npm run test:badge-triggers
+              # What a real browser does with a retired address's answer (Chromium and WebKit).
+              npm run test:address-retired
               npm run test:chat-selection
               npm run test:chat-scroll
     steps:
@@ -514,15 +516,15 @@ jobs:
   unit-test-shards:
     needs: changes
     if: fromJSON(needs.changes.outputs.plan).jobs['unit-test-shards'] == 'run'
-    name: unit-tests (${{ matrix.shard }}/${{ matrix.shard-total }})
+    name: unit-tests (Python ${{ matrix.python }}, ${{ matrix.shard }}/${{ matrix.shard-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # Eight runners with two planned lanes each: the refreshed complete-run
-        # timings give each lane about five minutes of file work. Preserve
-        # discovery, watchdogs and one-process-per-file isolation.
+        # Each Python version runs the full suite over 16 timing-balanced lanes,
+        # two per runner, under the same 20-minute job deadline.
+        python: ['3.12', '3.15']
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
         shard-total: [8]
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
@@ -540,7 +542,7 @@ jobs:
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
       # Exact setup-uv versions still fetch a remote manifest on a cold runner.
       - name: Install pinned uv
@@ -550,7 +552,7 @@ jobs:
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
-          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.13.7-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.13.7-py${{ matrix.python }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       - name: Install package and test deps
         # Install the declared dev group instead of a hand-listed set so test
@@ -1581,7 +1583,7 @@ jobs:
       - name: Verify locked Windows installer failures and upgrade recovery guidance
         run: >-
           python -m pytest -q -ra
-          tests/test_windows_install_release.py tests/test_install_network_guidance.py
+          tests/test_windows_install_release.py tests/test_install_network_guidance.py tests/test_install_status.py
 
       # Its job object is the one the watch worker uses; no other job runs
       # this file on Windows.
