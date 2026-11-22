@@ -3,7 +3,8 @@
 <plist version="1.0">
 <dict>
 	<!-- The bundle's localizations: English stays the system UI language for
-	     English users; zh-Hans carries the Services menu title 「问 Vibey」. -->
+	     English users; zh-Hans carries the Services menu title 「问 Vibey」
+	     and the Local Network question's sentence. -->
 	<key>CFBundleLocalizations</key>
 	<array>
 		<string>en</string>
@@ -31,5 +32,11 @@
 	     unless the host app declares why it needs the microphone. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Avibe uses the microphone for voice input in the Workbench.</string>
+	<!-- The direct path to another computer's instance reaches it on the
+	     same network. macOS asks for Local Network access the first time
+	     and shows this sentence; without it the question has no reason.
+	     The iPhone App's sentence; zh-Hans is in InfoPlist.strings. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Lets Avibe connect directly to the computer running Avibe when it's on the same network. If you don't allow it, Avibe still works over the internet.</string>
 </dict>
 </plist>
