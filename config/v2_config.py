@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from pathlib import Path
+from types import NoneType, UnionType
 from typing import (
     Any,
     Callable,
@@ -22,6 +23,9 @@ from typing import (
     Mapping,
     Optional,
     TypeVar,
+    Union,
+    get_args,
+    get_origin,
 )
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
@@ -887,6 +891,15 @@ def _named_bool(path: str, value: object) -> bool:
     raise ValueError(f"Config '{path}' must be a boolean")
 
 
+def _unwrap_optional(declared: object) -> tuple[object, bool]:
+    """Unwrap only a union of one kind and None, in either union syntax."""
+    if get_origin(declared) in (Union, UnionType):
+        args = get_args(declared)
+        if len(args) == 2 and NoneType in args:
+            return (args[0] if args[1] is NoneType else args[1]), True
+    return declared, False
+
+
 def _named_value(path: str, declared: object, value: object) -> object:
     """The value a field's declared kind names, or a refusal.
 
@@ -911,26 +924,16 @@ def _named_value(path: str, declared: object, value: object) -> object:
     understands them.
     """
 
-    if isinstance(declared, str):
-        text = declared
-    elif isinstance(declared, type):
-        text = declared.__name__
-    else:
-        # ``Optional[int]`` and friends are not classes, and their ``__name__``
-        # is the bare ``"Optional"``, which would drop the kind being wrapped.
-        text = str(declared)
-    optional = re.fullmatch(r"(?:typing\.)?Optional\[(?:typing\.)?(.+)\]", text)
-    if optional:
-        if value is None:
-            return None
-        text = optional.group(1)
-    if text == "bool":
+    kind, optional = _unwrap_optional(declared)
+    if optional and value is None:
+        return None
+    if kind is bool:
         return _named_bool(path, value)
-    if text in ("int", "float"):
+    if kind in (int, float):
         if isinstance(value, bool):
             raise ValueError(f"Config '{path}' must be a number")
         try:
-            number = int(value) if text == "int" else float(value)
+            number = kind(value)
         except (TypeError, ValueError, OverflowError) as exc:
             # ``OverflowError`` is how Python spells "this float names no
             # integer": ``int(float("inf"))`` raises it rather than
@@ -964,7 +967,7 @@ def _named_value(path: str, declared: object, value: object) -> object:
             # ``"14.9"`` already raises above.
             raise ValueError(f"Config '{path}' must be a number")
         return number
-    if text == "str":
+    if kind is str:
         if not isinstance(value, str):
             raise ValueError(f"Config '{path}' must be a string")
     return value

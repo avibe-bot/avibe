@@ -63,6 +63,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for AdmittedStream<S> {
 }
 
 pub(super) async fn bind(key: iroh::SecretKey) -> Option<Endpoint> {
+    endpoint_builder(key).bind().await.ok()
+}
+
+pub(super) fn endpoint_builder(key: iroh::SecretKey) -> iroh::endpoint::Builder {
     let keep_alive = Duration::from_millis(1500);
     let config = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(0))
@@ -84,9 +88,6 @@ pub(super) async fn bind(key: iroh::SecretKey) -> Option<Endpoint> {
         .portmapper_config(PortmapperConfig::Disabled)
         .net_report_config(NetReportConfig::minimal())
         .transport_config(config)
-        .bind()
-        .await
-        .ok()
 }
 
 pub(super) struct Link {
