@@ -500,6 +500,37 @@ def test_manager_saves_config_credentials_and_reads_masked_result(management_htt
     assert ("public_relay_trial" in switches) is (role == "owner")
 
 
+@pytest.mark.parametrize(('role', 'patch', 'error'), [
+    ('owner', {'trusted_public_origins': ['https://workbench.example.test']}, 'proxy_origin_change_requires_direct_owner'),
+    ('member', {'setup_port': 16318}, 'listener_change_requires_owner'),
+    ('member', {'setup_host': 'localhost'}, 'listener_change_requires_owner'),
+])
+def test_network_authority_change_rejected_without_writing(management_http, role, patch, error):
+    request = management_http(role)
+    before = paths.get_config_path().read_bytes()
+    refused = request('POST', '/api/config', payload={'language': 'zh', 'ui': patch})
+    assert refused.status_code == 403 and refused.get_json()['error'] == error
+    assert paths.get_config_path().read_bytes() == before
+
+
+def test_network_authority_unchanged_round_trip_and_direct_owner_edit(management_http):
+    local = ui_server.app.test_client()
+    origins = ['https://workbench.example.test']
+    direct = local.post('/api/config', json={'ui': {'trusted_public_origins': origins}},
+                        headers=csrf_headers(local, 'http://127.0.0.1'))
+    assert direct.status_code == 200 and V2Config.load().ui.trusted_public_origins == origins
+    ui = V2Config.load().ui
+    echoed = management_http('member')('POST', '/api/config', payload={
+        'ui': {'trusted_public_origins': origins, 'setup_port': ui.setup_port, 'setup_host': ui.setup_host},
+        'runtime': {'log_level': 'DEBUG'},
+    })
+    assert echoed.status_code == 200 and V2Config.load().runtime.log_level == 'DEBUG'
+    remote = management_http('owner')
+    assert remote('POST', '/api/config', payload={'ui': {'setup_port': ui.setup_port + 1}}).status_code == 200
+    assert remote('POST', '/api/config', payload={'ui': {'trusted_public_origins': []}}).status_code == 403
+    assert V2Config.load().ui.trusted_public_origins == origins
+
+
 @pytest.mark.parametrize(
     "payload",
     [

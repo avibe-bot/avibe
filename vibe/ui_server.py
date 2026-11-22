@@ -8724,14 +8724,15 @@ def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
 
 
 def _save_config_and_runtime_decisions(
-    payload: dict, *, user_context: Any = None,
+    payload: dict, *, user_context: Any = None, direct_origin_writer: bool = False,
 ) -> tuple[V2Config, bool, bool, bool, list[str]]:
     from vibe import api
     from vibe import remote_access
 
     with CONFIG_LOCK:
         previous_config = _load_remote_access_config()
-        config = api.save_config(payload, generic_remote_access=True, user_context=user_context)
+        config = api.save_config(payload, generic_remote_access=True, user_context=user_context,
+                                 direct_origin_writer=direct_origin_writer)
         previous_cloud = previous_config.remote_access.vibe_cloud if previous_config is not None else None
         current_cloud = config.remote_access.vibe_cloud
         old_instance_id = str(previous_cloud.instance_id or "") if previous_cloud is not None else ""
@@ -8907,7 +8908,10 @@ async def config_post():
             _save_config_and_runtime_decisions,
             payload,
             user_context=authorization_context,
+            direct_origin_writer=_is_direct_loopback_connection(),
         )
+    except api.NetworkSettingsForbidden as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 403
     except ValueError as exc:
         # Same chokepoint as the allowlist rejection above: a non-owner write
         # answers with a stable code whichever layer refused it, including
