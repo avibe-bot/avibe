@@ -185,8 +185,8 @@ function ReachCard({ reach, operate = false, optimize, actions }: {
   }
   if (reach.state === 'off' && reach.surface === 'browser') {
     const { problem } = reach;
-    // An address that cannot start a claim has no button to press.
-    const noAction = problem?.code === 'link_required';
+    // An address that cannot start a claim, or an organization's Avibe, has no button to press.
+    const noAction = problem?.code === 'link_required' || problem?.code === 'organization';
     return (
       <SettingsPanel title={t('devices.reach.title')} description={t('devices.reach.lead')} actions={offBadge}>
         {!noAction && (
@@ -210,8 +210,6 @@ function ReachCard({ reach, operate = false, optimize, actions }: {
             )}
           </div>
         )}
-        {/* An organization's Avibe is not bound this way: the one sentence that says how. */}
-        <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted"><KeptTail text={t('devices.claim.problem.organization')} /></p>
       </SettingsPanel>
     );
   }
@@ -621,7 +619,7 @@ function SignedOutPanel({ rows }: { rows: SignedOutDevice[] }) {
 function SignOutNoticeCard({ notice, onDismiss }: { notice: SignOutNotice; onDismiss?: () => void }) {
   const { t } = useTranslation();
   return (
-    <Notice tone="plain" action={<Button variant="ghost" size="xs" onClick={onDismiss}>{t('common.close')}</Button>}>
+    <Notice tone="plain" action={<Button variant="ghost" size="xs" onClick={onDismiss}>{t('devices.notice.dismiss')}</Button>}>
       <div className="font-medium">
         {notice.device ? t('devices.signedOut.justNow', { device: notice.device }) : t('devices.signedOut.justNowMany')}
       </div>
@@ -729,7 +727,7 @@ export function DevicesPageView({
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
       {signOutNotice && <SignOutNoticeCard notice={signOutNotice} onDismiss={actions.onDismissNotice} />}
       {problem && (
-        <Notice action={<Button variant="ghost" size="xs" onClick={actions.onDismissNotice}>{t('common.close')}</Button>}>
+        <Notice action={<Button variant="ghost" size="xs" onClick={actions.onDismissNotice}>{t('devices.notice.dismiss')}</Button>}>
           <KeptTail text={t(problemKeys[problem])} />
         </Notice>
       )}

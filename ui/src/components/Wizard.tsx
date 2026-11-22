@@ -301,7 +301,7 @@ const setupLanguage = (code: string): AppLanguage => {
 
 export function Wizard() {
   const api = useApi(); const { t, i18n } = useTranslation(); const navigate = useNavigate();
-  const { remote } = useInstanceAuthorization();
+  const { remote, instanceKind } = useInstanceAuthorization();
   const { control } = useStatus();
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<SetupReadFailure | null>(null);
@@ -603,7 +603,9 @@ export function Wizard() {
         // Setup is over either way; the step is simply not offered.
       }
     }
-    const offer = offersRemoteAccessStep({ remote, desktopShell, nativeShell: isNativeShell(), paired });
+    const offer = offersRemoteAccessStep({
+      remote, desktopShell, nativeShell: isNativeShell(), paired, organization: instanceKind === 'organization',
+    });
     navigate(offer ? SETUP_REMOTE_ACCESS_PATH : '/', { replace: true });
     if (hasDesktopClient() && isClientProjection(desktop) && desktop.connection.committed.kind === 'local') {
       presentDesktopClient('setup-complete');

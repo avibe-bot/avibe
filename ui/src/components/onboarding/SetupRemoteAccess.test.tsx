@@ -44,6 +44,8 @@ describe('Setup · remote access', () => {
     expect(offersRemoteAccessStep({ ...local, remote: true })).toBe(false);
     expect(offersRemoteAccessStep({ ...local, desktopShell: true })).toBe(false);
     expect(offersRemoteAccessStep({ ...local, nativeShell: true })).toBe(false);
+    // An organization's Avibe is not bound by a person's claim.
+    expect(offersRemoteAccessStep({ ...local, organization: true })).toBe(false);
   });
 
   it('turns on with the same claim as the Devices page, and skipping is a link to the workbench', async () => {

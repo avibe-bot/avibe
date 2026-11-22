@@ -99,7 +99,9 @@ describe('DevicesPage · turning remote access on', () => {
 
     const turnOn = await screen.findByRole('button', { name: '开启远程访问' });
     expect(screen.queryByRole('textbox')).toBeNull();
-    expect(screen.getByText(said('组织的 Avibe 用控制台里的配对密钥绑定：在这台电脑的终端运行 vibe remote pair。'))).toBeTruthy();
+    // No pairing key, and no word about one, anywhere on the page.
+    expect(document.body.textContent).not.toContain('配对密钥');
+    expect(document.body.textContent).not.toContain('vibe remote pair');
     fireEvent.click(turnOn);
 
     await waitFor(() => expect(submitted).not.toBeNull());
@@ -175,6 +177,22 @@ describe('DevicesPage · turning remote access on', () => {
     mount();
     expect(await screen.findByRole('button', { name: '开启远程访问' })).toBeTruthy();
     expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access');
+  });
+
+  it('offers no personal claim on an Avibe this computer records as an organization\'s', async () => {
+    const start = vi.spyOn(devicesApi, 'startClaim');
+    const capabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true, is_instance_owner: true };
+    render(
+      <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: 'organization', instanceRole: 'owner', capabilities }}>
+        <MemoryRouter initialEntries={['/settings/remote-access']}>
+          <Routes><Route path="/settings/remote-access" element={<DevicesPage />} /></Routes>
+        </MemoryRouter>
+      </InstanceAuthorizationContext.Provider>,
+    );
+    expect(await screen.findByText(said('这个 Avibe 属于一个组织，远程访问不在这里开启。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '开启远程访问' })).toBeNull();
+    expect(document.body.textContent).not.toContain('配对密钥');
+    expect(start).not.toHaveBeenCalled();
   });
 
   it('reads the trip without ending it, so a render that is thrown away cannot lose the hand-over', async () => {
@@ -290,7 +308,7 @@ describe('DevicesPage · devices', () => {
     // the button promises no deletion.
     await screen.findByRole('button', { name: '退出' });
     const asked = screen.getByRole('dialog');
-    expect(asked.textContent).toContain('会在确认这个 Avibe 的所有者之后删除；确认不了就不会删，可以之后在这里单独断开健康。');
+    expect(asked.textContent).toContain('这台设备同步过来的健康数据，会在确认这个 Avibe 的所有者之后删除；确认不了就不会删，之后可以在这里单独断开健康。');
     expect(within(asked).queryByRole('button', { name: '退出并删除健康数据' })).toBeNull();
     fireEvent.click(within(asked).getByRole('button', { name: '退出' }));
     await waitFor(() => expect(signOut).toHaveBeenCalledWith('iphone'));

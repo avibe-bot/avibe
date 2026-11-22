@@ -77,7 +77,7 @@ export function DevicesPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { showToast } = useToast();
-  const { remote, capabilities } = useInstanceAuthorization();
+  const { remote, capabilities, instanceKind } = useInstanceAuthorization();
   // The instance's owner, not everyone who may operate it: only the owner is answered on what
   // this page shows about the instance itself.
   const owner = capabilities.is_instance_owner;
@@ -249,6 +249,9 @@ export function DevicesPage() {
   // from this page.
   // Binding is the owner's: anyone else is offered nothing on an instance that is not bound.
   else if ((!status.paired || !host) && !owner) reach = { state: 'unknown' };
+  // An Avibe this computer's own record calls an organization's is not bound by a person's claim,
+  // from here or from the App: the page says so and offers nothing.
+  else if ((!status.paired || !host) && instanceKind === 'organization') reach = { state: 'off', surface: 'browser', problem: { code: 'organization' } };
   else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', account: null, name: '' };
   else if (!status.paired || !host) reach = { state: 'off', surface: 'browser', busy: flow.phase === 'sending', problem: claimIssue };
   else if (status.running || status.pid_state === 'unknown') {

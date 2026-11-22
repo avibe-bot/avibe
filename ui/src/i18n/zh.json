@@ -8065,7 +8065,7 @@
       "cancelOther": "取消那一个",
       "problem": {
         "linkRequired": "从这个地址开不了远程访问。请在运行 Avibe 的那台电脑上打开 Avibe 再开启；服务器上没有浏览器的话，在它的终端运行 vibe remote rebind。",
-        "organization": "组织的 Avibe 用控制台里的配对密钥绑定：在这台电脑的终端运行 vibe remote pair。",
+        "organization": "这个 Avibe 属于一个组织，远程访问不在这里开启。",
         "invalidReturn": "没有开启：从 avibe.bot 回来的这一步没有通过验证，什么都没有绑定。请再开启一次。",
         "expired": "这次请求在确认之前过期了，什么都没有绑定。",
         "declined": "已取消，什么都没有绑定。",
@@ -8207,9 +8207,9 @@
       "removeOthersBodyHealthPlain_other": "除了这台设备，其他 {{count}} 台都会退出。它们同步的健康数据会被删除。",
       "removeAllRemoteTitle": "退出所有远程设备？",
       "removeAllRemoteBody": "所有远程登录的设备都会退出，包括别人的设备。这台电脑上的页面不受影响。",
-      "removeAllRemoteBodyHealth": "所有远程登录的设备都会退出，包括别人的设备。它们同步的健康数据会在确认这个 Avibe 的所有者之后删除；确认不了就不会删。这台电脑上的页面不受影响。",
+      "removeAllRemoteBodyHealth": "所有远程登录的设备都会退出，包括别人的设备。它们同步过来的健康数据，会在确认这个 Avibe 的所有者之后删除；确认不了就不会删。这台电脑上的页面不受影响。",
       "turnOffLockedAll": "关闭后，所有远程设备（包括这一台）都打不开，只能回到运行 Avibe 的电脑上重新开启。",
-      "removeBodyAtHost": "这台设备同步到这个 Avibe 的健康数据会在确认这个 Avibe 的所有者之后删除；确认不了就不会删，可以之后在这里单独断开健康。",
+      "removeBodyAtHost": "这台设备同步过来的健康数据，会在确认这个 Avibe 的所有者之后删除；确认不了就不会删，之后可以在这里单独断开健康。",
       "removeActionAtHost": "退出",
       "turnOffKeptMember": "域名会保留。"
     },
@@ -8524,6 +8524,9 @@
       "openInBrowser": "在浏览器里打开",
       "invalidReturn": "没有重新绑定：从 avibe.bot 回来的这一步没有通过验证，什么都没有改变。请再试一次。",
       "refusedUnknown": "这次没有完成。（代码：{{code}}）"
+    },
+    "notice": {
+      "dismiss": "知道了"
     }
   }
 }

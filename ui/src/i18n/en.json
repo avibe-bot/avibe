@@ -8065,7 +8065,7 @@
       "cancelOther": "Cancel that one",
       "problem": {
         "linkRequired": "Remote access cannot be turned on from this address. Open Avibe on the computer that runs it and turn it on there; on a server with no browser, run vibe remote rebind in its terminal.",
-        "organization": "An organization's Avibe is bound with the pairing key from its console: run vibe remote pair in this computer's terminal.",
+        "organization": "This Avibe belongs to an organization; remote access is not turned on here.",
         "invalidReturn": "Not turned on: the return from avibe.bot did not pass verification, so nothing was bound. Turn it on again.",
         "expired": "The request expired before it was approved. Nothing was bound.",
         "declined": "Cancelled. Nothing was bound.",
@@ -8207,9 +8207,9 @@
       "removeOthersBodyHealthPlain_other": "Every device but this one, {{count}} in all, is signed out. Health data synced from them is deleted.",
       "removeAllRemoteTitle": "Sign out all remote devices?",
       "removeAllRemoteBody": "Every device signed in from elsewhere is signed out, other people's included. Pages on this computer are not affected.",
-      "removeAllRemoteBodyHealth": "Every device signed in from elsewhere is signed out, other people's included. Health data synced from them is deleted once this Avibe's owner is confirmed; if that cannot be confirmed it is kept. Pages on this computer are not affected.",
+      "removeAllRemoteBodyHealth": "Every device signed in from elsewhere is signed out, other people's included. The health data they synced here is deleted once this Avibe's owner is confirmed; if that cannot be confirmed it is kept. Pages on this computer are not affected.",
       "turnOffLockedAll": "Once off, no remote device can open it, this one included; turn it back on at the computer running Avibe.",
-      "removeBodyAtHost": "The health data this device synced to this Avibe is deleted once this Avibe's owner is confirmed; if that cannot be confirmed it is kept, and Health can be disconnected here on its own afterwards.",
+      "removeBodyAtHost": "The health data this device synced here is deleted once this Avibe's owner is confirmed; if that cannot be confirmed it is kept, and Health can be disconnected here on its own afterwards.",
       "removeActionAtHost": "Sign out",
       "turnOffKeptMember": "The domain is kept."
     },
@@ -8524,6 +8524,9 @@
       "openInBrowser": "Open in the browser",
       "invalidReturn": "Not bound again: the return from avibe.bot did not pass verification, so nothing changed. Try again.",
       "refusedUnknown": "This did not complete. (code: {{code}})"
+    },
+    "notice": {
+      "dismiss": "Got it"
     }
   }
 }

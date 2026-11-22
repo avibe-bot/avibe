@@ -189,8 +189,10 @@ function frame(
 
 const designFrames = frames([
   // 1. Remote access off: one action, no key.
-  frame('off', '未开启 · 浏览器：一个动作，去 avibe.bot 起名后自动回来；组织的 Avibe 一句话指向终端', at(700),
+  frame('off', '未开启 · 浏览器：一个动作，去 avibe.bot 起名后自动回来', at(700),
     { reach: { state: 'off', surface: 'browser' }, devices: onlyHost }),
+  frame('off-organization', '未开启 · 这台电脑自己的记录说它是组织的 Avibe：不提供个人的开启，一句话', at(700),
+    { reach: { state: 'off', surface: 'browser', problem: { code: 'organization' } }, devices: onlyHost }),
   frame('off-phone', '未开启 · 375 宽', PHONE, { reach: { state: 'off', surface: 'browser' }, devices: onlyHost }),
   frame('off-sending', '未开启 · 点了开启，正在向本机要这次请求', at(700),
     { reach: { state: 'off', surface: 'browser', busy: true }, devices: onlyHost }),
@@ -225,9 +227,11 @@ const designFrames = frames([
   frame('moved-unknown-phone', '请打开新地址 · 读不到新地址 · 375 宽', { width: 375, height: 700 }, { reach: { state: 'moved' }, devices: [] }),
 
   // 3. On, with devices.
-  frame('on', '已开启 · 在运行 Avibe 的电脑上看：主机、iPhone（打洞直连）、另一台电脑（Cloudflare 隧道）、两个浏览器', TALL,
+  // The account under the domain is the signed-in session's own: it shows where the owner opens
+  // the page from a signed-in device, and not at the computer itself, which has no sign-in.
+  frame('on', '已开启 · 在运行 Avibe 的电脑上看（这里没有登录账号，所以域名下面不显示账号）：主机、iPhone（打洞直连）、另一台电脑（Cloudflare 隧道）、两个浏览器', TALL,
     { reach: on, devices: all('host'), activity, bulk: 'all_remote' }, { themes: ['light', 'dark'] }),
-  frame('on-phone', '已开启 · 在 iPhone App 里看', { ...IPHONE_17_PRO, height: 1240 },
+  frame('on-phone', '已开启 · 所有者在 iPhone App 里看（已登录，所以域名下面是这次登录的账号）', { ...IPHONE_17_PRO, height: 1240 },
     { ...remote, devices: all('iphone'), activity, bulk: 'other_sessions' }, { app: true }),
   frame('on-remote', '已开启 · 从另一台电脑远程看：可以退出我的其他设备', TALL,
     { ...remote, devices: all('mini'), activity, bulk: 'other_sessions' }),
