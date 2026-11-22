@@ -12,6 +12,7 @@ import {
 } from '@/lib/desktopShell';
 import { hasNativeCapability } from '@/lib/native';
 import { WebPushControl } from '../workbench/WebPushControl';
+import { LiveActivitySettingRow } from './LiveActivitySettingRow';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsPanel, SettingsRow, ToggleSwitch } from './SettingsPrimitives';
 
@@ -28,6 +29,7 @@ export const SettingsNotificationsPage: React.FC = () => {
   const off = !preferences.enabled;
   const desktop = isDesktopShell();
   const nativePush = hasNativeCapability('push');
+  const lockScreenProgress = hasNativeCapability('lockScreenProgress');
   const [desktopActions, setDesktopActions] = useState<DesktopNotificationsActions | null>(null);
   const [desktopEnabled, setDesktopEnabled] = useState<boolean | null>(null);
   const [desktopSaving, setDesktopSaving] = useState(false);
@@ -128,7 +130,7 @@ export const SettingsNotificationsPage: React.FC = () => {
         )}
       </SettingsPanel>
 
-      {(capabilities.can_read_instance || desktop) && (
+      {(capabilities.can_read_instance || desktop || lockScreenProgress) && (
         <SettingsPanel title={t('settings.notifications.deviceTitle')}>
           {capabilities.can_read_instance && !desktop && (
             <SettingsRow
@@ -165,6 +167,7 @@ export const SettingsNotificationsPage: React.FC = () => {
               ) : undefined}
             />
           )}
+          {lockScreenProgress && <LiveActivitySettingRow />}
         </SettingsPanel>
       )}
     </SettingsPageShell>

@@ -19,10 +19,6 @@ struct NativeBridgePolicy {
 struct NativeShellMetadata: Equatable {
     static let contract = 1
     static let platform = "ios"
-    /// The Turn Live Activity entry (`liveActivity.*`, #4045/#4046) is
-    /// withdrawn: the owner never asked for it. Its code stays, unreachable.
-    static let liveActivitiesAvailable = false
-
     /// Every shell's capabilities. `direct` is added only when the App has a
     /// direct transport registered (`withDirect(_:)`).
     static let capabilities = [
@@ -37,8 +33,7 @@ struct NativeShellMetadata: Equatable {
         "instancePresentation": 1,
         "keyboardResizesViewport": 1,
         "notifications": 1,
-        // `liveActivities` is withdrawn (owner, 11-21): not announced, and
-        // its bridge methods refuse (`liveActivitiesAvailable`).
+        "lockScreenProgress": 1,
         "push": 1,
         "systemSchedule": 1,
         "viewport": 1,
@@ -46,7 +41,11 @@ struct NativeShellMetadata: Equatable {
         "voiceCapture": 1,
         // The App recognises a hold on the page's surfaces itself
         // (`voice.holdSurfaces`, `voice.holdAdopt`, `voice.holdReject`).
-        "voiceHold": 1,
+        // 2: a tap is never taken for a hold, however late the App learns
+        // that the finger lifted. The page names surfaces only from 2 on;
+        // the one build that announced 1 (TestFlight 50.1) could give a tap
+        // on the composer the hold's cue.
+        "voiceHold": 2,
     ]
 
     let shellVersion: String
@@ -238,6 +237,9 @@ enum NativeBridgeMethod: String, CaseIterable {
     case directHandover = "direct.handover"
     case directPreference = "direct.preference"
     case directSetPreference = "direct.setPreference"
+    case liveActivitySetting = "liveActivity.setting"
+    case liveActivitySetSetting = "liveActivity.setSetting"
+    case liveActivityObserve = "liveActivity.observe"
     case liveActivityStatus = "liveActivity.status"
     case liveActivityStart = "liveActivity.start"
     case liveActivityStop = "liveActivity.stop"
@@ -1217,12 +1219,9 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
         switch request.method {
-        case .liveActivityStatus, .liveActivityStart, .liveActivityStop, .liveActivityOpenSettings:
-            // Withdrawn: an older page that still calls these gets nothing.
-            guard NativeShellMetadata.liveActivitiesAvailable else {
-                reply(replyHandler, error: .unsupported)
-                return
-            }
+        case .liveActivityStatus, .liveActivityStart, .liveActivityStop:
+            reply(replyHandler, error: .unsupported)
+        case .liveActivitySetting, .liveActivitySetSetting, .liveActivityObserve, .liveActivityOpenSettings:
             let origin = policy.instanceOrigin
             Task { @MainActor [weak self, weak sourceWebView] in
                 guard let self, let url = sourceWebView?.url,

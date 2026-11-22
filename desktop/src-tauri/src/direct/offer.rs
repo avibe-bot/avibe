@@ -8,7 +8,6 @@ use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
-use tokio::time::Instant;
 
 pub(super) const ALPN: &[u8] = b"avibe-direct/1";
 #[derive(Deserialize)]
@@ -39,7 +38,7 @@ pub(super) struct Offer {
     pub generation: String,
     pub id: EndpointId,
     pub candidates: Vec<SocketAddr>,
-    pub until: Instant,
+    pub until: Duration,
 }
 
 pub(super) fn lan(addr: SocketAddr) -> bool {
@@ -55,7 +54,8 @@ impl Offer {
         origin: &Authority,
         instance: &str,
         client: EndpointId,
-        sent: Instant,
+        sent: Duration,
+        now: Duration,
     ) -> Option<Self> {
         if raw.len() > 16384 || instance.is_empty() {
             return None;
@@ -82,7 +82,7 @@ impl Offer {
             .checked_sub(w.issued_at)?
             .min(300);
         let until = sent.checked_add(Duration::from_secs(span))?;
-        if Instant::now() >= until {
+        if now >= until {
             return None;
         }
         let mut candidates = Vec::new();

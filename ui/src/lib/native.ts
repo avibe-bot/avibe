@@ -9,7 +9,7 @@ export type NativeCapability =
   | 'haptics'
   | 'instancePresentation'
   | 'keyboardResizesViewport'
-  | 'liveActivities'
+  | 'lockScreenProgress'
   | 'notifications'
   | 'push'
   | 'systemSchedule'
@@ -1154,25 +1154,25 @@ export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
 }
 
 
-export type NativeLiveActivityStatus = { enabled: boolean; tracking: boolean };
-export type NativeLiveActivityResult = { ok: true } | {
-  ok: false; code: 'disabled' | 'no_active_turn' | 'push_unavailable' | 'failed';
-};
+export type NativeLiveActivitySetting = { enabled: boolean; systemEnabled: boolean };
+export type NativeLiveActivityObservation = {
+  sessionId: string; agentName: string; sessionTitle: string | null; running: boolean;
+} | { sessionId: null };
 
-export function nativeLiveActivityStatus(sessionId: string) {
-  return callNative<NativeLiveActivityStatus>('liveActivities', 'liveActivity.status', { sessionId });
+export function nativeLiveActivitySetting() {
+  return callNative<NativeLiveActivitySetting>('lockScreenProgress', 'liveActivity.setting');
 }
 
-export function nativeLiveActivityStart(sessionId: string, agentName: string, sessionTitle: string | null) {
-  return callNative<NativeLiveActivityResult>('liveActivities', 'liveActivity.start', { sessionId, agentName, sessionTitle });
+export function nativeLiveActivitySetSetting(enabled: boolean) {
+  return callNative<NativeLiveActivitySetting>('lockScreenProgress', 'liveActivity.setSetting', { enabled });
 }
 
-export function nativeLiveActivityStop(sessionId: string) {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.stop', { sessionId });
+export function nativeLiveActivityObserve(observation: NativeLiveActivityObservation) {
+  return callNative<{ ok: true }>('lockScreenProgress', 'liveActivity.observe', observation);
 }
 
 export function nativeLiveActivityOpenSettings() {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.openSettings');
+  return callNative<{ ok: true }>('lockScreenProgress', 'liveActivity.openSettings');
 }
 
 /** This device's own path choice for this instance (`directPreference` 1): automatic, or the
