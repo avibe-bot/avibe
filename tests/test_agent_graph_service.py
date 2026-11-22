@@ -12,6 +12,7 @@ visibility emission + background filtering.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -748,6 +749,94 @@ def test_active_view_captures_nonterminal_past_window_and_aliases(isolated_state
         "ses_oldq": "queued",
         "ses_run": "queued",
     }
+
+
+def test_active_graph_reads_metadata_only_for_a_callback_that_needs_it(isolated_state):
+    # Ordinary old terminal runs still count, but reading their metadata can
+    # traverse megabytes of result overflow pages. A sent callback needs no
+    # mode check; only the unsent one needs SQLite's JSON extractor.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for sid in ("a", "b"):
+            _insert_session(conn, sid, scope_id=None)
+        for j in range(15):
+            _insert_run(conn, f"r{j:02}", session_id="a", created=NOW - timedelta(days=2, seconds=j),
+                        status="processing" if j == 14 else "completed")
+        _insert_run(conn, "sent", session_id="a", source_kind="agent", source_actor="b",
+                    callback_session_id="b", callback_status="sent", callback_run_id="delivery")
+        _insert_run(conn, "unsent", session_id="a", callback_session_id="b", callback_status="pending",
+                    metadata={"callback_mode": "failure"}, created=NOW)
+        calls = []
+
+        def extract(raw, path):
+            calls.append(path)
+            return json.loads(raw).get("callback_mode")
+
+        conn.connection.driver_connection.create_function("json_extract", 2, extract, deterministic=True)
+    try:
+        graph = agent_graph.build_graph(live_agents=[{"session_id": "b", "state": "idle"}],
+                                        include_ended=False, engine=engine, now=NOW)
+        assert calls == ["$.callback_mode"]
+        a = _nodes_by_id(graph)["a"]
+        assert (a["status"], a["run_counts"]) == ("queued", {"total": 17, "running": 1})
+        assert [r["id"] for r in a["runs"]] == ["unsent", "sent", *(f"r{j:02}" for j in range(8))]
+        assert _edge(graph, "callback", "a", "b")["last_run_id"] == "delivery"
+        assert _edge(graph, "spawn", "b", "a")["last_run_id"] == "sent"
+    finally:
+        engine.dispose()
+
+
+def test_active_graph_follows_noncanonical_pending_ancestor_through_missing_row(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for sid in ("live", "old", "unrelated"):
+            _insert_session(conn, sid, scope_id=None)
+        mids = [f"missing-{i}" for i in range(16)]
+        chain = ["live", *mids, "old", "live"]
+        for sid, caller in zip(chain, chain[1:]):
+            _insert_run(conn, f"run-{sid}", session_id=sid, source_kind="agent", source_actor=caller,
+                        status=" pending " if sid == "old" else "completed", created=NOW - timedelta(days=3))
+        _insert_run(conn, "other", session_id="unrelated", status=" pending ")
+        raw = conn.connection.driver_connection
+        if hasattr(raw, "setlimit"):
+            raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 12)
+    try:
+        graph = agent_graph.build_graph(live_agents=[{"session_id": "live", "state": "idle"}],
+                                        include_ended=False, engine=engine, now=NOW)
+        assert [n["session_id"] for n in graph["nodes"]] == ["live", "old"]
+        assert graph["counts"]["queued"] == 1
+        assert _edge(graph, "spawn", "live", "old")["last_run_id"] == "run-old"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("frontier,expected", [({"kid"}, {"parent"}), ({"absent", "missing"}, set())])
+def test_graph_lineage_and_status_lookups_seek_the_matching_keys(isolated_state, frontier, expected):
+    from sqlalchemy import event
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_run(conn, "child", session_id="kid", source_kind="agent", source_actor="parent")
+    plans = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def record(_conn, cursor, statement, parameters, *_args):
+        cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)
+        plans.extend(str(row[-1]) for row in cursor.fetchall())
+
+    try:
+        with engine.connect() as conn:
+            reader = agent_graph._GraphReader(conn, {"execute": 0., "fetch": 0.})
+            assert agent_graph._lineage_refs(reader, frontier) == expected
+            assert any("(source_kind=? AND session_id=?" in p and "COVERING INDEX" in p for p in plans), plans
+            assert any("ix_agent_runs_pair_callback (session_id=?" in p for p in plans), plans
+            assert not any("TEMP B-TREE" in p or "SCAN agent_runs" in p for p in plans), plans
+            plans.clear()
+            assert not agent_graph._has_noncanonical_pending_status(reader)
+            probes = [p for p in plans if "agent_runs" in p]
+            assert len(probes) == 2 and all("SEARCH" in p and "status>" in p for p in probes), probes
+    finally:
+        engine.dispose()
 
 
 def test_null_status_callback_target_not_promoted(isolated_state):

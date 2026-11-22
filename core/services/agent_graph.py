@@ -33,15 +33,16 @@ Scope is joined LEFT (``scope_id`` is nullable): a NULL scope renders as the
 from __future__ import annotations
 
 import json
+import sqlite3
 from time import perf_counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import and_, func, literal_column, or_, select
+from sqlalchemy import and_, func, literal_column, or_, select, text
 from sqlalchemy.engine import Engine
 
 from storage.agent_session_rows import session_openable_in_chat
-from storage.background import _id_batches, _status_query_values, normalize_run_status
+from storage.background import _status_query_values, normalize_run_status
 from storage.db import create_sqlite_engine
 from storage.models import agents, agent_runs, agent_sessions, run_definitions, scope_settings, scopes
 
@@ -206,6 +207,16 @@ class _GraphReader:
     def __init__(self, conn, timings: dict[str, float]):
         self.conn = conn
         self.timings = timings
+        raw = conn.connection.driver_connection
+        self.bind_limit = raw.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(raw, "getlimit") else 999
+
+    def batches(self, ids, *, reserved=0, copies=1):
+        # The node cap does not bound lineage, candidate count, trigger IDs,
+        # or tied timeline rows. Honor a connection's configured bind limit.
+        size = min(2000, (self.bind_limit - reserved) // copies)
+        values = list(ids)
+        for start in range(0, len(values), size):
+            yield values[start:start + size]
 
     def rows(self, stmt, *, mappings=False):
         started = perf_counter()
@@ -224,6 +235,7 @@ class _GraphReader:
         batch = result.fetchmany(512)
         self.timings["fetch"] += perf_counter() - started
         return batch
+
 
 def build_graph(
     *,
@@ -311,7 +323,8 @@ def build_graph(
             # filter or contribute an edge. Use the status index to check the
             # sole exception: an imported spelling normalized only in Python
             # (e.g. ' pending '). Such an ancestor still needs discovery.
-            follow_refs = include_ended or candidate_truncated or _has_noncanonical_pending_status(conn)
+            check_imported = not include_ended and _has_noncanonical_pending_status(conn)
+            follow_refs = include_ended or candidate_truncated or check_imported
             waves = [loaded_ids]
             while follow_refs and waves[-1]:
                 extra = _lineage_refs(conn, waves[-1]) - loaded_ids
@@ -328,15 +341,17 @@ def build_graph(
             # all. Active visibility needs only whether any run is nonterminal.
             nodes = _build_nodes(list(session_by_id.values()), live_by_session)
             if not include_ended:
-                extras = loaded_ids - nonterminal
-                if extras and follow_refs:
-                    # Imported status strings can normalize to a nonterminal
-                    # value without matching the indexed initial status lookup.
-                    stmt = select(agent_runs.c.session_id, agent_runs.c.status).where(
-                        agent_runs.c.session_id.in_(extras)
-                    ).distinct()
-                    nonterminal.update(sid for sid, status in conn.rows(stmt)
-                                       if normalize_run_status(status) in {"queued", "running"})
+                # Normalize only statuses on discovered sessions, using the
+                # covering session/status index. Missing/hidden intermediates
+                # don't need status checks, though their lineage must be read.
+                if check_imported:
+                    for wave in waves:
+                        for batch in conn.batches(s for s in wave if s in session_by_id and s not in nonterminal):
+                            stmt = select(agent_runs.c.session_id, agent_runs.c.status).where(
+                                agent_runs.c.session_id.in_(batch)
+                            ).distinct()
+                            nonterminal.update(sid for sid, status in conn.rows(stmt)
+                                               if normalize_run_status(status) in {"queued", "running"})
                 for node in nodes:
                     if not node["live"] and node["session_id"] in nonterminal:
                         node["status"] = "queued"
@@ -397,8 +412,19 @@ def _empty_payload(now: datetime, window: str, live_unreachable: bool) -> dict[s
 
 def _has_noncanonical_pending_status(conn) -> bool:
     indexed = set(_status_query_values("queued") + _status_query_values("running"))
+    # Jump to the next distinct key. SELECT DISTINCT status still walks the
+    # entire status index on each Active poll, even when no malformed spelling
+    # exists. The empty string is a real historical spelling, not a sentinel.
+    statuses = text("""
+        WITH RECURSIVE status_keys(value) AS (
+            SELECT min(status) FROM agent_runs WHERE status >= ''
+            UNION ALL
+            SELECT (SELECT min(status) FROM agent_runs WHERE status > status_keys.value)
+            FROM status_keys WHERE value IS NOT NULL
+        ) SELECT value FROM status_keys WHERE value IS NOT NULL
+    """)
     return any(status not in indexed and normalize_run_status(status) in {"queued", "running"}
-               for (status,) in conn.rows(select(agent_runs.c.status).distinct()))
+               for (status,) in conn.rows(statuses))
 
 
 def _active_run_session_ids(conn) -> set[str]:
@@ -434,22 +460,35 @@ def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
     # this frequently-polled scan ride the ``ix_agent_runs_updated`` index
     # instead of a full table scan (the other agent_runs indexes all lead with a
     # non-timestamp column and cannot serve a bare range predicate).
-    stmt = select(
-        agent_runs.c.session_id,
-        agent_runs.c.source_kind,
-        agent_runs.c.source_actor,
-        agent_runs.c.callback_session_id,
-        agent_runs.c.callback_status,
-    ).where(agent_runs.c.updated_at >= cutoff_iso)
-    for session_id, source_kind, source_actor, callback_sid, callback_status in conn.rows(stmt):
+    r = agent_runs.c
+    rowid = literal_column("agent_runs.rowid")
+    stmt = select(rowid, r.session_id, r.source_kind, r.source_actor).where(r.updated_at >= cutoff_iso)
+    recent_rowids = set()
+    sessions = set()
+    for rid, session_id, source_kind, source_actor in conn.rows(stmt):
+        recent_rowids.add(rid)
+        sessions.add(session_id)
         if session_id:
             candidates.add(session_id)
         if source_kind == "agent" and source_actor:
             candidates.add(source_actor)
-        # Only a callback target that will draw an edge (A4: non-null status) —
-        # a bare return route must not promote an unconnected root node.
-        if callback_sid and callback_status:
-            candidates.add(callback_sid)
+
+    # A callback target earns a candidate only for a run touched in-window.
+    # These two columns follow the result blobs: read them from the covering
+    # session/callback index, not the table once per recent run. A repaired
+    # run with no session of its own may still point to a real callback target.
+    callback = select(rowid, r.callback_session_id).where(
+        r.callback_session_id.is_not(None), r.callback_status.is_not(None), r.callback_status != "",
+    )
+    batches = [r.session_id.in_(batch) for batch in conn.batches((s for s in sessions if s), reserved=1)]
+    if None in sessions:
+        batches.append(r.session_id.is_(None))
+    if "" in sessions:
+        batches.append(r.session_id == "")
+    for belongs in batches:
+        for rid, target in conn.rows(callback.where(belongs)):
+            if rid in recent_rowids and target:
+                candidates.add(target)
     return candidates
 
 
@@ -495,9 +534,9 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
                 ),
             )
         )
-        .where(agent_sessions.c.id.in_(candidate_ids))
     )
-    return list(conn.rows(stmt, mappings=True))
+    return [row for batch in conn.batches(candidate_ids)
+            for row in conn.rows(stmt.where(agent_sessions.c.id.in_(batch)), mappings=True)]
 
 
 def _session_agent_display_name(row: Mapping[str, Any]) -> Optional[str]:
@@ -519,9 +558,10 @@ def _session_agent_display_name(row: Mapping[str, Any]) -> Optional[str]:
 def _run_totals(conn, session_ids):
     """Full-history counts and nonterminal status, from the covering status index."""
     r = agent_runs.c
-    stmt = select(r.session_id, r.status, func.count()).where(r.session_id.in_(session_ids)).group_by(r.session_id, r.status)
+    stmt = select(r.session_id, r.status, func.count()).group_by(r.session_id, r.status)
     totals = {}
-    for sid, status, count in conn.rows(stmt):
+    rows = (row for batch in conn.batches(session_ids) for row in conn.rows(stmt.where(r.session_id.in_(batch))))
+    for sid, status, count in rows:
         total, running, pending = totals.get(sid, (0, 0, False))
         status = normalize_run_status(status)
         totals[sid] = (total + count, running + (count if status == "running" else 0),
@@ -542,7 +582,8 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
     times = {}
     by_session = {}
     needed = set()
-    for rid, sid, raw in conn.rows(select(rowid, r.session_id, r.created_at).where(r.session_id.in_(session_ids))):
+    times_stmt = select(rowid, r.session_id, r.created_at)
+    for rid, sid, raw in (row for b in conn.batches(session_ids) for row in conn.rows(times_stmt.where(r.session_id.in_(b)))):
         instant = _parse_iso(raw) or _EPOCH
         times[rid] = (raw, instant)
         by_session.setdefault(sid, []).append(rid)
@@ -556,17 +597,19 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
         raw_max = max(times[k][0] for k in ids)
         needed.update(k for k in ids if times[k][1] >= boundary or times[k][0] == raw_max)
 
-    spawn = select(rowid).where(r.session_id.in_(session_ids), r.source_kind == "agent", r.source_actor.in_(visible))
-    needed.update(k for (k,) in conn.rows(spawn))
+    spawn = select(rowid, r.source_actor).where(r.source_kind == "agent")
     cb = select(rowid, r.callback_session_id, r.callback_status).where(
-        r.session_id.in_(session_ids), r.callback_session_id.in_(visible),
-        r.callback_status.is_not(None), r.callback_status != "",
+        r.callback_session_id.is_not(None), r.callback_status.is_not(None), r.callback_status != "",
     )
-    callbacks = {k: (target, status) for k, target, status in conn.rows(cb)}
+    callbacks = {}
+    for batch in conn.batches(session_ids, reserved=1):
+        needed.update(k for k, actor in conn.rows(spawn.where(r.session_id.in_(batch))) if actor in visible)
+        callbacks.update((k, (target, status)) for k, target, status in conn.rows(cb.where(r.session_id.in_(batch)))
+                         if target in visible)
     needed.update(callbacks)
 
     grouped = {}
-    for batch in _id_batches(needed):
+    for batch in conn.batches(needed):
         head = select(rowid, r.session_id, r.id, r.status, r.run_type, r.definition_id, r.source_kind, r.source_actor)
         for data in conn.rows(head.where(rowid.in_(batch)), mappings=True):
             k = data["rid"]
@@ -575,13 +618,15 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
                 data["callback_session_id"], data["callback_status"] = callbacks[k]
             grouped.setdefault(data["session_id"], []).append(data)
 
-    raw_order = lambda runs: max((r["created_at"], r["id"]) for r in runs)
-    grouped = dict(sorted(grouped.items(), key=lambda item: raw_order(item[1]), reverse=True))
+    def raw_order(item):
+        return max((row["created_at"], row["id"]) for row in item[1])
+
+    grouped = dict(sorted(grouped.items(), key=raw_order, reverse=True))
     timeline = {}
     for runs in grouped.values():
         runs.sort(key=lambda r: (r["instant"], r["id"]), reverse=True)
         timeline.update((r["rid"], r) for r in runs[:RUNS_PER_NODE])
-    for batch in _id_batches(timeline):
+    for batch in conn.batches(timeline):
         for k, started, completed in conn.rows(select(rowid, r.started_at, r.completed_at).where(rowid.in_(batch))):
             timeline[k].update(started_at=started, completed_at=completed)
 
@@ -589,7 +634,7 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
     # the other candidates evaluate the JSON predicate only on their own rows.
     if callbacks:
         by_callback = {run["rid"]: run for runs in grouped.values() for run in runs if run["rid"] in callbacks}
-        for batch in _id_batches(k for k, (_, status) in callbacks.items() if status != "sent"):
+        for batch in conn.batches((k for k, (_, status) in callbacks.items() if status != "sent"), reserved=1):
             mode = func.json_extract(r.metadata_json, "$.callback_mode")
             for k, callback_mode in conn.rows(select(rowid, mode).where(rowid.in_(batch))):
                 by_callback[k]["callback_mode"] = callback_mode
@@ -601,7 +646,7 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
             for run in runs:
                 if _draws_callback_edge(run):
                     latest.setdefault((sid, run["callback_session_id"]), run)
-        for batch in _id_batches(run["rid"] for run in latest.values()):
+        for batch in conn.batches(run["rid"] for run in latest.values()):
             for k, callback_id in conn.rows(select(rowid, r.callback_run_id).where(rowid.in_(batch))):
                 by_callback[k]["callback_run_id"] = callback_id
     return grouped
@@ -620,14 +665,21 @@ def _lineage_refs(conn, frontier: set[str]) -> set[str]:
     source/session and session/callback indexes; only an unsent callback can
     require touching the run's metadata to decide if it draws an edge."""
     r = agent_runs.c
-    callers = select(r.source_actor).where(r.source_kind == "agent", r.session_id.in_(frontier)).distinct()
-    targets = select(r.callback_session_id).where(
-        r.session_id.in_(frontier), r.callback_session_id.is_not(None),
+    # Group in index order, including the session. DISTINCT source_actor
+    # alone invites SQLite to walk *all* agent-authored runs via the actor
+    # index once per wave, filtering session_id from the table afterwards.
+    callers = select(r.session_id, r.source_actor).where(r.source_kind == "agent").group_by(r.session_id, r.source_actor)
+    targets = select(r.session_id, r.callback_session_id).where(
+        r.callback_session_id.is_not(None),
         r.callback_status.is_not(None), r.callback_status != "",
         or_(r.callback_status == "sent",
             func.json_extract(r.metadata_json, "$.callback_mode").is_distinct_from("failure")),
-    ).distinct()
-    return {sid for stmt in (callers, targets) for (sid,) in conn.rows(stmt) if sid}
+    ).group_by(r.session_id, r.callback_session_id)
+    refs = set()
+    for batch in conn.batches(frontier, reserved=5, copies=2):
+        wave = r.session_id.in_(batch)
+        refs.update(sid for _, sid in conn.rows(callers.where(wave).union_all(targets.where(wave))) if sid)
+    return refs
 
 
 def _build_edges(
@@ -732,9 +784,10 @@ def _load_trigger_nodes(conn, trigger_ids: set[str]) -> list[dict[str, Any]]:
         run_definitions.c.cron,
         run_definitions.c.run_at,
         run_definitions.c.enabled,
-    ).where(run_definitions.c.id.in_(trigger_ids))
+    )
     nodes: list[dict[str, Any]] = []
-    for data in conn.rows(stmt, mappings=True):
+    batches = conn.batches(sorted(trigger_ids))
+    for data in (row for b in batches for row in conn.rows(stmt.where(run_definitions.c.id.in_(b)), mappings=True)):
         nodes.append({
             "definition_id": data["id"],
             "definition_type": data["definition_type"],
