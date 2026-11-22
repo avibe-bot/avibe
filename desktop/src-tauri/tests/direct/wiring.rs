@@ -981,6 +981,16 @@ fn an_instance_that_answered_before_is_routed_before_its_view_first_loads() {
     assert_eq!(wiring.asks_through(session), None);
     assert_eq!(wiring.reconcile(None, |_| true, now), []);
     assert_eq!(wiring.reconcile(Some(&away(ONE, "main-runtime-2")), |_| true, now), []);
+    // Its view can be on show before a look has seen it there. An app
+    // window opened from it in that moment joins it and is routed as it is
+    // made; one of another instance or account does not.
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(session));
+    assert_eq!(
+        wiring.app_window_created("show-1", ACCOUNT, ONE, None),
+        [install(session, "show-1")]
+    );
+    assert_eq!(wiring.app_window_created("show-9", ACCOUNT, TWO, None), []);
+    assert_eq!(wiring.app_window_created("show-8", "account-2", ONE, None), []);
     let published = shown(ONE, "main-runtime-2");
     assert_eq!(wiring.reconcile(Some(&published), |_| true, now), []);
     assert_eq!(wiring.asks_through(session), Some("main-runtime-2"));
@@ -994,7 +1004,7 @@ fn an_instance_that_answered_before_is_routed_before_its_view_first_loads() {
     // It ends as any session does, and its route comes off every window.
     assert_eq!(
         wiring.choose(ACCOUNT, ONE, Mode::Tunnel),
-        [retire(session, &["main-runtime-2", "show-2"])]
+        [retire(session, &["main-runtime-2", "show-1", "show-2"])]
     );
     // "Cloudflare tunnel only", a configured proxy, system proxy settings
     // that rule the route out, and a system that cannot route: no client

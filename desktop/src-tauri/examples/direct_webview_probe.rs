@@ -238,6 +238,7 @@ mod fixture {
     pub struct Keeping {
         pub port: u16,
         open: Arc<Mutex<Vec<TcpStream>>>,
+        accepted: Arc<Mutex<usize>>,
         served: Arc<Mutex<usize>>,
     }
 
@@ -247,9 +248,11 @@ mod fixture {
             let port = listener.local_addr().expect("keeping address").port();
             let open = Arc::new(Mutex::new(Vec::new()));
             let served = Arc::new(Mutex::new(0));
-            let (kept, count) = (open.clone(), served.clone());
+            let accepted = Arc::new(Mutex::new(0));
+            let (kept, count, connections) = (open.clone(), served.clone(), accepted.clone());
             thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
+                    *connections.lock().expect("accepted") += 1;
                     if let Ok(handle) = stream.try_clone() {
                         kept.lock().expect("open").push(handle);
                     }
@@ -257,7 +260,17 @@ mod fixture {
                     thread::spawn(move || serve_keeping(stream, &count));
                 }
             });
-            Self { port, open, served }
+            Self {
+                port,
+                open,
+                accepted,
+                served,
+            }
+        }
+
+        /// The connections accepted so far, however they came.
+        pub fn accepted(&self) -> usize {
+            *self.accepted.lock().expect("accepted")
         }
 
         /// The requests answered so far.
@@ -892,16 +905,20 @@ mod macos_probe {
         };
 
         // 12. A route written before the store's first load carries the
-        //     page: every request goes to the listener.
+        //     page: every connection the host gets came through the
+        //     listener, for the page and for a request after it.
         let first = new_webview(mtm);
         let installed = route(&first);
         let loaded = load(&first, &format!("http://{reachable}/"), "kept");
-        let asked = through_listener();
-        let straight = keeping.served();
+        let answered = request(&first);
+        let (asked, accepted) = (through_listener(), keeping.accepted());
         report.case(
             "a-route-written-before-the-first-load-carries-the-page",
-            installed && loaded && asked >= 1 && request(&first) && through_listener() >= 1,
-            json!({ "installed": installed, "loaded": loaded, "through_listener": asked, "served": straight }),
+            installed && loaded && answered && asked >= 1 && accepted == asked,
+            json!({
+                "installed": installed, "loaded": loaded, "request_answered": answered,
+                "through_listener": asked, "connections_to_the_host": accepted,
+            }),
         );
 
         // 13. A route written after the store has a connection to the host
@@ -932,15 +949,72 @@ mod macos_probe {
         );
 
         // 14. Once every connection to the host has closed, the next one
-        //     follows the route.
-        let closed = keeping.close_all();
-        pump_until(Duration::from_millis(300), || false);
-        let answered = request(&late);
+        //     follows the route. WebKit may take a moment to see a close,
+        //     and a request sent before it has opens another connection off
+        //     the route: so close, wait and ask, until the listener is asked.
+        let mut closed = 0;
+        let mut rounds = 0;
+        let followed = pump_until(WAIT, || {
+            rounds += 1;
+            closed += keeping.close_all();
+            pump_until(Duration::from_millis(200), || false);
+            request(&late);
+            through_listener() >= 1
+        });
         report.case(
             "the-late-route-is-used-once-every-connection-to-the-host-has-closed",
-            closed >= 1 && answered && through_listener() >= 1,
-            json!({ "closed": closed, "answered": answered, "through_listener": through_listener() }),
+            closed >= 1 && followed,
+            json!({ "closed": closed, "rounds": rounds, "through_listener": through_listener() }),
         );
+
+        // 15. The view's first load now depends on the listener. A listener
+        //     that cannot open its leg answers 502; one that is gone does
+        //     not answer. Either way the route allows failover: the page
+        //     loads straight from the host.
+        let gone = {
+            let unused = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free port");
+            unused.local_addr().expect("its address").port()
+        };
+        let refusing = Proxy::start(reachable.clone(), Some(gone));
+        for (name, port, asked_of) in [
+            (
+                "the-page-loads-when-the-listener-answers-502",
+                refusing.port,
+                Some(&refusing),
+            ),
+            ("the-page-loads-when-the-listener-is-gone", gone, None),
+        ] {
+            let view = new_webview(mtm);
+            let installed = install_route(
+                &view,
+                mtm,
+                REACHABLE,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
+                USERNAME,
+                PASSWORD,
+            );
+            let before = keeping.accepted();
+            let loaded = load(&view, &format!("http://{reachable}/"), "kept");
+            let answered = request(&view);
+            let straight = keeping.accepted() - before;
+            // The 502 came from a listener that was really asked, with the
+            // credential.
+            let refused = asked_of.map(|proxy| {
+                proxy
+                    .asked()
+                    .iter()
+                    .filter(|asked| asked.target == reachable && asked.credential == "right")
+                    .count()
+            });
+            report.case(
+                name,
+                installed && loaded && answered && straight >= 1 && refused.is_none_or(|count| count >= 1),
+                json!({
+                    "installed": installed, "loaded": loaded, "request_answered": answered,
+                    "connections_straight_to_the_host": straight, "listener_asked_and_refused": refused,
+                }),
+            );
+        }
 
         report.failed
     }

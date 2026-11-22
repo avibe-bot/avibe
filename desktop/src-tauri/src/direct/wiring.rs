@@ -334,13 +334,16 @@ impl Wiring {
     }
 
     /// The session of the published instance view of `account` at `origin`:
-    /// the one an app window opened from that view shares.
+    /// the one an app window opened from that view shares. A session that
+    /// was started before its view was created counts from the start: its
+    /// view can be on show for a moment before a look has seen it there,
+    /// and an app window opened in that moment is routed like any other.
     pub fn shared(&self, account: &str, origin: &str) -> Option<u64> {
         self.sessions
             .iter()
             .find(|session| {
                 !session.scout
-                    && session.runtime.is_some()
+                    && (session.runtime.is_some() || session.early)
                     && session.target.account == account
                     && session.target.origin == origin
             })
