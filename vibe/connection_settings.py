@@ -159,6 +159,19 @@ class PinFailureWindow:
         return self.seconds >= OUTAGE_SECONDS
 
 
+def _valid_pin_attempt(attempt) -> bool:
+    return (isinstance(attempt, dict) and all(isinstance(attempt.get(k), str) and attempt[k] for k in ('id', 'boot'))
+            and isinstance(attempt.get('pins'), dict) and set(attempt['pins']) <= AUTOMATIC.keys())
+
+
+def _valid_pin_route(route) -> bool:
+    """Every field the recovery and startup paths index, so a damaged record degrades instead of raising."""
+    return (isinstance(route, dict) and _valid_pin_attempt(route.get('attempt'))
+            and isinstance(route.get('generation'), (str, type(None))) and isinstance(route.get('phase'), str)
+            and isinstance(route.get('relaxed'), list) and set(route['relaxed']) <= AUTOMATIC.keys()
+            and isinstance(route.get('protocol'), (str, type(None))) and 'remember' in route)
+
+
 class Journal:
     def __init__(self, clock: Callable[[], float] = _clock):
         self.clock = clock
@@ -180,9 +193,18 @@ class Journal:
                                        or op['setting'] not in FIELDS or op['state'] not in {'applying', 'verifying', 'restoring'}):
                     raise ValueError('invalid operation record')
             attempt = data.get('pinAttempt')
-            if attempt is not None and (not isinstance(attempt, dict) or not all(
-                    isinstance(attempt.get(k), str) and attempt[k] for k in ('id', 'boot'))):
+            if attempt is not None and not _valid_pin_attempt(attempt):
                 raise ValueError('invalid pin attempt ownership')
+            route = data.get('pinRoute')
+            if route is not None and not (_valid_pin_route(route) and (
+                    route.get('previous') is None or _valid_pin_route(route['previous']))):
+                raise ValueError('invalid pin route')
+            for slot, keys in (('outcome', ('id', 'setting', 'result', 'reason')), ('returnedToAutomatic', ('changes',)),
+                               ('verifiedPreference', ('protocol', 'generation', 'request'))):
+                if data.get(slot) is not None and (not isinstance(data[slot], dict) or not set(keys) <= data[slot].keys()):
+                    raise ValueError('invalid ' + slot)
+            if data['returnedToAutomatic'] is not None and not isinstance(data['returnedToAutomatic']['changes'], list):
+                raise ValueError('invalid returnedToAutomatic')
             prior = data.get('priorRepair')
             if prior is not None:
                 current = data['operation']

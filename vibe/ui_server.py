@@ -8588,17 +8588,17 @@ def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
 def _start_remote_monitors(config, *, startup=False):
     from vibe import connection_runtime, connection_settings, remote_access
 
-    if startup:
-        try:
-            connection_settings.adopt_host_enrollment()
-        except (OSError, ValueError, connection_settings.ConnectionError):
-            logger.warning('Could not adopt host relay enrollment; leaving relay eligibility unchanged')
-        try:
-            connection_runtime.recover_startup()
-            config = V2Config.load()  # storage may have been repaired
-        except (OSError, ValueError, connection_settings.ConnectionError):
-            logger.warning('Could not read connection recovery state during UI startup')
     try:
+        if startup:
+            try:
+                connection_settings.adopt_host_enrollment()
+            except (OSError, ValueError, connection_settings.ConnectionError):
+                logger.warning('Could not adopt host relay enrollment; leaving relay eligibility unchanged')
+            try:
+                connection_runtime.recover_startup()
+                config = V2Config.load()  # storage may have been repaired
+            except (OSError, ValueError, connection_settings.ConnectionError):
+                logger.warning('Could not read connection recovery state during UI startup')
         connection_runtime.start()
     finally:
         # An optional settings artifact must not disable heartbeat or auth polling.

@@ -1,4 +1,5 @@
 """Disposable config/journal and connector doubles. No phone, public tunnel or wall-clock sleeps."""
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -428,6 +429,40 @@ def test_unreadable_settings_disable_only_new_feature(rig, monkeypatch):
     result = ra.apply_settings({'transport_protocol': 'http2'})
     assert result['ok'] and result['previous_connector_drained']
     assert cs.journal.path.read_text() == 'not json'
+
+
+@pytest.mark.parametrize('damage', [
+    {'pinRoute': 'fixture'}, {'pinRoute': {'attempt': 'fixture'}},
+    {'pinRoute': {'attempt': {'id': 'a', 'boot': 'b', 'pins': {}}, 'generation': 'g', 'phase': 'comparing',
+                  'relaxed': ['protocol'], 'protocol': 'http2', 'remember': False, 'previous': 7}},
+    {'pinAttempt': {'id': 'a', 'boot': 'b'}}, {'outcome': 'fixture'}, {'returnedToAutomatic': {'changes': 'x'}},
+    {'verifiedPreference': []}])
+def test_malformed_journal_records_degrade_and_monitoring_still_starts(rig, monkeypatch, damage):
+    from vibe import ui_server
+    state = {'version': 1, 'binding': cs.relay_pairing(rig.cfg), 'operation': None, 'outcome': None,
+             'returnedToAutomatic': None, **damage}
+    cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
+    cs.journal.path.write_text(json.dumps(state))
+    with pytest.raises(cs.ConnectionError, match='connection_state_unavailable'):
+        cs.journal.load(rig.cfg)
+    starts = []
+    monkeypatch.setattr(cs, 'adopt_host_enrollment', lambda: None)
+    monkeypatch.setattr(cr, 'start', lambda: starts.append('worker'))
+    monkeypatch.setattr(ra, 'start_runtime_monitoring', lambda config: starts.append('monitor'))
+    ui_server._start_remote_monitors(rig.cfg, startup=True)
+    assert starts == ['worker', 'monitor']
+
+
+def test_unexpected_recovery_error_still_starts_ordinary_monitoring(rig, monkeypatch):
+    from vibe import ui_server
+    starts = []
+    monkeypatch.setattr(cs, 'adopt_host_enrollment', lambda: None)
+    monkeypatch.setattr(cr, 'recover_startup', lambda: (_ for _ in ()).throw(AttributeError('fixture')))
+    monkeypatch.setattr(cr, 'start', lambda: starts.append('worker'))
+    monkeypatch.setattr(ra, 'start_runtime_monitoring', lambda config: starts.append('monitor'))
+    with pytest.raises(AttributeError):
+        ui_server._start_remote_monitors(rig.cfg, startup=True)
+    assert starts == ['monitor']
 
 
 def test_candidate_not_ready_does_not_restore_untouched_connector(rig, monkeypatch):
