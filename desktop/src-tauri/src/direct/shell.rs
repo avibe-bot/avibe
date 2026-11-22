@@ -682,10 +682,10 @@ pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 #[path = "shell_macos.rs"]
-pub(crate) mod native;
+mod native;
 #[cfg(windows)]
 #[path = "shell_windows.rs"]
-pub(crate) mod native;
+mod native;
 #[cfg(not(any(target_os = "macos", windows)))]
 #[path = "shell_unsupported.rs"]
-pub(crate) mod native;
+mod native;

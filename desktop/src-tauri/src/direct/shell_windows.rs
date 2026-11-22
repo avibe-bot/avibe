@@ -10,30 +10,30 @@ use tokio::sync::oneshot;
 
 /// The challenge answers that are registered, by window label: at most one
 /// for a label, the newest window's.
-pub(crate) struct Answering(Vec<(String, i64)>);
+struct Answering(Vec<(String, i64)>);
 
 impl Answering {
-    pub(crate) const fn new() -> Self {
+    const fn new() -> Self {
         Self(Vec::new())
     }
 
     /// `window` answers under `registration` from now on. An app window's
     /// label is used again after its window closed: what an earlier window
     /// of that label had is forgotten.
-    pub(crate) fn put(&mut self, window: String, registration: i64) {
+    fn put(&mut self, window: String, registration: i64) {
         self.0.retain(|(label, _)| *label != window);
         self.0.push((window, registration));
     }
 
     /// The registration to take off `window`, once.
-    pub(crate) fn take(&mut self, window: &str) -> Option<i64> {
+    fn take(&mut self, window: &str) -> Option<i64> {
         let at = self.0.iter().position(|(label, _)| label == window)?;
         Some(self.0.swap_remove(at).1)
     }
 
     /// Forgets the windows that are no longer open: their answer went with
     /// their WebView.
-    pub(crate) fn keep(&mut self, open: impl Fn(&str) -> bool) {
+    fn keep(&mut self, open: impl Fn(&str) -> bool) {
         self.0.retain(|(label, _)| open(label));
     }
 }
@@ -140,3 +140,9 @@ pub async fn detach(app: &AppHandle, window: String) {
         let _ = stopped.await;
     }
 }
+
+// This module is the shell's `native` on Windows alone, so its tests run
+// there alone; they sit inside it, where what it keeps is private.
+#[cfg(test)]
+#[path = "../../tests/direct/answering.rs"]
+mod tests;

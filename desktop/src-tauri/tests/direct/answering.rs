@@ -1,4 +1,4 @@
-use super::shell::native::Answering;
+use super::Answering;
 
 /// One answer for a label, the newest window's; taken off once; and gone
 /// with a window that closed.
