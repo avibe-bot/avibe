@@ -1,4 +1,4 @@
-use super::{Client, Credential};
+use super::{Client, WindowRegistration};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -6,7 +6,7 @@ use tokio::{
     time::{timeout, Duration},
 };
 
-pub(super) async fn connect_as(c: &Client, credential: &Credential, expected: u16) -> TcpStream {
+pub(super) async fn connect_as(c: &Client, credential: &WindowRegistration, expected: u16) -> TcpStream {
     let route = c.route().unwrap();
     let (user, pass) = credential.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
@@ -63,11 +63,16 @@ async fn revoked_window_cannot_open_or_keep_a_connection_or_cross_instances() {
         echo(&mut sa).await;
         echo(&mut sb).await;
         drop(connect_as(&other, &a, 407).await);
-        c.revoke_window("a");
+        let foreign = other.window_credential("a").unwrap();
+        c.revoke_window(&foreign);
+        assert_eq!(c.handover().window_census(&foreign), None);
+        echo(&mut sa).await;
+        c.revoke_window(&a);
         let mut byte = [0];
         assert!(matches!(sa.read(&mut byte).await, Ok(0) | Err(_)));
         let fresh = c.window_credential("a").unwrap();
         drop(connect_as(&c, &a, 407).await);
+        c.revoke_window(&a); // late teardown, after same-label registration
         let mut reopened = connect_as(&c, &fresh, 200).await;
         echo(&mut reopened).await;
         echo(&mut sb).await;

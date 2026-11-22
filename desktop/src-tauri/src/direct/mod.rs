@@ -8,7 +8,9 @@ mod connect;
 #[path = "../../tests/direct/windows_credentials.rs"]
 mod credential_tests;
 mod credentials;
-pub use credentials::Credential;
+#[cfg(test)]
+use credentials::Credential;
+pub use credentials::WindowRegistration;
 pub use quiet::PublicCensus;
 #[cfg(test)]
 #[path = "../../tests/direct/cross_network.rs"]
@@ -244,14 +246,14 @@ impl Client {
     }
     /// Trusted shell window identity. Idempotent until revoked; reopening a
     /// window with the same label gets an unrelated secret and census.
-    pub fn window_credential(&self, window: &str) -> Option<Arc<Credential>> {
+    pub fn window_credential(&self, window: &str) -> Option<WindowRegistration> {
         self.listener
             .is_alive()
             .then(|| self.listener.windows.credential(window))
             .flatten()
     }
-    pub fn revoke_window(&self, window: &str) {
-        self.listener.windows.revoke(window)
+    pub fn revoke_window(&self, registration: &WindowRegistration) {
+        self.listener.windows.revoke(registration)
     }
     pub fn handover(&self) -> Handover {
         Handover {

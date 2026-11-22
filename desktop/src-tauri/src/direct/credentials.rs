@@ -33,6 +33,21 @@ impl Credential {
         bool::from(self.header.as_bytes().ct_eq(header.as_bytes()))
     }
 }
+/// Native capability for one registration lifetime. Clones retain its identity,
+/// not its authority: a revoked registration can never become current again.
+#[derive(Clone)]
+pub struct WindowRegistration {
+    label: String,
+    credential: Arc<Credential>,
+}
+impl WindowRegistration {
+    pub fn native_login(&self) -> (&str, &str) {
+        self.credential.native_login()
+    }
+    fn matches(&self, entry: &Entry) -> bool {
+        Arc::ptr_eq(&self.credential, &entry.credential)
+    }
+}
 struct Entry {
     credential: Arc<Credential>,
     valid: watch::Sender<bool>,
@@ -92,30 +107,39 @@ impl Windows {
     pub fn legacy_grant(&self) -> Grant {
         self.legacy.grant()
     }
-    pub fn credential(&self, window: &str) -> Option<Arc<Credential>> {
+    pub fn credential(&self, window: &str) -> Option<WindowRegistration> {
         if window.is_empty() || window.len() > 256 {
             return None;
         }
         let mut windows = self.windows.lock().unwrap();
-        if let Some(entry) = windows.get(window) {
-            return Some(entry.credential.clone());
-        }
-        if windows.len() >= 256 {
-            return None;
-        }
-        let entry = Entry::new()?;
-        let credential = entry.credential.clone();
-        windows.insert(window.to_owned(), entry);
-        Some(credential)
+        let entry = if let Some(entry) = windows.get(window) {
+            entry
+        } else {
+            if windows.len() >= 256 {
+                return None;
+            }
+            windows.entry(window.to_owned()).or_insert(Entry::new()?)
+        };
+        Some(WindowRegistration {
+            label: window.to_owned(),
+            credential: entry.credential.clone(),
+        })
     }
-    pub fn revoke(&self, window: &str) {
+    pub fn revoke(&self, registration: &WindowRegistration) {
         let mut windows = self.windows.lock().unwrap();
-        if let Some(entry) = windows.remove(window) {
-            entry.valid.send_replace(false);
+        if let std::collections::hash_map::Entry::Occupied(slot) = windows.entry(registration.label.clone()) {
+            if registration.matches(slot.get()) {
+                slot.remove().valid.send_replace(false);
+            }
         }
     }
-    pub fn window(&self, window: &str) -> Option<Grant> {
-        self.windows.lock().unwrap().get(window).map(Entry::grant)
+    pub fn window(&self, registration: &WindowRegistration) -> Option<Grant> {
+        self.windows
+            .lock()
+            .unwrap()
+            .get(&registration.label)
+            .filter(|entry| registration.matches(entry))
+            .map(Entry::grant)
     }
     pub fn authenticate(&self, header: &str) -> Option<Grant> {
         let windows = self.windows.lock().unwrap();

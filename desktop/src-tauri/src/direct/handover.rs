@@ -1,6 +1,6 @@
 use super::{
     connect::Authority,
-    credentials::{Grant, Windows},
+    credentials::{Grant, WindowRegistration, Windows},
     quiet::PublicCensus,
     transport::Link,
     SelectedPath,
@@ -62,15 +62,15 @@ impl Handover {
         };
         self.close(host, grant, sole_document).await
     }
-    /// Only the trusted shell supplies the originating window label.
-    pub async fn close_quiet_public_for_window(&self, host: &str, window: &str) -> HandoverResult {
-        let Some(grant) = self.windows.upgrade().and_then(|w| w.window(window)) else {
+    /// A delayed call retains the originating registration, even before its first poll.
+    pub async fn close_quiet_public_for_window(&self, host: &str, registration: &WindowRegistration) -> HandoverResult {
+        let Some(grant) = self.windows.upgrade().and_then(|w| w.window(registration)) else {
             return HandoverResult::NotUsable;
         };
         self.close(host, grant, || Some(())).await
     }
-    pub fn window_census(&self, window: &str) -> Option<PublicCensus> {
-        let grant = self.windows.upgrade()?.window(window)?;
+    pub fn window_census(&self, registration: &WindowRegistration) -> Option<PublicCensus> {
+        let grant = self.windows.upgrade()?.window(registration)?;
         let valid = grant.valid.borrow();
         (*valid).then(|| grant.legs.census())
     }

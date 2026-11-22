@@ -157,22 +157,30 @@ async fn run(changed_selection: bool) {
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
-    let pooled = if !changed_selection {
+    let public = if !changed_selection {
         let mut other = Client::new("other-app.avibe.bot", "other".into()).await.unwrap();
         let a = super::handover_tests::public_browser(&mut client).await;
         let b = super::handover_tests::public_browser(&mut other).await;
+        Some((a, b, other))
+    } else {
+        None
+    };
+    let handover = client.handover();
+    let retired = client.window_credential("second").unwrap();
+    let delayed = handover.close_quiet_public_for_window(host.host(), &retired);
+    client.revoke_window(&retired);
+    let pooled = if let Some((a, b, other)) = public {
         let first = client.window_credential("first").unwrap();
         let second = client.window_credential("second").unwrap();
         let mut one = super::credential_tests::connect_as(&client, &first, 200).await;
         let mut two = super::credential_tests::connect_as(&client, &second, 200).await;
         super::credential_tests::echo(&mut one).await;
         super::credential_tests::echo(&mut two).await;
-        Some((a, b, other, one, two))
+        Some((a, b, other, first, second, one, two))
     } else {
         None
     };
     let mut changes_status = client.path_changes();
-    let handover = client.handover();
     assert_eq!(*changes_status.borrow_and_update(), super::PathStatus::default());
     client.publish(link.clone(), super::EndpointDrain::new(ep));
     assert_eq!(changes_status.borrow_and_update().sequence, 1);
@@ -199,7 +207,7 @@ async fn run(changed_selection: bool) {
     let credential = client.window_credential("to-close").unwrap();
     let mut closing = super::credential_tests::connect_as(&client, &credential, 200).await;
     super::credential_tests::echo(&mut closing).await;
-    client.revoke_window("to-close");
+    client.revoke_window(&credential);
     assert_retired_read(closing.read(&mut [0]).await);
     drop(super::credential_tests::connect_as(&client, &credential, 407).await);
     let active = client.window_credential("second").unwrap();
@@ -238,17 +246,25 @@ async fn run(changed_selection: bool) {
         assert_eq!(client.refresh_reply(|_| std::future::pending()).await, retained);
     }
     assert_eq!(*deadlines.borrow(), renewed_until);
-    if let Some((mut mine, mut foreign, _other, mut one, mut two)) = pooled {
+    if let Some((mut mine, mut foreign, _other, first, second, mut one, mut two)) = pooled {
         assert_eq!(
-            handover.window_census("first"),
+            handover.window_census(&first),
             Some(super::PublicCensus { quiet: 1, busy: 0 })
         );
         assert_eq!(
-            handover.window_census("second"),
+            handover.window_census(&second),
+            Some(super::PublicCensus { quiet: 1, busy: 0 })
+        );
+        // First poll is after label reuse, with a replacement leg eligible to close.
+        assert_eq!(delayed.await, super::HandoverResult::NotUsable);
+        assert_eq!(handover.window_census(&retired), None);
+        client.revoke_window(&retired);
+        assert_eq!(
+            handover.window_census(&second),
             Some(super::PublicCensus { quiet: 1, busy: 0 })
         );
         assert_eq!(
-            handover.close_quiet_public_for_window(host.host(), "first").await,
+            handover.close_quiet_public_for_window(host.host(), &first).await,
             super::HandoverResult::Done { closed: 1, kept: 0 }
         );
         assert_retired_read(one.read(&mut [0]).await);
