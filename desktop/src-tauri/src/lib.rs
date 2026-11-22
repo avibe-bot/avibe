@@ -711,26 +711,59 @@ fn append_account_items<R: Runtime>(
     application: Option<&Submenu<R>>,
     connection: Option<&Submenu<R>>,
 ) -> tauri::Result<()> {
-    for (id, key) in [
-        ("desktop-client-account", "accountService"),
-        ("desktop-client-instances", "switchInstance"),
-        ("desktop-client-sign-out", "signOut"),
-    ] {
-        if let Some(label) = instance_client::native_copy(key) {
-            let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
-            tray.append(&item)?;
-            if let Some(submenu) = application {
-                submenu.append(&item)?;
+    for item in account_items(connection.is_some()) {
+        match (item, connection) {
+            (AccountItem::Copy { id, key }, _) => {
+                if let Some(label) = instance_client::native_copy(key) {
+                    let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
+                    tray.append(&item)?;
+                    if let Some(submenu) = application {
+                        submenu.append(&item)?;
+                    }
+                }
             }
-        }
-        if let Some(connection) = connection.filter(|_| id == "desktop-client-instances") {
-            tray.append(connection)?;
-            if let Some(submenu) = application {
-                submenu.append(connection)?;
+            (AccountItem::Connection, Some(connection)) => {
+                tray.append(connection)?;
+                if let Some(submenu) = application {
+                    submenu.append(connection)?;
+                }
             }
+            (AccountItem::Connection, None) => {}
         }
     }
     Ok(())
+}
+
+/// One of the account's items, before it is built.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountItem {
+    /// An item of the account's own, with the key of its text.
+    Copy { id: &'static str, key: &'static str },
+    /// The 「连接方式」 submenu.
+    Connection,
+}
+
+/// The account's items in order, on every system. With a `connection`
+/// submenu, it comes right after "Switch instance".
+fn account_items(connection: bool) -> Vec<AccountItem> {
+    let mut items = vec![
+        AccountItem::Copy {
+            id: "desktop-client-account",
+            key: "accountService",
+        },
+        AccountItem::Copy {
+            id: "desktop-client-instances",
+            key: "switchInstance",
+        },
+    ];
+    if connection {
+        items.push(AccountItem::Connection);
+    }
+    items.push(AccountItem::Copy {
+        id: "desktop-client-sign-out",
+        key: "signOut",
+    });
+    items
 }
 
 fn stop_is_available(owned: bool, activity: u8) -> bool {

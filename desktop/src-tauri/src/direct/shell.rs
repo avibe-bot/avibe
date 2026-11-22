@@ -30,6 +30,7 @@ use tokio::{
 
 pub(crate) const MENU_AUTOMATIC: &str = "direct-connection-automatic";
 pub(crate) const MENU_TUNNEL: &str = "direct-connection-tunnel";
+const MENU_CONNECTION: &str = "direct-connection";
 
 /// How often a session looks at the clock, to notice that the computer slept.
 const GLANCE: Duration = Duration::from_secs(30);
@@ -49,17 +50,66 @@ pub(crate) struct ConnectionMenu<R: Runtime> {
     pub tunnel: CheckMenuItem<R>,
 }
 
-impl<R: Runtime> ConnectionMenu<R> {
-    /// Greyed, with "automatic" ticked, until `show` says otherwise.
-    pub(crate) fn build(app: &AppHandle<R>) -> tauri::Result<Option<Self>> {
+/// The submenu as words: what every system builds it from. `None` when the
+/// product catalog lacks one of its three strings.
+struct ConnectionRows {
+    title: String,
+    /// The choices in the frame's order, each with its item's ID.
+    choices: [(&'static str, Mode, String); 2],
+}
+
+impl ConnectionRows {
+    fn read() -> Option<Self> {
         let text = |key: &str| crate::product_text(&format!("devices.connection.{key}"));
-        let (Some(title), Some(automatic), Some(tunnel)) = (text("title"), text("automatic"), text("tunnelOnly"))
-        else {
+        Some(Self {
+            title: text("title")?,
+            choices: [
+                (MENU_AUTOMATIC, Mode::Automatic, text("automatic")?),
+                (MENU_TUNNEL, Mode::Tunnel, text("tunnelOnly")?),
+            ],
+        })
+    }
+}
+
+/// What the submenu shows for a choice: whether it can be used, and which
+/// of its items is ticked.
+#[derive(Debug, PartialEq, Eq)]
+struct ConnectionState {
+    enabled: bool,
+    ticked: Mode,
+}
+
+impl ConnectionState {
+    /// The choice for the instance on show; `None`, and greyed with
+    /// "automatic" ticked, while this computer's own instance is.
+    fn of(chosen: Option<Mode>) -> Self {
+        Self {
+            enabled: chosen.is_some(),
+            ticked: chosen.unwrap_or_default(),
+        }
+    }
+}
+
+/// This computer's choice of path for the instance on show: each account's
+/// instance has its own, and this computer's own instance has none.
+fn chosen(shown: Option<&Published>, wiring: &Wiring) -> Option<Mode> {
+    shown.map(|shown| wiring.mode(&shown.target.account, &shown.target.origin))
+}
+
+impl<R: Runtime> ConnectionMenu<R> {
+    /// As for this computer's own instance until `show` says otherwise.
+    pub(crate) fn build(app: &AppHandle<R>) -> tauri::Result<Option<Self>> {
+        let Some(rows) = ConnectionRows::read() else {
             return Ok(None);
         };
-        let automatic = CheckMenuItem::with_id(app, MENU_AUTOMATIC, automatic, true, true, None::<&str>)?;
-        let tunnel = CheckMenuItem::with_id(app, MENU_TUNNEL, tunnel, true, false, None::<&str>)?;
-        let submenu = Submenu::with_id_and_items(app, "direct-connection", title, false, &[&automatic, &tunnel])?;
+        let state = ConnectionState::of(None);
+        let [automatic, tunnel] = rows.choices;
+        let item = |(id, mode, text): (&str, Mode, String)| {
+            CheckMenuItem::with_id(app, id, text, true, state.ticked == mode, None::<&str>)
+        };
+        let (automatic, tunnel) = (item(automatic)?, item(tunnel)?);
+        let submenu =
+            Submenu::with_id_and_items(app, MENU_CONNECTION, rows.title, state.enabled, &[&automatic, &tunnel])?;
         Ok(Some(Self {
             submenu,
             automatic,
@@ -67,13 +117,13 @@ impl<R: Runtime> ConnectionMenu<R> {
         }))
     }
 
-    /// The choice for the instance on show; `None`, and greyed, while this
-    /// computer's own instance is. The system ticks whatever was clicked, so
-    /// both ticks are always set from the choice.
+    /// The system ticks whatever was clicked, so both ticks are always set
+    /// from the choice.
     pub(crate) fn show(&self, chosen: Option<Mode>) {
-        let _ = self.submenu.set_enabled(chosen.is_some());
-        let _ = self.automatic.set_checked(chosen != Some(Mode::Tunnel));
-        let _ = self.tunnel.set_checked(chosen == Some(Mode::Tunnel));
+        let state = ConnectionState::of(chosen);
+        let _ = self.submenu.set_enabled(state.enabled);
+        let _ = self.automatic.set_checked(state.ticked == Mode::Automatic);
+        let _ = self.tunnel.set_checked(state.ticked == Mode::Tunnel);
     }
 }
 
@@ -644,9 +694,7 @@ pub(crate) fn menu(app: &AppHandle) -> tauri::Result<Option<Submenu<tauri::Wry>>
 }
 
 fn refresh_menu(app: &AppHandle, state: &Arc<Direct>) {
-    let chosen = lock(&state.shown)
-        .as_ref()
-        .map(|shown| lock(&state.wiring).mode(&shown.target.account, &shown.target.origin));
+    let chosen = chosen(lock(&state.shown).as_ref(), &lock(&state.wiring));
     let state = state.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(menu) = lock(&state.menu).as_ref() {
@@ -689,3 +737,7 @@ mod native;
 #[cfg(not(any(target_os = "macos", windows)))]
 #[path = "shell_unsupported.rs"]
 mod native;
+
+#[cfg(test)]
+#[path = "../../tests/direct/menu_model.rs"]
+mod menu_model_tests;
