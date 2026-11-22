@@ -74,16 +74,34 @@ final class FixtureHoldViewController: UIViewController {
         var page = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_HOLD_NO_SURFACES"] == "1"
             ? Self.page.replacingOccurrences(of: "const NO_SURFACES = false;", with: "const NO_SURFACES = true;")
             : Self.page
-        // A page that focuses its input by itself as it loads, with no touch.
+        // A page that focuses its input by itself as it loads, with no touch,
+        // under a cover that goes a second after the load, as the App's
+        // cold-start cover does: the page gets the focus after its input
+        // has been focused, not before.
         if ProcessInfo.processInfo.environment["AVIBE_FIXTURE_HOLD_SELF_FOCUS"] == "1" {
             page = page.replacingOccurrences(of: "const SELF_FOCUS = false;", with: "const SELF_FOCUS = true;")
+            let cover = UIView(frame: view.bounds)
+            cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            cover.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.2)
+            view.addSubview(cover)
+            self.cover = cover
         }
         webView.loadHTMLString(page, baseURL: URL(string: "\(Self.origin)/hold.html")!)
     }
 
     private let touchLog = FixtureHoldTouchLog()
+    /// Over the WebView until a second after its page has loaded.
+    private var cover: UIView?
+    private var loadedLooks = 0
 
     private func publishEvidence() {
+        if let cover, webView?.isLoading == false {
+            loadedLooks += 1
+            if loadedLooks >= 5 {
+                cover.removeFromSuperview()
+                self.cover = nil
+            }
+        }
         let lines = NativeHoldTimings.lines
         evidence.accessibilityValue = (lines.isEmpty ? "none" : lines.joined(separator: " | "))
             + " || touches: " + (touchLog.touches.isEmpty ? "none" : touchLog.touches.joined(separator: " "))
@@ -347,10 +365,13 @@ final class FixtureHoldViewController: UIViewController {
       document.getElementById("sheet-body").addEventListener("click", () => { sheetTaps += 1; set("s-sheet", "sheet=" + sheetTaps); });
 
       if (SELF_FOCUS) {
-        // The input is the active element from here, whether or not the page has the focus;
-        // what it reads 1.5 s later says whether the App has given the page the focus since.
+        // The input is the active element from here, whether or not the page has the focus.
+        // What the page reads as it asks, and again when the input's focus event comes (the
+        // page got the focus then), says in which order the two happened.
         input.focus();
-        setTimeout(() => set("s-self", "self=" + focusFacts()), 1500);
+        const asked = "self=asked:" + focusFacts();
+        set("s-self", asked);
+        input.addEventListener("focus", () => set("s-self", asked + ",event:" + focusFacts()), { once: true });
       }
       name();
       set("s-ready", "ready=yes");

@@ -82,16 +82,25 @@ final class HoldTouchUITests: XCTestCase {
         XCTAssertEqual(kept(), "none", "The App followed a touch with no surface named; \(facts())")
     }
 
-    /// A page that focuses its input by itself as it loads, with no touch: no keyboard comes
-    /// of that, whether or not the App then gives the page the focus (on iOS 27 it does, and
-    /// the input gets its focus event then).
+    /// A page that focuses its input by itself as it loads, with no touch, under a cover that
+    /// then goes (as the App's cold-start cover does): no keyboard comes of that. On iOS 27
+    /// the App gives the page the focus once the cover is gone, and the input gets its focus
+    /// event then; still no keyboard.
     func testAnInputThePageFocusedByItselfRaisesNoKeyboard() {
         app.launchEnvironment["AVIBE_FIXTURE_HOLD_SELF_FOCUS"] = "1"
         // Focused, the input is no hold surface.
         launch(warm: false, surfaces: "surfaces=plain")
-        // The page's reading of its focus, 1.5 s after it focused the input.
-        XCTAssertNotNil(waitForLabel(beginning: "self=active"), facts())
-        Thread.sleep(forTimeInterval: 1)
+        // The page asked while it had no focus: it lay under the cover.
+        XCTAssertEqual(
+            waitForLabel(beginning: "self=asked:")?.hasPrefix("self=asked:active=input/docFocus=false"), true,
+            "The page had the focus under a cover; \(facts())"
+        )
+        if #available(iOS 27, *) {
+            // The cover goes a second after the load, and the App gives the page the focus.
+            XCTAssertTrue(waitFor("focus=yes", timeout: 15), "The page got no focus once it was uncovered; \(facts())")
+        }
+        // Long enough for a keyboard to have come.
+        Thread.sleep(forTimeInterval: 3)
         let keyboard = app.keyboards.firstMatch.exists
         print("[hold smoke] self-focused input, keyboard=\(keyboard): \(facts())")
         XCTAssertFalse(keyboard, "A keyboard came with no touch; \(facts())")

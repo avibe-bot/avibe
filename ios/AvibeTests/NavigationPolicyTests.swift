@@ -4872,6 +4872,31 @@ private final class FirstResponderProbe: UIView {
     }
 }
 
+/// A UIKit view inside SwiftUI, as the App's WebView is.
+private struct ProbeInSwiftUI: UIViewRepresentable {
+    let view: UIView
+
+    func makeUIView(context: Context) -> UIView { view }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+/// The view as the App shows its WebView: in SwiftUI, with the App's own
+/// cover over it or not.
+private struct ProbeScreen: View {
+    let view: UIView
+    let covered: Bool
+    /// As the runtime's layer under Account.
+    var hitTested = true
+
+    var body: some View {
+        ZStack {
+            ProbeInSwiftUI(view: view).allowsHitTesting(hitTested)
+            if covered { RuntimeSkeleton() }
+        }
+    }
+}
+
 /// A touch that says which phase it is in.
 private final class TouchProbe: UITouch {
     var phaseNow: UITouch.Phase = .began
@@ -4931,8 +4956,17 @@ final class PageFocusKeeperTests: XCTestCase {
         XCTAssertEqual(inner.asked, 0)
 
         // The view kept it itself (a WebView does when its content view
-        // refused, and its page is then still unfocused): it is asked again.
+        // refused, and its page is then still unfocused): it is not asked
+        // at every look.
         XCTAssertTrue(view.isFirstResponder)
+        keeper.look()
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
+
+        // It is asked again after the reader's next touch.
+        let touch = TouchProbe()
+        keeper.touchesBegan([touch], with: UIEvent())
+        touch.phaseNow = .ended
         keeper.look()
         XCTAssertEqual(view.asked, 2)
 
@@ -4941,6 +4975,61 @@ final class PageFocusKeeperTests: XCTestCase {
         keeper.look()
         XCTAssertEqual(view.asked, 2)
         XCTAssertEqual(inner.asked, 0)
+    }
+
+    /// A view whose content refused is asked again each time it comes in
+    /// front.
+    @MainActor
+    func testAViewThatKeptFirstResponderItselfIsAskedAgainWhenItComesInFrontAgain() {
+        var shown = true
+        let (_, view, keeper) = makeKept(shown: { shown })
+        view.addSubview(FirstResponderProbe(frame: view.bounds))
+        keeper.look()
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
+        shown = false
+        keeper.look()
+        shown = true
+        keeper.look()
+        XCTAssertEqual(view.asked, 2)
+    }
+
+    /// A keyboard comes up for the page with no touch (VoiceOver, Voice
+    /// Control and Switch Control make none): the focus is the reader's
+    /// from then, and is not taken when the App goes inactive.
+    @MainActor
+    func testAKeyboardForThePageMakesItsFocusTheReaders() {
+        var shown = true
+        let (_, view, keeper) = makeKept(shown: { shown })
+        let content = FirstResponderProbe(frame: view.bounds)
+        view.addSubview(content)
+        view.content = content
+        keeper.look()
+        XCTAssertTrue(content.isFirstResponder)
+
+        keeper.keyboardWillShow()
+        shown = false
+        keeper.look()
+        XCTAssertEqual(view.ended, 0)
+        XCTAssertTrue(content.isFirstResponder)
+    }
+
+    /// A keyboard that comes up for something else, while the page has no
+    /// focus, changes nothing: what the keeper gives afterwards is still
+    /// taken back.
+    @MainActor
+    func testAKeyboardForSomethingElseDoesNotMakeALaterFocusTheReaders() {
+        var shown = true
+        let (_, view, keeper) = makeKept(shown: { shown })
+        let content = FirstResponderProbe(frame: view.bounds)
+        view.addSubview(content)
+        view.content = content
+        keeper.keyboardWillShow()
+        keeper.look()
+        XCTAssertTrue(content.isFirstResponder)
+        shown = false
+        keeper.look()
+        XCTAssertEqual(view.ended, 1)
     }
 
     /// While the App does not show its pages (App Lock is up, or the App
@@ -5123,6 +5212,40 @@ final class PageFocusKeeperTests: XCTestCase {
         keeper.look()
         XCTAssertEqual(view.ended, 0)
         XCTAssertTrue(content.isFirstResponder)
+    }
+
+    /// The App's covers are SwiftUI, in one hosting view with the WebView,
+    /// and "in front" is asked of UIKit's hit test. Under the cold-start
+    /// cover (`RuntimeSkeleton`, which takes the touches), and where SwiftUI
+    /// lets no touch through to it (the runtime's layer under Account), the
+    /// view is not in front; uncovered, it is.
+    @MainActor
+    func testTheAppsOwnSwiftUICoversKeepAViewFromBeingInFront() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.screen.bounds
+        let view = FirstResponderProbe()
+        let host = UIHostingController(rootView: ProbeScreen(view: view, covered: false))
+        window.rootViewController = host
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+
+        // SwiftUI answers once it has laid the screen out.
+        try await eventually(timeout: .seconds(10)) { @MainActor in
+            view.window === window && PageFocusKeeper.isOnTop(view, in: window)
+        }
+        host.rootView = ProbeScreen(view: view, covered: true)
+        try await eventually(timeout: .seconds(10)) { @MainActor in
+            !PageFocusKeeper.isOnTop(view, in: window)
+        }
+        host.rootView = ProbeScreen(view: view, covered: false)
+        try await eventually(timeout: .seconds(10)) { @MainActor in
+            PageFocusKeeper.isOnTop(view, in: window)
+        }
+        host.rootView = ProbeScreen(view: view, covered: false, hitTested: false)
+        try await eventually(timeout: .seconds(10)) { @MainActor in
+            !PageFocusKeeper.isOnTop(view, in: window)
+        }
     }
 
     /// Two views in front in one window (side by side): the one whose page

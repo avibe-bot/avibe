@@ -31,10 +31,11 @@ import UIKit.UIGestureRecognizerSubclass
 /// presented to the reader (the chat page marks what arrives as read), so
 /// one under App Lock, in an App that is not active, under a cover or
 /// behind a sheet must stay without it. And the focus given here is taken
-/// back when the WebView stops being in front before the reader has
-/// touched it. Once a finger has been on the WebView its focus is the
-/// reader's, as on iOS 26 after a tap: taking that would close a keyboard
-/// under Control Center or a system alert.
+/// back when the WebView stops being in front before the reader has used
+/// it. Once a finger has been on the WebView, or a keyboard has come up
+/// for it (VoiceOver, Voice Control and Switch Control make no touch), its
+/// focus is the reader's, as on iOS 26 after a tap: taking that would
+/// close a keyboard under Control Center or a system alert.
 ///
 /// As a gesture recogniser it only notes the fingers that come down on the
 /// WebView, and asks each touch itself whether it is still down. It never
@@ -54,9 +55,14 @@ final class PageFocusKeeper: UIGestureRecognizer {
     /// takes the gesture back (`reset()`) with the finger still on the
     /// glass, and sends this recogniser no end.
     private let touches = NSHashTable<UITouch>.weakObjects()
-    /// The page has the focus from here, and no finger has been on the
-    /// WebView since.
+    /// The page has the focus from here, and the reader has not used it
+    /// since: no finger on the WebView, no keyboard up for it.
     private var gaveUntouched = false
+    /// The WebView was asked since it last came in front, or was last
+    /// touched: one that keeps first responder itself, because its content
+    /// view refused, is not asked at every look.
+    private var asked = false
+    private var keyboardObserver: NSObjectProtocol?
     private var observer: CFRunLoopObserver?
     private var nextLook: TimeInterval = 0
     private var wakeAsked = false
@@ -79,10 +85,23 @@ final class PageFocusKeeper: UIGestureRecognizer {
         }
         CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
         self.observer = observer
+        keyboardObserver = NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardWillShowNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.keyboardWillShow() }
+        }
     }
 
     deinit {
         if let observer { CFRunLoopObserverInvalidate(observer) }
+        if let keyboardObserver { NotificationCenter.default.removeObserver(keyboardObserver) }
+    }
+
+    /// A keyboard comes up while the page has the focus: the reader is
+    /// typing into it, with or without a touch, and its focus is theirs.
+    func keyboardWillShow() {
+        guard let view, Self.holdsFirstResponder(in: view) else { return }
+        gaveUntouched = false
     }
 
     // MARK: Whether a finger is on the WebView
@@ -91,6 +110,7 @@ final class PageFocusKeeper: UIGestureRecognizer {
         for touch in touches { self.touches.add(touch) }
         // The reader has touched the page: its focus is theirs from here.
         gaveUntouched = false
+        asked = false
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -144,14 +164,21 @@ final class PageFocusKeeper: UIGestureRecognizer {
         if focused, !gaveUntouched { return }
         let inFront = appShowsPages() && Self.isOnTop(view, in: window)
         if focused {
+            asked = false
             guard !inFront else { return }
             gaveUntouched = false
             view.endEditing(true)
             return
         }
         gaveUntouched = false
-        // Another WebView in front in this window has the focus: it keeps it.
-        guard inFront, !Self.anotherInFrontIsFocused(than: self, in: window) else { return }
+        guard inFront else {
+            asked = false
+            return
+        }
+        // Asked already since it came in front; or another WebView in front
+        // in this window has the focus, and keeps it.
+        guard !asked, !Self.anotherInFrontIsFocused(than: self, in: window) else { return }
+        asked = true
         view.becomeFirstResponder()
         gaveUntouched = true
     }
