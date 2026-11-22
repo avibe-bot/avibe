@@ -712,6 +712,16 @@ fn refresh_menu(app: &AppHandle, state: &Arc<Direct>) {
     });
 }
 
+/// Undo the system's optimistic checkmark when admission deferred the click.
+/// This only renders the saved choice; it never chooses a path or starts work.
+pub(crate) fn restore_deferred_menu(app: &AppHandle, id: &str) {
+    if matches!(id, MENU_AUTOMATIC | MENU_TUNNEL) {
+        if let Some(state) = direct(app) {
+            refresh_menu(app, &state);
+        }
+    }
+}
+
 /// A click in the submenu. `true` when the event was this menu's.
 pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
     let mode = match id {
@@ -728,6 +738,10 @@ pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
     }
     true
 }
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+#[path = "../../tests/direct/app_lock_menu.rs"]
+pub(crate) mod app_lock_menu;
 
 /// The choice of path for the instance of `account` at `origin` is now
 /// `mode`: from the menu, or from a page of that instance. Nothing reloads.

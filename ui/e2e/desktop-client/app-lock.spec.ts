@@ -231,6 +231,7 @@ test('all four native Show buttons wait for unlock before page events or owner a
     await expect.poll(() => peer.send('showPresentation')).toMatchObject({ focused: false });
     await peer.send('outcome', { value: 'success' });
     const unlocked = await peer.send('unlock');
+    expect(unlocked).toMatchObject({ locked: false, pending: false });
     if (action === 'Annotate' || action === 'Share') {
       events.push(action === 'Annotate' ? 'avibe:show-annotate-open' : 'avibe:show-share-open');
       expect(unlocked.executed).toEqual([]);
@@ -328,6 +329,11 @@ test('E28 foreground-only Dock and tray requests preserve pending navigation', a
     expect(waiting.executed).toEqual([]);
     expect(waiting.windows.every((window) => window.pendingLabel.includes('link'))).toBe(true);
   }
+  for (const args of [[], ['--foreground'], ['avibe://unsupported/path']]) {
+    const waiting = await peer.send('source', { value: 'secondLaunch', arguments: args });
+    expect(waiting.pending).toBe(true);
+    expect(waiting.windows.every((window) => window.pendingLabel.includes('link'))).toBe(true);
+  }
   const unlocked = await peer.send('outcome', { value: 'success' });
   expect(unlocked.executed).toEqual(['new navigation']);
   expect(unlocked.pending).toBe(false);
@@ -345,6 +351,44 @@ test('authentication focus events never create a second immediate lock', async (
   const state = await peer.send('snapshot');
   expect(state.locked).toBe(false);
   expect(state.authCalls).toBe(1);
+});
+
+test('a deferred connection menu click keeps the actual choice checked even when superseded', async () => {
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: 'cancelled' });
+  const saved = { saved: 'automatic', automatic: true, tunnel: false };
+  expect(await peer.send('directMenu')).toEqual(saved);
+  for (const click of ['direct-connection-tunnel', 'direct-connection-automatic']) {
+    await peer.send('directMenu', { click });
+    await expect.poll(() => peer.send('directMenu')).toEqual(saved);
+    expect(await peer.send('snapshot')).toMatchObject({ locked: true, pending: true });
+  }
+  await peer.send('entry', { kind: 'command', value: 'replacement command' });
+  await peer.send('outcome', { value: 'success' });
+  const unlocked = await peer.send('unlock');
+  expect(unlocked.executed).toEqual(['replacement command']);
+  expect(unlocked.pending).toBe(false);
+  expect(await peer.send('directMenu')).toEqual(saved);
+});
+
+test('releases arriving while locked drain voice and Mini latches without admitting an action', async () => {
+  for (const kind of ['voiceHold', 'voiceToggle', 'mini']) {
+    for (const cancelled of [false, true]) {
+      await peer.send('reset');
+      const first = kind === 'mini' ? 'Toggle' : 'Voice(Listen)';
+      expect(await peer.send('shortcutCycle', { kind, step: 'prepare' })).toBe(first);
+      await peer.send('reset', { policy: 'immediately' });
+      if (cancelled) await peer.send('shortcutCycle', { kind, step: 'cancelVoice' });
+      await peer.send('shortcutCycle', { kind, step: 'release' });
+      expect(await peer.send('snapshot')).toMatchObject({
+        locked: true, pending: false, authCalls: 0, executed: [], floatingVisible: [false, false],
+      });
+      await peer.send('reset');
+      const next = kind === 'voiceToggle' && !cancelled ? 'Voice(Release)' : first;
+      expect(await peer.send('shortcutCycle', { kind, step: 'next' })).toBe(next);
+      expect(await peer.send('shortcutCycle', { kind, step: 'next' })).toBeNull();
+    }
+  }
 });
 
 
@@ -631,6 +675,9 @@ test('E30 Ask Vibey defers its real queue and file reads, then delivers through 
   expect(dock.windows.every((window) => window.pendingLabel.includes('Vibey'))).toBe(true);
   expect(dock.authCalls).toBe(pending.authCalls);
   expect((await peer.send('source', { value: 'tray' })).windows.every((window) => window.pendingLabel.includes('Vibey'))).toBe(true);
+  for (const args of [[], ['--foreground'], ['avibe://unsupported/path']]) {
+    expect((await peer.send('source', { value: 'secondLaunch', arguments: args })).windows.every((window) => window.pendingLabel.includes('Vibey'))).toBe(true);
+  }
   await peer.send('unlock');
   expect(await peer.send('composeQueue')).toEqual({ admitted: baseline.admitted, queued: 0 });
   await peer.send('outcome', { value: 'success' });
@@ -708,6 +755,7 @@ test('native notification choice and Reply wait for unlock and preserve the orig
     expect(admitted.after.windows.every((window) => window.pendingLabel === '')).toBe(true);
     expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);
     await peer.send('source', { value: 'dock' });
+    await peer.send('source', { value: 'secondLaunch', arguments: [] });
     await peer.send('tick', { time: 3600 });
     expect(await peer.send('notificationNotices')).toEqual([]);
     expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);

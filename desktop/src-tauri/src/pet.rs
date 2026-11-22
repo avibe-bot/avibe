@@ -532,6 +532,10 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutStat
                 handle_shortcut(app, &shortcut, ShortcutState::Pressed);
                 handle_shortcut(app, &shortcut, ShortcutState::Released);
             });
+        } else if let Some(pet) = app.try_state::<Pet>() {
+            // Key-up still ends an admitted physical press. Drain only the
+            // latch; do not reconcile/show a window or dispatch page actions.
+            let _ = shortcut_action(&pet, shortcut, ShortcutState::Released);
         }
         return;
     }
@@ -550,6 +554,47 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutStat
             None => {}
         }
     });
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_shortcut_cycle(app: &AppHandle, kind: &str, step: &str) -> Result<serde_json::Value, String> {
+    let pet = app.state::<Pet>();
+    if step == "prepare" {
+        pet.set_enabled(true)?;
+        pet.store()
+            .try_set_voice_mode(if kind == "voiceToggle" {
+                VoiceMode::Toggle
+            } else {
+                VoiceMode::Hold
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    let key = {
+        let store = pet.store();
+        parse_shortcut(if kind == "mini" {
+            store.toggle_shortcut()
+        } else {
+            store.shortcut()
+        })?
+    };
+    let action = match step {
+        "prepare" => {
+            *lock(&pet.voice_shortcut_state) = VoiceShortcutState::default();
+            *lock(&pet.toggle_shortcut_down) = false;
+            shortcut_action(&pet, &key, ShortcutState::Pressed)
+        }
+        "cancelVoice" => {
+            pet.reset_voice_shortcut_state();
+            None
+        }
+        "release" => {
+            handle_shortcut(app, &key, ShortcutState::Released);
+            None
+        }
+        "next" => shortcut_action(&pet, &key, ShortcutState::Pressed),
+        _ => return Err("unknown shortcut fixture step".into()),
+    };
+    Ok(serde_json::json!(action.map(|action| format!("{action:?}"))))
 }
 
 /// Brings the window in line with the switch and the Runtime the Workbench

@@ -2457,9 +2457,14 @@ fn main_document_finished(webview: &tauri::Webview) {
 fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
     let arguments: Vec<String> = arguments.into_iter().map(|a| a.as_ref().to_owned()).collect();
     let deferred = arguments.clone();
-    if app_lock::defer_kind(app, app_lock::EntryKind::Navigation, move |app| {
-        receive_native_deep_link(app, deferred)
+    let kind = if arguments.iter().any(|argument| {
+        argument == updater::OPEN_URL || avibe_runtime_host::deep_link::parse_deep_link(argument).is_some()
     }) {
+        app_lock::EntryKind::Navigation
+    } else {
+        app_lock::EntryKind::Action
+    };
+    if app_lock::defer_kind(app, kind, move |app| receive_native_deep_link(app, deferred)) {
         return;
     }
     let mut updates_requested = false;
@@ -2912,6 +2917,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             app_lock::EntryKind::Command
         };
         if app_lock::defer_kind(app, kind, move |app| handle_menu(app, &pending)) {
+            direct::shell::restore_deferred_menu(app, id);
             return;
         }
     }
@@ -3195,10 +3201,14 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             macos_terminate::install(app.handle());
-            let mut launch_arguments: Vec<String> = std::env::args_os().skip(1).filter_map(|a| a.into_string().ok()).collect();
+            let launch_arguments: Vec<String> = std::env::args_os().skip(1).filter_map(|a| a.into_string().ok()).collect();
             #[cfg(target_os = "macos")]
             // Keep master's ordering: an explicit launch link wins over setup resume.
-            if computer_use::take_setup_resume(app.handle()) { launch_arguments.insert(0, COMPUTER_USE_SETUP_DEEP_LINK.to_owned()); }
+            let launch_arguments = {
+                let mut arguments = launch_arguments;
+                if computer_use::take_setup_resume(app.handle()) { arguments.insert(0, COMPUTER_USE_SETUP_DEEP_LINK.to_owned()); }
+                arguments
+            };
             let pending_launch = launch_arguments.clone();
             let has_link = launch_arguments.iter().any(|a| a == updater::OPEN_URL || avibe_runtime_host::deep_link::parse_deep_link(a).is_some());
             if !has_link || !app_lock::queue_if_locked(app.handle(), move |app| receive_native_deep_link(app, pending_launch)) {

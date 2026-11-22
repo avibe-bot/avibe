@@ -17,6 +17,7 @@ pub(crate) use macos::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EntryKind {
     Navigation,
+    #[cfg(any(target_os = "macos", test))]
     Content,
     Command,
     Action,
@@ -55,6 +56,7 @@ pub enum Policy {
     OneMinute,
     FiveMinutes,
 }
+#[cfg(any(target_os = "macos", test))]
 impl Policy {
     fn delay(self) -> Option<f64> {
         match self {
@@ -115,8 +117,10 @@ pub enum Authentication {
     Change(Policy),
 }
 
+#[cfg(any(target_os = "macos", test))]
 const AUTH_RETURN_GRACE: f64 = 2.0;
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug)]
 struct Completion {
     epoch: u64,
@@ -127,6 +131,7 @@ struct Completion {
 /// The shared capability contract: only a confirmed missing passcode disables
 /// protection. Unknown/transient failures preserve the previous value, initially
 /// failing closed. `None` is a successful capability query.
+#[cfg(any(target_os = "macos", test))]
 fn password_available(error: Option<isize>, previous: Option<bool>) -> bool {
     match error {
         None => true,
@@ -135,6 +140,7 @@ fn password_available(error: Option<isize>, previous: Option<bool>) -> bool {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug)]
 struct ReturnWindow {
     ended_at: f64,
@@ -144,6 +150,7 @@ struct ReturnWindow {
 /// The only clock input is continuous monotonic seconds (includes sleep).
 /// A/C/V/W/Q/B/P transitions are specified in app-lock-desktop-event-table.md.
 /// Native code supplies observations; it never owns a second timing rule.
+#[cfg(any(target_os = "macos", test))]
 pub struct Machine {
     pub policy: Policy,
     pub availability: Availability,
@@ -158,6 +165,7 @@ pub struct Machine {
     returning: Option<ReturnWindow>,
     completion: Option<Completion>,
 }
+#[cfg(any(target_os = "macos", test))]
 impl Machine {
     pub fn new(policy: Policy, availability: Availability) -> Self {
         Self {

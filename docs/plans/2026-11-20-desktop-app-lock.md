@@ -320,3 +320,32 @@ i18n verifier, Rust formatting, library/boundary suites, all-feature clippy and
 substitute feature is rejected in release. Hardware behavior is not inferred
 from substituted authentication or system facts; the existing smoke checklist
 remains the hardware record. This task does not build an RC or install a package.
+
+## First PR review follow-up
+
+Codex reviewed `6946e2a778` and found two entry-boundary defects: link-free
+second launches replaced pending work as Navigation, and locked shortcut
+releases left physical key latches set. Link classification now checks the
+existing parser/update URL before selecting Navigation; all other launches
+are foreground-only Action. Locked key-up drains state only, with no window
+reconciliation or page action. Consumer tests preserve pending Ask selections,
+notification operation IDs and navigation across link-free launches, and exercise
+voice Hold/Toggle plus Mini releases with and without prior cancellation.
+
+Independent review additionally found optimistic Direct submenu checkmarks
+changing before unlock. Deferred clicks now restore the saved choice, tested
+with real CheckMenuItems and a superseding command. The four-button fixture
+now invokes performClick outside tao's callback: native sampling demonstrated
+its tracking loop could reenter redraw while tao held its event mutex.
+This changes the test driver only, not production Show replay or focus.
+
+The original 33-case native suite passed at 04:24 CST. The expanded 35-case
+suite passes 34 cases; the focus assertion awaits a real unlocked GUI session.
+Read-only public facts showed loginwindow frontmost, no key window and an
+inactive test app, while the deferred Show page event was delivered correctly.
+Main explicitly approved merging with the remaining review/CI gates because
+no production unlock replay or focus path changed after the green run. A
+persistent public-signal Watch will rerun all 35 cases when the Mac is unlocked
+and awake; failures are regressions to report, not reasons to weaken assertions.
+
+The deferred native rerun is armed as public-signal Watch `ac65a1ba3247`. It waits for a known non-loginwindow foreground application and an awake main display, then reruns all 35 cases on the final head. Production unlock replay/focus is unchanged by this revision. Windows CI also identified unused macOS-only implementation in normal Windows builds; compile-time platform boundaries now exclude that implementation while retaining pure tests.

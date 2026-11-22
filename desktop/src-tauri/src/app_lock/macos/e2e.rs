@@ -505,18 +505,29 @@ fn handle(app: &AppHandle, request: Value) {
                 let window = app
                     .get_webview_window("app-show-lock-fixture")
                     .ok_or("Show fixture required")?;
-                let native =
-                    unsafe { Retained::retain(window.ns_window().map_err(|e| e.to_string())?.cast::<NSWindow>()) }
-                        .ok_or("native window required")?;
                 let tag = request["tag"].as_i64().ok_or("tag required")? as isize;
-                let button = native
-                    .titlebarAccessoryViewControllers()
-                    .iter()
-                    .flat_map(|controller| controller.view().subviews().to_vec())
-                    .find_map(|view| view.downcast::<NSButton>().ok().filter(|button| button.tag() == tag))
-                    .ok_or("Show button required")?;
-                unsafe { button.performClick(None) };
-                Ok(snapshot(app))
+                let app = app.clone();
+                let id = id.clone();
+                // performClick runs a tracking loop. Calling it inside tao's
+                // user callback can reenter redraw while tao holds its mutex.
+                crate::macos_terminate::on_main_queue(move || {
+                    let result = (|| {
+                        let native = unsafe {
+                            Retained::retain(window.ns_window().map_err(|e| e.to_string())?.cast::<NSWindow>())
+                        }
+                        .ok_or("native window required")?;
+                        let button = native
+                            .titlebarAccessoryViewControllers()
+                            .iter()
+                            .flat_map(|controller| controller.view().subviews().to_vec())
+                            .find_map(|view| view.downcast::<NSButton>().ok().filter(|button| button.tag() == tag))
+                            .ok_or("Show button required")?;
+                        unsafe { button.performClick(None) };
+                        Ok(snapshot(&app))
+                    })();
+                    output(id, result);
+                });
+                Ok(Value::Null)
             }
             "showRoute" => {
                 let window = app
@@ -636,6 +647,14 @@ fn handle(app: &AppHandle, request: Value) {
                 }
                 Ok(snapshot(app))
             }
+            "directMenu" => {
+                crate::direct::shell::app_lock_menu::run(app, request["click"].as_str()).map_err(|e| e.to_string())
+            }
+            "shortcutCycle" => crate::pet::e2e_shortcut_cycle(
+                app,
+                request["kind"].as_str().ok_or("shortcut kind required")?,
+                request["step"].as_str().ok_or("shortcut step required")?,
+            ),
             "source" => {
                 match request["value"].as_str().ok_or("source required")? {
                     "dock" => crate::focus_or_restore_main_window(app),
@@ -644,6 +663,11 @@ fn handle(app: &AppHandle, request: Value) {
                     "signOut" => crate::handle_menu(app, "desktop-client-sign-out"),
                     "instances" => crate::handle_menu(app, "desktop-client-instances"),
                     "link" => crate::receive_native_deep_link(app, ["avibe://session/native-fixture"]),
+                    "secondLaunch" => {
+                        let arguments: Vec<String> =
+                            serde_json::from_value(request["arguments"].clone()).map_err(|e| e.to_string())?;
+                        crate::receive_native_deep_link(app, arguments);
+                    }
                     "documentFinished" => crate::apply_pending_deep_link_on_main(app),
                     "shortcutPress" | "shortcutRelease" => {
                         use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
@@ -821,7 +845,7 @@ fn handle(app: &AppHandle, request: Value) {
     })();
     if !matches!(
         op,
-        "setPolicy" | "quitAlert" | "chrome" | "composeRead" | "closeGuard" | "showRead" | "showRoute"
+        "setPolicy" | "quitAlert" | "chrome" | "composeRead" | "closeGuard" | "showRead" | "showRoute" | "showPress"
     ) || result.is_err()
     {
         output(id, result);
@@ -854,6 +878,7 @@ pub(crate) fn run() {
     let app = tauri::Builder::default()
         .setup(move |app| {
             app.manage(crate::compose::Queue::default());
+            app.manage(crate::pet::Pet::new(path.with_file_name("pet.json")));
             crate::notifications::macos::e2e_notices(true);
             let notifications = crate::notifications::Notifications::new(path.with_file_name("notifications.json"));
             notifications
