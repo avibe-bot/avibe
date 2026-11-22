@@ -543,10 +543,14 @@ def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace(mon
     grace_exceeded = threading.Event()
     monkeypatch.setattr("core.controller.logger.critical", lambda *_: grace_exceeded.set())
     release = threading.Event()
+    join_started = threading.Event()
+    join_completed = threading.Event()
 
     class _Supervisor:
         async def stop(self) -> None:
+            join_started.set()
             await asyncio.to_thread(release.wait)
+            join_completed.set()
 
     controller.runtime_work_supervisor = _Supervisor()
 
@@ -558,12 +562,14 @@ def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace(mon
         assert loop_running.wait(timeout=2)
         controller.request_shutdown("test")
         assert grace_exceeded.wait(timeout=2)
+        assert join_started.wait(timeout=2)
         assert controller._shutdown_tainted is True
         assert thread.is_alive()
         assert controller.service_lock_safe_to_release is False
         release.set()
         thread.join(timeout=2)
         assert not thread.is_alive()
+        assert join_completed.is_set()
         assert controller._shutdown_tainted is True
         assert controller.service_lock_safe_to_release is False
     finally:
