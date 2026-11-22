@@ -1,8 +1,11 @@
 //! Parse only a private, native fetch completion. Unavailable and malformed
 //! answers both leave the normal tunnel in use. There is no public API to
 //! nominate an address, wall-clock comparison, or DNS for direct bootstrap.
-use super::connect::Authority;
-use iroh::EndpointId;
+use super::{
+    connect::Authority,
+    path::{global_v6, punched_family, AddressFamily, SelectedPath, TrialRelay},
+};
+use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use serde::Deserialize;
 use std::{
     net::{IpAddr, SocketAddr},
@@ -27,6 +30,8 @@ struct Wire {
 struct Endpoint {
     id: String,
     addresses: Vec<serde_json::Value>,
+    #[serde(default)]
+    relay: serde_json::Value,
 }
 #[derive(Deserialize)]
 struct Client {
@@ -38,6 +43,7 @@ pub(super) struct Offer {
     pub generation: String,
     pub id: EndpointId,
     pub candidates: Vec<SocketAddr>,
+    pub relay: Option<TrialRelay>,
     pub until: Duration,
 }
 
@@ -49,6 +55,48 @@ pub(super) fn lan(addr: SocketAddr) -> bool {
         }
 }
 impl Offer {
+    pub(super) fn bootstrap(&self) -> EndpointAddr {
+        let mut addr = EndpointAddr::new(self.id);
+        for candidate in &self.candidates {
+            addr = addr.with_ip_addr(*candidate);
+        }
+        if let Some(r) = &self.relay {
+            addr = addr.with_relay_url(r.home());
+        }
+        addr
+    }
+
+    /// Called only with a path snapshot of the authenticated connection, never
+    /// to authorize bootstrap. A LAN-only grant still requires exact membership.
+    pub(super) fn selected(&self, peer: EndpointId, remote: &TransportAddr) -> Option<SelectedPath> {
+        if peer != self.id {
+            return None;
+        }
+        match remote {
+            TransportAddr::Relay(url) => self
+                .relay
+                .as_ref()
+                .filter(|r| r.permits(url))
+                .map(|_| SelectedPath::Relay),
+            TransportAddr::Ip(a) => {
+                let listed = self.candidates.contains(a);
+                if !listed && self.relay.is_none() && !self.candidates.iter().copied().any(global_v6) {
+                    return None;
+                }
+                if lan(*a) || (listed && a.ip().is_loopback()) {
+                    // The private loopback address can be listed only by the confined interop fixture.
+                    Some(SelectedPath::Lan(if a.is_ipv4() {
+                        AddressFamily::Ipv4
+                    } else {
+                        AddressFamily::Ipv6
+                    }))
+                } else {
+                    punched_family(*a).map(SelectedPath::Punched)
+                }
+            }
+            _ => None,
+        }
+    }
     pub(super) fn parse(
         raw: &str,
         origin: &Authority,
@@ -87,15 +135,13 @@ impl Offer {
         }
         let mut candidates = Vec::new();
         for entry in w.endpoint.addresses.iter().take(32) {
-            if entry.get("kind").and_then(|s| s.as_str()) != Some("lan") {
-                continue;
-            }
+            let kind = entry.get("kind").and_then(|s| s.as_str());
             if let Some(a) = entry
                 .get("address")
                 .and_then(|s| s.as_str())
                 .filter(|s| s.len() <= 64 && !s.contains('%'))
                 .and_then(|s| s.parse().ok())
-                .filter(|a| lan(*a))
+                .filter(|a| matches!(kind, Some("lan") if lan(*a)) || matches!(kind, Some("ipv6") if global_v6(*a)))
             {
                 if !candidates.contains(&a) {
                     candidates.push(a);
@@ -105,7 +151,9 @@ impl Offer {
                 }
             }
         }
-        (!candidates.is_empty()).then_some(Self {
+        let relay = TrialRelay::offered(&w.endpoint.relay);
+        (!candidates.is_empty() || relay.is_some()).then_some(Self {
+            relay,
             id,
             generation: w.generation,
             candidates,

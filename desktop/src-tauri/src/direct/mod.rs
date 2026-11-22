@@ -4,6 +4,9 @@
 mod clock;
 mod connect;
 #[cfg(test)]
+#[path = "../../tests/direct/cross_network.rs"]
+mod cross_network_tests;
+#[cfg(test)]
 #[path = "../../tests/direct/sidecar.rs"]
 mod interop;
 #[cfg(test)]
@@ -14,6 +17,8 @@ mod offer;
 #[cfg(test)]
 #[path = "../../tests/direct/offer.rs"]
 mod offer_tests;
+mod path;
+pub use path::{AddressFamily, SelectedPath};
 mod public;
 pub mod rendezvous;
 #[cfg(test)]
@@ -29,7 +34,7 @@ pub mod webview_windows;
 use clock::Clock;
 use connect::Authority;
 use futures_util::StreamExt;
-use iroh::{Endpoint, SecretKey, TransportAddr};
+use iroh::{Endpoint, SecretKey};
 use listener::Listener;
 use offer::Offer;
 use std::{sync::Arc, time::Duration};
@@ -61,7 +66,6 @@ pub struct Client {
     host: Authority,
     instance: String,
     key: SecretKey,
-    endpoint: Option<Endpoint>,
     links: watch::Sender<Option<Arc<Link>>>,
     listener: Listener,
     monitor: Option<JoinHandle<()>>,
@@ -82,7 +86,6 @@ impl Client {
             host,
             instance,
             key: SecretKey::generate(),
-            endpoint: None,
             links,
             listener,
             monitor: None,
@@ -167,6 +170,17 @@ impl Client {
         self.listener.health()
     }
 
+    /// A verified direct CONNECT stream is live on this link. An idle probe,
+    /// public fallback alone, a withdrawn grant or an unavailable path is None.
+    pub fn selected_path(&self) -> Option<SelectedPath> {
+        let slot = self.links.borrow();
+        let link = slot.as_ref()?;
+        if !self.listener.is_alive() || !link.has_stream() {
+            return None;
+        }
+        link.selected_path()
+    }
+
     fn retire(&mut self) {
         if let Some(t) = self.monitor.take() {
             t.abort()
@@ -189,9 +203,6 @@ impl Client {
             )
         }) else {
             self.retire();
-            if let Some(endpoint) = self.endpoint.take() {
-                endpoint.close().await;
-            }
             return false;
         };
         if self.links.borrow().as_ref().is_some_and(|link| link.renew(&offer)) {
@@ -203,29 +214,27 @@ impl Client {
         if !self.listener.is_alive() || self.clock.now() >= offer.until {
             return false;
         }
-        if self.endpoint.is_none() {
-            self.endpoint = tokio::time::timeout(
-                offer.until.saturating_sub(self.clock.now()),
-                transport::bind(self.key.clone()),
-            )
-            .await
-            .ok()
-            .flatten();
-        }
-        let Some(endpoint) = self.endpoint.as_ref() else {
+        // A non-renewable grant gets a fresh endpoint. In particular an old
+        // relay map or iroh peer-address cache cannot cross a policy change.
+        let Ok(Ok(endpoint)) = tokio::time::timeout(
+            offer.until.saturating_sub(self.clock.now()),
+            transport::endpoint_builder(self.key.clone(), offer.relay.as_ref()).bind(),
+        )
+        .await
+        else {
             return false;
         };
-        let Some(link) = Link::dial(endpoint, offer, &self.host, self.clock.clone()).await else {
+        let Some(link) = Link::dial(&endpoint, offer, &self.host, self.clock.clone()).await else {
             return false;
         };
         if !self.listener.is_alive() || !link.usable() {
             return false;
         }
-        self.publish(link);
+        self.publish(link, endpoint);
         true
     }
 
-    fn publish(&mut self, link: Arc<Link>) {
+    fn publish(&mut self, link: Arc<Link>, endpoint: Endpoint) {
         self.links.send_replace(Some(link.clone()));
         let tx = self.links.clone();
         self.monitor = Some(tokio::spawn(async move {
@@ -243,7 +252,7 @@ impl Client {
                     biased;
                     _=deadlines.changed()=>continue,
                     _=tokio::time::sleep(remaining.min(Duration::from_millis(250)))=>continue,
-                    next=paths.next()=>{let Some(snapshot)=next else{break};if !snapshot.iter().any(|p|p.is_selected()&&matches!(p.remote_addr(),TransportAddr::Ip(a) if link.offer.candidates.contains(a))){break}}
+                    next=paths.next()=>{let Some(snapshot)=next else{break};if link.selected_in(snapshot).is_none(){break}}
                 }
             }
             // The old watcher can finish while a new link is being published.
@@ -256,6 +265,7 @@ impl Client {
                 }
             });
             link.retire();
+            endpoint.close().await;
         }));
     }
 }
