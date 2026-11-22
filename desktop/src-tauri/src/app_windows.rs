@@ -530,6 +530,9 @@ pub(crate) fn navigation(view: &Webview, url: &Url) -> Option<bool> {
     if url.scheme() != "avibe-app" {
         return None;
     }
+    if crate::direct::shell::page_request(view, url) {
+        return Some(false);
+    }
     if close_navigation(url) {
         request_close(view);
         return Some(false);
@@ -913,6 +916,12 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
     }
     if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
         builder = builder.additional_browser_args(arguments);
+    }
+    // Its page is told this window's path, as its instance view's is.
+    if source.runtime.disposable {
+        if let Some(script) = crate::direct::shell::page_script(app, &label, &source.runtime.origin) {
+            builder = builder.initialization_script(script);
+        }
     }
     // As the instance view it was opened from: no notifications permission
     // for another computer's instance on Windows.

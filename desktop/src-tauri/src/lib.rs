@@ -2153,6 +2153,12 @@ fn build_main_child(
     if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
         builder = builder.additional_browser_args(arguments);
     }
+    // Its page is told this window's path, and may ask for a hand-over.
+    if disposable {
+        if let Some(script) = direct::shell::page_script(app, label, destination) {
+            builder = builder.initialization_script(script);
+        }
+    }
     if let Some(script) = instance_client::initial_script(app) {
         builder = builder.initialization_script(script);
     }
@@ -2900,6 +2906,7 @@ pub fn run() {
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
+                    direct::shell::page_loaded(webview);
                     if webview.label() == pet::PET_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Started {
                         pet::page_loading(webview.app_handle());
                     }
