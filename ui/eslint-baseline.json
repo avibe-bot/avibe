@@ -22,7 +22,6 @@
       "no-useless-assignment": 1
     },
     "src/App.tsx": {
-      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 1
     },
     "src/apps/LibraryApp.tsx": {

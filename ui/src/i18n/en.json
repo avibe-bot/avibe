@@ -3382,7 +3382,7 @@
     "title": "Can't open the control panel here",
     "body": "Avibe is running, but it refused to open the control panel at this address.",
     "hint": "Sign in at avibe.bot and open it from your list, or open it on the computer that runs Avibe.",
-    "codeLabel": "Reason",
+    "code": "Reason: {{code}}",
     "retry": "Retry"
   },
   "errors": {

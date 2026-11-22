@@ -19,7 +19,7 @@ export const AccessBlocked = ({ code }: { code: string | null }) => {
                 <CardContent className="space-y-4">
                     <p className="text-sm text-muted">{t('accessBlocked.hint')}</p>
                     {code ? (
-                        <p className="text-xs text-muted font-mono">{t('accessBlocked.codeLabel')}: {code}</p>
+                        <p className="text-xs text-muted font-mono">{t('accessBlocked.code', { code })}</p>
                     ) : null}
                     <Button onClick={() => window.location.reload()}>{t('accessBlocked.retry')}</Button>
                 </CardContent>

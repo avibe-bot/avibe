@@ -2270,12 +2270,15 @@ def _render_oauth_error_html(
         height: 44px;
         padding: 0 24px;
         border-radius: 12px;
-        background: #0f172a;
+        /* The product's lead button in the light theme, as on the bound-address
+           page (vibe/bound_address_notice.py): one look for these static pages. */
+        background: #10b981;
         color: #fff;
         font: 700 15px/44px Inter, ui-sans-serif, system-ui;
         text-decoration: none;
+        box-shadow: 0 0 20px -4px rgba(91, 255, 160, 0.6);
       }}
-      .oauth-error-button:hover {{ background: #1e293b; }}
+      .oauth-error-button:hover {{ background: #0ea372; }}
       .oauth-error-code {{
         margin-top: 22px;
         font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
