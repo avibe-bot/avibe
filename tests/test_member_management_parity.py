@@ -513,6 +513,40 @@ def test_network_authority_change_rejected_without_writing(management_http, role
     assert paths.get_config_path().read_bytes() == before
 
 
+@pytest.mark.parametrize(('host', 'port', 'listeners', 'allowed'), [
+    ('127.0.0.1', 15131, [('127.0.0.1', 15131)], True),
+    ('127.0.0.1', 15132, [('127.0.0.1', 15131)], False),
+    ('127.0.0.2', 15131, [('127.0.0.1', 15131)], False),
+    ('127.0.0.1', 15131, [('127.0.0.1', 15132)], False),
+    ('127.0.0.1', 15131, [('0.0.0.0', 15131)], False),
+    ('127.0.0.1', 15131, [], False),
+])
+def test_member_reload_preserves_the_verified_live_endpoint(management_http, monkeypatch, host, port, listeners, allowed):
+    from types import SimpleNamespace
+    from tests.test_host_network_access import Acceptor
+    from tests.test_ui_server_reload import _ImmediateThread
+    from vibe import runtime
+
+    request = management_http('member')
+    config = V2Config.load()
+    config.ui.setup_host, config.ui.setup_port = '127.0.0.1', 15131
+    config.save()
+    server = SimpleNamespace(started=True, should_exit=False, servers=[Acceptor(h, p) for h, p in listeners])
+    calls = []
+    monkeypatch.setattr(ui_server, '_server', server)
+    monkeypatch.setattr(runtime, 'read_status', lambda: {})
+    monkeypatch.setattr(runtime, 'write_status', lambda *_: None)
+    monkeypatch.setattr(runtime, 'spawn_background', lambda argv, *_: calls.append(argv) or 123)
+    # Replace only this module's launcher; TestClient needs its real portal threads.
+    monkeypatch.setattr(ui_server, 'threading', SimpleNamespace(Thread=_ImmediateThread))
+    response = request('POST', '/api/ui/reload', payload={'host': host, 'port': port})
+    if allowed:
+        assert response.status_code == 200 and [argv[3:] for argv in calls] == [['127.0.0.1', '15131']]
+    else:
+        assert response.status_code == 403 and response.get_json()['error'] == 'listener_change_requires_owner'
+        assert calls == [] and not server.should_exit
+
+
 def test_network_authority_unchanged_round_trip_and_direct_owner_edit(management_http):
     local = ui_server.app.test_client()
     origins = ['https://workbench.example.test']

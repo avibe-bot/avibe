@@ -10226,7 +10226,19 @@ def _clear_remote_browser_cookie(response):
 
 
 @app.route("/api/ui/reload", methods=["POST"])
-def ui_reload():
+async def ui_reload():
+    from starlette.concurrency import run_in_threadpool
+
+    context = _request_authorization_context()
+    owner = bool(context and context.is_instance_owner)
+    # asyncio's listener objects belong to this loop. Pass immutable observed
+    # endpoints to the worker; disk/config locks and subprocess I/O stay off it.
+    server = _server
+    listeners = () if owner else ui_network_access.active_listeners(server)
+    return await run_in_threadpool(_dispatch_ui_reload, owner, server, listeners)
+
+
+def _dispatch_ui_reload(owner, server, listeners):
     from vibe import runtime
 
     from vibe.desktop_runtime import normalize_desktop_port
@@ -10266,24 +10278,12 @@ def ui_reload():
     except ValueError:
         return jsonify({"error": "invalid_port"}), 400
 
-    status = runtime.read_status()
+    from core.services import settings as settings_service
+    from config import paths as config_paths
+    import sys
 
-    try:
-        from core.services import settings as settings_service
-
-        current_config = settings_service.load_config()
-    except Exception:
-        current_config = None
-    if current_config is not None:
-        bind_host = runtime.effective_ui_bind_host(current_config, requested_host=host)
-    else:
-        bind_host = host
-
-    def _restart():
-        global _server
-        import sys
-        import time
-        from config import paths as config_paths
+    def spawn(bind_host):
+        status = runtime.read_status()
         pid = runtime.spawn_background(
             runtime.ui_server_argv(sys.executable, bind_host, port),
             config_paths.get_runtime_ui_pid_path(),
@@ -10291,23 +10291,49 @@ def ui_reload():
             "ui_stderr.log",
         )
         runtime.write_status(
-            status.get("state", "running"),
-            status.get("detail"),
-            status.get("service_pid"),
-            pid,
+            status.get("state", "running"), status.get("detail"), status.get("service_pid"), pid,
         )
+
+    def retire_old_server():
         time.sleep(0.2)
-        # Shutdown the old server to release the port
-        if _server:
-            if hasattr(_server, "should_exit"):
-                _server.should_exit = True
+        if server is not None:
+            if hasattr(server, "should_exit"):
+                server.should_exit = True
             else:
-                shutdown = getattr(_server, "shutdown", None)
+                shutdown = getattr(server, "shutdown", None)
                 if callable(shutdown):
                     shutdown()
 
-    # Schedule restart after response is sent
-    threading.Thread(target=_restart).start()
+    if owner:
+        try:
+            current_config = settings_service.load_config()
+        except Exception:
+            current_config = None
+        bind_host = runtime.effective_ui_bind_host(current_config, requested_host=host) if current_config is not None else host
+
+        def restart():
+            spawn(bind_host)
+            retire_old_server()
+
+        threading.Thread(target=restart).start()
+    else:
+        from config.v2_config import config_file_lock, config_recovery_refusal
+
+        refused = jsonify({"ok": False, "error": "listener_change_requires_owner"}), 403
+        with config_file_lock():
+            try:
+                current_config = settings_service.load_config()
+                if config_recovery_refusal(current_config, 'ui', 'remote_access'):
+                    return refused
+                target = ui_network_access.matching_reload_target(listeners, current_config, host, port)
+            except (ValueError, TypeError, AttributeError, OSError):
+                return refused
+            if target is None or server is not _server or getattr(server, 'should_exit', True):
+                return refused
+            # No delayed task may substitute a later config/DNS result. Launch
+            # only with the verified literal while the saved target is locked.
+            spawn(target)
+        threading.Thread(target=retire_old_server).start()
     return jsonify({"ok": True, "host": host, "port": port})
 
 
