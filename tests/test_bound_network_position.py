@@ -313,30 +313,51 @@ def test_listener_started_without_config_picks_up_later_binding_and_retries(monk
 
 
 @pytest.mark.parametrize('unreadable', ['not-json', 'null', '{"version": 99}'])
-def test_unreadable_push_receipt_pauses_only_anonymous_work(monkeypatch, tmp_path, unreadable):
+def test_only_listener_recovers_unreadable_receipt_by_retiring_mixed_grants(monkeypatch, tmp_path, unreadable):
     from sqlalchemy import update
     from storage.models import state_meta
     from vibe import api
 
     monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
-    monkeypatch.delenv(ui_server.TRUSTED_PROXY_IPS_ENV, raising=False)
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.10')
+    monkeypatch.delenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, raising=False)
     config = _bind(_unbound())
+    config.ui.trusted_public_origins = ['https://work.example.test']
     config.save()
     engine = get_cached_sqlite_engine()
     with cutover.listener_publications():
         cutover.reconcile_startup(config)
     with engine.begin() as conn:
         anon = push.upsert_subscription(conn, user_key='local', payload=_payload('anon'))
+        off = push.upsert_subscription(conn, user_key='local', payload=_payload('off'))
+        push.disable_subscription(conn, user_key='local', endpoint=off['endpoint'])
         signed = push.upsert_subscription(conn, user_key='remote:member', payload=_payload('signed'))
         conn.execute(update(state_meta).where(state_meta.c.key == 'web_push.local_binding.v1').values(value_json=unreadable))
-    # The rest of the UI remains usable; an unreadable receipt is neither
-    # a fresh install nor authority to discard the previous anonymous rows.
-    with cutover.serving_listener():
-        api.save_config({'ui': {'trusted_public_origins': ['https://desk.example.test']}})
-        assert not cutover.may_dispatch(engine, anon)
-        assert cutover.may_dispatch(engine, signed)
+    # The sender and a config-only publisher leave the unreadable history alone.
+    config = api.save_config({'ui': {'trusted_public_origins': ['https://desk.example.test']}})
+    cutover.reconcile_startup(config)
+    assert not cutover.may_dispatch(engine, anon) and cutover.may_dispatch(engine, signed)
     with engine.connect() as conn:
         assert push.get_enabled_by_endpoint(conn, endpoint=anon['endpoint'], user_key='local')
+        assert not cutover.receipt_current(conn, config)
+
+    # Even with a complete active proxy declaration, the listener cannot infer
+    # where the old rows came from. Publish a current receipt and retire in one commit.
+    with cutover.serving_listener():
+        with engine.connect() as conn:
+            assert cutover.receipt_current(conn, config)
+            assert push.is_binding_retired(conn, anon['endpoint'])
+            assert not push.is_binding_retired(conn, off['endpoint'])
+            assert not push.get_enabled_by_endpoint(conn, endpoint=off['endpoint'], user_key='local')
+            assert push.get_enabled_by_endpoint(conn, endpoint=signed['endpoint'], user_key='remote:member')
+        client = ui_server.app.test_client()
+        response = client.post('/api/web-push/subscriptions', base_url=HOST, headers=csrf_headers(client, HOST),
+                               json={'subscription': _payload('anon'), 'binding_repair': True})
+        assert response.status_code == 200 and response.get_json()['accepted']
+        fresh = response.get_json()['subscription']
+        cutover.reconcile_startup(config)
+    assert fresh['id'] != anon['id'] and cutover.may_dispatch(engine, fresh)
+    assert not cutover.may_dispatch(engine, anon) and cutover.may_dispatch(engine, signed)
 
 
 def test_host_push_grant_survives_remote_off_and_cookie_rotation(monkeypatch, tmp_path, serving_ui_writer):
@@ -451,6 +472,45 @@ def test_rotated_foreground_grant_cannot_consume_an_opt_out_or_signed_endpoint(m
         assert not push.get_enabled_by_endpoint(conn, endpoint=_payload("new-native")["endpoint"], user_key="local")
         assert push.is_binding_retired(conn, _payload("c")["endpoint"])
         assert push.get_enabled_by_endpoint(conn, endpoint=_payload("member")["endpoint"], user_key="remote:member")
+
+
+def test_declared_ingress_uses_the_same_transport_policy_for_http_and_websocket(monkeypatch, tmp_path):
+    from starlette.requests import HTTPConnection
+
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '192.0.2.0/28,2001:db8::10,127.0.0.1')
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, 'https://work.example.test:8443')
+    config = _bind(_unbound())
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    config.ui.trusted_public_origins = [cloud.public_url, 'https://old-app.avibe.bot']
+    config.save()
+
+    def decisions(current, *, peer='192.0.2.10', host='localhost', origin_host='work.example.test:8443', direct=False):
+        # Exercise both consumers' peer/authority extraction, not two calls to
+        # the shared predicate. These scopes never open a connection or run a route.
+        headers = {'host': host, 'x-forwarded-host': origin_host, 'x-forwarded-proto': 'https'}
+        with ui_server.app.test_request_context('/', base_url='http://' + host, headers=headers) as req:
+            scope = req._request.scope
+            scope['client'] = (peer, 1234) if peer is not None else None
+            if direct:
+                scope[ui_server.DIRECT_INGRESS_SCOPE_KEY] = {}
+            ws = HTTPConnection({**scope, 'type': 'websocket'})
+            return (ui_server._trusted_public_origin_local_request(current),
+                    ui_server._websocket_trusted_public_origin_local_request(ws, current))
+
+    for peer in ('192.0.2.10', '192.0.2.11', '2001:db8::10'):
+        assert decisions(config, peer=peer) == (True, True)
+    for facts in ({'peer': None}, {'peer': '192.0.2.16'}, {'peer': '127.0.0.1'}, {'peer': '::ffff:127.0.0.1'},
+                  {'peer': '::ffff:127.0.0.1', 'host': 'fixture.example.test'},
+                  {'direct': True}, {'host': 'fixture.example.test'}, {'origin_host': 'fixture.example.test'},
+                  {'origin_host': 'old-app.avibe.bot'}, {'origin_host': 'work.example.test'}, {'origin_host': config.ui.setup_host}):
+        assert decisions(config, **facts) == (False, False), facts
+    assert decisions(None) == (False, False)
+    # The very same declarations remain on disk; lack of binding evidence is not permission.
+    (paths.get_state_dir() / 'remote-binding-reset.json').write_text('{}')
+    assert decisions(config) == (False, False)
+    assert ui_server._owner_proxy_fields() == {}
 
 
 def test_declared_origin_navigation_shares_private_notice_without_granting_access(monkeypatch, tmp_path):

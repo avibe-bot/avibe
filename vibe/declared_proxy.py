@@ -85,14 +85,22 @@ def _subtract(networks, blocked):
 
 
 @lru_cache(maxsize=32)
-def _eligible_networks(entries, remote_on):
-    # Socket parsers normalize mapped IPv6 to IPv4. Do not count v6-only
-    # declarations of mapped space as an independent usable transport range.
-    networks = tuple(_subtract((network for network, _ in entries), _MAPPED))
-    if remote_on:
-        for block in _LOOPBACK:
-            networks = tuple(_subtract(networks, block))
-    return tuple(n for version in (4, 6) for n in ipaddress.collapse_addresses(x for x in networks if x.version == version))
+def _eligible_peers(entries, remote_on):
+    # Classify the declarations that still contribute an address, before
+    # collapsing their networks. A wholly excluded CIDR contributes nothing.
+    blocked = (_MAPPED, *_LOOPBACK) if remote_on else (_MAPPED,)
+    networks = []
+    declarations = []
+    for network, is_cidr in entries:
+        parts = (network,)
+        for block in blocked:
+            parts = tuple(_subtract(parts, block))
+        if parts:
+            networks.extend(parts)
+            declarations.append(is_cidr)
+    effective = tuple(n for version in (4, 6) for n in ipaddress.collapse_addresses(x for x in networks if x.version == version))
+    scope = 'range' if len(declarations) > 1 or any(declarations) else 'single_address'
+    return effective, scope
 
 
 @dataclass(frozen=True)
@@ -152,7 +160,7 @@ def listener_policy(config) -> Policy | None:
         return None
     entries = declared_peers(os.environ.get(PEERS_ENV, ''))
     cloud = config.remote_access.vibe_cloud
-    networks = _eligible_networks(entries, cloud.enabled)
+    networks, peer_scope = _eligible_peers(entries, cloud.enabled)
     if not networks:
         return Policy()
     origins = {origin for value in origin_entries(config, os.environ.get(ORIGINS_ENV, '')) if (origin := normalize_origin(value))}
@@ -173,4 +181,4 @@ def listener_policy(config) -> Policy | None:
                            and not instance_address.is_managed_name(host)))
     if not origins:
         return Policy()
-    return Policy(origins, networks, 'range' if len(entries) > 1 or entries[0][1] else 'single_address')
+    return Policy(origins, networks, peer_scope)

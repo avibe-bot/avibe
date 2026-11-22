@@ -112,7 +112,7 @@ def _prior(record):
 
 
 def _record(raw):
-    """Only a missing DB row is a fresh install. Never replace evidence we cannot read."""
+    """A malformed existing row is not evidence of a fresh install."""
     if raw is None:
         return None
     try:
@@ -138,9 +138,12 @@ def _attest(conn, config, policy, *, first=False, predecessor=None):
     target = _target(config, policy)
     generation = target['generation']
     record = _record(_raw(conn))
-    if record is _UNREADABLE or (record == target and not first):
+    if record == target and not first:
         return
-    before = _evidence(_prior(record))
+    # A verified listener can recover missing history only by withdrawing the
+    # mixed grants. Retirement and the replacement receipt commit together.
+    unreadable = record is _UNREADABLE
+    before = None if unreadable else _evidence(_prior(record))
     carry = (before is not None and not first and (
         before.generation == generation or (predecessor is not None and before.generation == _generation(predecessor))
         or (isinstance(record, dict) and record.get('carry_to') == generation)))
@@ -148,7 +151,7 @@ def _attest(conn, config, policy, *, first=False, predecessor=None):
     # A narrow/withdrawn policy cannot distinguish the remaining browsers.
     withdrawn = before is not None and (not before.origins.issubset(policy.origins) or any(
         not any(old.version == new.version and old.subnet_of(new) for new in policy.networks) for old in before.peers))
-    if withdrawn or (not policy.origins and not carry):
+    if unreadable or withdrawn or (not policy.origins and not carry):
         conn.execute(push.update().where(push.c.user_key == 'local',
             (push.c.enabled == 1) | push.c.provider_invalidated_at.is_not(None)).values(
                 user_key=RETIRED_LOCAL, enabled=0, provider_invalidated_at=None, updated_at=_utc_now_iso()))
@@ -193,7 +196,7 @@ def reconcile_startup(config):
         # unless something changed. This path never grants or modifies authority.
         with engine.connect() as conn:
             raw = _raw(conn)
-            if raw == json.dumps(_target(config, policy), sort_keys=True) or _record(raw) is _UNREADABLE:
+            if raw == json.dumps(_target(config, policy), sort_keys=True):
                 return
     with config_file_lock():
         current = V2Config.load()
