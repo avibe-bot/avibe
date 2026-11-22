@@ -8,7 +8,7 @@ import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '
 import type {
   AccountResult, AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
   DirectState, HealthData, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
-  SignedOutDevice, TunnelChange, TunnelSetting, TunnelStatus, UnlinkedHealth,
+  SignedOutDevice, SwitchSetting, TunnelChange, TunnelSetting, TunnelStatus, UnlinkedHealth,
 } from './types';
 
 const HEALTH: readonly HealthData[] = ['steps', 'activity', 'workouts', 'sleep'];
@@ -261,6 +261,21 @@ function tunnelChange(operation: unknown, outcome: unknown): TunnelChange | unde
   }
 }
 
+const switchSetting = (raw: unknown): SwitchSetting | null => (raw === 'direct' || raw === 'relay' ? raw : null);
+
+/** Direct and the relay are written after the instance has answered: its operation says a change
+ *  is still on its way, its outcome how the last one ended. */
+function switchChange(operation: unknown, outcome: unknown): Pick<ConnectionState, 'switching' | 'switched'> {
+  const running = record(operation);
+  const last = record(outcome);
+  const now = switchSetting(running.setting);
+  const done = switchSetting(last.setting);
+  return {
+    switching: now ? { setting: now, id: text(running.id) } : undefined,
+    switched: done ? { setting: done, id: text(last.id), failed: last.result === 'failed', reason: text(last.reason) ?? 'unknown' } : undefined,
+  };
+}
+
 function relayFromWire(raw: unknown): RelayState | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const relay = record(raw);
@@ -287,6 +302,7 @@ export function connectionFromWire(raw: unknown, interfaces: ConnectionState['in
     direct: DIRECT.find((each) => each === body.direct) ?? 'unknown',
     relay: relayFromWire(body.relay),
     change: tunnelChange(body.operation, body.outcome),
+    ...switchChange(body.operation, body.outcome),
     returnedToAutomatic: returnedAt ? {
       at: returnedAt,
       changes: list(returned.changes).flatMap((each) => {

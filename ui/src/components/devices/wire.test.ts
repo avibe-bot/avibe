@@ -204,6 +204,19 @@ describe('connectionFromWire', () => {
     expect(read({ outcome: { setting: 'direct', result: 'applied' } })?.change).toBeUndefined();
   });
 
+  it('reads a change of direct or the relay that the instance accepted and has not written, and how the last one ended', () => {
+    // #4114: a switch answers `202` and is written afterwards; `operation` and `outcome` carry it.
+    const waiting = read({ operation: { id: 'op-1', setting: 'direct', from: true, to: false, state: 'applying' } });
+    expect(waiting?.switching).toEqual({ setting: 'direct', id: 'op-1' });
+    expect(waiting?.change).toBeUndefined();
+    expect(read({ outcome: { id: 'op-1', setting: 'direct', from: true, to: false, result: 'applied', reason: 'saved', at: '2026-11-22T01:00:00Z' } })?.switched)
+      .toEqual({ setting: 'direct', id: 'op-1', failed: false, reason: 'saved' });
+    expect(read({ outcome: { id: 'op-2', setting: 'relay', from: false, to: true, result: 'failed', reason: 'tunnel_unhealthy' } })?.switched)
+      .toEqual({ setting: 'relay', id: 'op-2', failed: true, reason: 'tunnel_unhealthy' });
+    // A tunnel setting's change is not a switch's.
+    expect(read({ operation: { id: 'op-3', setting: 'protocol', state: 'verifying', to: 'http2' } })?.switching).toBeUndefined();
+  });
+
   it('shows the relay only where the instance reports one, and exactly the settings returned to automatic', () => {
     expect(read({})?.relay).toBeUndefined();
     expect(read({ relay: { enabled: false, connected: false, canEnable: false, unavailableReason: 'direct_permission_required' } })?.relay)

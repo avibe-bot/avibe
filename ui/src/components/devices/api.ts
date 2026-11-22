@@ -143,9 +143,15 @@ export const devicesApi = {
 
   connection: async (interfaces: TunnelNetworkInterface[]): Promise<ConnectionState | null> =>
     connectionFromWire(await get('/api/devices/connection'), interfaces),
-  /** `202`: accepted, not applied; the result is read from the state. */
-  changeConnection: async (setting: ConnectionSetting, to: RemoteAccessSettings[keyof RemoteAccessSettings] | boolean) => {
-    await call('/api/devices/connection', { method: 'PATCH', body: { setting, to } });
+  /**
+   * `202`: accepted, not applied; the result is read from the state. `operationId` names the
+   * change the instance took on for this setting, when it took one on: how it ended is the
+   * outcome that carries the same id.
+   */
+  changeConnection: async (setting: ConnectionSetting, to: RemoteAccessSettings[keyof RemoteAccessSettings] | boolean): Promise<{ operationId: string | null }> => {
+    const { body } = await call('/api/devices/connection', { method: 'PATCH', body: { setting, to } });
+    const operation = body.operation && typeof body.operation === 'object' ? body.operation as Record<string, unknown> : {};
+    return { operationId: operation.setting === setting && typeof operation.id === 'string' ? operation.id : null };
   },
   interfaces: async (): Promise<TunnelNetworkInterface[]> => {
     const body = await get<{ interfaces?: TunnelNetworkInterface[] }>('/api/remote-access/network-interfaces');

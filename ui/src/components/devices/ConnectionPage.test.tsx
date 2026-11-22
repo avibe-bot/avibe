@@ -98,6 +98,47 @@ describe('ConnectionPage · settings', () => {
     expect(screen.getByRole('switch', { name: '直连' }).getAttribute('aria-checked')).toBe('true');
   });
 
+  it('follows a direct switch the instance accepted until it is written, and says a refusal that came after', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // `202`: accepted, not applied. The state still holds the old value and the change on its way.
+    const change = vi.spyOn(devicesApi, 'changeConnection').mockResolvedValue({ operationId: 'op-1' });
+    mount('/settings/remote-access/connection', true);
+    const direct = await screen.findByRole('switch', { name: '直连' });
+    read.mockResolvedValue(connection({ switching: { setting: 'direct', id: 'op-1' } }));
+    fireEvent.click(direct);
+    await waitFor(() => expect(change).toHaveBeenCalledWith('direct', false));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    // Still on its way: the row waits, nothing is said, and the page keeps reading.
+    expect((screen.getByRole('switch', { name: '直连' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('alert')).toBeNull();
+    const reads = read.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(read.mock.calls.length).toBeGreaterThan(reads);
+
+    // Written: the switch shows it, and nothing is said.
+    read.mockResolvedValue(connection({ direct: 'off', switched: { setting: 'direct', id: 'op-1', failed: false, reason: 'saved' } }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(screen.getByRole('switch', { name: '直连' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    // Asked again, accepted, and refused when the instance came to write it: said like a refusal before.
+    change.mockResolvedValue({ operationId: 'op-2' });
+    read.mockResolvedValue(connection({ direct: 'ready' }));
+    for (let second = 0; second < 31; second += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+    expect(screen.getByRole('switch', { name: '直连' }).getAttribute('aria-checked')).toBe('true');
+    read.mockResolvedValue(connection({ direct: 'ready', switching: { setting: 'direct', id: 'op-2' } }));
+    fireEvent.click(screen.getByRole('switch', { name: '直连' }));
+    await waitFor(() => expect(change).toHaveBeenCalledTimes(2));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    read.mockResolvedValue(connection({ direct: 'ready', switched: { setting: 'direct', id: 'op-2', failed: true, reason: 'tunnel_unhealthy' } }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+    expect(await screen.findByText(said('没有改：现在确认不了 Cloudflare 隧道是通的，关掉可能让你断开。稍后再试。'))).toBeTruthy();
+    expect(screen.getByRole('switch', { name: '直连' }).getAttribute('aria-checked')).toBe('true');
+    expect(change).toHaveBeenCalledTimes(2);
+  });
+
   it('reads at once after a switch whose answer was lost, and says why a refused setting did not change', async () => {
     const change = vi.spyOn(devicesApi, 'changeConnection').mockRejectedValueOnce(new LostAnswer());
     mount();

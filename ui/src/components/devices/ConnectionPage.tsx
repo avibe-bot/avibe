@@ -25,12 +25,19 @@ import { CONNECTION_ADDRESS_PATH, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVIC
 import { renameDevices } from './rules';
 import type {
   AddressState, ConnectionSetting, ConnectionState, Device, DirectPreference, RebindDialog, RebindRefusal, RebindState,
-  RenameDevice, RenameRefusal, RenameStep, RetiredName, SwitchRefusal, TunnelChange, TunnelSetting,
+  RenameDevice, RenameRefusal, RenameStep, RetiredName, SwitchRefusal, SwitchSetting, TunnelChange, TunnelSetting,
 } from './types';
 import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
 import { useNow } from './useNow';
 import { useOptimizeRoute } from './useOptimizeRoute';
 import { rebindRefusal, rebindUnavailable, renameRefusal, tunnelFromStatus } from './wire';
+
+/** Why a switch did not change, as the page says it. Why the relay cannot be turned on is the
+ *  state's own line after the next read, so those are not said twice. */
+function switchRefusal(code: string): SwitchRefusal['reason'] | null {
+  if (code === 'direct_permission_required' || code === 'relay_transport_unavailable' || code === 'relay_not_enrolled') return null;
+  return code === 'tunnel_unhealthy' || code === 'connection_change_busy' ? code : 'unknown';
+}
 
 const REFRESH_MS = 30_000;
 const FOLLOW_MS = 2_000;
@@ -81,6 +88,8 @@ export function ConnectionPage() {
   const [diagnosing, setDiagnosing] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState<string | undefined>();
   const interfaces = useRef<TunnelNetworkInterface[]>([]);
+  /** A change of direct or the relay the instance accepted and had not written yet: whose it is. */
+  const awaited = useRef<{ row: SwitchSetting; id: string } | null>(null);
   /** A tunnel change whose answer never arrived: what was asked, and how often the state was read since. */
   const lostSetting = useRef<{ setting: TunnelSetting; to: string; reads: number } | null>(null);
 
@@ -93,6 +102,17 @@ export function ConnectionPage() {
         setConnection(next);
         setLoad('ready');
         setSettling((left) => Math.max(0, left - 1));
+        const waited = awaited.current;
+        if (waited && next.switching?.id !== waited.id) {
+          // The switch this page asked for is no longer on its way: the instance's record of that
+          // same change says whether it was written. A refusal after acceptance is said like one before.
+          awaited.current = null;
+          const ended = next.switched;
+          if (ended?.id === waited.id && ended.failed) {
+            const reason = switchRefusal(ended.reason);
+            if (reason) setRefused({ row: waited.row, reason });
+          }
+        }
         const lost = lostSetting.current;
         if (!lost) {
           // The instance's own word replaces what this page assumed while it waited.
@@ -256,7 +276,7 @@ export function ConnectionPage() {
 
   // While a change is running (or its answer was lost), only reads: the state says how it ended.
   const change = localChange ?? connection?.change;
-  const following = Boolean(change && RUNNING.has(change.state)) || recovering || settling > 0;
+  const following = Boolean(change && RUNNING.has(change.state)) || Boolean(connection?.switching) || recovering || settling > 0;
   useEffect(() => {
     if (!following) return undefined;
     const timer = window.setInterval(() => { void readConnection(); void readStatus(); }, FOLLOW_MS);
@@ -333,7 +353,8 @@ export function ConnectionPage() {
     else setSending(setting);
     void (async () => {
       try {
-        await api.changeConnection(setting, to);
+        const answer = await api.changeConnection(setting, to);
+        if ((setting === 'direct' || setting === 'relay') && answer.operationId) awaited.current = { row: setting, id: answer.operationId };
         if (tunnelSetting && alive.current) setLocalChange(undefined);
       } catch (error) {
         if (!alive.current) return;
@@ -351,11 +372,8 @@ export function ConnectionPage() {
           const busy = error instanceof DevicesApiError && error.code === 'connection_change_busy';
           setLocalChange({ setting: tunnelSetting, state: 'failed', from, reason: busy ? 'connection_change_busy' : 'unknown' });
         } else if (!isTunnelSetting(setting)) {
-          const code = error instanceof DevicesApiError ? error.code : '';
-          // Why the relay cannot be turned on is the state's own line after the next read.
-          if (code !== 'direct_permission_required' && code !== 'relay_transport_unavailable' && code !== 'relay_not_enrolled') {
-            setRefused({ row: setting, reason: code === 'tunnel_unhealthy' || code === 'connection_change_busy' ? code : 'unknown' });
-          }
+          const reason = switchRefusal(error instanceof DevicesApiError ? error.code : '');
+          if (reason) setRefused({ row: setting, reason });
         }
       } finally {
         if (alive.current) setSending(undefined);
@@ -572,7 +590,8 @@ export function ConnectionPage() {
       path={preference ? deviceUsing(nativePath, pageVia, nativeDirectPathReported()) : undefined}
       preference={preference}
       refused={refused}
-      sending={sending}
+      // A switch the instance has accepted and not written yet waits like one being sent.
+      sending={sending ?? connection?.switching?.setting}
       optimize={optimize}
       diagnostics={diagnosticsOpen ? {
         status, diagnostics, running: diagnosing, error: diagnosticsError, now,

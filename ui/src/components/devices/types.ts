@@ -195,7 +195,15 @@ export type ConnectionState = {
   returnedToAutomatic?: { at: string; changes: Array<{ setting: TunnelSetting; from: string }> };
   /** The tunnel runs on another combination for now while the saved settings are unchanged. */
   temporaryRoute?: { protocol: 'quic' | 'http2' | null; differences: TunnelSetting[] };
+  /** Direct or the relay was asked to change and the instance has not written it yet (`202`:
+   *  accepted, not applied). The row waits; the state says how it ended. */
+  switching?: { setting: SwitchSetting; id?: string };
+  /** How the last change of direct or the relay ended, by the instance's own record. */
+  switched?: { setting: SwitchSetting; id?: string; failed: boolean; reason: string };
 };
+
+/** The two settings the instance changes after it has answered. */
+export type SwitchSetting = 'direct' | 'relay';
 
 /** 「优化线路」: evaluating now (`busy`), not pressable for a moment (`disabled`), what came of the
  *  last press (`problem`: why it did not start), and when it can be or will be tried again. */
