@@ -10,7 +10,7 @@ use tauri::{Manager, Webview, Window};
 
 /// Existing clearance under the traffic lights; this does not add a bar over
 /// the chat header, which continues to reach the top edge.
-pub const TITLE_BAR_INSET: f64 = 28.0;
+pub const TITLE_BAR_INSET: f64 = 34.0;
 #[cfg(test)]
 const SUPPORT_META: &str = "avibe-shell-drag-regions";
 
@@ -138,7 +138,7 @@ mod tests {
             .unwrap();
             let script = inset_script(&config);
             assert!(script.contains(&format!("'--shell-window-controls-left', '{x}px'")));
-            assert!(script.contains("'--shell-titlebar-inset', '28px'"));
+            assert!(script.contains("'--shell-titlebar-inset', '34px'"));
             assert_eq!(configured_controls(&config), Some((x, 17.0)));
         }
         assert!(!inset_script(&tauri::Config::default()).contains("--shell-window-controls-left"));
