@@ -79,8 +79,8 @@ standalone session" entry point (model support only); mobile canvas rendering
   ruling, replacing an earlier remembered 含历史 default): every visit opens on
   活跃, the choice lasts only while the tab stays open, and a value older builds
   stored is ignored. The search-locate path may widen 活跃 → 含历史 for that
-  same visit. Time window / project / `显示后台会话` are not remembered either. Only general
-  navigation resumes the memory: a contextual entry point passes
+  same visit. Time window / project / `显示后台会话` are not remembered either.
+  Only general navigation resumes the memory: a contextual entry point passes
   `/agents?tab=definitions` and that destination wins without being remembered.
 
 ### Graph semantics (all from existing columns)
