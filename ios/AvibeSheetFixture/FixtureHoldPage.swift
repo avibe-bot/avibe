@@ -49,7 +49,7 @@ final class FixtureHoldViewController: UIViewController {
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         // As `WebViewFactory` sets every WebView up, and `WebViewController`
         // its primary one.
-        webView.addGestureRecognizer(PageFocusTouchObserver())
+        webView.addGestureRecognizer(PageFocusKeeper(appShowsPages: { UIApplication.shared.applicationState == .active }))
         webView.addGestureRecognizer(NativeHoldTouchObserver())
         NativeHoldCapture.shared.watch(webView)
         // The fixture's own record of each touch as UIKit delivers it, beside
@@ -71,9 +71,13 @@ final class FixtureHoldViewController: UIViewController {
 
         // The control: the page names no surface, so the App's hold
         // recognition follows nothing. The page treats its input as before.
-        let page = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_HOLD_NO_SURFACES"] == "1"
+        var page = ProcessInfo.processInfo.environment["AVIBE_FIXTURE_HOLD_NO_SURFACES"] == "1"
             ? Self.page.replacingOccurrences(of: "const NO_SURFACES = false;", with: "const NO_SURFACES = true;")
             : Self.page
+        // A page that focuses its input by itself as it loads, with no touch.
+        if ProcessInfo.processInfo.environment["AVIBE_FIXTURE_HOLD_SELF_FOCUS"] == "1" {
+            page = page.replacingOccurrences(of: "const SELF_FOCUS = false;", with: "const SELF_FOCUS = true;")
+        }
         webView.loadHTMLString(page, baseURL: URL(string: "\(Self.origin)/hold.html")!)
     }
 
@@ -125,6 +129,7 @@ final class FixtureHoldViewController: UIViewController {
       <p id="s-press">press=none</p>
       <p id="s-drag">drag=none</p>
       <p id="s-tap">tap=none</p>
+      <p id="s-self">self=none</p>
       <div id="row">
         <textarea id="input" class="holdable" aria-label="Message"></textarea>
         <button id="send" type="button">Send</button>
@@ -140,6 +145,8 @@ final class FixtureHoldViewController: UIViewController {
       const HOLD_MS = 200, GRACE_MS = 100, SLOP = 10, CANCEL = 80, UNCANCEL = 60;
       // The control (`AVIBE_FIXTURE_HOLD_NO_SURFACES`): the page names no surface.
       const NO_SURFACES = false;
+      // `AVIBE_FIXTURE_HOLD_SELF_FOCUS`: the page focuses its input as it loads.
+      const SELF_FOCUS = false;
       const native = window.avibeNative;
       const input = document.getElementById("input");
       const plain = document.getElementById("plain");
@@ -339,6 +346,12 @@ final class FixtureHoldViewController: UIViewController {
       document.getElementById("close-sheet").addEventListener("click", (event) => { event.stopPropagation(); sheet.classList.remove("open"); name(); });
       document.getElementById("sheet-body").addEventListener("click", () => { sheetTaps += 1; set("s-sheet", "sheet=" + sheetTaps); });
 
+      if (SELF_FOCUS) {
+        // The input is the active element from here, whether or not the page has the focus;
+        // what it reads 1.5 s later says whether the App has given the page the focus since.
+        input.focus();
+        setTimeout(() => set("s-self", "self=" + focusFacts()), 1500);
+      }
       name();
       set("s-ready", "ready=yes");
     })();

@@ -4846,26 +4846,50 @@ final class FormAccessoryBarTests: XCTestCase {
     }
 }
 
-/// A view that says whether it is first responder, and counts being asked.
+/// A view that says whether it is first responder, and counts being asked
+/// to become it and to end editing.
 private final class FirstResponderProbe: UIView {
     var first = false
+    /// Its content takes first responder when it is asked, as a WebView's does.
+    var content: FirstResponderProbe?
     private(set) var asked = 0
+    private(set) var ended = 0
 
     override var isFirstResponder: Bool { first }
 
     override func becomeFirstResponder() -> Bool {
         asked += 1
-        first = true
+        if let content { content.first = true } else { first = true }
+        return true
+    }
+
+    override func endEditing(_ force: Bool) -> Bool {
+        ended += 1
+        first = false
+        content?.first = false
         return true
     }
 }
 
-final class PageFocusTouchObserverTests: XCTestCase {
+final class PageFocusKeeperTests: XCTestCase {
     private let instance = WebOrigin.parseConfigured("https://alice-app.avibe.bot")!
 
-    /// Every WebView the factory makes has the observer, and it is passive.
+    /// A view with a keeper, in a window that is shown.
     @MainActor
-    func testEveryInstanceWebViewHasThePassiveObserver() throws {
+    private func makeKept(shown: @escaping () -> Bool = { true }) -> (UIWindow, FirstResponderProbe, PageFocusKeeper) {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 200, height: 200))
+        window.isHidden = false
+        addTeardownBlock { @MainActor in window.isHidden = true }
+        let view = FirstResponderProbe(frame: CGRect(x: 0, y: 0, width: 200, height: 200))
+        window.addSubview(view)
+        let keeper = PageFocusKeeper(appShowsPages: shown)
+        view.addGestureRecognizer(keeper)
+        return (window, view, keeper)
+    }
+
+    /// Every WebView the factory makes has the keeper, and it is passive.
+    @MainActor
+    func testEveryInstanceWebViewHasThePassiveKeeper() throws {
         let factory = WebViewFactory(
             instanceOrigin: instance,
             websiteDataStore: .nonPersistent()
@@ -4877,67 +4901,188 @@ final class PageFocusTouchObserverTests: XCTestCase {
             delegate: delegate
         )
         for webView in [primary, child] {
-            let observers = (webView.gestureRecognizers ?? []).compactMap { $0 as? PageFocusTouchObserver }
-            XCTAssertEqual(observers.count, 1)
-            let observer = try XCTUnwrap(observers.first)
-            XCTAssertFalse(observer.cancelsTouchesInView)
-            XCTAssertFalse(observer.delaysTouchesBegan)
-            XCTAssertFalse(observer.delaysTouchesEnded)
+            let keepers = (webView.gestureRecognizers ?? []).compactMap { $0 as? PageFocusKeeper }
+            XCTAssertEqual(keepers.count, 1)
+            let keeper = try XCTUnwrap(keepers.first)
+            XCTAssertFalse(keeper.cancelsTouchesInView)
+            XCTAssertFalse(keeper.delaysTouchesBegan)
+            XCTAssertFalse(keeper.delaysTouchesEnded)
         }
     }
 
-    /// A view in a window with no first responder inside it is asked to
-    /// become it. It is asked, not its content: a WebView hands it on.
+    /// A view in front with no first responder inside it is asked to become
+    /// it. It is asked, not its content: a WebView hands it on.
     @MainActor
-    func testAViewWithNoFirstResponderInsideIsMadeFirstResponder() {
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
-        let view = FirstResponderProbe()
-        let inner = FirstResponderProbe()
+    func testAViewInFrontWithAnUnfocusedPageIsMadeFirstResponder() {
+        let (_, view, keeper) = makeKept()
+        let inner = FirstResponderProbe(frame: view.bounds)
         view.addSubview(inner)
-        window.addSubview(view)
 
-        PageFocusTouchObserver.focusPage(in: view)
+        keeper.look()
         XCTAssertEqual(view.asked, 1)
         XCTAssertEqual(inner.asked, 0)
 
         // The view kept it itself (a WebView does when its content view
-        // refused, and its page is then still unfocused): the next touch
-        // asks again.
+        // refused, and its page is then still unfocused): it is asked again.
         XCTAssertTrue(view.isFirstResponder)
-        PageFocusTouchObserver.focusPage(in: view)
+        keeper.look()
         XCTAssertEqual(view.asked, 2)
 
-        // Its content has it now: the touch after that asks nothing.
+        // Its content has it now: nothing more is asked.
         inner.first = true
-        PageFocusTouchObserver.focusPage(in: view)
+        keeper.look()
         XCTAssertEqual(view.asked, 2)
         XCTAssertEqual(inner.asked, 0)
     }
 
-    /// The page's content view lies inside the WebView: while it is first
-    /// responder (the page is focused, with or without its keyboard), a touch
-    /// asks nothing.
+    /// While the App does not show its pages (App Lock is up, or the App
+    /// is not active: Control Center, the App Switcher, a system alert) the
+    /// page gets no focus, and gets it once the App shows them again: a
+    /// focused page counts as shown to the reader.
     @MainActor
-    func testAViewWhoseDescendantIsFirstResponderIsLeftAlone() {
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
-        let view = FirstResponderProbe()
-        let scroll = UIView()
-        let content = FirstResponderProbe()
-        content.first = true
-        scroll.addSubview(content)
-        view.addSubview(scroll)
-        window.addSubview(view)
-
-        PageFocusTouchObserver.focusPage(in: view)
+    func testAPageGetsNoFocusWhileTheAppDoesNotShowItsPages() {
+        var shown = false
+        let (_, view, keeper) = makeKept(shown: { shown })
+        keeper.look()
         XCTAssertEqual(view.asked, 0)
-        XCTAssertEqual(content.asked, 0)
+
+        shown = true
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
     }
 
+    /// The focus given here is taken back when the App stops showing its
+    /// pages (App Lock comes up, the App goes inactive) or something comes
+    /// over the view, and given again when it is in front once more.
     @MainActor
-    func testAViewOutOfAWindowIsLeftAlone() {
-        let view = FirstResponderProbe()
-        PageFocusTouchObserver.focusPage(in: view)
+    func testTheFocusGivenIsTakenBackWhenTheViewIsNoLongerInFront() {
+        var shown = true
+        let (window, view, keeper) = makeKept(shown: { shown })
+        let content = FirstResponderProbe(frame: view.bounds)
+        view.addSubview(content)
+        view.content = content
+
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
+        XCTAssertTrue(content.isFirstResponder)
+        // In front and focused: nothing more.
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
+        XCTAssertEqual(view.ended, 0)
+
+        // The App stops showing its pages.
+        shown = false
+        keeper.look()
+        XCTAssertEqual(view.ended, 1)
+        XCTAssertFalse(content.isFirstResponder)
+        keeper.look()
+        XCTAssertEqual(view.ended, 1)
+        XCTAssertEqual(view.asked, 1)
+
+        // And shows them again.
+        shown = true
+        keeper.look()
+        XCTAssertEqual(view.asked, 2)
+        XCTAssertTrue(content.isFirstResponder)
+
+        // Something comes over it (a cover, a sheet).
+        let cover = UIView(frame: window.bounds)
+        window.addSubview(cover)
+        keeper.look()
+        XCTAssertEqual(view.ended, 2)
+        cover.removeFromSuperview()
+        keeper.look()
+        XCTAssertEqual(view.asked, 3)
+    }
+
+    /// A page focused some other way (the reader tapped it, as on iOS 26)
+    /// keeps its focus when the App stops showing its pages: taking it
+    /// would close a keyboard under Control Center or a system alert. App
+    /// Lock ends editing itself when it locks.
+    @MainActor
+    func testAFocusTheKeeperDidNotGiveIsNotTakenBack() {
+        var shown = true
+        let (_, view, keeper) = makeKept(shown: { shown })
+        let content = FirstResponderProbe(frame: view.bounds)
+        view.addSubview(content)
+        content.first = true
+
+        keeper.look()
         XCTAssertEqual(view.asked, 0)
+        shown = false
+        keeper.look()
+        XCTAssertEqual(view.ended, 0)
+        XCTAssertTrue(content.isFirstResponder)
+    }
+
+    /// Something lies over the view's middle (a cover, a sheet, an alert):
+    /// a touch there would not reach it, and its page gets no focus. Taken
+    /// away, it does.
+    @MainActor
+    func testAViewWithSomethingOverItIsLeftAloneUntilItIsUncovered() {
+        let (window, view, keeper) = makeKept()
+        let cover = UIView(frame: CGRect(x: 50, y: 50, width: 100, height: 100))
+        window.addSubview(cover)
+        XCTAssertFalse(PageFocusKeeper.isOnTop(view, in: window))
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+
+        cover.removeFromSuperview()
+        XCTAssertTrue(PageFocusKeeper.isOnTop(view, in: window))
+        keeper.look()
+        XCTAssertEqual(view.asked, 1)
+    }
+
+    /// A view that takes no touches (the runtime under Account), or that is
+    /// in no window, is left alone.
+    @MainActor
+    func testAViewThatTakesNoTouchesOrIsInNoWindowIsLeftAlone() {
+        let (window, view, keeper) = makeKept()
+        view.isUserInteractionEnabled = false
+        XCTAssertFalse(PageFocusKeeper.isOnTop(view, in: window))
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+
+        view.isUserInteractionEnabled = true
+        view.removeFromSuperview()
+        keeper.look()
+        XCTAssertEqual(view.asked, 0)
+    }
+
+    /// Two views in front in one window (side by side): the one whose page
+    /// has the focus keeps it, and the other does not take it in turn.
+    @MainActor
+    func testTwoViewsInFrontDoNotTakeTheFocusFromEachOther() {
+        let (window, left, leftKeeper) = makeKept()
+        left.frame = CGRect(x: 0, y: 0, width: 100, height: 200)
+        let leftContent = FirstResponderProbe(frame: left.bounds)
+        left.addSubview(leftContent)
+        left.content = leftContent
+        let right = FirstResponderProbe(frame: CGRect(x: 100, y: 0, width: 100, height: 200))
+        window.addSubview(right)
+        let rightKeeper = PageFocusKeeper(appShowsPages: { true })
+        right.addGestureRecognizer(rightKeeper)
+
+        leftKeeper.look()
+        XCTAssertEqual(left.asked, 1)
+        rightKeeper.look()
+        XCTAssertEqual(right.asked, 0)
+
+        // The left one is covered: the right one, still in front, gets it.
+        let cover = UIView(frame: left.frame)
+        window.addSubview(cover)
+        rightKeeper.look()
+        XCTAssertEqual(right.asked, 1)
+    }
+
+    /// A touch in a descendant counts as reaching the view.
+    @MainActor
+    func testADescendantUnderTheMiddleCountsAsTheView() {
+        let (window, view, _) = makeKept()
+        let content = UIView(frame: view.bounds)
+        view.addSubview(content)
+        XCTAssertTrue(PageFocusKeeper.isOnTop(view, in: window))
+        XCTAssertFalse(PageFocusKeeper.holdsFirstResponder(in: view))
     }
 }
 

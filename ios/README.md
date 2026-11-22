@@ -104,18 +104,30 @@ and Web resizing cannot both run.
   This uses a private WebKit class, an App Review risk the owner accepted on
   2026-11-08 (`docs/plans/ios-app.md` section 5). Keyboard QuickType
   suggestions are unaffected. The bundled sign-in page keeps the default bar.
-- On iOS 27, a touch on an instance WebView (primary or child) makes it
-  first responder at touch-down, unless its content view already is
-  (`PageFocusTouchObserver`, a passive recogniser). A WebKit page has the
-  focus only while its content view is first responder, and on iOS 27 a
-  press the page takes for itself (the composer prevents the default on
-  `touchstart`) no longer makes it that. So the first tap on the composer
-  raised no keyboard wherever the content view was not first responder: in
-  a fresh WebView (a cold launch, a push tap, an instance switch), and
-  after App Lock or the account cover ended editing. Nothing is done
-  before a touch, and nothing on iOS 26, so on CI's iOS 26 simulator only
-  the unit tests cover it; the real touches are checked on an iOS 27
-  simulator.
+- On iOS 27, an instance WebView (primary or child) that is in front is
+  made first responder before any touch (`PageFocusKeeper`), so its page
+  has the focus as a browser tab has. A WebKit page has the focus only
+  while its content view is first responder; an ordinary tap makes it
+  that, but on iOS 27 a press the page takes for itself (the composer
+  prevents the default on `touchstart`) no longer does, so the first tap
+  on the composer raised no keyboard in a fresh WebView (a cold launch, a
+  push tap, an instance switch) and after App Lock or the account cover
+  ended editing.
+  - In front means: the App is active, App Lock covers nothing, and a
+    touch at the WebView's middle would reach it (no cover, sheet, alert
+    or other WebView over it).
+  - It is done when the main thread is idle and no finger is on the
+    WebView, never during a touch: the first first responder of a cold App
+    costs the main thread up to seconds, which between a finger coming
+    down and lifting made the page time a tap as a hold.
+  - The focus given this way is taken back when the WebView stops being
+    in front before the reader has touched it. After a touch it is the
+    reader's, as on iOS 26.
+  - Consequence: on iOS 27 an open conversation that is shown and
+    uncovered counts as read without a touch. iOS 26 is unchanged (there a
+    page has no focus before a tap either, and the composer's own tap
+    gives it); so on CI's iOS 26 simulator only the unit tests cover the
+    keeper, and the real touches are checked on an iOS 27 simulator.
 - External application schemes from top-level browsing contexts use
   `UIApplication`.
 - JavaScript alerts, confirmations, and prompts use native alerts. Their

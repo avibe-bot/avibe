@@ -56,8 +56,13 @@ final class HoldTouchUITests: XCTestCase {
     /// And it focuses the input, though no ordinary tap has reached the
     /// WebView yet. On iOS 27 a page has no focus until one has, and the
     /// press on the input is not one (the page prevents its default): the
-    /// App gives the page the focus at touch-down (`PageFocusTouchObserver`).
+    /// App gives the page the focus before any touch (`PageFocusKeeper`).
     /// Without that this tap raises no keyboard on iOS 27.
+    ///
+    /// And the page sees a tap: giving the page the focus costs the main
+    /// thread up to seconds on a cold App, and none of that may fall
+    /// between the finger coming down and lifting, or the page times the
+    /// tap as a hold and records.
     func testTheFirstTapAfterAColdLaunchIsNoHold() {
         firstTap(startsAtRecognition: false)
     }
@@ -77,17 +82,37 @@ final class HoldTouchUITests: XCTestCase {
         XCTAssertEqual(kept(), "none", "The App followed a touch with no surface named; \(facts())")
     }
 
+    /// A page that focuses its input by itself as it loads, with no touch: no keyboard comes
+    /// of that, whether or not the App then gives the page the focus (on iOS 27 it does, and
+    /// the input gets its focus event then).
+    func testAnInputThePageFocusedByItselfRaisesNoKeyboard() {
+        app.launchEnvironment["AVIBE_FIXTURE_HOLD_SELF_FOCUS"] = "1"
+        // Focused, the input is no hold surface.
+        launch(warm: false, surfaces: "surfaces=plain")
+        // The page's reading of its focus, 1.5 s after it focused the input.
+        XCTAssertNotNil(waitForLabel(beginning: "self=active"), facts())
+        Thread.sleep(forTimeInterval: 1)
+        let keyboard = app.keyboards.firstMatch.exists
+        print("[hold smoke] self-focused input, keyboard=\(keyboard): \(facts())")
+        XCTAssertFalse(keyboard, "A keyboard came with no touch; \(facts())")
+        XCTAssertEqual(label(beginning: "typed="), "typed=0", facts())
+    }
+
     private func firstTap(startsAtRecognition: Bool) {
         launch(startsAtRecognition: startsAtRecognition, warm: false)
         requireTheFirstTapFocusesAndTypes("startsAtRecognition=\(startsAtRecognition)")
         requireFollowedWithNoCue("The first tap after a cold launch")
     }
 
-    /// The first tap on the input: it takes the focus, and typing reaches it. A focus event
-    /// alone is not the keyboard: the input must have its input session too.
+    /// The first tap on the input: the page sees a tap and starts nothing of its own, the
+    /// input takes the focus, and typing reaches it. A focus event alone is not the keyboard:
+    /// the input must have its input session too.
     private func requireTheFirstTapFocusesAndTypes(_ what: String) {
         input.tap()
         let focused = waitFor("focus=yes")
+        // What the page made of the press, read before anything else is done to the page.
+        let press = label(beginning: "press=") ?? "press=none"
+        let holds = label(beginning: "holds=") ?? "holds=missing"
         var typed = false
         if focused {
             // Typing reaches it: the keyboard is up, or a hardware keyboard stands in for it.
@@ -96,7 +121,11 @@ final class HoldTouchUITests: XCTestCase {
         }
         // Long enough for a late cue to have come, and for the page's later reading of its focus.
         Thread.sleep(forTimeInterval: 2)
-        print("[hold smoke] first tap, \(what), focused=\(focused), typed=\(typed): \(facts())")
+        print("[hold smoke] first tap, \(what), focused=\(focused), typed=\(typed), \(press): \(facts())")
+        // The page's own hold starts 300 ms into a press: a tap it saw as longer became one.
+        XCTAssertEqual(holds, "holds=0:none", "The page took the first tap for a hold (\(press)); \(facts())")
+        XCTAssertEqual(label(beginning: "holds="), "holds=0:none", "A take came of the first tap; \(facts())")
+        XCTAssertFalse(kept().contains("hold page"), "The page started the microphone for a tap; \(facts())")
         XCTAssertTrue(focused, "The first tap did not focus the input; \(facts())")
         XCTAssertTrue(typed, "The first tap focused the input, but typing did not reach it; \(facts())")
     }
@@ -402,7 +431,7 @@ final class HoldTouchUITests: XCTestCase {
 
     /// Everything the page says of itself, for a failure's message.
     private func facts() -> String {
-        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag=", "tap="]
+        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag=", "tap=", "self="]
         return "page: " + names.compactMap { label(beginning: $0) }.joined(separator: " ")
             + "; App: " + evidence()
     }
