@@ -762,9 +762,9 @@
       "languageSaveFailed": "语言已在本机切换，但未能保存到此实例",
       "appLock": {
         "title": "App 锁",
-        "descriptionFaceId": "打开 Avibe，或离开超过所选时间后回来，需要先用面容 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
-        "descriptionTouchIdPhone": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
-        "descriptionMac": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或 Mac 登录密码解锁。只对这台 Mac 生效，更改时需要验证一次。",
+        "descriptionFaceId": "用面容 ID 或设备密码解锁 Avibe，只对这台 iPhone 生效。",
+        "descriptionTouchIdPhone": "用触控 ID 或设备密码解锁 Avibe，只对这台 iPhone 生效。",
+        "descriptionMac": "用触控 ID 或登录密码解锁 Avibe，只对这台 Mac 生效。",
         "off": "关闭",
         "immediately": "立即",
         "oneMinute": "1 分钟后",

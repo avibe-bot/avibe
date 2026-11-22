@@ -762,9 +762,9 @@
       "languageSaveFailed": "The language changed here, but could not be saved for this instance",
       "appLock": {
         "title": "App Lock",
-        "descriptionFaceId": "Unlock with Face ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
-        "descriptionTouchIdPhone": "Unlock with Touch ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
-        "descriptionMac": "Unlock with Touch ID or your Mac password when you open Avibe, or come back after the time you choose. Applies to this Mac only; changing it asks you to verify.",
+        "descriptionFaceId": "Unlock Avibe with Face ID or your passcode. Applies to this iPhone only.",
+        "descriptionTouchIdPhone": "Unlock Avibe with Touch ID or your passcode. Applies to this iPhone only.",
+        "descriptionMac": "Unlock Avibe with Touch ID or your login password. Applies to this Mac only.",
         "off": "Off",
         "immediately": "Immediately",
         "oneMinute": "After 1 minute",
