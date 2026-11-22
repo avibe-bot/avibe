@@ -14,7 +14,7 @@ use iroh::{
 use std::{
     io,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
@@ -31,7 +31,6 @@ pub(super) type Stream = Box<dyn Duplex>;
 // before polling an existing direct stream, not just before opening a new one.
 struct AdmittedStream<S> {
     inner: S,
-    _live_stream: Arc<()>,
     clock: Clock,
     deadline: tokio::sync::watch::Receiver<Duration>,
 }
@@ -91,11 +90,27 @@ pub(super) fn endpoint_builder(key: iroh::SecretKey, relay: Option<&TrialRelay>)
         .transport_config(config)
 }
 
+#[derive(Default)]
+struct Commits {
+    live: usize,
+    lost: bool,
+    retired: bool,
+}
+pub(super) struct Committed(Arc<Link>);
+impl Drop for Committed {
+    fn drop(&mut self) {
+        let mut c = self.0.commits.lock().unwrap();
+        c.live -= 1;
+        // I/O can observe loss before the path monitor gets scheduled.
+        c.lost |= !self.0.usable();
+    }
+}
+
 pub(super) struct Link {
     pub conn: Connection,
     pub offer: Offer,
     pub plan: Selection,
-    live_streams: Arc<()>,
+    commits: Mutex<Commits>,
     pub(super) clock: Clock,
     deadline: tokio::sync::watch::Sender<Duration>,
 }
@@ -128,8 +143,22 @@ impl Link {
         self.deadline.send_replace(next.until);
         true
     }
+    pub(super) fn commit_stream(self: &Arc<Self>) -> Option<Committed> {
+        let mut c = self.commits.lock().unwrap();
+        if c.retired || !self.usable() {
+            return None;
+        }
+        c.live += 1;
+        Some(Committed(self.clone()))
+    }
+    pub(super) fn claim_loss(&self) -> bool {
+        let mut c = self.commits.lock().unwrap();
+        let closed = !c.retired && (c.live > 0 || c.lost);
+        c.retired = true;
+        closed
+    }
     pub(super) fn has_stream(&self) -> bool {
-        Arc::strong_count(&self.live_streams) > 1
+        self.commits.lock().unwrap().live > 0
     }
     pub(super) fn usable(&self) -> bool {
         self.selected_path().is_some()
@@ -160,7 +189,7 @@ impl Link {
             conn,
             offer,
             plan: Selection::default(),
-            live_streams: Arc::new(()),
+            commits: Mutex::default(),
         });
         let _probe = timeout_at(until, link.open(host)).await.ok()??;
         Some(link)
@@ -196,7 +225,6 @@ impl Link {
                 }
                 return Some(Box::new(AdmittedStream {
                     inner: tokio::io::join(recv, send),
-                    _live_stream: self.live_streams.clone(),
                     clock: self.clock.clone(),
                     deadline: self.deadlines(),
                 }));
