@@ -99,8 +99,11 @@ final class HoldTouchUITests: XCTestCase {
     /// no surface named failing the same way; on iOS 26.5 the same tap
     /// focuses. An iPhone 17 Pro on iOS 27.2.1 raises the keyboard at the
     /// first tap after a cold launch (checked by hand the same day), so
-    /// this is the simulator's, not the App's. Strict: a simulator on which
-    /// the tap focuses again fails here, and this mark is then removed.
+    /// this is the simulator's, not the App's. The full record (what was
+    /// measured, the phone's answer, and what a fix would have to respect)
+    /// is the closing comment of avibe-bot/avibe#4168. Strict: a simulator
+    /// on which the tap focuses again fails here, and this mark is then
+    /// removed.
     private func requireTheColdFirstTapFocused(
         _ focused: Bool, file: StaticString = #filePath, line: UInt = #line
     ) {
