@@ -150,6 +150,41 @@ interface AvibeNative {
 | [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number, closure: number}`, and for the selected instance's host, for diagnosis, `path` (`"relay" \| "ipv4" \| "ipv6" \| null`) and `attempts` (the last five: offered and local candidate counts by family, and the result; no address or identity). Read-only, no parameters. Version 2 adds `direct.handover()` → `{closed, kept, skipped?}`, no parameters (remote-direct-ios.md section 7). Version 3: `path` is also carried by `direct.transportChanged` when known, a change of it advances `sequence`, and the status adds `connections` (the last five CONNECT races: `direct` and `public` as ms or `none`/`failed`/`timeout`/`cancelled`, `winner`, `path`, `sticky`) and `losses` (the last five closes of direct relays for a path that is gone: `cause` (`lost`/`generation_replaced`/`background`), `relays`, `last_byte_ms`, `path`). With `path`, for display, the status may add `path_scope` (`"local"` when the selected path's remote address is private, shared address space (100.64/10), unique-local or link-local, else `"global"`; never for the relay) and `rtt_ms` (that path's measured round trip); neither is in the event, and a change of either is not a change of the status. For diagnosis it may also add `counts`, since the instance was selected: `verifications` (times a usable path was suspended to be checked again), `probes` (`path_update`, `candidate_failed`, `renewal`), `dials`, `path_updates` (updates of the system's network path acted on) and `path_updates_ignored` (updates that changed nothing the transport depends on). Numbers only; not in the event, and no change of the status. | `direct.transportChanged({preferred, sequence, closure})` |
 | `directPreference` | This device's path choice for the instance of the asking page, kept by the App per account and instance (the instance's Devices › Connection page). `direct.preference()` → `{mode: "automatic" \| "tunnel", reverted: null \| {at: <ms since epoch>, reason: "unreachable"}}`, no parameters. `direct.setPreference({mode})` takes exactly `mode`, `"automatic"` or `"tunnel"` (any other value is refused with `invalid_argument`, so later modes keep the shape), and answers the same object with `reverted: null`; a change of mode reopens the instance at the page's URL after the answer. `"tunnel"` (Cloudflare tunnel only): opens of that instance still prepare the route (a host loaded once without one keeps WebKit's pooled public connections on the store, so a later Automatic could not take effect), but select nothing, so nothing dials, every plan has only the public candidate, and nothing hands over. If such an open runs out of time or its document fails to load, while the device has a network, avibe.bot lists the instance online and the listener has not failed, the App sets the mode back to `"automatic"` once (it stays so until chosen again), records `reverted`, and opens the instance again. A stored mode this build does not know reads as `"automatic"`. Only in an App with a direct transport. | `direct.preferenceChanged({mode, reverted})` when the App sets it back itself |
 
+**The desktop app** answers `direct` (version 3) and `directPreference`, and
+nothing else, in the windows it opens for another computer's instance: that
+instance's view in the main window, and the app windows opened from it. The
+object there has `platform: "desktop"`, which the Web UI accepts for `direct`
+only; in every other respect such a page is not in a native shell. (Nothing
+in the Web UI calls the preference methods on Desktop yet: Devices ›
+Connection asks through the phone App's bridge.) An instance whose address
+the direct path does not serve gets no bridge. What differs from the phone
+App:
+
+- The status is the window's own. `preferred` is `"direct"` only while that
+  window has a session's route and the session's client prefers a direct
+  path; a window without a route is on the tunnel whatever another window
+  uses. The shell delivers the status to the document on every load and
+  every change, so `direct.status()` answers at once, with the tunnel before
+  anything was delivered.
+- `sequence` and `closure` are the window's and only grow; a document counts
+  `closure` from its own first delivery. `closure` also grows when the
+  window's route is taken off (the session ended), since the listener its
+  connections ran through is gone.
+- No `rtt_ms`, `attempts`, `connections`, `losses` or `counts`: the desktop
+  core measures and records none.
+- `direct.handover()` closes only when the asking window is the only open
+  one with the session's route (its instance view and app windows share one
+  listener); otherwise `skipped: "other_documents"`.
+- `direct.setPreference` changes the choice the app's own 「连接方式」 menu
+  shows, and reloads nothing. The desktop app never sets a choice back
+  itself, so `reverted` is always `null` and there is no
+  `direct.preferenceChanged`.
+- A request reaches the shell as a link to `avibe-app://direct` that the
+  shell refuses to follow, carrying a token only that window's bridge script
+  has. No command or message handler is given to the instance's origin. On
+  Windows, where the WebView puts a page's leave question before the shell
+  can refuse the link, the bridge keeps that one question from the page.
+
 Phase 0a PR 2 implements this v1 subset:
 
 - `app.info()` returns

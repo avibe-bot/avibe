@@ -1,15 +1,53 @@
 //! Versioned nonsecret client selection. Credential implementations are native.
 use super::protocol::{ClientError, ClientTarget};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};
+use std::{collections::BTreeMap, fs, io::Write, path::PathBuf, sync::Arc};
 
 /// Bound per account; older entries fall back to server order.
 const RECENT_LIMIT: usize = 64;
 
-pub trait Credentials: Send + Sync {
+/// Scoped, in-memory undo for the coordinator's existing credential/selection commit.
+/// Never serialize or log this object. Some OS stores can checkpoint a root without decrypting it.
+pub trait CredentialWrite: Send {
+    fn publish(&mut self, bytes: &[u8]) -> Result<(), ClientError>;
+    fn rollback(self: Box<Self>) -> Result<(), ClientError>;
+}
+
+pub trait Credentials: Send + Sync + 'static {
     fn read(&self, account_id: &str) -> Result<Option<Vec<u8>>, ClientError>;
     fn write(&self, account_id: &str, bytes: &[u8]) -> Result<(), ClientError>;
     fn erase(&self, account_id: &str) -> Result<(), ClientError>;
+    fn begin_write(self: Arc<Self>, id: &str) -> Result<Box<dyn CredentialWrite>, ClientError> {
+        let prior = self.read(id)?;
+        Ok(Box::new(OrdinaryWrite {
+            store: self,
+            id: id.into(),
+            prior,
+            attempted: false,
+        }))
+    }
+}
+
+struct OrdinaryWrite<T: Credentials + ?Sized> {
+    store: Arc<T>,
+    id: String,
+    prior: Option<Vec<u8>>,
+    attempted: bool,
+}
+impl<T: Credentials + ?Sized> CredentialWrite for OrdinaryWrite<T> {
+    fn publish(&mut self, bytes: &[u8]) -> Result<(), ClientError> {
+        self.attempted = true;
+        self.store.write(&self.id, bytes)
+    }
+    fn rollback(self: Box<Self>) -> Result<(), ClientError> {
+        if !self.attempted {
+            return Ok(());
+        }
+        match &self.prior {
+            Some(bytes) => self.store.write(&self.id, bytes),
+            None => self.store.erase(&self.id),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]

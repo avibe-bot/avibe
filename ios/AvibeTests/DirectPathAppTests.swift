@@ -4538,6 +4538,16 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
         if let directTransport {
+            // The transport is selected only for a routed host. A first bind
+            // slower than the App's listener wait leaves the host on the
+            // public path with no selection at all; say so rather than fail
+            // below on a selection that was never made.
+            XCTAssertFalse(
+                app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+                "The App routed no host: its first bind was slower than the listener wait, so nothing is selected.",
+                file: file,
+                line: line
+            )
             XCTAssertEqual(open.routes, [.loading, .browser(runtime)], file: file, line: line)
             let target = try XCTUnwrap(directTransport.selections.last, file: file, line: line)
             XCTAssertEqual(target.runtime, runtime, file: file, line: line)

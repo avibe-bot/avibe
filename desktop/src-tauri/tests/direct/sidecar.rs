@@ -70,7 +70,7 @@ async fn run(changed_selection: bool) {
     // The offer below deliberately replaces the advertised interface with loopback.
     // A wildcard client lets iroh migrate to that real interface mid-refresh;
     // the production monitor then correctly retires the unoffered path (#4149).
-    let ep = transport::endpoint_builder(client.key.clone())
+    let ep = transport::endpoint_builder(client.key.clone(), None)
         .clear_ip_transports()
         .bind_addr_with_opts(
             (Ipv4Addr::LOCALHOST, 0),
@@ -117,6 +117,7 @@ async fn run(changed_selection: bool) {
         let offer = Offer {
             generation: "ci".into(),
             id: peer,
+            relay: None,
             candidates: vec![(Ipv4Addr::LOCALHOST, port).into()],
             until: client.clock.now() + Duration::from_secs(20),
         };
@@ -131,6 +132,7 @@ async fn run(changed_selection: bool) {
     let mut renewal = Offer {
         generation: "ci".into(),
         id: peer,
+        relay: None,
         candidates: vec![(Ipv4Addr::LOCALHOST, port).into()],
         until: renewed_until,
     };
@@ -138,11 +140,48 @@ async fn run(changed_selection: bool) {
     assert!(link.renew(&renewal));
     deadlines.changed().await.unwrap();
     assert_eq!(*deadlines.borrow_and_update(), renewed_until);
+    renewal.relay = super::path::TrialRelay::offered("public-trial-v1", "https://aps1-1.relay.n0.iroh.link./");
+    assert!(renewal.relay.is_some());
+    assert!(
+        !link.renew(&renewal),
+        "changing relay authority cannot extend an old endpoint"
+    );
+    renewal.relay = None;
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
-    client.endpoint = Some(ep);
-    client.publish(link.clone());
+    let pooled = if !changed_selection {
+        let mut other = Client::new("other-app.avibe.bot", "other".into()).await.unwrap();
+        let a = super::handover_tests::public_browser(&mut client).await;
+        let b = super::handover_tests::public_browser(&mut other).await;
+        Some((a, b, other))
+    } else {
+        None
+    };
+    let mut changes_status = client.path_changes();
+    let handover = client.handover();
+    assert_eq!(*changes_status.borrow_and_update(), super::PathStatus::default());
+    client.publish(link.clone(), super::EndpointDrain::new(ep));
+    assert_eq!(changes_status.borrow_and_update().sequence, 1);
+    assert_eq!(
+        handover.close_quiet_public("other-app.avibe.bot", || Some(())).await,
+        super::HandoverResult::NotUsable
+    );
+    assert_eq!(
+        handover.close_quiet_public(host.host(), || None::<()>).await,
+        super::HandoverResult::OtherDocuments
+    );
+    if pooled.is_none() {
+        assert_eq!(
+            handover.close_quiet_public(host.host(), || Some(())).await,
+            super::HandoverResult::Done { closed: 0, kept: 0 }
+        );
+    }
+    assert_eq!(
+        client.selected_path(),
+        None,
+        "the CONNECT probe is not a browser stream"
+    );
     use base64::{engine::general_purpose::STANDARD, Engine};
     let (user, pass) = client.listener.credential.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
@@ -163,6 +202,10 @@ async fn run(changed_selection: bool) {
     line.clear();
     r.read_line(&mut line).await.unwrap();
     assert_eq!(line, "\r\n");
+    assert_eq!(
+        client.selected_path(),
+        Some(super::SelectedPath::Lan(super::AddressFamily::Ipv4))
+    );
     elapsed.store(23, Ordering::SeqCst);
     let retained = RefreshOutcome::Retained {
         retry_before: Duration::from_secs(1),
@@ -175,6 +218,34 @@ async fn run(changed_selection: bool) {
         assert_eq!(client.refresh_reply(|_| std::future::pending()).await, retained);
     }
     assert_eq!(*deadlines.borrow(), renewed_until);
+    if let Some((mut mine, mut foreign, _other)) = pooled {
+        assert_eq!(
+            handover.close_quiet_public(host.host(), || Some(())).await,
+            super::HandoverResult::Done { closed: 1, kept: 0 }
+        );
+        assert_retired_read(mine.read(&mut [0]).await);
+        foreign.write_all(b"z").await.unwrap();
+        assert_eq!(foreign.read_u8().await.unwrap(), b'z');
+        assert!(
+            !changes_status.has_changed().unwrap(),
+            "intentional quiet handover is not an involuntary closure"
+        );
+    }
+    if changed_selection {
+        // A terminal accept error ends eligibility for *new* connections.
+        // The already-committed stream must survive, including a transient refresh.
+        client.listener.accept_fault.notify_one();
+        timeout(
+            Duration::from_secs(2),
+            changes_status.wait_for(|s| s.preferred == super::PreferredPath::Tunnel),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(changes_status.borrow().closure, 0);
+        assert!(client.route().is_none());
+        assert_eq!(client.refresh_reply(|_| async { Reply::Failed }).await, retained);
+    }
     // Same established stream, after the failed renewals; no CONNECT replay.
     r.get_mut().write_all(b"opaque").await.unwrap();
     let mut answer = [0; 6];
@@ -196,6 +267,7 @@ async fn run(changed_selection: bool) {
             until: Duration::from_secs(60),
             generation: "ci".into(),
             id: peer,
+            relay: None,
             candidates: link.offer.candidates.clone()
         }));
     }
@@ -209,6 +281,19 @@ async fn run(changed_selection: bool) {
     );
     let mut end = [0];
     assert_retired_read(r.read(&mut end).await);
+    assert_eq!(client.selected_path(), None);
+    assert_eq!(
+        *changes_status.borrow_and_update(),
+        super::PathStatus {
+            preferred: super::PreferredPath::Tunnel,
+            sequence: 2,
+            closure: u64::from(!changed_selection)
+        }
+    );
+    assert_eq!(
+        handover.close_quiet_public(host.host(), || Some(())).await,
+        super::HandoverResult::NotUsable
+    );
     ingress_task.await.unwrap();
     drop(client);
     control.write_all(b"{\"type\":\"stop\"}\n").await.unwrap();

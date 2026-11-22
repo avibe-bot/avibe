@@ -47,6 +47,8 @@ class MetricsSample:
     packet_loss_total: float
     closed_connections_total: float
     timeout_packet_loss_by_connection: tuple[tuple[str, float], ...] = ()
+    # None means unknown; the Prometheus dialing gauge cannot prove a disconnected tunnel.
+    registered_connections: int | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,7 @@ def parse_metrics(
             scalar("quic_client_closed_connections_total", "quic_client_closed_connections"),
         ),
         timeout_packet_loss_by_connection=tuple(sorted(timeout_losses.items())),
+        registered_connections=registered_connections,
     )
 
 

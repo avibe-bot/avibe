@@ -2633,6 +2633,38 @@ def test_each_inbox_row_awaits_only_its_own_sessions_turn(isolated_state, latest
     assert single == listed
 
 
+def test_inbox_consults_historical_terminal_time_only_for_unlinked_input(isolated_state):
+    """EXPLAIN includes the legacy sort even when the linked-input branch skips it."""
+    engine = create_sqlite_engine()
+    session_id = "ses_inbox_clock"
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _session_with_accepted_turn(conn, scope_id, session_id, terminal=True)
+        # Mixed precision: lexical comparison would put the whole second later.
+        stamp = "2099-01-01T00:00:00.250Z"
+        conn.exec_driver_sql("UPDATE session_turns SET terminal_at=? WHERE session_id=?", (stamp, session_id))
+        real_day = conn.exec_driver_sql("SELECT julianday(?)", (stamp,)).scalar_one()
+        visited = []
+
+        def observe_day(value):
+            visited.append(value)
+            assert value == stamp
+            return real_day
+
+        conn.connection.driver_connection.create_function("julianday", 1, observe_day)
+        try:
+            row = messages_service.get_inbox_session(conn, session_id)
+            assert row["replied"] is False
+            assert visited == [], "linked input unnecessarily sorted terminal history"
+            _insert_msg(conn, scope_id, session_id, "user", "mirrored", "2099-01-01T00:00:00Z")
+            row = messages_service.get_inbox_session(conn, session_id)
+            assert row["replied"] is False and row["preview_text"] == "previous reply"
+            assert visited == [stamp]
+        finally:
+            conn.connection.driver_connection.create_function("julianday", 1, None)
+    engine.dispose()
+
+
 @pytest.mark.parametrize("reader", ["single", "feed", "session_counts", "scope_counts"])
 def test_unread_queries_keep_catalog_plan_and_bound_workspace_notices(isolated_state, reader):
     from sqlalchemy import event
@@ -2685,6 +2717,9 @@ def test_unread_queries_keep_catalog_plan_and_bound_workspace_notices(isolated_s
     if reader == "single":
         assert "session_id=?" in catalog and "session_id>?" not in catalog, catalog
         assert not [step for step in plan if "session_id>?" in step], plan
+        for ordered in ("ix_messages_inbox_activity", "ix_messages_inbox_agent_reply", "ix_messages_inbox_user_send"):
+            assert any(f"{ordered} (platform=? AND session_id=?)" in step for step in plan), plan
+        assert any("ix_message_deliveries_message (message_id=?)" in step for step in plan), plan
     elif reader != "scope_counts":
         assert "session_id>?" in catalog, catalog
     # Only the existing scope aggregate groups scope ids over unread results.

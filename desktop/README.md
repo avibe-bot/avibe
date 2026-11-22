@@ -1020,6 +1020,20 @@ Developer ID–signed build is denied the same way. The first recording shows th
 standard macOS prompt; a later denial is changed in System Settings → Privacy &
 Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
 
+## Local network
+
+The direct path to another computer's instance dials it on the same network.
+macOS (15 and later) asks for Local Network access the first time, and shows
+`NSLocalNetworkUsageDescription`: `src-tauri/Info.plist` has the English
+sentence, `src-tauri/macos/{en,zh-Hans}.lproj/InfoPlist.strings` both
+localizations. They are the iPhone App's sentences
+(`ios/Avibe/Resources/InfoPlist.xcstrings`), and
+`tests/notarization_preflight.rs` holds them equal. A denial is changed in
+System Settings → Privacy & Security → Local Network. The app works either
+way: without the access a same-network path is not found and the instance is
+reached as before. The direct core cannot yet tell a denial from a peer that
+is not reachable, so the app does not say which it is.
+
 ## CI
 
 `.github/workflows/desktop-shell.yml` runs on macOS and Windows whenever

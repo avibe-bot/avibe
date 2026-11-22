@@ -334,7 +334,9 @@ final class DeviceDescriptionTests: XCTestCase {
         health: HealthCredentialStoring = HealthMemoryCredentials(),
         defaults existing: UserDefaults? = nil,
         sessionCheckFails: Bool = false,
-        waitForInstances: Bool = true
+        waitForInstances: Bool = true,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws -> AppModel {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
@@ -388,32 +390,44 @@ final class DeviceDescriptionTests: XCTestCase {
             systemScheduleStore: FileSystemSystemScheduleStore(
                 fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
             ),
+            // The App's account page gets a web content launch's time, as in
+            // `DirectPathAppTests` (#3973): on the CI simulator that launch
+            // has taken over a minute, past the App's own 30 s readiness.
+            runtimeOpenTiming: WebKitReadiness.LaunchTolerantTiming(),
             badgeCenter: DeviceTestBadgeCenter(),
             healthCredentials: health
         )
         if waitForInstances {
-            try await waitUntil {
-                if case .onboarding(.instances) = appModel.route { return true }
-                return false
-            }
+            // The App's launch settled on this account and these instances,
+            // not merely on the picker (a failed launch lands there too).
+            try await WebKitReadiness.waitForSignedInFixture(
+                appModel,
+                accountID: "account-1",
+                instanceIDs: ["instance-1", "instance-2"],
+                requests: server.requests,
+                budget: WebKitReadiness.launchedTransportOperation,
+                file: file, line: line
+            )
         }
         return appModel
     }
 
-    /// Waits for the App to reach a state. The bound is a ceiling for a slow
-    /// simulator, as in the other AppModel fixtures (an App's first startup
-    /// in a test process takes seconds there), not a schedule. Past it the
-    /// test stops at once rather than act on a state it never reached.
+    /// Waits for the App to reach a state. Every wait here runs while an
+    /// account transport of the App under test may still be launching its
+    /// web content process, so the bound is what that one operation may take
+    /// with this fixture's timing (`launchedTransportOperation`): a ceiling,
+    /// not a schedule. Past it the test stops at once rather than act on a
+    /// state it never reached.
     @MainActor
     private func waitUntil(
-        timeout: TimeInterval = 20,
         file: StaticString = #filePath,
         line: UInt = #line,
         _ condition: @MainActor () -> Bool
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: WebKitReadiness.launchedTransportOperation)
         while !condition() {
-            guard Date() < deadline else {
+            guard clock.now < deadline else {
                 XCTFail("Timed out waiting for the condition", file: file, line: line)
                 throw WaitTimedOut()
             }

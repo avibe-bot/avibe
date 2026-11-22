@@ -130,6 +130,7 @@ def stop_targets(conn, binding, subject, owner, caller, device_id, keep_device, 
         push.c.device_label,
         push.c.device_id,
         links.c.subject,
+        links.c.login_role,
         links.c.device_id.label("logical_id"),
     )
     if device_id is not None:
@@ -148,7 +149,8 @@ def stop_targets(conn, binding, subject, owner, caller, device_id, keep_device, 
         meta = describe({'User-Agent': row.user_agent or ''})
         label = (meta['kind'], row.device_label or meta['display_name'])
         if row.logical_id:
-            stopped[(row.logical_id, row.subject)] = label
+            # With the role its proven account signed in with, for the receipt.
+            stopped[(row.logical_id, row.subject)] = (*label, row.login_role)
         else:
             group = _legacy_key(binding, row)
             if group not in legacy or row.id < legacy[group][0]:

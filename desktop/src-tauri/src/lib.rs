@@ -334,8 +334,6 @@ fn native_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> Desk
 }
 
 /// One string of the product's copy, at a dotted key, in the system's language.
-/// Only the macOS title bar reads one.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn product_text(key: &str) -> Option<String> {
     let catalog: serde_json::Value = serde_json::from_str(product_catalog_source(sys_locale::get_locales())).ok()?;
     key.split('.')
@@ -669,19 +667,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         .map(|label| MenuItem::with_id(app, "instance-auxiliary-limitation", label, false, None::<&str>))
         .transpose()?;
     if instance_client::enabled(app) {
-        for (id, key) in [
-            ("desktop-client-account", "accountService"),
-            ("desktop-client-instances", "switchInstance"),
-            ("desktop-client-sign-out", "signOut"),
-        ] {
-            if let Some(label) = instance_client::native_copy(key) {
-                let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
-                tray.append(&item)?;
-                if let Some(submenu) = &application {
-                    submenu.append(&item)?;
-                }
-            }
-        }
+        let connection = direct::shell::menu(app)?;
+        append_account_items(app, &tray, application.as_ref(), connection.as_ref())?;
     }
     app.set_menu(application_menu)?;
     TrayIconBuilder::with_id(TRAY_ID)
@@ -713,6 +700,70 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             .show(|_| {});
     }
     Ok(())
+}
+
+/// The account's items, at the end of the tray menu and of the application
+/// submenu. `connection` is this computer's choice of path, right after
+/// "Switch instance" (ui/design: desktop/connection-choice/menu-*).
+fn append_account_items<R: Runtime>(
+    app: &AppHandle<R>,
+    tray: &Menu<R>,
+    application: Option<&Submenu<R>>,
+    connection: Option<&Submenu<R>>,
+) -> tauri::Result<()> {
+    for item in account_items(connection.is_some()) {
+        match (item, connection) {
+            (AccountItem::Copy { id, key }, _) => {
+                if let Some(label) = instance_client::native_copy(key) {
+                    let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
+                    tray.append(&item)?;
+                    if let Some(submenu) = application {
+                        submenu.append(&item)?;
+                    }
+                }
+            }
+            (AccountItem::Connection, Some(connection)) => {
+                tray.append(connection)?;
+                if let Some(submenu) = application {
+                    submenu.append(connection)?;
+                }
+            }
+            (AccountItem::Connection, None) => {}
+        }
+    }
+    Ok(())
+}
+
+/// One of the account's items, before it is built.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountItem {
+    /// An item of the account's own, with the key of its text.
+    Copy { id: &'static str, key: &'static str },
+    /// The 「连接方式」 submenu.
+    Connection,
+}
+
+/// The account's items in order, on every system. With a `connection`
+/// submenu, it comes right after "Switch instance".
+fn account_items(connection: bool) -> Vec<AccountItem> {
+    let mut items = vec![
+        AccountItem::Copy {
+            id: "desktop-client-account",
+            key: "accountService",
+        },
+        AccountItem::Copy {
+            id: "desktop-client-instances",
+            key: "switchInstance",
+        },
+    ];
+    if connection {
+        items.push(AccountItem::Connection);
+    }
+    items.push(AccountItem::Copy {
+        id: "desktop-client-sign-out",
+        key: "signOut",
+    });
+    items
 }
 
 fn stop_is_available(owned: bool, activity: u8) -> bool {
@@ -885,6 +936,8 @@ fn next_tray_state(
 /// Brings every native control in line with the shell's current activity and
 /// window, so availability is decided in one place whoever asks.
 fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>) {
+    // The shown instance, the account or a window may have changed.
+    direct::shell::poke(app);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(menus) = handle.try_state::<NativeMenus>() else {
@@ -2064,6 +2117,7 @@ fn build_main_child(
     disposable: bool,
     directory: Option<std::path::PathBuf>,
     generation: u64,
+    destination: &Url,
 ) -> Option<tauri::Webview> {
     let physical = app.get_window(MAIN_WINDOW)?;
     let config = app
@@ -2117,6 +2171,28 @@ fn build_main_child(
     if let Some(proxy) = &config.proxy_url {
         builder = builder.proxy_url(proxy.clone());
     }
+    // Another computer's instance on Windows asks for no notifications
+    // permission, so its page never registers a push worker.
+    if disposable && cfg!(windows) {
+        builder = builder.on_permission_request(|_, kind| direct::shell::remote_instance_permission(kind));
+    }
+    // Another computer's instance that has answered on the direct path
+    // before: its client starts now, so that the view's route is in place
+    // before its first load. Never beside a configured proxy.
+    let direct_route = if disposable {
+        direct::shell::instance_view_route(app, destination)
+    } else {
+        None
+    };
+    if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
+        builder = builder.additional_browser_args(arguments);
+    }
+    // Its page is told this window's path, and may ask for a hand-over.
+    if disposable {
+        if let Some(script) = direct::shell::page_script(app, label, destination) {
+            builder = builder.initialization_script(script);
+        }
+    }
     if let Some(script) = instance_client::initial_script(app) {
         builder = builder.initialization_script(script);
     }
@@ -2140,6 +2216,9 @@ fn build_main_child(
     if instance_downloads::install(&view).is_err() {
         let _ = view.close();
         return None;
+    }
+    if let Some(route) = direct_route {
+        direct::shell::window_created(app, label, route);
     }
     #[cfg(target_os = "macos")]
     {
@@ -2827,6 +2906,9 @@ pub fn run() {
             if let Some(quit) = runtime_lifecycle_request(event.id().as_ref()) {
                 request_runtime_lifecycle(app.clone(), quit);
             }
+            if direct::shell::menu_event(app, event.id().as_ref()) {
+                return;
+            }
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
@@ -2858,6 +2940,7 @@ pub fn run() {
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
+                    direct::shell::page_loaded(webview);
                     if webview.label() == pet::PET_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Started {
                         pet::page_loading(webview.app_handle());
                     }
@@ -3042,6 +3125,7 @@ pub fn run() {
             ));
             app.manage(pet::Pet::new(app.path().app_local_data_dir()?.join("pet.json")));
             show_share::setup(app.handle());
+            direct::shell::init(app.handle());
             #[cfg(target_os = "macos")]
             {
                 app.manage(compose::Queue::default());
