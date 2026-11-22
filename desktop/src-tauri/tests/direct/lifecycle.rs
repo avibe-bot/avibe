@@ -1,4 +1,4 @@
-use super::{listener::Listener, transport::Stream, Client, Route};
+use super::{listener::Listener, Client, Route};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,7 +33,7 @@ async fn no_transport_for_unavailable_missing_malformed_or_ineligible_offer() {
         assert_eq!(client.route().unwrap().proxy, port);
     }
 }
-async fn connect(route: Route<'_>) -> TcpStream {
+pub(super) async fn connect(route: Route<'_>) -> TcpStream {
     let auth = STANDARD.encode(format!("{}:{}", route.username, route.password));
     let head = format!(
         "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
@@ -53,13 +53,8 @@ async fn failed_refresh_keeps_existing_and_new_public_connects_until_detach() {
         let mut c = Client::new("desk-app.avibe.bot", "one".into()).await.unwrap();
         // Substitute only the public dial target before publishing the route.
         // Use the production accept, authorization, selection and TCP relay.
-        c.listener = Listener::bind_via(c.host.clone(), c.links.subscribe(), |_| async {
-            let (stream, mut echo) = tokio::io::duplex(1024);
-            tokio::spawn(async move {
-                let (mut r, mut w) = tokio::io::split(&mut echo);
-                let _ = tokio::io::copy(&mut r, &mut w).await;
-            });
-            Some(Box::new(stream) as Stream)
+        c.listener = Listener::bind_via(c.host.clone(), c.links.subscribe(), |_| {
+            super::handover_tests::echo_socket()
         })
         .await
         .unwrap();

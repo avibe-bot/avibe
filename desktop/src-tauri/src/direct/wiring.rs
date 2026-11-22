@@ -358,7 +358,14 @@ impl Wiring {
             origin: origin.to_owned(),
         });
         let session = match self.routing {
-            Routing::Live => self.shared(account, origin),
+            // Only a session that may still exist: one the system's proxy
+            // settings have just ruled out ends at the next look, and a
+            // window must not get its route for the moment in between.
+            Routing::Live => self.shared(account, origin).filter(|shared| {
+                self.sessions
+                    .iter()
+                    .any(|session| session.id == *shared && self.permitted(&session.target))
+            }),
             Routing::AtCreation => created_for,
             Routing::Unsupported => None,
         };
@@ -568,6 +575,17 @@ impl Wiring {
         self.sessions
             .iter()
             .any(|candidate| candidate.id == session && candidate.runtime.as_deref() == Some(window))
+    }
+
+    /// Whether `window` is, at this moment, a window the session routes.
+    /// Asked on the main thread just before a route or a challenge answer is
+    /// put on the window: one that was queued for a session that has ended
+    /// meanwhile is then dropped, instead of landing after the session's
+    /// route was taken off.
+    pub fn routes(&self, session: u64, window: &str) -> bool {
+        self.sessions
+            .iter()
+            .any(|candidate| candidate.id == session && candidate.routed.iter().any(|label| label == window))
     }
 
     /// The window a session asks its rendezvous through: its instance view,

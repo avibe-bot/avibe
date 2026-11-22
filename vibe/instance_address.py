@@ -1309,6 +1309,10 @@ _PAGE_ERRORS: dict[str, tuple[int, str]] = {
     "binding_changed": (409, "address_changed"),
     "operation_conflict": (409, "address_changed"),
     "invalid_device_secret": (409, "pairing_invalid"),
+    # avibe.bot's record of this computer's tunnel does not match what the tunnel
+    # really is. Definitive for this operation: it is settled here and not sent
+    # again; the way out is to bind remote access again, then try again.
+    "remote_access_configuration_mismatch": (409, "remote_access_configuration_mismatch"),
 }
 _LIMIT_FIELDS = ("limit", "held_count", "earliest_release_at")
 

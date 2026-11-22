@@ -705,6 +705,7 @@ def test_b1_a_pending_answer_repeats_the_same_request_and_a_refusal_changes_noth
     ((403, {"error": "rename_ineligible"}), "rename_ineligible", 409),
     ((409, {"error": "binding_changed"}), "address_changed", 409),
     ((401, {"error": "invalid_device_secret"}), "pairing_invalid", 409),
+    ((409, {"error": "remote_access_configuration_mismatch"}), "remote_access_configuration_mismatch", 409),
     ((404, {}), "unavailable", 503),
 ])
 def test_refusals_reach_the_page_as_stable_codes(address, monkeypatch, reply, code, status):
@@ -723,6 +724,66 @@ def test_refusals_reach_the_page_as_stable_codes(address, monkeypatch, reply, co
         instance_address.change(confirmation, ("loopback",))
     assert (refused.value.code, refused.value.status) == (code, status)
     assert binding().active_host == OLD and instance_address._journal(binding()) is None
+
+
+def test_a_tunnel_configuration_mismatch_settles_the_operation_and_is_never_sent_again(address):
+    plane, _ = address
+    _cookie, sid = sign_in()
+    # The refusal may also be the answer to a repeat of a request first answered "pending".
+    plane.pending_answers = 1
+    plane.refuse = (409, {"error": "remote_access_configuration_mismatch"})
+    rename_to("new")
+    run()
+
+    def sent():
+        return [call[2] for call in plane.calls if call[1] == "hostname-renames"]
+
+    assert len(sent()) == 2 and len({body["operation_id"] for body in sent()}) == 1
+    # Settled: no journal, so nothing is left to send; the page reads the code.
+    assert instance_address._journal(binding()) is None
+    assert instance_address.describe()["operation"] == {
+        "state": "failed", "hostname": NEW, "error": "remote_access_configuration_mismatch"}
+    assert instance_address._advance_operation() <= 0
+    run()
+    assert len(sent()) == 2
+    # Nothing of the change happened: the address, its sessions, and no cleaning anywhere.
+    assert binding().active_host == OLD and not is_cleaning(get(OLD)) and get(NEW).status_code == 503
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.execute(select(remote_device_sessions.c.session_id)).scalars().all() == [sid]
+        assert conn.execute(select(instance_address_clearings)).all() == []
+    # The way out is a new attempt after binding again: a new operation, not the settled one.
+    plane.refuse = None
+    rename_to("new")
+    run()
+    assert binding().active_host == NEW
+    assert len(sent()) == 3 and sent()[2]["operation_id"] != sent()[0]["operation_id"]
+
+
+@pytest.mark.parametrize("no_answer", [
+    TimeoutError("timed out"),
+    ConnectionError("partial read"),
+    remote_access.BackendRequestError(503, {"error": "remote_access_configuration_mismatch"}),
+    remote_access.BackendRequestError(429, {"retry_after_seconds": 2}),
+])
+def test_an_unanswered_rename_is_not_taken_for_a_configuration_mismatch(address, no_answer):
+    plane, _ = address
+    rename_to("new")
+    answer = plane.rename
+
+    def unanswered(_body):
+        raise no_answer
+
+    plane.rename = unanswered
+    for _ in range(3):
+        assert instance_address._advance_operation() > 0  # the same request is owed again
+    journal = instance_address._journal(binding())
+    assert journal["phase"] == "intent" and binding().active_host == OLD
+    assert instance_address.describe()["operation"]["state"] == "pending"
+    plane.rename = answer
+    run()
+    sent = [call[2] for call in plane.calls if call[1] == "hostname-renames"]
+    assert len(sent) == 4 and {body["operation_id"] for body in sent} == {journal["operation_id"]}
+    assert binding().active_host == NEW and instance_address._journal(binding()) is None
 
 
 def test_c4_a_phone_paired_on_the_new_address_before_the_health_step_is_kept(address):

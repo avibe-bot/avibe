@@ -234,3 +234,108 @@ def test_age_limit_is_unconfirmed_and_erases_ref(paired, monkeypatch):
     assert read()[0]['account_results'] == [{'status': 'unconfirmed', 'reason': 'retry_exhausted', 'count': 1}]
     with get_cached_sqlite_engine().connect() as conn:
         assert conn.scalar(select(jobs.c.reference)) is None
+
+
+def test_a_recorded_role_leaves_with_its_receipt(paired, monkeypatch):
+    from sqlalchemy import event
+
+    from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
+
+    cfg, clock, enroll, stop, read = paired
+    target = enroll('A', None)
+    enroll('B', B)
+    _, _, [result], _ = stop(target, delegate=False)
+    assert result['group'] == 'mine' and read() == [result]
+    monkeypatch.setattr(worker, '_ROLE_PAGE', 2)
+    monkeypatch.setattr(worker, '_roles_checked_to', '')  # as after a start
+    with get_cached_sqlite_engine().begin() as conn:
+        assert conn.execute(select(roles.c.receipt, roles.c.login_role)).all() == [(result['operation_id'], 'owner')]
+        # Roles whose receipts an earlier version already removed.
+        conn.execute(roles.insert(), [dict(receipt=f'left-{n}', login_role='member') for n in range(5)])
+    fake_issuer(monkeypatch, 204)
+    engine, statements = get_cached_sqlite_engine(), []
+
+    def record(_conn, _cursor, statement, parameters, *_):
+        if 'remote_signout_receipt_roles' in statement:
+            statements.append((statement, parameters))
+
+    event.listen(engine, 'before_cursor_execute', record)
+    try:
+        passes = 0
+        while worker._roles_checked_to is not None:
+            worker.run_once(lambda: cfg)
+            passes += 1
+        ran = len(statements)
+        with engine.connect() as conn:
+            assert conn.execute(select(roles.c.receipt)).scalars().all() == [result['operation_id']]
+        del statements[ran:]  # the check above is the test's own
+        # Six roles, two keys at a step, and a last step that finds the end; then the table is not read for this again.
+        assert passes == 4
+        clock[0] += 7 * 86400 + 1
+        worker.run_once(lambda: cfg)
+    finally:
+        event.remove(engine, 'before_cursor_execute', record)
+    with engine.connect() as conn:
+        assert conn.execute(select(receipts.c.id)).all() == [] and conn.execute(select(roles.c.receipt)).all() == []
+        # Every statement a tick runs on the table reaches it by key.
+        kinds = {statement.split()[0].upper() for statement, _ in statements}
+        assert kinds == {'SELECT', 'DELETE'}
+        for statement, parameters in statements:
+            plan = [row[-1] for row in conn.exec_driver_sql('EXPLAIN QUERY PLAN ' + statement, parameters)]
+            assert plan and not any(step.startswith('SCAN remote_signout_receipt') for step in plan), (statement, plan)
+            assert not any('TEMP B-TREE' in step for step in plan), (statement, plan)
+    assert read() == []
+
+
+@pytest.mark.no_sqlite_template
+def test_receipt_role_migration_round_trip_keeps_existing_receipts(tmp_path):
+    import sqlite3
+
+    from alembic import command
+
+    from storage import migrations
+
+    path = tmp_path / "registry.sqlite"
+    previous, head = "20261121_0097", "20261122_0098"
+    migrations.run_migrations(path, revision=previous)
+    row = ("receipt-1", "binding", "person", "device", "browser", "Chrome", 5, 50)
+
+    def kept(db):
+        return (db.execute("SELECT * FROM remote_signout_receipts").fetchall(),
+                db.execute("SELECT receipt,status,count FROM remote_signout_items").fetchall(),
+                db.execute("SELECT sql FROM sqlite_master WHERE name LIKE '%signout_receipts' OR tbl_name = 'remote_signout_receipts' "
+                           "ORDER BY name").fetchall())
+
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO remote_signout_receipts(id,binding,subject,device_id,kind,display_name,created_at,expires_at) "
+                   "VALUES (?,?,?,?,?,?,?,?)", row)
+        db.execute("INSERT INTO remote_signout_items(receipt,status,reason,count) VALUES ('receipt-1','accepted',NULL,1)")
+        before = kept(db)
+    assert before[0] == [row]
+    for _ in range(2):  # and again after a downgrade
+        migrations.run_migrations(path, revision=head)
+        with sqlite3.connect(path) as db:
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (head,)
+            # The receipts table is untouched; a receipt written before says nothing about the role.
+            assert kept(db) == before
+            assert db.execute("SELECT receipt, login_role FROM remote_signout_receipt_roles").fetchall() == []
+            db.execute("INSERT INTO remote_signout_receipt_roles(receipt, login_role) VALUES ('receipt-1', 'owner')")
+        command.downgrade(migrations.alembic_config(path), previous)
+        with sqlite3.connect(path) as db:
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (previous,)
+            assert kept(db) == before
+            assert db.execute("SELECT name FROM sqlite_master WHERE name LIKE '%receipt_roles%'").fetchall() == []
+
+
+@pytest.mark.no_sqlite_template
+def test_receipt_role_migration_replays_on_a_database_that_already_has_the_table(tmp_path):
+    from storage import migrations
+    from storage.db import create_sqlite_engine
+    from storage.models import metadata
+
+    path = tmp_path / "head-shape.sqlite"
+    engine = create_sqlite_engine(path)
+    metadata.create_all(engine)
+    engine.dispose()
+    migrations.run_migrations(path)
+    migrations.run_migrations(path)

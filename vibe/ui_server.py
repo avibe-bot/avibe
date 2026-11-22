@@ -2090,6 +2090,7 @@ def _restart_vibe_cloud_login_from_state(config: V2Config, state: str | None):
 # other code falls back to the generic "default_*" strings so an unexpected failure
 # still renders a usable page.
 _OAUTH_ERROR_PAGE_CODES = {
+    "account_session_signed_out",
     "invalid_oauth_state",
     "oauth_exchange_failed",
     "remote_pairing_mismatch",
