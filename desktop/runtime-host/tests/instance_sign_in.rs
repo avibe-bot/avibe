@@ -708,14 +708,14 @@ async fn an_accepted_passkey_whose_session_read_failed_is_read_again() {
         vec![
             ("/api/passkey-primary/options", primary_options()),
             ("/api/passkey-primary/verify", primary_verified()),
-            ("/api/mobile/session", reply(503, json!({"error":"unavailable"}), None)),
+            ("/api/mobile/session", reply(503, json!({"error":"signed_out"}), None)),
             ("/api/mobile/session", reply(200, signed_in(), None)),
         ],
         None,
         keys.clone(),
     );
     let failed = act(&f.client, ClientAction::SignInWithPasskey).await;
-    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "request_failed");
     assert_eq!(failed.state.account.status, AccountStatus::SignedOut);
     let again = act(&f.client, ClientAction::SignInWithPasskey).await;
     assert!(again.ok, "{:?}", again.error);
@@ -747,7 +747,7 @@ async fn an_accepted_passkey_whose_session_read_failed_is_read_again() {
 #[tokio::test]
 async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
     let keys = passkeys(Ok(json!({"id":"cred","rawId":"cred","type":"public-key"})));
-    let f = fixture(
+    let f = restored_owing_a_second_factor_with_keys(
         vec![
             ("/api/passkey-primary/options", primary_options()),
             ("/api/passkey-primary/verify", primary_verified()),
@@ -757,18 +757,17 @@ async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
             ("/api/passkey-primary/verify", primary_verified()),
             ("/api/mobile/session", reply(200, signed_in(), None)),
         ],
-        None,
         keys.clone(),
-    );
+    )
+    .await;
+    let saved = f.private.read("account-a").unwrap().unwrap();
     assert!(!act(&f.client, ClientAction::SignInWithPasskey).await.ok);
-    assert_eq!(
-        act(&f.client, ClientAction::SignInWithPasskey)
-            .await
-            .error
-            .unwrap()
-            .code,
-        "signed_out"
-    );
+    let denied = act(&f.client, ClientAction::SignInWithPasskey).await;
+    assert_eq!(denied.error.unwrap().code, "signed_out");
+    assert_eq!(denied.state.account.status, AccountStatus::SecondFactorRequired);
+    assert_eq!(denied.state.account.email.as_deref(), Some("a@example.test"));
+    assert_eq!(saved_account(&f.path).as_deref(), Some("account-a"));
+    assert_eq!(f.private.read("account-a").unwrap(), Some(saved));
     let outcome = act(&f.client, ClientAction::SignInWithPasskey).await;
     assert!(outcome.ok, "{:?}", outcome.error);
     assert_eq!(keys.options.lock().unwrap().len(), 2);
@@ -1559,6 +1558,12 @@ struct Restored {
     _root: tempfile::TempDir,
 }
 async fn restored_owing_a_second_factor(after: Vec<(&'static str, Response)>) -> Restored {
+    restored_owing_a_second_factor_with_keys(after, passkeys(Err("x"))).await
+}
+async fn restored_owing_a_second_factor_with_keys(
+    after: Vec<(&'static str, Response)>,
+    keys: Arc<FakePasskeys>,
+) -> Restored {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("connection.json");
     let store = ConnectionStore::new(path.clone());
@@ -1579,7 +1584,7 @@ async fn restored_owing_a_second_factor(after: Vec<(&'static str, Response)>) ->
         store,
         http.clone(),
         private.clone(),
-        passkeys(Err("x")),
+        keys,
         Arc::new(View),
     ));
     client.restore_account().await.unwrap();

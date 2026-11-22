@@ -657,7 +657,14 @@ impl AccountFlow {
         } else if owner.is_some() {
             Err(ClientError::new("request_failed"))
         } else {
-            Err(response.error())
+            let error = response.error();
+            // These two outcomes retire credentials. Only the HTTP 401 or
+            // the authenticated identity comparison above can establish them.
+            if matches!(error.code.as_str(), "signed_out" | "account_changed") {
+                Err(ClientError::new("request_failed"))
+            } else {
+                Err(error)
+            }
         }
     }
 

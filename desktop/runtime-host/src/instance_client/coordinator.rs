@@ -624,6 +624,16 @@ impl Coordinator {
         if let Some(selection) = &mut working.selection {
             selection.session.fence(epoch.clone());
         }
+        // A failed first factor used its own candidate jar. Its signed_out reply
+        // cannot revoke the published account (which may still owe MFA).
+        let first_factor_candidate = matches!(
+            request.action,
+            ClientAction::RequestOtp { .. }
+                | ClientAction::VerifyOtp { .. }
+                | ClientAction::SignInPassword { .. }
+                | ClientAction::SignInWithProvider { .. }
+                | ClientAction::SignInWithPasskey
+        );
         let owner = self.presentation_owner();
         let result = self.execute(&mut working, request.action, &epoch, provider).await;
         if epoch.check().is_err() || (result.is_err() && self.view.terminal_commit(&epoch)) {
@@ -631,12 +641,15 @@ impl Coordinator {
             self.recover_commit(&epoch, owner, &error).await;
             return self.reply(request.request_id, Err(error));
         }
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|error| matches!(error.code.as_str(), "signed_out" | "account_changed"))
+        if !first_factor_candidate
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(|error| matches!(error.code.as_str(), "signed_out" | "account_changed"))
         {
-            let cleanup = self.escape(ClientAction::SignOut { intent_id: None }, None, None).await;
+            let cleanup = self
+                .escape(ClientAction::SignOut { intent_id: None }, Some(epoch.value), None)
+                .await;
             return self.reply(request.request_id, cleanup.and(result));
         }
         if let Err(error) = &result {
