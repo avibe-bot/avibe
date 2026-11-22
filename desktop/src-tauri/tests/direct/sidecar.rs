@@ -140,9 +140,7 @@ async fn run(changed_selection: bool) {
     assert!(link.renew(&renewal));
     deadlines.changed().await.unwrap();
     assert_eq!(*deadlines.borrow_and_update(), renewed_until);
-    renewal.relay = super::path::TrialRelay::offered(
-        &json!({"policy":"public-trial-v1","url":"https://aps1-1.relay.n0.iroh.link./"}),
-    );
+    renewal.relay = super::path::TrialRelay::offered("public-trial-v1", "https://aps1-1.relay.n0.iroh.link./");
     assert!(renewal.relay.is_some());
     assert!(
         !link.renew(&renewal),
@@ -152,7 +150,7 @@ async fn run(changed_selection: bool) {
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
-    client.publish(link.clone(), ep);
+    client.publish(link.clone(), super::EndpointDrain::new(ep));
     assert_eq!(
         client.selected_path(),
         None,

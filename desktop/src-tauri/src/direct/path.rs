@@ -30,10 +30,8 @@ const TRIAL: [&str; 4] = [
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct TrialRelay(RelayUrl);
 impl TrialRelay {
-    pub fn offered(value: &serde_json::Value) -> Option<Self> {
-        let url = value.get("url")?.as_str()?;
-        (value.get("policy")?.as_str()? == "public-trial-v1" && TRIAL.contains(&url))
-            .then(|| Self(url.parse().expect("static trial URL")))
+    pub fn offered(policy: &str, url: &str) -> Option<Self> {
+        (policy == "public-trial-v1" && TRIAL.contains(&url)).then(|| Self(url.parse().expect("static trial URL")))
     }
     pub fn home(&self) -> RelayUrl {
         self.0.clone()

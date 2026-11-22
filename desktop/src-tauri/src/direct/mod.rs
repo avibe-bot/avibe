@@ -7,6 +7,9 @@ mod connect;
 #[path = "../../tests/direct/cross_network.rs"]
 mod cross_network_tests;
 #[cfg(test)]
+#[path = "../../tests/direct/drain.rs"]
+mod drain_tests;
+#[cfg(test)]
 #[path = "../../tests/direct/sidecar.rs"]
 mod interop;
 #[cfg(test)]
@@ -59,6 +62,28 @@ pub enum RefreshOutcome {
         retry_before: Duration,
     },
     Retired,
+}
+
+/// Once bind succeeds, cancellation must still drain queued QUIC close frames.
+/// The worker owns a separate endpoint handle and outlives a cancelled probe,
+/// monitor or close waiter. Dropping the sender (including in Drop) starts it.
+struct EndpointDrain {
+    stop: tokio::sync::oneshot::Sender<()>,
+    done: JoinHandle<()>,
+}
+impl EndpointDrain {
+    fn new(endpoint: Endpoint) -> Self {
+        let (stop, rx) = tokio::sync::oneshot::channel();
+        let done = tokio::spawn(async move {
+            let _ = rx.await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), endpoint.close()).await;
+        });
+        Self { stop, done }
+    }
+    async fn close(self) {
+        drop(self.stop);
+        let _ = self.done.await;
+    }
 }
 
 pub struct Client {
@@ -132,7 +157,7 @@ impl Client {
                     .map(|l| l.remaining())
                     .unwrap_or_default();
                 if remaining.is_zero() {
-                    self.retire();
+                    self.retire().await;
                     RefreshOutcome::Retired
                 } else {
                     RefreshOutcome::Retained {
@@ -181,12 +206,16 @@ impl Client {
         link.selected_path()
     }
 
-    fn retire(&mut self) {
-        if let Some(t) = self.monitor.take() {
-            t.abort()
-        }
+    fn withdraw(&mut self) -> Option<JoinHandle<()>> {
         if let Some(l) = self.links.send_replace(None) {
+            // Withdraw immediately; a zero deadline also wakes the monitor.
             l.retire()
+        }
+        self.monitor.take()
+    }
+    async fn retire(&mut self) {
+        if let Some(task) = self.withdraw() {
+            let _ = task.await;
         }
     }
     /// Only the native isolated-world adapter may supply a completion. No
@@ -202,7 +231,7 @@ impl Client {
                 self.clock.now(),
             )
         }) else {
-            self.retire();
+            self.retire().await;
             return false;
         };
         if self.links.borrow().as_ref().is_some_and(|link| link.renew(&offer)) {
@@ -210,7 +239,7 @@ impl Client {
         }
         // Retire previous authority before starting a replacement. Never use a
         // stale result to make a new stream while waiting for the next probe.
-        self.retire();
+        self.retire().await;
         if !self.listener.is_alive() || self.clock.now() >= offer.until {
             return false;
         }
@@ -224,17 +253,25 @@ impl Client {
         else {
             return false;
         };
+        self.probe(endpoint, offer).await
+    }
+
+    async fn probe(&mut self, endpoint: Endpoint, offer: Offer) -> bool {
+        let drain = EndpointDrain::new(endpoint.clone());
         let Some(link) = Link::dial(&endpoint, offer, &self.host, self.clock.clone()).await else {
+            drain.close().await;
             return false;
         };
         if !self.listener.is_alive() || !link.usable() {
+            link.retire();
+            drain.close().await;
             return false;
         }
-        self.publish(link, endpoint);
+        self.publish(link, drain);
         true
     }
 
-    fn publish(&mut self, link: Arc<Link>, endpoint: Endpoint) {
+    fn publish(&mut self, link: Arc<Link>, drain: EndpointDrain) {
         self.links.send_replace(Some(link.clone()));
         let tx = self.links.clone();
         self.monitor = Some(tokio::spawn(async move {
@@ -265,12 +302,13 @@ impl Client {
                 }
             });
             link.retire();
-            endpoint.close().await;
+            drain.close().await;
         }));
     }
 }
 impl Drop for Client {
     fn drop(&mut self) {
-        self.retire()
+        // Detach rather than abort: the signalled monitor and drain own shutdown.
+        drop(self.withdraw());
     }
 }

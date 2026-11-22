@@ -10,11 +10,16 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 fn parse(addresses: Value, relay: Value) -> Option<Offer> {
+    parse_relay_json(addresses, &relay.to_string())
+}
+
+fn parse_relay_json(addresses: Value, relay_json: &str) -> Option<Offer> {
     let client = SecretKey::from_bytes(&[1; 32]).public();
     let peer = SecretKey::from_bytes(&[2; 32]).public();
     let host = Authority::managed("one-app.avibe.bot").unwrap();
-    let raw = json!({"version":1,"status":"ready","hostname":host.host(),"instance_id":"one","generation":"g","issued_at":10,"expires_at":40,"alpn":"avibe-direct/1","endpoint":{"id":peer.to_string(),"addresses":addresses,"relay":relay},"client":{"endpoint_id":client.to_string(),"admitted_until":30}});
-    Offer::parse(&raw.to_string(), &host, "one", client, Duration::ZERO, Duration::ZERO)
+    let raw = json!({"version":1,"status":"ready","hostname":host.host(),"instance_id":"one","generation":"g","issued_at":10,"expires_at":40,"alpn":"avibe-direct/1","endpoint":{"id":peer.to_string(),"addresses":addresses,"relay":"RELAY_JSON"},"client":{"endpoint_id":client.to_string(),"admitted_until":30}});
+    let text = raw.to_string().replace("\"RELAY_JSON\"", relay_json);
+    Offer::parse(&text, &host, "one", client, Duration::ZERO, Duration::ZERO)
 }
 
 #[test]
@@ -54,6 +59,29 @@ fn only_exact_trial_policy_and_home_url_enable_the_custom_map() {
         assert_eq!(lan.bootstrap().relay_urls().count(), 0);
         assert!(matches!(TrialRelay::mode(lan.relay.as_ref()), RelayMode::Disabled));
         assert_eq!(lan.selected(lan.id, &TransportAddr::Relay(home.parse().unwrap())), None);
+    }
+}
+
+#[test]
+fn repeated_relay_grant_fields_do_not_authorize_a_map_or_erase_ips() {
+    let policy = r#""policy":"public-trial-v1""#;
+    let url = r#""url":"https://aps1-1.relay.n0.iroh.link./""#;
+    for fields in [
+        format!("{policy},{policy},{url}"),
+        format!("{policy},{url},{url}"),
+        format!(r#""policy":"unknown",{policy},{url}"#),
+        format!(r#"{policy},"policy":"unknown",{url}"#),
+        format!(r#"{policy},"url":"https://other.invalid/",{url}"#),
+        format!(r#"{policy},{url},"url":"https://other.invalid/""#),
+    ] {
+        let raw = format!("{{{fields}}}");
+        assert!(parse_relay_json(json!([]), &raw).is_none());
+        let lan = parse_relay_json(json!([{"kind":"lan","address":"10.1.1.2:123"}]), &raw).unwrap();
+        assert!(lan.relay.is_none());
+        assert_eq!(
+            lan.bootstrap().ip_addrs().copied().collect::<Vec<_>>(),
+            ["10.1.1.2:123".parse::<std::net::SocketAddr>().unwrap()]
+        );
     }
 }
 

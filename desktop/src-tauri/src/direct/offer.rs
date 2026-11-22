@@ -31,7 +31,16 @@ struct Endpoint {
     id: String,
     addresses: Vec<serde_json::Value>,
     #[serde(default)]
-    relay: serde_json::Value,
+    relay: Option<WireRelay>,
+}
+// Decode the object before converting anything to a JSON map. The struct
+// variant rejects duplicate fields; malformed relay metadata alone must not
+// discard otherwise valid IP candidates.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireRelay {
+    Fields { policy: String, url: String },
+    Invalid(serde::de::IgnoredAny),
 }
 #[derive(Deserialize)]
 struct Client {
@@ -151,7 +160,10 @@ impl Offer {
                 }
             }
         }
-        let relay = TrialRelay::offered(&w.endpoint.relay);
+        let relay = match w.endpoint.relay {
+            Some(WireRelay::Fields { policy, url }) => TrialRelay::offered(&policy, &url),
+            _ => None,
+        };
         (!candidates.is_empty() || relay.is_some()).then_some(Self {
             relay,
             id,
