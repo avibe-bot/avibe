@@ -461,34 +461,19 @@ def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
     # instead of a full table scan (the other agent_runs indexes all lead with a
     # non-timestamp column and cannot serve a bare range predicate).
     r = agent_runs.c
-    rowid = literal_column("agent_runs.rowid")
-    stmt = select(rowid, r.session_id, r.source_kind, r.source_actor).where(r.updated_at >= cutoff_iso)
-    recent_rowids = set()
-    sessions = set()
-    for rid, session_id, source_kind, source_actor in conn.rows(stmt):
-        recent_rowids.add(rid)
-        sessions.add(session_id)
+    # Read callback routing on these same recent records. A lookup by the
+    # sessions touched in-window would read their entire callback histories,
+    # even for a candidate excluded before the graph loads any history.
+    stmt = select(r.session_id, r.source_kind, r.source_actor, r.callback_session_id, r.callback_status).where(
+        r.updated_at >= cutoff_iso
+    )
+    for session_id, source_kind, source_actor, target, callback_status in conn.rows(stmt):
         if session_id:
             candidates.add(session_id)
         if source_kind == "agent" and source_actor:
             candidates.add(source_actor)
-
-    # A callback target earns a candidate only for a run touched in-window.
-    # These two columns follow the result blobs: read them from the covering
-    # session/callback index, not the table once per recent run. A repaired
-    # run with no session of its own may still point to a real callback target.
-    callback = select(rowid, r.callback_session_id).where(
-        r.callback_session_id.is_not(None), r.callback_status.is_not(None), r.callback_status != "",
-    )
-    batches = [r.session_id.in_(batch) for batch in conn.batches((s for s in sessions if s), reserved=1)]
-    if None in sessions:
-        batches.append(r.session_id.is_(None))
-    if "" in sessions:
-        batches.append(r.session_id == "")
-    for belongs in batches:
-        for rid, target in conn.rows(callback.where(belongs)):
-            if rid in recent_rowids and target:
-                candidates.add(target)
+        if target and callback_status:
+            candidates.add(target)
     return candidates
 
 
@@ -597,15 +582,15 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
         raw_max = max(times[k][0] for k in ids)
         needed.update(k for k in ids if times[k][1] >= boundary or times[k][0] == raw_max)
 
-    spawn = select(rowid, r.source_actor).where(r.source_kind == "agent")
-    cb = select(rowid, r.callback_session_id, r.callback_status).where(
-        r.callback_session_id.is_not(None), r.callback_status.is_not(None), r.callback_status != "",
-    )
+    spawn = select(rowid).where(r.source_kind == "agent")
+    cb = select(rowid, r.callback_session_id, r.callback_status).where(r.callback_status.is_not(None), r.callback_status != "")
     callbacks = {}
-    for batch in conn.batches(session_ids, reserved=1):
-        needed.update(k for k, actor in conn.rows(spawn.where(r.session_id.in_(batch))) if actor in visible)
-        callbacks.update((k, (target, status)) for k, target, status in conn.rows(cb.where(r.session_id.in_(batch)))
-                         if target in visible)
+    for batch in conn.batches(session_ids, reserved=1, copies=2):
+        belongs = r.session_id.in_(batch)
+        for endpoints in conn.batches(visible, reserved=1 + len(batch)):
+            needed.update(k for k, in conn.rows(spawn.where(belongs, r.source_actor.in_(endpoints))))
+            matching = cb.where(belongs, r.callback_session_id.in_(endpoints))
+            callbacks.update((k, (target, status)) for k, target, status in conn.rows(matching))
     needed.update(callbacks)
 
     grouped = {}

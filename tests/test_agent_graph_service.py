@@ -839,6 +839,45 @@ def test_graph_lineage_and_status_lookups_seek_the_matching_keys(isolated_state,
         engine.dispose()
 
 
+@pytest.mark.parametrize("recent_target", [None, "visible"])
+def test_history_candidate_discovery_reads_only_recent_runs_of_filtered_source(isolated_state, recent_target):
+    from sqlalchemy import event
+
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            _insert_session(conn, "hidden", scope_id=None, status="archived")
+            _insert_session(conn, "visible", scope_id=None)
+            for i in range(19):
+                _insert_run(conn, f"old-{i}", session_id="hidden", callback_session_id="visible",
+                            callback_status="sent", created=NOW - timedelta(days=3))
+            _insert_run(conn, "recent", session_id="hidden", callback_session_id=recent_target,
+                        callback_status="sent" if recent_target else None)
+        with engine.connect() as conn:
+            plans, fetched = [], []
+
+            @event.listens_for(conn, "before_cursor_execute")
+            def plan(_conn, cursor, statement, parameters, *_args):
+                cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)
+                plans.extend(r[-1] for r in cursor.fetchall())
+
+            class Reader(agent_graph._GraphReader):
+                def _fetch(self, result):
+                    rows = super()._fetch(result)
+                    fetched.append(len(rows))
+                    return rows
+
+            reader = Reader(conn, {"execute": 0., "fetch": 0.})
+            expected = {"visible"} if recent_target else set()
+            assert agent_graph._resolve_candidates(reader, set(), _run_iso(NOW - timedelta(days=1))) == expected | {"hidden"}
+            assert sum(fetched) == 1
+            assert len(plans) == 1 and "ix_agent_runs_updated (updated_at>" in plans[0], plans
+        graph = agent_graph.build_graph(now=NOW, engine=engine)
+        assert {n["session_id"] for n in graph["nodes"]} == expected
+    finally:
+        engine.dispose()
+
+
 def test_null_status_callback_target_not_promoted(isolated_state):
     # A run that records a callback route but no callback_status (A4: no edge)
     # must not promote the (otherwise inactive) target into an unconnected node.
