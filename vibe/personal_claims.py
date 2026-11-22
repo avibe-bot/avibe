@@ -354,8 +354,12 @@ class _Flow:
                     result = client.accept(ticket, grant)
                     self._check_home()  # the network wait does not pin the pairing destination
                     if not isinstance(result, Pending):
-                        if self.mode == "desktop" and self._target.existing_id not in (None, result.instance_id):
-                            # Accept was dispatched, so this is ambiguous. Never persist a key for another instance.
+                        # Accept was dispatched, so a mismatch is ambiguous. Never persist a key for another instance.
+                        # A new name has no prior id; an issuer that says the hostname already belonged to one is the same refusal.
+                        if self.mode == "desktop" and (
+                            self._target.existing_id not in (None, result.instance_id)
+                            or self._target.existing_id is None and result.binding_disposition == "existing"
+                        ):
                             raise ClaimError("fresh_claim_required")
                         self.update("pairing")
                         paired = remote_access.pair_personal_claim(

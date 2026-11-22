@@ -118,6 +118,7 @@ class Issuance:
     instance_id: str
     hostname: str
     key: str
+    binding_disposition: str | None = None
 
 
 @dataclass(frozen=True)
@@ -237,10 +238,12 @@ class ClaimsClient:
             return Pending(delay)
         try:
             instance, pairing = d["instance"], d["pairing"]
+            disposition = d.get("binding_disposition")
             if (status == 200 and d.get("status") == "redeemed" and Grant.parse(d, instance["hostname"]) == approved
                     and text(instance["id"], 120) and instance["public_url"] == "https://" + approved.hostname
-                    and text(pairing["pairing_key"], 512) and _instant(pairing["expires_at"]) <= ticket.deadline):
-                return Issuance(instance["id"], approved.hostname, pairing["pairing_key"])
+                    and text(pairing["pairing_key"], 512) and _instant(pairing["expires_at"]) <= ticket.deadline
+                    and disposition in (None, "new", "existing")):
+                return Issuance(instance["id"], approved.hostname, pairing["pairing_key"], disposition)
         except (KeyError, TypeError, ClaimError):
             pass
         raise ClaimError("fresh_claim_required")

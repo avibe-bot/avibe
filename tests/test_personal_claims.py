@@ -200,6 +200,27 @@ def test_desktop_machine_checks_its_own_ack_reviewed_host_and_receipt(claim_peer
     assert bool(V2Config.load().remote_access.vibe_cloud.instance_id) == (state == "bound")
 
 
+@pytest.mark.parametrize("disposition,bound", [("new", True), ("existing", False), ("former", False)])
+def test_a_new_name_does_not_keep_a_key_the_issuer_says_already_existed(claim_peer, disposition, bound):
+    body = {"status": "redeemed", "account": claim_peer.account, "binding_disposition": disposition,
+            "instance": {"id": "inst_A", "hostname": claim_peer.hostname, "slug": "fixture",
+                         "public_url": "https://" + claim_peer.hostname},
+            "pairing": {"pairing_key": claim_peer.key, "expires_at": claim_peer.expiry}}
+    claim_peer.outcomes = [
+        (200, {"status": "granted", "account": claim_peer.account, "hostname": claim_peer.hostname}, None),
+        (200, body, None),
+    ]
+
+    def review(ticket):
+        flow.arm(claim_id=ticket["claim_id"], kind="new", hostname=claim_peer.hostname, existing_instance_id=None)
+
+    flow = _desktop_claim(signed_in_subject="owner-id", publish_ticket=review)
+    result = flow.run()
+    assert bool(V2Config.load().remote_access.vibe_cloud.instance_id) is bound
+    assert result["state"] == "bound" if bound else result["code"] == "fresh_claim_required"
+    assert claim_peer.key not in json.dumps(result)
+
+
 @pytest.mark.parametrize("boundary,accepts,redeems,phase", [
     ("ticket", 0, 0, None), ("accepting", 0, 0, None),
     ("accept_reply", 1, 0, None), ("redeem_reply", 1, 1, "prepared"),
