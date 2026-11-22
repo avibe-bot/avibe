@@ -854,3 +854,54 @@ test('locked voice press is Action and repeats across unlock cannot start a take
     expect(await peer.send('shortcutCycle', { kind, step: 'suppressed' })).toBe(false);
   }
 });
+
+
+test('startup consumes explicit links before setup resume, Off and after unlock', async () => {
+  const cases = [
+    { arguments: ['avibe://session/explicit'], resume: true, target: '/chat/explicit', update: false },
+    { arguments: ['avibe://show/explicit'], resume: true, target: '/apps/show/explicit', update: false },
+    { arguments: ['avibe://settings'], resume: true, target: '/settings/general', update: false },
+    { arguments: ['avibe://session/first', 'avibe://session/second'], resume: true, target: '/chat/first', update: false },
+    { arguments: ['avibe://updates', 'avibe://session/explicit'], resume: true, target: '/chat/explicit', update: true },
+    { arguments: ['avibe://updates'], resume: true, target: '/settings/computer-use', update: true },
+    { arguments: [], resume: true, target: '/settings/computer-use', update: false },
+    { arguments: ['--flag', 'https://invalid.example'], resume: true, target: '/settings/computer-use', update: false },
+    { arguments: [], resume: false, target: null, update: false },
+    { arguments: ['invalid'], resume: false, target: null, update: false },
+    { arguments: ['avibe://session/explicit'], resume: false, target: '/chat/explicit', update: false },
+  ];
+  for (const policy of ['off', 'immediately']) for (const entry of cases) {
+    await peer.send('reset', { policy });
+    await peer.send('startup', entry);
+    if (policy !== 'off') {
+      expect(await peer.send('startupRead')).toEqual({ target: null, update: false });
+      await peer.send('outcome', { value: 'success' }); await peer.send('unlock');
+    }
+    expect(await peer.send('startupRead')).toEqual({ target: entry.target, update: entry.update });
+  }
+});
+
+
+test('all seven deferred checkmarks follow effective state after cancel and replacement', async () => {
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: 'cancelled' });
+  type Menus = { items: Record<string, { saved: boolean; checked: boolean }>; files: Record<string, number[]> };
+  const before = await peer.send<Menus>('checkmarks');
+  expect(Object.keys(before.items)).toHaveLength(7);
+  for (const click of Object.keys(before.items)) {
+    await peer.send('checkmarks', { click });
+    await expect.poll(() => peer.send('checkmarks')).toEqual(before);
+    await peer.send('entry', { kind: 'command', value: 'replacement' });
+    expect(await peer.send('checkmarks')).toEqual(before);
+  }
+  await peer.send('outcome', { value: 'success' }); await peer.send('unlock');
+  expect(await peer.send('checkmarks')).toEqual(before);
+  // The real Notifications preference is test-owned; replay toggles once.
+  await peer.send('reset', { policy: 'immediately' });
+  await peer.send('outcome', { value: 'cancelled' });
+  await peer.send('checkmarks', { click: 'notifications' });
+  await peer.send('outcome', { value: 'success' }); await peer.send('unlock');
+  await peer.send('tick', { time: 1 });
+  const after = await peer.send<Menus>('checkmarks');
+  expect(after.items.notifications).toEqual({ saved: !before.items.notifications.saved, checked: !before.items.notifications.saved });
+});

@@ -780,6 +780,39 @@ describe('Composer native App Lock cancellation', () => {
     Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked } });
     window.dispatchEvent(new Event('avibe:voice-lock'));
   });
+  it('keeps a retry result for explicit recovery after unlock without changing the draft', async () => {
+    let resolve!: (response: Response) => void;
+    let retry = false;
+    const previous = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, options) => path === '/api/asr/transcribe'
+      ? retry ? new Promise((ok) => { resolve = ok; }) : Promise.resolve(Response.json({ error: 'transcription_empty' }, { status: 422 }))
+      : previous(path, options));
+    voiceMocks.realtimeStart.mockRejectedValue(new Error('use relay'));
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const onSend = vi.fn();
+    try {
+      signal(false); renderComposer('retry-lock-owner', { initialDraft: 'original draft', onSend });
+      const textbox = await screen.findByRole('textbox') as HTMLTextAreaElement;
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+      act(() => {
+        voiceMocks.onPcm?.(pcm(0.05, 1_280));
+        voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 3_000, final: true });
+        voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
+      });
+      const button = await screen.findByRole('button', { name: en.chat.compose.voiceRetry });
+      retry = true; fireEvent.click(button); await waitFor(() => expect(resolve).toBeDefined());
+      signal(true);
+      await act(async () => resolve(Response.json({ text: 'recovered once', cleanup: 'success' })));
+      const copy = await screen.findByRole('button', { name: en.chat.compose.voiceCopyTranscript });
+      expect(textbox.value).toBe('original draft'); expect(onSend).not.toHaveBeenCalled();
+      fireEvent.click(copy); expect(writeText).not.toHaveBeenCalled();
+      signal(false); fireEvent.click(copy);
+      await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith('recovered once'));
+      expect(textbox.value).toBe('original draft'); expect(onSend).not.toHaveBeenCalled();
+    } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
   it('does not admit a microphone when consent returns after lock and unlock', async () => {
     try {
       signal(false); renderComposer('lock-consent');

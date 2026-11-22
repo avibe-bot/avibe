@@ -620,6 +620,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [value, setValue] = useState('');
   const [homeVoiceKey] = useState(() => `draft:${newLocalId()}`);
   const voiceKey = sessionId ?? (stageMedia ? homeVoiceKey : undefined);
+  const currentVoiceKey = useRef(voiceKey);
+  useEffect(() => { currentVoiceKey.current = voiceKey; }, [voiceKey]);
   // Where a take spoken here is kept until its words land (lib/voiceTakeStore): this Session, or
   // the Home draft, which a reload starts afresh under a new key but the same place.
   const voiceKeepTarget = sessionId ?? (stageMedia ? 'home' : null);
@@ -1237,10 +1239,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setTranscribing(true);
     try {
       await retryStoredVoiceSession(session);
-      if (desktopVoiceLock.current(lockToken)) presentVoiceSession(session);
+      if (!unmountedRef.current && currentVoiceKey.current === session.sessionId && voiceSessionsById.get(session.sessionId) === session) {
+        if (desktopVoiceLock.current(lockToken)) presentVoiceSession(session);
+        else retainSettledVoiceSession(session);
+      }
     } finally {
-      transcribingRef.current = false;
-      if (!unmountedRef.current) setTranscribing(false);
+      const owner = voiceSessionsById.get(session.sessionId);
+      if (!unmountedRef.current && currentVoiceKey.current === session.sessionId && (!owner || owner === session)) {
+        transcribingRef.current = false;
+        setTranscribing(false);
+      }
     }
   };
 
@@ -1253,7 +1261,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [restoreRealtimePreview]);
 
   const copyReadyVoiceTranscript = useCallback(async (session: VoiceRecordingSession) => {
-    if (!session.transcript) return;
+    if (!desktopVoiceLock.allowed() || !session.transcript) return;
     if (await copyTextToClipboard(session.transcript)) {
       showToast(t('chat.compose.voiceTranscriptCopied'), 'success');
     }

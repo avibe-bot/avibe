@@ -312,6 +312,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const press = useRef<Press | null>(null);
   const take = useRef<Take | null>(null);
   const retryingKeptTake = useRef(false);
+  const retainedRetryText = useRef<{ take: Take; text: string } | null>(null);
   const clock = useRef<ReturnType<typeof setInterval> | null>(null);
   const armed = useRef(false);
   // Set while this hook releases the pointer itself, so its lostpointercapture is not the system's.
@@ -410,6 +411,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
     take.current = null;
+    retryingKeptTake.current = false;
+    retainedRetryText.current = null;
     releasePointer();
     reset();
     toPhase('idle');
@@ -420,7 +423,6 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Retrying an already kept take owns no microphone; preserve that take but
     // invalidate the new attempt's UI/send continuation.
     if (retryingKeptTake.current) {
-      retryingKeptTake.current = false;
       setFinalizing(false); toPhase('interrupted'); return;
     }
     // Already submitted work and explicitly kept interrupted takes are not retracted.
@@ -428,6 +430,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       || phaseRef.current === 'recording' || phaseRef.current === 'armed'
       || (phaseRef.current === 'settling' && finalizingRef.current)) end(null);
   }), [end, setFinalizing, toPhase]);
+
+  useEffect(() => desktopVoiceLock.onUnlock(() => {
+    const retained = retainedRetryText.current;
+    retainedRetryText.current = null;
+    if (retained && take.current === retained.take && phaseRef.current === 'interrupted') {
+      setText(retained.text); setStash(''); setCanRetry(false);
+    }
+  }), []);
 
   /** The take ended without a send: keep what was heard until the user decides. */
   const interrupt = useCallback((reason: HoldInterruptReason, heard: string) => {
@@ -1054,7 +1064,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
 
   const retry = useCallback(() => {
     const current = take.current;
-    if (!desktopVoiceLock.allowed() || phaseRef.current !== 'interrupted' || !current || !current.dictation.canRetry()) return;
+    if (!desktopVoiceLock.allowed() || retryingKeptTake.current || phaseRef.current !== 'interrupted' || !current || !current.dictation.canRetry()) return;
     const lockToken = desktopVoiceLock.token();
     retryingKeptTake.current = true;
     current.ending = 'send';
@@ -1062,14 +1072,20 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     toPhase('settling');
     void current.dictation.retry({ before: '', after: '' }).then(
       (words) => {
-        if (!desktopVoiceLock.current(lockToken) || take.current !== current) return;
+        if (take.current !== current) return;
         retryingKeptTake.current = false;
+        if (!desktopVoiceLock.current(lockToken)) {
+          if (desktopVoiceLock.allowed()) { setText(words); setStash(''); setCanRetry(false); }
+          else retainedRetryText.current = { take: current, text: words };
+          return;
+        }
         if (!words.trim()) end('too-short');
         else void deliver(words.trim());
       },
       (error: unknown) => {
-        if (!desktopVoiceLock.current(lockToken) || take.current !== current) return;
+        if (take.current !== current) return;
         retryingKeptTake.current = false;
+        if (!desktopVoiceLock.current(lockToken)) return;
         if (error instanceof VoiceTranscriptionError && error.code === 'cancelled') return;
         interrupt(failureReason(current, error), text);
       },

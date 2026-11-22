@@ -656,6 +656,33 @@ fn handle(app: &AppHandle, request: Value) {
                 }
                 Ok(snapshot(app))
             }
+            "startup" => {
+                let arguments: Vec<String> =
+                    serde_json::from_value(request["arguments"].clone()).map_err(|e| e.to_string())?;
+                app.state::<Mutex<crate::DeepLinks>>().lock().unwrap().clear_pending();
+                *app.state::<crate::PendingDesktopUpdateOpen>().0.lock().unwrap() = Default::default();
+                crate::receive_startup_arguments(
+                    app,
+                    crate::startup_arguments(arguments, request["resume"].as_bool().unwrap_or(false)),
+                );
+                Ok(snapshot(app))
+            }
+            "startupRead" => {
+                let origin = avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:9999").unwrap();
+                let target = app
+                    .state::<Mutex<crate::DeepLinks>>()
+                    .lock()
+                    .unwrap()
+                    .workbench_navigation(&origin, &origin.navigation_url())
+                    .map(|n| n.url().path().to_owned());
+                Ok(
+                    json!({"target": target, "update": app.state::<crate::PendingDesktopUpdateOpen>().current().is_some()}),
+                )
+            }
+            "checkmarks" => {
+                crate::checkmark_peer::run(app, machine(app).path.parent().unwrap(), request["click"].as_str())
+                    .map_err(|e| e.to_string())
+            }
             "directMenu" => {
                 crate::direct::shell::app_lock_menu::run(app, request["click"].as_str()).map_err(|e| e.to_string())
             }
@@ -891,6 +918,8 @@ pub(crate) fn run() {
             }
         })
         .setup(move |app| {
+            app.manage(Mutex::new(crate::DeepLinks::default()));
+            app.manage(crate::PendingDesktopUpdateOpen::default());
             app.manage(crate::compose::Queue::default());
             app.manage(crate::pet::Pet::new(path.with_file_name("pet.json")));
             crate::notifications::macos::e2e_notices(true);

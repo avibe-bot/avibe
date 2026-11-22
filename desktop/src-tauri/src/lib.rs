@@ -2456,6 +2456,30 @@ fn main_document_finished(webview: &tauri::Webview) {
     refresh_native_controls(webview.app_handle(), None);
 }
 
+#[cfg(target_os = "macos")]
+fn startup_arguments(mut arguments: Vec<String>, resume: bool) -> Vec<String> {
+    // The parser consumes the first valid explicit link; setup resume is only a fallback.
+    if resume {
+        arguments.push(COMPUTER_USE_SETUP_DEEP_LINK.to_owned());
+    }
+    arguments
+}
+
+fn receive_startup_arguments(app: &AppHandle, arguments: Vec<String>) {
+    let pending = arguments.clone();
+    let has_link = arguments
+        .iter()
+        .any(|a| a == updater::OPEN_URL || avibe_runtime_host::deep_link::parse_deep_link(a).is_some());
+    if !has_link || !app_lock::queue_if_locked(app, move |app| receive_native_deep_link(app, pending)) {
+        if arguments.iter().any(|a| a == updater::OPEN_URL) {
+            request_desktop_updates(app);
+        }
+        if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+            links.receive(arguments.into_iter().filter(|a| a != updater::OPEN_URL));
+        }
+    }
+}
+
 fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
     let arguments: Vec<String> = arguments.into_iter().map(|a| a.as_ref().to_owned()).collect();
     let deferred = arguments.clone();
@@ -2910,6 +2934,32 @@ fn request_private_runtime_removal(app: AppHandle) {
         });
 }
 
+// Reconcile system-toggled checkmarks from effective state without executing a command.
+fn render_saved_checkmarks(app: &AppHandle) {
+    direct::shell::restore_deferred_menu(app);
+    if let Some(menus) = app.try_state::<NativeMenus>() {
+        #[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+        let login = app
+            .try_state::<checkmark_peer::Login>()
+            .map(|state| state.0)
+            .unwrap_or_else(|| app.autolaunch().is_enabled().unwrap_or(false));
+        #[cfg(not(all(target_os = "macos", feature = "app-lock-e2e")))]
+        let login = app.autolaunch().is_enabled().unwrap_or(false);
+        let _ = menus.login.set_checked(login);
+        if let Some(notifications) = app.try_state::<notifications::Notifications>() {
+            notifications::sync_native_menu(app, notifications.enabled());
+        }
+    }
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
+    refresh_computer_use_control(app);
+    pet::refresh_menu(app);
+    updater::refresh_channel_menu(app);
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+#[path = "../tests/app_lock/checkmarks.rs"]
+mod checkmark_peer;
+
 fn handle_menu(app: &AppHandle, id: &str) {
     if id != QUIT_MENU_ID {
         let pending = id.to_owned();
@@ -2919,7 +2969,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
             app_lock::EntryKind::Command
         };
         if app_lock::defer_kind(app, kind, move |app| handle_menu(app, &pending)) {
-            direct::shell::restore_deferred_menu(app, id);
+            render_saved_checkmarks(app);
             return;
         }
     }
@@ -3204,22 +3254,10 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             macos_terminate::install(app.handle());
-            let launch_arguments: Vec<String> = std::env::args_os().skip(1).filter_map(|a| a.into_string().ok()).collect();
+            let arguments: Vec<String> = std::env::args_os().skip(1).filter_map(|a| a.into_string().ok()).collect();
             #[cfg(target_os = "macos")]
-            // Keep master's ordering: an explicit launch link wins over setup resume.
-            let launch_arguments = {
-                let mut arguments = launch_arguments;
-                if computer_use::take_setup_resume(app.handle()) { arguments.insert(0, COMPUTER_USE_SETUP_DEEP_LINK.to_owned()); }
-                arguments
-            };
-            let pending_launch = launch_arguments.clone();
-            let has_link = launch_arguments.iter().any(|a| a == updater::OPEN_URL || avibe_runtime_host::deep_link::parse_deep_link(a).is_some());
-            if !has_link || !app_lock::queue_if_locked(app.handle(), move |app| receive_native_deep_link(app, pending_launch)) {
-                if launch_arguments.iter().any(|a| a == updater::OPEN_URL) { request_desktop_updates(app.handle()); }
-                if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
-                    links.receive(launch_arguments.into_iter().filter(|a| a != updater::OPEN_URL));
-                }
-            }
+            let arguments = startup_arguments(arguments, computer_use::take_setup_resume(app.handle()));
+            receive_startup_arguments(app.handle(), arguments);
             updater::init(app.handle())?;
             let bundled_origin = if cfg!(windows) {
                 "http://tauri.localhost/"

@@ -246,7 +246,7 @@ pub(crate) fn set_native_available(app: &AppHandle, available: bool) {
     }
 }
 
-fn refresh_menu(app: &AppHandle) {
+pub(crate) fn refresh_menu(app: &AppHandle) {
     let Some(menus) = app.try_state::<PetMenus>() else {
         return;
     };

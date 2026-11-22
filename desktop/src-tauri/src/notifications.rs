@@ -489,7 +489,7 @@ pub(crate) fn reconcile(app: &AppHandle) {
     }
 }
 
-fn sync_native_menu(app: &AppHandle, enabled: bool) {
+pub(crate) fn sync_native_menu(app: &AppHandle, enabled: bool) {
     if let Some(menus) = app.try_state::<crate::NativeMenus>() {
         if menus.notifications.set_checked(enabled).is_err() {
             eprintln!("failed to refresh the desktop notification menu");

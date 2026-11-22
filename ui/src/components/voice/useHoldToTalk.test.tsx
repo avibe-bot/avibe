@@ -1573,6 +1573,26 @@ describe('App Lock cancels held voice rather than preserving an interruption', (
     Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked } });
     window.dispatchEvent(new Event('avibe:voice-lock'));
   });
+  it('retains late successful retry words on the same interruption until explicit send', async () => {
+    const el = await mount();
+    try {
+      signal(false); await holdFor(el); await elapse(1_000); up(el);
+      await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('unavailable'))); await flush();
+      let resolve!: (text: string) => void;
+      pipeline.takes[0].retry.mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
+      await act(async () => hold.retry());
+      const original = hold.text;
+      signal(true);
+      await act(async () => resolve('retained recovered words'));
+      expect(hold.phase).toBe('interrupted'); expect(hold.text).toBe(original);
+      expect(send).not.toHaveBeenCalled(); expect(pipeline.takes[0].abort).not.toHaveBeenCalled();
+      signal(false);
+      expect(hold.text).toBe('retained recovered words'); expect(hold.canRetry).toBe(false);
+      await act(async () => hold.sendInterrupted());
+      expect(send).toHaveBeenCalledExactlyOnceWith('retained recovered words', { input: 'voice' });
+      expect(pipeline.takes[0].retry).toHaveBeenCalledOnce();
+    } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
   it.each(['pressing', 'starting', 'listening', 'settling'] as const)('invalidates %s, late pointer release and final words', async (phase) => {
     const el = await mount();
     try {

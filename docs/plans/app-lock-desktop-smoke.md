@@ -98,8 +98,11 @@ acceptance decision. A PR, exact-head Codex review and CI follow acceptance.
 ## November 23 merge validation
 
 PR #4191 is authorized for merge only, without an RC or installation. Its native
-suite now contains 37 cases; 36 passed while the GUI was at loginwindow. The
+suite now contains 39 cases; 38 passed while the GUI was at loginwindow. The
 unchanged Show foreground assertion awaits public-signal Watch ac65a1ba3247,
 which reruns the complete suite after unlock and display wake. Fake managed
 voice tests never open a real microphone. Third-party Show pages managing their
 own microphone are outside the built-in voice-controller cancellation boundary.
+
+The retained-take, startup-priority and seven-checkmark completion contract and
+consumer evidence are in `app-lock-review-boundaries.md`.

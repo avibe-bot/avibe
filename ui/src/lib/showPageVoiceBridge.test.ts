@@ -374,6 +374,53 @@ describe('Show voice App Lock lifetime', () => {
     Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked } });
     window.dispatchEvent(new Event('avibe:voice-lock'));
   };
+  it.each([false, true])('retains the settled retry owner across lock (keeper=%s)', async (keep) => {
+    const session = new FakeVoiceSession();
+    const events: ShowPageVoiceEvent[] = [];
+    const host = new ShowPageVoiceHost({ post: (e) => events.push(e), availability: async () => ({ available: true, maxFileBytes: null }),
+      createSession: () => session, keep: () => keep ? { target: 'session-a', intent: 'insert' } : null });
+    const request = { type: ANNOTATION_VOICE_REQUEST_MESSAGE, action: 'start', requestId: 'retained', before: '', after: '' };
+    try {
+      signal(false); host.handle(request);
+      await vi.waitFor(() => expect(events.some((e) => e.kind === 'started')).toBe(true));
+      session.result.reject(new VoiceTranscriptionError('unavailable'));
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ retryable: true }));
+      signal(true); signal(true);
+      host.handle({ ...request, action: 'retry' });
+      expect(session.abort).not.toHaveBeenCalled();
+      expect(session.retry).not.toHaveBeenCalled();
+      signal(false); host.handle({ ...request, action: 'retry' });
+      await vi.waitFor(() => expect(session.retry).toHaveBeenCalledOnce());
+      session.retryResult.resolve('retained words');
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ kind: 'result', text: 'retained words' }));
+    } finally { host.dispose(); Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+
+  it('keeps successful late retry text for one explicit use without another transcription', async () => {
+    const session = new FakeVoiceSession();
+    const events: ShowPageVoiceEvent[] = [];
+    const host = new ShowPageVoiceHost({ post: (e) => events.push(e), availability: async () => ({ available: true, maxFileBytes: null }), createSession: () => session });
+    const request = { type: ANNOTATION_VOICE_REQUEST_MESSAGE, action: 'start', requestId: 'late', before: '', after: '' };
+    try {
+      signal(false); host.handle(request);
+      await vi.waitFor(() => expect(events.some((e) => e.kind === 'started')).toBe(true));
+      session.result.reject(new VoiceTranscriptionError('unavailable'));
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ retryable: true }));
+      host.handle({ ...request, action: 'retry' });
+      signal(true); session.retryResult.resolve('cached words');
+      await vi.waitFor(() => expect(session.retry).toHaveBeenCalledOnce());
+      await Promise.resolve(); await Promise.resolve();
+      expect(events.some((e) => e.kind === 'result')).toBe(false);
+      signal(false);
+      expect(events.some((e) => e.kind === 'result')).toBe(false);
+      host.handle({ ...request, action: 'retry' });
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ kind: 'result', text: 'cached words' }));
+      host.handle({ ...request, action: 'retry' });
+      expect(events.filter((e) => e.kind === 'result')).toHaveLength(1);
+      expect(session.retry).toHaveBeenCalledOnce();
+    } finally { host.dispose(); Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+
   it.each(['availability', 'starting', 'listening', 'finishing'] as const)('cancels %s without late result or recovery and admits a new request', async (phase) => {
     const availability = deferred<{ available: boolean; maxFileBytes: number | null }>();
     const started = deferred<void>();

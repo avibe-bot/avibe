@@ -124,7 +124,11 @@ drafts and explicit new recording after unlock. Shared dictation tests consume
 real controller cleanup with fake tracks, pipeline and realtime transport;
 no real microphone is opened. Explicitly kept/completed takes remain intact.
 
-The native suite has 37 cases. Thirty-six pass, including both added lifecycle
+The native suite has 39 cases. Thirty-eight pass, including both added lifecycle
 cases rerun after the final queued-key/reload assertions. The unchanged Show
 focus case remains pending the public unlock Watch; the machine is at loginwindow.
 The final independent review must confirm the unlock replay/focus boundary.
+
+Retained-take retries and disposal are completed by the state/exit table in
+`app-lock-review-boundaries.md`; that table preserves completed results while
+fencing locked delivery and new retry admission.
