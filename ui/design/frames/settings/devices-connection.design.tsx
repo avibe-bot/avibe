@@ -78,6 +78,8 @@ const designFrames = frames([
   frame('remote-domain-only', '连接方式 · 同一个版本从远处看：也只有域名一行，不提重新绑定', WIDE,
     { ...remote, address: { ...address, eligible: false, ineligibleReason: 'address_state_unknown' }, rebind: undefined }),
   frame('remote-browser', '连接方式 · 浏览器远程打开：走的是 Cloudflare 隧道；重新绑定要回到那台电脑上做', WIDE, remote),
+  frame('desktop-window', '连接方式 · Avibe Desktop 里打开另一台电脑的实例的窗口：说这台设备走的路径，这里还没有选择可改', WIDE,
+    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null } }),
   frame('app', '连接方式 · Avibe App：「这台设备」只有 自动 / 仅 Cloudflare 隧道，自动在前', { ...IPHONE_17_PRO, height: 2300 },
     { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'automatic', reverted: null } }, { app: true }),
   frame('app-tunnel-only', '连接方式 · Avibe App 选了「仅 Cloudflare 隧道」', { ...IPHONE_17_PRO, height: 2300 },

@@ -58,8 +58,10 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   remote: boolean;
   /** How this page's own connection came in, once it is observed. */
   via?: 'tunnel' | 'direct' | null;
-  /** The Avibe App's own path and choice; absent outside an App that offers the choice. */
+  /** The path this device uses, where its shell has one of its own (the Avibe App, a Desktop
+   *  window of another computer's instance). Null: none reported yet. Absent in a browser. */
   path?: DeviceUsing | null;
+  /** The Avibe App's own choice of path; absent where the shell offers none. */
   preference?: DirectPreference;
   refused?: SwitchRefusal;
   /** A switch whose change is on its way: it waits. */
@@ -409,8 +411,12 @@ export function ConnectionPageView({
       )}
 
       {preference && <PreferenceGroup path={path} preference={preference} onChange={actions.onPreferenceChange} />}
+      {/* A shell with a path of its own and no choice to offer: what this device uses, and no more. */}
+      {!preference && path !== undefined && (
+        <SettingsPanel title={t('devices.connection.thisDevice')} description={path ? deviceUsingText(t, path) : t('devices.connection.noPath')} />
+      )}
 
-      <SettingsPanel title={t('devices.connection.offered')} description={preference ? undefined : t('devices.connection.offeredBrowser')}>
+      <SettingsPanel title={t('devices.connection.offered')} description={preference || path !== undefined ? undefined : t('devices.connection.offeredBrowser')}>
         <Row
           title={t('remoteAccess.direct.usingTunnel')}
           hint={t('devices.connection.tunnelDetail')}

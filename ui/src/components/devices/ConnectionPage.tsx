@@ -10,7 +10,7 @@ import type { RemoteAccessStatus, TunnelConnectivityDiagnostics, TunnelNetworkIn
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { hasDesktopClient } from '@/desktop/bridge';
 import { liveStreamVia, subscribeLiveStreamVia } from '@/lib/liveStreamVia';
-import { nativeDirectPathReported } from '@/lib/native';
+import { nativeDirectAvailable, nativeDirectPathReported } from '@/lib/native';
 import {
   nativeDirectChoiceAvailable, onNativeDirectChoiceChanged, readNativeDirectChoice, setNativeDirectChoice,
   type NativeDirectChoice,
@@ -605,7 +605,9 @@ export function ConnectionPage() {
       tunnel={tunnel}
       remote={remote}
       via={pageVia === 'direct' ? 'direct' : pageVia === 'other' && remote ? 'tunnel' : null}
-      path={preference ? deviceUsing(nativePath, pageVia, nativeDirectPathReported()) : undefined}
+      // The shell's own path: the Avibe App, and a Desktop window of another computer's instance
+      // (which has no choice to offer here yet). A browser has none, and the page says so.
+      path={preference || nativeDirectAvailable() ? deviceUsing(nativePath, pageVia, nativeDirectPathReported()) : undefined}
       preference={preference}
       refused={refused}
       // A switch the instance has accepted and not written yet waits like one being sent.
