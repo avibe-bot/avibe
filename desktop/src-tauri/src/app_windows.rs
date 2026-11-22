@@ -873,6 +873,7 @@ async fn launch_owned(source: &Source, request: &Request, protocol: bool) -> Sta
             .focused(false)
             .incognito(source.runtime.disposable)
             .initialization_script(NATIVE_APP_WINDOW_MARKER)
+            .initialization_script(crate::app_lock::VOICE_MARKER)
             .initialization_script(PROTOCOL_SCRIPT)
             // Only a Show window learns it can share and export; `show_share` checks again.
             .initialization_script(if matches!(target, AppWindowTarget::ShowPage(_)) {

@@ -24,6 +24,7 @@ a package without main's packaging instruction.
 | Real Ask consumer | Production enqueue, WKWebView transport and shipped lazy DesktopCompose/ DesktopComposeMount: locked requests do not allocate shares or open files; latest Content/Navigation wins; cancellation followed by Dock/tray Open retains the payload and pending hint; unlock stages without sending. Previously admitted shares wait while locked. |
 | Native Show actions | While locked, click each of Annotate, Open Chat, Share and Open in Browser: no page event, popover or browser opening before unlock. After unlock the latest action runs once; Annotate/Share restores and focuses the owning Show window so its UI is visible in front of Workbench. Cancel and replace an action; navigate the window during the wait and confirm the stale action is not replayed. The accessory labels are generic and its bound title remains concealed. |
 | Notification answers | While locked, choose a quick reply and separately type Reply. Neither submits before unlock; cancel then click Dock and confirm the answer survives. After unlock exactly one request carries the original operation ID and revision. Replace a pending answer with a Command, Content or Navigation: one generic not-delivered notice opens the original Session, without including the answer/source text. Quit-discard stays silent. Stale/already-handled follow-up uses D2a's existing notices. Off submits as before. |
+| Managed voice cancellation | With fake microphone/pipeline input, cover Mini, Workbench dictation, Workbench/BotHold hold-to-talk and Show built-in voice during consent/permission, starting, listening and finishing/settling. Actual lock cancels and releases; late results/releases cannot submit, keep new audio, change the previous draft or open a window. Preserve explicit completed/kept/submitted work and normal Off/Release/Escape. Locked voice hotkeys require a new physical press after unlock. Check initial/reloaded native documents, including remote Workbenches using this Mac's microphone. |
 | Queue priority | Action fills only an empty slot. It cannot replace another pending intent or clear an older Workbench navigation/update. Explicit commands retain their existing deferred execution behavior. |
 | Default Off and settings | Settings is under General. Off preserves existing window/entry behavior. Setting changes commit only after successful system verification; cancellation preserves the previous value. Automated evidence uses the peer; coordinate with Max for a real verification. |
 | Windows and privacy | On the designated package/profile, inspect main, independent App/Show, new windows and an assigned Vault fixture. Content and document titles are covered; input cannot reach content; Mini/update popovers hide. Inspect light/dark, resize, Mission Control and screen-sharing captures with test content. System tray/menu controls stay usable. |
@@ -93,3 +94,12 @@ For each package/hardware group, record pass/fail/untested, integrated SHA,
 package signing identity, macOS/hardware context, and the first-gate timing.
 Attach only test-content captures and scrubbed diagnostics. Main owns Max's
 acceptance decision. A PR, exact-head Codex review and CI follow acceptance.
+
+## November 23 merge validation
+
+PR #4191 is authorized for merge only, without an RC or installation. Its native
+suite now contains 37 cases; 36 passed while the GUI was at loginwindow. The
+unchanged Show foreground assertion awaits public-signal Watch ac65a1ba3247,
+which reruns the complete suite after unlock and display wake. Fake managed
+voice tests never open a real microphone. Third-party Show pages managing their
+own microphone are outside the built-in voice-controller cancellation boundary.

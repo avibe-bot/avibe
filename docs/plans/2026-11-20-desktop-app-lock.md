@@ -2,7 +2,7 @@
 
 ## Contract
 
-Based on origin/master `8d801522c46fbe8e07fb968dd79e06d97cc26d0b`
+Based on origin/master `d1b9fe5db3cc0b7e19681571a5d489559aecae9e`
 (2026-11-23 snapshot, including notification answers #4105, the compact 40pt
 Show title bar and four controls #4108, Workbench chrome #4162, and #4181/#4182). The approved product
 specification is the orchestrator's `app-lock-plan.md` and `app-lock-design/`.
@@ -349,3 +349,34 @@ persistent public-signal Watch will rerun all 35 cases when the Mac is unlocked
 and awake; failures are regressions to report, not reasons to weaken assertions.
 
 The deferred native rerun is armed as public-signal Watch `ac65a1ba3247`. It waits for a known non-loginwindow foreground application and an awake main display, then reruns all 35 cases on the final head. Production unlock replay/focus is unchanged by this revision. Windows CI also identified unused macOS-only implementation in normal Windows builds; compile-time platform boundaries now exclude that implementation while retaining pure tests.
+
+
+## Managed voice merge gate (November 23)
+
+Main expanded the Mini recording finding to the four built-in recording
+controllers: Mini, Workbench dictation, Show built-in voice and Workbench/BotHold
+hold-to-talk. The approved [lifecycle inventory](app-lock-mini-voice-lifecycle.md)
+is the implementation contract. Actual lock entry aborts unfinished capture and
+startup/finishing work, releases resources and invalidates late results without
+sending, saving a new take, editing the old draft or opening a window. Completed,
+explicitly kept or already submitted work remains intact. Off and no native
+signal retain ordinary Release/Escape behavior. Arbitrary third-party Show page
+microphone use is outside the managed-controller boundary.
+
+The shared read-only document signal includes remote Runtime Workbenches in this
+Mac's native windows and initial/reloaded pages. The existing background sync
+can schedule publication up to 250ms after a dirty state transition. Locked
+voice-only shortcuts are foreground Action, never deferred recording requests;
+a physical press spanning unlock remains suppressed through release. The normal
+Mini visibility shortcut remains Command. Production Show unlock replay/focus
+is unchanged; voice-specific late focus/recording callbacks are invalidated.
+
+Current evidence supersedes historical counts above: 366 Desktop tests pass
+with one existing ignored, 397 focused UI tests pass, UI build/typechecks/lint
+pass and all-target/all-feature clippy is clean. One existing Computer Use
+shutdown child test failed in a parallel run; the complete serial library run
+passed, including that case. Release compilation passes and rejects the e2e
+authentication substitute. Thirty-six of 37 native cases pass; the original
+Show focus assertion remains unchanged and deferred to Watch ac65a1ba3247.
+That Watch now reruns all 37 cases after the public unlocked/awake signal.
+The branch rebases onto the merged Mini #4190 without modifying that PR.

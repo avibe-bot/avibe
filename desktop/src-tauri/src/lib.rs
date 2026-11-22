@@ -2067,6 +2067,7 @@ fn build_main_window(
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
         .initialization_script(show_share::marker())
         .initialization_script(app_lock::MARKER)
+        .initialization_script(app_lock::VOICE_MARKER)
         .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
@@ -2158,6 +2159,7 @@ fn build_main_child(
             .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
             .initialization_script(show_share::marker())
             .initialization_script(app_lock::MARKER)
+            .initialization_script(app_lock::VOICE_MARKER)
             .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
             .initialization_script(format!(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
@@ -3000,6 +3002,7 @@ pub fn run() {
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
                     direct::shell::page_loaded(webview);
+                    if payload.event() == tauri::webview::PageLoadEvent::Finished { app_lock::voice_document_ready(webview); }
                     if webview.label() == pet::PET_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Started {
                         pet::page_loading(webview.app_handle());
                     }

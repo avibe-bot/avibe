@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from './desktopVoiceLock';
 import { nativeCaptureAllowed } from './nativeVoiceCapture';
 import {
   ShowPageVoiceDictation,
@@ -104,6 +105,7 @@ type StartingVoiceSession = {
 };
 
 type ActiveVoiceSession = {
+  settled: boolean;
   requestId: string;
   captureClaim: VoiceCaptureClaim;
   session: ShowPageVoiceSession;
@@ -167,8 +169,19 @@ export class ShowPageVoiceHost {
   private active: ActiveVoiceSession | null = null;
   private starting: StartingVoiceSession | null = null;
   private disposed = false;
+  private readonly stopWatchingLock: () => void;
 
   constructor(dependencies: ShowPageVoiceHostDependencies) {
+    this.stopWatchingLock = desktopVoiceLock.onInvalidate(() => {
+      const pending = this.starting;
+      const active = this.active;
+      this.starting = null;
+      this.active = null;
+      if (pending) { pending.cancelled = true; pending.session?.abort(); pending.captureClaim.release(); }
+      if (active) { if (!active.settled) active.session.abort(); active.captureClaim.release(); }
+      const id = active?.requestId ?? pending?.requestId;
+      if (id) this.postError(id, 'cancelled', false);
+    });
     this.dependencies = {
       ...dependencies,
       createSession: dependencies.createSession
@@ -187,7 +200,7 @@ export class ShowPageVoiceHost {
       void this.start(request);
     } else if (request.action === 'stop') {
       if (this.active?.requestId === request.requestId) this.active.session.finish();
-    } else if (request.action === 'retry') {
+    } else if (request.action === 'retry' && desktopVoiceLock.allowed()) {
       if (this.active?.requestId === request.requestId) void this.retry(this.active, request);
     } else {
       if (this.starting?.requestId === request.requestId) {
@@ -205,6 +218,7 @@ export class ShowPageVoiceHost {
 
   dispose(): void {
     this.disposed = true;
+    this.stopWatchingLock();
     if (this.starting) {
       this.starting.cancelled = true;
       this.starting.captureClaim.release();
@@ -241,7 +255,7 @@ export class ShowPageVoiceHost {
   }
 
   private async start(request: Extract<ShowPageVoiceRequest, { action: 'start' }>): Promise<void> {
-    if (this.active || this.starting) {
+    if (!desktopVoiceLock.allowed() || this.active || this.starting) {
       this.postError(request.requestId, 'failed', false);
       return;
     }
@@ -282,7 +296,7 @@ export class ShowPageVoiceHost {
         },
       });
       pending.session = session;
-      const active = { requestId: request.requestId, captureClaim, session };
+      const active = { requestId: request.requestId, captureClaim, session, settled: false };
       this.starting = null;
       this.active = active;
       try {
@@ -365,6 +379,7 @@ export class ShowPageVoiceHost {
   ): void {
     if (this.disposed || this.active !== active) return;
     active.captureClaim.release();
+    active.settled = true;
     const code = voiceErrorCode(error);
     // An empty transcript of a take that held speech-loud sound is a recognition that failed:
     // its recording stays, to be retried.

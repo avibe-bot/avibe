@@ -25,6 +25,8 @@ const harness = (options: {
   let pipeline!: VoiceRecordingPipelineOptions;
   let realtime!: VoiceRealtimeOptions;
   const realtimeAbort = vi.fn();
+  const trackStop = vi.fn();
+  const pipelineAbort = vi.fn();
   const stop = () => {
     pipeline.onSegment(new Blob(['tail'], { type: 'audio/wav' }), { durationMs: 20_000, overlapMs: 500, final: true });
     pipeline.onStopped('finish', { pendingSegmentCount: 1 });
@@ -39,7 +41,7 @@ const harness = (options: {
     keep: { target: 'ses_a', intent: 'send' },
     onLiveChange: options.onLiveChange,
   }, {
-    getUserMedia: async () => ({ getTracks: () => [{ stop: vi.fn() }] }) as unknown as MediaStream,
+    getUserMedia: async () => ({ getTracks: () => [{ stop: trackStop }] }) as unknown as MediaStream,
     createRealtime: (realtimeOptions) => {
       realtime = realtimeOptions;
       return {
@@ -56,7 +58,7 @@ const harness = (options: {
     }),
     createPipeline: (pipelineOptions) => {
       pipeline = pipelineOptions;
-      return { start: async () => true, abort: vi.fn(), finish };
+      return { start: async () => true, abort: pipelineAbort, finish };
     },
     finalize: options.finalize ?? vi.fn(async () => ({ text: 'every word', cleanup: 'success' as const })),
     newDictationId: () => 'kept-take',
@@ -66,6 +68,8 @@ const harness = (options: {
     finish,
     stop,
     realtimeAbort,
+    trackStop,
+    pipelineAbort,
     enqueued,
     pipeline: () => pipeline,
     realtime: () => realtime,
@@ -266,5 +270,28 @@ describe('ShowPageVoiceDictation says when live recognition is not working', () 
     await take.dictation.start();
     take.realtime().onError?.(new Error('realtime_closed'));
     expect(onLiveChange).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('native App Lock discards only unfinished dictation', () => {
+  let revision = 20000;
+  it.each(['listening', 'finishing', 'detached'] as const)('aborts %s resources and rejects late segments without keeping a take', async (phase) => {
+    setLocalSnapshotPrincipal('local');
+    const take = harness({ realtimeFinish: () => new Promise(() => {}) });
+    try {
+      await take.dictation.start();
+      take.pipeline().onSegment(new Blob(['before']), { durationMs: 2000, final: false });
+      await vi.waitFor(async () => expect((await readVoiceTakes()).length).toBe(1));
+      if (phase === 'finishing') take.dictation.finish();
+      if (phase === 'detached') take.dictation.detach();
+      Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked: true } });
+      window.dispatchEvent(new Event('avibe:voice-lock'));
+      await expect(take.dictation.done).rejects.toMatchObject({ code: 'cancelled' });
+      expect(take.trackStop).toHaveBeenCalled(); expect(take.pipelineAbort).toHaveBeenCalled();
+      expect(take.realtimeAbort).toHaveBeenCalled();
+      take.pipeline().onSegment(new Blob(['after']), { durationMs: 2000, final: true });
+      take.pipeline().onStopped('finish', { pendingSegmentCount: 1 });
+      await vi.waitFor(async () => expect(await readVoiceTakes()).toEqual([]));
+    } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
   });
 });

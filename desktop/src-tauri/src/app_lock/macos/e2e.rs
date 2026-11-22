@@ -371,6 +371,14 @@ fn handle(app: &AppHandle, request: Value) {
                 Ok(snapshot(app))
             }
             "composePage" => {
+                if request["reload"].as_bool() == Some(true) {
+                    PEER.with_borrow_mut(|p| p.as_mut().unwrap().compose_loaded = false);
+                    app.get_webview(crate::MAIN_WINDOW)
+                        .ok_or("compose fixture required")?
+                        .reload()
+                        .map_err(|e| e.to_string())?;
+                    return Ok(snapshot(app));
+                }
                 let window = app.get_window(crate::MAIN_WINDOW).unwrap();
                 if app.get_webview(crate::MAIN_WINDOW).is_none() {
                     let directory = machine(app).path.parent().unwrap().join("webview");
@@ -384,6 +392,7 @@ fn handle(app: &AppHandle, request: Value) {
                                         .unwrap(),
                                 ),
                             )
+                            .initialization_script(super::super::VOICE_MARKER)
                             .data_directory(directory)
                             .incognito(true)
                             .on_page_load(|_, payload| {
@@ -876,6 +885,11 @@ pub(crate) fn run() {
         })
     });
     let app = tauri::Builder::default()
+        .on_page_load(|view, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                voice_document_ready(view);
+            }
+        })
         .setup(move |app| {
             app.manage(crate::compose::Queue::default());
             app.manage(crate::pet::Pet::new(path.with_file_name("pet.json")));
@@ -895,6 +909,7 @@ pub(crate) fn run() {
                 pending: Mutex::new(None),
                 path: path.clone(),
                 dirty: std::sync::atomic::AtomicBool::new(false),
+                voice: Mutex::new((0, false)),
             });
             PRESENTATION.with_borrow_mut(|p| p.app = Some(app.handle().clone()));
             install_window_hooks();

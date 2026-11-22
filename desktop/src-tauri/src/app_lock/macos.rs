@@ -33,6 +33,7 @@ struct Owner {
     pending: Mutex<Option<Entry>>,
     path: PathBuf,
     dirty: std::sync::atomic::AtomicBool,
+    voice: Mutex<(u64, bool)>,
 }
 struct Cover {
     window: Weak<NSWindow>,
@@ -912,8 +913,50 @@ fn show_lifecycle_alert(
     });
     true
 }
+pub(crate) fn voice_epoch(app: &AppHandle) -> u64 {
+    app.try_state::<Owner>()
+        .map_or(0, |owner| owner.voice.lock().unwrap().0)
+}
+fn voice_script(app: &AppHandle) -> String {
+    let (revision, locked) = *machine(app).voice.lock().unwrap();
+    format!("if (window.self === window.top) {{ window.__AVIBE_VOICE_LOCK__ = {{revision:{revision},locked:{locked}}}; window.dispatchEvent(new Event('avibe:voice-lock')); }}")
+}
+pub(crate) fn voice_document_ready(webview: &Webview) {
+    let app = webview.app_handle();
+    if app.try_state::<Owner>().is_none() {
+        return;
+    }
+    sync_windows(app);
+    let _ = webview.eval(voice_script(app));
+}
+fn sync_voice(app: &AppHandle, locked: bool) {
+    let changed = {
+        let owner = machine(app);
+        let mut state = owner.voice.lock().unwrap();
+        if state.1 == locked {
+            false
+        } else {
+            state.0 += 1;
+            state.1 = locked;
+            true
+        }
+    };
+    if !changed {
+        return;
+    }
+    if locked {
+        crate::pet::cancel_voice_for_app_lock(app);
+    }
+    let script = voice_script(app);
+    for view in app.webviews().values() {
+        let _ = view.eval(&script);
+    }
+}
+
 fn sync_on_main(app: &AppHandle, mtm: MainThreadMarker) {
-    if !is_locked(app) {
+    let locked = is_locked(app);
+    sync_voice(app, locked);
+    if !locked {
         let (covers, hidden) =
             PRESENTATION.with_borrow_mut(|p| (std::mem::take(&mut p.covers), std::mem::take(&mut p.hidden_windows)));
         if !covers.is_empty() {
@@ -1286,6 +1329,7 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
         pending: Mutex::new(None),
         path,
         dirty: std::sync::atomic::AtomicBool::new(false),
+        voice: Mutex::new((0, false)),
     });
     PRESENTATION.with_borrow_mut(|p| p.app = Some(app.clone()));
     install_window_hooks();

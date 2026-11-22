@@ -1,3 +1,4 @@
+/* @vitest-environment jsdom */
 import { describe, expect, it, vi } from 'vitest';
 
 import { noteAppVoice } from './appVoice';
@@ -366,3 +367,40 @@ describe('ShowPageVoiceHost', () => {
   });
 });
 
+
+describe('Show voice App Lock lifetime', () => {
+  let revision = 10;
+  const signal = (locked: boolean) => {
+    Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked } });
+    window.dispatchEvent(new Event('avibe:voice-lock'));
+  };
+  it.each(['availability', 'starting', 'listening', 'finishing'] as const)('cancels %s without late result or recovery and admits a new request', async (phase) => {
+    const availability = deferred<{ available: boolean; maxFileBytes: number | null }>();
+    const started = deferred<void>();
+    const old = new FakeVoiceSession(); old.start.mockImplementation(() => started.promise);
+    const fresh = new FakeVoiceSession();
+    const events: ShowPageVoiceEvent[] = [];
+    const createSession = vi.fn().mockReturnValueOnce(old).mockReturnValue(fresh);
+    const host = new ShowPageVoiceHost({ post: (e) => events.push(e), availability: () => availability.promise, createSession });
+    const request = { type: ANNOTATION_VOICE_REQUEST_MESSAGE, action: 'start', requestId: 'old', before: '', after: '' };
+    try {
+      signal(false); host.handle(request);
+      if (phase !== 'availability') { availability.resolve({ available: true, maxFileBytes: null }); await vi.waitFor(() => expect(old.start).toHaveBeenCalled()); }
+      if (phase === 'listening' || phase === 'finishing') { started.resolve(); await vi.waitFor(() => expect(events.some((e) => e.kind === 'started')).toBe(true)); }
+      if (phase === 'finishing') host.handle({ ...request, action: 'stop' });
+      signal(true);
+      host.handle({ ...request, requestId: 'locked' });
+      signal(false);
+      availability.resolve({ available: true, maxFileBytes: null }); started.resolve(); old.result.resolve('stale words');
+      await Promise.resolve(); await Promise.resolve();
+      expect(events.some((e) => e.kind === 'result')).toBe(false);
+      expect(events.some((e) => e.kind === 'error' && e.retryable)).toBe(false);
+      if (phase !== 'availability') expect(old.abort).toHaveBeenCalled();
+      if (phase === 'availability') createSession.mockReset().mockReturnValue(fresh);
+      host.handle({ ...request, requestId: 'fresh' });
+      await vi.waitFor(() => expect(fresh.start).toHaveBeenCalled());
+      fresh.result.resolve('new words');
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ kind: 'result', requestId: 'fresh', text: 'new words' })));
+    } finally { host.dispose(); Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+});

@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '../../src/lib/desktopVoiceLock';
 // Exercise the shipped lazy DesktopCompose -> DesktopComposeMount path in
 // WKWebView. Only router/composer context and the final input are test-owned.
 import { useEffect } from 'react';
@@ -9,7 +10,8 @@ import { ComposerBridgeContext, type ComposeTarget } from '../../src/context/Com
 import { ToastContext } from '../../src/context/ToastContext';
 import type { Receiver } from '../../src/desktop/desktopComposeReceiver';
 
-const observed = { lines: [] as string[], files: [] as { name: string; text: string }[], notices: [] as string[], mounted: false, route: '', answers: [] as { path: string; body: Record<string, unknown> }[] };
+const observed = { voiceCancelled: 0, get voiceAllowed() { return desktopVoiceLock.allowed(); }, lines: [] as string[], files: [] as { name: string; text: string }[], notices: [] as string[], mounted: false, route: '', answers: [] as { path: string; body: Record<string, unknown> }[] };
+desktopVoiceLock.onInvalidate(() => { observed.voiceCancelled += 1; });
 const target: ComposeTarget = {
   sessionId: 'ses_main', composerReady: true, showChat: () => {},
   appendLine: (line) => {

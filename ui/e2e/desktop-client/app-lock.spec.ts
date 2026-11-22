@@ -384,7 +384,7 @@ test('releases arriving while locked drain voice and Mini latches without admitt
         locked: true, pending: false, authCalls: 0, executed: [], floatingVisible: [false, false],
       });
       await peer.send('reset');
-      const next = kind === 'voiceToggle' && !cancelled ? 'Voice(Release)' : first;
+      const next = first; // Lock entry cancels the active take in either voice mode.
       expect(await peer.send('shortcutCycle', { kind, step: 'next' })).toBe(next);
       expect(await peer.send('shortcutCycle', { kind, step: 'next' })).toBeNull();
     }
@@ -811,5 +811,46 @@ test('E46 replacing a pending notification answer reports not delivered and reta
     expect((await peer.send<Answers>('composeRead')).answers.some(
       (answer) => answer.body.operation_id === original.operationId,
     )).toBe(false);
+  }
+});
+
+test('native lock publication invalidates managed document voice once and Off stays admitted', async () => {
+  await peer.send('reset'); await peer.send('composePage');
+  await expect.poll(() => peer.send('composeRead')).toMatchObject({ voiceAllowed: true });
+  const before = await peer.send<{ voiceCancelled: number }>('composeRead');
+  await peer.send('tick', { time: 3600 });
+  expect(await peer.send('composeRead')).toMatchObject({ voiceAllowed: true, voiceCancelled: before.voiceCancelled });
+  await peer.send('reset', { policy: 'immediately' });
+  await expect.poll(() => peer.send('composeRead')).toMatchObject({ voiceAllowed: false, voiceCancelled: before.voiceCancelled + 1 });
+  await peer.send('tick', { time: 3601 });
+  expect(await peer.send('composeRead')).toMatchObject({ voiceAllowed: false, voiceCancelled: before.voiceCancelled + 1 });
+  await peer.send('composePage', { reload: true });
+  await expect.poll(() => peer.send('composeRead')).toMatchObject({ voiceAllowed: false });
+  await peer.send('outcome', { value: 'success' }); await peer.send('unlock');
+  await expect.poll(() => peer.send('composeRead')).toMatchObject({ voiceAllowed: true });
+});
+
+test('locked voice press is Action and repeats across unlock cannot start a take', async () => {
+  for (const kind of ['voiceHold', 'voiceToggle']) {
+    await peer.send('reset');
+    await peer.send('shortcutCycle', { kind, step: 'prepare' });
+    await peer.send('reset', { policy: 'immediately' });
+    await peer.send('outcome', { value: 'cancelled' });
+    await peer.send('entry', { kind: 'content', value: 'keep content' });
+    await peer.send('shortcutCycle', { kind, step: 'nativePress' });
+    expect(await peer.send('shortcutCycle', { kind, step: 'suppressed' })).toBe(true);
+    await peer.send('outcome', { value: 'success' });
+    const unlocked = await peer.send('unlock');
+    expect(unlocked.executed).toEqual(['keep content']);
+    await peer.send('shortcutCycle', { kind, step: 'nativePress' });
+    expect(await peer.send('shortcutCycle', { kind, step: 'suppressed' })).toBe(true);
+    await peer.send('shortcutCycle', { kind, step: 'release' });
+    expect(await peer.send('shortcutCycle', { kind, step: 'suppressed' })).toBe(false);
+    expect(await peer.send('shortcutCycle', { kind, step: 'next' })).toBe('Voice(Listen)');
+    await peer.send('shortcutCycle', { kind, step: 'release' });
+    await peer.send('shortcutCycle', { kind, step: 'stalePress' });
+    expect(await peer.send('shortcutCycle', { kind, step: 'suppressed' })).toBe(true);
+    await peer.send('shortcutCycle', { kind, step: 'release' });
+    expect(await peer.send('shortcutCycle', { kind, step: 'suppressed' })).toBe(false);
   }
 });

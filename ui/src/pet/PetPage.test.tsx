@@ -1595,6 +1595,44 @@ describe('desktop mini v2 interaction contract', () => {
     }
   }
 
+  it.each(['starting', 'listening', 'finishing'] as const)('App Lock discards %s Mini capture, fences late results and preserves the draft', async (phase) => {
+    const captures: Dictation[] = [];
+    class Dictation {
+      ready = deferred<void>(); result = deferred<string>(); done = this.result.promise;
+      start = vi.fn(() => this.ready.promise); finish = vi.fn();
+      abort = vi.fn(); detach = vi.fn(); setAside = vi.fn(); landed = vi.fn();
+      constructor(public input: { onPreview: (text: string) => void }) { captures.push(this); }
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      const revisionBase = Date.now();
+      const signal = (revision: number, locked: boolean) => act(() => {
+        Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: revisionBase + revision, locked } });
+        window.dispatchEvent(new Event('avibe:voice-lock'));
+      });
+      try {
+        mainSession('S'); render(<PetPage />); tapHotkey();
+        await userEvent.type(await screen.findByRole('textbox'), 'draft before lock');
+        await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+        const old = captures[0];
+        if (phase !== 'starting') await act(async () => old.ready.resolve());
+        if (phase === 'finishing') await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+        signal(1, true); signal(1, true);
+        expect(old.abort).toHaveBeenCalledOnce();
+        summon('release'); summon('listen');
+        expect(captures).toHaveLength(1);
+        signal(2, false);
+        await act(async () => { old.input.onPreview('stale'); old.ready.resolve(); old.result.resolve('stale final'); });
+        expect(old.detach).not.toHaveBeenCalled(); expect(old.setAside).not.toHaveBeenCalled();
+        expect(old.landed).not.toHaveBeenCalled(); expect(api.sendSessionMessage).not.toHaveBeenCalled();
+        expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('draft before lock');
+        expect(captures).toHaveLength(1);
+        await userEvent.click(screen.getByLabelText('pet.voice.open'));
+        await act(async () => { captures[1].ready.resolve(); captures[1].result.resolve('new words'); });
+        expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('draft before lock new words');
+      } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+    });
+  });
+
   it.each(['stop', 'escape', 'failure', 'completion'] as const)('resets native toggle voice state on %s so the next press starts again', async (ending) => {
     const captures: Array<Deferred<string>> = [];
     const start = vi.fn(async () => {});

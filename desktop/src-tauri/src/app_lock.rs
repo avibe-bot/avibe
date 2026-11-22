@@ -11,7 +11,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
     defer, defer_kind, defer_with_replacement, init, is_locked, protects_view, queue_if_locked, ready,
-    show_discard_question, show_lifecycle_busy, show_quit_question, sync_windows,
+    show_discard_question, show_lifecycle_busy, show_quit_question, sync_windows, voice_document_ready, voice_epoch,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +46,20 @@ pub const MARKER: &str = if cfg!(target_os = "macos") {
 } else {
     ""
 };
+
+/// Read-only admission marker; native page-load sync supplies the current state.
+pub const VOICE_MARKER: &str = if cfg!(target_os = "macos") {
+    "if (window.self === window.top) window.__AVIBE_VOICE_LOCK__ = {revision:-1,locked:true};"
+} else {
+    ""
+};
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn voice_epoch(_app: &tauri::AppHandle) -> u64 {
+    0
+}
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn voice_document_ready(_webview: &tauri::Webview) {}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
