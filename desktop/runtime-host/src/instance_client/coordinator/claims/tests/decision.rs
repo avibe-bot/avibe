@@ -88,6 +88,7 @@ impl Transport for Hosted {
     async fn send(&self, req: Request) -> Result<Response> {
         let mut status = 200;
         let mut headers = reqwest::header::HeaderMap::new();
+        let raced_name = self.publication_case.starts_with("name_race_");
         let owed = self.review.is_some_and(|s| s.starts_with("factor_"));
         let verified = owed && self.factors.load(Ordering::SeqCst) != 0;
         let ordinary = if verified {
@@ -165,6 +166,7 @@ impl Transport for Hosted {
             }
             "/api/v1/claims/read" => Some(
                 if self.ticket_reads.fetch_add(1, Ordering::SeqCst) == 0
+                    || raced_name
                     || self.publication_case.starts_with("check_error_")
                 {
                     "session=synthetic"
@@ -172,7 +174,7 @@ impl Transport for Hosted {
                     ordinary
                 },
             ),
-            "/api/v1/claims/grant" => Some(if self.grants.fetch_add(1, Ordering::SeqCst) == 0 {
+            "/api/v1/claims/grant" => Some(if self.grants.fetch_add(1, Ordering::SeqCst) == 0 || raced_name {
                 "session=synthetic"
             } else if verified {
                 "ordinary=after-factor; __Host-avibe-sign-in-proof=fixture.proof"
@@ -209,7 +211,7 @@ impl Transport for Hosted {
                 assert_eq!(
                     req.body,
                     Some(if again {
-                        json!({"user_code":"ABCD234567","prefix":"desk"})
+                        json!({"user_code":"ABCD234567","prefix":if raced_name {"spare"}else{"desk"}})
                     } else {
                         json!({"user_code":"ABCD234567"})
                     })
@@ -227,9 +229,12 @@ impl Transport for Hosted {
                     });
                 }
                 if again {
-                    assert!(self.review.is_some());
+                    assert!(raced_name || self.review.is_some());
                 }
                 let mut projection = json!({"mode":"desktop","locale":"en","expires_at":self.expiry,"device_name":"fixture computer","account_subject":"fixture-a","account_email":"fixture@example.test","state":"new","prefilled_prefix":"desk","prefix":"desk","taken":false});
+                if again && raced_name {
+                    projection["prefix"] = json!("spare");
+                }
                 if self.publication_case.starts_with("read_refresh_") {
                     headers.insert(
                         reqwest::header::SET_COOKIE,
@@ -266,7 +271,7 @@ impl Transport for Hosted {
                 assert_eq!(
                     req.body,
                     Some(
-                        json!({"user_code":"ABCD234567","mode":"desktop","confirm_device":true,"prefix":"desk","expected_subject":"fixture-a","existing_instance_id":null})
+                        json!({"user_code":"ABCD234567","mode":"desktop","confirm_device":true,"prefix":if raced_name && !first {"spare"}else{"desk"},"expected_subject":"fixture-a","existing_instance_id":null})
                     )
                 );
                 if first {
@@ -275,14 +280,23 @@ impl Transport for Hosted {
                     wait.await.map_err(|_| stale())?;
                 } else {
                     assert!(
-                        matches!(
-                            self.review,
-                            Some("ok" | "refused" | "factor_ok" | "factor_recovery" | "factor_pk_ok")
-                        ) || self.review.is_some_and(|r| r.starts_with("factor_enroll_"))
+                        raced_name
+                            || matches!(
+                                self.review,
+                                Some("ok" | "refused" | "factor_ok" | "factor_recovery" | "factor_pk_ok")
+                            )
+                            || self.review.is_some_and(|r| r.starts_with("factor_enroll_"))
                     );
                     assert_eq!(self.grants.load(Ordering::SeqCst), 2);
                 }
-                if self.publication_case.starts_with("grant_denied_") {
+                if first && raced_name {
+                    status = 409;
+                    headers.insert(
+                        reqwest::header::SET_COOKIE,
+                        "session=unattributed; Secure; Path=/".parse().unwrap(),
+                    );
+                    json!({"error":"taken"})
+                } else if self.publication_case.starts_with("grant_denied_") {
                     status = 409;
                     json!({"error":"binding_unavailable", "reason":"paired_installation_loopback_required"})
                 } else if (first && self.require_proof) || self.review == Some("refused") {
@@ -295,7 +309,7 @@ impl Transport for Hosted {
                     }
                     json!({"error":"first_factor_reauthentication_required"})
                 } else {
-                    json!({"status":"granted","hostname":"desk-app.avibe.bot"})
+                    json!({"status":"granted","hostname":if raced_name {"spare-app.avibe.bot"}else{"desk-app.avibe.bot"}})
                 }
             }
             "https://avibe.bot/api/config/auth" if self.require_proof => {
@@ -521,6 +535,10 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "no_saved_owner_at_confirm",
         "machine",
         "publication_offline",
+        "name_race_edit",
+        "name_race_drop",
+        "name_race_credential",
+        "name_race_replaced",
         "grant_denied_live",
         "grant_denied_replaced",
         "decline_live",
@@ -1043,6 +1061,67 @@ async fn check_cut(cut: &'static str) {
         return;
     }
     reply.send(()).unwrap();
+    if cut.starts_with("name_race_") {
+        let pending = decision.await.unwrap();
+        peer.assert_unarmed();
+        assert!(confirm(receipt).await.is_err());
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
+        let check = |r: Uuid| {
+            dispatch(ClaimAction::Check {
+                revision: r.to_string(),
+                prefix: "spare".into(),
+            })
+        };
+        assert!(check(revision).await.is_err());
+        if cut == "name_race_drop" {
+            drop(pending);
+            assert!(peer.arm().await.is_err());
+            return;
+        }
+        if cut == "name_race_replaced" {
+            caller.retire();
+            let next = c.claim_document(generation).unwrap();
+            assert_eq!(pending.deliver().unwrap_err().code, "stale_generation");
+            assert!(next.caller().unwrap().monitoring() && peer.arm().await.is_err());
+            return;
+        }
+        if cut == "name_race_credential" {
+            replace_credential();
+            assert_eq!(pending.deliver().unwrap_err().code, "stale_generation");
+            assert!(peer.arm().await.is_err());
+            return;
+        }
+        let taken = pending.deliver().unwrap().unwrap();
+        let edit = opaque(taken["revision"].as_str().unwrap()).unwrap();
+        assert_eq!(taken, json!({"state":"name_taken","revision":edit.to_string()}));
+        assert_ne!(edit, revision);
+        let accept = |r: Uuid| {
+            dispatch(ClaimAction::Confirm {
+                receipt: receipt.to_string(),
+                revision: r.to_string(),
+            })
+        };
+        assert!(accept(edit).await.is_err() && check(revision).await.is_err());
+        assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 1);
+        let fresh = check(edit).await.unwrap().deliver().unwrap().unwrap();
+        let replacement = opaque(fresh["revision"].as_str().unwrap()).unwrap();
+        assert_eq!(fresh["screen"]["prefix"], "spare");
+        assert_ne!(replacement, edit);
+        assert!(accept(edit).await.is_err());
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
+        peer.assert_unarmed();
+        let second = accept(replacement);
+        tokio::pin!(second);
+        let arm = tokio::select! { _=&mut second=>panic!("unreleased machine result"), arm=peer.arm()=>arm.unwrap() };
+        assert_eq!(arm["hostname"], "spare-app.avibe.bot");
+        peer.finish.send(Ok(MachineOutcome::Declined)).ok().unwrap();
+        assert_eq!(
+            second.await.unwrap().deliver().unwrap(),
+            Some(json!({"state":"declined"}))
+        );
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 2);
+        return;
+    }
     if hosted.require_proof {
         let pending_offer = decision.await.unwrap();
         assert!(caller.monitoring());

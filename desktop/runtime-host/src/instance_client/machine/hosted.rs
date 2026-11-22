@@ -70,6 +70,7 @@ impl ReviewedGrant {
 }
 
 pub(crate) enum GrantResponse {
+    NewNameTaken,
     Matched(MatchedSubmission),
     ProofRequired(ProofNeeded),
 }
@@ -440,6 +441,23 @@ impl HostedClaim {
                     refused_revision: expected,
                     target,
                 }));
+            }
+            if target.existing_id.is_none() && error_code(r) == Some((409, "taken")) {
+                // The confirmed revision is spent, but this exact refusal did not arm
+                // the helper. Preserve only enough to read another prefix on its ticket.
+                // Neither the old target, a suggested replacement, nor response cookies
+                // can authorize the next grant.
+                self.dispatched = false;
+                self.review = Some(Read {
+                    screen: Screen::New {
+                        prefilled: None,
+                        selected: Some(target.prefix),
+                        taken: true,
+                        names: None,
+                    },
+                    target: None,
+                });
+                return Ok(GrantResponse::NewNameTaken);
             }
             if let Some(error) = refusal(r, true) {
                 flow.session = jar; // this exact-origin refusal can still refresh the ordinary session

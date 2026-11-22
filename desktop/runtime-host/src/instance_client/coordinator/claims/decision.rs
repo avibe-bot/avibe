@@ -9,6 +9,7 @@ use crate::instance_client::{
 pub(super) enum DecisionOutcome<'a> {
     Terminal(PendingDecision),
     ProofOffered(PendingProofOffer<'a>),
+    NameTaken(Box<PendingNameEdit<'a>>),
 }
 
 struct Confirming {
@@ -21,7 +22,7 @@ struct Confirming {
     adoption: tokio::sync::watch::Receiver<bool>,
 }
 impl Confirming {
-    fn with_owner<T>(&self, c: &Coordinator, f: impl FnOnce(&mut Instant) -> Result<T>) -> Result<T> {
+    fn with_owner<T>(&self, c: &Coordinator, f: impl FnOnce(&mut Claims) -> Result<T>) -> Result<T> {
         if !Arc::ptr_eq(&self.caller.owner, &c.claims) {
             return Err(stale());
         }
@@ -31,7 +32,7 @@ impl Confirming {
         let mut owner = c.claims.lock().expect("claim owner");
         self.epoch.check()?;
         self.caller.check()?;
-        let until = owner.confirming(self.receipt, self.revision, &self.account)?;
+        owner.confirming(self.receipt, self.revision, &self.account)?;
         if inner.state.account.status != AccountStatus::SignedIn
             || inner.state.account.identity.as_ref() != Some(&self.account)
             || inner.record.account_id.as_ref() != Some(&self.account.id)
@@ -43,7 +44,40 @@ impl Confirming {
         if !*self.adoption.borrow() || !matches!(self.adoption.has_changed(), Ok(false)) {
             return Err(stale());
         }
-        f(until)
+        f(&mut owner)
+    }
+}
+
+/// No editable revision is available until the original document receives the refusal.
+/// A lost reply drops only its own unarmed helper and receipt.
+#[must_use]
+pub(super) struct PendingNameEdit<'a> {
+    owner: Confirming,
+    claim: HostedClaim,
+    borrow: Borrow<'a>,
+}
+impl PendingNameEdit<'_> {
+    pub(super) fn deliver(self, c: &Coordinator) -> Result<Value> {
+        let Self {
+            owner,
+            claim,
+            mut borrow,
+        } = self;
+        let revision = claim.revision();
+        owner
+            .with_owner(c, |claims| {
+                if !claim.machine_live() {
+                    return Err(stale());
+                }
+                claims.active.as_mut().ok_or_else(stale)?.stage = Stage::Reading {
+                    idle: Some(claim),
+                    interrupt: None,
+                    delivery: Delivery::EditOnly,
+                };
+                borrow.returned = true;
+                Ok(json!({"state":"name_taken", "revision":revision.to_string()}))
+            })
+            .map_err(|_| stale())
     }
 }
 
@@ -119,8 +153,8 @@ impl Coordinator {
                 previous,
             )
         };
-        // Only an exact proof challenge can return ownership to this receipt.
-        // Otherwise losing the caller or the response releases the original pipe.
+        // Keep the original pipe only for a qualified proof offer or a definite
+        // refusal of a new name. Neither grants permission to arm or replay.
         let mut borrow = Borrow {
             owner: &self.claims,
             receipt,
@@ -178,6 +212,13 @@ impl Coordinator {
             owner.confirming(receipt, revision, a)?;
             let grant = match grant {
                 GrantResponse::Matched(grant) => grant,
+                GrantResponse::NewNameTaken => {
+                    return Ok(DecisionOutcome::NameTaken(Box::new(PendingNameEdit {
+                        owner: confirming,
+                        claim,
+                        borrow,
+                    })));
+                }
                 GrantResponse::ProofRequired(proof) => {
                     let cookies = flow.session.factor_cookies().ok_or_else(stale)?;
                     owner
@@ -222,9 +263,10 @@ impl Coordinator {
             r = verify => r,
         };
         confirming
-            .with_owner(self, |until| {
+            .with_owner(self, |claims| {
                 if let Ok(Some(p)) = &observed {
                     p.check()?;
+                    let until = claims.confirming(receipt, revision, &confirming.account)?;
                     *until = (*until).min(p.deadline());
                 }
                 Ok(())

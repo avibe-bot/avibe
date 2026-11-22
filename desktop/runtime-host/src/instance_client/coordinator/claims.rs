@@ -150,6 +150,7 @@ enum Stage {
 }
 #[derive(PartialEq, Eq)]
 enum Delivery {
+    EditOnly, // a delivered definite refusal permits a read, never a confirmation
     Unreleased,
     Released(Uuid), // passed the final native delivery gate, not proof of human interaction
     Confirming(Uuid, Instant),
@@ -390,6 +391,7 @@ impl ClaimReply<'_> {
             ReplyBody::Observation(c, observation) => return observation.take(c).map(Some),
             ReplyBody::Decision(c, decision) => {
                 return Ok(Some(match *decision {
+                    decision::DecisionOutcome::NameTaken(reply) => reply.deliver(c)?,
                     decision::DecisionOutcome::Terminal(reply) => {
                         json!({"state": if reply.deliver(c)? { "bound" } else { "declined" }})
                     }
