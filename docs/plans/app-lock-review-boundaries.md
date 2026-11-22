@@ -170,3 +170,17 @@ adapter and preference-save mutations are all rejected. The CI-equivalent
 `--locked --all-features` shell-boundary suite passes all 54 tests locally on
 macOS; its platform-neutral source checks normalize Windows line endings.
 Windows execution remains for the final remote CI run. Rust formatting passes.
+
+## Approved independent dependency correction
+
+The orchestrator subsequently approved the isolated non-voice candidate
+`ade0da5590`, integrated after the shell-boundary contract correction. It moves
+the unchanged routeable catalog ID projection into a lightweight module; the
+first-screen picker no longer imports the catalog editor. Existing deferred
+editing boundaries and all voice/App Lock behavior remain unchanged. The
+experiment measured home 613,105 and chat 913,738 gzip bytes, both within the
+original budgets. See `4191-home-static-dependencies.md` for the import graph and
+consumer evidence. The abandoned lazy-card and semantic-reduction experiments
+are absent from the final source diff. The combined head must repeat production
+build/budget, offline consumer and shell-boundary checks, receive independent
+review, and pass fresh remote CI and exact-head Codex review before merge.
