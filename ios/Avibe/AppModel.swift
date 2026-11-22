@@ -458,8 +458,76 @@ final class AppModel: ObservableObject {
                 outside: liveOrigins,
                 accountID: accountID
             )
+            // And, once two answers a day apart agree, what such an
+            // address left in the account's WebKit store.
+            await self?.departedInstanceData.reconcile(live: liveOrigins, accountID: accountID)
         }
     )
+
+    /// The addresses this account opened here, and the removal of what one
+    /// left behind once it is no longer the account's.
+    private lazy var departedInstanceData = DepartedInstanceData(
+        defaults: defaults,
+        currentStore: { [weak self] in self?.websiteDataStore.identifier },
+        clean: { [weak self] origin, accountID in
+            await self?.removeDepartedInstanceData(origin: origin, accountID: accountID) ?? false
+        }
+    )
+
+    /// Removes what `origin` stored in the account's WebKit store, its
+    /// cached page, and this device's path choice for it. Only for an
+    /// address the signed-in account does not list and nothing shows.
+    private func removeDepartedInstanceData(origin: String, accountID: String) async -> Bool {
+        guard let address = WebOrigin.parseConfigured(origin) else {
+            return false
+        }
+        let store = websiteDataStore.identifier
+        // Asked now, and again right before each thing is deleted: the
+        // removal is prepared across suspensions, and the address may be
+        // listed again meanwhile.
+        let stillDeparted = { [weak self] () -> Bool in
+            guard let self else {
+                return false
+            }
+            // Not during a sign-out, a reset or a change of account: the
+            // store is about to go, with everything in it.
+            return self.sessionCoordinator.settledAccountID == accountID
+                && self.websiteDataStore.identifier == store
+                && !self.sessionCoordinator.currentInstances.contains(where: {
+                    WebOrigin(url: $0.url)?.serialized == origin
+                })
+                && self.route.runtime.flatMap({ WebOrigin(url: $0.instance.url)?.serialized }) != origin
+        }
+        guard stillDeparted() else {
+            return false
+        }
+        // Cookies belong to a host: kept while another address the account
+        // lists, or avibe.bot itself, is on that host.
+        let hostInUse = sessionCoordinator.controlPlaneURL.host == address.host
+            || sessionCoordinator.currentInstances.contains {
+                WebOrigin(url: $0.url)?.host == address.host
+            }
+        guard await InstanceSiteDataCleaner.clean(
+            origin: address,
+            in: websiteDataStore.dataStore,
+            removingCookies: !hostInUse,
+            willUse: { [weak self] webView in
+                // A store rotation waits for this WebView as for any other
+                // of the store.
+                self?.recordRuntimeReleaseBarrier(
+                    WebsiteDataStoreReleaseBarrier(webViews: [webView])
+                )
+            },
+            stillWanted: stillDeparted
+        ), stillDeparted() else {
+            return false
+        }
+        RuntimePageCache(directory: RuntimePageCache.root
+            .appendingPathComponent(store.uuidString, isDirectory: true))
+            .removePage(accountID: accountID, origin: origin)
+        directPathPreferences.set(.automatic, accountID: accountID, origin: origin)
+        return true
+    }
 
     private lazy var turnActivities = TurnActivityCoordinator(
         defaults: defaults,
@@ -681,6 +749,21 @@ final class AppModel: ObservableObject {
         }
         runtimeOpenLifecycleObservers = [
             runtimeOpenNotificationCenter.addObserver(
+                forName: UIScene.didActivateNotification, object: nil, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.hasCompletedBootstrap else { return }
+                    let target = self.liveActivityTarget
+                    self.turnActivities.selectTarget(target)
+                    Task { await self.turnActivities.foreground(target: target) }
+                }
+            },
+            runtimeOpenNotificationCenter.addObserver(
+                forName: UIScene.willDeactivateNotification, object: nil, queue: nil
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.liveActivityWillDeactivate() }
+            },
+            runtimeOpenNotificationCenter.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification,
                 object: nil,
                 queue: nil
@@ -806,33 +889,43 @@ final class AppModel: ObservableObject {
               let target = liveActivityTarget, target.instanceOrigin == origin.serialized else {
             throw NativeBridgeError.forbidden
         }
-        if request.method == .liveActivityOpenSettings {
+        switch request.method {
+        case .liveActivitySetting:
+            guard request.params.isEmpty else { throw NativeBridgeError.invalidRequest }
+            return turnActivities.setting()
+        case .liveActivitySetSetting:
+            guard request.params.count == 1,
+                  let value = request.params["enabled"] as? NSNumber,
+                  CFGetTypeID(value) == CFBooleanGetTypeID() else { throw NativeBridgeError.invalidRequest }
+            await turnActivities.setSetting(value.boolValue)
+            return turnActivities.setting()
+        case .liveActivityObserve:
+            if request.params.count == 1, request.params["sessionId"] is NSNull {
+                await turnActivities.observe(nil)
+            } else {
+                guard request.params.count == 4,
+                      let sessionID = request.params["sessionId"] as? String, !sessionID.isEmpty, sessionID.count <= 256,
+                      let name = request.params["agentName"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      request.params["sessionTitle"] is String || request.params["sessionTitle"] is NSNull,
+                      let running = request.params["running"] as? NSNumber,
+                      CFGetTypeID(running) == CFBooleanGetTypeID() else { throw NativeBridgeError.invalidRequest }
+                await turnActivities.observe(.init(sessionID: sessionID, agentName: name,
+                    sessionTitle: request.params["sessionTitle"] as? String, running: running.boolValue, target: target))
+            }
+            return ["ok": true]
+        case .liveActivityOpenSettings:
             guard request.params.isEmpty else { throw NativeBridgeError.invalidRequest }
             await UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
             return ["ok": true]
-        }
-        guard let sessionID = request.params["sessionId"] as? String,
-              !sessionID.isEmpty, sessionID.count <= 256 else { throw NativeBridgeError.invalidRequest }
-        switch request.method {
-        case .liveActivityStatus:
-            guard request.params.count == 1 else { throw NativeBridgeError.invalidRequest }
-            return turnActivities.status(sessionID: sessionID, target: target)
-        case .liveActivityStop:
-            guard request.params.count == 1 else { throw NativeBridgeError.invalidRequest }
-            await turnActivities.stop(sessionID: sessionID, target: target)
-            return ["ok": true]
-        case .liveActivityStart:
-            guard request.params.count == 3, let name = request.params["agentName"] as? String,
-                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  request.params["sessionTitle"] is String || request.params["sessionTitle"] is NSNull else {
-                throw NativeBridgeError.invalidRequest
-            }
-            return await turnActivities.start(sessionID: sessionID, agentName: name,
-                sessionTitle: request.params["sessionTitle"] as? String, target: target,
-                registrationID: nativePushCoordinator.liveActivityRegistrationID(
-                    accountID: target.accountID, instanceOrigin: target.instanceOrigin))
         default: throw NativeBridgeError.unsupported
         }
+    }
+
+    /// This callback must not enqueue a Task before Activity.request.
+    private func liveActivityWillDeactivate() {
+        guard hasCompletedBootstrap, !route.coversRuntime, let target = liveActivityTarget else { return }
+        turnActivities.willDeactivate(registrationID: nativePushCoordinator.liveActivityRegistrationID(
+            accountID: target.accountID, instanceOrigin: target.instanceOrigin))
     }
 
     func openLiveActivity(_ url: URL) {
@@ -1431,13 +1524,8 @@ final class AppModel: ObservableObject {
     private func bootstrap() async {
         let launch = Self.coldStartSignposter.beginInterval("bootstrap")
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
-        // The Turn Live Activity entry is withdrawn (11-21): first of all,
-        // before the session check (whose sign-out would DELETE each ledger
-        // row), end any card an earlier build left and forget the ledger,
-        // with no instance request.
-        if !NativeShellMetadata.liveActivitiesAvailable {
-            await turnActivities.endAllLocally()
-        }
+        // Retire earlier-build cards locally before any account cleanup can send.
+        if !turnActivities.deviceEnabled { await turnActivities.endAllLocally() }
         await websiteDataStore.sweepOrphans()
         // Open first: with the last session avibe.bot confirmed and its
         // selected instance on this device, open that instance now and check
@@ -1592,13 +1680,9 @@ final class AppModel: ObservableObject {
         // Navigation requested before bootstrap is delivered before Health
         // restoration, which may wait on the network and HealthKit.
         deliverPendingInstanceOpen()
-        // Withdrawn (11-21): `bootstrap` ended any old card; nothing is
-        // reconciled or started.
-        if NativeShellMetadata.liveActivitiesAvailable {
-            if !AvibeAppDelegate.isRunningTests { turnActivities.observeAuthorization() }
-            turnActivities.selectTarget(liveActivityTarget)
-            await turnActivities.reconcile(target: liveActivityTarget)
-        }
+        if !AvibeAppDelegate.isRunningTests { turnActivities.observeAuthorization() }
+        turnActivities.selectTarget(liveActivityTarget)
+        await turnActivities.reconcile(target: liveActivityTarget)
         await healthSync?.resume(foreground: UIApplication.shared.applicationState != .background)
     }
 
@@ -2430,12 +2514,6 @@ final class AppModel: ObservableObject {
     /// remainder. A timer that could not fire on time (no background
     /// interval was reported) ends its attempt here.
     private func runtimeOpenWillEnterForeground() {
-        if hasCompletedBootstrap {
-            if NativeShellMetadata.liveActivitiesAvailable {
-                turnActivities.selectTarget(liveActivityTarget)
-                Task { await turnActivities.reconcile(target: liveActivityTarget) }
-            }
-        }
         Task { await healthSync?.resume(foreground: true) }
         Task { [weak self] in
             await self?.systemScheduleCoordinator.retryPendingCleanup()
@@ -2626,11 +2704,16 @@ final class AppModel: ObservableObject {
             confirmSessionThenOpen()
             return true
         }
-        if NativeShellMetadata.liveActivitiesAvailable {
-            let turnTarget = liveActivityTarget
-            turnActivities.selectTarget(turnTarget)
-            Task { await turnActivities.reconcile(target: turnTarget) }
+        if let origin = WebOrigin(url: runtime.instance.url)?.serialized {
+            departedInstanceData.noteOpened(
+                accountID: runtime.account.id,
+                origin: origin,
+                store: runtime.websiteDataStoreID
+            )
         }
+        let turnTarget = liveActivityTarget
+        turnActivities.selectTarget(turnTarget)
+        Task { await turnActivities.reconcile(target: turnTarget) }
         nativePushCoordinator.resumeAfterAccountActivation()
         if let previous = runtimeOpenAttempt {
             lastRuntimeOpenTermination = RuntimeOpenTermination(

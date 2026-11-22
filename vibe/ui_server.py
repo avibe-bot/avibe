@@ -14428,6 +14428,9 @@ _VOICE_CAPTURE_ATTEMPT_ENUMS = {
     "engine": {"healthy", "stalled", "unknown"},
     # Why the iOS App ended a take it recorded (ios/Avibe/NativeHoldCapture.swift).
     "nativeEnd": {"interrupted", "route", "background", "gone", "replaced", "action_button", "other"},
+    # A hold the iOS App recognised itself: whether its microphone opened at touch-down
+    # ("early"), was only prepared then ("quiet"), or opened at recognition ("late").
+    "hold": {"early", "quiet", "late"},
 }
 _VOICE_CAPTURE_ATTEMPT_INTS = {
     "atMs",
@@ -14441,6 +14444,17 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     "clockAdvanceMs",
     "renderCalls",
     "emptyInputs",
+    # The App's own timings of a hold it recognised, in ms from touch-down: the cue, the live
+    # microphone, its first audio, the page taking the take, the release.
+    "holdRecMs",
+    "holdLiveMs",
+    "holdBufMs",
+    "holdAdoptMs",
+    "holdUpMs",
+    # The App's two durations of any take it records: activating its audio session, and
+    # starting the microphone.
+    "holdActMs",
+    "holdStartMs",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8
@@ -14724,6 +14738,13 @@ def asr_status():
                 # This account's answer to the voice disclosure: "granted",
                 # "declined", or null when it has not been asked.
                 "consent": _voice_consent_for(_voice_consent_user_key()),
+                # Whether, in the iOS App, the App recognises holds and records
+                # every take (``audio_asr.app_hold``); false is the off switch.
+                "app_hold": getattr(audio_asr_config, "app_hold", True) is not False,
+                # Whether a touch on the main Bot's button opens the microphone
+                # there at once (``audio_asr.app_hold_main_at_touch``); false
+                # makes that button open it when the hold is recognised.
+                "app_hold_main_at_touch": getattr(audio_asr_config, "app_hold_main_at_touch", True) is not False,
             }
         )
     except Exception:

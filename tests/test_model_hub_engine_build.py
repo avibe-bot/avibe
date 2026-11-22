@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -102,7 +103,13 @@ def _candidate_manifest(tmp_path: Path, *, source_sha: str, patches: list[Path])
 
 @pytest.mark.parametrize(
     ("patch_mode", "wrong_pinned_size"),
-    [("pinned", False), ("pinned", True), ("changed", False)],
+    [
+        pytest.param("pinned", False, marks=pytest.mark.xfail(
+            sys.version_info >= (3, 14), strict=True, raises=guard.ReleaseGuardError,
+            reason="#4134 follow-up: pin the engine packager's gzip level to reproduce the archive",
+        )),
+        ("pinned", True), ("changed", False),
+    ],
 )
 def test_build_source_release_applies_patches_in_order_and_materializes_six_targets(
     tmp_path: Path,

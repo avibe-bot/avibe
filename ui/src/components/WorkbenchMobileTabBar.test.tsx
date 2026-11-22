@@ -9,11 +9,17 @@ import { BotsContext, type BotsState } from '../context/BotsContext';
 import { WorkbenchInboxContext, type InboxState } from '../context/WorkbenchInboxContext';
 import type { Bot } from '../lib/bots';
 import { WorkbenchMobileTabBar } from './WorkbenchMobileTabBar';
+import { noteAppVoice } from '../lib/appVoice';
 
 const api = vi.hoisted(() => ({ sendSessionMessage: vi.fn(), listSessionMessages: vi.fn() }));
 // The hold's own path is useHoldToTalk's test; here the bar hands it what to send and where a tap goes.
 const hold = vi.hoisted(() => ({
-  options: null as null | { send: (text: string, metadata: object) => Promise<boolean>; onTap?: () => void; context?: () => unknown },
+  options: null as null | {
+    send: (text: string, metadata: object) => Promise<boolean>;
+    onTap?: () => void;
+    context?: () => unknown;
+    startsAtRecognition?: () => boolean;
+  },
   phase: 'idle',
   progress: 0,
 }));
@@ -137,6 +143,18 @@ describe('WorkbenchMobileTabBar', () => {
     await expect(hold.options!.send('Check the release', { input: 'voice' })).resolves.toBe(true);
     expect(api.sendSessionMessage).toHaveBeenCalledWith('ses_main', { text: 'Check the release', metadata: { input: 'voice' } });
     expect(screen.queryByTestId('chat')).toBeNull();
+  });
+
+  // In the iOS App a touch on the main Bot opens the microphone like one on the composer, unless
+  // the instance says otherwise (`audio_asr.app_hold_main_at_touch`, said by `/api/asr/status`):
+  // then the App starts recording there only when it recognises the hold.
+  it('lets the instance say that a touch on the main Bot opens no microphone', () => {
+    renderBar(bots({}), {}, vi.fn());
+    expect(hold.options!.startsAtRecognition!()).toBe(false);
+    noteAppVoice({ app_hold: true, app_hold_main_at_touch: false });
+    expect(hold.options!.startsAtRecognition!()).toBe(true);
+    noteAppVoice({ app_hold: true, app_hold_main_at_touch: true });
+    expect(hold.options!.startsAtRecognition!()).toBe(false);
   });
 
   it("hears a held take in the main Bot's conversation", async () => {

@@ -8,10 +8,17 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from typing import TYPE_CHECKING
+
 from config.atomic_io import write_atomic
 from core.mcp_hub.errors import McpHubError
-from mcp.client.auth.oauth2 import OAuthClientProvider
-from mcp.shared.auth import OAuthClientMetadata, OAuthClientInformationFull, OAuthMetadata, OAuthToken, ProtectedResourceMetadata
+
+if TYPE_CHECKING:
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+# The MCP SDK is imported where it is used, not here: this module is loaded at
+# every controller start, and the SDK (with its dependencies, about 55k tracked
+# objects and 18 MiB) is needed only once an HTTP MCP server signs in.
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +56,8 @@ class AvibeTokenStorage:
         return read_state(self.name, self.server_url)
 
     async def get_tokens(self) -> OAuthToken | None:
+        from mcp.shared.auth import OAuthToken
+
         value = (await asyncio.to_thread(self.raw)).get("tokens")
         return OAuthToken.model_validate(value) if isinstance(value, dict) else None
 
@@ -61,6 +70,8 @@ class AvibeTokenStorage:
             value.pop("expiresAt", None)
         await asyncio.to_thread(_write, self.name, value)
     async def get_client_info(self) -> OAuthClientInformationFull | None:
+        from mcp.shared.auth import OAuthClientInformationFull
+
         value = (await asyncio.to_thread(self.raw)).get("client")
         if isinstance(value, dict) and self.redirect_uri is not None:
             uris = [str(item) for item in value.get("redirect_uris") or []]
@@ -84,41 +95,6 @@ class AvibeTokenStorage:
         value.pop("expiresAt", None)
         await asyncio.to_thread(_write, self.name, value)
 
-class AvibeOAuthProvider(OAuthClientProvider):
-    """SDK provider with persisted expiry, AS metadata and PRM."""
-
-    async def _initialize(self) -> None:
-        await super()._initialize()
-        raw = await asyncio.to_thread(self.context.storage.raw) if hasattr(self.context.storage, "raw") else {}
-        if raw.get("expiresAt") is not None:
-            self.context.token_expiry_time = float(raw["expiresAt"])
-        for key, attr, model in (("authServerMetadata", "oauth_metadata", OAuthMetadata), ("resourceMetadata", "protected_resource_metadata", ProtectedResourceMetadata)):
-            if isinstance(raw.get(key), dict):
-                try:
-                    setattr(self.context, attr, model.model_validate(raw[key]))
-                except Exception:
-                    logger.warning("Ignoring invalid stored MCP OAuth metadata")
-        configured = getattr(self, "_configured_client_info", None)
-        if configured is not None:
-            self.context.client_info = configured
-
-    async def _handle_token_response(self, response) -> None:
-        await super()._handle_token_response(response)
-        raw = await asyncio.to_thread(self.context.storage.raw)
-        if self.context.oauth_metadata is not None:
-            raw["authServerMetadata"] = self.context.oauth_metadata.model_dump(mode="json")
-        if self.context.protected_resource_metadata is not None:
-            raw["resourceMetadata"] = self.context.protected_resource_metadata.model_dump(mode="json")
-        await asyncio.to_thread(_write, self.context.storage.name, raw)
-
-    async def _handle_refresh_response(self, response) -> bool:
-        status = getattr(response, "status_code", 0)
-        ok = await super()._handle_refresh_response(response)
-        if not ok and status in {400, 401}:
-            await self.context.storage.clear_tokens()
-        return ok
-
-
 def redirect_mode(origin: str | None, *, cloud_origin: str | None = None, cli: bool = False, port: int | None = None) -> tuple[str, str]:
     candidate = cloud_origin if cli and cloud_origin else origin
     parsed = urlparse(candidate or "")
@@ -141,9 +117,13 @@ def parse_callback_url(value: str) -> dict[str, str]:
     return result
 
 
-def make_provider(name: str, definition: dict, redirect_uri: str, *, redirect_handler, callback_handler, filter_redirect: bool = True) -> AvibeOAuthProvider:
+def make_provider(name: str, definition: dict, redirect_uri: str, *, redirect_handler, callback_handler, filter_redirect: bool = True):
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
+
     transport = definition["transport"]
     oauth = definition.get("oauth") or {}
+    from core.mcp_hub.oauth_provider import AvibeOAuthProvider
+
     provider = AvibeOAuthProvider(
         transport["url"],
         OAuthClientMetadata(redirect_uris=[redirect_uri], client_name="Avibe MCP Hub", application_type="native", token_endpoint_auth_method="none", scope=oauth.get("scopes")),

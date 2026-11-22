@@ -2213,6 +2213,7 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(NativeShellMetadata.capabilities["systemSchedule"], 1)
         XCTAssertEqual(NativeShellMetadata.capabilities["device"], 1)
         // Withdrawn (11-21): the methods stay recognized but refuse.
+        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
         XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
@@ -2236,6 +2237,9 @@ final class MobileOnboardingTests: XCTestCase {
                 "haptics.selection",
                 "health.connect",
                 "liveActivity.openSettings",
+                "liveActivity.setting",
+                "liveActivity.setSetting",
+                "liveActivity.observe",
                 "liveActivity.start",
                 "liveActivity.status",
                 "liveActivity.stop",
@@ -2255,6 +2259,9 @@ final class MobileOnboardingTests: XCTestCase {
                 "voice.capturePrepare",
                 "voice.captureStart",
                 "voice.captureStop",
+                "voice.holdAdopt",
+                "voice.holdReject",
+                "voice.holdSurfaces",
             ]
         )
     }

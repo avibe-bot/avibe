@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod app_windows;
+pub mod direct;
 pub mod instance_client;
 mod instance_credentials;
 mod instance_downloads;

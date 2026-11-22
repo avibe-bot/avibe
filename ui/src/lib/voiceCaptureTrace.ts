@@ -165,6 +165,19 @@ export type VoiceCaptureAttempt = {
   end?: 'rendered' | 'no_frames' | 'stalled' | 'not_running' | 'stopped' | 'error';
   /** A take the App recorded and ended itself: why (ios/Avibe/NativeHoldCapture.swift). */
   nativeEnd?: VoiceNativeEnd;
+  /** A hold the App recognised itself (lib/nativeVoiceHold), and its own timings in ms from
+   *  touch-down: when it gave the cue, when the microphone was live, its first audio, when the
+   *  page took the take, and the release. `early`: the microphone opened at touch-down. */
+  hold?: 'early' | 'quiet' | 'late';
+  holdRecMs?: number;
+  holdLiveMs?: number;
+  holdBufMs?: number;
+  holdAdoptMs?: number;
+  holdUpMs?: number;
+  /** The App's two durations of any take it records: activating its audio session, and starting
+   *  the microphone. */
+  holdActMs?: number;
+  holdStartMs?: number;
 };
 
 export type VoiceNativeEnd = 'interrupted' | 'route' | 'background' | 'gone' | 'replaced' | 'action_button' | 'other';

@@ -107,17 +107,28 @@ enum WebKitReadiness {
         accountID: String,
         instanceIDs: Set<String>,
         requests: FixtureRequestLog,
-        budget: Duration = standardTransportOperation
+        budget: Duration = standardTransportOperation,
+        recordsFailure: Bool = true,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
+        // `recordsFailure: false` is for the one test that expects this to
+        // throw and reads the error itself.
+        func thrown(_ what: String, _ error: FixtureReadinessError) -> Error {
+            recordsFailure ? recordThrown(what, error, file: file, line: line) : error
+        }
         let clock = ContinuousClock()
         let started = clock.now
         let deadline = started.advanced(by: budget)
         while case .loading = app.route {
             guard clock.now < deadline else {
-                throw FixtureReadinessError(description: fixtureEvidence(
-                    app, stage: "bootstrap did not settle", started: started,
-                    requests: requests
-                ))
+                throw thrown(
+                    "The signed-in fixture did not settle",
+                    FixtureReadinessError(description: fixtureEvidence(
+                        app, stage: "bootstrap did not settle", started: started,
+                        requests: requests
+                    ))
+                )
             }
             try await Task.sleep(for: .milliseconds(50))
         }
@@ -129,8 +140,11 @@ enum WebKitReadiness {
               app.mobileSessionCoordinator.currentAccount?.id == accountID,
               Set(app.mobileSessionCoordinator.currentInstances.map(\.id)) == instanceIDs
         else {
-            throw FixtureReadinessError(description:
-                "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())"
+            throw thrown(
+                "The signed-in fixture settled on another state",
+                FixtureReadinessError(description:
+                    "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())"
+                )
             )
         }
     }
@@ -178,6 +192,24 @@ final class FixtureRequestLog: @unchecked Sendable {
         attachment.lifetime = .keepAlways
         test.add(attachment)
     }
+}
+
+/// Records the error a shared test helper is about to throw, and returns it.
+///
+/// On the CI simulator XCTest has reported errors thrown by these tests as
+/// `caught error: "InvalidTransition { phase: idle targetPhase: failed(deinit) }"`
+/// (a wait that timed out and a page load that failed, so far). The text
+/// matches a private type of Apple's Gestures framework; why it is printed in
+/// place of the test's own error is not known. The failure recorded here is
+/// what names the real one in the log. Only for a throw no caller expects.
+func recordThrown(
+    _ what: String,
+    _ error: Error,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) -> Error {
+    XCTFail("\(what): \(String(reflecting: error))", file: file, line: line)
+    return error
 }
 
 struct FixtureReadinessError: Error, CustomStringConvertible {

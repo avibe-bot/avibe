@@ -25,14 +25,10 @@
     }
   },
   "liveActivity": {
-    "offer": "Show on Lock Screen",
-    "tracking": "Showing on the Lock Screen",
-    "stop": "Stop",
+    "title": "Show progress on the Lock Screen",
+    "description": "When you leave Avibe while the conversation you are viewing is still working, its progress appears on the Lock Screen and in the Dynamic Island.",
     "systemOff": "Live Activities are off in Settings",
-    "settings": "Settings",
-    "no_active_turn": "This turn has ended.",
-    "push_unavailable": "Turn on notifications to show this on the Lock Screen.",
-    "failed": "Couldn't update the Lock Screen. Try again."
+    "settings": "Settings"
   },
   "desktopBootstrap": {
     "askVibey": {
