@@ -48,12 +48,16 @@ pub(super) struct Pages {
 }
 
 /// The bridge script for a window of another computer's instance that is
-/// about to be created for the instance at `origin`. `None` where this
-/// system or configuration can never route: the page then behaves as it
-/// does in any browser.
+/// about to be created for the instance at `origin`. `None` where a window
+/// of that instance can never be routed (this system or configuration, or
+/// an address the direct path does not serve): its page then is exactly as
+/// it is in any browser.
 pub(crate) fn script(app: &AppHandle, label: &str, origin: &url::Url) -> Option<String> {
-    let state = direct(app).filter(|state| state.available)?;
+    let state = direct(app)?;
     let origin = origin_of(origin.as_str())?;
+    if !lock(&state.wiring).routable(&origin) {
+        return None;
+    }
     let account = app
         .try_state::<instance_client::Client>()?
         .coordinator
@@ -64,7 +68,7 @@ pub(crate) fn script(app: &AppHandle, label: &str, origin: &url::Url) -> Option<
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).ok()?;
     let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-    let script = bridge::script(&token, &app.package_info().version.to_string());
+    let script = bridge::script(&token, &app.package_info().version.to_string(), cfg!(windows));
     // A label that is used again names a new window: nothing of the old
     // one's, its token least of all, is kept.
     lock(&state.pages).windows.insert(
@@ -133,28 +137,23 @@ pub(crate) fn loaded(view: &Webview) {
 }
 
 fn push(app: &AppHandle, state: &Arc<Direct>, label: &str, always: bool) {
-    let Some((account, origin)) = lock(&state.pages)
-        .windows
-        .get(label)
-        .map(|page| (page.account.clone(), page.origin.clone()))
-    else {
-        return;
-    };
-    let (routed, mode) = {
-        let wiring = lock(&state.wiring);
-        (wiring.routed_by(label), wiring.mode(&account, &origin))
-    };
     let script = {
+        // Held from the look at the wiring to the ledger's entry: several
+        // threads refresh, and what each saw is entered in the order seen.
         let mut pages = lock(&state.pages);
         let Pages { windows, sessions } = &mut *pages;
         let Some(page) = windows.get_mut(label) else { return };
+        let (routed, mode) = {
+            let wiring = lock(&state.wiring);
+            (wiring.routed_by(label), wiring.mode(&page.account, &page.origin))
+        };
         // A route whose client is gone carries nothing.
         let routed = routed.and_then(|session| sessions.get(&session).map(|live| (session, *live.paths.borrow())));
         if !page.ledger.observe(routed) && !always {
             return;
         }
         bridge::delivery(
-            &origin,
+            &page.origin,
             &Message::State {
                 status: page.ledger.status(),
                 preference: bridge::preference(mode),

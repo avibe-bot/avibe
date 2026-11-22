@@ -1,4 +1,4 @@
-(token, version) => {
+(token, version, asksBeforeLeaving) => {
   // The page's `direct` capability in a window of another computer's
   // instance (docs/plans/ios-app.md section 4, as the phone App answers it).
   // Top frame only, once per document. `token` is this window's own: only
@@ -47,13 +47,16 @@
   };
 
   // A request is a link the shell refuses to follow. Where the WebView asks
-  // the page before leaving it, that question is not the page's to answer:
-  // nothing is being left.
-  window.addEventListener('beforeunload', (event) => {
-    if (!asking) return;
-    asking = false;
-    event.stopImmediatePropagation();
-  }, true);
+  // the page before leaving it (`asksBeforeLeaving`: WebView2 does, WebKit
+  // does not), that question is not the page's to answer: nothing is being
+  // left. Elsewhere nothing is ever kept from the page.
+  if (asksBeforeLeaving) {
+    window.addEventListener('beforeunload', (event) => {
+      if (!asking) return;
+      asking = false;
+      event.stopImmediatePropagation();
+    }, true);
+  }
 
   const ask = (method, params) => new Promise((resolve, reject) => {
     if (pending.size >= 16) {
@@ -69,8 +72,10 @@
     const link = document.createElement('a');
     link.href = `avibe-app://direct?request=${encodeURIComponent(JSON.stringify({ token, id, method, params }))}`;
     (document.body ?? document.documentElement).append(link);
-    asking = true;
-    setTimeout(() => { asking = false; }, 50);
+    if (asksBeforeLeaving) {
+      asking = true;
+      setTimeout(() => { asking = false; }, 50);
+    }
     try { link.click(); } finally { link.remove(); }
   });
 

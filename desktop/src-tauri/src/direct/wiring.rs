@@ -610,6 +610,17 @@ impl Wiring {
             .map(|found| found.target.origin.as_str())
     }
 
+    /// Whether a window of the instance at `origin` could ever be routed:
+    /// this system and configuration can route, and the address is one the
+    /// direct path serves. Whatever the choice of path is now.
+    pub fn routable(&self, origin: &str) -> bool {
+        self.routing != Routing::Unsupported
+            && !self.proxy_configured
+            && origin
+                .strip_prefix("https://")
+                .is_some_and(|host| Authority::managed(host).is_some())
+    }
+
     /// The session whose route is on `window`, if one is.
     pub fn routed_by(&self, window: &str) -> Option<u64> {
         self.sessions

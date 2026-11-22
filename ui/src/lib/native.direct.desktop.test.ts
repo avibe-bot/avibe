@@ -16,7 +16,7 @@ type NativeModule = typeof import('./native');
 const script = new Function(`return (${readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), '../../../desktop/src-tauri/src/direct/page_bridge.js'),
   'utf8',
-)})`)() as (token: string, version: string) => void;
+)})`)() as (token: string, version: string, asksBeforeLeaving: boolean) => void;
 
 /**
  * Runs the script as a new document would. Its two properties cannot be
@@ -24,14 +24,14 @@ const script = new Function(`return (${readFileSync(
  * document in the same window, so for the length of this call alone they are
  * made removable.
  */
-const install = (token: string, version: string) => {
+const install = (token: string, version: string, asksBeforeLeaving: boolean) => {
   const page = window;
   const defineProperty = Object.defineProperty;
   Object.defineProperty = ((target: object, key: PropertyKey, descriptor: PropertyDescriptor) =>
     defineProperty(target, key, target === page ? { ...descriptor, configurable: true } : descriptor)
   ) as typeof Object.defineProperty;
   try {
-    script(token, version);
+    script(token, version, asksBeforeLeaving);
   } finally {
     Object.defineProperty = defineProperty;
   }
@@ -62,10 +62,12 @@ const settle = async () => {
   for (let i = 0; i < 10; i += 1) await Promise.resolve();
 };
 
-const load = async (early?: unknown): Promise<NativeModule> => {
+/** `webView2`: the system whose WebView asks the page before the shell can refuse a link. */
+const load = async (early?: unknown, webView2 = true): Promise<NativeModule> => {
   vi.resetModules();
+  asksBeforeLeaving = webView2;
   if (early) (window as unknown as Record<string, unknown>).__AVIBE_DIRECT_EARLY__ = early;
-  install('window-token', '3.2.7');
+  install('window-token', '3.2.7', webView2);
   // The page's own guard, registered after the script as any page listener is.
   window.addEventListener('beforeunload', onLeave);
   document.addEventListener('click', onClick);
@@ -200,13 +202,23 @@ describe('the desktop direct bridge', () => {
     expect(leaveQuestions).toBe(1);
   });
 
-  it('keeps the page\'s guard for a leave that comes after a request no WebView asked about', async () => {
+  it('keeps the page\'s guard for a leave that comes after a request the WebView did not ask about', async () => {
     vi.useFakeTimers();
-    asksBeforeLeaving = false;
     const native = await load(state(1, 'ipv4'));
+    asksBeforeLeaving = false;
 
     void native.nativeDirectHandover();
     await vi.advanceTimersByTimeAsync(50);
+    window.dispatchEvent(new Event('beforeunload', { cancelable: true }));
+    expect(leaveQuestions).toBe(1);
+  });
+
+  it('keeps nothing from the page where the WebView never asks before the shell refuses', async () => {
+    const native = await load(state(1, 'ipv4'), false);
+
+    void native.nativeDirectHandover();
+    expect(requests).toHaveLength(1);
+    // A real leave at the very next moment is the page's to answer.
     window.dispatchEvent(new Event('beforeunload', { cancelable: true }));
     expect(leaveQuestions).toBe(1);
   });
@@ -256,7 +268,7 @@ describe('the desktop direct bridge', () => {
   it('is not installed over a bridge that is already there', () => {
     const existing = { contract: 1, platform: 'ios' };
     Object.defineProperty(window, 'avibeNative', { configurable: true, value: existing });
-    install('window-token', '3.2.7');
+    install('window-token', '3.2.7', true);
     expect(window.avibeNative).toBe(existing);
   });
 });

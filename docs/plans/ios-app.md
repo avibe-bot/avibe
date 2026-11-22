@@ -153,9 +153,12 @@ interface AvibeNative {
 **The desktop app** answers `direct` (version 3) and `directPreference`, and
 nothing else, in the windows it opens for another computer's instance: that
 instance's view in the main window, and the app windows opened from it. The
-object there has `platform: "desktop"`, which the Web UI accepts for these two
-capabilities only; in every other respect such a page is not in a native
-shell. What differs from the phone App:
+object there has `platform: "desktop"`, which the Web UI accepts for `direct`
+only; in every other respect such a page is not in a native shell. (Nothing
+in the Web UI calls the preference methods on Desktop yet: Devices ›
+Connection asks through the phone App's bridge.) An instance whose address
+the direct path does not serve gets no bridge. What differs from the phone
+App:
 
 - The status is the window's own. `preferred` is `"direct"` only while that
   window has a session's route and the session's client prefers a direct
@@ -178,7 +181,9 @@ shell. What differs from the phone App:
   `direct.preferenceChanged`.
 - A request reaches the shell as a link to `avibe-app://direct` that the
   shell refuses to follow, carrying a token only that window's bridge script
-  has. No command or message handler is given to the instance's origin.
+  has. No command or message handler is given to the instance's origin. On
+  Windows, where the WebView puts a page's leave question before the shell
+  can refuse the link, the bridge keeps that one question from the page.
 
 Phase 0a PR 2 implements this v1 subset:
 

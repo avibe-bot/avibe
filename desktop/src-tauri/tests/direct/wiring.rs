@@ -975,3 +975,22 @@ fn a_page_closes_shared_connections_only_from_the_sole_routed_window() {
     assert_eq!(wiring.routed_by("main-runtime-1"), None);
     assert!(!wiring.sole(session, "main-runtime-1", |_| false));
 }
+
+#[test]
+fn only_an_instance_that_could_be_routed_is_one_whose_page_gets_a_bridge() {
+    let custom = "https://avibe.example.com";
+    let mut wiring = live();
+    assert!(wiring.routable(ONE));
+    // Whatever the choice of path: its page can still read and change it.
+    wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert!(wiring.routable(ONE));
+    // An address the direct path does not serve, and anything that is not
+    // an instance's own origin.
+    for origin in [custom, "http://one-app.avibe.bot", "one-app.avibe.bot", ""] {
+        assert!(!wiring.routable(origin), "{origin}");
+    }
+    // A configured proxy, or a system that cannot route.
+    assert!(!Wiring::new(Routing::Live, true, Choices::unsaved()).routable(ONE));
+    assert!(!Wiring::new(Routing::Unsupported, false, Choices::unsaved()).routable(ONE));
+    assert!(Wiring::new(Routing::AtCreation, false, Choices::unsaved()).routable(ONE));
+}

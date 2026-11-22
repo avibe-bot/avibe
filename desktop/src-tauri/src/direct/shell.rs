@@ -88,7 +88,7 @@ pub(crate) struct Direct {
     wake: Notify,
     menu: Mutex<Option<ConnectionMenu<tauri::Wry>>>,
     /// The windows whose pages are told their path, and what tells them.
-    /// Never held together with `wiring`.
+    /// Taken before `wiring` where both are held, never after it.
     pages: Mutex<pages::Pages>,
     /// Whether this system and configuration can route at all.
     available: bool,

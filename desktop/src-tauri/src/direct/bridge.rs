@@ -22,9 +22,17 @@ const PAGE_BRIDGE: &str = include_str!("page_bridge.js");
 const MAX_REQUEST: usize = 1024;
 
 /// The script a window of another computer's instance starts every document
-/// with. `token` is that window's alone.
-pub fn script(token: &str, version: &str) -> String {
-    format!("({PAGE_BRIDGE})({},{});", json!(token), json!(version))
+/// with. `token` is that window's alone. `asks_before_leaving`: this
+/// system's WebView puts a page's leave question before the shell can
+/// refuse a link (WebView2), so the script keeps its own request's from the
+/// page; where it does not (WebKit), the script keeps nothing from it.
+pub fn script(token: &str, version: &str, asks_before_leaving: bool) -> String {
+    format!(
+        "({PAGE_BRIDGE})({},{},{});",
+        json!(token),
+        json!(version),
+        asks_before_leaving
+    )
 }
 
 /// A window's state as its page counts it. The core counts per client, and

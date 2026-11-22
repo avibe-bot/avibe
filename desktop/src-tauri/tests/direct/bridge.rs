@@ -227,9 +227,10 @@ fn a_delivery_runs_only_in_the_instances_own_top_document() {
 
 #[test]
 fn the_bridge_script_is_given_the_token_and_the_version_as_data() {
-    let script = bridge::script("to\"ken", "3.2.7");
-    assert!(script.starts_with("((token, version) => {"));
-    assert!(script.ends_with(")(\"to\\\"ken\",\"3.2.7\");"));
+    let script = bridge::script("to\"ken", "3.2.7", true);
+    assert!(script.starts_with("((token, version, asksBeforeLeaving) => {"));
+    assert!(script.ends_with(")(\"to\\\"ken\",\"3.2.7\",true);"));
+    assert!(bridge::script("token", "3.2.7", false).ends_with(")(\"token\",\"3.2.7\",false);"));
     // It names nothing of a listener, and offers `direct` alone.
     for word in ["127.0.0.1", "password", "Proxy-Authorization", "__TAURI"] {
         assert!(!script.contains(word), "{word}");
