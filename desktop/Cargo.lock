@@ -311,18 +311,20 @@ dependencies = [
  "getrandom 0.4.3",
  "iroh",
  "keyring",
- "notify-rust",
  "objc2",
  "objc2-app-kit",
  "objc2-authentication-services",
  "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-local-authentication",
  "objc2-security",
+ "objc2-user-notifications",
  "objc2-web-kit",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "subtle",
  "sys-locale",
  "tar",
  "tauri",
@@ -3446,6 +3448,7 @@ checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
@@ -3597,6 +3600,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-local-authentication"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48e0b8b339e0d9d2ed4416b7f93f9d4daadff7d4dd797f89867cde11aeac607"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-quartz-core"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3683,6 +3697,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.1",
+ "block2",
  "objc2",
  "objc2-foundation",
 ]

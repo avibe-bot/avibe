@@ -231,7 +231,7 @@ final class HoldTouchUITests: XCTestCase {
     /// the touch, which must not read as lifted while it is down).
     func testAHoldOnTheInputGetsTheAppsOwnCue() {
         // With the microphone starting at recognition the cue comes whatever the microphone
-        // does, so this holds on any simulator. With the default (it starts at touch-down), a
+        // does, so this holds on any simulator. With the default (it starts before recognition), a
         // simulator with no microphone ends the press at its failed start, before any cue:
         // that is accepted, and anything else must be the cue.
         for startsAtRecognition in [true, false] {
@@ -386,6 +386,15 @@ final class HoldTouchUITests: XCTestCase {
                 + "With 'none', check that the fixture has the microphone. \(facts())",
             file: file, line: line
         )
+        // A touch that lifted (no `moved=` kept): nor was the microphone started for it. Its
+        // lift came before the input could start (the later of prepared, at least about 100 ms
+        // on a simulator, and 50 ms). A drag may legitimately start it before it leaves the slop.
+        if !kept().contains("moved=") {
+            XCTAssertFalse(
+                kept().contains(" open=") || kept().contains(" begin="),
+                "The microphone was started for \(what); \(facts())", file: file, line: line
+            )
+        }
         XCTAssertFalse(kept().contains(" rec="), "\(what) was recognised as a hold by the App; \(facts())", file: file, line: line)
         XCTAssertFalse(
             label(beginning: "events=")?.contains("recognised") ?? true,

@@ -23,6 +23,7 @@ type Fake = {
     onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
     nativeCapture?: boolean | { adopt: string };
     pressedAt?: number;
+    holdMiss?: string;
   };
   done: Promise<string>;
   resolve: (text: string) => void;
@@ -1263,6 +1264,8 @@ describe('a hold the iOS App recognises', () => {
     });
     expect(pipeline.takes).toHaveLength(1);
     expect(pipeline.takes[0].input.nativeCapture).toEqual({ adopt: 'n1' });
+    // A take the App recorded says no miss.
+    expect(pipeline.takes[0].input.holdMiss).toBeUndefined();
     expect(pipeline.takes[0].input.pressedAt).toBe(pressedAt);
     expect(pipeline.takes[0].start).toHaveBeenCalledTimes(1);
     expect(native.permission).not.toHaveBeenCalled();
@@ -1318,6 +1321,8 @@ describe('a hold the iOS App recognises', () => {
     expect(pipeline.takes).toHaveLength(1);
     // Its own start, as in an App that does not recognise holds.
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The trace says the App followed it and never answered.
+    expect(pipeline.takes[0].input.holdMiss).toBe('unanswered');
     expect(hold.phase).toBe('listening');
     expect(native.impact).toHaveBeenCalledWith('medium');
 
@@ -1407,6 +1412,8 @@ describe('a hold the iOS App recognises', () => {
     await flush();
     expect(pipeline.takes).toHaveLength(1);
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The trace says why the App did not record it.
+    expect(pipeline.takes[0].input.holdMiss).toBe('failed');
   });
 
   it('refuses a hold the page does not see: no press, a press that already ended, or a take in the way', async () => {
@@ -1541,6 +1548,8 @@ describe('a hold the iOS App recognises', () => {
     await flush();
     expect(pipeline.takes).toHaveLength(1);
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The trace says why the App did not follow it.
+    expect(pipeline.takes[0].input.holdMiss).toBe('off');
     expect(hold.phase).toBe('listening');
     expect(native.impact).toHaveBeenCalledWith('medium');
     up(el);
@@ -1564,5 +1573,56 @@ describe('a hold the iOS App recognises', () => {
     await holdFor(el);
     expect(pipeline.takes).toHaveLength(1);
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+  });
+});
+
+describe('App Lock cancels held voice rather than preserving an interruption', () => {
+  let revision = 100;
+  const signal = (locked: boolean) => act(() => {
+    Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked } });
+    window.dispatchEvent(new Event('avibe:voice-lock'));
+  });
+  it('retains late successful retry words on the same interruption until explicit send', async () => {
+    const el = await mount();
+    try {
+      signal(false); await holdFor(el); await elapse(1_000); up(el);
+      await act(async () => pipeline.takes[0].reject(new VoiceTranscriptionError('unavailable'))); await flush();
+      let resolve!: (text: string) => void;
+      pipeline.takes[0].retry.mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
+      await act(async () => hold.retry());
+      const original = hold.text;
+      signal(true);
+      await act(async () => resolve('retained recovered words'));
+      expect(hold.phase).toBe('interrupted'); expect(hold.text).toBe(original);
+      expect(send).not.toHaveBeenCalled(); expect(pipeline.takes[0].abort).not.toHaveBeenCalled();
+      signal(false);
+      expect(hold.text).toBe('retained recovered words'); expect(hold.canRetry).toBe(false);
+      await act(async () => hold.sendInterrupted());
+      expect(send).toHaveBeenCalledExactlyOnceWith('retained recovered words', { input: 'voice' });
+      expect(pipeline.takes[0].retry).toHaveBeenCalledOnce();
+    } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+  it.each(['pressing', 'starting', 'listening', 'settling'] as const)('invalidates %s, late pointer release and final words', async (phase) => {
+    const el = await mount();
+    try {
+      signal(false);
+      if (phase === 'starting') pipeline.startMs = 5000;
+      down(el);
+      if (phase !== 'pressing') await act(async () => { await vi.advanceTimersByTimeAsync(phase === 'starting' ? 250 : 1000); });
+      const old = pipeline.takes[0];
+      if (phase === 'settling') up(el);
+      signal(true);
+      expect(hold.phase).toBe('idle');
+      if (old) { expect(old.abort).toHaveBeenCalled(); expect(old.setAside).not.toHaveBeenCalled(); }
+      up(el); down(el);
+      signal(false);
+      await act(async () => { old?.resolve('stale words'); await vi.advanceTimersByTimeAsync(6000); });
+      expect(send).not.toHaveBeenCalled(); expect(onTap).not.toHaveBeenCalled();
+      expect(hold.phase).toBe('idle');
+      pipeline.startMs = 0;
+      down(el); await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      up(el); await act(async () => pipeline.takes.at(-1)!.resolve('fresh words'));
+      expect(send).toHaveBeenCalledWith('fresh words', expect.anything());
+    } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
   });
 });

@@ -133,6 +133,23 @@
       "runCanceled": {
         "title": "Run canceled",
         "body": "Background work was canceled."
+      },
+      "answerRequested": {
+        "title": "Waiting for your answer",
+        "body": "An Agent is waiting for your answer."
+      },
+      "answer": {
+        "reply": "Reply…",
+        "send": "Send",
+        "placeholder": "Reply to this conversation",
+        "notSent": "Not sent",
+        "notDelivered": "Not delivered",
+        "answerAgain": "Open Avibe to answer again.",
+        "alreadyChoice": "Already answered \"{{choice}}\" on another device.",
+        "alreadyText": "Already answered on another device.",
+        "stale": "The conversation has moved on. Open it to see the latest before replying.",
+        "gone": "This conversation can't be opened anymore.",
+        "unavailable": "Couldn't reach this instance. Open Avibe to answer again."
       }
     },
     "pet": {
@@ -746,9 +763,9 @@
       "languageSaveFailed": "The language changed here, but could not be saved for this instance",
       "appLock": {
         "title": "App Lock",
-        "descriptionFaceId": "Unlock with Face ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
-        "descriptionTouchIdPhone": "Unlock with Touch ID or your passcode when you open Avibe, or come back after the time you choose. Applies to this iPhone only; changing it asks you to verify.",
-        "descriptionMac": "Unlock with Touch ID or your Mac password when you open Avibe, or come back after the time you choose. Applies to this Mac only; changing it asks you to verify.",
+        "descriptionFaceId": "Unlock Avibe with Face ID or your passcode. Applies to this iPhone only.",
+        "descriptionTouchIdPhone": "Unlock Avibe with Touch ID or your passcode. Applies to this iPhone only.",
+        "descriptionMac": "Unlock Avibe with Touch ID or your login password. Applies to this Mac only.",
         "off": "Off",
         "immediately": "Immediately",
         "oneMinute": "After 1 minute",
@@ -3173,6 +3190,9 @@
       "desktopTitle": "Desktop app notifications",
       "desktopHint": "Vault approvals and finished background runs. This computer only; same switch as the menu bar.",
       "desktopHintMenuBar": "Vault approvals and finished background runs. Switch them for this computer from the menu bar icon › Notifications.",
+      "desktopHintAnswers": "Vault approvals, finished background runs, and Agent messages waiting for your answer, which you can pick or reply to right in the notification. This computer only; same switch as the menu bar.",
+      "desktopDenied": "macOS hasn't allowed Avibe to send notifications, so this computer gets no alerts and you can't reply from them.",
+      "openSystemSettings": "Open System Settings",
       "desktopSaveFailed": "Couldn't save the notification switch. Try again."
     }
   },
@@ -3635,6 +3655,7 @@
       "maximize": "Maximize",
       "restore": "Restore",
       "openInNewTab": "Open in New Tab",
+      "openInBrowser": "Open in Browser",
       "openChat": "Open Chat"
     },
     "preview": {

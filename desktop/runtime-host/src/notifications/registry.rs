@@ -19,7 +19,14 @@ pub struct NotificationReceipt {
     readable: AtomicBool,
     read_reconciliation_eligible: AtomicBool,
     observed_unread: AtomicBool,
+    /// A delivery about one new unread message (an Agent's question).
+    unread_message: AtomicBool,
+    /// Set when a snapshot taken after `unread_message` was confirmed includes
+    /// this receipt: the unread read paired with that snapshot was issued after
+    /// the message was committed, so its zero is a read, not a stale sample.
+    sampled_since_confirmed: AtomicBool,
     posted_at: OnceLock<Instant>,
+    opens: OnceLock<String>,
 }
 
 impl NotificationReceipt {
@@ -35,10 +42,38 @@ impl NotificationReceipt {
         self.session_id.as_deref()
     }
 
+    /// Name what a click on this notification opens, as an `avibe://` link.
+    /// Only a link the deep-link parser accepts is kept, and only the first.
+    pub fn set_opens(&self, link: String) {
+        if crate::deep_link::parse_deep_link(&link).is_some() {
+            let _ = self.opens.set(link);
+        }
+    }
+
+    /// The `avibe://` link a click opens: the one named for it, else its
+    /// Session's conversation. `None` when neither is a valid deep link.
+    pub fn opens(&self) -> Option<String> {
+        if let Some(link) = self.opens.get() {
+            return Some(link.clone());
+        }
+        let link = format!("avibe://session/{}", self.session_id.as_deref()?);
+        crate::deep_link::parse_deep_link(&link).map(|_| link)
+    }
+
     pub fn confirm_workbench_session(&self, read_reconciliation_eligible: bool) {
         self.readable.store(true, Ordering::SeqCst);
         self.read_reconciliation_eligible
             .store(read_reconciliation_eligible, Ordering::SeqCst);
+    }
+
+    /// A delivery about one new unread message in a Workbench Session (an
+    /// Agent's question, a `result` the unread count includes). Unlike a run, a
+    /// zero count from a read issued after this confirmation retires it even
+    /// when no earlier sample saw the Session unread: the question was read on
+    /// another device before the shell's next refresh.
+    pub fn confirm_unread_message(&self) {
+        self.confirm_workbench_session(true);
+        self.unread_message.store(true, Ordering::SeqCst);
     }
 
     pub fn readable(&self) -> bool {
@@ -94,7 +129,10 @@ impl NotificationRegistry {
             readable: AtomicBool::new(false),
             read_reconciliation_eligible: AtomicBool::new(false),
             observed_unread: AtomicBool::new(false),
+            unread_message: AtomicBool::new(false),
+            sampled_since_confirmed: AtomicBool::new(false),
             posted_at: OnceLock::new(),
+            opens: OnceLock::new(),
         });
         if receipt.session_id.is_some() {
             self.prune_abandoned();
@@ -104,8 +142,14 @@ impl NotificationRegistry {
     }
 
     /// Must be taken BEFORE the unread HTTP request, not when it completes.
+    /// Taken immediately before an unread read; that read is paired with it.
     pub fn snapshot(&mut self) -> NotificationSnapshot {
         self.prune_abandoned();
+        for receipt in &self.receipts {
+            if receipt.unread_message.load(Ordering::SeqCst) {
+                receipt.sampled_since_confirmed.store(true, Ordering::SeqCst);
+            }
+        }
         self.receipts.clone()
     }
 
@@ -126,12 +170,18 @@ impl NotificationRegistry {
     /// A complete raw unread map, never the preference-filtered badge total.
     /// Return exact posted keys, including retired posts awaiting OS delivery:
     /// e.g. Linux's plugin may not have assigned its D-Bus id on the first pass.
+    /// `unread` is the complete map of one read (the server lists every Session
+    /// with unread > 0 and the total is checked against its sum), so a Session
+    /// absent from it has zero. A read that fails, or a map that is partial,
+    /// never reaches here.
     pub fn reconcile(&mut self, snapshot: NotificationSnapshot, unread: &HashMap<String, u64>) -> NotificationSnapshot {
         for receipt in snapshot {
             if let Some(session) = receipt.session_id() {
                 if unread.get(session).copied().unwrap_or(0) > 0 {
                     receipt.observed_unread.store(true, Ordering::SeqCst);
-                } else if receipt.observed_unread.load(Ordering::SeqCst) {
+                } else if receipt.observed_unread.load(Ordering::SeqCst)
+                    || receipt.sampled_since_confirmed.load(Ordering::SeqCst)
+                {
                     // Even successful Runs can settle without a result. Initial
                     // absence is not a read; require an observed unread -> read
                     // transition after this delivery was reserved.
@@ -254,5 +304,83 @@ mod tests {
         assert!(registry.snapshot().is_empty());
         let mut reconnected = NotificationRegistry::default();
         assert!(reconnected.reserve(Some("a".into())).unwrap().id() > old_id);
+    }
+
+    #[test]
+    fn a_click_opens_the_named_link_or_the_session_and_never_an_unparsed_target() {
+        let mut registry = NotificationRegistry::default();
+        let session = registry.reserve(Some("ses_a".into())).unwrap();
+        assert_eq!(session.opens().as_deref(), Some("avibe://session/ses_a"));
+
+        let approval = registry.reserve(None).unwrap();
+        assert_eq!(approval.opens(), None);
+        approval.set_opens("avibe://vaults/request/req_1".into());
+        assert_eq!(approval.opens().as_deref(), Some("avibe://vaults/request/req_1"));
+        // The first accepted link stays; later ones do not replace it.
+        approval.set_opens("avibe://vaults/request/req_2".into());
+        assert_eq!(approval.opens().as_deref(), Some("avibe://vaults/request/req_1"));
+
+        let refused = registry.reserve(None).unwrap();
+        for link in [
+            "https://avibe.bot/vaults",
+            "avibe://vaults/request/a b",
+            "avibe://session/../x",
+        ] {
+            refused.set_opens(link.into());
+        }
+        assert_eq!(refused.opens(), None);
+        let odd_session = registry.reserve(Some("ses a".into())).unwrap();
+        assert_eq!(odd_session.opens(), None);
+    }
+
+    #[test]
+    fn a_question_read_before_any_unread_sample_is_retired_but_a_run_is_not() {
+        let mut registry = NotificationRegistry::default();
+        let question = registry.reserve(Some("asked".into())).unwrap();
+        question.confirm_unread_message();
+        question.posted();
+        let run = registry.reserve(Some("ran".into())).unwrap();
+        run.confirm_workbench_session(true);
+        run.posted();
+        let snapshot = registry.snapshot();
+        let zero = HashMap::from([(String::from("asked"), 0), (String::from("ran"), 0)]);
+        let retired = registry.reconcile(snapshot, &zero);
+        assert_eq!(
+            retired.iter().map(|receipt| receipt.id()).collect::<Vec<_>>(),
+            [question.id()]
+        );
+        assert!(question.retired());
+        assert!(!run.retired());
+    }
+
+    #[test]
+    fn a_session_absent_from_a_complete_map_has_zero_unread() {
+        // The server lists only Sessions with unread > 0; a read Session is absent.
+        let mut registry = NotificationRegistry::default();
+        let question = registry.reserve(Some("asked".into())).unwrap();
+        question.confirm_unread_message();
+        question.posted();
+        let snapshot = registry.snapshot();
+        registry.reconcile(snapshot, &HashMap::from([(String::from("other"), 2)]));
+        assert!(question.retired());
+    }
+
+    #[test]
+    fn a_zero_from_a_sample_taken_before_confirmation_does_not_retire_the_question() {
+        let mut registry = NotificationRegistry::default();
+        let question = registry.reserve(Some("asked".into())).unwrap();
+        // This read was paired with a snapshot taken before the question was confirmed.
+        let early = registry.snapshot();
+        question.confirm_unread_message();
+        question.posted();
+        registry.reconcile(early, &HashMap::new());
+        assert!(!question.retired());
+        // A later read that still counts it unread keeps it, and its read retires it.
+        let counted = registry.snapshot();
+        registry.reconcile(counted, &HashMap::from([(String::from("asked"), 1)]));
+        assert!(!question.retired());
+        let read = registry.snapshot();
+        registry.reconcile(read, &HashMap::new());
+        assert!(question.retired());
     }
 }

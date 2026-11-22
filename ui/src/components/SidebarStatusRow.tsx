@@ -36,8 +36,8 @@ export function LineGlyph({ text, className, children }: { text: string; classNa
 /** The status's leading glyph, in a fixed 10px slot so the label beside it never shifts when the
  *  glyph changes (a dot while connected, a 10px icon while offline or switching), centred on the
  *  label's letters. The glyph starts at the slot's left edge. The row is flush with the Apps button
- *  above; a status drawn as a button (the desktop account trigger) centres the glyph and its label
- *  as one group inside its hover wash, with the same inset on both sides. */
+ *  above. The desktop account trigger centres its own glyph on the button instead
+ *  (`DesktopAccountRowView`). */
 export function StatusGlyph({ label, children }: { label: string; children: ReactNode }) {
   return <LineGlyph text={label} className="w-2.5 [&_svg]:size-2.5">{children}</LineGlyph>;
 }

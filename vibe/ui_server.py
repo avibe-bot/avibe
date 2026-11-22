@@ -3240,13 +3240,23 @@ def add_api_timing_headers(response: Response) -> Response:
     response.headers["X-Vibe-Request-Ms"] = elapsed_text
     if elapsed_ms >= SLOW_API_REQUEST_MS:
         payload_size = response.headers.get("Content-Length")
+        graph_stages = getattr(g, "graph_stage_seconds", None)
+        # Server-side only: pre-authorization stages reflect work on the
+        # instance's entire graph. Never put them in a member's response.
+        stages_text = "" if graph_stages is None else " stages_ms=" + ",".join(
+            f"{stage}:{graph_stages[stage] * 1000:.1f}"
+            for stage in ("ipc", "queue", "open", "execute", "fetch", "assemble", "acl", "json", "resume",
+                          # Inclusive graph phase times; overlap execute/fetch/assemble above.
+                          "candidates", "lineage", "histories", "edges")
+        )
         logger.warning(
-            "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s",
+            "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s%s",
             request.path,
             request.method,
             response.status_code,
             elapsed_ms,
             payload_size or "unknown",
+            stages_text,
         )
     return response
 
@@ -6298,6 +6308,7 @@ async def agents_graph_get():
 
     live_agents: list = []
     live_unreachable = False
+    started = time.perf_counter()
     try:
         result = await internal_client.list_running_agents()
         live_agents = (result.get("body") or {}).get("agents") or []
@@ -6305,17 +6316,33 @@ async def agents_graph_get():
         # Controller down: fall back to a DB-only graph (history stays visible).
         live_unreachable = True
 
-    payload = await asyncio.to_thread(
-        agent_graph.build_graph,
-        live_agents=live_agents,
-        window=window,
-        project=project,
-        include_ended=include_ended,
-        include_background=include_background,
-        live_unreachable=live_unreachable,
-    )
     context = _request_authorization_context()
-    return jsonify(_authorized_graph_payload(context, payload))
+    submitted = time.perf_counter()
+    stages = {"ipc": submitted - started}
+
+    def render_graph():
+        entered = time.perf_counter()
+        stages["queue"] = entered - submitted
+        payload = agent_graph.build_graph(
+            live_agents=live_agents, window=window, project=project,
+            include_ended=include_ended, include_background=include_background,
+            live_unreachable=live_unreachable, timings=stages,
+        )
+        built = time.perf_counter()
+        # Includes Python/ORM overhead, not time blocked opening or reading SQLite.
+        stages["assemble"] = max(0.0, built - entered - stages["open"] - stages["execute"] - stages["fetch"])
+        authorized = _authorized_graph_payload(context, payload)
+        filtered = time.perf_counter()
+        stages["acl"] = filtered - built
+        response = jsonify(authorized)
+        finished = time.perf_counter()
+        stages["json"] = finished - filtered
+        return response, finished
+
+    response, finished = await asyncio.to_thread(render_graph)
+    stages["resume"] = time.perf_counter() - finished
+    g.graph_stage_seconds = stages
+    return response
 
 
 @app.route("/api/agents/<name>", methods=["GET"])
@@ -14459,11 +14486,40 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     # starting the microphone.
     "holdActMs",
     "holdStartMs",
+    # When a hold's microphone may start, and how it went: the earliest time in ms after
+    # touch-down, how long the touch took to reach the App, when the input was prepared and
+    # when it was asked to start (ms from the App's handling of the touch), and the session's
+    # category and the engine's set-up durations.
+    "holdT",
+    "holdDlyMs",
+    "holdArmMs",
+    "holdBeginMs",
+    "holdCatMs",
+    "holdPrepMs",
+    # The App's counts of the touches on its surfaces that were not holds, since it was
+    # installed: those that lifted, those that moved away, those it opened the microphone
+    # for, and those it would have with each judged time.
+    "holdTaps",
+    "holdTapsMoved",
+    "holdTapsOpen",
+    "holdTapsW50",
+    "holdTapsW80",
+    "holdTapsW100",
+    "holdTapsW120",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8
 _VOICE_CAPTURE_MAX_STALLED_RATES = 4
 _VOICE_CAPTURE_MAX_TRACK_EVENTS = 24
+
+
+def _app_hold_start_ms(audio_asr_config: Any) -> int | None:
+    """``audio_asr.app_hold_start_ms`` as the page may send it to the App: a whole number of ms
+    from 0 to 500, else null (the App's own default)."""
+    value = getattr(audio_asr_config, "app_hold_start_ms", None)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 500:
+        return value
+    return None
 
 
 def _voice_count(value: Any) -> bool:
@@ -14593,6 +14649,12 @@ def asr_telemetry():
         "audioSession": {"auto", "playback", "transient", "transient-solo", "ambient", "play-and-record"},
         "audioSessionState": _VOICE_AUDIO_SESSION_STATES,
         "audioSessionStateEnd": _VOICE_AUDIO_SESSION_STATES,
+        # In the iOS App, why a hold's press was not followed by the App
+        # (ui/src/lib/nativeVoiceHold.ts, `holdMissReason`).
+        "holdMiss": {
+            "off", "viewport", "unlisted", "closed", "hidden", "covered", "limit",
+            "pending", "refused", "outside", "failed", "gone", "unanswered",
+        },
     }
     outcome = payload.get("outcome")
     if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
@@ -14749,6 +14811,13 @@ def asr_status():
                 # there at once (``audio_asr.app_hold_main_at_touch``); false
                 # makes that button open it when the hold is recognised.
                 "app_hold_main_at_touch": getattr(audio_asr_config, "app_hold_main_at_touch", True) is not False,
+                # The earliest a hold's microphone may start in the App, in ms
+                # after touch-down (``audio_asr.app_hold_start_ms``); null: the
+                # App's own default. A value out of 0..500 is said as null.
+                "app_hold_start_ms": _app_hold_start_ms(audio_asr_config),
+                # Whether the App may activate its audio session before the
+                # microphone starts (``audio_asr.app_hold_prepare_at_touch``).
+                "app_hold_prepare_at_touch": getattr(audio_asr_config, "app_hold_prepare_at_touch", True) is not False,
             }
         )
     except Exception:

@@ -19,7 +19,7 @@ const designFrames = frames(desktopInstanceFrames.map(({ fixture, ...frame }) =>
   if (footer) return {
     ...frame, status: 'shipped',
     render: () => <Routes>
-      <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}>
+      <Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools} divided>
         <DesktopAccountRowView {...footer} localUpdater={<VersionBadge openUpward />} />
       </AppShellFooter>} />}>
         <Route path="/" element={<Workbench />} />

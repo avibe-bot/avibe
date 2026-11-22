@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-lock-set-policy"
+description = "Enables the app_lock_set_policy command without any pre-configured scope."
+commands.allow = ["app_lock_set_policy"]
+
+[[permission]]
+identifier = "deny-app-lock-set-policy"
+description = "Denies the app_lock_set_policy command without any pre-configured scope."
+commands.deny = ["app_lock_set_policy"]

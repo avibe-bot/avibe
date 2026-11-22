@@ -647,6 +647,13 @@ export function hasNativeVoiceHold(): boolean {
   return hasNativeCapability('voiceHold', NATIVE_VOICE_HOLD_VERSION) && hasNativeVoiceCapture();
 }
 
+/** From `voiceHold` 3 (TestFlight 52.1) a surface may say when its microphone may start
+ *  (`startAfterMs`) and whether the App may prepare before (`prepare`). An older App refuses a
+ *  list that says either. */
+export function hasNativeVoiceHoldStart(): boolean {
+  return hasNativeCapability('voiceHold', 3) && hasNativeVoiceHold();
+}
+
 /** A place where a hold may record now, in the WebView's own points. */
 export type NativeVoiceHoldSurface = {
   id: string;
@@ -657,6 +664,11 @@ export type NativeVoiceHoldSurface = {
   /** A touch here opens no microphone: the App starts its input when it recognises the hold.
    *  Unsaid, the App's default (at touch-down). */
   start?: 'recognition';
+  /** The earliest the microphone may start, in ms after touch-down (`voiceHold` 3). Unsaid, the
+   *  App's default. */
+  startAfterMs?: number;
+  /** `start`: the App activates nothing before the microphone starts (`voiceHold` 3). */
+  prepare?: 'start';
 };
 
 /** The App's answer to a list of surfaces: `ok` (it follows presses there), or why it does not.

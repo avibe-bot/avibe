@@ -517,6 +517,25 @@ def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path, sqlite_sch
     with pytest.raises(ValueError):
         api.save_config({"audio_asr": {"app_hold_main_at_touch": "recognition"}})
 
+    # When a hold's microphone may start, and whether the App may prepare before it:
+    # unset and on unless saved, one key at a time.
+    assert updated.audio_asr.app_hold_start_ms is None
+    assert updated.audio_asr.app_hold_prepare_at_touch is True
+    timed = api.save_config({"audio_asr": {"app_hold_start_ms": 80}})
+    assert timed.audio_asr.app_hold_start_ms == 80
+    assert timed.audio_asr.app_hold_prepare_at_touch is True
+    assert api.config_to_payload(timed)["audio_asr"]["app_hold_start_ms"] == 80
+    bare = api.save_config({"audio_asr": {"app_hold_prepare_at_touch": False}})
+    assert bare.audio_asr.app_hold_prepare_at_touch is False
+    assert bare.audio_asr.app_hold_start_ms == 80
+    assert api.save_config({"audio_asr": {"app_hold_start_ms": None}}).audio_asr.app_hold_start_ms is None
+    # A spelling that names a number reads as one, as this section's numbers do; a switch
+    # or a word does not.
+    assert api.save_config({"audio_asr": {"app_hold_start_ms": "100"}}).audio_asr.app_hold_start_ms == 100
+    for wrong in ("eighty", True, 80.5):
+        with pytest.raises(ValueError):
+            api.save_config({"audio_asr": {"app_hold_start_ms": wrong}})
+
 
 def test_save_config_marks_explicit_audio_asr_disable_patch(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

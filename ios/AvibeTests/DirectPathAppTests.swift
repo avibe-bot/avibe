@@ -2059,77 +2059,83 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testBridgeFreezesAuthorityBeforeItsTaskForCreateAndCancel() async throws {
         for action in ["create", "cancel"] {
-            let now = Date(timeIntervalSince1970: 1_800_000_000)
-            let platform = RuntimeSystemSchedulePlatform()
-            let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
-                                        systemScheduleNow: { now })
-            let runtime = try await select("instance-1", in: app)
-            let originalIdentity = app.runtimeIdentity
-            var captures = 0
-            var capturedAdmission: SystemScheduleAdmission?
-            var deliveries = 0
-            let controller = try makeRuntimeController(app, runtime, afterScheduleAdmission: { admission in
-                captures += 1
-                capturedAdmission = admission
-                withUnsafeCurrentTask { XCTAssertNil($0, "admission must precede NativeBridge's Task") }
-                guard case .authorized(let context) = admission else {
-                    XCTFail("trusted primary source must be admitted")
-                    return
+            // The page's process has ended under this test on CI: see
+            // `onceMoreIfItsPageProcessEnded`.
+            try await onceMoreIfItsPageProcessEnded { shown in
+                let now = Date(timeIntervalSince1970: 1_800_000_000)
+                let platform = RuntimeSystemSchedulePlatform()
+                let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                                            systemScheduleNow: { now })
+                let runtime = try await select("instance-1", in: app)
+                let originalIdentity = app.runtimeIdentity
+                var captures = 0
+                var capturedAdmission: SystemScheduleAdmission?
+                var deliveries = 0
+                let controller = try makeRuntimeController(app, runtime, afterScheduleAdmission: { admission in
+                    captures += 1
+                    capturedAdmission = admission
+                    withUnsafeCurrentTask { XCTAssertNil($0, "admission must precede NativeBridge's Task") }
+                    guard case .authorized(let context) = admission else {
+                        XCTFail("trusted primary source must be admitted")
+                        return
+                    }
+                    XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                    app.openSelectedInstance(path: "/")
+                    XCTAssertNotEqual(app.runtimeIdentity, originalIdentity)
+                }, onScheduleDelivery: { admission in
+                    deliveries += 1
+                    guard case .authorized(let context) = admission else {
+                        XCTFail("delivery must carry the original admission")
+                        return
+                    }
+                    XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                    XCTAssertNotEqual(context.runtimeIdentity, app.runtimeIdentity)
+                })
+                app.registerRuntimeController(controller, for: runtime)
+                let page = try RuntimePage(controller: controller)
+                // Recorded before its first load, which is also the page's.
+                shown.page = page
+                defer { page.close() }
+                try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+                let params = scheduleParams(requestID: "old-\(action)", operationID: "target", now: now)
+                let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
+                let store = try XCTUnwrap(appScheduleStore)
+                let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+                if action == "cancel" {
+                    var record = cleanupPendingRecord(request: request, owner: owner,
+                        systemIdentifier: "must-remain", updatedAt: now)
+                    record.lifecycle = .managedScheduled
+                    record.createState = .scheduled
+                    XCTAssertTrue(store.save(record))
                 }
-                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
-                app.openSelectedInstance(path: "/")
-                XCTAssertNotEqual(app.runtimeIdentity, originalIdentity)
-            }, onScheduleDelivery: { admission in
-                deliveries += 1
-                guard case .authorized(let context) = admission else {
-                    XCTFail("delivery must carry the original admission")
-                    return
+                let payload: [String: Any] = action == "create" ? params : [
+                    "requestId": "old-cancel", "operationId": "target", "kind": "alarm", "purpose": "user"
+                ]
+                let bridgeResult = try jsonObject(try await page.systemScheduleOutcome(
+                    method: action == "create" ? "systemSchedule.request" : "systemSchedule.cancel", params: payload))
+                // Reopening retires the old factory as well. It may refuse delivery
+                // before AppModel, but may never resolve into the replacement owner.
+                if let receipt = bridgeResult["receipt"] as? [String: Any] {
+                    XCTAssertEqual(action, "create")
+                    XCTAssertEqual(receipt["state"] as? String, "stale_context")
+                } else {
+                    XCTAssertEqual(bridgeResult["errorCode"] as? String, "forbidden")
                 }
-                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
-                XCTAssertNotEqual(context.runtimeIdentity, app.runtimeIdentity)
-            })
-            app.registerRuntimeController(controller, for: runtime)
-            let page = try RuntimePage(controller: controller)
-            defer { page.close() }
-            try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
-            let params = scheduleParams(requestID: "old-\(action)", operationID: "target", now: now)
-            let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
-            let store = try XCTUnwrap(appScheduleStore)
-            let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
-            if action == "cancel" {
-                var record = cleanupPendingRecord(request: request, owner: owner,
-                    systemIdentifier: "must-remain", updatedAt: now)
-                record.lifecycle = .managedScheduled
-                record.createState = .scheduled
-                XCTAssertTrue(store.save(record))
-            }
-            let payload: [String: Any] = action == "create" ? params : [
-                "requestId": "old-cancel", "operationId": "target", "kind": "alarm", "purpose": "user"
-            ]
-            let bridgeResult = try jsonObject(try await page.systemScheduleOutcome(
-                method: action == "create" ? "systemSchedule.request" : "systemSchedule.cancel", params: payload))
-            // Reopening retires the old factory as well. It may refuse delivery
-            // before AppModel, but may never resolve into the replacement owner.
-            if let receipt = bridgeResult["receipt"] as? [String: Any] {
-                XCTAssertEqual(action, "create")
-                XCTAssertEqual(receipt["state"] as? String, "stale_context")
-            } else {
-                XCTAssertEqual(bridgeResult["errorCode"] as? String, "forbidden")
-            }
-            XCTAssertEqual(captures, 1)
-            XCTAssertLessThanOrEqual(deliveries, 1)
-            let originalAdmission = try XCTUnwrap(capturedAdmission)
-            let deliveredCreate = await app.requestSystemSchedule(request, admission: originalAdmission)
-            XCTAssertEqual(deliveredCreate["state"] as? String, "stale_context")
-            let deliveredCancel = await app.cancelSystemSchedule(.init(requestID: "old-cancel",
-                operationID: "target", kind: .alarm, purpose: .user), admission: originalAdmission)
-            XCTAssertNil(deliveredCancel)
-            XCTAssertEqual(platform.scheduleCalls, 0)
-            XCTAssertEqual(platform.cancelCalls, 0)
-            XCTAssertNil(app.systemScheduleConfirmation)
-            if action == "cancel" {
-                XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
-                               .managedScheduled)
+                XCTAssertEqual(captures, 1)
+                XCTAssertLessThanOrEqual(deliveries, 1)
+                let originalAdmission = try XCTUnwrap(capturedAdmission)
+                let deliveredCreate = await app.requestSystemSchedule(request, admission: originalAdmission)
+                XCTAssertEqual(deliveredCreate["state"] as? String, "stale_context")
+                let deliveredCancel = await app.cancelSystemSchedule(.init(requestID: "old-cancel",
+                    operationID: "target", kind: .alarm, purpose: .user), admission: originalAdmission)
+                XCTAssertNil(deliveredCancel)
+                XCTAssertEqual(platform.scheduleCalls, 0)
+                XCTAssertEqual(platform.cancelCalls, 0)
+                XCTAssertNil(app.systemScheduleConfirmation)
+                if action == "cancel" {
+                    XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
+                                   .managedScheduled)
+                }
             }
         }
     }
@@ -2154,15 +2160,25 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     func testSameOriginReturnDoesNotReviveARequestRevokedAtProvisionalStart() async throws {
-        // WebKit can end a page's WebContent process under a test (seen on
-        // CI at its network process's request, run 44658571690). The page's
-        // load or its bridge call in flight then fails, and the scenario
-        // cannot be finished without its page. So it is run once more, from
-        // the start, only when the fixture saw that page's process end; any
-        // other failure, and a second ended process, fails the test.
+        try await onceMoreIfItsPageProcessEnded { record in
+            try await self.sameOriginReturnScenario(recording: record)
+        }
+    }
+
+    /// WebKit can end a page's WebContent process under a test (seen on CI
+    /// at its network process's request, run 44658571690). The page's load
+    /// or its bridge call in flight then fails, and the scenario cannot be
+    /// finished without its page. So `scenario` is run once more, from the
+    /// start, only when the fixture saw the page it recorded lose its
+    /// process; any other failure, and a second ended process, fails the
+    /// test. Only for a test with such a failure on record.
+    @MainActor
+    private func onceMoreIfItsPageProcessEnded(
+        _ scenario: @MainActor (RuntimePageRecord) async throws -> Void
+    ) async throws {
         let first = RuntimePageRecord()
         do {
-            try await sameOriginReturnScenario(recording: first)
+            try await scenario(first)
             return
         } catch where first.page?.webContentProcessTerminated == true {
             print("[iOS fixture] stage=scenario run again, its page's process ended: \(error)")
@@ -2170,7 +2186,7 @@ final class DirectPathAppTests: XCTestCase {
         // A page whose first load failed was never handed to the scenario,
         // which closes the ones it gets. Closing twice is harmless.
         first.page?.close()
-        try await sameOriginReturnScenario(recording: RuntimePageRecord())
+        try await scenario(RuntimePageRecord())
     }
 
     @MainActor
@@ -3137,17 +3153,28 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testContinuousRuntimeOpenTimerUsesTheScheduleCallAsItsDeadlineOrigin() async throws {
         let timing = ContinuousRuntimeOpenTiming()
-        var fired = false
-        let timer = timing.schedule(after: .milliseconds(80)) {
-            fired = true
+        var fired: [String] = []
+        let held = timing.schedule(after: .milliseconds(80)) {
+            fired.append("scheduled before the hold")
         }
+        // The main actor is held past that timer's deadline.
         let holdUntil = ContinuousClock.now.advanced(by: .milliseconds(120))
         while ContinuousClock.now < holdUntil {
             _ = 1 + 1
         }
-        try await Task.sleep(for: .milliseconds(20))
-        XCTAssertTrue(fired)
-        withExtendedLifetime(timer) {}
+        // A second timer, scheduled only now and for less than the first
+        // one's whole delay. Counted from its schedule call, the first
+        // timer's deadline is already past, so it fires first. Counted from
+        // when its task first ran, which is after the hold, it would be due
+        // 80 ms from here and fire after this one. The order holds however
+        // long a loaded simulator takes over either: no margin is waited.
+        let reference = timing.schedule(after: .milliseconds(60)) {
+            fired.append("scheduled after the hold")
+        }
+        try await eventually { fired.count == 2 }
+        XCTAssertEqual(fired, ["scheduled before the hold", "scheduled after the hold"])
+        withExtendedLifetime(held) {}
+        withExtendedLifetime(reference) {}
     }
 
     @MainActor
@@ -4538,13 +4565,14 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
         if let directTransport {
-            // The transport is selected only for a routed host. A first bind
-            // slower than the App's listener wait leaves the host on the
-            // public path with no selection at all; say so rather than fail
-            // below on a selection that was never made.
+            // The transport is selected only for a routed host. A listener
+            // fault, or a first bind slower than the App's listener wait,
+            // leaves the host on the public path with no selection at all;
+            // say which rather than fail below on a selection that was
+            // never made.
             XCTAssertFalse(
                 app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
-                "The App routed no host: its first bind was slower than the listener wait, so nothing is selected.",
+                whyNoHostIsRouted(by: app),
                 file: file,
                 line: line
             )
@@ -5129,9 +5157,39 @@ final class DirectPathAppTests: XCTestCase {
             sessionResponse: { withoutInstanceOne },
             reusingDefaults: defaults
         )
-        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
-            (try? recorded()[originOne]) == nil && next.mobileSessionCoordinator.currentAccount != nil
+        // The removal is one attempt for each signed-in answer. One that
+        // cannot finish in its bounds (its page has 10 s to load and each of
+        // its steps 8 s; a web content launch on the CI simulator can take
+        // longer) leaves everything in place and is made again at the next
+        // answer, by design. The launch gave one answer. So while the
+        // address is still recorded the App is asked again, through its own
+        // session check, as a later launch or refresh asks: one check at a
+        // time, 10 s after the last one ended. A newer answer waits for a
+        // running attempt, so this is a few attempts, not one per check.
+        let checks = SessionChecks()
+        let clock = ContinuousClock()
+        let began = clock.now
+        do {
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                let signedIn = next.mobileSessionCoordinator.currentAccount != nil
+                if signedIn, (try? recorded()[originOne]) == nil {
+                    return true
+                }
+                if signedIn {
+                    checks.askAgainIfDue(next, at: clock.now)
+                }
+                return false
+            }
+        } catch {
+            print("[iOS fixture] stage=departed address still recorded, after=\(began.duration(to: clock.now)), answers=\(1 + checks.asked)")
+            await checks.settle()
+            throw error
         }
+        // A check still in flight ends before the fixture removes its store.
+        await checks.settle()
+        // How long the removal took and how many answers it needed: one
+        // answer and a few seconds when the first attempt succeeded.
+        print("[iOS fixture] stage=departed address removed, after=\(began.duration(to: clock.now)), answers=\(1 + checks.asked)")
         XCTAssertNil(next.runtimePageCache.page(accountID: "account-1", origin: originOne))
         XCTAssertEqual(choices.preference(accountID: "account-1", origin: originOne), .automatic)
         // The listed instance keeps its own.
@@ -5566,12 +5624,13 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
-        // The transport is selected only for a routed host. A first bind
-        // slower than the App's listener wait leaves the host on the public
-        // path with no selection at all; say so rather than time out below.
+        // The transport is selected only for a routed host. A listener fault,
+        // or a first bind slower than the App's listener wait, leaves the
+        // host on the public path with no selection at all; say which rather
+        // than time out below.
         XCTAssertFalse(
             app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
-            "The App routed no host: its first bind was slower than the listener wait, so nothing is selected."
+            whyNoHostIsRouted(by: app)
         )
         // The transport's selection follows the browser asynchronously: wait
         // for it rather than for a fixed time a loaded simulator may exceed.
@@ -7215,13 +7274,24 @@ final class DirectPathAppTests: XCTestCase {
         return answer
     }
 
+    /// Why the App routed no host, as far as the App itself says. Two things
+    /// leave a host on the public path with nothing selected and no listener
+    /// to find, both by design: the listener faulted (seen on CI after one
+    /// of the simulator's system services was interrupted, run 44934936305),
+    /// or its first bind and ownership check were slower than the App's
+    /// listener wait (1 s). The App reports only the first.
+    @MainActor
+    private func whyNoHostIsRouted(by app: AppModel) -> String {
+        app.directListenerFault
+            ? "The App routed no host: its listener faulted, so the host loads on the public path, nothing is selected and no listener serves."
+            : "The App routed no host and reports no listener fault: its first bind was slower than the listener wait, so the host loads on the public path, nothing is selected and no listener serves."
+    }
+
     /// The App's direct listener, found from outside: the one new listening
     /// socket on 127.0.0.1 since `baseline`. First, through WebKit's own
-    /// store, that the App routed its host at all. A first bind and ownership
-    /// check slower than the App's listener wait (1 s) leave the host on the
-    /// public path and stop the listener, by design; then there is no
-    /// listener to find, and the failure says so instead of reading as a
-    /// scan that missed one.
+    /// store, that the App routed its host at all: when it did not, there is
+    /// no listener to find, and the failure says why (`whyNoHostIsRouted`)
+    /// instead of reading as a scan that missed one.
     @MainActor
     private func directListenerPort(
         of app: AppModel,
@@ -7231,7 +7301,7 @@ final class DirectPathAppTests: XCTestCase {
     ) throws -> NWEndpoint.Port {
         XCTAssertFalse(
             app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
-            "The App routed no host: its first bind was slower than the listener wait, so it loads on the public path and serves no listener.",
+            whyNoHostIsRouted(by: app),
             file: file,
             line: line
         )
@@ -7285,23 +7355,43 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         source.appModel = app
-        // The probe's stream, then the relay's.
+        // The probe's stream, then the relay's. The dial waits for it: see
+        // below.
         let connection = DirectIrohFakeConnection(
             log: log,
             remote: DirectIrohFixtures.instanceEndpoint,
             answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.established]
         )
-        engine.prepare().connection.resolve(connection)
+        let endpoint = engine.prepare()
 
         let runtime = try await select("instance-1", in: app)
         let controller = try makeRuntimeController(app, runtime)
         app.registerRuntimeController(controller, for: runtime)
         let page = try RuntimePage(controller: controller)
         // A document of the instance's origin, loaded here before the path
-        // comes up: the runtime's own load of the instance would otherwise
-        // send WebKit's own CONNECT through the route, and could take the
-        // relay's stream below.
+        // comes up.
         try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+        // The runtime's own load of the instance sends WebKit's own CONNECT
+        // through the route. With no path up it ends on the public leg. Once
+        // the path is up it would be a direct relay and take the stream the
+        // CONNECT below is to get (seen on CI, run 44981277303: the path came
+        // up first, `504` here, and four streams). So the dial is held until
+        // the App has recorded that CONNECT's end; WebKit sends it once its
+        // processes are running.
+        guard !app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty else {
+            // Nothing of the runtime's goes through the listener then.
+            XCTFail(whyNoHostIsRouted(by: app))
+            throw DirectTestTimeout()
+        }
+        do {
+            try await eventually(timeout: WebKitReadiness.webContentLaunch) {
+                self.directStatus(app, self.instance)?.races.isEmpty == false
+            }
+        } catch {
+            XCTFail("WebKit's own CONNECT for the runtime's load never reached the App's listener.")
+            throw error
+        }
+        endpoint.connection.resolve(connection)
         try await eventually {
             // A request made before the WebView existed is asked again.
             scheduler.fire(Self.patientIrohTiming.pageRetrySeconds)
@@ -8230,6 +8320,39 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
         creationResultContinuation = nil
         holdAfterSystemCreation = false
         continuation?.resume()
+    }
+}
+
+/// The App's own session checks, asked for by a test that waits for
+/// something the App does at each signed-in answer: one at a time, and not
+/// sooner than `spacing` after the last one ended.
+@MainActor
+private final class SessionChecks {
+    private static let spacing: Duration = .seconds(10)
+    private(set) var asked = 0
+    private var running: Task<Void, Never>?
+    private var lastEnded: ContinuousClock.Instant?
+
+    func askAgainIfDue(_ app: AppModel, at now: ContinuousClock.Instant) {
+        guard let since = lastEnded else {
+            // The launch's own answer has just been given.
+            lastEnded = now
+            return
+        }
+        guard running == nil, since.duration(to: now) >= Self.spacing else {
+            return
+        }
+        asked += 1
+        running = Task { @MainActor in
+            _ = try? await app.mobileSessionCoordinator.refresh()
+            self.lastEnded = ContinuousClock.now
+            self.running = nil
+        }
+    }
+
+    /// Returns once no check is in flight.
+    func settle() async {
+        await running?.value
     }
 }
 

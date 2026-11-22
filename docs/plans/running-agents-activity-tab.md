@@ -147,8 +147,8 @@ OpenCode 已是一等活后端（进程模型不同、无 pid）。
 **`Definitions`**（保留现有肌肉记忆）；`Running` 为并列项。
 
 **后续补充**：J1 只定义"首次默认"，不再定义"每次重置"。之后再进 `/agents`
-（含侧边栏点击）会恢复上次离开时所在的子 Tab；停在 `Running` 时，其内部
-活跃/含历史 视图选择也一并恢复（详见
+（含侧边栏点击）会恢复上次离开时所在的子 Tab；`Running` 内部的
+活跃/含历史 视图选择不记忆，每次进入都回到 活跃（详见
 `agents-run-graph-and-session-visibility.md` 的 Filters 段与
 `ui/src/lib/agentsViewMemory.ts`）。记忆是本地浏览器级的 best-effort：
 私密模式或存储被拦截时静默回落到首次默认。

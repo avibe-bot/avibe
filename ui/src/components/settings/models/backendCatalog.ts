@@ -4,13 +4,14 @@
 // One concept for all three backends. Their runtime adapters still differ —
 // Claude Code reads the Gateway's Anthropic projection, Codex gets a written
 // `model_catalog_json`, OpenCode gets a provider overlay — but those are derived
-// artifacts. The catalog is the state, and this module is the only place that
-// reads it, orders it, or turns a draft into a write.
+// artifacts. The catalog is the state, and this module owns its editing. The
+// shared read-only ID projection lives in backendCatalogIds.
 //
 // It deliberately knows nothing about Sources or Routes. A catalog row names a
 // model the Agent may select; which supplier serves it stays with the Route, and
 // mixing the two here is what the contract's 「no Source id, no upstream model
 // id, no priority, no fallback」 rule exists to prevent.
+import { routeableCatalogModelIds } from './backendCatalogIds';
 import type { ModelsApi } from './modelsApi';
 import type {
   AgentBackend,
@@ -52,13 +53,6 @@ export function listedModelIds(agent: AgentSupply): string[] {
  *  whole compatibility signal: nothing downstream invents rows to stand in for
  *  a payload the server never sent. */
 export const catalogModels = (agent: AgentSupply): BackendModel[] | null => agent.catalog_models ?? null;
-
-export function routeableCatalogModelIds(catalog: readonly BackendModel[]): string[] {
-  const seen = new Set<string>();
-  return catalog
-    .filter((model) => model.routeable && model.id && !seen.has(model.id) && seen.add(model.id))
-    .map((model) => model.id);
-}
 
 /**
  * The model ids an Agent card enumerates, in catalog order.

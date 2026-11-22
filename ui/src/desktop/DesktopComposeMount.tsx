@@ -5,9 +5,14 @@ import { useComposeTarget } from '../context/ComposerBridgeContext';
 import { useStandaloneAppTab } from '../context/StandaloneAppTabContext';
 import { ToastContext } from '../context/ToastContext';
 import { botSessionPath, MAIN_BOT_SESSION_ID } from '../lib/bots';
+import { apiFetch } from '../lib/apiFetch';
+import { ANSWER_RECEIVER, createAnswerReceiver } from './desktopAnswerReceiver';
 import { createReceiver, RECEIVER } from './desktopComposeReceiver';
 
-/** Installs the receiver while mounted; renders nothing. DesktopCompose decides where it mounts. */
+/**
+ * Installs the desktop shell's two document receivers while mounted, Ask Vibey's
+ * and the notification answers'; renders nothing. DesktopCompose decides where it mounts.
+ */
 export function DesktopComposeMount() {
   const standalone = useStandaloneAppTab();
   const { t } = useTranslation();
@@ -35,6 +40,20 @@ export function DesktopComposeMount() {
     host[RECEIVER] = receiver;
     return () => {
       if (host[RECEIVER] === receiver) delete host[RECEIVER];
+    };
+  }, [standalone]);
+
+  useEffect(() => {
+    if (standalone) return;
+    const receiver = createAnswerReceiver((path, body) => apiFetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+    const host = window as unknown as Record<string, unknown>;
+    host[ANSWER_RECEIVER] = receiver;
+    return () => {
+      if (host[ANSWER_RECEIVER] === receiver) delete host[ANSWER_RECEIVER];
     };
   }, [standalone]);
   return null;

@@ -63,6 +63,10 @@ def scope(*paths):
     (("ui/new-config.ts",), HEAVY),
     (("ui/src/mobile/bridge.ts",), {"ui-browser-checks", "ios-shell", "desktop-shell"}),
     (("ui/src/i18n/en.json",), {"ui-browser-checks", "desktop-shell"}),
+    # desktop-shell's composer caret probe guards these.
+    (("ui/src/components/workbench/Composer.tsx",), {"ui-browser-checks", "desktop-shell"}),
+    (("ui/e2e/voice-shortcut/fixture.tsx",), {"ui-browser-checks", "desktop-shell"}),
+    (("ui/src/components/workbench/Composer.layout.test.tsx",), {"ui-browser-checks"}),
 ])
 def test_representative_pr_diffs_are_conservative(paths, expected):
     plan = make_plan("PR", scope(*paths))

@@ -31,13 +31,17 @@ impl Authority {
 }
 
 #[derive(PartialEq, Eq, Debug)]
-pub enum Head {
+pub enum Head<T = ()> {
     More,
     Refuse(u16),
-    Accept(usize),
+    Accept(usize, T),
 }
 
-pub fn parse_connect(input: &[u8], authority: &Authority, expected_proxy_auth: Option<&str>) -> Head {
+pub fn parse_connect<T>(
+    input: &[u8],
+    authority: &Authority,
+    authenticate: impl FnOnce(Option<&str>) -> Option<T>,
+) -> Head<T> {
     let end = input[..input.len().min(HEAD_LIMIT + 4)]
         .windows(4)
         .position(|s| s == b"\r\n\r\n");
@@ -99,17 +103,17 @@ pub fn parse_connect(input: &[u8], authority: &Authority, expected_proxy_auth: O
             saw_host = true;
         }
     }
-    if expected_proxy_auth.is_some() && expected_proxy_auth != proxy_auth {
-        return Head::Refuse(407);
+    match authenticate(proxy_auth) {
+        Some(grant) => Head::Accept(end + 4, grant),
+        None => Head::Refuse(407),
     }
-    Head::Accept(end + 4)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn parse_connect(input: &[u8], a: &Authority) -> Head {
-        super::parse_connect(input, a, None)
+        super::parse_connect(input, a, |_| Some(()))
     }
     #[test]
     fn protected_listener_requires_the_current_proxy_credential() {
@@ -118,7 +122,7 @@ mod tests {
             super::parse_connect(
                 format!("CONNECT desk-app.avibe.bot:443 HTTP/1.1\r\n{headers}\r\n").as_bytes(),
                 &a,
-                Some("Basic fixture-current"),
+                |value| (value == Some("Basic fixture-current")).then_some(()),
             )
         };
         assert_eq!(check(""), Head::Refuse(407));
@@ -130,7 +134,7 @@ mod tests {
         );
         assert!(matches!(
             check("Proxy-Authorization: Basic fixture-current\r\n"),
-            Head::Accept(_)
+            Head::Accept(_, ())
         ));
         assert!(!a.direct_head().windows(5).any(|s| s == b"Basic"));
     }
@@ -143,7 +147,7 @@ mod tests {
         }
         let n = head.len();
         head.extend_from_slice(&[0x16, 3, 1, 0xff]);
-        assert_eq!(parse_connect(&head, &a), Head::Accept(n));
+        assert_eq!(parse_connect(&head, &a), Head::Accept(n, ()));
         for t in [
             "child.desk-app.avibe.bot:443",
             "desk-app.avibe.bot:80",

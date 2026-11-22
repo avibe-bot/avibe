@@ -133,6 +133,23 @@
       "runCanceled": {
         "title": "运行已取消",
         "body": "后台工作已取消。"
+      },
+      "answerRequested": {
+        "title": "等你回复",
+        "body": "Agent 在等你回复。"
+      },
+      "answer": {
+        "reply": "回复…",
+        "send": "发送",
+        "placeholder": "回复这个会话",
+        "notSent": "没有发送",
+        "notDelivered": "没有送达",
+        "answerAgain": "打开 Avibe 重新回复。",
+        "alreadyChoice": "已经在其他设备上回复了「{{choice}}」。",
+        "alreadyText": "已在其他设备上回复。",
+        "stale": "会话已经有了新进展。打开看看再回复。",
+        "gone": "这个会话已经打不开了。",
+        "unavailable": "连不上这个实例。打开 Avibe 重新回复。"
       }
     },
     "pet": {
@@ -746,9 +763,9 @@
       "languageSaveFailed": "语言已在本机切换，但未能保存到此实例",
       "appLock": {
         "title": "App 锁",
-        "descriptionFaceId": "打开 Avibe，或离开超过所选时间后回来，需要先用面容 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
-        "descriptionTouchIdPhone": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
-        "descriptionMac": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或 Mac 登录密码解锁。只对这台 Mac 生效，更改时需要验证一次。",
+        "descriptionFaceId": "用面容 ID 或设备密码解锁 Avibe，只对这台 iPhone 生效。",
+        "descriptionTouchIdPhone": "用触控 ID 或设备密码解锁 Avibe，只对这台 iPhone 生效。",
+        "descriptionMac": "用触控 ID 或登录密码解锁 Avibe，只对这台 Mac 生效。",
         "off": "关闭",
         "immediately": "立即",
         "oneMinute": "1 分钟后",
@@ -3173,6 +3190,9 @@
       "desktopTitle": "桌面 App 系统通知",
       "desktopHint": "Vault 审批和后台任务完成。只对本机生效，和菜单栏里的开关是同一个。",
       "desktopHintMenuBar": "Vault 审批和后台任务完成。本机的开关在菜单栏图标 › 通知。",
+      "desktopHintAnswers": "Vault 审批、后台任务完成，以及 Agent 等你回复的消息。等你回复的消息可以直接在通知里选或回复。只对这台电脑生效，和菜单栏里的开关是同一个。",
+      "desktopDenied": "macOS 没有允许 Avibe 发通知，所以这台电脑收不到通知，也不能在通知里回复。",
+      "openSystemSettings": "打开系统设置",
       "desktopSaveFailed": "无法保存通知开关，请稍后重试。"
     }
   },
@@ -3635,6 +3655,7 @@
       "maximize": "最大化",
       "restore": "还原",
       "openInNewTab": "在新标签页打开",
+      "openInBrowser": "在浏览器打开",
       "openChat": "打开聊天"
     },
     "preview": {

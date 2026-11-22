@@ -171,7 +171,7 @@ extern "C" {
 
 /// Runs `work` on the main thread from the main dispatch queue, which AppKit
 /// also drains while it waits on a held quit, and outside every tao callback.
-fn on_main_queue(work: impl FnOnce() + Send + 'static) {
+pub(crate) fn on_main_queue(work: impl FnOnce() + Send + 'static) {
     extern "C" fn run(context: *mut c_void) {
         // SAFETY: `context` is the box leaked below, handed over exactly once.
         let work = unsafe { Box::from_raw(context.cast::<Box<dyn FnOnce() + Send>>()) };

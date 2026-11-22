@@ -33,10 +33,12 @@ Scope is joined LEFT (``scope_id`` is nullable): a NULL scope renders as the
 from __future__ import annotations
 
 import json
+import sqlite3
+from time import perf_counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal_column, or_, select, text
 from sqlalchemy.engine import Engine
 
 from storage.agent_session_rows import session_openable_in_chat
@@ -199,6 +201,42 @@ def _schedule_label(row: Mapping[str, Any]) -> Optional[str]:
 
 # ── main assembly ────────────────────────────────────────────────────────────
 
+class _GraphReader:
+    """Time SQL execution and row retrieval, not the Python that consumes rows."""
+
+    def __init__(self, conn, timings: dict[str, float]):
+        self.conn = conn
+        self.timings = timings
+        raw = conn.connection.driver_connection
+        self.bind_limit = raw.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(raw, "getlimit") else 999
+
+    def batches(self, ids, *, reserved=0, copies=1):
+        # The node cap does not bound lineage, candidate count, trigger IDs,
+        # or tied timeline rows. Honor a connection's configured bind limit.
+        size = min(2000, (self.bind_limit - reserved) // copies)
+        values = list(ids)
+        for start in range(0, len(values), size):
+            yield values[start:start + size]
+
+    def rows(self, stmt, *, mappings=False):
+        started = perf_counter()
+        result = self.conn.execute(stmt)
+        executed = perf_counter()
+        self.timings["execute"] += executed - started
+        keys = tuple(result.keys()) if mappings else ()
+        for batch in iter(lambda: self._fetch(result), []):
+            if mappings:
+                yield from (dict(zip(keys, row)) for row in batch)
+            else:
+                yield from batch
+
+    def _fetch(self, result):
+        started = perf_counter()
+        batch = result.fetchmany(512)
+        self.timings["fetch"] += perf_counter() - started
+        return batch
+
+
 def build_graph(
     *,
     live_agents: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -210,6 +248,7 @@ def build_graph(
     now: Optional[datetime] = None,
     node_cap: int = NODE_CAP,
     engine: Optional[Engine] = None,
+    timings: Optional[dict[str, float]] = None,
 ) -> dict[str, Any]:
     """Assemble the run-graph payload (contract §3 + amendments A1/A2).
 
@@ -228,21 +267,33 @@ def build_graph(
     live_by_session = _index_live_agents(live_agents or ())
     live_ids = set(live_by_session)
 
+    timings = timings if timings is not None else {}
+    timings.update(execute=0.0, fetch=0.0, candidates=0.0, lineage=0.0, histories=0.0, edges=0.0)
+    opening = perf_counter()
     owned_engine = engine is None
     engine = engine or create_sqlite_engine()
     try:
-        with engine.connect() as conn:
+        with engine.connect() as connection:
+            timings["open"] = perf_counter() - opening
+            # Pin one SQLite snapshot: compact index passes use implicit rowids
+            # to join facts from the same run without rereading its payload.
+            if not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN")
+            conn = _GraphReader(connection, timings)
             # The candidate source differs by view. History (include_ended) uses
             # the window scan. Active (contract A5 = live + queued) uses the live
             # set plus every session with a non-terminal run, independent of the
             # window and of the raw status alias — so a stuck-queued job older
             # than the cutoff, or a controller-down stale ``running`` row, can't
             # disappear from the active view.
+            stage = perf_counter()
             if include_ended:
                 candidate_ids = _resolve_candidates(conn, live_ids, cutoff_iso)
             else:
-                candidate_ids = set(live_ids) | _active_run_session_ids(conn)
+                nonterminal = _active_run_session_ids(conn)
+                candidate_ids = live_ids | nonterminal
             if not candidate_ids:
+                timings["candidates"] = perf_counter() - stage
                 return _empty_payload(now, window, live_unreachable)
 
             # Bound the expensive run-history load by choosing which candidate
@@ -260,38 +311,75 @@ def build_graph(
             candidate_truncated = len(ranked) > node_cap
             session_by_id = {r["id"]: r for r in ranked[:node_cap]}
             loaded_ids = set(session_by_id)
+            timings["candidates"] = perf_counter() - stage
+            stage = perf_counter()
 
-            runs_by_session = _load_runs(conn, loaded_ids)
-            # Pull in lineage sessions referenced by a retained run — even a
-            # spawn/callback older than the window (e.g. a long-lived live
-            # session's original delegation) — so the edge and its "who started
-            # it / reports to" endpoints survive. Fixed point, but track attempted
-            # ids in ``loaded_ids`` (monotonic): a run can point at a session id
-            # with no ``agent_sessions`` row (stale source_actor/callback from
-            # imported or repaired state) which never lands in ``session_by_id``,
-            # so keying the loop off that alone would spin forever.
-            while True:
-                extra = _lineage_refs(runs_by_session) - loaded_ids
+            # Discover lineage using only reference columns. The cap is on the
+            # final visible nodes, not on depth: a hidden or missing intermediate
+            # can still lead to a visible ancestor. Keep discovery waves so edge
+            # ordering stays the same as when full histories were read per wave.
+            # A non-truncated Active seed already contains every visible live
+            # or nonterminal session. An ended ancestor can't survive that
+            # filter or contribute an edge. Use the status index to check the
+            # sole exception: an imported spelling normalized only in Python
+            # (e.g. ' pending '). Such an ancestor still needs discovery.
+            check_imported = not include_ended and _has_noncanonical_pending_status(conn)
+            follow_refs = include_ended or candidate_truncated or check_imported
+            waves = [loaded_ids]
+            while follow_refs and waves[-1]:
+                extra = _lineage_refs(conn, waves[-1]) - loaded_ids
                 if not extra:
                     break
-                loaded_ids |= extra
-                runs_by_session.update(_load_runs(conn, extra))
+                waves.append(extra)
+                loaded_ids = loaded_ids | extra
                 for row in _load_sessions(conn, extra):
-                    session_by_id.setdefault(row["id"], row)
-            session_rows = list(session_by_id.values())
-            edges, trigger_ids = _build_edges(runs_by_session, loaded_ids, cutoff)
+                    session_by_id[row["id"]] = row
+
+            # Construct and rank the nodes before fetching the expensive run
+            # projections (timestamps and metadata can follow large result blobs
+            # in SQLite overflow pages). History visibility doesn't need runs at
+            # all. Active visibility needs only whether any run is nonterminal.
+            nodes = _build_nodes(list(session_by_id.values()), live_by_session)
+            if not include_ended:
+                # Normalize only statuses on discovered sessions, using the
+                # covering session/status index. Missing/hidden intermediates
+                # don't need status checks, though their lineage must be read.
+                if check_imported:
+                    for wave in waves:
+                        for batch in conn.batches(s for s in wave if s in session_by_id and s not in nonterminal):
+                            stmt = select(agent_runs.c.session_id, agent_runs.c.status).where(
+                                agent_runs.c.session_id.in_(batch)
+                            ).distinct()
+                            nonterminal.update(sid for sid, status in conn.rows(stmt)
+                                               if normalize_run_status(status) in {"queued", "running"})
+                for node in nodes:
+                    if not node["live"] and node["session_id"] in nonterminal:
+                        node["status"] = "queued"
+            nodes = _filter_nodes(nodes, project=project, include_ended=include_ended,
+                                  include_background=include_background)
+            nodes, cap_truncated = _cap_nodes(nodes, node_cap)
+            node_ids = {n["session_id"] for n in nodes}
+            timings["lineage"] = perf_counter() - stage
+            stage = perf_counter()
+            runs_by_session = {}
+            counts_by_session = _run_totals(conn, node_ids)
+            for wave in waves:
+                if visible := wave & node_ids:
+                    runs_by_session.update(_load_runs(conn, visible, node_ids, cutoff))
+            for node in nodes:
+                sid = node["session_id"]
+                _add_run_details(node, runs_by_session.get(sid, []), counts_by_session.get(sid, (0, 0, False)))
+            timings["histories"] = perf_counter() - stage
+            stage = perf_counter()
+            edges, trigger_ids = _build_edges(runs_by_session, node_ids, cutoff)
             trigger_nodes = _load_trigger_nodes(conn, trigger_ids)
+            timings["edges"] = perf_counter() - stage
     finally:
         if owned_engine:
             engine.dispose()
 
-    nodes = _build_nodes(session_rows, runs_by_session, live_by_session)
-    nodes = _filter_nodes(nodes, project=project, include_ended=include_ended,
-                          include_background=include_background)
-    nodes, cap_truncated = _cap_nodes(nodes, node_cap)
     truncated = candidate_truncated or cap_truncated
 
-    node_ids = {n["session_id"] for n in nodes}
     edges = _filter_edges(edges, node_ids, {t["definition_id"] for t in trigger_nodes})
     trigger_nodes = _prune_triggers(trigger_nodes, edges)
 
@@ -322,6 +410,23 @@ def _empty_payload(now: datetime, window: str, live_unreachable: bool) -> dict[s
     }
 
 
+def _has_noncanonical_pending_status(conn) -> bool:
+    indexed = set(_status_query_values("queued") + _status_query_values("running"))
+    # Jump to the next distinct key. SELECT DISTINCT status still walks the
+    # entire status index on each Active poll, even when no malformed spelling
+    # exists. The empty string is a real historical spelling, not a sentinel.
+    statuses = text("""
+        WITH RECURSIVE status_keys(value) AS (
+            SELECT min(status) FROM agent_runs WHERE status >= ''
+            UNION ALL
+            SELECT (SELECT min(status) FROM agent_runs WHERE status > status_keys.value)
+            FROM status_keys WHERE value IS NOT NULL
+        ) SELECT value FROM status_keys WHERE value IS NOT NULL
+    """)
+    return any(status not in indexed and normalize_run_status(status) in {"queued", "running"}
+               for (status,) in conn.rows(statuses))
+
+
 def _active_run_session_ids(conn) -> set[str]:
     """Sessions with a non-terminal run — the non-live half of the active view
     (contract A5). Uses the run store's own normalized status family
@@ -332,7 +437,7 @@ def _active_run_session_ids(conn) -> set[str]:
     few (in-flight work drains), so the set stays small."""
     raw_statuses = _status_query_values("queued") + _status_query_values("running")
     stmt = select(agent_runs.c.session_id).where(agent_runs.c.status.in_(raw_statuses)).distinct()
-    return {row[0] for row in conn.execute(stmt) if row[0]}
+    return {row[0] for row in conn.rows(stmt) if row[0]}
 
 
 def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
@@ -355,22 +460,20 @@ def _resolve_candidates(conn, live_ids: set[str], cutoff_iso: str) -> set[str]:
     # this frequently-polled scan ride the ``ix_agent_runs_updated`` index
     # instead of a full table scan (the other agent_runs indexes all lead with a
     # non-timestamp column and cannot serve a bare range predicate).
-    stmt = select(
-        agent_runs.c.session_id,
-        agent_runs.c.source_kind,
-        agent_runs.c.source_actor,
-        agent_runs.c.callback_session_id,
-        agent_runs.c.callback_status,
-    ).where(agent_runs.c.updated_at >= cutoff_iso)
-    for row in conn.execute(stmt).mappings():
-        if row["session_id"]:
-            candidates.add(row["session_id"])
-        if row["source_kind"] == "agent" and row["source_actor"]:
-            candidates.add(row["source_actor"])
-        # Only a callback target that will draw an edge (A4: non-null status) —
-        # a bare return route must not promote an unconnected root node.
-        if row["callback_session_id"] and row["callback_status"]:
-            candidates.add(row["callback_session_id"])
+    r = agent_runs.c
+    # Read callback routing on these same recent records. A lookup by the
+    # sessions touched in-window would read their entire callback histories,
+    # even for a candidate excluded before the graph loads any history.
+    stmt = select(r.session_id, r.source_kind, r.source_actor, r.callback_session_id, r.callback_status).where(
+        r.updated_at >= cutoff_iso
+    )
+    for session_id, source_kind, source_actor, target, callback_status in conn.rows(stmt):
+        if session_id:
+            candidates.add(session_id)
+        if source_kind == "agent" and source_actor:
+            candidates.add(source_actor)
+        if target and callback_status:
+            candidates.add(target)
     return candidates
 
 
@@ -416,9 +519,9 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
                 ),
             )
         )
-        .where(agent_sessions.c.id.in_(candidate_ids))
     )
-    return [dict(row) for row in conn.execute(stmt).mappings()]
+    return [row for batch in conn.batches(candidate_ids)
+            for row in conn.rows(stmt.where(agent_sessions.c.id.in_(batch)), mappings=True)]
 
 
 def _session_agent_display_name(row: Mapping[str, Any]) -> Optional[str]:
@@ -437,41 +540,100 @@ def _session_agent_display_name(row: Mapping[str, Any]) -> Optional[str]:
     return catalog_name or internal_name or None
 
 
-def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
-    """Every run belonging to a candidate session, newest first, grouped by
-    session. Full lineage (not window-limited) so aggregates + edges are
-    accurate for a session once it is in scope."""
-    stmt = (
-        select(
-            agent_runs.c.id,
-            agent_runs.c.session_id,
-            agent_runs.c.status,
-            agent_runs.c.run_type,
-            agent_runs.c.definition_id,
-            agent_runs.c.source_kind,
-            agent_runs.c.source_actor,
-            agent_runs.c.parent_run_id,
-            agent_runs.c.callback_session_id,
-            agent_runs.c.callback_status,
-            agent_runs.c.callback_run_id,
-            func.json_extract(agent_runs.c.metadata_json, "$.callback_mode").label("callback_mode"),
-            agent_runs.c.created_at,
-            agent_runs.c.started_at,
-            agent_runs.c.completed_at,
-        )
-        .where(agent_runs.c.session_id.in_(candidate_ids))
-        .order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
-    )
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for row in conn.execute(stmt).mappings():
-        data = dict(row)
-        grouped.setdefault(data["session_id"], []).append(data)
-    # Re-sort newest-first in Python: stored run times mix `...Z` (seconds) and
-    # `.isoformat()` (`+00:00`, microseconds), so SQLite's text order_by can rank
-    # two same-second runs wrong and leave a stale run at runs[0] — which drives
-    # the node status, the recent-runs timeline, and the active-view filter.
+def _run_totals(conn, session_ids):
+    """Full-history counts and nonterminal status, from the covering status index."""
+    r = agent_runs.c
+    stmt = select(r.session_id, r.status, func.count()).group_by(r.session_id, r.status)
+    totals = {}
+    rows = (row for batch in conn.batches(session_ids) for row in conn.rows(stmt.where(r.session_id.in_(batch))))
+    for sid, status, count in rows:
+        total, running, pending = totals.get(sid, (0, 0, False))
+        status = normalize_run_status(status)
+        totals[sid] = (total + count, running + (count if status == "running" else 0),
+                       pending or status in {"queued", "running"})
+    return totals
+
+
+def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime) -> dict[str, list[dict[str, Any]]]:
+    """Hydrate runs that can contribute a timeline or an edge in this wave.
+
+    `created_at` and the callback fields follow unbounded text/JSON on the
+    table record. Reading them from every row (even without selecting the
+    blobs) walks overflow pages. Read creation times and endpoint membership
+    from covering indexes; touch later table columns only when needed.
+    """
+    r = agent_runs.c
+    rowid = literal_column("agent_runs.rowid").label("rid")
+    times = {}
+    by_session = {}
+    needed = set()
+    times_stmt = select(rowid, r.session_id, r.created_at)
+    for rid, sid, raw in (row for b in conn.batches(session_ids) for row in conn.rows(times_stmt.where(r.session_id.in_(b)))):
+        instant = _parse_iso(raw) or _EPOCH
+        times[rid] = (raw, instant)
+        by_session.setdefault(sid, []).append(rid)
+        if instant >= cutoff:
+            needed.add(rid)  # potential trigger; definition/type are before payloads
+    for ids in by_session.values():
+        # Keep all ties at the timeline boundary until we have the real run
+        # IDs to break them. The raw maximum separately decides session/edge
+        # insertion order (the legacy SQL ORDER BY created_at DESC, id DESC).
+        boundary = sorted((times[k][1] for k in ids), reverse=True)[min(RUNS_PER_NODE, len(ids)) - 1]
+        raw_max = max(times[k][0] for k in ids)
+        needed.update(k for k in ids if times[k][1] >= boundary or times[k][0] == raw_max)
+
+    spawn = select(rowid).where(r.source_kind == "agent")
+    cb = select(rowid, r.callback_session_id, r.callback_status).where(r.callback_status.is_not(None), r.callback_status != "")
+    callbacks = {}
+    for batch in conn.batches(session_ids, reserved=1, copies=2):
+        belongs = r.session_id.in_(batch)
+        for endpoints in conn.batches(visible, reserved=1 + len(batch)):
+            needed.update(k for k, in conn.rows(spawn.where(belongs, r.source_actor.in_(endpoints))))
+            matching = cb.where(belongs, r.callback_session_id.in_(endpoints))
+            callbacks.update((k, (target, status)) for k, target, status in conn.rows(matching))
+    needed.update(callbacks)
+
+    grouped = {}
+    for batch in conn.batches(needed):
+        head = select(rowid, r.session_id, r.id, r.status, r.run_type, r.definition_id, r.source_kind, r.source_actor)
+        for data in conn.rows(head.where(rowid.in_(batch)), mappings=True):
+            k = data["rid"]
+            data["created_at"], data["instant"] = times[k]
+            if k in callbacks:
+                data["callback_session_id"], data["callback_status"] = callbacks[k]
+            grouped.setdefault(data["session_id"], []).append(data)
+
+    def raw_order(item):
+        return max((row["created_at"], row["id"]) for row in item[1])
+
+    grouped = dict(sorted(grouped.items(), key=raw_order, reverse=True))
+    timeline = {}
     for runs in grouped.values():
-        runs.sort(key=lambda r: (_parse_iso(r.get("created_at")) or _EPOCH, r["id"]), reverse=True)
+        runs.sort(key=lambda r: (r["instant"], r["id"]), reverse=True)
+        timeline.update((r["rid"], r) for r in runs[:RUNS_PER_NODE])
+    for batch in conn.batches(timeline):
+        for k, started, completed in conn.rows(select(rowid, r.started_at, r.completed_at).where(rowid.in_(batch))):
+            timeline[k].update(started_at=started, completed_at=completed)
+
+    # A sent callback always draws an edge, even in failure-only mode. For
+    # the other candidates evaluate the JSON predicate only on their own rows.
+    if callbacks:
+        by_callback = {run["rid"]: run for runs in grouped.values() for run in runs if run["rid"] in callbacks}
+        for batch in conn.batches((k for k, (_, status) in callbacks.items() if status != "sent"), reserved=1):
+            mode = func.json_extract(r.metadata_json, "$.callback_mode")
+            for k, callback_mode in conn.rows(select(rowid, mode).where(rowid.in_(batch))):
+                by_callback[k]["callback_mode"] = callback_mode
+        # Only the newest drawable callback per (sender, target) contributes
+        # its delivery ID. Reading that trailing field on all historical sent
+        # callbacks can otherwise cost as much as reading all the payloads.
+        latest = {}
+        for sid, runs in grouped.items():
+            for run in runs:
+                if _draws_callback_edge(run):
+                    latest.setdefault((sid, run["callback_session_id"]), run)
+        for batch in conn.batches(run["rid"] for run in latest.values()):
+            for k, callback_id in conn.rows(select(rowid, r.callback_run_id).where(rowid.in_(batch))):
+                by_callback[k]["callback_run_id"] = callback_id
     return grouped
 
 
@@ -483,19 +645,25 @@ def _draws_callback_edge(run: Mapping[str, Any]) -> bool:
     return run.get("callback_mode") != "failure" or run.get("callback_status") == "sent"
 
 
-def _lineage_refs(runs_by_session: dict[str, list[dict[str, Any]]]) -> set[str]:
-    """Session ids referenced as a spawn caller or callback target by any run."""
-    refs: set[str] = set()
-    for runs in runs_by_session.values():
-        for run in runs:
-            if run.get("source_kind") == "agent" and run.get("source_actor"):
-                refs.add(run["source_actor"])
-            # Only follow a callback target that will actually draw an edge
-            # (A4: callback edges need a non-null status). A run that merely
-            # recorded a return route otherwise promotes an unconnected root that
-            # consumes cap/count with no report edge.
-            if _draws_callback_edge(run):
-                refs.add(run["callback_session_id"])
+def _lineage_refs(conn, frontier: set[str]) -> set[str]:
+    """Advance one wave, including old delegations. The two probes use the
+    source/session and session/callback indexes; only an unsent callback can
+    require touching the run's metadata to decide if it draws an edge."""
+    r = agent_runs.c
+    # Group in index order, including the session. DISTINCT source_actor
+    # alone invites SQLite to walk *all* agent-authored runs via the actor
+    # index once per wave, filtering session_id from the table afterwards.
+    callers = select(r.session_id, r.source_actor).where(r.source_kind == "agent").group_by(r.session_id, r.source_actor)
+    targets = select(r.session_id, r.callback_session_id).where(
+        r.callback_session_id.is_not(None),
+        r.callback_status.is_not(None), r.callback_status != "",
+        or_(r.callback_status == "sent",
+            func.json_extract(r.metadata_json, "$.callback_mode").is_distinct_from("failure")),
+    ).group_by(r.session_id, r.callback_session_id)
+    refs = set()
+    for batch in conn.batches(frontier, reserved=5, copies=2):
+        wave = r.session_id.in_(batch)
+        refs.update(sid for _, sid in conn.rows(callers.where(wave).union_all(targets.where(wave))) if sid)
     return refs
 
 
@@ -556,11 +724,10 @@ def _build_edges(
             # stays in scope via other in-window activity or lineage); a historical
             # or since-disabled definition must not resurface just because its old
             # session lingers.
-            run_at = _parse_iso(created)
             if (
                 run.get("run_type") in _TRIGGER_RUN_TYPES
                 and run.get("definition_id")
-                and run_at is not None
+                and (run_at := _parse_iso(created)) is not None
                 and run_at >= cutoff
             ):
                 definition_id = run["definition_id"]
@@ -602,10 +769,10 @@ def _load_trigger_nodes(conn, trigger_ids: set[str]) -> list[dict[str, Any]]:
         run_definitions.c.cron,
         run_definitions.c.run_at,
         run_definitions.c.enabled,
-    ).where(run_definitions.c.id.in_(trigger_ids))
+    )
     nodes: list[dict[str, Any]] = []
-    for row in conn.execute(stmt).mappings():
-        data = dict(row)
+    batches = conn.batches(sorted(trigger_ids))
+    for data in (row for b in batches for row in conn.rows(stmt.where(run_definitions.c.id.in_(b)), mappings=True)):
         nodes.append({
             "definition_id": data["id"],
             "definition_type": data["definition_type"],
@@ -616,17 +783,28 @@ def _load_trigger_nodes(conn, trigger_ids: set[str]) -> list[dict[str, Any]]:
     return nodes
 
 
+def _add_run_details(node, runs, totals) -> None:
+    total, running, pending = totals
+    if not node["live"]:
+        node["status"] = "queued" if pending else _node_status(None, runs[:1])[0]
+    node["run_counts"] = {"total": total, "running": running}
+    node["runs"] = [
+        {"id": r["id"], "status": normalize_run_status(r["status"]), "run_type": r.get("run_type"),
+         "created_at": _iso_z(r.get("created_at")), "started_at": _iso_z(r.get("started_at")),
+         "completed_at": _iso_z(r.get("completed_at"))}
+        for r in runs[:RUNS_PER_NODE]
+    ]
+
+
 def _build_nodes(
     session_rows: list[dict[str, Any]],
-    runs_by_session: dict[str, list[dict[str, Any]]],
     live_by_session: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     for row in session_rows:
         session_id = row["id"]
-        runs = runs_by_session.get(session_id, [])
         live = live_by_session.get(session_id)
-        status, is_live = _node_status(live["state"] if live else None, runs)
+        status, is_live = _node_status(live["state"] if live else None, [])
 
         # Hide user-deleted chats (archived session) and sessions under an
         # archived project (avibe project scope with scope_settings.enabled=0) —
@@ -636,19 +814,6 @@ def _build_nodes(
         if (row.get("status") == "archived" or is_archived_project) and not is_live:
             continue
 
-        run_count_total = len(runs)
-        run_count_running = sum(1 for r in runs if normalize_run_status(r["status"]) == "running")
-        recent = [
-            {
-                "id": r["id"],
-                "status": normalize_run_status(r["status"]),
-                "run_type": r.get("run_type"),
-                "created_at": _iso_z(r.get("created_at")),
-                "started_at": _iso_z(r.get("started_at")),
-                "completed_at": _iso_z(r.get("completed_at")),
-            }
-            for r in runs[:RUNS_PER_NODE]
-        ]
 
         # A private ``vibe agent run`` session hangs on the legacy
         # ``private_agent_run`` pseudo-scope (placeholder platform, no delivery).
@@ -686,8 +851,8 @@ def _build_nodes(
             "created_at": _iso_z(row.get("created_at")),
             "last_active_at": _iso_z(row.get("last_active_at")),
             "elapsed_seconds": (live or {}).get("elapsed_seconds") if is_live else None,
-            "run_counts": {"total": run_count_total, "running": run_count_running},
-            "runs": recent,
+            "run_counts": {},
+            "runs": [],
             # Legacy rows backfill to foreground (contract §1).
             "visibility": row.get("visibility") or "foreground",
         }

@@ -9,6 +9,14 @@ pub(crate) mod choices;
 mod clock;
 mod connect;
 #[cfg(test)]
+#[path = "../../tests/direct/windows_credentials.rs"]
+mod credential_tests;
+mod credentials;
+#[cfg(test)]
+use credentials::Credential;
+pub use credentials::WindowRegistration;
+pub use quiet::PublicCensus;
+#[cfg(test)]
 #[path = "../../tests/direct/cross_network.rs"]
 mod cross_network_tests;
 #[cfg(test)]
@@ -210,7 +218,7 @@ impl Client {
         if !listener.is_alive() {
             return None;
         }
-        let (username, password) = listener.credential.native_login();
+        let (username, password) = listener.windows.legacy().native_login();
         Some(Route {
             host: self.host.host(),
             proxy: std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, listener.port),
@@ -240,12 +248,23 @@ impl Client {
     pub fn path_changes(&self) -> watch::Receiver<PathStatus> {
         self.status.subscribe()
     }
+    /// Trusted shell window identity. Idempotent until revoked; reopening a
+    /// window with the same label gets an unrelated secret and census.
+    pub fn window_credential(&self, window: &str) -> Option<WindowRegistration> {
+        self.listener
+            .is_alive()
+            .then(|| self.listener.windows.credential(window))
+            .flatten()
+    }
+    pub fn revoke_window(&self, registration: &WindowRegistration) {
+        self.listener.windows.revoke(registration)
+    }
     pub fn handover(&self) -> Handover {
         Handover {
             host: self.host.clone(),
             links: self.links.subscribe(),
             health: self.listener.health(),
-            public: self.listener.public_legs.clone(),
+            windows: Arc::downgrade(&self.listener.windows),
         }
     }
 

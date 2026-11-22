@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from './desktopVoiceLock';
 import {
   finalizeVoiceDictation,
   VOICE_SETTLE_RETRY_WINDOW_MS,
@@ -75,12 +76,16 @@ export const keptVoiceTakeHasAudio = (take: Pick<VoiceTake, 'segments'>): boolea
  * it was written meanwhile, the newer record stands.
  */
 export function retryKeptVoiceTake(take: VoiceTake): Promise<string> {
+  if (!desktopVoiceLock.allowed()) return Promise.reject(new VoiceTranscriptionError('cancelled'));
+  const token = desktopVoiceLock.token();
   const existing = running.get(take.id);
   if (existing) return existing;
   const read = take.revision ?? 0;
   const run = (async () => {
     const claimed = await claimVoiceTake(take.id, async () => {
+      if (!desktopVoiceLock.current(token)) throw new VoiceTranscriptionError('cancelled');
       const { segments, truncated } = keptVoiceSegments(take, await readVoiceTakeAudio(take.id));
+      if (!desktopVoiceLock.current(token)) throw new VoiceTranscriptionError('cancelled');
       if (!segments.some((segment) => segment.blob)) throw new VoiceTranscriptionError('failed');
       try {
         const result = await finalizeVoiceDictation(segments, { dictationId: take.id, before: '', after: '' }, {

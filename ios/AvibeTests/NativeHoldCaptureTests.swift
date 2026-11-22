@@ -53,6 +53,12 @@ final class NativeHoldCaptureTests: XCTestCase {
     private var heard: [NativeHoldCapture.Event] = []
     /// Touches that were not holds, as counted: how long, and whether moved.
     private var taps: [String] = []
+    /// The same, whole: whether the microphone was started, and would have been.
+    private var tapRecords: [NativeHoldCapture.Tap] = []
+    /// The counts of touches that were not holds that a hold's timings carry.
+    private var tapsTotal: String?
+    /// The earliest an input starts when the page names no time: its timer.
+    private let startDelay = TimeInterval(NativeHoldCapture.defaultStartAfterMs) / 1000
     /// The App's default is to start at touch-down; these tests say which.
     private var startsAtTouchDown = false
 
@@ -78,7 +84,11 @@ final class NativeHoldCaptureTests: XCTestCase {
             ),
             startsAtTouchDown: { [unowned self] in startsAtTouchDown },
             noteTimings: { [unowned self] in notes.append($0) },
-            noteTap: { [unowned self] ms, moved in taps.append("\(ms)\(moved ? " moved" : "")") },
+            noteTap: { [unowned self] tap in
+                taps.append("\(tap.ms)\(tap.moved ? " moved" : "")")
+                tapRecords.append(tap)
+            },
+            tapsTotal: { [unowned self] in tapsTotal },
             sendHoldEvent: { [unowned self] _, detail in holdEvents.append(detail) },
             sendCaptureEvent: { [unowned self] _, _, event in heard.append(event) }
         )
@@ -129,12 +139,22 @@ final class NativeHoldCaptureTests: XCTestCase {
         }
     }
 
-    /// A press on the composer held to recognition; the take's id.
+    /// A press on the composer held to recognition; the take's id. Where
+    /// the input may start before recognition, it starts at its time.
     private func hold(_ capture: NativeHoldCapture, in webView: WKWebView) throws -> String {
         capture.touchDown(at: Self.onComposer, in: webView)
+        startEarly()
         clock += 200
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
         return try XCTUnwrap(holdEvents.last?["take"] as? String)
+    }
+
+    /// The earliest moment for the input to start has come, and the App has
+    /// handled the touches that reached it: the input starts if the finger
+    /// is down. False when no start was waiting for that moment.
+    @discardableResult
+    private func startEarly(touchesHeard: Bool = true) -> Bool {
+        fire(startDelay, touchesHeard: touchesHeard)
     }
 
     private func drain() {
@@ -357,8 +377,9 @@ final class NativeHoldCaptureTests: XCTestCase {
 
     func testTheShellAdvertisesItsOwnHoldRecognition() {
         // 2: a tap is never taken for a hold. The page names surfaces from 2 on, so the one
-        // build that announced 1 (TestFlight 50.1) follows nothing.
-        XCTAssertEqual(NativeShellMetadata.capabilities["voiceHold"], 2)
+        // build that announced 1 (TestFlight 50.1) follows nothing. 3: a surface may name when
+        // its input starts (`startAfterMs`) and whether anything is prepared before (`prepare`).
+        XCTAssertEqual(NativeShellMetadata.capabilities["voiceHold"], 3)
         XCTAssertEqual(
             NativeBridgeMethod.allCases.map(\.rawValue).filter { $0.hasPrefix("voice.hold") },
             ["voice.holdSurfaces", "voice.holdAdopt", "voice.holdReject"]
@@ -665,10 +686,14 @@ final class NativeHoldCaptureTests: XCTestCase {
             holdEvents = []
             notes = []
             taps = []
+            tapRecords = []
             clock = 0
 
             capture.touchDown(at: Self.onComposer, in: webView)
-            XCTAssertEqual(audio.calls, ["begin"])
+            XCTAssertEqual(audio.calls, ["arm"])
+            // Its time has come with the finger still down: the input starts.
+            XCTAssertTrue(startEarly())
+            XCTAssertEqual(audio.calls, ["arm", "begin"])
             audio.onPCM?(Data([1, 0, 2, 0]))
             clock = 150
             if scroll {
@@ -677,7 +702,7 @@ final class NativeHoldCaptureTests: XCTestCase {
                 capture.touchEnded(in: webView)
             }
             // The input is stopped at once, and the take is gone.
-            XCTAssertEqual(audio.calls, ["begin", "stop"], "\(scroll)")
+            XCTAssertEqual(audio.calls, ["arm", "begin", "stop"], "\(scroll)")
             XCTAssertNil(capture.currentTake)
             XCTAssertFalse(capture.followsPress)
             // What the input had still on its way is dropped too.
@@ -689,6 +714,7 @@ final class NativeHoldCaptureTests: XCTestCase {
             // Kept of it: how long it lasted, as a count.
             XCTAssertTrue(notes.isEmpty, "\(scroll)")
             XCTAssertEqual(taps, [scroll ? "150 moved" : "150"])
+            XCTAssertEqual(tapRecords.map(\.opened), [true])
             // And no page can take it afterwards.
             XCTAssertFalse(fire(NativeHoldCapture.defaultHoldSeconds))
             capture.stop(take: "anything")
@@ -744,28 +770,332 @@ final class NativeHoldCaptureTests: XCTestCase {
         audio.calls = []
         clock = 3_000
         capture.touchDown(at: Self.onComposer, in: webView)
-        XCTAssertEqual(audio.calls, ["begin"])
+        XCTAssertTrue(startEarly())
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
         clock = 3_200
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
         let second = try XCTUnwrap(holdEvents.last?["take"] as? String)
         XCTAssertEqual(try capture.adopt(take: second, webView: webView).get()["variant"] as? String, "early")
     }
 
-    /// Started at touch-down too, the cue does not wait for the microphone.
-    func testTheCueComesAtRecognitionWhileAStartFromTouchDownHasNotAnswered() {
+    // MARK: When the input may start
+
+    /// The invariant: **a lift before the input starts never opens the
+    /// microphone.** The input is prepared at touch-down and starts only
+    /// once it is prepared, its time has come, and the finger, asked itself
+    /// after the App has handled the touches that reached it, is still down
+    /// and where it came down. A tap that lifted first, told to the App or
+    /// not, ends as a tap with nothing started.
+    func testALiftBeforeTheStartNeverOpensTheMicrophone() {
+        startsAtTouchDown = true
+        for told in [true, false] {
+            let audio = FakeAudio()
+            let (capture, webView) = makeHoldCapture(audio)
+            heard = []
+            holdEvents = []
+            haptics = []
+            taps = []
+            tapRecords = []
+            clock = 0
+            var lifted: TimeInterval?
+            capture.touchDown(
+                at: Self.onComposer, in: webView, timestamp: 50,
+                touch: { .init(liftedAt: lifted, point: Self.onComposer) }
+            )
+            XCTAssertEqual(audio.calls, ["arm"], "\(told)")
+            // A 30 ms tap.
+            lifted = 50.03
+            clock = 30
+            if told { capture.touchEnded(in: webView, timestamp: 50.03) }
+            // Its time comes; nothing is started.
+            clock = 50
+            XCTAssertEqual(startEarly(), !told, "\(told)")
+            XCTAssertEqual(audio.calls, ["arm", "disarm"], "\(told)")
+            XCTAssertFalse(capture.followsPress, "\(told)")
+            XCTAssertNil(capture.currentTake, "\(told)")
+            XCTAssertNil(audio.onPCM, "\(told)")
+            XCTAssertFalse(fire(NativeHoldCapture.defaultHoldSeconds), "\(told)")
+            XCTAssertEqual(haptics, ["prepare"], "\(told)")
+            XCTAssertTrue(holdEvents.isEmpty, "\(told)")
+            XCTAssertEqual(taps, ["30"], "\(told)")
+            XCTAssertEqual(tapRecords.map(\.opened), [false], "\(told)")
+        }
+    }
+
+    /// A finger that has moved away when the input could start: a drag,
+    /// and nothing is started.
+    func testAFingerThatHasMovedAwayByTheStartOpensNothing() {
+        startsAtTouchDown = true
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        var point = Self.onComposer
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50, touch: { .init(liftedAt: nil, point: point) })
+        point = CGPoint(x: Self.onComposer.x, y: Self.onComposer.y - 30)
+        clock = 50
+        XCTAssertTrue(startEarly())
+        XCTAssertEqual(audio.calls, ["arm", "disarm"])
+        XCTAssertFalse(capture.followsPress)
+        XCTAssertEqual(taps, ["50 moved"])
+        XCTAssertEqual(tapRecords.map(\.opened), [false])
+    }
+
+    /// The start comes at the later of "prepared" and the surface's time:
+    /// preparing quicker than the time waits for it, preparing slower is
+    /// waited for. The cue is not moved by either.
+    func testTheInputStartsAtTheLaterOfPreparedAndItsTime() throws {
+        startsAtTouchDown = true
+        // Preparing answers at 30 ms; the time is 80 ms.
+        let audio = FakeAudio()
+        audio.holdsAnswers = true
+        let capture = makeCapture(audio)
+        let webView = WKWebView(frame: .zero)
+        capture.watch(webView)
+        let surface = NativeHoldCapture.Surface(id: "composer", rect: Self.composer.rect, startAfterMs: 80)
+        XCTAssertTrue(capture.setSurfaces([surface], for: webView))
+        capture.touchDown(at: Self.onComposer, in: webView)
+        clock = 30
+        audio.answer()
+        XCTAssertEqual(audio.calls, ["arm"])
+        clock = 80
+        XCTAssertTrue(fire(0.08))
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
+        audio.answer()
+        clock = 200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        var take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        var timings = try capture.adopt(take: take, webView: webView).get()
+        XCTAssertEqual(timings["startAfterMs"] as? Int, 80)
+        XCTAssertEqual(timings["armedAt"] as? Int, 30)
+        XCTAssertEqual(timings["beginAt"] as? Int, 80)
+        XCTAssertEqual(timings["liveAt"] as? Int, 80)
+        XCTAssertEqual(timings["recognisedAt"] as? Int, 200)
+        capture.touchEnded(in: webView)
+        capture.stop(take: take)
+        drain()
+
+        // Preparing answers at 120 ms, after the time: the start is then.
+        audio.calls = []
+        clock = 1_000
+        capture.touchDown(at: Self.onComposer, in: webView)
+        clock = 1_080
+        XCTAssertTrue(fire(0.08))
+        XCTAssertEqual(audio.calls, ["arm"])
+        clock = 1_120
+        audio.answer()
+        XCTAssertEqual(audio.calls, ["arm"])
+        hearTouches()
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
+        audio.answer()
+        clock = 1_200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        timings = try capture.adopt(take: take, webView: webView).get()
+        XCTAssertEqual(timings["armedAt"] as? Int, 120)
+        XCTAssertEqual(timings["beginAt"] as? Int, 120)
+        capture.touchEnded(in: webView)
+        capture.stop(take: take)
+        drain()
+    }
+
+    /// The App's default when the page names no time: 50 ms. A surface may
+    /// name 0 (the start as soon as prepared, the finger still asked), and
+    /// a surface at recognition starts with the cue.
+    func testTheSurfacesTimeOrTheAppsDefault() throws {
+        startsAtTouchDown = true
+        XCTAssertEqual(NativeHoldCapture.defaultStartAfterMs, 50)
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        let webView = WKWebView(frame: .zero)
+        capture.watch(webView)
+
+        XCTAssertTrue(capture.setSurfaces([Self.composer], for: webView))
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertTrue(timers.contains { !$0.cancelled && $0.delay == 0.05 })
+        capture.touchEnded(in: webView)
+
+        let now = NativeHoldCapture.Surface(id: "composer", rect: Self.composer.rect, startAfterMs: 0)
+        XCTAssertTrue(capture.setSurfaces([now], for: webView))
+        audio.calls = []
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertTrue(fire(0))
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
+        clock += 200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        var take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        XCTAssertEqual(try capture.adopt(take: take, webView: webView).get()["startAfterMs"] as? Int, 0)
+        capture.touchEnded(in: webView)
+        capture.stop(take: take)
+        drain()
+
+        // A time past the threshold is the threshold: the start is the cue's.
+        let late = NativeHoldCapture.Surface(id: "composer", rect: Self.composer.rect, startAfterMs: 400)
+        XCTAssertTrue(capture.setSurfaces([late], for: webView))
+        audio.calls = []
+        timers = []
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertEqual(timers.filter { !$0.cancelled }.map(\.delay), [NativeHoldCapture.defaultHoldSeconds])
+        clock += 200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        let timings = try capture.adopt(take: take, webView: webView).get()
+        XCTAssertEqual(timings["variant"] as? String, "quiet")
+        XCTAssertEqual(timings["startAfterMs"] as? Int, 200)
+        capture.touchEnded(in: webView)
+        capture.stop(take: take)
+        drain()
+    }
+
+    /// `prepare: "start"`: nothing is activated before the input starts.
+    /// A tap then touches the session not at all.
+    func testASurfaceThatPreparesAtTheStartActivatesNothingBeforeIt() throws {
+        startsAtTouchDown = true
+        let audio = FakeAudio()
+        let capture = makeCapture(audio)
+        let webView = WKWebView(frame: .zero)
+        capture.watch(webView)
+        let surface = NativeHoldCapture.Surface(id: "composer", rect: Self.composer.rect, preparesAtStart: true)
+        XCTAssertTrue(capture.setSurfaces([surface], for: webView))
+
+        capture.touchDown(at: Self.onComposer, in: webView)
+        XCTAssertEqual(audio.calls, [])
+        clock = 40
+        capture.touchEnded(in: webView)
+        XCTAssertFalse(startEarly())
+        XCTAssertEqual(audio.calls, [])
+        XCTAssertEqual(taps, ["40"])
+
+        clock = 1_000
+        capture.touchDown(at: Self.onComposer, in: webView)
+        clock = 1_050
+        XCTAssertTrue(startEarly())
+        // The start prepares as it starts.
+        XCTAssertEqual(audio.calls, ["begin"])
+        clock = 1_200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        let take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        let timings = try capture.adopt(take: take, webView: webView).get()
+        XCTAssertEqual(timings["bare"] as? Bool, true)
+        XCTAssertEqual(timings["beginAt"] as? Int, 50)
+        XCTAssertEqual(timings["activateMs"] as? Int, 12)
+        capture.touchEnded(in: webView)
+        capture.stop(take: take)
+        drain()
+    }
+
+    /// For each threshold judged, a tap says whether the input would have
+    /// started with it: the finger still down once prepared and the
+    /// threshold had passed. And whether it did start.
+    func testATapSaysWhetherTheMicrophoneOpenedAndWouldHaveForEachThreshold() {
+        startsAtTouchDown = true
+        XCTAssertEqual(NativeHoldTaps.thresholds, [50, 80, 100, 120])
+        // Prepared at 60 ms; a 90 ms tap, the input started at 60 ms.
+        let audio = FakeAudio()
+        audio.holdsAnswers = true
+        let (capture, webView) = makeHoldCapture(audio)
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 10)
+        clock = 50
+        XCTAssertTrue(startEarly())
+        clock = 60
+        audio.answer()
+        hearTouches()
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
+        clock = 90
+        capture.touchEnded(in: webView, timestamp: 10.09)
+        var tap = tapRecords.last
+        XCTAssertEqual(tap?.ms, 90)
+        XCTAssertEqual(tap?.opened, true)
+        XCTAssertEqual(tap?.wouldOpen, [50: true, 80: true, 100: false, 120: false])
+        audio.answer()
+        drain()
+
+        // A 40 ms tap whose preparing had not answered: no threshold opens it.
+        audio.calls = []
+        clock = 1_000
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 20)
+        clock = 1_040
+        capture.touchEnded(in: webView, timestamp: 20.04)
+        tap = tapRecords.last
+        XCTAssertEqual(tap?.ms, 40)
+        XCTAssertEqual(tap?.opened, false)
+        XCTAssertEqual(tap?.wouldOpen, [50: false, 80: false, 100: false, 120: false])
+        XCTAssertEqual(audio.calls, ["arm", "disarm"])
+        audio.answer()
+
+        // A 120 ms tap whose touch reached the App 100 ms late, prepared 10 ms
+        // after that: by the App's clock the finger was down for 20 ms only,
+        // so no threshold would have opened it.
+        clock = 2_000
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 30, deliveredAfterMs: 100)
+        clock = 2_010
+        audio.answer()
+        clock = 2_020
+        capture.touchEnded(in: webView, timestamp: 30.12)
+        tap = tapRecords.last
+        XCTAssertEqual(tap?.ms, 120)
+        XCTAssertEqual(tap?.wouldOpen, [50: false, 80: false, 100: false, 120: false])
+    }
+
+    /// The counts keep `open` and each threshold's `w…`, and come back from
+    /// their line; a hold's timings carry the counts to its page.
+    func testTheTapCountsKeepOpenAndWouldOpenAndAHoldCarriesThem() throws {
+        var tap = NativeHoldCapture.Tap(ms: 90, moved: false, opened: true)
+        tap.wouldOpen = [50: true, 80: true, 100: false, 120: false]
+        var counts = NativeHoldTaps.adding(tap, to: [:])
+        counts = NativeHoldTaps.adding(NativeHoldCapture.Tap(ms: 40, moved: false, wouldOpen: [50: false]), to: counts)
+        counts = NativeHoldTaps.adding(NativeHoldCapture.Tap(ms: 300, moved: true), to: counts)
+        let line = try XCTUnwrap(NativeHoldTaps.line(for: counts))
+        XCTAssertEqual(line, "hold taps 25:1 75:1 moved=1 open=1 w50=1 w80=1")
+        XCTAssertEqual(NativeHoldTaps.counts(in: line), counts)
+
+        tapsTotal = "75:1 moved=1 open=1 w50=1"
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        let take = try hold(capture, in: webView)
+        _ = try capture.adopt(take: take, webView: webView).get()
+        capture.stop(take: take)
+        drain()
+        let timings = try XCTUnwrap(holdEvents.last { $0["phase"] as? String == "timings" }?["timings"] as? [String: Any])
+        XCTAssertEqual(timings["taps"] as? String, "75:1 moved=1 open=1 w50=1")
+    }
+
+    /// How long the touch took to reach the App is kept with the hold.
+    func testAHoldKeepsHowLongItsTouchTookToReachTheApp() throws {
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        capture.touchDown(at: Self.onComposer, in: webView, deliveredAfterMs: 18)
+        clock = 200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        let take = try XCTUnwrap(holdEvents.last?["take"] as? String)
+        XCTAssertEqual(try capture.adopt(take: take, webView: webView).get()["deliveryMs"] as? Int, 18)
+        capture.stop(take: take)
+        drain()
+        XCTAssertTrue(try XCTUnwrap(notes.last).contains(" dly=18 "), notes.last ?? "")
+    }
+
+    /// Started before recognition too, the cue does not wait for the
+    /// microphone: preparing that has not answered keeps the start waiting,
+    /// and recognition starts it with the cue.
+    func testTheCueComesAtRecognitionWhileAStartBeforeItHasNotAnswered() {
         startsAtTouchDown = true
         let audio = FakeAudio()
         audio.holdsAnswers = true
         let (capture, webView) = makeHoldCapture(audio)
 
         capture.touchDown(at: Self.onComposer, in: webView)
-        XCTAssertEqual(audio.calls, ["begin"])
+        XCTAssertEqual(audio.calls, ["arm"])
+        // Its time has come, but preparing has not answered: the start waits.
+        clock = 50
+        XCTAssertTrue(startEarly())
+        XCTAssertEqual(audio.calls, ["arm"])
         clock = 200
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
         XCTAssertEqual(haptics, ["prepare", "fire"])
         XCTAssertEqual(holdEvents.first?["phase"] as? String, "recognised")
-        XCTAssertEqual(audio.pendingAnswers, 1)
-        XCTAssertEqual(audio.calls, ["begin"])
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
+        XCTAssertEqual(audio.pendingAnswers, 2)
+        // Preparing answers later: nothing more is started.
+        audio.answer()
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
     }
 
     /// A recognised hold whose page never took it ends however it ends
@@ -817,10 +1147,11 @@ final class NativeHoldCaptureTests: XCTestCase {
             let audio = FakeAudio()
             let (capture, webView) = makeHoldCapture(audio)
             capture.touchDown(at: Self.onComposer, in: webView)
+            XCTAssertEqual(startEarly(), early)
             capture.appWillResignActive()
             XCTAssertFalse(capture.followsPress, "\(early)")
             XCTAssertNil(capture.currentTake)
-            XCTAssertEqual(audio.calls, early ? ["begin", "stop"] : ["arm", "disarm"])
+            XCTAssertEqual(audio.calls, early ? ["arm", "begin", "stop"] : ["arm", "disarm"])
             XCTAssertFalse(fire(NativeHoldCapture.defaultHoldSeconds))
 
             heard = []
@@ -901,6 +1232,9 @@ final class NativeHoldCaptureTests: XCTestCase {
         haptics = []
         capture.touchDown(at: Self.onComposer, in: webView)
         XCTAssertTrue(capture.followsPress)
+        // Prepared; then its time comes, and the start fails.
+        audio.answer()
+        XCTAssertTrue(startEarly())
         audio.answer()
         XCTAssertFalse(capture.followsPress)
         XCTAssertNil(capture.currentTake)
@@ -923,6 +1257,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         let (capture, webView) = makeHoldCapture(audio)
 
         capture.touchDown(at: Self.onComposer, in: webView, timestamp: 10)
+        XCTAssertTrue(startEarly())
         audio.onPCM?(Data([1, 0]))
         clock = 230
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
@@ -932,7 +1267,7 @@ final class NativeHoldCaptureTests: XCTestCase {
         capture.touchEnded(in: webView, timestamp: 10.19)
         XCTAssertNil(capture.currentTake)
         XCTAssertFalse(capture.followsPress)
-        XCTAssertEqual(audio.calls, ["begin", "stop"])
+        XCTAssertEqual(audio.calls, ["arm", "begin", "stop"])
         assertGone(capture.adopt(take: take, webView: webView))
         audio.onPCM?(Data([2, 0]))
         drain()
@@ -1200,24 +1535,28 @@ final class NativeHoldCaptureTests: XCTestCase {
             holdEvents = []
             heard = []
             taps = []
+            tapRecords = []
             notes = []
             clock = 0
 
             // A tap of 80 ms. The main thread is busy for a second from its touch-down.
             capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50)
-            audio.onPCM?(Data([1, 0]))
             clock = 1_000
-            // The timer, a second late, runs before the lift is handled.
+            // The timers, late, run before the lift is handled: the start
+            // waits for the App to have heard the touches, as the cue does.
+            XCTAssertEqual(startEarly(touchesHeard: false), early, "\(early)")
             XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds, touchesHeard: false), "\(early)")
             XCTAssertEqual(haptics, ["prepare"], "\(early)")
             XCTAssertTrue(holdEvents.isEmpty, "\(early)")
-            XCTAssertEqual(audio.calls, [early ? "begin" : "arm"], "\(early)")
+            // No start without the finger seen down: the microphone is not opened.
+            XCTAssertEqual(audio.calls, ["arm"], "\(early)")
 
             // The lift is handled: a tap, with what a tap leaves.
             capture.touchEnded(in: webView, timestamp: 50.08)
             XCTAssertFalse(capture.followsPress, "\(early)")
             XCTAssertNil(capture.currentTake, "\(early)")
-            XCTAssertEqual(audio.calls, early ? ["begin", "stop"] : ["arm", "disarm"], "\(early)")
+            XCTAssertEqual(audio.calls, ["arm", "disarm"], "\(early)")
+            XCTAssertEqual(tapRecords.map(\.opened), [false], "\(early)")
             // Nothing more once the App has caught up, and nothing later.
             hearTouches()
             audio.onPCM?(Data([2, 0]))
@@ -1253,6 +1592,8 @@ final class NativeHoldCaptureTests: XCTestCase {
                 at: Self.onComposer, in: webView, timestamp: 50,
                 touch: { .init(liftedAt: lifted, point: Self.onComposer) }
             )
+            // At 50 ms the finger is down: the input starts where it may.
+            XCTAssertEqual(startEarly(), early, "\(early)")
             audio.onPCM?(Data([1, 0]))
             // The finger lifts after 70 ms; nothing tells the App.
             lifted = 50.07
@@ -1262,7 +1603,7 @@ final class NativeHoldCaptureTests: XCTestCase {
             XCTAssertNil(capture.currentTake, "\(early)")
             XCTAssertEqual(haptics, ["prepare"], "\(early)")
             XCTAssertTrue(holdEvents.isEmpty, "\(early)")
-            XCTAssertEqual(audio.calls, early ? ["begin", "stop"] : ["arm", "disarm"], "\(early)")
+            XCTAssertEqual(audio.calls, early ? ["arm", "begin", "stop"] : ["arm", "disarm"], "\(early)")
             audio.onPCM?(Data([2, 0]))
             drain()
             XCTAssertTrue(heard.isEmpty, "\(early)")
@@ -1290,6 +1631,8 @@ final class NativeHoldCaptureTests: XCTestCase {
             var point = Self.onComposer
 
             capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50, touch: { .init(liftedAt: nil, point: point) })
+            // At 50 ms the finger is where it came down: the input starts where it may.
+            XCTAssertEqual(startEarly(), early, "\(early)")
             // The finger moves 40 pt, past the slop, with no word of a move to the App.
             point = CGPoint(x: Self.onComposer.x + 40, y: Self.onComposer.y)
             clock = 200
@@ -1298,7 +1641,7 @@ final class NativeHoldCaptureTests: XCTestCase {
             XCTAssertNil(capture.currentTake, "\(early)")
             XCTAssertEqual(haptics, ["prepare"], "\(early)")
             XCTAssertTrue(holdEvents.isEmpty, "\(early)")
-            XCTAssertEqual(audio.calls, early ? ["begin", "stop"] : ["arm", "disarm"], "\(early)")
+            XCTAssertEqual(audio.calls, early ? ["arm", "begin", "stop"] : ["arm", "disarm"], "\(early)")
             XCTAssertEqual(taps, ["200 moved"], "\(early)")
             capture.stop(webView: webView)
             drain()
@@ -1440,12 +1783,14 @@ final class NativeHoldCaptureTests: XCTestCase {
         let (capture, webView) = makeHoldCapture(audio)
 
         capture.touchDown(at: Self.onComposer, in: webView)
-        XCTAssertEqual(audio.calls, ["begin"])
+        XCTAssertEqual(audio.calls, ["arm"])
+        XCTAssertTrue(startEarly())
+        XCTAssertEqual(audio.calls, ["arm", "begin"])
         audio.onPCM?(Data([9, 0]))
         clock = 90
         capture.touchEnded(in: webView)
         drain()
-        XCTAssertEqual(audio.calls, ["begin", "stop"])
+        XCTAssertEqual(audio.calls, ["arm", "begin", "stop"])
         XCTAssertTrue(heard.isEmpty)
         XCTAssertTrue(holdEvents.isEmpty)
         XCTAssertEqual(haptics, ["prepare"])
@@ -1454,6 +1799,8 @@ final class NativeHoldCaptureTests: XCTestCase {
 
         clock = 1_000
         capture.touchDown(at: Self.onComposer, in: webView)
+        clock = 1_050
+        XCTAssertTrue(startEarly())
         audio.onPCM?(Data([1, 0]))
         clock = 1_200
         XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
@@ -1462,9 +1809,13 @@ final class NativeHoldCaptureTests: XCTestCase {
         // What was said before the cue is the take's.
         XCTAssertEqual(heard, [.pcm(Data([1, 0]))])
         XCTAssertEqual(timings["variant"] as? String, "early")
-        XCTAssertEqual(timings["liveAt"] as? Int, 0)
-        XCTAssertEqual(timings["cueToLive"] as? Int, -200)
-        XCTAssertEqual(timings["liveEarly"] as? Int, 0)
+        XCTAssertEqual(timings["startAfterMs"] as? Int, 50)
+        XCTAssertEqual(timings["armedAt"] as? Int, 0)
+        XCTAssertEqual(timings["beginAt"] as? Int, 50)
+        XCTAssertEqual(timings["liveAt"] as? Int, 50)
+        XCTAssertEqual(timings["cueToLive"] as? Int, -150)
+        // Had it started at touch-down with no wait: its own set-up and start (7 + 12 + 3 + 5).
+        XCTAssertEqual(timings["liveEarly"] as? Int, 27)
         XCTAssertEqual(timings["liveQuiet"] as? Int, 205)
         capture.stop(take: take)
         drain()
@@ -1530,7 +1881,27 @@ final class NativeHoldCaptureTests: XCTestCase {
             [.init(id: "composer", rect: rect, startsAtRecognition: false)]
         )
         XCTAssertEqual(NativeHoldCapture.surfaces(from: [surface])?.first?.startsAtRecognition, false)
+        // The earliest the input may start, and whether anything is prepared before it.
+        XCTAssertEqual(
+            NativeHoldCapture.surfaces(from: [surface.merging(["startAfterMs": 80, "prepare": "start"]) { _, new in new }]),
+            [.init(id: "composer", rect: rect, startAfterMs: 80, preparesAtStart: true)]
+        )
+        XCTAssertEqual(
+            NativeHoldCapture.surfaces(from: [surface.merging(["startAfterMs": 0, "prepare": "touch", "start": "touch"]) { _, new in new }]),
+            [.init(id: "composer", rect: rect, startAfterMs: 0)]
+        )
+        XCTAssertNil(NativeHoldCapture.surfaces(from: [surface])?.first?.startAfterMs)
+        XCTAssertEqual(NativeHoldCapture.startAfterMs(from: 500), 500)
+        for value in [-1, 501, 50.5, true, "50"] as [Any] {
+            XCTAssertNil(NativeHoldCapture.startAfterMs(from: value), String(describing: value))
+        }
         let invalid: [Any?] = [
+            [surface.merging(["startAfterMs": 501]) { _, new in new }],
+            [surface.merging(["startAfterMs": "50"]) { _, new in new }],
+            [surface.merging(["startAfterMs": 50, "start": "recognition"]) { _, new in new }],
+            [surface.merging(["prepare": "later"]) { _, new in new }],
+            [surface.merging(["prepare": true]) { _, new in new }],
+            [surface.merging(["startAfterMs": 50, "prepare": "touch", "start": "touch", "extra": 1]) { _, new in new }],
             [surface.merging(["start": "later"]) { _, new in new }],
             [surface.merging(["start": true]) { _, new in new }],
             [surface.merging(["start": 1]) { _, new in new }],

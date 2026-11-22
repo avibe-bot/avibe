@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mainBotStartsAtRecognition, noteAppVoice } from './appVoice';
 import {
   holdFollowed,
+  holdMissReason,
   refreshHoldSurfaces,
   registerHoldSurface as registerSurface,
   type HoldSurface,
@@ -114,7 +115,7 @@ beforeEach(() => {
   document.elementFromPoint = topAt;
 });
 afterEach(async () => {
-  noteAppVoice({ app_hold: true, app_hold_main_at_touch: true });
+  noteAppVoice({ app_hold: true, app_hold_main_at_touch: true, app_hold_start_ms: null, app_hold_prepare_at_touch: true });
   // Every surface taken back, and the App told: the next test starts from nothing named.
   await unregisterAll();
   document.body.replaceChildren();
@@ -519,6 +520,93 @@ describe('the hold surfaces the iOS App follows', () => {
       expect(holdFollowed('composer', 100, 720)).toBe(false);
       unregister();
     }
+  });
+
+  // From `voiceHold` 3 (TestFlight 52.1): when a hold's microphone may start, and whether the App
+  // may prepare before, as the instance set them (`audio_asr.app_hold_start_ms`,
+  // `audio_asr.app_hold_prepare_at_touch`), on every box; a surface at recognition keeps `start`.
+  it('says when the microphone may start and whether to prepare before, to an App that knows them', async () => {
+    install({ voice: 1, voiceCapture: 1, voiceHold: 3 });
+    noteAppVoice({ app_hold_start_ms: 80, app_hold_prepare_at_touch: false });
+    registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
+    registerHoldSurface('bot', surface(box(150, 780, 90, 60), { startsAtRecognition: () => true }));
+    await settle();
+    expect(named().at(-1)).toEqual({
+      surfaces: [
+        { id: 'composer', x: 0, y: 700, width: 390, height: 60, startAfterMs: 80, prepare: 'start' },
+        { id: 'bot', x: 150, y: 780, width: 90, height: 60, start: 'recognition', prepare: 'start' },
+      ],
+      holdMs: 200,
+    });
+
+    // Unset again: the App's own default, and preparing at touch-down.
+    noteAppVoice({ app_hold_start_ms: null, app_hold_prepare_at_touch: true });
+    await settle();
+    expect(named().at(-1)).toEqual({
+      surfaces: [
+        { id: 'composer', x: 0, y: 700, width: 390, height: 60 },
+        { id: 'bot', x: 150, y: 780, width: 90, height: 60, start: 'recognition' },
+      ],
+      holdMs: 200,
+    });
+
+    // A time out of 0..500, or not a whole number, is the App's default.
+    for (const wrong of [501, -1, 80.5, '80']) {
+      noteAppVoice({ app_hold_start_ms: wrong });
+      await settle();
+      expect(named().at(-1)?.surfaces?.[0], String(wrong)).toEqual({ id: 'composer', x: 0, y: 700, width: 390, height: 60 });
+    }
+  });
+
+  it('says neither to an App before version 3, which would refuse the list', async () => {
+    noteAppVoice({ app_hold_start_ms: 80, app_hold_prepare_at_touch: false });
+    registerHoldSurface('composer', surface(box(0, 700, 390, 60)));
+    await settle();
+    expect(named().at(-1)).toEqual({ surfaces: [{ id: 'composer', x: 0, y: 700, width: 390, height: 60 }], holdMs: 200 });
+  });
+
+  // For the capture trace: why the App did not follow a press at a point (the trace's `holdMiss`).
+  it('says why the App does not follow a press', async () => {
+    let element: Element | null = box(0, 700, 390, 60);
+    const held = surface(null, { element: () => element });
+    expect(holdMissReason('composer', 100, 720)).toBe('unlisted');
+    registerHoldSurface('composer', held);
+    await settle();
+    expect(holdMissReason('composer', 100, 720)).toBeUndefined();
+    // Followed, and the finger outside its box.
+    expect(holdMissReason('composer', 100, 300)).toBe('outside');
+
+    // A take being finalized there: no hold may record now.
+    const kept = element;
+    element = null;
+    refreshHoldSurfaces();
+    await settle();
+    expect(holdMissReason('composer', 100, 720)).toBe('closed');
+
+    // Something over it.
+    element = kept;
+    const sheet = box(0, 0, 390, 844);
+    refreshHoldSurfaces();
+    await settle();
+    expect(holdMissReason('composer', 100, 720)).toBe('covered');
+    sheet.remove();
+
+    // Named, the App's answer still on its way; then refused.
+    let answerList!: (error: unknown) => void;
+    answers = [new Promise((_, reject) => { answerList = reject; })];
+    refreshHoldSurfaces();
+    await settle();
+    expect(holdMissReason('composer', 100, 720)).toBe('pending');
+    answerList({ code: 'failed', message: 'consent' });
+    await settle();
+    expect(holdMissReason('composer', 100, 720)).toBe('refused');
+
+    // Turned off for the instance, and a document that does not cover the viewport.
+    noteAppVoice({ app_hold: false });
+    expect(holdMissReason('composer', 100, 720)).toBe('off');
+    noteAppVoice({ app_hold: true });
+    viewport('width=device-width, initial-scale=1.0');
+    expect(holdMissReason('composer', 100, 720)).toBe('viewport');
   });
 
   it('goes on hearing the App until it has been told the last surface went', async () => {

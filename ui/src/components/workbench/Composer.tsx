@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '../../lib/desktopVoiceLock';
 import type { TranslationKey } from '@/i18n/types';
 import {
   forwardRef,
@@ -205,6 +206,8 @@ type VoiceSegment = VoiceTranscriptionSegment & {
 };
 
 type VoiceRecordingSession = {
+  lockToken: number;
+  stopWatchingLock?: () => void;
   sessionId: string;
   dictationId: string;
   /** What the take's microphone delivered (lib/voiceCaptureTrace), for an honest note. */
@@ -617,6 +620,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [value, setValue] = useState('');
   const [homeVoiceKey] = useState(() => `draft:${newLocalId()}`);
   const voiceKey = sessionId ?? (stageMedia ? homeVoiceKey : undefined);
+  const currentVoiceKey = useRef(voiceKey);
+  useEffect(() => { currentVoiceKey.current = voiceKey; }, [voiceKey]);
   // Where a take spoken here is kept until its words land (lib/voiceTakeStore): this Session, or
   // the Home draft, which a reload starts afresh under a new key but the same place.
   const voiceKeepTarget = sessionId ?? (stageMedia ? 'home' : null);
@@ -1094,6 +1099,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     overlapMs?: number,
     final = false,
   ) => {
+    if (session.abortController.signal.aborted) return;
     const segment: VoiceSegment = {
       blob,
       sequence: session.segments.length,
@@ -1123,6 +1129,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const presentVoiceSession = useCallback((session: VoiceRecordingSession) => {
+    if (session.abortController.signal.aborted) return;
     const activeHere = (
       !unmountedRef.current
       && voiceKey === session.sessionId
@@ -1168,8 +1175,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       await finalizeVoiceSession(session);
       presentVoiceSession(session);
     } finally {
+      session.stopWatchingLock?.();
       if (recordingSessionRef.current === session) recordingSessionRef.current = null;
-      if (activeHere) {
+      if (activeHere && desktopVoiceLock.current(session.lockToken)) {
         transcribingRef.current = false;
         if (!unmountedRef.current) setTranscribing(false);
       }
@@ -1215,8 +1223,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       await session.finalization;
       presentVoiceSession(session);
     } finally {
+      session.stopWatchingLock?.();
       if (recordingSessionRef.current === session) recordingSessionRef.current = null;
-      if (activeHere) {
+      if (activeHere && desktopVoiceLock.current(session.lockToken)) {
         transcribingRef.current = false;
         if (!unmountedRef.current) setTranscribing(false);
       }
@@ -1224,15 +1233,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const retryVoiceSession = async (session: VoiceRecordingSession) => {
-    if (unmountedRef.current || transcribingRef.current) return;
+    if (!desktopVoiceLock.allowed() || unmountedRef.current || transcribingRef.current) return;
+    const lockToken = desktopVoiceLock.token();
     transcribingRef.current = true;
     setTranscribing(true);
     try {
       await retryStoredVoiceSession(session);
-      presentVoiceSession(session);
+      if (!unmountedRef.current && currentVoiceKey.current === session.sessionId && voiceSessionsById.get(session.sessionId) === session) {
+        if (desktopVoiceLock.current(lockToken)) presentVoiceSession(session);
+        else retainSettledVoiceSession(session);
+      }
     } finally {
-      transcribingRef.current = false;
-      if (!unmountedRef.current) setTranscribing(false);
+      const owner = voiceSessionsById.get(session.sessionId);
+      if (!unmountedRef.current && currentVoiceKey.current === session.sessionId && (!owner || owner === session)) {
+        transcribingRef.current = false;
+        setTranscribing(false);
+      }
     }
   };
 
@@ -1245,7 +1261,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [restoreRealtimePreview]);
 
   const copyReadyVoiceTranscript = useCallback(async (session: VoiceRecordingSession) => {
-    if (!session.transcript) return;
+    if (!desktopVoiceLock.allowed() || !session.transcript) return;
     if (await copyTextToClipboard(session.transcript)) {
       showToast(t('chat.compose.voiceTranscriptCopied'), 'success');
     }
@@ -1290,6 +1306,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [presentVoiceSession, voiceKey]);
 
   const startRecording = async (capturedInsertion?: VoiceInsertionSnapshot) => {
+    if (!desktopVoiceLock.allowed()) return;
+    const lockToken = desktopVoiceLock.token();
     if (
       !voiceKey
       || recordingStartRef.current
@@ -1308,7 +1326,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     // Voice goes to a third-party AI service: the mic button and ⌥Z ask until this account
     // said yes, and record nothing meanwhile. The draft's caret and the
     // conversation are taken first, as they were when the press came (ui/design: composer/voice-consent/*).
-    if (await resolveVoicePress() !== 'granted') return;
+    if (await resolveVoicePress() !== 'granted' || !desktopVoiceLock.current(lockToken)) return;
     if (recordingStartRef.current || voiceSessionsById.has(voiceKey)) return;
     // Start compiling the capture graph in parallel with the permission and
     // lock steps. The microphone is still requested only by getUserMedia below.
@@ -1328,15 +1346,42 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
     });
     voiceCaptureClaimRef.current = captureClaim;
+    const stopWatchingLock = desktopVoiceLock.onInvalidate(() => {
+      const session = startingSession;
+      session?.abortController.abort();
+      session?.captureRetries.abort();
+      session?.realtime?.abort();
+      session?.keeper?.forget();
+      startingPipeline?.abort();
+      stream?.getTracks().forEach((track) => track.stop());
+      captureClaim.release();
+      if (session) {
+        restoreRealtimePreview(session);
+        deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+      }
+      if (recordingSessionRef.current === session) recordingSessionRef.current = null;
+      if (recorderRef.current === startingPipeline) recorderRef.current = null;
+      if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
+      clearRecordingTimers();
+      recordingStartRef.current = false;
+      transcribingRef.current = false;
+      if (!unmountedRef.current) {
+        setRecording(false); setRecordingStarting(false); setTranscribing(false);
+        setVoiceRetainedSession((current) => current === session ? null : current);
+      }
+      stopWatchingLock();
+    });
     // The take's capture, from here to the end of its microphone (lib/voiceCaptureTrace).
     const dictationId = newVoiceDictationId();
     const trace = new VoiceCaptureTrace('tap', dictationId);
     let micRequestedAt: number | null = null;
     try {
       await captureClaim.ready;
+      if (!desktopVoiceLock.current(lockToken)) return;
       // In the iOS App the App records this take too, once its microphone is allowed
       // (lib/nativeVoiceCapture): one owner of the audio session, and no microphone of the page's.
       const nativeCapture = await nativeCaptureAllowed();
+      if (!desktopVoiceLock.current(lockToken)) return;
       micRequestedAt = trace.mark();
       stream = nativeCapture ? emptyVoiceStream() : await requestVoiceInputStream();
       // The App's capture settles its own microphone.
@@ -1350,6 +1395,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const abortController = new AbortController();
       const captureRetries = new AbortController();
       const session: VoiceRecordingSession = {
+        lockToken,
+        stopWatchingLock,
         sessionId: voiceKey,
         dictationId,
         captureClass: () => trace.captureClass(),
@@ -1377,7 +1424,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         context,
         signal: abortController.signal,
         onPreview: (preview) => {
-          if (recordingSessionRef.current !== session || unmountedRef.current) return;
+          if (recordingSessionRef.current !== session || unmountedRef.current || session.abortController.signal.aborted) return;
           session.realtimeFirstPreviewAt ??= Date.now();
           if (`${preview.text}${preview.stash}`.trim()) session.realtimeHeardWords = true;
           showRealtimePreview(session, `${preview.text}${preview.stash}`.trim());
@@ -1409,6 +1456,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           queueVoiceSegment(session, blob, metadata.durationMs, metadata.overlapMs, metadata.final);
         },
         onPcm: (samples) => {
+          if (session.abortController.signal.aborted) return;
           // What would be transcribed, its flushed tail included, is what the gate judges.
           session.activity.observePcm(samples);
           if (session.realtimeState === 'connecting' || session.realtimeState === 'active') {
@@ -1423,6 +1471,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ).length;
         },
         onCaptureState: (state) => {
+          if (session.abortController.signal.aborted) return;
           // Recorded without Web Audio: no live PCM, so its words come over HTTP when it ends.
           if (state !== 'live' && session.realtime && session.realtimeState !== 'failed') {
             session.realtimeState = 'failed';
@@ -1431,6 +1480,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
         },
         onError: (error) => {
+          if (session.abortController.signal.aborted) return;
           session.captureError = error;
           if (session.realtime) {
             session.realtimeState = 'failed';
@@ -1442,6 +1492,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
         },
         onStopped: (reason, metadata) => {
+          if (session.abortController.signal.aborted && (reason !== 'abort' || !desktopVoiceLock.current(lockToken))) {
+            captureClaim.release(); stopWatchingLock(); return;
+          }
           session.captureRetries.abort();
           captureClaim.release();
           if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
@@ -1450,7 +1503,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           clearRecordingTimers();
           if (!unmountedRef.current) setRecording(false);
 
-          if (reason === 'abort') {
+          if (reason === 'abort' || !desktopVoiceLock.current(lockToken)) {
+            stopWatchingLock();
             session.keeper?.forget();
             session.abortController.abort();
             session.realtime?.abort();
@@ -1501,6 +1555,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const captureActive = await pipeline.start();
       if (!captureActive) return;
       if (!captureClaim.isCurrent()) {
+        if (!desktopVoiceLock.current(lockToken)) { pipeline.abort(); return; }
         pipeline.finish();
         return;
       }
@@ -1535,14 +1590,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       startingSession?.keeper?.forget();
       startingSession?.abortController.abort();
       startingSession?.realtime?.abort();
-      if (startingSession) restoreRealtimePreview(startingSession);
+      if (startingSession && desktopVoiceLock.current(lockToken)) restoreRealtimePreview(startingSession);
       if (recorderRef.current === startingPipeline) recorderRef.current = null;
       if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
       captureClaim.release();
       if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
       clearRecordingTimers();
       stream?.getTracks().forEach((track) => track.stop());
-      if (!unmountedRef.current) {
+      if (!unmountedRef.current && desktopVoiceLock.current(lockToken)) {
         setRecording(false);
         showToast(t(
           stream
@@ -1555,8 +1610,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         captureClaim.release();
         if (voiceCaptureClaimRef.current === captureClaim) voiceCaptureClaimRef.current = null;
       }
-      recordingStartRef.current = false;
-      if (!unmountedRef.current) setRecordingStarting(false);
+      if (!startingSession || startingSession.abortController.signal.aborted) stopWatchingLock();
+      if (desktopVoiceLock.current(lockToken)) {
+        recordingStartRef.current = false;
+        if (!unmountedRef.current) setRecordingStarting(false);
+      }
     }
   };
 
@@ -2511,6 +2569,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     <ComposerHoldSurface phase={hold.phase} pointer={holdPointer} progress={hold.progress} point={holdPoint} />
   );
   // The box a hold is pressed on, measured for leave-to-cancel; raised above the card's halo while held.
+  // The box is its own stacking context (`isolate`): below a transcript that scrolls, WebKit (the
+  // macOS Desktop app, Safari) otherwise keeps an empty input's caret but never draws it until a
+  // key is typed.
   const boxHoldProps = {
     ref: boxRef,
     ...holdHandlers,
@@ -2576,7 +2637,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {...boxHoldProps}
           data-working={busyControls || undefined}
           className={cn(
-            'composer-edge relative flex w-full flex-col gap-1 rounded-2xl border p-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
+            'composer-edge relative isolate flex w-full flex-col gap-1 rounded-2xl border p-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
             holdRaised && 'z-50',
           )}
         >
@@ -2599,7 +2660,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {...boxHoldProps}
           data-working={busyControls || undefined}
           className={cn(
-            'composer-edge relative flex w-full items-end gap-1.5 rounded-2xl border py-2 pr-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
+            'composer-edge relative isolate flex w-full items-end gap-1.5 rounded-2xl border py-2 pr-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
             mediaEnabled ? 'pl-1.5' : 'pl-3.5',
             holdRaised && 'z-50',
           )}

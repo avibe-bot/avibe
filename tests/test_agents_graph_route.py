@@ -109,6 +109,26 @@ def test_controller_unreachable_degrades(monkeypatch, tmp_path):
     assert body["counts"]["live"] == 0
 
 
+def test_slow_graph_log_reports_only_fixed_server_side_stage_times(monkeypatch, tmp_path, caplog):
+    from vibe import ui_server
+
+    _seed(monkeypatch, tmp_path)
+    _mock_live(monkeypatch, [])
+    monkeypatch.setattr(ui_server, "SLOW_API_REQUEST_MS", 0)
+    # An empty candidate set still records every stage, without logging the
+    # caller's filters or publishing pre-ACL timings to the browser.
+    resp = app.test_client().get("/api/agents-graph?project=private-filter&include_ended=0")
+    assert resp.status_code == 200
+    entry = next(r.getMessage() for r in caplog.records if "slow api request path=/api/agents-graph" in r.getMessage())
+    assert "private-filter" not in entry
+    stages = dict(item.split(":") for item in entry.split(" stages_ms=")[1].split(","))
+    assert set(stages) == {"ipc", "queue", "open", "execute", "fetch", "assemble", "acl", "json", "resume",
+                           "candidates", "lineage", "histories", "edges"}
+    assert all(float(value) >= 0 for value in stages.values())
+    assert "lineage" not in resp.headers["Server-Timing"]
+    assert "stages_ms" not in json.loads(resp.content)
+
+
 def test_graph_endpoint_outside_agent_namespace(monkeypatch, tmp_path):
     """A7: the graph endpoint is /api/agents-graph, OUTSIDE /api/agents/<name>,
     so it neither shadows nor is shadowed by an agent literally named 'graph'."""

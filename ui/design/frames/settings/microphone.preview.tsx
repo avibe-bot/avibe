@@ -31,7 +31,7 @@ export const MicrophoneSettingsPreview = () => {
       platform={fixture.platform}
       state={fixture.state as MicrophoneSettingsState}
       selection={selected}
-      devices={devices}
+      devices={fixture.devices ?? devices}
       missing={fixture.state === 'missing' || fixture.state === 'disconnected'}
       level={level}
     />

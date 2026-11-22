@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '@/lib/desktopVoiceLock';
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { AudioLines, FileHeadphone, FileX, Loader2, PenLine, RotateCcw, Send, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
@@ -184,17 +185,20 @@ function useAutoRetry(takes: VoiceTake[], onFailed: (id: string) => void) {
   useVoiceConsent();
   useEffect(() => {
     retryAll.current = (only) => {
+      if (!desktopVoiceLock.allowed()) return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
       if (knownVoiceConsent() !== 'granted') return;
       for (const take of takes) {
         if (take.status === 'transcribed' || isRetryingVoiceTake(take.id) || !keptVoiceTakeHasAudio(take)) continue;
         if (only && !only(take)) continue;
+        // An online/visible attempt also satisfies the initial attempt. Otherwise
+        // a render with the old pending row can start it again as that run ends.
+        triedOnLoad.add(take.id);
         void retryKeptVoiceTake(take).catch(() => onFailed(take.id));
       }
     };
     retryAll.current((take) => {
       if (take.setAside || triedOnLoad.has(take.id)) return false;
-      triedOnLoad.add(take.id);
       return true;
     });
   });
@@ -242,6 +246,7 @@ export function PendingVoiceTakes({
             retrying={isRetryingVoiceTake(take.id)}
             failed={failed.has(take.id)}
             onRetry={() => {
+              if (!desktopVoiceLock.allowed()) return;
               if (knownVoiceConsent() !== 'granted') {
                 askVoiceConsent();
                 return;
@@ -258,11 +263,11 @@ export function PendingVoiceTakes({
             onDiscard={() => void deleteVoiceTake(take.id)}
             // Once, across documents: another tab showing the same take cannot land it again.
             onInsert={() => {
-              if (text) void landVoiceTake(take.id, () => onInsert(text));
+              if (desktopVoiceLock.allowed() && text) void landVoiceTake(take.id, () => desktopVoiceLock.allowed() && onInsert(text));
             }}
             onSend={onSend && take.intent === 'send'
               ? () => {
-                  if (text) void landVoiceTake(take.id, () => onSend(text));
+                  if (desktopVoiceLock.allowed() && text) void landVoiceTake(take.id, () => desktopVoiceLock.allowed() ? onSend(text) : Promise.resolve(false));
                 }
               : undefined}
           />

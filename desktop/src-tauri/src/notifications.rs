@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use avibe_runtime_host::notifications::{
-    run_notifications, HttpNotificationTransport, NotificationFilter, NotificationGate, NotificationIntent,
-    NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot,
+    run_notifications, AnswerRequest, HttpNotificationTransport, NotificationFilter, NotificationGate,
+    NotificationIntent, NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,10 @@ use tauri::{AppHandle, Manager, Webview};
 
 use crate::{native_catalog_for_locales, pet, updater, MAIN_WINDOW};
 
+#[cfg(target_os = "macos")]
+mod answer;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 mod native;
 
 pub const MENU_ID: &str = "notifications";
@@ -30,11 +34,37 @@ pub struct NativeNotificationCatalog {
     run_succeeded: NotificationCopy,
     run_failed: NotificationCopy,
     run_canceled: NotificationCopy,
+    answer_requested: NotificationCopy,
+    // Answering from a notification exists on macOS only.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    answer: AnswerCatalog,
+}
+
+/// The words of an answerable notification and of an answer that did not go through.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct AnswerCatalog {
+    pub reply: String,
+    pub send: String,
+    pub placeholder: String,
+    pub not_sent: String,
+    pub not_delivered: String,
+    pub answer_again: String,
+    pub already_choice: String,
+    pub already_text: String,
+    pub stale: String,
+    pub gone: String,
+    pub unavailable: String,
 }
 
 #[derive(Clone, Deserialize)]
 struct NotificationCopy {
     title: String,
+    /// The second line macOS draws under the title; other systems leave it out.
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    subtitle: Option<String>,
     body: String,
 }
 
@@ -45,8 +75,20 @@ impl NativeNotificationCatalog {
             NotificationIntent::RunSucceeded => &self.run_succeeded,
             NotificationIntent::RunFailed => &self.run_failed,
             NotificationIntent::RunCanceled => &self.run_canceled,
+            NotificationIntent::AnswerRequested => &self.answer_requested,
         }
         .clone()
+    }
+
+    /// An answerable question: where it was asked as the title, "waiting for
+    /// your answer" under it, and the message itself as the body.
+    fn render_question(&self, source: Option<String>, preview: Option<String>) -> NotificationCopy {
+        let copy = &self.answer_requested;
+        NotificationCopy {
+            title: source.clone().unwrap_or_else(|| copy.title.clone()),
+            subtitle: source.map(|_| copy.title.clone()),
+            body: preview.unwrap_or_else(|| copy.body.clone()),
+        }
     }
 
     /// With a known source the banner reads like a mail notification: where it
@@ -57,6 +99,7 @@ impl NativeNotificationCatalog {
         match source {
             Some(source) => NotificationCopy {
                 title: source,
+                subtitle: None,
                 body: copy.title,
             },
             None => copy,
@@ -194,6 +237,36 @@ struct NativeSink {
     registry: Arc<Mutex<NotificationRegistry>>,
 }
 
+impl NativeSink {
+    /// Rechecked when the OS lets a deferred post out (the first post waits on
+    /// the permission question): the receipt not retired, the same
+    /// presentation, and the same focus and switch gate.
+    fn still_wanted(
+        &self,
+        receipt: &Arc<NotificationReceipt>,
+        presentation_generation: u64,
+    ) -> Box<dyn Fn() -> bool + Send + Sync> {
+        let (sink, receipt) = (self.clone(), receipt.clone());
+        Box::new(move || {
+            !receipt.retired() && sink.presentation_generation() == presentation_generation && sink.gate().allows()
+        })
+    }
+
+    fn post(&self, posted: Result<native::Posted, String>, receipt: &Arc<NotificationReceipt>) {
+        match posted {
+            Ok(native::Posted::Now) => receipt.posted(),
+            Ok(native::Posted::Later) => {}
+            Err(_) => {
+                self.registry
+                    .lock()
+                    .expect("notification registry lock")
+                    .forget(receipt.id());
+                eprintln!("The desktop notification could not be submitted to the operating system.");
+            }
+        }
+    }
+}
+
 impl NotificationSink for NativeSink {
     fn registry(&self) -> &Mutex<NotificationRegistry> {
         &self.registry
@@ -239,15 +312,11 @@ impl NotificationSink for NativeSink {
             let copy = native_catalog_for_locales(sys_locale::get_locales())
                 .notifications
                 .render(intent, source);
-            if native::show(&sink.app, &receipt, copy, sink.registry.clone()).is_err() {
-                sink.registry
-                    .lock()
-                    .expect("notification registry lock")
-                    .forget(receipt.id());
-                eprintln!("The desktop notification could not be submitted to the operating system.");
-            } else {
-                receipt.posted();
-            }
+            let wanted = sink.still_wanted(&receipt, presentation_generation);
+            sink.post(
+                native::show(&sink.app, &receipt, copy, sink.registry.clone(), wanted),
+                &receipt,
+            );
         });
         if queued.is_err() {
             self.registry
@@ -273,16 +342,57 @@ impl NotificationSink for NativeSink {
             if receipts.is_empty() {
                 return;
             }
-            match native::withdraw(&sink.app, receipts) {
-                Ok(removed) => {
-                    let mut registry = sink.registry.lock().expect("notification registry lock");
-                    for id in removed {
-                        registry.forget(id);
-                    }
-                }
-                Err(_) => eprintln!("The desktop notifications could not be withdrawn from the operating system."),
+            if native::withdraw(&sink.app, receipts, sink.registry.clone()).is_err() {
+                eprintln!("The desktop notifications could not be withdrawn from the operating system.");
             }
         });
+    }
+
+    fn deliver_answer_request(
+        &self,
+        request: AnswerRequest,
+        source: Option<String>,
+        presentation_generation: u64,
+        receipt: Arc<NotificationReceipt>,
+    ) {
+        let sink = self.clone();
+        let cleanup = receipt.clone();
+        let queued = self.app.run_on_main_thread(move || {
+            if receipt.retired() || sink.presentation_generation() != presentation_generation || !sink.gate().allows() {
+                sink.registry
+                    .lock()
+                    .expect("notification registry lock")
+                    .forget(receipt.id());
+                return;
+            }
+            let catalog = native_catalog_for_locales(sys_locale::get_locales()).notifications;
+            let copy = catalog.render_question(source.clone(), request.preview.clone());
+            let wanted = sink.still_wanted(&receipt, presentation_generation);
+            #[cfg(target_os = "macos")]
+            if macos::available() {
+                macos::show_question(
+                    &receipt,
+                    copy,
+                    &request,
+                    source,
+                    &catalog.answer,
+                    sink.registry.clone(),
+                    wanted,
+                );
+                return;
+            }
+            let _ = (&request, source);
+            sink.post(
+                native::show(&sink.app, &receipt, copy, sink.registry.clone(), wanted),
+                &receipt,
+            );
+        });
+        if queued.is_err() {
+            self.registry
+                .lock()
+                .expect("notification registry lock")
+                .forget(cleanup.id());
+        }
     }
 
     fn show_unread(&self, total: u64, presentation_generation: u64) {
@@ -320,6 +430,32 @@ fn paint_badge(app: &AppHandle, total: u64) {
     }
 }
 
+/// A one-off notice from the shell itself (not a Runtime event). It honors the
+/// shell's notification switch and nothing withdraws it. Its callers (Ask
+/// Vibey, notification answers) exist on macOS only.
+#[cfg(target_os = "macos")]
+pub(crate) fn notice(app: &AppHandle, title: String, body: String) {
+    if app
+        .try_state::<Notifications>()
+        .is_some_and(|notifications| !notifications.enabled())
+    {
+        return;
+    }
+    if native::notice(
+        app,
+        NotificationCopy {
+            title,
+            subtitle: None,
+            body,
+        },
+        None,
+    )
+    .is_err()
+    {
+        eprintln!("The desktop notification could not be submitted to the operating system.");
+    }
+}
+
 pub fn start(app: &AppHandle, origin: LoopbackOrigin) {
     app.state::<Notifications>().start(app, origin);
 }
@@ -353,7 +489,7 @@ pub(crate) fn reconcile(app: &AppHandle) {
     }
 }
 
-fn sync_native_menu(app: &AppHandle, enabled: bool) {
+pub(crate) fn sync_native_menu(app: &AppHandle, enabled: bool) {
     if let Some(menus) = app.try_state::<crate::NativeMenus>() {
         if menus.notifications.set_checked(enabled).is_err() {
             eprintln!("failed to refresh the desktop notification menu");
@@ -403,11 +539,47 @@ pub fn desktop_notifications_set_enabled(window: Webview, app: AppHandle, enable
     set_enabled(&app, enabled)
 }
 
+/// What macOS currently allows Avibe to post: `authorized`, `denied`,
+/// `not_determined` (asked by the first post), or `unavailable` where this
+/// shell has no system notification permission to report.
+#[tauri::command]
+pub async fn desktop_notifications_authorization(window: Webview) -> Result<String, String> {
+    ensure_workbench(&window)?;
+    #[cfg(target_os = "macos")]
+    let authorization = macos::authorization().await;
+    #[cfg(not(target_os = "macos"))]
+    let authorization = "unavailable";
+    Ok(authorization.to_owned())
+}
+
+/// Opens Avibe's own page in System Settings › Notifications. No URL comes from the page.
+#[tauri::command]
+pub fn desktop_notifications_open_settings(window: Webview, app: AppHandle) -> Result<(), String> {
+    ensure_workbench(&window)?;
+    #[cfg(target_os = "macos")]
+    tauri_plugin_opener::open_url(macos::settings_url(&app.config().identifier), None::<&str>)
+        .map_err(|error| error.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+    Ok(())
+}
+
 /// A stopped connection leaves no count it can vouch for. The clear queues
 /// behind any paint already dispatched, which the generation bump voids.
 pub fn stop(app: &AppHandle) {
     app.state::<Notifications>().stop();
     clear_badge(app);
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_answer(
+    app: &tauri::AppHandle,
+    question: serde_json::Value,
+    action: &str,
+    typed: Option<String>,
+    opens: Option<String>,
+) -> Result<Option<String>, String> {
+    macos::e2e_answer(app, question, action, typed, opens)
 }
 
 #[cfg(test)]
@@ -481,6 +653,7 @@ mod tests {
                 NotificationIntent::RunSucceeded,
                 NotificationIntent::RunFailed,
                 NotificationIntent::RunCanceled,
+                NotificationIntent::AnswerRequested,
             ] {
                 let copy = catalog.copy(intent);
                 assert!(!copy.title.is_empty() && !copy.body.is_empty());
