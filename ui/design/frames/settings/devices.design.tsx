@@ -106,6 +106,8 @@ const fullActivity: DeviceActivity[] = [
 type On = Extract<Reach, { state: 'on' }>;
 /** At the computer that runs Avibe: its session carries no account, so none is shown. */
 const on: On = { state: 'on', host, tunnel: 'up', ms: 120, direct: true };
+/** What a member reads: whether direct is on is the owner's to see, so the line does not say it. */
+const onForMember: On = { ...on, direct: false };
 /** From another device of the owner's: the account is the one that device is signed in as. */
 const onRemote: On = { ...on, account };
 const remote = { reach: onRemote, viewerAccount: account };
@@ -240,17 +242,17 @@ const designFrames = frames([
   frame('on-shared-phone', '三组设备 · 375 宽', { width: 375, height: 1900 },
     { reach: on, devices: [...all('host'), pushOnly, unnamed, sara, saraPhone, orphan], activity, bulk: 'all_remote' }),
   frame('member-operate', '能管理这个 Avibe 的成员：自己的设备，加上远程访问的开关和「优化线路」；绑定、域名、连接方式、别人的设备都没有', at(760),
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
+    { reach: onForMember, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
   frame('member-operate-phone', '能管理的成员 · 375 宽', PHONE,
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
+    { reach: onForMember, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
   frame('member-operate-waiting', '能管理的成员 · 「优化线路」下面一行：自动优化什么时候重试', at(760),
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices, optimize: { wait: { kind: 'automatic', time: '10:42:00' } } }),
+    { reach: onForMember, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices, optimize: { wait: { kind: 'automatic', time: '10:42:00' } } }),
   frame('member-operate-turn-off', '能管理的成员从远处关闭远程访问：同样先确认', at(860),
-    { reach: on, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices, confirm: 'turn-off' }),
+    { reach: onForMember, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices, confirm: 'turn-off' }),
   frame('member-operate-paused', '能管理的成员 · 远程访问关着（在本机网络里看）：可以再打开', at(700),
     { reach: { state: 'paused', host }, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', devices: memberDevices }),
   frame('member', '不能管理的成员：只看到自己的设备，没有实例的控制项', at(640),
-    { reach: on, viewer: 'member', viewerAccount: 'sara@example.test', bulk: 'other_sessions',
+    { reach: onForMember, viewer: 'member', viewerAccount: 'sara@example.test', bulk: 'other_sessions',
       devices: memberDevices }),
   frame('tunnel-unknown', '已开启 · 连接器的进程读不出来：说读不到，不说连不上', at(700), { reach: unreadable, devices: all('host') }),
   frame('tunnel-slow', '已开启 · 隧道连着但很慢（延迟过了「很慢」那条线）：说慢，不说连不上', at(760), { reach: slow, devices: all('host') }),
