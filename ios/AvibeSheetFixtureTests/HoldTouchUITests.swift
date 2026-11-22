@@ -315,6 +315,9 @@ final class HoldTouchUITests: XCTestCase {
                 + "With 'none', check that the fixture has the microphone. \(facts())",
             file: file, line: line
         )
+        // Nor was the microphone started for it: the finger had lifted or moved away by the
+        // time the input could start (counted as `open=` with the touches that were not holds).
+        XCTAssertFalse(kept().contains(" open="), "The microphone was started for \(what); \(facts())", file: file, line: line)
         XCTAssertFalse(kept().contains(" rec="), "\(what) was recognised as a hold by the App; \(facts())", file: file, line: line)
         XCTAssertFalse(
             label(beginning: "events=")?.contains("recognised") ?? true,
