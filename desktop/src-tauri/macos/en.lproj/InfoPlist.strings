@@ -1,0 +1,2 @@
+/* Why macOS asks for Local Network access (NSLocalNetworkUsageDescription in Info.plist). */
+"NSLocalNetworkUsageDescription" = "Lets Avibe connect directly to the computer running Avibe when it's on the same network. If you don't allow it, Avibe still works over the internet.";
