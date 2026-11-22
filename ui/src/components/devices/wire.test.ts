@@ -320,7 +320,9 @@ describe('rebindFromWire', () => {
     expect(rebindUnavailable('local_identity_unavailable')).toEqual({ state: 'needsTerminal' });
     expect(rebindUnavailable('direct_loopback_required')).toEqual({ state: 'remote' });
     expect(rebindUnavailable('local_operator_required')).toEqual({ state: 'remote' });
-    expect(rebindUnavailable('http_500')).toEqual({ state: 'unknown' });
+    // Not the overview's own word: nothing is said on its strength.
+    expect(rebindUnavailable('http_500')).toBeNull();
+    expect(rebindUnavailable('instance_access_forbidden')).toBeNull();
     expect(rebindFromWire({ binding_state: 'damaged' })).toEqual({ state: 'unknown' });
     // The computer's own refusals keep their code and are not said as avibe.bot's.
     expect(rebindRefusal('reset_not_eligible')).toEqual({ code: 'unknown', raw: 'reset_not_eligible' });

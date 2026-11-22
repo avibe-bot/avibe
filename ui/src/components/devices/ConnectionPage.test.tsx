@@ -211,6 +211,8 @@ describe('ConnectionPage · settings', () => {
     ['no such route', () => new DevicesApiError(404, 'not_found', {}), false],
     ['no such route, seen from afar', () => new DevicesApiError(404, 'not_found', {}), true],
     ['an answer that is not the instance\'s JSON', () => new LostAnswer(), false],
+    ['the tunnel\'s own error, seen from afar', () => new DevicesApiError(502, 'http_502', {}), true],
+    ['the role gate in front of the route', () => new DevicesApiError(403, 'instance_access_forbidden', {}), true],
   ] as const)('shows no bind-again row and says nothing on an instance without it (%s)', async (_name, refusal, away) => {
     vi.spyOn(devicesApi, 'rebind').mockRejectedValue(refusal());
     // Opened at the row's own anchor, as the Devices page's notice would.
@@ -623,12 +625,12 @@ describe('ConnectionPageView', () => {
 
   it('says more than one binding record at avibe.bot in its own sentence, and points to binding again only where that exists', () => {
     const refused = view({ address: address(), rename: { step: 'form', name: 'maxwell', refusal: { code: 'rebind_required' } }, rebind: { state: 'ready' } });
-    expect(screen.getByText(said('没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。先重新绑定远程访问，再改一次。'))).toBeTruthy();
+    expect(screen.getByText(said('没有改：avibe.bot 上这台电脑有不止一条绑定记录，avibe.bot 选不出该用哪一条。先重新绑定远程访问，再改一次。'))).toBeTruthy();
     refused.unmount();
 
     // Found while reading the name's state: said in the domain's row, beside the way out.
     const read = view({ address: address({ eligible: false, stateError: 'rebind_required' }), rebind: { state: 'ready' } });
-    expect(screen.getByText(said('avibe.bot 上这台电脑有不止一条绑定记录，现在读不到域名的状态。先重新绑定远程访问。'))).toBeTruthy();
+    expect(screen.getByText(said('avibe.bot 上这台电脑有不止一条绑定记录，所以这里的域名信息可能不是最新的。先重新绑定远程访问。'))).toBeTruthy();
     read.unmount();
     // Without binding again on this instance, nothing sends anyone there.
     const without = view({ address: address({ eligible: false, stateError: 'rebind_required' }) });
@@ -639,7 +641,7 @@ describe('ConnectionPageView', () => {
     for (const [code, reason] of [
       ['pairing_invalid', '没有改：avibe.bot 不再接受这台电脑的绑定。'],
       ['remote_access_configuration_mismatch', '没有改：avibe.bot 上的记录和这台电脑的远程访问配置对不上。'],
-      ['rebind_required', '没有改：avibe.bot 上这台电脑有不止一条绑定记录，它选不出该用哪一条。'],
+      ['rebind_required', '没有改：avibe.bot 上这台电脑有不止一条绑定记录，avibe.bot 选不出该用哪一条。'],
     ] as const) {
       const bare = view({ address: address(), rename: { step: 'form', name: 'maxwell', refusal: { code } } });
       expect(screen.getByText(said(reason))).toBeTruthy();

@@ -195,16 +195,21 @@ export function ConnectionPage() {
     }
   }, []);
 
-  // The row exists only on the instance's own word. A build without binding again answers 404
-  // (or something that is not its JSON): no row, and nothing said about it. No answer at all
-  // leaves what was known before.
+  // The row exists only on the overview's own word. A build without binding again answers 404:
+  // no row, and nothing said about it. Anything that is not that word (no answer, something that
+  // is not its JSON, the tunnel's own error, the role gate) leaves what was known before.
   const readRebind = useCallback(async (): Promise<RebindState | undefined> => {
     let next: RebindState | undefined;
     try {
       next = await api.rebind();
     } catch (error) {
       if (!(error instanceof DevicesApiError)) return rebindRef.current;
-      next = error.status === 404 ? undefined : rebindUnavailable(error.code);
+      if (error.status === 404) next = undefined;
+      else {
+        const said = rebindUnavailable(error.code);
+        if (!said) return rebindRef.current;
+        next = said;
+      }
     }
     // Anywhere but this computer the instance refuses the overview: said as where it is done.
     if (next && remote) next = { state: 'remote' };

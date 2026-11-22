@@ -4,7 +4,7 @@
 import { apiFetch } from '@/lib/apiFetch';
 import type { RemoteAccessSettings, RemoteAccessStatus, TunnelConnectivityDiagnostics, TunnelNetworkInterface } from '@/context/ApiContext';
 import {
-  activityFromWire, addressFromWire, connectionFromWire, devicesFromWire, rebindFromWire, renameDeviceFromWire,
+  activityFromWire, addressFromWire, connectionFromWire, devicesFromWire, rebindFromWire, rebindUnavailable, renameDeviceFromWire,
   signedOutFromWire, type DevicesSnapshot,
 } from './wire';
 import type {
@@ -202,7 +202,9 @@ export const devicesApi = {
       await get('/api/remote-access/rebind');
       return true;
     } catch (error) {
-      return error instanceof DevicesApiError && error.status !== 404;
+      // Only the overview's own refusals: the role gate answers a member before any route is
+      // looked up, and the tunnel answers for an instance it cannot reach.
+      return error instanceof DevicesApiError && rebindUnavailable(error.code) !== null;
     }
   },
   startRebind: async (locale: string) => claimForm(await post('/api/remote-access/rebind/claims', { locale })),

@@ -448,8 +448,11 @@ export function rebindFromWire(raw: unknown): RebindState {
 
 /** The overview's own refusals that mean "this page cannot do it": a damaged or unreadable binding
  *  record is the terminal command's to handle, and anywhere but this computer it is said as such. */
-export function rebindUnavailable(code: string): RebindState {
+export function rebindUnavailable(code: string): RebindState | null {
   if (code === 'direct_loopback_required' || code === 'local_operator_required') return { state: 'remote' };
   if (code === 'local_binding_unavailable' || code === 'local_identity_unavailable') return { state: 'needsTerminal' };
-  return { state: 'unknown' };
+  // Any other refusal is not the overview's own word: the role gate in front of every route
+  // (`instance_access_forbidden`), the tunnel's own 502, a build that has no such route. None of
+  // them says that this instance has binding again.
+  return null;
 }

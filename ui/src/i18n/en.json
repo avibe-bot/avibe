@@ -8406,7 +8406,7 @@
         "rebindRequiredPlain": "Not changed: avibe.bot holds more than one binding record for this computer and cannot tell which to use."
       },
       "howOther": "Sign out on that device.",
-      "stateRebindRequired": "avibe.bot holds more than one binding record for this computer, so the domain's state cannot be read. Bind remote access again first."
+      "stateRebindRequired": "avibe.bot holds more than one binding record for this computer, so what is shown about the domain here may be out of date. Bind remote access again first."
     },
     "setup": {
       "title": "Open it from your phone and other computers",

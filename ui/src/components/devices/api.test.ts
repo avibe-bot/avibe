@@ -32,6 +32,14 @@ describe('devicesApi', () => {
     await expect(devicesApi.rebindOffered()).resolves.toBe(true);
     fetched.mockResolvedValue(answer(403, { error: 'direct_loopback_required' }));
     await expect(devicesApi.rebindOffered()).resolves.toBe(true);
+    // The role gate answers a member before any route is looked up, with or without the route;
+    // the tunnel answers for an instance it cannot reach. Neither is the overview's word.
+    fetched.mockResolvedValue(answer(403, { error: 'instance_access_forbidden' }));
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
+    fetched.mockResolvedValue({ ok: false, status: 502, json: async () => { throw new SyntaxError('<html>'); } } as unknown as Response);
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
+    fetched.mockResolvedValue(answer(503, { error: 'remote_access_disabled' }));
+    await expect(devicesApi.rebindOffered()).resolves.toBe(false);
     // A build before it: no such route. Nor is a page of HTML, an empty answer or no answer its word.
     fetched.mockResolvedValue(answer(404, { error: 'not_found' }));
     await expect(devicesApi.rebindOffered()).resolves.toBe(false);
