@@ -8082,7 +8082,8 @@ def _local_push_registration_state(conn) -> BindingState | None:
     config, state = position_snapshot()
     if state is BindingState.UNBOUND or (
         state is BindingState.BOUND and receipt_current(conn, config)
-        and (_is_direct_loopback_connection() or _is_trusted_docker_loopback_request())
+        and (_is_direct_loopback_connection() or _is_trusted_docker_loopback_request()
+             or _trusted_public_origin_local_request(config))
     ):
         return state
     return None
@@ -8249,7 +8250,9 @@ def web_push_subscribe():
                 return jsonify({'error': 'session_revoked'}), 401
             if payload.get('binding_repair') is True:
                 row = None
-                if not background_rotation and local_state is BindingState.BOUND:
+                if (not background_rotation and payload.get('explicit_enable') is not True
+                        and local_state is BindingState.BOUND
+                        and (_is_direct_loopback_connection() or _is_trusted_docker_loopback_request())):
                     row = web_push_service.resume_retired_host_subscription(
                         conn, payload=subscription, previous_endpoints=previous_endpoints, device_id=device_id,
                         user_agent=user_agent, device_label=device_label,
@@ -21239,9 +21242,6 @@ def run_ui_server(host: str, port: int) -> None:
         if config_load_error is not None:
             logger.warning("Skipping UI startup reconciliation because config load failed: %s", config_load_error)
         if config is not None:
-            from storage.web_push_cutover import reconcile_startup
-
-            reconcile_startup(config)
             try:
                 _start_remote_monitors(config, startup=True)
             except Exception:
@@ -21289,11 +21289,14 @@ def run_ui_server(host: str, port: int) -> None:
                     daemon=True,
                     name="remote-access-reconcile-on-start",
                 ).start()
-                _UI_RUNTIME_ACTIVE = True
-                try:
-                    _server.run(sockets=bound_sockets)
-                finally:
-                    _UI_RUNTIME_ACTIVE = False
+                from storage.web_push_cutover import serving_listener
+
+                with serving_listener():
+                    _UI_RUNTIME_ACTIVE = True
+                    try:
+                        _server.run(sockets=bound_sockets)
+                    finally:
+                        _UI_RUNTIME_ACTIVE = False
                 break
             except OSError as e:
                 for bound_socket in bound_sockets:
