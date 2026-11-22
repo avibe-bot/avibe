@@ -1,11 +1,7 @@
-//! The native Show window's title-bar share button (ui/design:
-//! show-pages/desktop-native-entry/titlebar-*): the system share symbol at the
-//! right of the title bar, with no label, sized and coloured as a toolbar
-//! symbol (design/titlebar-size, option A). Pressing it asks the window's
-//! current document to open its share popover by dispatching
-//! `avibe:show-share-open`. That is Rust talking to the page; no IPC is
-//! granted for it. A document that does not listen (another route, another
-//! site) simply ignores it.
+//! The native Show window's four title-bar controls (ui/design:
+//! show-pages/desktop-native-controls/group-*). Annotate and Share dispatch
+//! events to the window's own route; Chat and Browser call its native owner.
+//! No page IPC is granted for these actions.
 //!
 //! On macOS 26 and later the system draws the title from the traffic lights
 //! and cuts it off a fixed distance from the right edge, whatever accessory
@@ -17,40 +13,41 @@
 //!
 //! It names no crate item, so a probe can compile it from its source file.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use objc2::{
     define_class, msg_send,
     rc::{Retained, Weak},
-    runtime::AnyObject,
-    sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
+    sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
 };
 use objc2_app_kit::{
-    NSAccessibility, NSAutoresizingMaskOptions, NSButton, NSColor, NSFont, NSFontWeightMedium, NSImage,
-    NSImageSymbolConfiguration, NSLayoutAttribute, NSLineBreakMode, NSObjectNSKeyValueBindingCreation, NSTextField,
-    NSTitlebarAccessoryViewController, NSView, NSWindow, NSWindowButton, NSWindowTitleVisibility,
-    NSWindowWillCloseNotification,
+    NSAccessibility, NSAutoresizingMaskOptions, NSBezierPath, NSButton, NSButtonType, NSCellImagePosition, NSColor,
+    NSEvent, NSFont, NSFontWeightMedium, NSImage, NSImageSymbolConfiguration, NSLayoutAttribute, NSLineBreakMode,
+    NSObjectNSKeyValueBindingCreation, NSTextField, NSTitlebarAccessoryViewController, NSToolbar, NSToolbarDisplayMode,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWindowToolbarStyle, NSWindowWillCloseNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSProcessInfo, NSRect, NSSize, NSString};
 
 /// The open event, dispatched only while the top document is still on
 /// `route`, the path the window was opened at; the path is JSON-quoted.
-fn open_script(route: &str) -> String {
+fn open_script(route: &str, event: &str) -> String {
+    let event = serde_json::to_string(event).expect("an event is JSON");
     let route = serde_json::to_string(route).expect("a path is JSON");
-    format!(
-        "if(window.self===window.top&&location.pathname==={route})window.dispatchEvent(new CustomEvent('avibe:show-share-open'));"
-    )
+    format!("if(window.self===window.top&&location.pathname==={route})window.dispatchEvent(new CustomEvent({event}));")
 }
 
 /// The symbol's point size: a toolbar symbol's, as Safari's and Preview's.
-const SYMBOL: f64 = 15.0;
+const SYMBOL: f64 = 14.0;
+const WASH: f64 = 20.0;
+const GAP: f64 = 4.0;
 /// The button, square, in points.
 const BUTTON: f64 = 28.0;
 /// From the button to the window's right edge: the traffic lights' inset
 /// from the left edge.
 const RIGHT: f64 = 9.0;
-/// The accessory's width: the button, its inset, and a little room before it.
-const WIDTH: f64 = BUTTON + RIGHT + 4.0;
+/// The accessory's width: four buttons, gaps, trailing inset and leading space.
+const WIDTH: f64 = BUTTON * 4.0 + GAP * 3.0 + RIGHT + 4.0;
 /// Between the end of the title and the accessory.
 const TITLE_GAP: f64 = 8.0;
 /// Between the zoom button and the title, as the system lays it out.
@@ -60,7 +57,7 @@ const TITLE_LEAD: f64 = 13.0;
 const TITLE_MIN: f64 = 40.0;
 
 /// How wide the title may be in a title bar `bar` points wide whose title
-/// starts at `leading`: up to the share button, less a gap.
+/// starts at `leading`: up to the control group, less a gap.
 fn title_width(bar: f64, leading: f64) -> f64 {
     (bar - leading - WIDTH - TITLE_GAP).max(0.0)
 }
@@ -77,7 +74,7 @@ fn draws_own_title() -> bool {
 }
 
 pub struct HostFields {
-    press: Box<dyn Fn()>,
+    press: Box<dyn Fn(Action)>,
     /// The drawn title, if there is one.
     title: RefCell<Option<Weak<Title>>>,
 }
@@ -94,8 +91,10 @@ define_class!(
 
     impl Host {
         #[unsafe(method(press:))]
-        fn press(&self, _sender: Option<&AnyObject>) {
-            (self.ivars().press)();
+        fn press(&self, sender: Option<&NSButton>) {
+            if let Some(action) = sender.and_then(|sender| ACTIONS.get(sender.tag() as usize)) {
+                (self.ivars().press)(*action);
+            }
         }
 
         /// The window closes, whether the person closed it or the shell
@@ -128,7 +127,7 @@ define_class!(
 );
 
 impl Host {
-    fn new(mtm: MainThreadMarker, height: f64, press: Box<dyn Fn()>) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, height: f64, press: Box<dyn Fn(Action)>) -> Retained<Self> {
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, height));
         let this = Self::alloc(mtm).set_ivars(HostFields {
             press,
@@ -216,32 +215,127 @@ impl Title {
     }
 }
 
-/// Adds the button to the title bar of `window`, a native Show window, and on
-/// macOS 26 and later draws its title to end before it. `label` is the
-/// button's spoken name and tooltip. A press runs `press`, on the main thread.
-pub fn install_on(window: &NSWindow, mtm: MainThreadMarker, label: &str, press: Box<dyn Fn()>) -> bool {
-    let label = NSString::from_str(label);
-    let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("square.and.arrow.up"),
-        Some(&label),
-    ) else {
-        return false;
-    };
-    // SAFETY: Reading a constant AppKit defines.
-    let symbol = NSImageSymbolConfiguration::configurationWithPointSize_weight(SYMBOL, unsafe { NSFontWeightMedium });
-    let image = image.imageWithSymbolConfiguration(&symbol).unwrap_or(image);
+/// Native control order, shared with the web popover anchors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Annotate,
+    Chat,
+    Share,
+    Browser,
+}
+const ACTIONS: [Action; 4] = [Action::Annotate, Action::Chat, Action::Share, Action::Browser];
+const SYMBOLS: [&str; 4] = [
+    "plus.bubble",
+    "message",
+    "square.and.arrow.up",
+    "arrow.up.forward.square",
+];
+
+pub struct ButtonFields {
+    hovered: Cell<bool>,
+}
+define_class!(
+    #[unsafe(super(NSButton))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AvibeShowTitleBarButton"]
+    #[ivars = ButtonFields]
+    pub struct TitlebarButton;
+    impl TitlebarButton {
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: Option<&NSEvent>) {
+            self.ivars().hovered.set(true);
+            NSView::setNeedsDisplay(self, true);
+        }
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: Option<&NSEvent>) {
+            self.ivars().hovered.set(false);
+            NSView::setNeedsDisplay(self, true);
+        }
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, rect: NSRect) {
+            if self.ivars().hovered.get() {
+                NSColor::labelColor().colorWithAlphaComponent(0.04).setFill();
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                    NSRect::new(NSPoint::new((BUTTON - WASH) / 2.0, (BUTTON - WASH) / 2.0), NSSize::new(WASH, WASH)),
+                    6.0, 6.0,
+                ).fill();
+            }
+            // SAFETY: NSButton draws its symbol and keyboard focus as usual.
+            let _: () = unsafe { msg_send![super(self), drawRect: rect] };
+        }
+    }
+);
+
+impl TitlebarButton {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ButtonFields {
+            hovered: Cell::new(false),
+        });
+        // SAFETY: NSButton's designated initializer.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        // SAFETY: The view owns this tracking area; its owner receives the two implemented selectors.
+        let tracking = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                this.bounds(),
+                NSTrackingAreaOptions::MouseEnteredAndExited
+                    | NSTrackingAreaOptions::ActiveInActiveApp
+                    | NSTrackingAreaOptions::InVisibleRect,
+                Some(&this),
+                None,
+            )
+        };
+        this.addTrackingArea(&tracking);
+        this
+    }
+}
+
+/// Install the four controls. Labels are localized by the caller; presses stay native.
+pub fn install_on(window: &NSWindow, mtm: MainThreadMarker, labels: &[String; 4], press: Box<dyn Fn(Action)>) -> bool {
+    // Use AppKit's compact title/toolbar row (40 pt on the current macOS).
+    // AppKit positions the traffic lights and owns the content boundary,
+    // including full-screen transitions; no controls are moved by hand.
+    window.setToolbarStyle(NSWindowToolbarStyle::UnifiedCompact);
+    let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &NSString::from_str("AvibeShowControls"));
+    toolbar.setDisplayMode(NSToolbarDisplayMode::IconOnly);
+    toolbar.setAllowsUserCustomization(false);
+    window.setToolbar(Some(&toolbar));
     let height = window.frame().size.height - window.contentLayoutRect().size.height;
     let host = Host::new(mtm, height, press);
-    // SAFETY: the host implements `press:` and outlives the button it holds.
-    let button = unsafe { NSButton::buttonWithImage_target_action(&image, Some(&host), Some(sel!(press:)), mtm) };
-    button.setBordered(false);
-    button.setContentTintColor(Some(&NSColor::labelColor()));
-    button.setToolTip(Some(&label));
-    button.setFrame(NSRect::new(
-        NSPoint::new(WIDTH - RIGHT - BUTTON, ((height - BUTTON) / 2.0).round()),
-        NSSize::new(BUTTON, BUTTON),
-    ));
-    host.addSubview(&button);
+    for (index, symbol_name) in SYMBOLS.iter().enumerate() {
+        let label = NSString::from_str(&labels[index]);
+        let Some(image) =
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(symbol_name), Some(&label))
+        else {
+            return false;
+        };
+        // SAFETY: Reading a constant AppKit defines.
+        let symbol =
+            NSImageSymbolConfiguration::configurationWithPointSize_weight(SYMBOL, unsafe { NSFontWeightMedium });
+        let image = image.imageWithSymbolConfiguration(&symbol).unwrap_or(image);
+        let button = TitlebarButton::new(
+            mtm,
+            NSRect::new(
+                NSPoint::new(4.0 + index as f64 * (BUTTON + GAP), ((height - BUTTON) / 2.0).round()),
+                NSSize::new(BUTTON, BUTTON),
+            ),
+        );
+        button.setButtonType(NSButtonType::MomentaryPushIn);
+        button.setImagePosition(NSCellImagePosition::ImageOnly);
+        button.setTitle(&NSString::from_str(""));
+        button.setImage(Some(&image));
+        button.setBordered(false);
+        button.setContentTintColor(Some(&NSColor::labelColor()));
+        button.setToolTip(Some(&label));
+        button.setAccessibilityLabel(Some(&label));
+        button.setTag(index as isize);
+        // SAFETY: The host implements press: and owns each button.
+        unsafe {
+            button.setTarget(Some(&host));
+            button.setAction(Some(sel!(press:)));
+        }
+        host.addSubview(&button);
+    }
     let accessory = NSTitlebarAccessoryViewController::new(mtm);
     accessory.setView(&host);
     accessory.setLayoutAttribute(NSLayoutAttribute::Right);
@@ -251,6 +345,11 @@ pub fn install_on(window: &NSWindow, mtm: MainThreadMarker, label: &str, press: 
             *host.ivars().title.borrow_mut() = Some(Weak::from_retained(&title));
         }
     }
+    // Unlike the main Workbench's overlay, the Show WebView starts below the
+    // native row. Tauri/AppKit may have enabled a full-size content view.
+    let mut style = window.styleMask();
+    style.remove(NSWindowStyleMask::FullSizeContentView);
+    window.setStyleMask(style);
     // SAFETY: The host implements `windowWillClose:`; the center holds it
     // weakly, and it removes itself there. The window is only matched.
     unsafe {
@@ -282,12 +381,17 @@ fn install_title(window: &NSWindow, mtm: MainThreadMarker, height: f64) -> Optio
     Some(title)
 }
 
-/// Adds the button to a native Show window opened at `route`; a press
+/// Adds the controls to a native Show window opened at `route`; a press
 /// dispatches the open event into its current document if that document is
 /// still on `route`, checked natively and again in the script. Away from it
 /// (another page, or a `pushState` elsewhere) a press does nothing; back on it,
 /// it works again.
-pub fn install(window: &tauri::WebviewWindow, label: String, route: String) {
+pub fn install(
+    window: &tauri::WebviewWindow,
+    labels: [String; 4],
+    destination: tauri::Url,
+    action: impl Fn(Action) + Send + 'static,
+) {
     let owned = window.clone();
     let _ = window.run_on_main_thread(move || {
         let Some(mtm) = MainThreadMarker::new() else { return };
@@ -297,14 +401,29 @@ pub fn install(window: &tauri::WebviewWindow, label: String, route: String) {
             return;
         };
         let page = owned.clone();
-        let script = open_script(&route);
+        // The window starts at about:blank while Runtime cookies are projected.
+        // Bind to its registered destination, never the provisional document.
+        let origin = destination.origin();
+        let route = destination.path().to_owned();
         install_on(
             &ns_window,
             mtm,
-            &label,
-            Box::new(move || {
-                if page.url().is_ok_and(|url| url.path() == route) {
-                    let _ = page.eval(&script);
+            &labels,
+            Box::new(move |pressed| {
+                if !page
+                    .url()
+                    .is_ok_and(|url| url.origin() == origin && url.path() == route)
+                {
+                    return;
+                }
+                match pressed {
+                    Action::Annotate => {
+                        let _ = page.eval(open_script(&route, "avibe:show-annotate-open"));
+                    }
+                    Action::Share => {
+                        let _ = page.eval(open_script(&route, "avibe:show-share-open"));
+                    }
+                    Action::Chat | Action::Browser => action(pressed),
                 }
             }),
         );
@@ -317,24 +436,24 @@ mod tests {
 
     #[test]
     fn the_open_script_dispatches_the_event_the_page_listens_for() {
-        let script = open_script("/apps/show/ses%3A1");
-        assert!(script.contains("new CustomEvent('avibe:show-share-open')"));
+        let script = open_script("/apps/show/ses%3A1", "avibe:show-share-open");
+        assert!(script.contains(r#"new CustomEvent("avibe:show-share-open")"#));
         assert!(script.starts_with("if(window.self===window.top&&location.pathname===\"/apps/show/ses%3A1\")"));
         // A path cannot break out of its string.
-        assert!(open_script("/a\");alert(1);//").contains(r#""/a\");alert(1);//""#));
+        assert!(open_script("/a\");alert(1);//", "avibe:show-share-open").contains(r#""/a\");alert(1);//""#));
     }
 
     // A 1040 pt Show window's title bar, with the system's title starting at
     // 82 pt, after the traffic lights.
     #[test]
-    fn a_title_ends_before_the_share_button_with_room_to_spare() {
+    fn a_title_ends_before_the_control_group_with_room_to_spare() {
         let width = title_width(1040.0, 82.0);
         assert_eq!(width, 1040.0 - 82.0 - WIDTH - TITLE_GAP);
-        // The share button starts at 1040 - RIGHT - BUTTON.
-        assert!(82.0 + width + TITLE_GAP <= 1040.0 - RIGHT - BUTTON);
+        // The first button starts after the accessory's leading spacer.
+        assert!(82.0 + width + TITLE_GAP <= 1040.0 - WIDTH + 4.0);
         assert!(shows_title(width));
         // The narrowest Show window keeps a long stretch of title.
-        assert!(title_width(720.0, 82.0) > 500.0);
+        assert!(title_width(720.0, 82.0) > 480.0);
     }
 
     #[test]

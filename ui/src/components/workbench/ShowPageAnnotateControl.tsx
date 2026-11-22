@@ -65,6 +65,8 @@ interface ShowPageAnnotateControlProps {
   compact?: boolean;
   /** Associate portalled popover focus with its owning app window. */
   ownerWindowId?: string;
+  /** Invisible anchor for the native title-bar button; preserves the compact picker. */
+  anchorOnly?: boolean;
 }
 
 export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = ({
@@ -75,6 +77,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   onPopoverOpenChange,
   compact = false,
   ownerWindowId,
+  anchorOnly = false,
 }) => {
   const { t } = useTranslation();
   const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
@@ -139,8 +142,10 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
           compact
             ? 'size-6 shrink-0 rounded-md border-0 text-muted shadow-none hover:bg-wash hover:text-foreground'
             : 'size-7 shrink-0',
+          anchorOnly && 'size-7 pointer-events-none opacity-0',
         )}
         disabled
+        {...(anchorOnly ? { tabIndex: -1, 'aria-hidden': true } : {})}
         aria-label={t('chat.showPage.annotate.unavailable')}
         title={t('chat.showPage.annotate.unavailable')}
       >
@@ -224,7 +229,9 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                 compact
                   ? 'size-6 shrink-0 rounded-md text-muted hover:bg-wash hover:text-foreground'
                   : 'size-7 shrink-0',
+                anchorOnly && 'size-7 pointer-events-none opacity-0',
               )}
+              {...(anchorOnly ? { tabIndex: -1, 'aria-hidden': true } : {})}
               aria-label={toggleLabel}
               title={enabled ? toggleLabel : shortcutHint}
             >
@@ -235,6 +242,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
             align="end"
             className="w-64 p-1.5"
             data-window-owner-id={ownerWindowId}
+            onCloseAutoFocus={(event) => { if (anchorOnly) event.preventDefault(); }}
           >
             <div className="flex items-center justify-between px-2 pb-1.5 pt-1">
               <span className="text-[13px] font-medium text-foreground">{t('chat.showPage.annotate.modeTitle')}</span>

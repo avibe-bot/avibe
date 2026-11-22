@@ -60,6 +60,7 @@ import {
 } from '../lib/settingsOverlay';
 import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
+import { DesktopShowChatCommand } from './DesktopShowChatCommand';
 import { DesktopSettingsCommand } from './DesktopSettingsCommand';
 import { VaultHandoffReturn } from './VaultHandoffReturn';
 import { prefetchRoutePages } from '../routePages';
@@ -453,6 +454,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <DesktopSettingsCommand />
+          <DesktopShowChatCommand />
           <DesktopClientPresentation />
           <Outlet />
         </SettingsOverlayNavigationBoundary>
@@ -523,6 +525,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     <NativeDeviceReporter />
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <DesktopSettingsCommand />
+    <DesktopShowChatCommand />
     <DesktopClientPresentation />
     <VaultHandoffReturn />
     <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
