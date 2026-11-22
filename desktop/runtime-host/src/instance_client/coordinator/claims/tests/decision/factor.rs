@@ -67,9 +67,20 @@ pub(super) async fn challenge(
             caller.retire();
         }
         hosted.factor_release.notify_one();
-        let outcome = verify.await;
-        if matches!(cut, "factor_unknown" | "factor_malformed") {
-            assert_eq!(outcome.unwrap_err().code, "factor_delivery_unknown");
+        let direct = verify.await.unwrap();
+        if cut == "factor_unknown_late" {
+            caller.retire();
+        }
+        let outcome = direct.deliver();
+        if matches!(cut, "factor_unknown" | "factor_unknown_late" | "factor_malformed") {
+            assert_eq!(
+                outcome.unwrap_err().code,
+                if cut == "factor_unknown_late" {
+                    "stale_generation"
+                } else {
+                    "factor_delivery_unknown"
+                }
+            );
             assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
             assert!(!caller.monitoring());
             assert!(submit(CodeMethod::Totp, "000002").await.is_err());
@@ -78,7 +89,11 @@ pub(super) async fn challenge(
             assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
             return false;
         }
-        outcome.unwrap();
+        if matches!(cut, "factor_close" | "factor_pk_close") {
+            assert_eq!(outcome.unwrap_err().code, "stale_generation");
+        } else {
+            outcome.unwrap();
+        }
     }
     let found = recovery::read_once(c).await;
     if cut == "factor_subject" {

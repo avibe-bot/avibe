@@ -51,17 +51,25 @@ pub(super) async fn finish(
         caller.retire();
     }
     hosted.factor_release.notify_one();
-    let result = wait.await;
-    if matches!(cut, "factor_enroll_unknown" | "factor_enroll_replaced") {
-        let err = result.err().expect("no direct result");
+    let reply = wait.await.unwrap();
+    if matches!(
+        cut,
+        "factor_enroll_unknown" | "factor_enroll_unknown_late" | "factor_enroll_replaced"
+    ) {
+        if cut == "factor_enroll_unknown_late" {
+            caller.retire();
+        }
+        let err = reply.deliver().err().expect("no direct success or codes");
+        drop(reply);
         if cut == "factor_enroll_unknown" {
             assert_eq!(err.code, "factor_delivery_unknown");
+        } else {
+            assert_eq!(err.code, "stale_generation");
         }
         assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
         assert!(submit("000002").await.is_err());
         return false;
     }
-    let reply = result.unwrap();
     recovery::offer(c).await; // ordinary recovery became available independently of this reply
     assert!(!serde_json::to_string(&c.state()).unwrap().contains("aaaaa-bbbb"));
     if cut == "factor_enroll_close" {

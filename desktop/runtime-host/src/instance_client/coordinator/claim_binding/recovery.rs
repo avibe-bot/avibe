@@ -71,7 +71,7 @@ impl RecoveryDelivery {
             {
                 Ok(json!({"state":"unavailable"}))
             }
-            Answer::Saved(id) if slot.committed == Some(id) => Ok(json!({"state":"saved"})),
+            Answer::Saved(id) if slot.committed() == Some(id) => Ok(json!({"state":"saved"})),
             Answer::Offer(id, token)
                 if slot
                     .pending

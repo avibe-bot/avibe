@@ -1,6 +1,7 @@
 //! Explicit mail send after a hosted proof challenge. No bridge command, no
 //! credential publication, and no path from this phase directly to an arm.
 mod factor;
+mod submission;
 use super::super::claim_binding::BindingId;
 use super::*;
 use crate::instance_client::{
@@ -8,6 +9,7 @@ use crate::instance_client::{
     machine::hosted::ProofNeeded,
     transport::FactorCookies,
 };
+pub(super) use submission::SubmittedReply;
 
 pub(super) struct StepUp {
     proof: ProofNeeded,
@@ -302,10 +304,7 @@ impl Coordinator {
     }
     /// The waiting document owns cancellation up to the final admission in the worker.
     /// Once admitted, dropping that waiter may retire the sheet, not the account task.
-    pub(super) async fn forward_proof_code(
-        self: &Arc<Self>,
-        start: ClaimStart<'_>,
-    ) -> Result<super::super::claim_binding::BindingId> {
+    pub(super) async fn forward_proof_code(self: &Arc<Self>, start: ClaimStart<'_>) -> Result<SubmittedReply> {
         let ClaimStart {
             mut prepared,
             mut borrow,
@@ -317,20 +316,28 @@ impl Coordinator {
         let caller = (*caller).clone();
         let ordinary = self.clone();
         let result = tokio::spawn(async move {
-            let id = ordinary.with_proof(&caller, &epoch, receipt, delivery, |inner, a, step| {
+            let (id, cookies) = ordinary.with_proof(&caller, &epoch, receipt, delivery, |inner, a, step| {
                 if !matches!(step.phase, Phase::Prepared) {
                     return Err(changed());
                 }
+                let previous = inner
+                    .account
+                    .session
+                    .factor_cookies()
+                    .filter(|c| c == &step.initial_credential)
+                    .ok_or_else(stale)?;
                 let id = ordinary
                     .binding
                     .lock()
                     .expect("ordinary binding")
                     .reserve(inner, a, &mut prepared)?;
                 step.phase = Phase::Submitted(id);
-                Ok(id)
+                Ok((id, previous))
             })?;
-            ordinary.accept_forward(id, prepared).await?;
-            Ok(id)
+            let outcome = ordinary.accept_forward(id, prepared).await;
+            Ok(SubmittedReply::new(
+                ordinary, caller, epoch, receipt, id, cookies, outcome,
+            ))
         })
         .await
         .map_err(|_| ClientError::new("code_delivery_unknown"))?;
@@ -378,7 +385,12 @@ impl Coordinator {
             let Phase::Submitted(id) = &step.phase else {
                 return Err(changed());
             };
-            if self.binding.lock().expect("ordinary binding").committed() != Some(*id) {
+            if !self
+                .binding
+                .lock()
+                .expect("ordinary binding")
+                .published_for(*id, &inner, account)
+            {
                 return Err(changed());
             }
             step.proof.check(account)?;

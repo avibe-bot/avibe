@@ -8,6 +8,7 @@ pub(in crate::instance_client::coordinator) struct EnrolledReply {
     c: Arc<Coordinator>,
     owner: FactorOwner,
     id: BindingId,
+    refusal: Option<Box<SubmittedReply>>,
 }
 impl EnrolledReply {
     fn exact<'a>(&self, claims: &'a mut Claims) -> Result<&'a mut StepUp> {
@@ -35,6 +36,9 @@ impl EnrolledReply {
     // contains no codes: closing the document destroys them, even if the reply
     // waits elsewhere. No ordinary I/O, lock on Inner or second chance here.
     pub(in crate::instance_client::coordinator) fn deliver(&self) -> Result<EnrolledCodes> {
+        if let Some(refused) = &self.refusal {
+            refused.check()?;
+        }
         self.with_document(|step| {
             // Transient lock contention does not consume this original receipt.
             let slot = self.c.binding.try_lock().map_err(|_| busy())?;
@@ -76,13 +80,14 @@ impl Coordinator {
         tokio::spawn(async move {
             let result =
                 async {
-                    let (id, epoch, setup, flow, account) =
+                    let (id, epoch, setup, flow, account, previous) =
                         owner.with(&c, At::DeliveredTotp, |inner, a, step, slot| {
                             let Phase::TotpSetup { setup, until, .. } = &step.phase else {
                                 return Err(changed());
                             };
+                            let previous = credentials(inner, a)?;
                             if setup.material.is_some()
-                                || credentials(inner, a)? != setup.cookies
+                                || previous != setup.cookies
                                 || Instant::now() >= *until
                                 || tx.is_closed()
                             {
@@ -94,7 +99,7 @@ impl Coordinator {
                             else {
                                 unreachable!()
                             };
-                            Ok((id, epoch, setup, Box::new(inner.account.clone()), a.clone()))
+                            Ok((id, epoch, setup, Box::new(inner.account.clone()), a.clone(), previous))
                         })?;
                     let mut naming = Borrow {
                         owner: &c.claims,
@@ -108,16 +113,27 @@ impl Coordinator {
                             Ok((bound, codes)) => (Ok(bound), Some(codes)),
                             Err(e) => (Err(e), None),
                         };
-                    c.finish_forward(id, bound)?;
+                    let refusal = c.finish_forward(id, bound).err().map(|error| {
+                        Box::new(SubmittedReply::new(
+                            c.clone(),
+                            owner.caller.clone(),
+                            Epoch::new(c.generation.clone(), generation),
+                            receipt,
+                            id,
+                            previous,
+                            Err(error),
+                        ))
+                    });
                     naming.returned = true;
                     let direct = EnrolledReply {
                         c: c.clone(),
                         owner,
                         id,
+                        refusal,
                     };
                     // Loss of the waiter, its document, or its separate display
                     // material never undoes acceptance or dispatches enrollment again.
-                    if !tx.is_closed() {
+                    if direct.refusal.is_none() && !tx.is_closed() {
                         let _ = direct.with_document(|step| {
                             step.enrolled = codes;
                             Ok(())

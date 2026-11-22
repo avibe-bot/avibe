@@ -58,7 +58,7 @@ impl FactorOwner {
         };
         let mut slot = c.binding.lock().expect("ordinary binding");
         if *p != self.predecessor
-            || slot.committed() != Some(*p)
+            || !slot.published_for(*p, &inner, &active.account)
             || slot.occupied()
             || inner.record.account_id.as_ref() != Some(&active.account.id)
         {
@@ -72,27 +72,31 @@ impl FactorOwner {
         c: Arc<Coordinator>,
         at: At,
         prepare: impl FnOnce(&Inner, &Account) -> Result<PreparedFactor> + Send + 'static,
-    ) -> Result<()> {
+    ) -> Result<SubmittedReply> {
         let (reply, waiting) = oneshot::channel();
         tokio::spawn(async move {
             let run = async {
-                let (id, epoch, factor) = self.with(&c, at, |inner, a, step, slot| {
+                let (id, epoch, factor, previous) = self.with(&c, at, |inner, a, step, slot| {
                     let factor = prepare(inner, a)?;
+                    let previous = inner.account.session.factor_cookies().ok_or_else(stale)?;
                     if reply.is_closed() {
                         return Err(stale());
                     }
                     let (id, epoch) = slot.reserve_factor(inner, a, self.predecessor)?;
                     step.phase = Phase::Submitted(id);
-                    Ok((id, epoch, factor))
+                    Ok((id, epoch, factor, previous))
                 })?;
-                let mut naming = Borrow {
-                    owner: &c.claims,
-                    receipt: self.receipt,
-                    returned: false,
-                };
                 let result = c.finish_forward(id, factor.forward(epoch).await);
-                naming.returned = result.is_ok();
-                result
+                let generation = Epoch::new(c.generation.clone(), self.generation);
+                Ok(SubmittedReply::new(
+                    c,
+                    self.caller,
+                    generation,
+                    self.receipt,
+                    id,
+                    previous,
+                    result,
+                ))
             }
             .await;
             let _ = reply.send(run);
@@ -101,7 +105,7 @@ impl FactorOwner {
     }
 }
 impl Coordinator {
-    pub(in crate::instance_client::coordinator) async fn submit_claim_factor_code(
+    pub(in crate::instance_client::coordinator::claims) async fn submit_claim_factor_code(
         self: &Arc<Self>,
         caller: &ClaimCaller,
         generation: u64,
@@ -109,7 +113,7 @@ impl Coordinator {
         predecessor: BindingId,
         method: CodeMethod,
         code: String,
-    ) -> Result<()> {
+    ) -> Result<SubmittedReply> {
         let owner = FactorOwner {
             caller: caller.clone(),
             generation,
@@ -122,13 +126,13 @@ impl Coordinator {
             })
             .await
     }
-    pub(in crate::instance_client::coordinator) async fn submit_claim_factor_passkey(
+    pub(in crate::instance_client::coordinator::claims) async fn submit_claim_factor_passkey(
         self: &Arc<Self>,
         caller: &ClaimCaller,
         generation: u64,
         receipt: Uuid,
         predecessor: BindingId,
-    ) -> Result<()> {
+    ) -> Result<SubmittedReply> {
         if !self.passkeys.supported() {
             return Err(ClientError::new("passkey_unavailable"));
         }

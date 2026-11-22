@@ -1,7 +1,10 @@
 //! The ordinary account owns a dispatched first factor, not the naming sheet.
 //! This slot never enters a working Inner, a record, or a bridge projection.
 use super::*;
-use crate::instance_client::account::{BindingBase, BoundClaimSession, DiscoveredSession, PreparedClaimCode};
+use crate::instance_client::{
+    account::{BindingBase, BoundClaimSession, DiscoveredSession, PreparedClaimCode},
+    transport::FactorCookies,
+};
 use uuid::Uuid;
 
 mod recovery;
@@ -13,7 +16,9 @@ pub(super) struct BindingId(Uuid);
 pub(super) struct BindingSlot {
     pending: Option<Pending>,
     // Positive receipt of key readback AND account publication. Never restored.
-    committed: Option<BindingId>,
+    committed: Option<(BindingId, FactorCookies)>,
+    // Only to qualify a pending private refusal; grants no recovery or replay.
+    rejected: Option<BindingId>,
 }
 struct Pending {
     id: BindingId,
@@ -61,19 +66,32 @@ impl BindingSlot {
     pub(super) fn retire(&mut self) {
         self.pending.take();
         self.committed = None;
+        self.rejected = None;
     }
     pub(super) fn occupied(&self) -> bool {
         self.pending.is_some()
     }
     pub(super) fn accepted(&self, id: BindingId) -> bool {
-        self.committed == Some(id)
+        self.committed() == Some(id)
             || self
                 .pending
                 .as_ref()
                 .is_some_and(|p| p.id == id && !matches!(p.phase, Phase::Forwarding))
     }
     pub(super) fn committed(&self) -> Option<BindingId> {
-        self.committed
+        self.committed.as_ref().map(|(id, _)| *id)
+    }
+    pub(super) fn published_for(&self, id: BindingId, inner: &Inner, account: &Account) -> bool {
+        self.committed.as_ref().is_some_and(|(current, cookies)| {
+            *current == id
+                && inner.account.session.factor_cookies().as_ref() == Some(cookies)
+                && [BindingBase::SignedIn, BindingBase::OwedFactor]
+                    .into_iter()
+                    .any(|base| selected(inner, account, base))
+        })
+    }
+    pub(super) fn rejected(&self, id: BindingId) -> bool {
+        self.rejected == Some(id)
     }
     pub(super) fn reserve(
         &mut self,
@@ -91,7 +109,7 @@ impl BindingSlot {
         account: &Account,
         previous: BindingId,
     ) -> Result<(BindingId, Epoch), ClientError> {
-        if self.committed != Some(previous) {
+        if !self.published_for(previous, inner, account) {
             return Err(stale());
         }
         self.start(inner, account, BindingBase::OwedFactor)
@@ -112,6 +130,7 @@ impl BindingSlot {
         let epoch = Epoch::new(clock.clone(), 1);
         let id = BindingId(Uuid::new_v4());
         self.committed = None;
+        self.rejected = None;
         self.pending = Some(Pending {
             id,
             account: account.clone(),
@@ -171,6 +190,7 @@ impl Coordinator {
             }
             Err(error) => {
                 slot.retire();
+                slot.rejected = Some(id);
                 Err(error)
             } // uncertain is not permission to submit this delivery again
         }
@@ -288,6 +308,7 @@ impl Coordinator {
         {
             return Err(stale());
         }
+        let cookies = found.flow.session.factor_cookies().ok_or_else(stale)?;
         let mut flow = found.flow.clone();
         flow.fence(Epoch::new(self.generation.clone(), inner.state.generation));
         inner.account = flow;
@@ -297,7 +318,7 @@ impl Coordinator {
         order_catalog(&mut inner);
         inner.state.revision += 1;
         slot.retire();
-        slot.committed = Some(id);
+        slot.committed = Some((id, cookies));
         Ok(())
     }
 

@@ -38,7 +38,7 @@ impl Passkeys for Hosted {
     }
 }
 
-pub(super) type Verify<'a> = Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
+pub(super) type Verify<'a> = Pin<Box<dyn Future<Output = Result<proof::SubmittedReply>> + 'a>>;
 
 pub(super) async fn prepare<'a>(
     c: &'a Arc<Coordinator>,
@@ -53,7 +53,10 @@ pub(super) async fn prepare<'a>(
     let mut run = Box::pin(submit());
     let platform = &hosted.platform;
     if cut == "factor_pk_path" {
-        assert_eq!(run.await.unwrap_err().code, "invalid_action");
+        assert_eq!(
+            run.await.err().expect("preparation did not refuse").code,
+            "invalid_action"
+        );
         assert_eq!(platform.challenges.load(Ordering::SeqCst), 0);
         assert_eq!(platform.sheets.load(Ordering::SeqCst), 0);
         return None;
@@ -79,7 +82,10 @@ pub(super) async fn prepare<'a>(
     }
     platform.issue.notify_one();
     if cut == "factor_pk_nolist" {
-        assert_eq!(run.await.unwrap_err().code, "invalid_passkey_challenge");
+        assert_eq!(
+            run.await.err().expect("preparation did not refuse").code,
+            "invalid_passkey_challenge"
+        );
         assert_eq!(platform.sheets.load(Ordering::SeqCst), 0);
         return None;
     }
@@ -89,7 +95,10 @@ pub(super) async fn prepare<'a>(
     match cut {
         "factor_pk_wrong_id" => {
             platform.answer.notify_one();
-            assert_eq!(run.await.unwrap_err().code, "invalid_passkey_assertion");
+            assert_eq!(
+                run.await.err().expect("preparation did not refuse").code,
+                "invalid_passkey_assertion"
+            );
             None
         }
         "factor_pk_drop" => {
@@ -112,7 +121,7 @@ pub(super) async fn prepare<'a>(
             tokio::time::pause();
             tokio::time::advance(Duration::from_secs(301)).await;
             platform.answer.notify_one();
-            assert_eq!(run.await.unwrap_err().code, "expired");
+            assert_eq!(run.await.err().expect("preparation did not refuse").code, "expired");
             None
         }
         _ => {

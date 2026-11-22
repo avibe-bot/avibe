@@ -363,7 +363,10 @@ impl Transport for Hosted {
                 assert_eq!(self.factors.fetch_add(1, Ordering::SeqCst), 0, "enrollment replay");
                 self.factor_entered.notify_one();
                 self.factor_release.notified().await;
-                if self.review == Some("factor_enroll_unknown") {
+                if matches!(
+                    self.review,
+                    Some("factor_enroll_unknown" | "factor_enroll_unknown_late")
+                ) {
                     return Err(ClientError::new("network_unavailable"));
                 }
                 status = 201;
@@ -427,7 +430,7 @@ impl Transport for Hosted {
                 );
                 self.factor_entered.notify_one();
                 self.factor_release.notified().await;
-                if self.review == Some("factor_unknown") {
+                if matches!(self.review, Some("factor_unknown" | "factor_unknown_late")) {
                     return Err(ClientError::new("network_unavailable"));
                 }
                 if self.review == Some("factor_malformed") {
@@ -554,6 +557,11 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_save_changed_before_undo",
         "proof_start_save_rollback_error",
         "proof_start_unknown",
+        "proof_start_unknown_live",
+        "proof_start_unknown_credential",
+        "proof_start_unknown_successor",
+        "proof_start_auto_save_direct",
+        "proof_start_auto_save_direct_changed",
         "proof_start_review_unsaved",
         "proof_start_review_ok",
         "proof_start_review_refused",
@@ -567,6 +575,7 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_review_factor_close",
         "proof_start_review_factor_subject",
         "proof_start_review_factor_unknown",
+        "proof_start_review_factor_unknown_late",
         "proof_start_review_factor_malformed",
         "proof_start_review_factor_path",
         "proof_start_review_factor_pk_ok",
@@ -588,6 +597,7 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_review_factor_enroll_absent",
         "proof_start_review_factor_enroll_bad_codes",
         "proof_start_review_factor_enroll_unknown",
+        "proof_start_review_factor_enroll_unknown_late",
         "proof_start_review_factor_enroll_close",
         "proof_start_review_factor_enroll_drop",
         "proof_start_review_factor_enroll_replaced",
@@ -718,7 +728,7 @@ async fn check_cut(cut: &'static str) {
         forward: Mutex::new(Some(forward_wait)),
         forwarding: Notify::new(),
         reads: AtomicU64::new(0),
-        unknown: cut == "proof_start_unknown",
+        unknown: cut.starts_with("proof_start_unknown"),
         review,
         grants: AtomicU64::new(0),
         publication_case: cut,
@@ -1187,7 +1197,9 @@ async fn check_cut(cut: &'static str) {
                                 tokio::pin!(f);
                                 tokio::select! { _ = &mut f => panic!("code response was held"), _ = hosted.forwarding.notified() => () }
                                 unlocked();
-                                if review.is_none() {
+                                let late_failure = cut.starts_with("proof_start_unknown_");
+                                let after_save = cut.starts_with("proof_start_auto_save_direct");
+                                if review.is_none() && !late_failure && !after_save {
                                     caller.retire();
                                 } // sheet closure cannot cancel a dispatched account transaction
                                 if cut == "proof_start_retired" {
@@ -1196,12 +1208,29 @@ async fn check_cut(cut: &'static str) {
                                 }
                                 if cut == "proof_start_auto_save_refused" {
                                     memory.refuse_one_save();
-                                } else if cut == "proof_start_auto_save" {
+                                } else if cut.starts_with("proof_start_auto_save") {
                                     memory.allow_one_save();
                                 }
                                 forward_reply.send(()).unwrap();
+                                let direct = f.await.unwrap();
                                 if adopting {
-                                    f.await.unwrap(); // the account owns completion even when naming is gone
+                                    if after_save {
+                                        recovery::auto(&c, &hosted, &memory, false).await;
+                                        if cut.ends_with("_changed") {
+                                            replace_credential();
+                                            assert_eq!(direct.deliver().unwrap_err().code, "stale_generation");
+                                        } else {
+                                            direct.deliver().unwrap(); // its own publication, not the old jar
+                                        }
+                                        assert!(submit("000001").await.is_err());
+                                        return;
+                                    }
+                                    let projected = direct.deliver();
+                                    if review.is_some() {
+                                        projected.unwrap();
+                                    } else {
+                                        assert_eq!(projected.unwrap_err().code, "stale_generation");
+                                    }
                                     if cut.starts_with("proof_start_auto_save") {
                                         recovery::auto(&c, &hosted, &memory, cut.ends_with("_refused")).await;
                                         assert!(peer.arm().await.is_err());
@@ -1218,7 +1247,28 @@ async fn check_cut(cut: &'static str) {
                                     save::exercise(&c, &memory, cut).await;
                                     assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
                                 } else {
-                                    assert!(f.await.is_err());
+                                    if cut.ends_with("_credential") {
+                                        replace_credential();
+                                    }
+                                    let next = (cut == "proof_start_unknown_successor").then(|| {
+                                        caller.retire();
+                                        let doc = c.claim_document(generation).unwrap();
+                                        let next = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
+                                        (doc, next)
+                                    });
+                                    let error = direct.deliver().unwrap_err();
+                                    assert_eq!(
+                                        error.code,
+                                        if cut == "proof_start_unknown_live" {
+                                            "code_delivery_unknown"
+                                        } else {
+                                            "stale_generation"
+                                        }
+                                    );
+                                    if let Some((_doc, next)) = next {
+                                        assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, next);
+                                    }
+                                    assert!(submit("000001").await.is_err());
                                     assert!(!c.binding.lock().unwrap().occupied());
                                     assert_eq!(hosted.reads.load(Ordering::SeqCst), 0);
                                 }
