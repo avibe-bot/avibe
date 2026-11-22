@@ -10,7 +10,10 @@ export const VersionChip = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HT
   attention?: boolean;
   /** The pulsing dot of an available update. */
   updateDot?: boolean;
-}>(({ attention = false, updateDot = false, className, children, ...props }, ref) => (
+  /** `row`: the desktop app's bottom row, a 28 px button with no fill until the pointer is on it, then
+   *  the Settings button's wash; a version to look at keeps its gold. */
+  size?: 'chip' | 'row';
+}>(({ attention = false, updateDot = false, size = 'chip', className, children, ...props }, ref) => (
   <button
     ref={ref}
     type="button"
@@ -20,6 +23,8 @@ export const VersionChip = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HT
       badgeVariants({ variant: attention ? 'warning' : 'secondary' }),
       interactiveBadgeTriggerClassName,
       'relative rounded-md font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+      size === 'row' && 'h-7 px-3 text-xs',
+      size === 'row' && !attention && 'border-transparent bg-transparent hover:bg-field-hover hover:brightness-100 active:bg-field-hover',
       className,
     )}
   >
