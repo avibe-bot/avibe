@@ -3642,21 +3642,15 @@ def _is_retired_setup_document(conn, config, name) -> bool:
 
 
 def _retired_setup_notice(conn):
-    # Claude owns the localized document. Never interpolate Host, request URL,
-    # connector status, pairing identity, or a per-instance target in this page.
+    # The same page for every visitor and install: nothing of the request but
+    # its language reaches it (``vibe/bound_address_notice.py``).
+    from vibe import bound_address_notice
+
     language = instance_address_responses.response_language(conn.headers.get("accept-language", ""))
-    line = html.escape(t("remote_access.address_retired.line", language))
-    content = (
-        f'<!doctype html><html lang="{language}"><meta charset="utf-8">'
-        f'<p>{line}</p><a href="https://avibe.bot/app" rel="noreferrer">avibe.bot</a></html>'
-    )
     return FastAPIResponse(
-        content if conn.scope["method"] != "HEAD" else "",
+        bound_address_notice.document(language) if conn.scope["method"] != "HEAD" else "",
         media_type="text/html",
-        headers={
-            "Referrer-Policy": "no-referrer",
-            "Content-Security-Policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-        },
+        headers=bound_address_notice.HEADERS,
     )
 
 
