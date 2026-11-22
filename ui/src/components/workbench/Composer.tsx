@@ -2511,6 +2511,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     <ComposerHoldSurface phase={hold.phase} pointer={holdPointer} progress={hold.progress} point={holdPoint} />
   );
   // The box a hold is pressed on, measured for leave-to-cancel; raised above the card's halo while held.
+  // The box is its own stacking context (`isolate`): below a transcript that scrolls, WebKit (the
+  // macOS Desktop app, Safari) otherwise keeps an empty input's caret but never draws it until a
+  // key is typed.
   const boxHoldProps = {
     ref: boxRef,
     ...holdHandlers,
@@ -2576,7 +2579,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {...boxHoldProps}
           data-working={busyControls || undefined}
           className={cn(
-            'composer-edge relative flex w-full flex-col gap-1 rounded-2xl border p-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
+            'composer-edge relative isolate flex w-full flex-col gap-1 rounded-2xl border p-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
             holdRaised && 'z-50',
           )}
         >
@@ -2599,7 +2602,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           {...boxHoldProps}
           data-working={busyControls || undefined}
           className={cn(
-            'composer-edge relative flex w-full items-end gap-1.5 rounded-2xl border py-2 pr-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
+            'composer-edge relative isolate flex w-full items-end gap-1.5 rounded-2xl border py-2 pr-2 shadow-composer focus-within:shadow-composer-focus data-working:shadow-composer-focus',
             mediaEnabled ? 'pl-1.5' : 'pl-3.5',
             holdRaised && 'z-50',
           )}
