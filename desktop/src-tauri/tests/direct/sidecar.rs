@@ -67,7 +67,24 @@ async fn run(changed_selection: bool) {
     let ticks = elapsed.clone();
     client.clock = Clock(Arc::new(move || Duration::from_secs(ticks.load(Ordering::SeqCst))));
     let who = client.key.public();
-    let ep = transport::bind(client.key.clone()).await.unwrap();
+    // The offer below deliberately replaces the advertised interface with loopback.
+    // A wildcard client lets iroh migrate to that real interface mid-refresh;
+    // the production monitor then correctly retires the unoffered path (#4149).
+    let ep = transport::endpoint_builder(client.key.clone())
+        .clear_ip_transports()
+        .bind_addr_with_opts(
+            (Ipv4Addr::LOCALHOST, 0),
+            iroh::endpoint::BindOpts::default()
+                .set_prefix_len(32)
+                .set_is_default_route(false),
+        )
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let sockets = ep.bound_sockets();
+    assert_eq!(sockets.len(), 1, "fixture must not have a wildcard or IPv6 socket");
+    assert_eq!(sockets[0].ip(), Ipv4Addr::LOCALHOST);
     assert!(ep.id() == who);
     let admit = json!({"type":"admission","endpoint_id":who.to_string(),"ttl_seconds":30});
     control.write_all(format!("{admit}\n").as_bytes()).await.unwrap();
@@ -91,7 +108,7 @@ async fn run(changed_selection: bool) {
                 r.get_mut().write_all(b"answer").await.unwrap();
                 // Hold the ingress end open: only client retirement may end the stream.
                 let mut end = [0];
-                assert!(matches!(r.read(&mut end).await, Ok(0) | Err(_)));
+                assert_retired_read(r.read(&mut end).await);
             }
         }
     });
@@ -191,9 +208,20 @@ async fn run(changed_selection: bool) {
         RefreshOutcome::Retired
     );
     let mut end = [0];
-    assert!(matches!(r.read(&mut end).await, Ok(0) | Err(_)));
+    assert_retired_read(r.read(&mut end).await);
     ingress_task.await.unwrap();
     drop(client);
     control.write_all(b"{\"type\":\"stop\"}\n").await.unwrap();
     assert!(child.wait().await.unwrap().success());
+}
+
+fn assert_retired_read(read: std::io::Result<usize>) {
+    // Only after the complete payload exchange and explicit retirement: a closed
+    // TCP leg may surface as EOF or a reset/abort (including Winsock 10054).
+    use std::io::ErrorKind::{ConnectionAborted, ConnectionReset};
+    match read {
+        Ok(0) => (),
+        Err(e) if matches!(e.kind(), ConnectionReset | ConnectionAborted) => (),
+        other => panic!("expected EOF or connection shutdown after retirement, got {other:?}"),
+    }
 }
