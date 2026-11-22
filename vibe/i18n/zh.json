@@ -1256,6 +1256,8 @@
       "cookie_hint": "重试后仍然卡住?请确认浏览器允许本站使用 Cookie。",
       "default_title": "重新登录一下",
       "default_body": "登录未完成,请重试。",
+      "account_session_signed_out_title": "这台设备已被退出",
+      "account_session_signed_out_body": "请过几分钟再登录。一直不行的话，先在 avibe.bot 退出登录，再回来登录。",
       "invalid_oauth_state_title": "登录会话已过期",
       "invalid_oauth_state_body": "安全登录链接已过期,或无法与当前浏览器匹配。这通常是因为登录链接闲置了几分钟,或在另一个标签页/窗口中打开。重新登录即可继续。",
       "oauth_exchange_failed_title": "登录未能完成",
