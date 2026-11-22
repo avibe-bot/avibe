@@ -767,13 +767,15 @@ def _read_state_once(binding: Binding, *, again: bool = False) -> _StateRead | N
         definitive = 400 <= exc.status < 500 and exc.status != 429
         _read_refused = definitive
         code = exc.payload.get("error") if isinstance(exc.payload, dict) else None
+        if not isinstance(code, str):
+            code = ""  # an object or a list where the code belongs names nothing
         with _LOCK:
             if latest():
                 if definitive:
                     # Another definitive answer takes a standing refusal's place;
                     # a throttle or a server fault says nothing about it.
                     _standing_refusal = None
-                worded = _READ_PAGE_ERRORS.get(code) if definitive and isinstance(code, str) else None
+                worded = _READ_PAGE_ERRORS.get(code) if definitive else None
                 _read_refusal = (binding.pairing, *worded) if worded is not None else None
         if exc.status == 401:
             # The binding is no longer current: no cleaning anywhere, and no

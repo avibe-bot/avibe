@@ -919,6 +919,30 @@ def test_another_answer_to_a_person_asking_ends_the_standing_refusal_and_is_word
     assert refused.value.code == "unavailable"
 
 
+@pytest.mark.parametrize("error", [{"code": "conflict"}, ["rebind_required"], 409, None, True])
+@pytest.mark.parametrize("status", [401, 403, 409])
+def test_a_refusal_whose_code_is_not_a_string_names_nothing(address, status, error):
+    plane, clocks = address
+    plane.fail = remote_access.BackendRequestError(status, {"error": error})
+    assert instance_address.refresh_state(force=True) is False
+    told = instance_address.describe()  # the page's route still answers
+    assert told["state_error"] is None and told["eligible"] is True
+    assert instance_address._standing_refusal is None and instance_address._read_refusal is None
+    clocks.advance(61)
+    with pytest.raises(instance_address.AddressError) as refused:
+        instance_address.preview("third", ("loopback",))
+    assert refused.value.code == "unavailable"
+    plane.fail = None
+    plane.refuse = (status, {"error": error})
+    clocks.advance(6)
+    rename_to("third")
+    run()
+    assert instance_address._journal(binding()) is None and binding().active_host == OLD
+    expected = "pairing_invalid" if status == 401 else "unavailable"
+    assert instance_address.describe()["operation"]["error"] == expected
+    assert instance_address._standing_refusal is None
+
+
 def test_a_state_reply_older_than_the_refusal_does_not_end_it(address):
     plane, _ = address
     answer = plane.state
