@@ -13,6 +13,7 @@ from storage.db import get_cached_sqlite_engine
 from storage.device_account_signout import RECEIPT_TTL
 from storage.models import (remote_account_refs as refs, remote_account_revocations as jobs,
                             remote_account_pairings as pairings, remote_signout_items as items,
+                            remote_signout_receipt_roles as receipt_roles,
                             remote_signout_receipts as receipts)
 from vibe.account_session_revoke import dispatch, pairing_epoch
 
@@ -67,6 +68,10 @@ def _claim(config, now):
         expired_receipts = select(receipts.c.id).where(receipts.c.expires_at <= now).order_by(receipts.c.expires_at).limit(32)
         conn.execute(items.delete().where(items.c.receipt.in_(expired_receipts)))
         conn.execute(receipts.delete().where(receipts.c.id.in_(expired_receipts)))
+        # A role goes with its receipt, also one whose receipt an earlier version removed.
+        left = select(receipt_roles.c.receipt).where(~select(receipts.c.id).where(
+            receipts.c.id == receipt_roles.c.receipt).exists()).limit(32)
+        conn.execute(receipt_roles.delete().where(receipt_roles.c.receipt.in_(left)))
         _expire_page(conn, jobs, jobs.c.digest, jobs.c.forget_at, now)
         if config is not None:
             _retire_old_pairings(conn, epoch or '', now)

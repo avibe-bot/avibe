@@ -1,7 +1,10 @@
-"""Record on a sign-out receipt the role its device signed in with.
+"""Record with a sign-out receipt the role its device signed in with.
 
 A receipt outlives its device's row. For a viewer on this computer itself the
-device list sorts "mine" from "others" by that role, so the receipt keeps it.
+device list sorts "mine" from "others" by that role, so it is kept beside the
+receipt. A table of its own, as ``device_session_extensions`` is for sessions:
+adding a column cannot be both a literal operation and safe to replay on a
+database that already has the head shape.
 """
 
 from alembic import op
@@ -16,10 +19,13 @@ MIGRATION_COMPATIBILITY = "additive"
 
 
 def upgrade() -> None:
-    op.add_column("remote_signout_receipts", sa.Column("login_role", sa.String(), nullable=True))
+    op.create_table(
+        "remote_signout_receipt_roles",
+        sa.Column("receipt", sa.String(), primary_key=True),
+        sa.Column("login_role", sa.String(), nullable=False),
+        if_not_exists=True,
+    )
 
 
 def downgrade() -> None:
-    # A batch rebuild: SQLite before 3.35 cannot DROP COLUMN.
-    with op.batch_alter_table("remote_signout_receipts") as batch:
-        batch.drop_column("login_role")
+    op.drop_table("remote_signout_receipt_roles", if_exists=True)

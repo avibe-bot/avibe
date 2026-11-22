@@ -473,11 +473,11 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
     assert_local_result(stopped, 0)
     # A device left with notifications only is still known by its proven account and that account's role.
     assert [row["group"] for row in stopped.get_json()["sign_out_results"]] == ["mine"]
-    from storage.models import remote_signout_receipts
+    from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
 
     with get_cached_sqlite_engine().connect() as conn:
-        assert conn.execute(select(remote_signout_receipts.c.subject, remote_signout_receipts.c.login_role)).all() == [
-            ("member", "owner")]
+        assert conn.execute(select(receipts.c.subject, roles.c.login_role).join_from(
+            receipts, roles, roles.c.receipt == receipts.c.id)).all() == [("member", "owner")]
     stopped = sign_out(owner, legacy["id"] + "/sign-out")
     assert_local_result(stopped, 0)
     assert [row["group"] for row in stopped.get_json()["sign_out_results"]] == [None]
@@ -514,7 +514,7 @@ def test_legacy_adoption_and_ordinary_requests_are_read_only_after_first_visit(i
 
 def test_a_sign_out_receipt_says_whose_device_it_was_for_each_viewer(install):
     from storage.device_account_signout import recent
-    from storage.models import remote_signout_receipts as receipts
+    from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
     from storage.web_push_service import upsert_subscription
     from vibe.account_session_revoke import pairing_epoch
 
@@ -552,7 +552,8 @@ def test_a_sign_out_receipt_says_whose_device_it_was_for_each_viewer(install):
     assert groups(member) == {member_spare: "mine"}
     # A receipt written before the role was recorded is not sorted for anyone, whatever its name or kind says.
     with get_cached_sqlite_engine().begin() as conn:
-        conn.execute(receipts.update().where(receipts.c.device_id == own_spare).values(login_role=None))
+        conn.execute(roles.delete().where(roles.c.receipt.in_(
+            select(receipts.c.id).where(receipts.c.device_id == own_spare))))
     assert groups(owner) == {own_spare: None, member_spare: "others"}
     for row in listing(owner)["recent_sign_outs"]:
         assert set(row) == {"operation_id", "device_id", "kind", "display_name", "group", "local_status", "account_results"}

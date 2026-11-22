@@ -12,6 +12,7 @@ from sqlalchemy import or_, select
 from storage.models import (
     remote_account_refs as refs, remote_account_revocations as jobs, remote_account_pairings as pairings,
     remote_device_sessions as sessions, remote_signout_receipts as receipts, remote_signout_items as items,
+    remote_signout_receipt_roles as receipt_roles,
 )
 
 RECEIPT_TTL = 7 * 86400
@@ -117,7 +118,7 @@ def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, sele
     for key in push_devices:
         if key not in outcomes:
             outcomes[key][('not_applicable', 'no_reference', None)] = 1
-    parents, children, output = [], [], []
+    parents, children, recorded, output = [], [], [], []
     for key, counts in outcomes.items():
         device, subject = key
         kind, name = labels[key]
@@ -125,7 +126,9 @@ def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, sele
         expiry = None if any(job for _, _, job in counts) else now + RECEIPT_TTL
         role = roles.get(key) if subject else None
         parents.append(dict(id=op, binding=receipt_scope or binding, subject=subject, device_id=device, kind=kind, display_name=name,
-                            login_role=role, created_at=now, expires_at=expiry))
+                            created_at=now, expires_at=expiry))
+        if role:
+            recorded.append(dict(receipt=op, login_role=role))
         aggregate = Counter()
         for (status, reason, job), count in counts.items():
             aggregate[status, reason] += count
@@ -134,6 +137,8 @@ def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, sele
     if parents:
         conn.execute(receipts.insert(), parents)
         conn.execute(items.insert(), children)
+    if recorded:
+        conn.execute(receipt_roles.insert(), recorded)
     return output
 
 
@@ -144,7 +149,8 @@ def _public(op, device, kind, name, counts, group):
 
 def recent(conn, binding, subject, owner, now):
     query = select(receipts.c.id, receipts.c.device_id, receipts.c.kind, receipts.c.display_name,
-                   receipts.c.subject, receipts.c.login_role).where(
+                   receipts.c.subject, receipt_roles.c.login_role).select_from(
+        receipts.outerjoin(receipt_roles, receipt_roles.c.receipt == receipts.c.id)).where(
         receipts.c.binding == binding, or_(receipts.c.expires_at.is_(None), receipts.c.expires_at > now))
     if not owner:
         query = query.where(receipts.c.subject == subject)
