@@ -145,3 +145,28 @@ The final clean rebuild reproduces 614,509 / 915,200. Strict locked delivery
 semantics, eager offline retrieval and both budgets are unchanged. Further
 optimization scope requires the orchestrator's decision; no failing candidate
 is pushed or merged.
+
+## CI failure inventory — run 45076783540
+
+The exact-head Codex summary for `fccd8c8f96` is completed with no findings;
+all five review threads are resolved. CI still blocks merging. Job logs and
+workflow `needs` establish these causes (not inferred from aggregate names):
+
+| Failed job | Evidence and root cause | Disposition |
+| --- | --- | --- |
+| build-linux-artifacts | First-load budget step: home 600.1 KiB > 600 KiB | Independent budget blocker; separate optimization lane |
+| desktop-shell / macos-26 and windows-latest | Same shell boundary assertion: login checkbox call count expected 1, actual 2 | Independent outdated source contract; allow authoritative read-only redraw, preserve unique write adapter |
+| install-upgrade-regression | Aggregate rejects skipped install-upgrade-shards; shards need build-linux-artifacts | Consequence of budget failure; installation cases did not run |
+| windows-install-smoke | Aggregate rejects skipped smoke runners, web-fetch-runtime/macos, windows-model-hub and windows-control-ipc; each needs build-linux-artifacts | Consequence of budget failure; these cases did not run |
+| scenario-evidence | Rejects skipped install-upgrade-shards, windows-model-hub and windows-control-ipc | Same dependency failure, no separate scenario-test failure |
+| unit-tests | Rejects failed scenario-evidence, desktop-shell and build-linux-artifacts; actual Python shards succeeded | Aggregate of the two independent causes above |
+
+Windows shell artifact uploads also fail because the security producer was
+skipped after Test Rust failed; the job step results confirm this ordering.
+No CI gate or workflow is relaxed. The adjusted shell contract keeps the unique
+write adapter and verifies authoritative redraw without enable/disable, preference
+writes or calls back into write adapters. In-memory injected enable, disable,
+adapter and preference-save mutations are all rejected. The CI-equivalent
+`--locked --all-features` shell-boundary suite passes all 54 tests locally on
+macOS; its platform-neutral source checks normalize Windows line endings.
+Windows execution remains for the final remote CI run. Rust formatting passes.

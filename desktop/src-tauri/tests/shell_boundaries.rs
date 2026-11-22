@@ -1456,11 +1456,41 @@ fn start_at_login_is_restored_through_the_toggle_write_policy() {
         );
     }
     // The policy takes its write as `FnOnce` and the adapter runs it once, so a
-    // failure is reported, never retried. Nothing else enables the registration
-    // or draws its checkbox, so no caller can discard a write's result again.
+    // failure is reported, never retried. Deferred menu clicks may redraw the
+    // effective value, but must not become another registration write adapter.
     assert_eq!(source.matches("settle_start_at_login(").count(), 2);
     assert_eq!(source.matches(".enable()").count(), 1);
-    assert_eq!(source.matches("login.set_checked(").count(), 1);
+    let redraw = body("render_saved_checkmarks");
+    let check_redraw = |redraw: &str| {
+        assert!(redraw.contains("app.autolaunch().is_enabled().unwrap_or(false)"));
+        assert!(redraw.contains("menus.login.set_checked(login)"));
+        for forbidden in [
+            ".enable(",
+            ".disable(",
+            "set_start_at_login(",
+            "toggle_start_at_login(",
+            "settle_start_at_login(",
+            ".save(",
+            ".persist(",
+        ] {
+            assert!(!redraw.contains(forbidden), "redraw must not call {forbidden}");
+        }
+    };
+    check_redraw(&redraw);
+    assert_eq!(redraw.matches("login.set_checked(").count(), 1);
+    assert_eq!(adapter.matches("login.set_checked(").count(), 1);
+    assert_eq!(source.replace(&redraw, "").matches("login.set_checked(").count(), 1);
+    // Prove this boundary rejects accidental writes, rather than merely
+    // accepting the increased number of checkbox calls.
+    for mutation in [
+        "app.autolaunch().enable();",
+        "app.autolaunch().disable();",
+        "set_start_at_login(app, Ok(true));",
+        "preferences.save();",
+    ] {
+        let mutated = format!("{redraw}\n{mutation}");
+        assert!(std::panic::catch_unwind(|| check_redraw(&mutated)).is_err());
+    }
 }
 
 #[test]
