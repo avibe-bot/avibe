@@ -49,6 +49,7 @@ class ModelHubRequest(dict[str, Any]):
         pinned_hop: tuple[str, str | None] | None = None,
         pin_identity_claim: Callable[[str, bool], bool] | None = None,
         speed: str | None = None,
+        thread_calls: frozenset[tuple[str,str]] = frozenset(),
     ) -> None:
         super().__init__(payload)
         self.protocol = protocol
@@ -68,6 +69,7 @@ class ModelHubRequest(dict[str, Any]):
         # The turn's processing tier: ``"fast"`` asks each attempt for its
         # vendor's fast tier where that exact hop offers one (fast_mode.py).
         self.speed = speed
+        self.thread_calls = thread_calls
 
     def with_payload(self, payload: Mapping[str, Any]) -> "ModelHubRequest":
         """The same request metadata over another body."""
@@ -75,7 +77,7 @@ class ModelHubRequest(dict[str, Any]):
         return ModelHubRequest(
             payload, protocol=self.protocol, headers=self.headers,
             primary_origin=self.primary_origin, pinned_hop=self.pinned_hop,
-            pin_identity_claim=self.pin_identity_claim, speed=self.speed,
+            pin_identity_claim=self.pin_identity_claim, speed=self.speed, thread_calls=self.thread_calls,
         )
 
 

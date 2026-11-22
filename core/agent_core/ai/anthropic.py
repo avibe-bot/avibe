@@ -240,7 +240,7 @@ class AnthropicAdapter(ProviderAdapter):
         replay: str | None = None
         attempt: threads.Attempt | None = None
         response_id: str | None = None
-        fallback_model = False
+        lossless = True
         origin = endpoint_origin(request.endpoint)
 
         def new_assembler() -> StreamAssembler:
@@ -315,7 +315,7 @@ class AnthropicAdapter(ProviderAdapter):
         try:
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
-                nonlocal response_counts, refusal_detail, response_id, fallback_model
+                nonlocal response_counts, refusal_detail, response_id, lossless
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -390,6 +390,8 @@ class AnthropicAdapter(ProviderAdapter):
                         yield assembler.error("thread_missing_start", kind="invalid_request")
                         return
                     if event_type == "message_start":
+                        if message_started or message_stopped:
+                            lossless = False
                         if message_started and attempt and attempt.mode == "continue":
                             yield assembler.error("thread_duplicate_start", kind="invalid_request")
                             return
@@ -431,12 +433,18 @@ class AnthropicAdapter(ProviderAdapter):
                         # Each response's own usage: the last request's input already holds every paused part, so
                         # it is the context the merged response stands for (plan §4.3 as implemented).
                         response_usage = _anthropic_usage(message.get("usage"))
-                        response_id = message.get("id") if isinstance(message.get("id"), str) else None
+                        mid = message.get("id")
+                        response_id = mid if isinstance(mid, str) and 0 < len(mid) <= 256 and mid.isascii() else None
+                        assembler.set_usage(response_usage)
                         if attempt and attempt.mode == "continue":
-                            counts = message.get("usage") or {}
-                            total = sum(
-                                counts.get(k) or 0
-                                for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                            total = (
+                                (
+                                    response_usage.input_tokens
+                                    + response_usage.cache_read_tokens
+                                    + response_usage.cache_write_tokens
+                                )
+                                if response_usage
+                                else 0
                             )
                             if self._gateway and (
                                 not assembler.verified_origin
@@ -448,7 +456,6 @@ class AnthropicAdapter(ProviderAdapter):
                             if attempt.prior is None or total * 100 < attempt.prior.tokens * threads.MIN_USAGE_PERCENT:
                                 yield assembler.error("thread_usage_mismatch", kind="invalid_request")
                                 return
-                        assembler.set_usage(response_usage)
                         start_usage = message.get("usage")
                         if isinstance(start_usage, Mapping) and "server_tool_use" in start_usage:
                             response_counts = reported_counts(start_usage.get("server_tool_use"), bound=None)
@@ -482,14 +489,18 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        if (
+                            not message_started
+                            or kind not in ("text", "tool_use", "thinking", "redacted_thinking")
+                            or block.get("citations")
+                            or (kind == "tool_use" and not block.get("id"))
+                        ):
+                            lossless = False
                         if kind == "fallback":
-                            fallback_model = True
                             if assembler.has_content():
                                 terminal = assembler.terminal(
                                     assembler.exception(
-                                        RuntimeError(
-                                            "Anthropic performed an unsupported mid-output model fallback"
-                                        )
+                                        RuntimeError("Anthropic performed an unsupported mid-output model fallback")
                                     )
                                 )
                                 if terminal is not None:
@@ -655,6 +666,8 @@ class AnthropicAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         delta_type = delta.get("type")
+                        if delta_type not in ("text_delta", "thinking_delta", "signature_delta", "input_json_delta"):
+                            lossless = False
                         if not isinstance(delta_type, str):
                             terminal = assembler.terminal(
                                 assembler.error(
@@ -935,7 +948,8 @@ class AnthropicAdapter(ProviderAdapter):
 
                 speculative = bool(attempt and attempt.mode != "full")
                 response_id = None
-                fallback_model = visible = False
+                lossless = True
+                visible = False
                 failed = None
                 driver = drive_sse_stream(
                     self._client,
@@ -971,7 +985,14 @@ class AnthropicAdapter(ProviderAdapter):
                             rejected = True
                             break
                         if isinstance(event, ProviderError):
-                            if speculative and not cancel.cancelled and not visible:
+                            if speculative and not cancel.cancelled and not (visible or assembler.streamed):
+                                if response_usage:
+                                    attempt.record["discarded_usage"] = {
+                                        "input_tokens": response_usage.input_tokens,
+                                        "output_tokens": response_usage.output_tokens,
+                                        "cache_read_tokens": response_usage.cache_read_tokens,
+                                        "cache_write_tokens": response_usage.cache_write_tokens,
+                                    }
                                 failed = (
                                     event.message
                                     if event.message.startswith("thread_")
@@ -986,8 +1007,6 @@ class AnthropicAdapter(ProviderAdapter):
                                     if event.status
                                     else event.kind
                                 )
-                                if _rejects_ttl(event):
-                                    _remember_ttl_rejection(sending.endpoint)
                                 break
                             if event.status == 400:
                                 _log_refused_request_shape(sending, wire.body, continuations)
@@ -1006,7 +1025,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 and response_id
                                 and message.usage
                                 and message_stopped
-                                and not fallback_model
+                                and lossless
                                 and message.stop_reason in ("stop", "tool_use")
                                 and (
                                     not self._gateway
@@ -1017,7 +1036,10 @@ class AnthropicAdapter(ProviderAdapter):
                                     )
                                 )
                             ):
-                                assistant = _message_to_anthropic(message, sending.supports_images)
+                                assistant_hash = await asyncio.to_thread(_replayable_digest, message)
+                                if assistant_hash is None:
+                                    yield event
+                                    continue
                                 u = message.usage
                                 threads.remember(
                                     threads.parents,
@@ -1027,7 +1049,7 @@ class AnthropicAdapter(ProviderAdapter):
                                         attempt.fixed,
                                         len(full_wire.body["messages"]),
                                         attempt.history,
-                                        threads.message_digest([assistant]),
+                                        assistant_hash,
                                         response_id,
                                         u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens,
                                         time.monotonic() + threads.PARENT_SECONDS,
@@ -1129,6 +1151,17 @@ class AnthropicAdapter(ProviderAdapter):
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
                 yield terminal
+
+
+def _replayable_digest(message: AssistantMessage) -> bytes | None:
+    for b in message.content:
+        if (
+            (isinstance(b, ThinkingBlock) and not b.signature)
+            or (isinstance(b, TextBlock) and (not b.text.strip() or b.citations))
+            or (isinstance(b, ToolCallBlock) and b.id != b.native_id)
+        ):
+            return None
+    return threads.message_digest([_message_to_anthropic(message, False)])
 
 
 def _binding_prefix(

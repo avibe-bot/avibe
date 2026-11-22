@@ -11201,8 +11201,9 @@ class ModelHubService:
         if decision.action != "surface" and not retry_overload:
             raise AssertionError("consumed streams cannot retry or fall through")
         source_transition_persisted: bool | None = None
-        if decision.reason is not None and not resolved.thread_attempt:
+        if decision.reason is not None:
             source_transition_persisted = False
+        if decision.reason is not None and not resolved.thread_attempt:
             config = self.store.load()
             source = next(
                 (item for item in config.sources if item.id == resolved.source_id),
@@ -11630,6 +11631,7 @@ class ModelHubService:
         decision: ResolutionDecision,
         settlement_generation: int,
         attempt_observer: Optional[AttemptObserver],
+        thread_attempt: bool = False,
     ) -> None:
         """Persist facts from an upstream call that beat downstream cancellation."""
 
@@ -11644,12 +11646,12 @@ class ModelHubService:
                 (),
                 (),
                 HopOrigin(source.vendor, source.protocol, source_model_id, source.id, identity_digest(source))
-                if backend == "vibey" else None,
+                if backend == "vibey"
+                else None,
             )
-        if decision.action == "fallback" or (
-            decision.action == "surface"
-            and outcome.stream_started
-            and decision.reason is not None
+        if not thread_attempt and (
+            decision.action == "fallback"
+            or (decision.action == "surface" and outcome.stream_started and decision.reason is not None)
         ):
             await self._settle_fallback_source(
                 source,
@@ -12032,6 +12034,7 @@ class ModelHubService:
                     outcome=outcome,
                     decision=decision,
                     settlement_generation=settlement_generation,
+                    thread_attempt=thread_attempt,
                     attempt_observer=attempt_observer,
                 )
                 raise cancelled
@@ -12103,6 +12106,7 @@ class ModelHubService:
                         outcome=outcome,
                         decision=decision,
                         settlement_generation=settlement_generation,
+                        thread_attempt=thread_attempt,
                         attempt_observer=attempt_observer,
                     )
                     raise cancelled
@@ -12165,8 +12169,9 @@ class ModelHubService:
             if decision.action == "surface":
                 self.recovery.release(source.id, settlement_generation)
                 source_transition_persisted: bool | None = None
-                if outcome.stream_started and decision.reason is not None and not thread_attempt:
+                if outcome.stream_started and decision.reason is not None:
                     source_transition_persisted = False
+                if outcome.stream_started and decision.reason is not None and not thread_attempt:
                     _reason, source_transition_persisted = await self._settle_fallback_source(
                         source,
                         decision,

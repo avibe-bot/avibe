@@ -102,6 +102,33 @@ class Attempt:
     record: dict
 
 
+def _cache_plan(full: dict) -> tuple[str | None, int | None]:
+    """CPA keeps three explicit breakpoints for threads. Keep the ordinary path when dropping the older
+    user breakpoint could put its warmed prefix beyond the cache's 20-block lookup window."""
+    static = sum("cache_control" in b for b in full.get("tools", ()))
+    system = full.get("system")
+    if isinstance(system, list):
+        static += sum("cache_control" in b for b in system)
+    marks = []
+    offset = 0
+    for i, msg in enumerate(full["messages"]):
+        blocks = msg["content"]
+        if isinstance(blocks, list):
+            for block in blocks:
+                if block.get("type") in ("server_tool_use", "web_search_tool_result"):
+                    return "native_history", None
+                if "cache_control" in block:
+                    marks.append((offset, i))
+                offset += 1
+        else:
+            offset += 1
+    if static + len(marks) <= 3:
+        return None, None
+    if len(marks) != 2 or marks[-1][0] - marks[0][0] >= 20:
+        return "preserve_cache_breakpoints", None
+    return None, marks[0][1]
+
+
 def prepare(
     wire: WireRequest, ep: ModelEndpoint, gateway: bool, parent: Parent | None, route: bytes, ordinary: str | None
 ) -> Attempt:
@@ -122,6 +149,9 @@ def prepare(
     )
     body = full
     reason = ordinary
+    omitted_mark = None
+    if not ordinary:
+        ordinary, omitted_mark = _cache_plan(full)
     mode = "full" if ordinary or (get_state_dir() / "disable-message-threads").exists() else "create"
     if mode == "full":
         reason = ordinary or "disabled"
@@ -153,11 +183,20 @@ def prepare(
                 body.update(messages=suffix, thread={"type": "continue", "previous_message_id": parent.message_id})
     if mode == "create":
         body = {**full, "thread": {"type": "create"}}
+        if omitted_mark is not None:
+            # Change only the copy used for create. The ordinary replay keeps every original byte.
+            msg = msgs[omitted_mark]
+            unmarked = [{k: v for k, v in b.items() if k != "cache_control"} for b in msg["content"]]
+            body["messages"] = [*msgs[:omitted_mark], {**msg, "content": unmarked}, *msgs[omitted_mark + 1 :]]
     if mode != "full":
         betas.append(BETA)
         if gateway:
             headers[PIN_SOURCE_HEADER] = ep.source_id
             headers.setdefault(PIN_MODEL_HEADER, ep.model_id)
+            if mode == "continue":
+                headers["x-avibe-thread-declarations"] = encoded(
+                    [[tool["name"], tool["type"]] for tool in full.get("tools", ()) if tool.get("type")]
+                ).decode("ascii")
     if betas:
         headers["anthropic-beta"] = ",".join(betas)
     # The transport records actual bytes only once a send is handed to HTTPX.
