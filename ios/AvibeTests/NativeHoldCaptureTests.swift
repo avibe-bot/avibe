@@ -377,7 +377,8 @@ final class NativeHoldCaptureTests: XCTestCase {
 
     func testTheShellAdvertisesItsOwnHoldRecognition() {
         // 2: a tap is never taken for a hold. The page names surfaces from 2 on, so the one
-        // build that announced 1 (TestFlight 50.1) follows nothing.
+        // build that announced 1 (TestFlight 50.1) follows nothing. 3: a surface may name when
+        // its input starts (`startAfterMs`) and whether anything is prepared before (`prepare`).
         XCTAssertEqual(NativeShellMetadata.capabilities["voiceHold"], 3)
         XCTAssertEqual(
             NativeBridgeMethod.allCases.map(\.rawValue).filter { $0.hasPrefix("voice.hold") },
@@ -1813,7 +1814,8 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(timings["beginAt"] as? Int, 50)
         XCTAssertEqual(timings["liveAt"] as? Int, 50)
         XCTAssertEqual(timings["cueToLive"] as? Int, -150)
-        XCTAssertEqual(timings["liveEarly"] as? Int, 50)
+        // Had it started at touch-down with no wait: its own set-up and start (7 + 12 + 3 + 5).
+        XCTAssertEqual(timings["liveEarly"] as? Int, 27)
         XCTAssertEqual(timings["liveQuiet"] as? Int, 205)
         capture.stop(take: take)
         drain()

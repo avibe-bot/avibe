@@ -91,11 +91,14 @@ final class NativeHoldCapture {
 
     /// One press's timings, in ms from its touch-down unless a duration.
     struct HoldTimings: Equatable {
-        /// `early`: started before recognition, once prepared and not
-        /// before `startAfterMs`, with the finger seen down (the default).
-        /// `quiet`: prepared at touch-down, started at recognition. `late`:
-        /// all of it at recognition (other audio playing, or a Bluetooth
-        /// route).
+        /// What was planned at touch-down. `early`: start before
+        /// recognition, once prepared and not before `startAfterMs`, with the
+        /// finger seen down (the default). `quiet`: prepared at touch-down,
+        /// started at recognition. `late`: all of it at recognition (other
+        /// audio playing, or a Bluetooth route). An `early` press whose
+        /// start was overtaken by recognition (preparing slower than the
+        /// threshold, a stalled main thread) has `beginAt` at or after
+        /// `recognisedAt`.
         var variant = "early"
         /// The hold threshold this press was timed with, in ms.
         var holdMs = 200
@@ -145,10 +148,10 @@ final class NativeHoldCapture {
         }
 
         /// Touch-down to the first captured audio had the input started at
-        /// touch-down: measured when it did (`early`), else from this
-        /// press's own set-up and start times.
+        /// touch-down with no wait: this press's own set-up and start times,
+        /// worked out the same way for every variant. (`liveAt` is what this
+        /// press measured, waits included.)
         var liveEarly: Int? {
-            if variant == "early" { return liveAt }
             guard let setUpMs, let startMs else { return nil }
             return setUpMs + startMs
         }

@@ -162,7 +162,7 @@ final class HoldTouchUITests: XCTestCase {
     /// the touch, which must not read as lifted while it is down).
     func testAHoldOnTheInputGetsTheAppsOwnCue() {
         // With the microphone starting at recognition the cue comes whatever the microphone
-        // does, so this holds on any simulator. With the default (it starts at touch-down), a
+        // does, so this holds on any simulator. With the default (it starts before recognition), a
         // simulator with no microphone ends the press at its failed start, before any cue:
         // that is accepted, and anything else must be the cue.
         for startsAtRecognition in [true, false] {
