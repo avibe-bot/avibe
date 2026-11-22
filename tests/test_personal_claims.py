@@ -10,11 +10,20 @@ from uuid import uuid4
 
 import pytest
 
+from config import paths
 from config.v2_config import V2Config
 from tests.test_pairing_recovery import pairing_host as pairing_host
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import desktop_local_instance as local, personal_claims as claims, remote_access, ui_server
+from vibe.desktop_claim_admission import ClaimHome
 from vibe.personal_claim_client import local_origin
+
+
+def _desktop_claim(**kwargs):
+    # Machine-only tests; the pipe suite exercises the real admission handoff.
+    root = paths.physical_home(paths.get_vibe_remote_dir())
+    info = root.stat()
+    return claims.DesktopClaim(home=ClaimHome(root, (info.st_dev, info.st_ino)), **kwargs)
 
 
 class Peer:
@@ -29,6 +38,7 @@ class Peer:
         self.expiry = (datetime.now(timezone.utc) + timedelta(minutes=3)).isoformat()
         self.key = "fixture-claim-pairing-material"
         self.result = None
+        self.start_fields = {}
 
     def connection(self, *_args):
         return self
@@ -48,7 +58,7 @@ class Peer:
             self.id = str(uuid4())
             self.challenges.append(d["code_challenge"])
             self.result = (201, {"claim_id": self.id, "user_code": self.code, "user_url": f"https://avibe.bot/connect/{self.code}",
-                                 "expires_at": self.expiry, "poll_interval_seconds": 5}, None)
+                                 "expires_at": self.expiry, "poll_interval_seconds": 5, **self.start_fields}, None)
         else:
             assert path == "/api/v1/claims/redeem" and d["claim_id"] == self.id
             verifier = d["code_verifier"]
@@ -94,6 +104,20 @@ def claim_peer(pairing_host, monkeypatch):
     return peer
 
 
+@pytest.fixture
+def service_adoptions(pairing_host):
+    from vibe import service_claim_binding
+
+    calls = []
+
+    def activate():
+        calls.append(V2Config.load().remote_access.vibe_cloud.instance_id)
+        return True
+
+    with service_claim_binding.serving(activate):
+        yield calls
+
+
 @pytest.fixture(params=["loopback", "private_network"])
 def owner_browser(request, claim_peer, monkeypatch):
     """The initiating owner's browser: on this machine, or another computer on an admitted home network."""
@@ -120,7 +144,11 @@ def test_grant_never_suffices_without_the_mode_gate(claim_peer, mode, expected, 
         prompts.append((email, hostname))
         return approve
     if mode == "desktop":
-        result = claims.run_desktop(signed_in_subject=expected, show_link=shown.append)
+        def review(ticket):
+            shown.append(ticket["user_url"])
+            flow.arm(claim_id=ticket["claim_id"], kind="new", hostname=claim_peer.hostname, existing_instance_id=None)
+        flow = _desktop_claim(signed_in_subject=expected, publish_ticket=review)
+        result = flow.run()
     else:
         result = claims.run_link(expected_subject=expected, confirm=confirm if expected is None else None, show_link=shown.append)
     assert shown == ["https://avibe.bot/connect/ABCD234567"]
@@ -131,10 +159,85 @@ def test_grant_never_suffices_without_the_mode_gate(claim_peer, mode, expected, 
     assert claim_peer.key not in json.dumps(result)
 
 
+@pytest.mark.parametrize("ack,kind,target_id,host,state", [
+    (None, "new", None, "different.avibe.bot", "declined"),
+    (None, "existing", "inst_A", "fixture.avibe.bot", "unsupported"),
+    (1, "existing", "inst_A", "fixture.avibe.bot", "unsupported"),
+    ("true", "existing", "inst_A", "fixture.avibe.bot", "unsupported"),
+    (True, "existing", "inst_A", "fixture.avibe.bot", "bound"),
+    (True, "existing", "another-instance", "fixture.avibe.bot", "ambiguous"),
+])
+def test_desktop_machine_checks_its_own_ack_reviewed_host_and_receipt(claim_peer, ack, kind, target_id, host, state):
+    if ack is not None:
+        claim_peer.start_fields["ordinary_decision_readback"] = ack
+    seen = []
+
+    def reviewed(ticket):
+        seen.append(ticket)
+        assert set(ticket) == {"claim_id", "user_code", "user_url", "device_name", "mode", "expires_at", "ordinary_decision_readback"}
+        assert ticket["ordinary_decision_readback"] is (ack is True)
+        args = dict(kind=kind, hostname=host, existing_instance_id=target_id)
+        with pytest.raises(claims.ClaimError, match="decision_changed"):
+            flow.arm(claim_id="a-different-attempt", **args)
+        if state == "unsupported":
+            with pytest.raises(claims.ClaimError, match="local_runtime_upgrade_required"):
+                flow.arm(claim_id=ticket["claim_id"], **args)
+            flow.cancel()
+        else:
+            flow.arm(claim_id=ticket["claim_id"], **args)
+            with pytest.raises(claims.ClaimError, match="decision_changed"):
+                flow.arm(claim_id=ticket["claim_id"], **args)
+
+    flow = _desktop_claim(signed_in_subject="owner-id", publish_ticket=reviewed)
+    result = flow.run()
+    assert len(seen) == 1
+    if state in ("declined", "unsupported"):
+        assert result["state"] == "declined" and claim_peer.decisions == ["decline"]
+    elif state == "ambiguous":
+        assert result["code"] == "fresh_claim_required" and claim_peer.decisions == ["owner-id"]
+    else:
+        assert result["state"] == "bound" and claim_peer.decisions == ["owner-id"]
+    assert bool(V2Config.load().remote_access.vibe_cloud.instance_id) == (state == "bound")
+
+
+def test_desktop_close_before_arm_never_observes_or_accepts(claim_peer):
+    shown = threading.Event()
+    messages, outcomes = [], []
+
+    def publish(ticket):
+        messages.append(ticket)
+        shown.set()
+
+    flow = _desktop_claim(signed_in_subject="owner-id", publish_ticket=publish)
+    worker = threading.Thread(target=lambda: outcomes.append(flow.run()))
+    worker.start()
+    try:
+        assert shown.wait(5)
+        assert [path for path, _ in claim_peer.calls] == ["/api/v1/claims"]
+        flow.cancel()
+        with pytest.raises(claims.ClaimError, match="decision_changed"):
+            flow.arm(claim_id=messages[0]["claim_id"], kind="new", hostname=claim_peer.hostname, existing_instance_id=None)
+    finally:
+        flow.cancel()
+        worker.join(5)
+    assert not worker.is_alive() and outcomes[0]["state"] == "declined"
+    assert claim_peer.decisions == ["decline"] and not claims._marker().exists()
+
+
+def test_desktop_rejects_noncanonical_backend_before_start_or_identity_creation(claim_peer):
+    cfg = V2Config.load()
+    cfg.remote_access.vibe_cloud.backend_url = "https://other.example"
+    cfg.save()
+    flow = _desktop_claim(signed_in_subject="owner-id", publish_ticket=lambda _: pytest.fail("unexpected ticket"))
+    assert flow.run()["code"] == "invalid_backend"
+    assert not local._identity_path().exists() and not claim_peer.calls
+
+
 def test_unknown_account_is_never_noninteractively_accepted(claim_peer):
     for kwargs in ({}, {"expected_subject": ""}, {"expected_subject": "owner-id", "confirm": lambda *_: True}):
         assert claims.run_link(show_link=lambda _: None, **kwargs)["code"] == "link_confirmation_required"
-    assert claims.run_desktop(signed_in_subject="", show_link=lambda _: None)["code"] == "invalid_request"
+    with pytest.raises(claims.ClaimError, match="invalid_request"):
+        _desktop_claim(signed_in_subject="", publish_ticket=lambda _: None)
     assert claim_peer.calls == []
 
 
@@ -293,7 +396,8 @@ def test_other_workflow_cannot_start_while_link_is_waiting(claim_peer):
     worker.start()
     try:
         assert ready.wait(3)
-        assert claims.run_desktop(show_link=lambda _: None, signed_in_subject="owner-id")["code"] == "claim_in_progress"
+        flow = _desktop_claim(publish_ticket=lambda _: None, signed_in_subject="owner-id")
+        assert flow.run()["code"] == "claim_in_progress"
     finally:
         finish.set()
         worker.join(3)

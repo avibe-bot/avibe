@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-claim-review"
+description = "Enables the desktop_claim_review command without any pre-configured scope."
+commands.allow = ["desktop_claim_review"]
+
+[[permission]]
+identifier = "deny-desktop-claim-review"
+description = "Denies the desktop_claim_review command without any pre-configured scope."
+commands.deny = ["desktop_claim_review"]

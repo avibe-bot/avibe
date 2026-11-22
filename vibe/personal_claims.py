@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hmac
 import json
@@ -15,7 +16,20 @@ from config.atomic_io import write_atomic
 from config.v2_config import config_file_lock
 from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe import desktop_local_instance as local, remote_access
-from vibe.personal_claim_client import ClaimError, ClaimsClient, Grant, Pending, Ticket, local_origin, return_proof, text
+from vibe.desktop_claim_admission import ClaimHome
+from vibe.personal_claim_client import ClaimError, ClaimsClient, Grant, Pending, Ticket, _valid_hostname, local_origin, return_proof, text
+
+
+@contextmanager
+def _start_config_lock(home: ClaimHome | None):
+    # Acquiring the config lock can create its directory, and a wait on the
+    # lock file doesn't prevent a home move. Check on both sides of acquire.
+    if home is not None:
+        home.check()
+    with config_file_lock():
+        if home is not None:
+            home.check()
+        yield
 
 
 @dataclass(frozen=True)
@@ -26,11 +40,11 @@ class _Source:
     backend: str
 
     @classmethod
-    def load(cls, on_bound):
+    def load(cls, on_bound, home):
         # Only an explicit start reaches this reconciliation. Do not retire a still-usable
         # predecessor when a new start, browser grant or mode gate might subsequently fail.
-        replaceable = _recover_before_start(on_bound)
-        with config_file_lock():
+        replaceable = _recover_before_start(on_bound, home)
+        with _start_config_lock(home):
             config, pending = local._config(), local._pending()
             cloud = config.remote_access.vibe_cloud
             if pending != replaceable:
@@ -39,6 +53,8 @@ class _Source:
                 raise ClaimError("already_bound")
             if any((cloud.instance_id, cloud.instance_secret, cloud.tunnel_token, cloud.client_id, cloud.session_secret)):
                 raise ClaimError("local_binding_unavailable")
+            if home is not None:
+                home.check()
             installation = local.ensure_installation_id(recover_from=(pending or {}).get("personal_claim"))
             return cls(installation, local.claim_revision(config, installation, pending), socket.gethostname(), cloud.backend_url)
 
@@ -49,9 +65,9 @@ class _Source:
                 raise ClaimError("local_binding_changed")
 
 
-def _recover_before_start(on_bound):
+def _recover_before_start(on_bound, home):
     """Return the *exact* still-prepared record an explicit new claim may supersede."""
-    with config_file_lock():
+    with _start_config_lock(home):
         pending = local._pending()
         if not pending:
             return None
@@ -60,6 +76,8 @@ def _recover_before_start(on_bound):
             cloud = local._config().remote_access.vibe_cloud
             if any((cloud.instance_id, cloud.instance_secret, cloud.tunnel_token, cloud.client_id, cloud.session_secret)):
                 raise ClaimError("local_binding_unavailable")
+            if home is not None:
+                home.check()
             if not remote_access.complete_pairing_revocation(pending["operation_id"]):
                 raise ClaimError("pairing_recovery_required")
             return None
@@ -74,7 +92,11 @@ def _recover_before_start(on_bound):
             # Restore the same ID only if the claim still has its original binding source.
             identity = remote_access._pairing_identity_from_cloud(local._config().remote_access.vibe_cloud)
             if remote_access._pairing_identity_fingerprint(identity) == pending["source_fingerprint"]:
+                if home is not None:
+                    home.check()
                 local.ensure_installation_id(recover_from=pending["personal_claim"])
+    if home is not None:
+        home.check()
     if phase == "prepared":
         result = remote_access._retry_installation_pairing(pending)
         code, status = result.get("error"), result.get("status")
@@ -149,6 +171,7 @@ def redirect_origin_allows_auto_accept(origin: str, *, admitted_owner: bool) -> 
 class _Flow:
     def __init__(self, mode, locale, *, origin="", admitted_owner=False, expected=None, confirm=None, show=None, on_bound=None):
         self.on_bound = on_bound
+        self._start_home: ClaimHome | None = None
         self.previous_expiry = None
         self.admitted_owner = admitted_owner
         self._cleanup_client = None
@@ -208,16 +231,34 @@ class _Flow:
 
         if self.locale not in ("en", "zh"):
             raise ClaimError("invalid_request")
-        source = _Source.load(self.on_bound)
+        if self.mode == "desktop":
+            if not isinstance(self, DesktopClaim):
+                raise ClaimError("invalid_request")
+            # Recovery itself may replay an earlier request. Check the local authority before
+            # touching that journal, and check the actual issuer again before ClaimsClient.start.
+            with _start_config_lock(self._start_home):
+                if local._config().remote_access.vibe_cloud.backend_url not in ("https://avibe.bot", "https://avibe.bot/"):
+                    raise ClaimError("invalid_backend")
+        source = _Source.load(self.on_bound, self._start_home)
+        if self.mode == "desktop" and source.backend not in ("https://avibe.bot", "https://avibe.bot/"):
+            raise ClaimError("invalid_backend")
         self.previous_expiry = _outcome().get("expires_at")
         if not text(source.device, 120):
             raise ClaimError("invalid_device_name")
         client = ClaimsClient(source.backend)
         state = secrets.token_urlsafe(32) if self.mode == "redirect" else ""
+        if self.mode == "desktop" and self.cancelled:
+            self.update("declined")
+            return
+        if self._start_home is not None:
+            self._start_home.check()
         ticket = self.ticket = client.start(source.installation, source.device, self.mode, self.locale, origin=self.origin, state=state)
         self._cleanup_client = client
         self._check_time()
         with self.lock:
+            if self.mode == "desktop" and self.cancelled:
+                self.update("declined")
+                return
             self.update("pending")
             if self.mode == "redirect":
                 self._browser = secrets.token_urlsafe(32)
@@ -235,6 +276,8 @@ class _Flow:
         if self.mode == "redirect":
             with self.lock:
                 self.lock.wait_for(lambda: self.returned or self.cancelled, timeout=max(0, ticket.deadline - time.time()))
+        elif self.mode == "desktop":
+            self._await_native_arm(ticket, source.device)
         else:
             self._wait(ticket.interval)
         grant = None
@@ -244,8 +287,10 @@ class _Flow:
             self._check_time()
             try:
                 if self.cancelled:
-                    self._decline_attempted = True
-                    client.decline(ticket)
+                    # Desktop releases machine admission before best-effort decline I/O.
+                    if self.mode != "desktop":
+                        self._decline_attempted = True
+                        client.decline(ticket)
                     self.update("declined", code="subject_mismatch" if mismatch else "declined")
                     return
                 if grant is None:
@@ -260,6 +305,10 @@ class _Flow:
                             # binding is not a bad return proof.
                             raise
                         raise
+                    # A desktop sheet may have closed while the read was in flight.
+                    # Discard even a valid grant before doing any local preflight work.
+                    if self.mode == "desktop" and self.cancelled:
+                        continue
                     if self.mode == "redirect" and isinstance(result, Pending):
                         self._wait(result.delay, interrupt=False)
                         raise ClaimError("invalid_return")
@@ -268,6 +317,9 @@ class _Flow:
                             approved = self.returned and redirect_origin_allows_auto_accept(
                                 self.origin, admitted_owner=self.admitted_owner,
                             )
+                        elif self.mode == "desktop":
+                            approved = self._matches_arm(result)
+                            mismatch = self.expected != result.subject
                         elif self.expected is not None:
                             approved = self.expected == result.subject
                             mismatch = not approved
@@ -294,6 +346,9 @@ class _Flow:
                     source.validate()
                     result = client.accept(ticket, grant)
                     if not isinstance(result, Pending):
+                        if self.mode == "desktop" and self._target.existing_id not in (None, result.instance_id):
+                            # Accept was dispatched, so this is ambiguous. Never persist a key for another instance.
+                            raise ClaimError("fresh_claim_required")
                         self.update("pairing")
                         paired = remote_access.pair_personal_claim(
                             key=result.key, backend_url=client.base, device=source.device, revision=source.revision,
@@ -304,6 +359,10 @@ class _Flow:
                             if paired.get("error") in ("local_binding_changed", "pairing_superseded_after_redeem"):
                                 raise ClaimError("local_binding_changed")
                             raise ClaimError("pairing_recovery_required" if _journal_for(ticket.id) else "fresh_claim_required")
+                        if self.mode == "desktop":
+                            # Private only: retain the actual redeemed target, not just the
+                            # hostname in the public flow view or a later catalog row.
+                            self._publication = DesktopPublication(ticket.id, result.instance_id, source.installation, grant.hostname)
                         if self.on_bound:
                             self.on_bound()
                         self.update("bound", account={"email": grant.email}, hostname=grant.hostname)
@@ -317,22 +376,28 @@ class _Flow:
                 backoff = min(60, max(2, backoff * 2))
                 self.update("waiting", code=exc.code, retry_after_seconds=delay)
             # Cancellation fences local consent immediately but may not bypass upstream backoff.
-            self._wait(delay, interrupt=False)
+            self._wait(delay, interrupt=self.mode == "desktop" and not self.accepting)
+
+    def _decline_if_live(self):
+        if (not self.accepting and not self._decline_attempted and self._cleanup_client and self.ticket
+                and time.time() < self.ticket.deadline):
+            self._decline_attempted = True
+            try:
+                self._cleanup_client.decline(self.ticket)
+            except ClaimError:
+                pass  # A lost decline is not proof a hosted reservation was released.
+        self._cleanup_client = None
 
     def run(self):
         try:
+            if self._start_home is not None:
+                self._start_home.check()
             with MigrationFileLock(paths.get_state_dir() / "personal-claim.lock", timeout_seconds=0):
                 try:
                     self._execute()
                 finally:
-                    # A failed/preempted gate is not permission to leave a grant armed.
-                    if (not self.accepting and not self._decline_attempted and self._cleanup_client and self.ticket
-                            and time.time() < self.ticket.deadline):
-                        try:
-                            self._cleanup_client.decline(self.ticket)
-                        except ClaimError:
-                            pass  # An unconfirmed cleanup never reports that the hold is free.
-                    self._cleanup_client = None
+                    if self.mode != "desktop":
+                        self._decline_if_live()
         except (ClaimError, local.LocalInstanceError) as exc:
             self.update("error", code=exc.code, **({"retry_after_seconds": exc.retry_after} if getattr(exc, "retry_after", 0) else {}))
         except MigrationLockTimeout:
@@ -341,6 +406,8 @@ class _Flow:
             # Request bodies, exception locals and underlying HTTP detail are not diagnostics.
             self.update("error", code="fresh_claim_required" if self.accepting else "local_claim_unavailable")
         finally:
+            if self.mode == "desktop":
+                self._decline_if_live()
             self._browser = self._proof = None
             self.confirm = self.show = None
             self.ready.set()
@@ -381,10 +448,86 @@ def run_link(*, show_link: Callable[[str], None], expected_subject: str | None =
     return _Flow("link", locale, expected=expected_subject, confirm=confirm, show=show_link).run()
 
 
-def run_desktop(*, signed_in_subject: str, show_link: Callable[[str], None], locale="en") -> dict:
-    if not text(signed_in_subject, 200) or not callable(show_link):
-        return {"state": "error", "code": "invalid_request"}
-    return _Flow("desktop", locale, expected=signed_in_subject, show=show_link).run()
+@dataclass(frozen=True, repr=False)
+class DesktopPublication:
+    claim_id: str
+    instance_id: str
+    installation: str
+    hostname: str
+
+
+@dataclass(frozen=True, repr=False)
+class _ReviewedTarget:
+    hostname: str
+    existing_id: str | None
+
+
+class DesktopClaim(_Flow):
+    """Machine end of one private conversation; not an HTTP, CLI or Harness operation.
+
+    Rust owns the account read/grant. This object owns the local source, verifier, ticket,
+    issuer acknowledgement and the final machine decision. It never opens a URL.
+    """
+
+    def __init__(self, *, home: ClaimHome, signed_in_subject: str, publish_ticket: Callable[[dict], None], locale="en"):
+        if not isinstance(home, ClaimHome) or not text(signed_in_subject, 200) or not callable(publish_ticket):
+            raise ClaimError("invalid_request")
+        super().__init__("desktop", locale, expected=signed_in_subject)
+        self._start_home = home
+        self._publish_ticket = publish_ticket
+        self._target: _ReviewedTarget | None = None
+        self._publication: DesktopPublication | None = None
+        self._used = False
+
+    def take_publication(self) -> DesktopPublication:
+        # Only after the worker returns on the original pipe, never from a
+        # restored journal or another observation. Not permission to pair again.
+        publication, self._publication = self._publication, None
+        if not publication or not self.ticket or self.ticket.id != publication.claim_id:
+            raise ClaimError("local_binding_changed")
+        return publication
+
+    def run(self):
+        with self.lock:
+            if self._used:
+                raise ClaimError("invalid_request")
+            self._used = True
+            if self.cancelled:
+                return {"state": "declined"}
+        return super().run()
+
+    def _await_native_arm(self, ticket, device):
+        # Emit only this projection over the private pipe. Never send the verifier, local
+        # installation ID, a grant, or a pairing key to Rust.
+        self._publish_ticket({"claim_id": ticket.id, "user_code": ticket.code, "user_url": ticket.url,
+                              "mode": "desktop", "device_name": device, "expires_at": ticket.expiry,
+                              "ordinary_decision_readback": ticket.ordinary_decision_readback})
+        with self.lock:
+            self.lock.wait_for(lambda: self._target is not None or self.cancelled,
+                               timeout=max(0, ticket.deadline - time.time()))
+            self._check_time()
+
+    def arm(self, *, claim_id, kind, hostname, existing_instance_id):
+        """Only the private adapter may call this after Rust validates its submitted review."""
+        with self.lock:
+            t = self.ticket
+            if (not t or not _matches(t.id, claim_id) or self.view.get("state") != "pending"
+                    or self.cancelled or self.accepting or self._target is not None):
+                raise ClaimError("decision_changed")
+            self._check_time()
+            if (not _valid_hostname(hostname) or kind not in ("new", "existing")
+                    or (kind == "new" and existing_instance_id is not None)
+                    or (kind == "existing" and not text(existing_instance_id, 120))):
+                raise ClaimError("decision_changed")
+            if kind == "existing" and not t.ordinary_decision_readback:
+                raise ClaimError("local_runtime_upgrade_required")
+            self._target = _ReviewedTarget(hostname, existing_instance_id)
+            self.lock.notify_all()
+
+    def _matches_arm(self, grant):
+        target = self._target
+        return (target is not None and self.expected == grant.subject and target.hostname == grant.hostname
+                and (target.existing_id is None or self.ticket.ordinary_decision_readback))
 
 
 class RedirectClaims:

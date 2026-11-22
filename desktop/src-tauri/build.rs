@@ -13,6 +13,7 @@ fn main() {
     // Workbench and Show app windows the one Show share command.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "desktop_client_request",
+        "desktop_claim_review",
         "update_popover_fit",
         "bootstrap_status",
         "bootstrap_retry",

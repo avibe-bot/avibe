@@ -4,7 +4,7 @@ import pytest
 
 from config.v2_config import V2Config
 from tests.test_pairing_recovery import _response, pairing_host as pairing_host
-from tests.test_personal_claims import claim_peer as claim_peer
+from tests.test_personal_claims import claim_peer as claim_peer, service_adoptions as service_adoptions
 from vibe import personal_claims as claims, remote_access
 
 
@@ -87,7 +87,7 @@ def test_changed_source_only_supersedes_on_owner_accept(claim_peer, monkeypatch)
 
 
 @pytest.mark.parametrize("via", ["legacy", "fresh_start", "explicit_recovery"])
-def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, monkeypatch, via):
+def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, monkeypatch, service_adoptions, via):
     from tests.test_pairing_recovery import _fail_config_publication_once
     from tests.test_personal_claims import _start
     from vibe import ui_server
@@ -101,10 +101,8 @@ def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, m
     if via == "legacy":
         assert remote_access.pair("", "https://avibe.bot")["ok"]
     elif via == "fresh_start":
-        calls = []
-        monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: calls.append(V2Config.load().remote_access.vibe_cloud.instance_id))
         assert _start(client).get_json()["code"] == "already_bound"
-        assert calls == ["inst_A"]
+        assert service_adoptions == ["inst_A"]
     else:
         assert claims.recover_pairing(ident)["state"] == "bound"
     assert len(claim_peer.challenges) == 1 and client.get(route).get_json() == {"state": "bound"}

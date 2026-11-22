@@ -1092,6 +1092,7 @@ fn claim_exit_cleanup_flag(started: &AtomicBool) -> bool {
 
 /// Everything the shell does before it ends, however the end is carried out.
 fn authorize_exit(app: &AppHandle) {
+    instance_client::retire_claim_presentation(app);
     notifications::stop(app);
     app_windows::close_all(app);
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
@@ -2974,7 +2975,9 @@ pub fn run() {
                         if label == MAIN_WINDOW {
                             api.prevent_close();
                             if let Some(window) = app.get_window(MAIN_WINDOW) {
+                                instance_client::retire_claim_presentation(app);
                                 let _ = window.hide();
+                                instance_client::retire_claim_presentation(app);
                             }
                         }
                         if label == pet::PET_WINDOW {
@@ -3018,6 +3021,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             instance_client::desktop_client_request,
+            instance_client::desktop_claim_review,
             update_popover::update_popover_fit,
             bootstrap_status,
             bootstrap_retry,

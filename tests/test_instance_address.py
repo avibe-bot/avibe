@@ -7,7 +7,9 @@ side of it is the real code, config file and SQLite state.
 
 import json
 import sqlite3
+import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from alembic import command
@@ -150,7 +152,7 @@ def address(monkeypatch):
     instance_address._worker_read_requested.clear()
     for name, value in ():
         monkeypatch.setattr(instance_address, name, value)
-    monkeypatch.setattr(ui_server, "_start_instance_address", lambda: None)
+    monkeypatch.setattr(ui_server, "_start_instance_address", lambda **_: True)
     return plane, clocks
 
 
@@ -961,6 +963,70 @@ def test_b4_a_definitive_refusal_of_the_state_read_is_told_apart_from_a_fault(ad
     assert instance_address._read_when_asked() is False and instance_address._read_refused is False
     plane.fail = remote_access.BackendRequestError(503, {})
     assert instance_address._read_when_asked() is False and instance_address._read_refused is False
+
+
+def test_service_retries_worker_start_and_wakes_an_already_running_address_reader(monkeypatch):
+    # Service-side sink only: no real connector, address daemon, service restart or HTTP.
+    events = []
+
+    class Worker:
+        def __init__(self, *, name, target, daemon):
+            assert name == "instance-address" and target is instance_address._worker_loop and daemon
+
+        def start(self):
+            events.append("start")
+            if events.count("start") == 1:
+                raise RuntimeError("fixture thread unavailable")
+
+    owed, wake = threading.Event(), threading.Event()
+    monkeypatch.setattr(instance_address, "threading", SimpleNamespace(Thread=Worker))
+    monkeypatch.setattr(instance_address, "_worker_started", False)
+    monkeypatch.setattr(instance_address, "_worker_read_requested", owed)
+    monkeypatch.setattr(instance_address, "_worker_wake", wake)
+    monkeypatch.setattr(instance_address, "_hooks", {})
+    def monitor(config):
+        events.append("monitors")
+        return True
+
+    monkeypatch.setattr(ui_server, "_start_remote_monitors", monitor)
+    monkeypatch.setattr(ui_server, "_UI_RUNTIME_ACTIVE", False)
+    assert not ui_server._on_claim_bound() and not events
+    monkeypatch.setattr(ui_server, "_UI_RUNTIME_ACTIVE", True)
+    assert not ui_server._on_claim_bound() and not owed.is_set()
+    assert ui_server._on_claim_bound() and owed.is_set() and wake.is_set()
+    owed.clear()
+    wake.clear()
+    assert ui_server._ensure_remote_access_monitoring() and not wake.is_set() and not owed.is_set()
+    assert ui_server._on_claim_bound() and wake.is_set() and owed.is_set()
+    assert events == ["monitors", "start", "monitors", "start", "monitors", "monitors"]
+    monkeypatch.setattr(ui_server, "_start_remote_monitors", lambda config: False)
+    assert not ui_server._on_claim_bound()  # monitor startup refusal cannot acknowledge both workers
+
+
+@pytest.mark.parametrize("old_read", ["unpaired", "finished"])
+def test_publication_during_an_older_address_read_is_still_owed(address, monkeypatch, old_read):
+    plane, _ = address
+
+    def overlapping():
+        instance_address._wake_worker(read_state=True)  # the newly committed binding became visible
+        return None
+
+    with monkeypatch.context() as old:
+        if old_read == "unpaired":
+            old.setattr(instance_address, "current_binding", overlapping)
+        else:
+            def completed(*, force):
+                assert force
+                instance_address._wake_worker(read_state=True)
+                return True
+            old.setattr(instance_address, "refresh_state", completed)
+        instance_address._wake_worker(read_state=True)
+        assert instance_address._read_when_asked()
+    assert instance_address._worker_read_requested.is_set()
+    plane.calls.clear()
+    assert instance_address._read_when_asked()
+    assert not instance_address._worker_read_requested.is_set()
+    assert plane.calls == [("POST", "hostname-state", {})]
 
 
 def test_b4_a_read_that_is_owed_survives_a_failed_request(address):

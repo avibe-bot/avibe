@@ -16,6 +16,15 @@ use super::{
     transport::{Epoch, NativeSession, Response, Transport},
 };
 
+mod claim_session;
+mod email_code;
+pub(super) use claim_session::{
+    BindingBase, BoundClaimSession, DiscoveredSession, EnrolledCodes, FactorChallenge, PreparedClaimCode,
+    PreparedFactor,
+};
+pub(super) use email_code::validate_code;
+use email_code::{Mailbox, TypedCode};
+
 pub const CONTROL_PLANE: &str = "https://avibe.bot/";
 pub const EMAIL_REDIRECT: &str = "https://avibe.bot/auth/callback?source=desktop-app";
 
@@ -71,9 +80,10 @@ fn primary_passkey_context() -> Value {
 #[derive(Clone)]
 pub struct AccountFlow {
     pub session: NativeSession,
-    provider: Option<NativeSession>,
-    provider_key: Option<String>,
-    email: Option<String>,
+    typed_code: Option<TypedCode>,
+    // A hosted MFA projection intentionally has no subject. Hold the original
+    // mailbox/expected subject through MFA until an authenticated 200 read.
+    factor_owner: Option<Mailbox>,
     enrollment_token: Option<String>,
     /// Instance ids in the order of the last catalog avibe.bot sent: pins,
     /// then newest. Published order is derived from it, never replaces it.
@@ -110,10 +120,9 @@ struct FactorProjection {
 impl AccountFlow {
     pub fn new(transport: Arc<dyn Transport>, passkey_sheet: bool) -> Self {
         Self {
-            session: NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), transport.clone()),
-            provider: None,
-            provider_key: None,
-            email: None,
+            session: NativeSession::account(transport.clone()),
+            typed_code: None,
+            factor_owner: None,
             enrollment_token: None,
             server_order: vec![],
             transport,
@@ -124,16 +133,21 @@ impl AccountFlow {
     }
 
     pub fn fence(&mut self, epoch: Epoch) {
-        self.session.fence(epoch.clone());
-        if let Some(provider) = &mut self.provider {
-            provider.fence(epoch);
-        }
+        self.session.fence(epoch);
+    }
+
+    /// The claim reader uses only this native account jar, never a provider attempt,
+    /// pending sign-in token or recoverable passkey jar from an account transaction.
+    pub(super) fn for_claim(&self, epoch: Epoch) -> Self {
+        let mut flow = Self::new(self.transport.clone(), self.passkey_sheet);
+        flow.session = self.session.clone();
+        flow.session.fence(epoch);
+        flow
     }
 
     pub fn clear_transient(&mut self) {
-        self.provider = None;
-        self.provider_key = None;
-        self.email = None;
+        self.typed_code = None;
+        self.factor_owner = None;
         self.enrollment_token = None;
     }
 
@@ -165,7 +179,7 @@ impl AccountFlow {
         self.clear_transient();
         self.resumes = None;
         self.accepted_passkey = None;
-        self.session = NativeSession::new(CONTROL_PLANE.parse().expect("fixed origin"), self.transport.clone());
+        self.session = NativeSession::account(self.transport.clone());
         self.session.fence(epoch);
         self.server_order.clear();
         state.account = AccountState {
@@ -188,40 +202,54 @@ impl AccountFlow {
         epoch: Epoch,
         state: &mut ClientState,
     ) -> Result<(), ClientError> {
-        let (mut flow, mut next) = self.first_factor(epoch.clone(), state)?;
-        flow.send_otp(email, epoch, &mut next).await?;
-        self.commit(flow, next, state);
-        Ok(())
-    }
-
-    async fn send_otp(&mut self, email: String, epoch: Epoch, state: &mut ClientState) -> Result<(), ClientError> {
-        let email = validated_email(email)?;
-        let (mut provider, key) = self.provider(epoch).await?;
-        let mut path = Url::parse("https://placeholder.test/auth/v1/otp").expect("fixed URL");
-        path.query_pairs_mut().append_pair("redirect_to", EMAIL_REDIRECT);
-        let response = provider
-            .request_with_headers(
-                Method::POST,
-                &path[url::Position::BeforePath..],
-                Some(json!({"email": email, "create_user": true})),
-                provider_headers(&key)?,
-            )
-            .await?;
-        if !response.success() {
-            return Err(response.error());
+        if let Some(old) = &self.typed_code {
+            old.can_resend()?;
         }
-        self.provider = Some(provider);
-        self.provider_key = Some(key);
-        self.email = Some(email.clone());
-        self.enrollment_token = None;
-        state.account = AccountState {
+        let (mut flow, mut next) = self.first_factor(epoch.clone(), state)?;
+        let mailbox = Mailbox::login(&email)?;
+        let email = mailbox.email().to_owned();
+        flow.send_code(mailbox, epoch, || Ok(())).await?;
+        next.account = AccountState {
             status: AccountStatus::Verifying,
             identity: None,
             email: Some(email),
             gate: None,
             methods: vec![],
         };
+        self.commit(flow, next, state);
         Ok(())
+    }
+
+    async fn send_code(
+        &mut self,
+        mailbox: Mailbox,
+        epoch: Epoch,
+        before_delivery: impl FnOnce() -> Result<(), ClientError>,
+    ) -> Result<(), ClientError> {
+        let config = auth_config(self.transport.clone(), Some(epoch.clone()))
+            .await
+            .map_err(email_code::transport_error)?;
+        let (issuer, key) =
+            supabase_session(&config, self.transport.clone(), epoch).map_err(email_code::transport_error)?;
+        let headers = provider_headers(&key)?;
+        before_delivery()?; // discovery may have outlived this document, ticket, or account
+        self.typed_code = Some(mailbox.deliver(issuer, headers).await?);
+        Ok(())
+    }
+
+    // Private account half only: the claim owner still has to witness and fence
+    // this identity, adopt the new ordinary session independently, and re-read.
+    pub(super) async fn send_claim_code(
+        &mut self,
+        witnessed: &Account,
+        epoch: Epoch,
+        before_delivery: impl FnOnce() -> Result<(), ClientError>,
+    ) -> Result<(), ClientError> {
+        if let Some(old) = &self.typed_code {
+            old.can_resend()?;
+        }
+        self.send_code(Mailbox::same_account(witnessed)?, epoch, before_delivery)
+            .await
     }
 
     async fn provider(&mut self, epoch: Epoch) -> Result<(NativeSession, String), ClientError> {
@@ -268,7 +296,7 @@ impl AccountFlow {
 
     /// Google, GitHub or Apple, second half, under the operation lock: a new
     /// first factor that redeems the browser's code with this attempt's own
-    /// verifier, then the email code's session endpoint and two-step gate.
+    /// verifier, then ordinary native token establishment and the two-step gate.
     pub async fn finish_provider_sign_in(
         &mut self,
         attempt: ProviderAttempt,
@@ -417,6 +445,10 @@ impl AccountFlow {
         if !response.success() {
             return Err(primary_passkey_error(&response));
         }
+        let body = response.json()?;
+        if response.status != 200 || body["ok"] != true || !body["next"].is_string() {
+            return Err(ClientError::new("invalid_response"));
+        }
         Ok(())
     }
 
@@ -483,31 +515,64 @@ impl AccountFlow {
     }
 
     pub async fn verify_otp(&mut self, code: String, state: &mut ClientState) -> Result<(), ClientError> {
-        if state.account.status != AccountStatus::Verifying || code.is_empty() || code.len() > 16 {
+        if state.account.status != AccountStatus::Verifying {
             return Err(ClientError::new("invalid_action"));
         }
-        let email = self.email.as_ref().ok_or_else(|| ClientError::new("invalid_action"))?;
-        let provider = self
-            .provider
-            .as_mut()
+        self.read_code_session(Some(&code), state).await
+    }
+
+    pub(super) async fn read_code_session(
+        &mut self,
+        code: Option<&str>,
+        state: &mut ClientState,
+    ) -> Result<(), ClientError> {
+        let delivery = self
+            .typed_code
+            .clone()
             .ok_or_else(|| ClientError::new("invalid_action"))?;
-        let response = provider
-            .request_with_headers(
-                Method::POST,
-                "/auth/v1/verify",
-                Some(json!({"email":email,"token":code,"type":"email"})),
-                provider_headers(
-                    self.provider_key
-                        .as_deref()
-                        .ok_or_else(|| ClientError::new("invalid_action"))?,
-                )?,
-            )
-            .await?;
-        let credentials = successful_json(response)?;
-        self.establish(credentials, state).await
+        let mailbox = delivery.mailbox.clone();
+        let mut jar = delivery.session(&self.session, code).await?;
+        let read = jar
+            .request(Method::GET, "/api/mobile/session", None)
+            .await
+            .map_err(email_code::transport_error)?;
+        if let Err(e) = self.project_for(read, state, Some(&mailbox)) {
+            // This was discovery of an isolated candidate. Its denial must not
+            // erase an unrelated saved account through coordinator sign-out.
+            if matches!(e.code.as_str(), "signed_out" | "account_changed") {
+                delivery.discard_bound();
+                return Err(ClientError::new("fresh_code_required"));
+            }
+            return Err(e);
+        }
+        self.session = jar;
+        self.typed_code = None;
+        // Only a subject frozen before a successful, server-bound step-up may
+        // resume its old credential key while MFA still owes its projection.
+        if let Some(subject) = mailbox.subject() {
+            self.resumes = Some(subject.to_owned());
+        }
+        self.factor_owner = (state.account.status == AccountStatus::SecondFactorRequired).then_some(mailbox);
+        Ok(())
     }
 
     pub async fn discover(&mut self, state: &mut ClientState) -> Result<(), ClientError> {
+        if self.typed_code.is_some() {
+            return self.read_code_session(None, state).await;
+        }
+        if let Some(owner) = self.factor_owner.clone() {
+            let mut jar = self.session.clone();
+            let response = jar
+                .request(Method::GET, "/api/mobile/session", None)
+                .await
+                .map_err(email_code::transport_error)?;
+            self.project_for(response, state, Some(&owner))?;
+            self.session = jar;
+            if state.account.status == AccountStatus::SignedIn {
+                self.factor_owner = None;
+            }
+            return Ok(());
+        }
         let response = self.session.request(Method::GET, "/api/mobile/session", None).await?;
         self.project(response, state)
     }
@@ -517,17 +582,29 @@ impl AccountFlow {
     }
 
     fn project(&mut self, response: Response, state: &mut ClientState) -> Result<(), ClientError> {
+        self.project_for(response, state, None)
+    }
+    fn project_for(
+        &mut self,
+        response: Response,
+        state: &mut ClientState,
+        owner: Option<&Mailbox>,
+    ) -> Result<(), ClientError> {
         if response.status == 200 {
             let result: SessionProjection =
                 serde_json::from_slice(&response.body).map_err(|_| ClientError::new("invalid_response"))?;
+            if owner.is_some_and(|m| !m.matches(&result.account.email, Some(&result.account.id))) {
+                return Err(ClientError::new("account_changed"));
+            }
             if result.account.id.is_empty() || result.account.email.is_empty() {
                 return Err(ClientError::new("invalid_response"));
             }
-            if state
-                .account
-                .identity
-                .as_ref()
-                .is_some_and(|old| old.id != result.account.id)
+            if self.resumes.as_ref().is_some_and(|id| id != &result.account.id)
+                || state
+                    .account
+                    .identity
+                    .as_ref()
+                    .is_some_and(|old| old.id != result.account.id)
             {
                 return Err(ClientError::new("account_changed"));
             }
@@ -554,6 +631,9 @@ impl AccountFlow {
         } else if response.status == 403 && response.error().code == "two_factor_required" {
             let factor: FactorProjection =
                 serde_json::from_slice(&response.body).map_err(|_| ClientError::new("invalid_response"))?;
+            if owner.is_some_and(|m| !m.matches(&factor.email, None)) {
+                return Err(ClientError::new("account_changed"));
+            }
             state.account = AccountState {
                 status: AccountStatus::SecondFactorRequired,
                 identity: None,
@@ -574,6 +654,8 @@ impl AccountFlow {
             Ok(())
         } else if response.status == 401 {
             Err(ClientError::new("signed_out"))
+        } else if owner.is_some() {
+            Err(ClientError::new("request_failed"))
         } else {
             Err(response.error())
         }

@@ -4,7 +4,10 @@ use avibe_runtime_host::{
     deep_link::DeepLinkReturn,
     instance_client::{
         account::{Passkeys, SystemBrowser},
-        coordinator::{ClientView, Coordinator},
+        coordinator::{
+            claims::{ClaimCaller, ClaimDocument, ClaimRequest},
+            ClientView, Coordinator,
+        },
         loopback::CallbackCopy,
         protocol::*,
         storage::{ConnectionRecord, ConnectionStore, Credentials},
@@ -323,6 +326,8 @@ impl RuntimeDocument {
     }
 }
 struct AccountDocument {
+    claim: Option<ClaimDocument>,
+    claim_visibility: u64,
     label: String,
     window: u64,
     destination: Url,
@@ -715,6 +720,7 @@ fn retire_stale_link(app: &AppHandle) {
 /// Per-physical-window callbacks cannot revive a retired document with the reused main label.
 pub fn window_created(app: &AppHandle) -> Option<u64> {
     let client = app.try_state::<Client>()?;
+    retire_claim_presentation(app);
     let window = client
         .presentations
         .lock()
@@ -1076,6 +1082,179 @@ fn updater_caller<R: tauri::Runtime>(
         || app
             .get_webview_window(crate::update_popover::UPDATE_POPOVER)
             .is_some_and(|window| crate::update_popover::is_page(window.as_ref(), bundle))
+}
+
+/// Private claim commands have their own capability and direct reply. The popup and
+/// general account state channel do not even have the command in their allowlist.
+#[tauri::command]
+pub(crate) async fn desktop_claim_review(
+    window: Webview,
+    app: AppHandle,
+    request: ClaimRequest,
+) -> Result<Option<serde_json::Value>, ClientError> {
+    let deny = || ClientError::new("untrusted_desktop_caller");
+    let client = app.try_state::<Client>().ok_or_else(deny)?;
+    let shell = app.try_state::<Shell>().ok_or_else(deny)?;
+    let physical = window.window();
+    if physical.label() != MAIN_WINDOW || shell.exit_cleanup_started.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(deny());
+    }
+    // Snapshot before any platform getter. A hide or same-URL reload during the getter
+    // must not be recaptured as the document that made the request.
+    let (receipt, observed) = {
+        let views = client.view.views.lock().expect("views");
+        let role = views.account.as_ref().ok_or_else(deny)?;
+        (
+            role.claim_receipt(window.label(), &client.view.bundle)
+                .ok_or_else(deny)?,
+            role.claim.as_ref().and_then(|d| d.caller().ok()),
+        )
+    };
+    if client.presentations.lock().expect("presentation intent").window != receipt.window {
+        return Err(deny());
+    }
+    let visible = || physical.is_visible().unwrap_or(false) && !physical.is_minimized().unwrap_or(true);
+    if !visible() || window.url().ok().as_ref() != Some(&receipt.destination) {
+        // A real observed hide/navigation is retirement even if the next OS
+        // sample sees a restored window. Never reacquire a successor to retire.
+        if let Some(observed) = observed {
+            observed.retire();
+        }
+        return Err(deny());
+    }
+    let cancel = request.action.cancels();
+    let caller = {
+        // Cancel only attenuates the matching receipt. Keep all the actual
+        // role checks, without refusing revocation because presentation I/O
+        // has the serializer. No private model is returned by cancellation.
+        let _windows = if cancel {
+            None
+        } else {
+            Some(client.view.windows.try_lock().map_err(|_| deny())?)
+        };
+        let mut views = client.view.views.lock().expect("views");
+        let presentation = client.view.presentation.lock().expect("presentation");
+        if shell.exit_cleanup_started.load(std::sync::atomic::Ordering::SeqCst)
+            || !presentation.account
+            || presentation.staging
+            || presentation.pending_commit.is_some()
+        {
+            return Err(deny());
+        }
+        let role = views
+            .account
+            .as_mut()
+            .filter(|a| a.claim_receipt(window.label(), &client.view.bundle).as_ref() == Some(&receipt))
+            .ok_or_else(deny)?;
+        if request.action.opens() {
+            role.claim = Some(client.coordinator.claim_document(request.expected_generation)?);
+        }
+        role.claim.as_ref().ok_or_else(deny)?.caller()?
+    };
+    let locale = receipt
+        .destination
+        .query_pairs()
+        .find_map(|(k, v)| (k == "locale").then(|| v.into_owned()))
+        .ok_or_else(deny)?;
+    let opened = request.action.opens();
+    let reply = client
+        .coordinator
+        .claim_review(&shell.host, &caller, &locale, request)
+        .await?;
+    // Open has now reserved native state (no helper or HTTP). Arm monitoring
+    // before handing off the receipt, even if the renderer never receives it.
+    if opened {
+        watch_claim_visibility(physical.clone(), caller.clone());
+    }
+    // This read cannot carry a reply through a replacement or into a hidden window.
+    if !visible()
+        || window.url().ok().as_ref() != Some(&receipt.destination)
+        || shell.exit_cleanup_started.load(std::sync::atomic::Ordering::SeqCst)
+        || client.presentations.lock().expect("presentation intent").window != receipt.window
+    {
+        caller.retire();
+        return Err(deny());
+    }
+    let _windows = if cancel {
+        None
+    } else {
+        Some(client.view.windows.try_lock().map_err(|_| {
+            caller.retire();
+            deny()
+        })?)
+    };
+    let views = client.view.views.lock().expect("views");
+    let state = client.view.presentation.lock().expect("presentation");
+    if !(state.account
+        && !state.staging
+        && state.pending_commit.is_none()
+        && views
+            .account
+            .as_ref()
+            .and_then(|a| a.claim_receipt(window.label(), &client.view.bundle))
+            .as_ref()
+            == Some(&receipt))
+    {
+        caller.retire();
+        return Err(deny());
+    }
+    reply.deliver()
+}
+// Native close/replacement/reload revoke synchronously. OS-level Hide/Minimize need
+// not generate a Tauri visibility event on either desktop. While this one attempt
+// exists only, observe its physical window (never query or change keyboard focus).
+fn watch_claim_visibility(window: tauri::Window, caller: ClaimCaller) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if !caller.monitoring() {
+                return;
+            }
+            if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(true) {
+                caller.retire();
+                return;
+            }
+        }
+    });
+}
+#[derive(PartialEq, Eq)]
+struct ClaimReceipt {
+    window: u64,
+    document: u64,
+    visibility: u64,
+    destination: Url,
+}
+impl AccountDocument {
+    fn claim_receipt(&self, label: &str, bundle: &Url) -> Option<ClaimReceipt> {
+        if !self.shown
+            || !self.admitted
+            || !self.loaded
+            || self.document != 1
+            || self.token.is_none()
+            || self.label != label
+            || !matches!(
+                (bundle.scheme(), bundle.host_str(), bundle.port()),
+                ("tauri", Some("localhost"), None) | ("http", Some("tauri.localhost"), None)
+            )
+            || account_view(&self.destination, bundle) != Some("account")
+        {
+            return None;
+        }
+        Some(ClaimReceipt {
+            window: self.window,
+            document: self.document,
+            visibility: self.claim_visibility,
+            destination: self.destination.clone(),
+        })
+    }
+}
+pub(crate) fn retire_claim_presentation(app: &AppHandle) {
+    if let Some(client) = app.try_state::<Client>() {
+        if let Some(role) = client.view.views.lock().expect("views").account.as_mut() {
+            role.claim_visibility += 1;
+            role.claim.take();
+        }
+    }
 }
 
 #[tauri::command]
@@ -1669,6 +1848,9 @@ fn apply_presentation(app: &AppHandle) {
                         destination: url.clone(),
                     });
                 }
+                // Replacement admission, not the asynchronous completion of view disposal,
+                // ends an old document's claim. A mere presentation event does not start one.
+                retire_claim_presentation(&app);
                 native.presentation.lock().expect("presentation").staging = true;
                 continuation
             };
@@ -1834,7 +2016,8 @@ impl NativeView {
 
     async fn close_account(&self) -> Result<(), ClientError> {
         let account = self.views.lock().expect("views").account.take();
-        let Some(account) = account else { return Ok(()) };
+        let Some(mut account) = account else { return Ok(()) };
+        account.claim.take(); // retire before awaiting native disposal
         let app = self.app.clone();
         let label = account.label.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -1881,6 +2064,8 @@ impl NativeView {
                 .as_ref()
                 .map(|runtime| (runtime.label.clone(), runtime.document));
             views.account = Some(AccountDocument {
+                claim: None,
+                claim_visibility: 0,
                 label: label.clone(),
                 window: physical,
                 destination: destination.clone(),
@@ -1925,6 +2110,7 @@ impl NativeView {
                             let mut views = client.view.views.lock().expect("views");
                             let Some(account) = views.account.as_mut().filter(|account| account.label == view.label()) else { return };
                             if event.event() == tauri::webview::PageLoadEvent::Started {
+                                account.claim.take();
                                 account.document += 1;
                                 account.admitted = account.document == 1 && *event.url() == account.destination;
                                 account.loaded = false;
@@ -2671,6 +2857,8 @@ mod tests {
                 document: 1,
             }),
             account: account.map(|(loaded, shown)| AccountDocument {
+                claim: None,
+                claim_visibility: 0,
                 label: "main-account-2".into(),
                 window: 1,
                 destination: url.clone(),
@@ -3209,6 +3397,51 @@ mod tests {
         assert!(!allows(&view, Some(7)));
     }
 
+    #[test]
+    fn specific_visible_claim_role_rejects_hidden_reloaded_updater_and_runtime_receivers() {
+        let bundle = Url::parse("tauri://localhost/").unwrap();
+        let url = account_url(&bundle, "account", Some("en")).unwrap();
+        let mut role = AccountDocument {
+            claim: None,
+            claim_visibility: 0,
+            label: "main-account-7".into(),
+            window: 2,
+            destination: url.clone(),
+            document: 1,
+            admitted: true,
+            loaded: true,
+            shown: true,
+            token: Some("fixture-document".into()),
+            returning: None,
+            owner: 2,
+        };
+        assert!(role.claim_receipt("main-account-7", &bundle).is_some());
+        for label in [
+            "main",
+            "main-runtime-7",
+            "main-account-8",
+            crate::update_popover::UPDATE_POPOVER,
+        ] {
+            assert!(role.claim_receipt(label, &bundle).is_none());
+        }
+        for view in ["updates", "sign-out", "setup-complete", "instances"] {
+            role.destination = account_url(&bundle, view, Some("en")).unwrap();
+            assert!(role.claim_receipt("main-account-7", &bundle).is_none());
+        }
+        role.destination = url;
+        role.shown = false;
+        assert!(role.claim_receipt("main-account-7", &bundle).is_none());
+        role.shown = true;
+        role.document = 2;
+        assert!(role.claim_receipt("main-account-7", &bundle).is_none());
+        role.document = 1;
+        role.loaded = false;
+        assert!(role.claim_receipt("main-account-7", &bundle).is_none());
+        let dev = Url::parse("http://localhost:1420/").unwrap();
+        role.destination = account_url(&dev, "account", Some("en")).unwrap();
+        role.loaded = true;
+        assert!(role.claim_receipt("main-account-7", &dev).is_none());
+    }
     #[test]
     fn only_supported_static_bundle_enables_the_client() {
         assert!(compatible_asset(
