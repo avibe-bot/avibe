@@ -6,7 +6,7 @@
 // (a hold) or put in the draft (a tap or ⌥Z dictation). Every part is shipped.
 import type { ReactNode } from 'react';
 
-import type { PendingVoiceItemProps } from '@/components/voice/PendingVoiceTakes';
+import type { PendingVoiceItemProps } from '@/components/voice/PendingVoiceItem';
 
 import { frames } from '../../frame';
 import { DesktopScreen } from '../../shell/DesktopScreen';

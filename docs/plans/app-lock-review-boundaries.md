@@ -114,6 +114,22 @@ Menu cases consume the production handler with actual AppKit checkmarks, cancel
 and replace deferred work, compare test-owned disk bytes, and verify successful
 notification replay toggles exactly once.
 
+## First-load CI follow-up
+
+The first-load gate rejected the frozen candidate at 600.1 KiB gzip for home.
+Keep its 600 KiB budget. Extract the unchanged `PendingVoiceItem` presentation
+into a chunk loaded through the existing `lazyPage` only when the list has
+something to draw. Storage ownership, automatic retry admission and every lock
+listener/guard remain eager in their existing owners; no capture cancellation
+or default-Off behavior waits for the chunk.
+
+A normal production build measured with CI's gzip level 6 gives home 613,958
+bytes (599.568359375 KiB) and chat 914,962 bytes (893.517578125 KiB), within the
+unchanged 600/900 KiB budgets. The real keeper/store/pending-list consumers,
+Composer, Hold and existing lazy-loader tests pass 147 cases. The design frames
+import the same extracted presentation directly; markup, props and copy are
+unchanged.
+
 ## Gates
 
 Record one old-red/new-green consuming test per family. Original reviewer checks
