@@ -7141,6 +7141,31 @@ final class DirectPathAppTests: XCTestCase {
 
     private var storeIdentifiers: Set<UUID> = []
     private var releaseFixtureApps: [@MainActor () -> Void] = []
+    /// Whether an App this test made is still alive: an App keeps its store.
+    private var fixtureAppIsAlive: [@MainActor () -> Bool] = []
+    /// Stores WebKit alone still held when their test ended, and since
+    /// when. Later teardowns try them again; see `removeTrackedStores`.
+    @MainActor private static var storesWebKitStillHolds: [UUID: Date] = [:]
+
+    /// The class is done: one more try for what WebKit still held. What it
+    /// still holds now is printed, with for how long, and is not a failure.
+    override class func tearDown() {
+        MainActor.assumeIsolated {
+            guard !DirectPathAppTests.storesWebKitStillHolds.isEmpty else { return }
+            let finished = XCTestExpectation(description: "final store sweep")
+            Task { @MainActor in
+                await DirectPathAppTests.retryStoresWebKitStillHolds()
+                finished.fulfill()
+            }
+            _ = XCTWaiter.wait(for: [finished], timeout: 10)
+            for (identifier, since) in DirectPathAppTests.storesWebKitStillHolds {
+                print("[iOS fixture] stage=class end, identifier=\(identifier), "
+                    + "WebKit still holds it after \(Int(Date().timeIntervalSince(since))) s")
+            }
+            DirectPathAppTests.storesWebKitStillHolds.removeAll()
+        }
+        super.tearDown()
+    }
     private func scheduleParams(
         requestID: String,
         operationID: String,
@@ -7742,8 +7767,54 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     private func trackStore(of app: AppModel) {
         storeIdentifiers.insert(app.websiteDataStore.identifier)
+        fixtureAppIsAlive.append { [weak app] in app != nil }
     }
 
+    @MainActor
+    private static func registeredStores() async -> Set<UUID> {
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                continuation.resume(returning: Set($0))
+            }
+        }
+    }
+
+    /// WebKit's answer for a store none of our pages uses any more, while a
+    /// web process of its own for that store has not shut down yet (iOS 27).
+    /// A store one of our pages still uses is "Data store is in use".
+    private static func isHeldByWebKitAlone(_ error: Error?) -> Bool {
+        error?.localizedDescription == "Data store is in use (by network process)"
+    }
+
+    /// One try for each store WebKit still held at an earlier teardown.
+    @MainActor
+    private static func retryStoresWebKitStillHolds() async {
+        for (identifier, since) in storesWebKitStillHolds {
+            let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+            if await !registeredStores().contains(identifier) {
+                storesWebKitStillHolds[identifier] = nil
+                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
+                    + "\(Int(Date().timeIntervalSince(since))) s after its test")
+            } else if !isHeldByWebKitAlone(error) {
+                storesWebKitStillHolds[identifier] = nil
+                XCTFail("Fixture store still registered: \(identifier); error=\(String(describing: error))")
+            }
+        }
+    }
+
+    /// Removes the stores this test's Apps used.
+    ///
+    /// What the test owns is asserted here: its Apps are released and no
+    /// page of theirs uses a store, within the same 5 s as before.
+    ///
+    /// On iOS 27 WebKit keeps a store while a web process of its own for it
+    /// has not shut down, and answers every removal "in use (by network
+    /// process)" until then. That process waits for the web content to
+    /// answer what WebKit last asked it: 11 ms at the median on CI, but over
+    /// 30 s for 3 of 683 processes in one run of this class, and five
+    /// minutes for one that never answered. No wait covers that, so such a
+    /// store, once no App of the test is alive, is left to later teardowns
+    /// (one try each) and to the class's own.
     @MainActor
     private func removeTrackedStores() async {
         // Release every App's runtime/account views before removing any
@@ -7752,26 +7823,31 @@ final class DirectPathAppTests: XCTestCase {
         for release in releaseFixtureApps { release() }
         releaseFixtureApps.removeAll()
         print("[iOS fixture] stage=App views invalidated before store removal")
+        await Self.retryStoresWebKitStillHolds()
         for identifier in storeIdentifiers {
             var removed = false
             var lastError: Error?
-            // iOS 27's WebKit can report a store "in use (by network
-            // process)" for longer after its views are gone: up to 30 s.
-            for _ in 0..<300 {
+            for _ in 0..<50 {
                 lastError = await AccountWebsiteDataStoreOperations.live
                     .removeIdentifier(identifier)
-                let registered = await withCheckedContinuation { continuation in
-                    WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
-                        continuation.resume(returning: Set($0))
-                    }
-                }
-                if !registered.contains(identifier) {
+                if await !Self.registeredStores().contains(identifier) {
                     removed = true
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            XCTAssertTrue(removed, "Fixture store still registered: \(identifier); error=\(String(describing: lastError))")
+            let appAlive = fixtureAppIsAlive.contains { $0() }
+            if !removed, !appAlive, Self.isHeldByWebKitAlone(lastError) {
+                Self.storesWebKitStillHolds[identifier] = Date()
+                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false, "
+                    + "WebKit still holds it: left to a later teardown")
+                continue
+            }
+            XCTAssertTrue(
+                removed,
+                "Fixture store still registered: \(identifier); an App of this test is still alive: \(appAlive); "
+                    + "error=\(String(describing: lastError))"
+            )
             print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
         }
         storeIdentifiers.removeAll()
