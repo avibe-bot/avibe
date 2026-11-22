@@ -1296,11 +1296,13 @@ def test_start_ui_normalizes_numeric_string_port_before_spawning(tmp_path, monke
     monkeypatch.setattr(runtime, "spawn_background", fake_spawn)
 
     assert runtime.start_ui("127.0.0.1", "05123", wait_for_ready=False) == 67890
-    assert spawned[0][0] == [
-        runtime.sys.executable,
-        "-c",
-        "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 5123)",
-    ]
+    executable, flag, code, *arguments = spawned[0][0]
+    assert (executable, flag) == (runtime.sys.executable, "-c")
+    # The host and the normalized port travel as their own arguments. The code
+    # that reads them is fixed: nothing of the address is ever part of it.
+    assert arguments == ["127.0.0.1", "5123"]
+    assert code == "from vibe.ui_server import run_ui_server; import sys; run_ui_server(sys.argv[1], int(sys.argv[2]))"
+    assert "127.0.0.1" not in code and "5123" not in code
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
