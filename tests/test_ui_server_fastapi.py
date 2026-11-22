@@ -443,7 +443,7 @@ def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 
     with pytest.raises(WebSocketDisconnect) as exc:
-        with app.test_client().websocket_connect("/ws/echo"):
+        with app.test_client().websocket_connect("ws://127.0.0.1/ws/echo", headers={TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}):
             pass
 
     assert exc.value.code == 1008
@@ -452,7 +452,7 @@ def test_websocket_echo_is_disabled_by_default(monkeypatch):
 def test_websocket_echo_smoke_when_enabled(monkeypatch):
     monkeypatch.setenv("VIBE_UI_ENABLE_WS_ECHO", "1")
 
-    with app.test_client().websocket_connect("/ws/echo") as websocket:
+    with app.test_client().websocket_connect("ws://127.0.0.1/ws/echo", headers={TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}) as websocket:
         websocket.send_text("hello")
 
         assert websocket.receive_text() == "echo: hello"

@@ -7328,8 +7328,9 @@ def test_cli_show_prewarm_ingress_requires_cli_token(monkeypatch, tmp_path):
 
 def test_cli_show_event_ingress_allows_configured_host_with_cli_token(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
-    config.remote_access.vibe_cloud.enabled = False
+    from config.v2_config import V2Config
+
+    config = V2Config.default()  # Confirmed unbound, not a disabled or incomplete pairing.
     config.ui.setup_host = "10.1.2.3"
     config.save()
     _create_agent_session("ses123")
@@ -7354,8 +7355,9 @@ def test_cli_show_event_ingress_allows_configured_host_with_cli_token(monkeypatc
 
 def test_cli_show_event_ingress_rejects_configured_host_without_cli_token(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _save_config(tmp_path)
-    config.remote_access.vibe_cloud.enabled = False
+    from config.v2_config import V2Config
+
+    config = V2Config.default()  # Confirmed unbound, not a disabled or incomplete pairing.
     config.ui.setup_host = "10.1.2.3"
     config.save()
     _create_agent_session("ses123")

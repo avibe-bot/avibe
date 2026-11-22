@@ -275,6 +275,36 @@ def test_rotated_foreground_grant_cannot_consume_an_opt_out_or_signed_endpoint(m
         assert push.get_enabled_by_endpoint(conn, endpoint=_payload("member")["endpoint"], user_key="remote:member")
 
 
+def test_declared_origin_navigation_shares_private_notice_without_granting_access(monkeypatch, tmp_path):
+    from starlette.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    config = _bind(_unbound())
+    origin = 'https://home.example.test:9443'
+    config.ui.trusted_public_origins = [origin]
+    config.save()
+    client = ui_server.app.test_client()
+    nav = {'Accept': 'text/html', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}
+    reference = client.get('/settings/devices', base_url=LAN, environ_base=LAN_PEER, headers=nav)
+    forward = {**nav, 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'home.example.test:9443'}
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, '127.0.0.1')
+    for url, peer, headers in [(origin, LAN_PEER, nav), (HOST, {'REMOTE_ADDR': '127.0.0.1'}, forward)]:
+        reply = client.get('/settings/devices?private=fixture', base_url=url, environ_base=peer, headers=headers)
+        assert reference.status_code == reply.status_code == 200 and reference.content == reply.content
+        assert reply.headers['Cache-Control'] == 'no-store' and reply.headers['Referrer-Policy'] == 'no-referrer'
+        assert 'Location' not in reply.headers
+    for url, path, headers in [(origin, '/', {'Accept': '*/*'}), (origin, '/api/session', nav),
+            (origin, '/', {**nav, 'Sec-Fetch-Mode': 'cors'}), ('https://home.example.test', '/', nav),
+            ('https://unlisted.example.test:9443', '/', nav), (HOST, '/', forward)]:
+        result = client.get(path, base_url=url, environ_base=LAN_PEER, headers=headers)
+        assert result.status_code == 503 and result.get_json()['error'] == 'remote_access_host_mismatch'
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with TestClient(ui_server.app).websocket_connect('wss://home.example.test:9443/api/terminal/local'):
+            pytest.fail('retired origin opened a socket')
+    assert closed.value.code == 1008
+
+
 def test_persisted_bound_lan_liveness_docker_and_canonical(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _bind(_unbound())
@@ -354,7 +384,8 @@ def test_missing_partial_reset_block_position(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path):
+@pytest.mark.parametrize('publication', ['binding', 'settings-save'])
+async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path, publication):
     # Real persisted config and actual ASGI middleware. Only the consumers are
     # stand-ins: no PTY, Vite server, network sockets or user's processes.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -423,9 +454,9 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path)
             [
                 sys.executable,
                 "-c",
-                "from vibe.api import save_config; "
-                'save_config({"remote_access":{"vibe_cloud":{"instance_id":"fixture",'
-                '"instance_secret":"bound","session_secret":"fixture-cookie"}}})',
+                'import sys,json; from vibe.api import save_config; save_config(json.loads(sys.argv[1]))',
+                ('{"ui":{"setup_host":"127.0.0.1"}}' if publication == 'settings-save' else
+                 '{"remote_access":{"vibe_cloud":{"instance_id":"fixture","instance_secret":"bound","session_secret":"fixture-cookie"}}}'),
             ],
             check=True,
             timeout=15,
@@ -445,8 +476,8 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unavailable", [False, True], ids=["bound", "snapshot-error"])
-async def test_idle_terminal_closes_on_first_tick_and_host_terminal_stays_open(monkeypatch, tmp_path, unavailable):
+@pytest.mark.parametrize('change', ['bound', 'snapshot-error', 'restrict-from-lan'])
+async def test_idle_terminal_closes_on_first_tick_and_host_terminal_stays_open(monkeypatch, tmp_path, change):
     from starlette.websockets import WebSocketDisconnect
     from vibe import setup_network_stream
 
@@ -494,7 +525,17 @@ async def test_idle_terminal_closes_on_first_tick_and_host_terminal_stays_open(m
         for _, _, sent in both:
             assert (await asyncio.wait_for(sent.get(), 3))["type"] == "websocket.accept"
             assert (await asyncio.wait_for(sent.get(), 3))["text"] == "ready"
-        if unavailable:
+        if change == 'restrict-from-lan':
+            from types import SimpleNamespace
+            from tests.test_host_network_access import Acceptor, restrict
+
+            port = V2Config.load().ui.setup_port
+            monkeypatch.setattr(ui_server, '_is_containerized_runtime', lambda: False)
+            monkeypatch.setattr(ui_server, '_server', SimpleNamespace(started=True, servers=[
+                Acceptor('192.168.2.3', port), Acceptor('127.0.0.1', port)]))
+            reply = restrict(ui_server.app.test_client(), LAN, LAN_PEER)
+            assert reply.status_code == 200, reply.content
+        elif change == 'snapshot-error':
             from vibe import network_position
 
             def failed_read(*args):

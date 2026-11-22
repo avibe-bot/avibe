@@ -24,7 +24,8 @@ def install(monkeypatch):
     from types import SimpleNamespace
     monkeypatch.setattr(permissions,'get_current_permissions',lambda *_: SimpleNamespace(source='live',
         projection={'instance':{'id':config.remote_access.vibe_cloud.instance_id},'access':{'owner':{'email':'owner@test.invalid'}}}))
-    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+    # Ingress and route handlers must see the same persisted installation.
+    config.save()
     return config
 
 
@@ -224,6 +225,7 @@ def test_bulk_fence_covers_unseen_and_racing_legacy_cookie_preserves_caller(inst
         assert remote_access.parse_session_identity(install, cookie)
     unseen = _pre_registry_cookie(install, login(install, "guest", "viewer"))
     install.remote_access.vibe_cloud.instance_secret = "fixture-runtime-credential"
+    install.save()
     local = ui_server.app.test_client()
     local_origin = "http://127.0.0.1:5123"
     view = listing(local, local_origin)
@@ -383,11 +385,17 @@ def test_local_device_administration_needs_pairing_and_direct_loopback(install, 
     loop = "http://127.0.0.1:5123"
     assert listing(local, loop)["bulk_action"] is None
     assert sign_out(local, "sign-out-others", loop).status_code == 403
-    install.ui.setup_host = "192.168.2.12"
+    from config.v2_config import V2Config
+
+    unbound = V2Config.default()
+    unbound.ui.setup_host = install.ui.setup_host = "192.168.2.12"
+    unbound.save()
     lan = dict(base_url="http://192.168.2.12:5123", environ_base={"REMOTE_ADDR": "192.168.2.50"})
     assert local.get("/api/devices", **lan).get_json()["bulk_action"] is None
     install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
-    assert local.get("/api/devices", **lan).status_code == 403
+    install.save()
+    refused = local.get("/api/devices", **lan)
+    assert refused.status_code == 503 and refused.get_json()['error'] == 'remote_access_host_mismatch'
     for headers in ({"X-Forwarded-For": "192.168.2.50"}, {"CF-Connecting-IP": "192.168.2.50"}):
         assert local.get("/api/devices", base_url=loop, headers=headers).status_code in (403, 503)
 
@@ -461,9 +469,11 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
     assert proven["group"] == "mine" and proven["account"]["login_role"] == "owner"
     assert listing(current)["unattributed"] == []
     install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    install.save()
     loop_view = listing(ui_server.app.test_client(), "http://127.0.0.1:5123")
     assert [r["id"] for r in loop_view["mine"] if r["push_only"]] == [proven["id"]]
     install.remote_access.vibe_cloud.instance_secret = ""
+    install.save()
     (legacy, local) = listing(owner)["unattributed"]
     for row in [legacy, local]:
         assert row["group"] == "unattributed" and row["push_only"]
@@ -559,6 +569,7 @@ def test_a_sign_out_receipt_says_whose_device_it_was_for_each_viewer(install):
         assert set(row) == {"operation_id", "device_id", "kind", "display_name", "group", "local_status", "account_results"}
     # A viewer on this computer itself has no account: by the role the device signed in with.
     install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    install.save()
     local = ui_server.app.test_client()
     assert answered(sign_out(local, partner + "/sign-out", loop)) == "mine"
     assert answered(sign_out(local, member_desk + "/sign-out", loop)) == "others"
@@ -586,6 +597,7 @@ def test_a_receipt_takes_the_role_the_list_showed_when_no_cookie_is_live(install
     clock["now"] = max(remote_access.parse_session_identity(install, cookie)["exp"] for cookie in (first, second))
     # Both cookies have idled out, neither has reached its absolute end: the list shows the notification registration.
     install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    install.save()
     local = ui_server.app.test_client()
     view = listing(local, loop)
     (row,) = [r for r in view["mine"] + view["others"] if r["push_only"]]

@@ -90,6 +90,7 @@ from modules.agents.catalog import (
     supports_runtime_refresh,
 )
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
+from vibe import ui_network_access
 from vibe.network_position import BindingState, binding_state, position_snapshot
 from vibe.setup_network_stream import serve_setup_connection
 from vibe.http_request_diagnostics import RequestCounterMiddleware, RequestCounters
@@ -3637,6 +3638,18 @@ def _is_retired_setup_document(conn, config, name) -> bool:
     accept = conn.headers.get("accept", "").lower()
     if "text/html" not in accept and not (path == "/" and accept in {"", "*/*"}):
         return False
+    # A declared custom origin selects presentation only, never a principal.
+    # Unlike the legacy private-IP root fallback, a wildcard Accept is not
+    # enough for a machine client to receive this document.
+    if ('text/html' in accept and conn.headers.get('sec-fetch-mode', 'navigate') == 'navigate'
+            and conn.headers.get('sec-fetch-dest', 'document') == 'document'):
+        if _websocket_has_forwarded_metadata(conn):
+            identity = _websocket_trusted_forwarded_origin_identity(conn)
+        else:
+            scheme = conn.scope.get('scheme', '')
+            identity = (scheme, name, _origin_port(conn.headers.get('host'), scheme))
+        if _trusted_public_origin_matches(config, identity):
+            return True
     setup_host = _normalized_host(config.ui.setup_host)
     if setup_host != name and not _is_wildcard_setup_host(setup_host):
         return False
@@ -3703,7 +3716,20 @@ class _SetupNetworkMiddleware:
             await self.app(scope, receive, send)
             return
         if state is BindingState.UNBOUND:
-            await serve_setup_connection(self.app, scope, receive, send)
+            # A private-IP stream must keep its own admission. Classify the
+            # origin, not the result of a second, fallible interface lookup:
+            # a transient lookup failure cannot turn a LAN lease into an
+            # unrestricted lease. Other origins retain the binding fence.
+            try:
+                address = ipaddress.ip_address(name)
+                private_origin = _is_private_address(address) and not address.is_loopback
+            except ValueError:
+                private_origin = False
+
+            def still_admitted(current):
+                return not private_origin or _websocket_is_local_request(conn, current)
+
+            await serve_setup_connection(self.app, scope, receive, send, still_admitted)
             return
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
@@ -9547,6 +9573,149 @@ def _device_owner_scope(viewer):
     return instance,None
 
 
+def _network_access_external(config):
+    if (_is_containerized_runtime() or _env_flag_enabled('VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS')
+            or os.environ.get('VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST')):
+        return 'network_access_container_managed'
+    if _trusted_public_origin_entries(config):
+        return 'network_access_proxy_managed'
+    return None
+
+
+def _setup_network_open(config, listeners):
+    from config.v2_config import config_recovery_refusal
+    from vibe.runtime import effective_ui_bind_host
+
+    if config_recovery_refusal(config, 'ui') or _network_access_external(config):
+        return None
+    target = ui_network_access.loopback_target(listeners, config.ui.setup_port)
+    if target is None:
+        return None
+    setup = _normalized_host(config.ui.setup_host)
+    addresses = {item.address for item in listeners}
+    if _is_loopback_host(setup):
+        return False if all(address.is_loopback for address in addresses) else None
+    effective = _normalized_host(effective_ui_bind_host(config))
+    try:
+        expected = ipaddress.ip_address('0.0.0.0' if effective == '*' else effective)
+    except ValueError:
+        return None
+    if expected not in addresses or any(a != expected and not a.is_loopback for a in addresses):
+        return None
+    if not _is_wildcard_setup_host(setup):
+        try:
+            requested = ipaddress.ip_address(setup)
+        except ValueError:
+            return None
+        if not _is_private_address(requested) or requested.is_multicast or requested.is_unspecified:
+            return None
+        if expected == requested and not _is_tunnel_wildcard_bind(config):
+            return True
+        # A tunnel-widened socket needs the specific local interface and a
+        # usable peer network; the wildcard by itself is not an open path.
+        return True if (_local_interface_network(requested) is not None
+                        and _setup_host_trust_network(requested) is not None) else None
+    # Wildcard admission uses a real private interface, not just an RFC1918 Host.
+    # Overlay enrollment alone does not prove an authorized remote peer exists.
+    try:
+        for interface_name, records in psutil.net_if_addrs().items():
+            for item in records:
+                if item.family not in (socket.AF_INET, socket.AF_INET6):
+                    continue
+                address = ipaddress.ip_address(item.address.split('%', 1)[0])
+                if (address.version == expected.version and not address.is_loopback and not address.is_unspecified
+                        and not address.is_multicast and _is_private_address(address)
+                        and not _is_tailscale_overlay_address(address)
+                        and _allows_wildcard_setup_host_trust(interface_name, address)
+                        and (network := _local_interface_network(address)) is not None
+                        and network.num_addresses > 1):
+                    return True
+    except (OSError, ValueError, psutil.Error):
+        pass
+    return None
+
+
+def _host_network_fields(listeners):
+    config, state = position_snapshot()
+    if state is BindingState.BOUND:
+        return {}
+    return {'network_open': _setup_network_open(config, listeners) if state is BindingState.UNBOUND else None}
+
+
+class _NetworkAccessError(Exception):
+    def __init__(self, code, status=409):
+        self.code = code
+        self.status = status
+
+
+def _restrict_network_access(listeners):
+    from config.v2_config import config_file_lock, config_recovery_refusal
+
+    # Never mutate the cached snapshot or seed a default from a missing file.
+    # Hold the same lock as binding publication through the one-field write.
+    with config_file_lock():
+        config = V2Config.load()
+        state = binding_state(config)
+        if state is BindingState.BOUND:
+            raise _NetworkAccessError('network_access_bound')
+        if state is not BindingState.UNBOUND or config_recovery_refusal(config, 'ui'):
+            raise _NetworkAccessError('network_access_state_unavailable', 503)
+        external = _network_access_external(config)
+        if external:
+            raise _NetworkAccessError(external)
+        target = ui_network_access.loopback_target(listeners, config.ui.setup_port)
+        if target is None:
+            raise _NetworkAccessError('network_access_listener_unavailable', 503)
+        # A LAN caller authorized before a concurrent change cannot overwrite
+        # that change as Owner. Check using this transaction's fresh config.
+        if not _is_local_request(config):
+            raise _NetworkAccessError('network_access_not_admitted', 403)
+        if config.ui.setup_host != target:
+            config.ui.setup_host = target
+            try:
+                config.save()
+            except Exception as exc:
+                raise _NetworkAccessError('network_access_save_failed', 503) from exc
+        return target, config.ui.setup_port
+
+
+class _NetworkRestrictionResponse(JSONResponse):
+    def __init__(self, target, port):
+        super().__init__({'ok': True, 'mode': 'this_computer'}, headers={'Cache-Control': 'no-store', 'Connection': 'close'})
+        self.target, self.port = target, port
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Best-effort cleanup, including on transport failure. Admission is
+            # already committed and never hinges on this client's receipt.
+            config, state = await asyncio.to_thread(position_snapshot)
+            if (state is BindingState.UNBOUND and config.ui.setup_host == self.target
+                    and config.ui.setup_port == self.port):
+                listeners = ui_network_access.active_listeners(_server)
+                if ui_network_access.loopback_target(listeners, self.port) == self.target:
+                    ui_network_access.close_redundant(listeners, self.target)
+
+
+@app.post('/api/devices/host/network-access', include_in_schema=False)
+async def restrict_host_network(starlette_request: FastAPIRequest):
+    async def handler():
+        if request.json != {'mode': 'this_computer'}:
+            return jsonify({'error': 'invalid_network_access_mode'}), 400
+        listeners = ui_network_access.active_listeners(_server)
+        try:
+            target, port = await asyncio.to_thread(_restrict_network_access, listeners)
+        except _NetworkAccessError as exc:
+            return jsonify({'error': exc.code}), exc.status
+        except Exception:
+            logger.exception('Unable to read UI network access state')
+            return jsonify({'error': 'network_access_state_unavailable'}), 503
+        return _NetworkRestrictionResponse(target, port)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route('/api/devices', methods=['GET'])
 async def device_list():
     from storage import device_catalog
@@ -9558,6 +9727,8 @@ async def device_list():
             'account': None, 'system_version': None, 'signed_in_at': None, 'last_active_at': None,
             'push_only': False, 'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
     host['functions'] = []
+    if viewer is None or viewer[2]:
+        host.update(await asyncio.to_thread(_host_network_fields, ui_network_access.active_listeners(_server)))
     if viewer is None:
         config = _load_remote_access_config()
         if config and binding_state(config) is BindingState.UNBOUND and _is_setup_host_request(config):
@@ -10054,16 +10225,41 @@ def _clear_remote_browser_cookie(response):
 def ui_reload():
     from vibe import runtime
 
-    payload = request.json or {}
-    host = payload.get("host")
-    port = payload.get("port")
-    if not host or not port:
+    from vibe.desktop_runtime import normalize_desktop_port
+    payload = request.json
+    if not isinstance(payload, dict) or 'host' not in payload or 'port' not in payload:
         return jsonify({"error": "host_and_port_required"}), 400
+    host = payload['host']
     if not isinstance(host, str):
         return jsonify({"error": "invalid_host"}), 400
+    host = host.strip()
+    if host.lower() == 'localhost':
+        host = 'localhost'
+    elif host != '*':
+        try:
+            if '%' in host:
+                raise ValueError
+            if host.startswith('[') and host.endswith(']'):
+                host = str(ipaddress.IPv6Address(host[1:-1]))
+            else:
+                host = str(ipaddress.ip_address(host))
+        except ValueError:
+            # A configured local DNS name is also a bind target. Validate
+            # labels without resolving them or using them for authorization.
+            try:
+                ascii_host = host.encode('idna').decode('ascii')
+            except UnicodeError:
+                return jsonify({"error": "invalid_host"}), 400
+            name = ascii_host.removesuffix('.')
+            labels = name.split('.')
+            if (not name or len(name) > 253 or labels[-1].isdigit()
+                    or any(not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label)
+                           for label in labels)):
+                return jsonify({"error": "invalid_host"}), 400
+            host = ascii_host
     try:
-        port = int(port)
-    except (TypeError, ValueError):
+        port = normalize_desktop_port(payload['port'])
+    except ValueError:
         return jsonify({"error": "invalid_port"}), 400
 
     status = runtime.read_status()
@@ -10084,14 +10280,11 @@ def ui_reload():
         import sys
         import time
         from config import paths as config_paths
-        command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
-        spawn_kwargs = {}
         pid = runtime.spawn_background(
-            [sys.executable, "-c", command],
+            runtime.ui_server_argv(sys.executable, bind_host, port),
             config_paths.get_runtime_ui_pid_path(),
             "ui_stdout.log",
             "ui_stderr.log",
-            **spawn_kwargs,
         )
         runtime.write_status(
             status.get("state", "running"),
