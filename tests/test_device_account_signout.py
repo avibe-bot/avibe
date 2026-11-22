@@ -252,6 +252,17 @@ def test_a_recorded_role_leaves_with_its_receipt(paired, monkeypatch):
         assert conn.execute(select(roles.c.receipt, roles.c.login_role)).all() == [(result['operation_id'], 'owner')]
         # Roles whose receipts an earlier version already removed.
         conn.execute(roles.insert(), [dict(receipt=f'left-{n}', login_role='member') for n in range(5)])
+    # Even orphan-only maintenance is deferred while reset owns the store.
+    from vibe.binding_admission import reset_intent_path
+    marker = reset_intent_path()
+    marker.write_text('{}')
+    try:
+        assert worker.run_once(lambda: pytest.fail('worker passed the reset fence')) is False
+        assert worker._roles_checked_to == ''
+        with get_cached_sqlite_engine().connect() as conn:
+            assert len(conn.execute(select(roles.c.receipt)).all()) == 6
+    finally:
+        marker.unlink()
     fake_issuer(monkeypatch, 204)
     engine, statements = get_cached_sqlite_engine(), []
 

@@ -330,8 +330,10 @@ def test_busy_connector_defers_identity_cutover_without_losing_work(cli_host, mo
     cs.journal.verifying(cfg, op['id'], 'old-generation')
     before = cs.journal.path.read_bytes()
 
-    def busy(*, timeout):
-        assert timeout == 0  # do not wait behind the running connector
+    timeouts = []
+
+    def busy(*, timeout=None):
+        timeouts.append(timeout)
         raise remote._ConnectorLifecycleBusy()
 
     with monkeypatch.context() as cut:
@@ -342,6 +344,7 @@ def test_busy_connector_defers_identity_cutover_without_losing_work(cli_host, mo
         else:
             assert reset.reset_interactively(confirm=lambda: True) == {'state': 'resetting'}
             assert reset._read()['phase'] == 'clear'
+    assert timeouts == [0]  # outside the retry handler: a blocking acquire must fail this test
     prior = V2Config.load()
     assert prior.remote_access.vibe_cloud.instance_id == 'inst_A' and cs.value(prior, 'ipFamily') == '6'
     assert cs.journal.path.read_bytes() == before
