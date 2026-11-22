@@ -6,6 +6,7 @@ import {
   hasNativeCapability,
   hasNativeShare,
   hasNativeShareExport,
+  hasNativeVoiceHold,
   isNativeShell,
   nativeAppInfo,
   nativeHapticImpact,
@@ -15,8 +16,12 @@ import {
   nativeSharePresent,
   nativeShowAccount,
   nativeSystemScheduleKinds,
+  nativeVoiceHoldAdopt,
+  nativeVoiceHoldReject,
+  nativeVoiceHoldSurfaces,
   nativeVoicePermission,
   onNativePushOpened,
+  onNativeVoiceHold,
   openNativeExternal,
   NATIVE_RECONCILE_MAX_SESSIONS,
   reconcileNativeNotifications,
@@ -339,6 +344,98 @@ describe('native shell bridge', () => {
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith('/chat/ses_1?from=push#latest');
+  });
+});
+
+// The App recognises a hold on the surfaces the page names (ios/Avibe/NativeHoldCapture.swift).
+describe("the iOS App's own hold recognition", () => {
+  const capabilities = { voice: 1, voiceCapture: 1, voiceHold: 2 };
+  const surface = { id: 'composer', x: 0, y: 700, width: 390, height: 60 };
+
+  it('is there only in an App that both recognises holds and records them', () => {
+    expect(hasNativeVoiceHold()).toBe(false);
+    installBridge({ capabilities: { voice: 1, voiceHold: 2 } });
+    expect(hasNativeVoiceHold()).toBe(false);
+    installBridge({ capabilities: { voice: 1, voiceCapture: 1 } });
+    expect(hasNativeVoiceHold()).toBe(false);
+    installBridge({ capabilities });
+    expect(hasNativeVoiceHold()).toBe(true);
+    installBridge({ capabilities: { ...capabilities, voiceHold: 3 } });
+    expect(hasNativeVoiceHold()).toBe(true);
+  });
+
+  // The one build that announced version 1 (TestFlight 50.1) could give a tap the hold's cue:
+  // for it the page names nothing, and the App follows nothing.
+  it('asks the first build of it (version 1) for nothing', async () => {
+    const call = installBridge({ capabilities: { ...capabilities, voiceHold: 1 } });
+    expect(hasNativeVoiceHold()).toBe(false);
+    await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe('failed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('names surfaces with the threshold, takes them back with an empty list, and reads why the App does not follow', async () => {
+    const call = installBridge({ capabilities });
+    await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe('ok');
+    expect(call).toHaveBeenLastCalledWith('voice.holdSurfaces', { surfaces: [surface], holdMs: 200 });
+    await expect(nativeVoiceHoldSurfaces([], 0)).resolves.toBe('ok');
+    // No threshold with no surface: the App takes `holdMs` from 100 to 500 only.
+    expect(call).toHaveBeenLastCalledWith('voice.holdSurfaces', { surfaces: [] });
+
+    for (const [error, answer] of [
+      [{ code: 'failed', message: 'consent' }, 'consent'],
+      [{ code: 'failed', message: 'unwatched' }, 'unwatched'],
+      [{ code: 'failed', message: 'superseded' }, 'superseded'],
+      [{ code: 'failed', message: 'anything' }, 'failed'],
+      [{ code: 'invalid_argument', message: 'consent' }, 'failed'],
+      [new Error('gone'), 'failed'],
+    ] as const) {
+      call.mockRejectedValueOnce(error);
+      await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe(answer);
+    }
+  });
+
+  it('asks an App without it for nothing', async () => {
+    const call = installBridge();
+    await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe('failed');
+    await nativeVoiceHoldReject('n1');
+    await expect(nativeVoiceHoldAdopt('n1')).rejects.toMatchObject({ code: 'unavailable' });
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('takes a take, refuses one, and passes on a refusal to take', async () => {
+    const call = installBridge({ capabilities });
+    call.mockResolvedValueOnce({ sampleRate: 16_000, timings: { variant: 'early', liveAt: 61 } });
+    await expect(nativeVoiceHoldAdopt('n1')).resolves.toEqual({ sampleRate: 16_000, timings: { variant: 'early', liveAt: 61 } });
+    expect(call).toHaveBeenLastCalledWith('voice.holdAdopt', { take: 'n1' });
+    call.mockRejectedValueOnce({ code: 'failed', message: 'gone' });
+    await expect(nativeVoiceHoldAdopt('n2')).rejects.toEqual({ code: 'failed', message: 'gone' });
+    call.mockRejectedValueOnce(new Error('bridge'));
+    await expect(nativeVoiceHoldReject('n3')).resolves.toBeUndefined();
+    expect(call).toHaveBeenLastCalledWith('voice.holdReject', { take: 'n3' });
+  });
+
+  it("hears the App's word about a press, and nothing that is not one", () => {
+    let emit!: (payload: unknown) => void;
+    const on = vi.fn((_event: string, handler: (payload: unknown) => void) => {
+      emit = handler;
+      return () => undefined;
+    });
+    installBridge({ capabilities, on });
+    const handler = vi.fn();
+    expect(onNativeVoiceHold(handler)).toBeTypeOf('function');
+    expect(on).toHaveBeenCalledWith('voice.hold', expect.any(Function));
+
+    emit({ phase: 'recognised', take: 'n1', surface: 'composer' });
+    emit({ phase: 'failed', take: 'n2', surface: 'composer', step: 'engine:1' });
+    emit({ phase: 'timings', take: 'n1', timings: { liveAt: 61 }, extra: true });
+    for (const malformed of [null, 'recognised', { phase: 'recognised' }, { phase: 'other', take: 'n1' }, { phase: 'recognised', take: 7 }]) {
+      emit(malformed);
+    }
+    expect(handler.mock.calls.map(([event]) => event)).toEqual([
+      { phase: 'recognised', take: 'n1', surface: 'composer' },
+      { phase: 'failed', take: 'n2', surface: 'composer', step: 'engine:1' },
+      { phase: 'timings', take: 'n1', timings: { liveAt: 61 } },
+    ]);
   });
 });
 

@@ -73,7 +73,11 @@ export type BotCenterPhase = 'idle' | 'pressed' | 'recording' | 'armed' | 'settl
 export type BotCenterHold = Pick<
   React.DOMAttributes<HTMLButtonElement>,
   'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onPointerCancel' | 'onLostPointerCapture' | 'onContextMenu' | 'onClick'
-> & { style?: CSSProperties };
+> & {
+  style?: CSSProperties;
+  /** The button itself, for the iOS App's own hold recognition (`useHoldToTalk().attachSurface`). */
+  ref?: React.Ref<HTMLButtonElement>;
+};
 
 /** The main Bot in the middle of the bar (ui/design: mobile/workbench-tab/team): its
  *  avatar lifted above the bar's edge, its unread count, its running dot, its name. A

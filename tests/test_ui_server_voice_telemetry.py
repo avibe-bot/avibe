@@ -327,6 +327,49 @@ def test_voice_telemetry_keeps_a_take_the_ios_app_recorded(caplog):
     assert response.status_code == 400
 
 
+def test_voice_telemetry_keeps_the_ios_apps_timings_of_a_hold_it_recognised(caplog):
+    client = app.test_client()
+    attempt = {
+        "kind": "native",
+        "atMs": 204,
+        "mic": "ok",
+        "micMs": 28,
+        "sampleRate": 16_000,
+        "chunks": 31,
+        "firstFrameMs": 29,
+        "levels": 96,
+        "trackStart": "none",
+        "end": "rendered",
+        "hold": "early",
+        "holdRecMs": 200,
+        "holdLiveMs": 61,
+        "holdBufMs": 160,
+        "holdAdoptMs": 231,
+        "holdUpMs": 2_480,
+        "holdActMs": 38,
+        "holdStartMs": 21,
+    }
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry",
+            # Anything else the App said of the hold (its audio route, say) is not kept.
+            json=_capture_trace(pressMs=204, attempts=[{**attempt, "route": "Speaker"}]),
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 200
+    _, metric = _logged_metric(caplog)
+    assert metric["attempts"] == [attempt]
+    for bad in ({"hold": "sometimes"}, {"holdLiveMs": -139}, {"holdAdoptMs": "soon"}, {"holdActMs": True}):
+        response = client.post(
+            "/api/asr/telemetry",
+            json=_capture_trace(attempts=[{"kind": "native", **bad}]),
+            headers=csrf_headers(client),
+        )
+        assert response.status_code == 400, bad
+        assert response.get_json() == {"error": "invalid_field", "field": "attempts"}
+
+
 def test_voice_telemetry_rejects_a_malformed_capture_trace():
     client = app.test_client()
     attempt_with_text = _capture_trace()
