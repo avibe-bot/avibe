@@ -19,21 +19,21 @@ pub(super) async fn exercise(
     let generation = c.state().generation;
     let again = || c.reread_after_proof(caller, generation, receipt);
     let confirm = |r| c.confirm_claim(caller, generation, receipt, r);
-    let save = c.binding_recovery().unwrap();
+    let save = recovery::offer(c).await;
     assert!(again().await.is_err()); // discovery alone is not key publication
     if cut == "unsaved" {
         {
             let _inner = c.inner.lock().unwrap();
             c.supersede_binding();
         }
-        assert!(c.binding_recovery().is_none() && again().await.is_err());
+        assert!(recovery::resume(c, &save).await.is_err() && again().await.is_err());
         assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
         assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 1);
         peer.assert_unarmed();
         return;
     }
     memory.allow_one_save();
-    c.recover_binding(save).await.unwrap();
+    assert_eq!(recovery::resume(c, &save).await.unwrap(), json!({"state":"saved"}));
     let factor = cut.starts_with("factor_");
     if factor && !super::factor::challenge(c, memory, hosted, caller, receipt, cut).await {
         assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);

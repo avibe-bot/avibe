@@ -4,6 +4,9 @@ use super::*;
 use crate::instance_client::account::{BindingBase, BoundClaimSession, DiscoveredSession, PreparedClaimCode};
 use uuid::Uuid;
 
+mod recovery;
+pub use recovery::{AccountRecoveryRequest, RecoveryDelivery, RecoveryWork};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct BindingId(Uuid);
 #[derive(Default)]
@@ -18,6 +21,9 @@ struct Pending {
     base: BindingBase,
     clock: Arc<AtomicU64>,
     phase: Phase,
+    // The first read/save belongs to the ordinary worker. An explicit retry
+    // must not race that first pass or silently inherit another transaction.
+    retry: Option<Uuid>,
 }
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -35,7 +41,7 @@ enum Phase {
 // Recoverable only by the ordinary native owner. Freeze the stage as well as
 // the transaction: a queued read may not turn into a write on a successor.
 #[derive(Clone, Copy)]
-pub(super) enum Recovery {
+enum Recovery {
     Read(BindingId),
     Save(BindingId),
 }
@@ -112,6 +118,7 @@ impl BindingSlot {
             base,
             clock,
             phase: Phase::Forwarding,
+            retry: None,
         });
         Ok((id, epoch))
     }
@@ -129,11 +136,15 @@ impl Coordinator {
         self.binding.lock().expect("ordinary binding").retire();
     }
 
-    pub(super) async fn accept_forward(&self, id: BindingId, code: PreparedClaimCode) -> Result<(), ClientError> {
+    pub(super) async fn accept_forward(
+        self: &Arc<Self>,
+        id: BindingId,
+        code: PreparedClaimCode,
+    ) -> Result<(), ClientError> {
         self.finish_forward(id, code.forward().await)
     }
     pub(super) fn finish_forward(
-        &self,
+        self: &Arc<Self>,
         id: BindingId,
         response: Result<BoundClaimSession, ClientError>,
     ) -> Result<(), ClientError> {
@@ -149,6 +160,13 @@ impl Coordinator {
                     session: Arc::new(bound),
                     reader: Default::default(),
                 };
+                drop(slot);
+                drop(inner);
+                // Receipt delivery (including one-time recovery material) does
+                // not wait for this GET or keychain. Neither sheet closure nor
+                // loss of the submitting waiter cancels this account-owned pass.
+                let ordinary = self.clone();
+                tokio::spawn(async move { ordinary.settle_accepted(id).await });
                 Ok(())
             }
             Err(error) => {
@@ -158,18 +176,38 @@ impl Coordinator {
         }
     }
 
-    pub(super) fn binding_recovery(&self) -> Option<Recovery> {
-        let inner = self.inner.lock().expect("client state");
-        let slot = self.binding.lock().expect("ordinary binding");
-        let p = slot.pending.as_ref().filter(|p| selected(&inner, &p.account, p.base))?;
-        match &p.phase {
-            Phase::Forwarding => None,
-            Phase::Bound { .. } => Some(Recovery::Read(p.id)),
-            Phase::Discovered(_) => Some(Recovery::Save(p.id)),
-        }
+    async fn settle_accepted(self: &Arc<Self>, id: BindingId) {
+        let failed = if self.read_bound_session(id).await.is_err() {
+            Recovery::Read(id)
+        } else if self.recover_binding(Recovery::Save(id)).await.is_err() {
+            Recovery::Save(id)
+        } else {
+            return;
+        };
+        // A terminal discovery refusal already retired its slot. A late failure
+        // cannot mark a different binding (even at the same public generation).
+        let _ = self.pause_recovery(failed);
     }
 
-    pub(super) async fn recover_binding(self: &Arc<Self>, recovery: Recovery) -> Result<(), ClientError> {
+    fn pause_recovery(&self, failed: Recovery) -> Option<Uuid> {
+        let id = match failed {
+            Recovery::Read(id) | Recovery::Save(id) => id,
+        };
+        let inner = self.inner.lock().expect("client state");
+        let mut slot = self.binding.lock().expect("ordinary binding");
+        let p = slot.get(id, &inner).ok()?;
+        if !matches!(
+            (&p.phase, failed),
+            (Phase::Bound { .. }, Recovery::Read(_)) | (Phase::Discovered(_), Recovery::Save(_))
+        ) {
+            return None;
+        }
+        let token = Uuid::new_v4();
+        p.retry = Some(token);
+        Some(token)
+    }
+
+    async fn recover_binding(self: &Arc<Self>, recovery: Recovery) -> Result<(), ClientError> {
         match recovery {
             Recovery::Read(id) => self.read_bound_session(id).await,
             Recovery::Save(id) => {
@@ -264,7 +302,7 @@ impl Coordinator {
     }
 
     /// A separate native recovery entry. It can never start or forward a code.
-    pub(super) async fn read_bound_session(&self, id: BindingId) -> Result<(), ClientError> {
+    async fn read_bound_session(&self, id: BindingId) -> Result<(), ClientError> {
         let (bound, state, reader) = {
             let inner = self.inner.lock().expect("client state");
             let mut slot = self.binding.lock().expect("ordinary binding");

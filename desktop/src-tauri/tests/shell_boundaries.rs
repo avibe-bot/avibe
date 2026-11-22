@@ -197,7 +197,11 @@ fn the_shell_enables_only_its_declared_capabilities() {
     assert!(account.get("remote").is_none());
     assert_eq!(
         account["permissions"],
-        serde_json::json!(["allow-desktop-client-request", "allow-desktop-claim-review"])
+        serde_json::json!([
+            "allow-desktop-client-request",
+            "allow-desktop-claim-review",
+            "allow-desktop-account-recovery"
+        ])
     );
 }
 
@@ -694,6 +698,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "desktop_update_auto_update_set",
         "desktop_client_request",
         "desktop_claim_review",
+        "desktop_account_recovery",
         "pet_settings",
         "pet_set_enabled",
         "pet_set_shortcut",

@@ -17,7 +17,7 @@ pub(super) struct Memory {
     writes: Mutex<VecDeque<Write>>,
     replace_after_read: Mutex<Option<Vec<u8>>>,
     attempts: AtomicU64,
-    changed: AtomicU64,
+    pub(super) changed: AtomicU64,
     boot: bool,
 }
 impl Memory {
@@ -145,7 +145,7 @@ async fn cold_restore(
     boot.restore_account().await.unwrap();
     assert_eq!(boot.state().account.identity.unwrap().id, "fixture-a");
     assert_eq!(mem.attempts.load(Ordering::SeqCst), 1);
-    assert!(boot.binding_recovery().is_none());
+    assert_eq!(recovery::inspect(&Arc::new(boot)).await, json!({"state":"unavailable"}));
 }
 
 pub(super) async fn exercise(c: &Arc<Coordinator>, mem: &Arc<Memory>, cut: &str) {
@@ -161,13 +161,11 @@ pub(super) async fn exercise(c: &Arc<Coordinator>, mem: &Arc<Memory>, cut: &str)
             == Some("synthetic")
     };
     assert!(account_is_old());
-    let save = c
-        .binding_recovery()
-        .expect("discovered session has a save-only recovery");
+    let save = recovery::offer(c).await;
     if matches!(cut, "proof_start_save_absent_prior" | "proof_start_save_invalid_prior") {
         let prior = (cut == "proof_start_save_invalid_prior").then(|| b"not-a-jar".to_vec());
         *mem.jar.lock().unwrap() = prior.clone();
-        assert!(c.recover_binding(save).await.is_err());
+        assert_eq!(recovery::resume(c, &save).await.unwrap()["state"], "available");
         assert!(mem.read("fixture-a").unwrap() == prior && account_is_old());
         assert_eq!(mem.attempts.load(Ordering::SeqCst), 0);
         assert_eq!(mem.changed.load(Ordering::SeqCst), 0);
@@ -176,16 +174,14 @@ pub(super) async fn exercise(c: &Arc<Coordinator>, mem: &Arc<Memory>, cut: &str)
     if cut == "proof_start_save_mismatch" {
         mem.writes.lock().unwrap().push_back(Write::UnexpectedValue);
         assert_eq!(
-            c.recover_binding(save).await.unwrap_err().code,
-            "credentials_unavailable"
+            recovery::resume(c, &save).await.unwrap(),
+            json!({"state":"storage_blocked"})
         );
         assert!(c.credential_io.lock().await.cleanup_error.is_some());
         assert!(account_is_old());
         assert!(mem.read("fixture-a").unwrap().as_deref() == Some(&b"unattributed fixture"[..]));
-        assert_eq!(
-            c.recover_binding(save).await.unwrap_err().code,
-            "credentials_unavailable"
-        );
+        assert_eq!(recovery::inspect(c).await, json!({"state":"storage_blocked"}));
+        assert!(recovery::resume(c, &save).await.is_err());
         assert_eq!(
             mem.attempts.load(Ordering::SeqCst),
             1,
@@ -201,19 +197,21 @@ pub(super) async fn exercise(c: &Arc<Coordinator>, mem: &Arc<Memory>, cut: &str)
             .lock()
             .unwrap()
             .extend([Write::Refuse, Write::ChangedThenError]);
-        assert_eq!(
-            c.recover_binding(save).await.unwrap_err().code,
-            "credentials_unavailable"
-        );
+        let refused = recovery::resume(c, &save).await.unwrap();
+        assert_eq!(refused["state"], "available");
         assert!(account_is_old() && mem.read("fixture-a").unwrap().unwrap() == old);
         assert_eq!(mem.changed.load(Ordering::SeqCst), 0);
-        c.recover_binding(c.binding_recovery().unwrap()).await.unwrap();
+        assert_eq!(
+            recovery::resume(c, refused["receipt"].as_str().unwrap()).await.unwrap(),
+            json!({"state":"saved"})
+        );
     } else {
         let (entered, started) = oneshot::channel();
         let (release, held) = mpsc::channel();
         mem.writes.lock().unwrap().push_back(Write::Hold(entered, held));
         let worker = c.clone();
-        let waiter = tokio::spawn(async move { worker.recover_binding(save).await });
+        let receipt = save.clone();
+        let waiter = tokio::spawn(async move { recovery::resume(&worker, &receipt).await });
         started.await.unwrap();
         assert!(c.credential_io.try_lock().is_err());
         assert!(c.operation.try_lock().is_ok() && c.claims.try_lock().is_ok());
@@ -238,7 +236,7 @@ pub(super) async fn exercise(c: &Arc<Coordinator>, mem: &Arc<Memory>, cut: &str)
                 _ = queued => panic!("credential owner was held"),
                 _ = std::future::ready(()) => (),
             }
-            assert!(c.binding_recovery().is_none());
+            assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
             if cut == "proof_start_save_changed_before_undo" {
                 // Replaced after the writer's first positive read, before its fenced
                 // RAM commit can undo. Do not overwrite it based on the earlier read.
@@ -262,7 +260,8 @@ pub(super) async fn exercise(c: &Arc<Coordinator>, mem: &Arc<Memory>, cut: &str)
         assert_eq!(owner.cleanup_error.is_some(), blocked);
         drop(owner);
         if superseded {
-            assert!(account_is_old() && c.binding_recovery().is_none());
+            assert!(account_is_old());
+            assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
             if cut == "proof_start_save_changed_before_undo" {
                 assert_eq!(mem.attempts.load(Ordering::SeqCst), 1);
                 assert!(mem.read("fixture-a").unwrap().as_deref() == Some(&b"unrelated replacement"[..]));
@@ -274,8 +273,8 @@ pub(super) async fn exercise(c: &Arc<Coordinator>, mem: &Arc<Memory>, cut: &str)
             return;
         }
     }
-    assert!(c.binding_recovery().is_none());
-    assert!(c.recover_binding(save).await.is_err());
+    assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
+    assert!(recovery::resume(c, &save).await.is_err());
     assert!(mem.writes.lock().unwrap().is_empty());
     let disk = mem.read("fixture-a").unwrap().unwrap();
     let restored = NativeSession::restore_account(c.transport.clone(), &disk).unwrap();

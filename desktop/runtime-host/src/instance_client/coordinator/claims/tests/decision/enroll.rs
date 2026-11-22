@@ -40,9 +40,7 @@ pub(super) async fn finish(
         drop(wait);
         hosted.factor_release.notify_one();
         // The suite bounds this scenario. Wait for the owning worker, not a sleep.
-        while c.binding_recovery().is_none() {
-            tokio::task::yield_now().await;
-        }
+        recovery::offer(c).await;
         assert!(submit("000002").await.is_err());
         return true;
     }
@@ -59,11 +57,12 @@ pub(super) async fn finish(
         if cut == "factor_enroll_unknown" {
             assert_eq!(err.code, "factor_delivery_unknown");
         }
-        assert!(c.binding_recovery().is_none() && submit("000002").await.is_err());
+        assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
+        assert!(submit("000002").await.is_err());
         return false;
     }
     let reply = result.unwrap();
-    assert!(c.binding_recovery().is_some());
+    recovery::offer(c).await; // ordinary recovery became available independently of this reply
     assert!(!serde_json::to_string(&c.state()).unwrap().contains("aaaaa-bbbb"));
     if cut == "factor_enroll_close" {
         assert!(reply.deliver().is_err());

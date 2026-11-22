@@ -20,6 +20,7 @@ use super::{
     transport::{Epoch, NativeSession, Transport},
 };
 mod claim_binding;
+pub use claim_binding::{AccountRecoveryRequest, RecoveryDelivery, RecoveryWork};
 pub mod claims;
 mod updates;
 use super::instance_update::InstanceUpdate;

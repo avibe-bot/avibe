@@ -70,7 +70,8 @@ pub(super) async fn challenge(
         let outcome = verify.await;
         if matches!(cut, "factor_unknown" | "factor_malformed") {
             assert_eq!(outcome.unwrap_err().code, "factor_delivery_unknown");
-            assert!(c.binding_recovery().is_none() && !caller.monitoring());
+            assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
+            assert!(!caller.monitoring());
             assert!(submit(CodeMethod::Totp, "000002").await.is_err());
             assert_eq!(hosted.factors.load(Ordering::SeqCst), 1);
             assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
@@ -79,28 +80,28 @@ pub(super) async fn challenge(
         }
         outcome.unwrap();
     }
-    let read = c.binding_recovery().unwrap();
-    assert_eq!(c.recover_binding(read).await.unwrap_err().code, "network_unavailable");
-    let found = c.recover_binding(read).await;
+    let found = recovery::read_once(c).await;
     if cut == "factor_subject" {
-        assert_eq!(found.unwrap_err().code, "account_changed");
+        assert_eq!(found, json!({"state":"unavailable"}));
         assert!(!caller.monitoring(), "terminal discovery must release this ticket");
-        assert!(c.binding_recovery().is_none());
+        assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
         assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
         assert!(c.reread_after_proof(caller, generation, receipt).await.is_err());
         return false;
     }
-    found.unwrap();
-    let save = c.binding_recovery().unwrap();
+    let save = found["receipt"].as_str().expect("successful GET owes only Save");
     memory.refuse_one_save();
-    assert_eq!(
-        c.recover_binding(save).await.unwrap_err().code,
-        "credentials_unavailable"
-    );
+    let refused = recovery::resume(c, save).await.unwrap();
+    assert_eq!(refused["state"], "available");
+    assert_ne!(refused["receipt"], save);
+    assert!(recovery::resume(c, save).await.is_err());
     assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
     assert!(c.reread_after_proof(caller, generation, receipt).await.is_err());
     memory.allow_one_save();
-    c.recover_binding(save).await.unwrap();
+    assert_eq!(
+        recovery::resume(c, refused["receipt"].as_str().unwrap()).await.unwrap(),
+        json!({"state":"saved"})
+    );
     assert!(c
         .binding
         .lock()

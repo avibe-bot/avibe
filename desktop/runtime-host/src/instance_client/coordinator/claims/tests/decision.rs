@@ -14,6 +14,7 @@ mod enroll;
 mod factor;
 mod output;
 mod passkey;
+mod recovery;
 mod review;
 mod save;
 use tokio::sync::Notify;
@@ -440,7 +441,7 @@ impl Transport for Hosted {
             }
             "https://avibe.bot/api/mobile/session" => {
                 let n = self.reads.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
+                if n == 0 && !self.publication_case.starts_with("proof_start_auto_save") {
                     return Err(ClientError::new("network_unavailable"));
                 }
                 if owed && n == 1 {
@@ -538,6 +539,8 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_no_owner",
         "proof_start_retired",
         "proof_start_bound",
+        "proof_start_auto_save",
+        "proof_start_auto_save_refused",
         "proof_start_save_drop",
         "proof_start_save_stale",
         "proof_start_save_mismatch",
@@ -674,6 +677,7 @@ async fn check_cut(cut: &'static str) {
     let mut record = store.load("fixture computer").unwrap();
     let review = cut.strip_prefix("proof_start_review_");
     let adopting = cut == "proof_start_bound"
+        || cut.starts_with("proof_start_auto_save")
         || cut.starts_with("proof_start_save_")
         || review.is_some()
         || cut.starts_with("read_refresh_");
@@ -1142,13 +1146,22 @@ async fn check_cut(cut: &'static str) {
                                     let _inner = c.inner.lock().unwrap();
                                     c.supersede_binding(); // same account, same generation, different transaction
                                 }
+                                if cut == "proof_start_auto_save_refused" {
+                                    memory.refuse_one_save();
+                                } else if cut == "proof_start_auto_save" {
+                                    memory.allow_one_save();
+                                }
                                 forward_reply.send(()).unwrap();
                                 if adopting {
-                                    f.await.unwrap(); // do not rely on a handle returned to the retired sheet
-                                    let read = c.binding_recovery().unwrap();
-                                    assert_eq!(c.recover_binding(read).await.unwrap_err().code, "network_unavailable");
-                                    c.recover_binding(read).await.unwrap();
-                                    assert!(c.recover_binding(read).await.is_err());
+                                    f.await.unwrap(); // the account owns completion even when naming is gone
+                                    if cut.starts_with("proof_start_auto_save") {
+                                        recovery::auto(&c, &hosted, &memory, cut.ends_with("_refused")).await;
+                                        assert!(peer.arm().await.is_err());
+                                        return;
+                                    }
+                                    let saved_stage = recovery::read_once(&c).await;
+                                    assert_eq!(saved_stage["state"], "available");
+                                    assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
                                     if let Some(cut) = review {
                                         review::exercise(&c, &memory, &hosted, peer, &caller, (receipt, revision), cut)
                                             .await;

@@ -6,7 +6,7 @@ use avibe_runtime_host::{
         account::{Passkeys, SystemBrowser},
         coordinator::{
             claims::{ClaimCaller, ClaimDocument, ClaimRequest},
-            ClientView, Coordinator,
+            AccountRecoveryRequest, ClientView, Coordinator,
         },
         loopback::CallbackCopy,
         protocol::*,
@@ -1248,6 +1248,69 @@ impl AccountDocument {
         })
     }
 }
+/// Account recovery belongs to the ordinary account, not a claim lifetime. Reuse
+/// the visible bundled document's role stamp, but never reserve or retire a claim.
+fn in_recovery_document<T>(
+    window: &Webview,
+    shell: &Shell,
+    client: &Client,
+    stamp: &ClaimReceipt,
+    admitted: impl FnOnce() -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    let deny = || ClientError::new("untrusted_desktop_caller");
+    let physical = window.window();
+    if physical.label() != MAIN_WINDOW
+        || !physical.is_visible().unwrap_or(false)
+        || physical.is_minimized().unwrap_or(true)
+        || window.url().ok().as_ref() != Some(&stamp.destination)
+        || client.presentations.lock().expect("presentation intent").window != stamp.window
+    {
+        return Err(deny());
+    }
+    let _windows = client.view.windows.try_lock().map_err(|_| deny())?;
+    let views = client.view.views.lock().expect("views");
+    let p = client.view.presentation.lock().expect("presentation");
+    if shell.exit_cleanup_started.load(std::sync::atomic::Ordering::SeqCst)
+        || !p.account
+        || p.staging
+        || p.pending_commit.is_some()
+        || views
+            .account
+            .as_ref()
+            .and_then(|a| a.claim_receipt(window.label(), &client.view.bundle))
+            .as_ref()
+            != Some(stamp)
+    {
+        return Err(deny());
+    }
+    admitted()
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_account_recovery(
+    window: Webview,
+    app: AppHandle,
+    request: AccountRecoveryRequest,
+) -> Result<serde_json::Value, ClientError> {
+    let deny = || ClientError::new("untrusted_desktop_caller");
+    let client = app.try_state::<Client>().ok_or_else(deny)?;
+    let shell = app.try_state::<Shell>().ok_or_else(deny)?;
+    let stamp = client
+        .view
+        .views
+        .lock()
+        .expect("views")
+        .account
+        .as_ref()
+        .and_then(|a| a.claim_receipt(window.label(), &client.view.bundle))
+        .ok_or_else(deny)?;
+    let work = in_recovery_document(&window, &shell, &client, &stamp, || {
+        client.coordinator.admit_account_recovery(request)
+    })?;
+    let reply = work.wait().await;
+    in_recovery_document(&window, &shell, &client, &stamp, || reply?.deliver())
+}
+
 pub(crate) fn retire_claim_presentation(app: &AppHandle) {
     if let Some(client) = app.try_state::<Client>() {
         if let Some(role) = client.view.views.lock().expect("views").account.as_mut() {
