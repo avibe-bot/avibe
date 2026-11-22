@@ -91,7 +91,7 @@ async fn run(changed_selection: bool) {
     let host = Authority::managed("desktop-test-app.avibe.bot").unwrap();
     let bytes = host.direct_head();
     let ingress_task = tokio::spawn(async move {
-        for leg in 0..2 {
+        for leg in 0..3 {
             let (socket, _) = ingress.accept().await.unwrap();
             let mut r = BufReader::new(socket);
             let mut preface = String::new();
@@ -102,6 +102,13 @@ async fn run(changed_selection: bool) {
             assert!(req == bytes);
             r.get_mut().write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
             if leg == 1 {
+                let mut byte = [0];
+                r.read_exact(&mut byte).await.unwrap();
+                assert_eq!(&byte, b"w");
+                r.get_mut().write_all(&byte).await.unwrap();
+                assert_retired_read(r.read(&mut byte).await);
+            }
+            if leg == 2 {
                 let mut data = [0; 6];
                 r.read_exact(&mut data).await.unwrap();
                 assert_eq!(&data, b"opaque");
@@ -150,7 +157,7 @@ async fn run(changed_selection: bool) {
     renewal.generation = "replacement".into();
     assert!(!link.renew(&renewal));
     assert!(!deadlines.has_changed().unwrap());
-    let pooled = if !changed_selection {
+    let public = if !changed_selection {
         let mut other = Client::new("other-app.avibe.bot", "other".into()).await.unwrap();
         let a = super::handover_tests::public_browser(&mut client).await;
         let b = super::handover_tests::public_browser(&mut other).await;
@@ -158,8 +165,22 @@ async fn run(changed_selection: bool) {
     } else {
         None
     };
-    let mut changes_status = client.path_changes();
     let handover = client.handover();
+    let retired = client.window_credential("second").unwrap();
+    let delayed = handover.close_quiet_public_for_window(host.host(), &retired);
+    client.revoke_window(&retired);
+    let pooled = if let Some((a, b, other)) = public {
+        let first = client.window_credential("first").unwrap();
+        let second = client.window_credential("second").unwrap();
+        let mut one = super::credential_tests::connect_as(&client, &first, 200).await;
+        let mut two = super::credential_tests::connect_as(&client, &second, 200).await;
+        super::credential_tests::echo(&mut one).await;
+        super::credential_tests::echo(&mut two).await;
+        Some((a, b, other, first, second, one, two))
+    } else {
+        None
+    };
+    let mut changes_status = client.path_changes();
     assert_eq!(*changes_status.borrow_and_update(), super::PathStatus::default());
     client.publish(link.clone(), super::EndpointDrain::new(ep));
     assert_eq!(changes_status.borrow_and_update().sequence, 1);
@@ -183,7 +204,14 @@ async fn run(changed_selection: bool) {
         "the CONNECT probe is not a browser stream"
     );
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let (user, pass) = client.listener.credential.native_login();
+    let credential = client.window_credential("to-close").unwrap();
+    let mut closing = super::credential_tests::connect_as(&client, &credential, 200).await;
+    super::credential_tests::echo(&mut closing).await;
+    client.revoke_window(&credential);
+    assert_retired_read(closing.read(&mut [0]).await);
+    drop(super::credential_tests::connect_as(&client, &credential, 407).await);
+    let active = client.window_credential("second").unwrap();
+    let (user, pass) = active.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, client.listener.port))
         .await
@@ -218,7 +246,29 @@ async fn run(changed_selection: bool) {
         assert_eq!(client.refresh_reply(|_| std::future::pending()).await, retained);
     }
     assert_eq!(*deadlines.borrow(), renewed_until);
-    if let Some((mut mine, mut foreign, _other)) = pooled {
+    if let Some((mut mine, mut foreign, _other, first, second, mut one, mut two)) = pooled {
+        assert_eq!(
+            handover.window_census(&first),
+            Some(super::PublicCensus { quiet: 1, busy: 0 })
+        );
+        assert_eq!(
+            handover.window_census(&second),
+            Some(super::PublicCensus { quiet: 1, busy: 0 })
+        );
+        // First poll is after label reuse, with a replacement leg eligible to close.
+        assert_eq!(delayed.await, super::HandoverResult::NotUsable);
+        assert_eq!(handover.window_census(&retired), None);
+        client.revoke_window(&retired);
+        assert_eq!(
+            handover.window_census(&second),
+            Some(super::PublicCensus { quiet: 1, busy: 0 })
+        );
+        assert_eq!(
+            handover.close_quiet_public_for_window(host.host(), &first).await,
+            super::HandoverResult::Done { closed: 1, kept: 0 }
+        );
+        assert_retired_read(one.read(&mut [0]).await);
+        super::credential_tests::echo(&mut two).await;
         assert_eq!(
             handover.close_quiet_public(host.host(), || Some(())).await,
             super::HandoverResult::Done { closed: 1, kept: 0 }
