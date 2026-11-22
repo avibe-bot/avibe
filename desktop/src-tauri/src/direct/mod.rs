@@ -1,6 +1,10 @@
 //! One controller per native-selected remote origin and signed-in session.
 //! Dropping it on a selection change retires the proxy and the peer. Never
 //! identify an instance or session by its installation ID.
+mod bridge;
+#[cfg(test)]
+#[path = "../../tests/direct/bridge.rs"]
+mod bridge_tests;
 pub(crate) mod choices;
 mod clock;
 mod connect;
