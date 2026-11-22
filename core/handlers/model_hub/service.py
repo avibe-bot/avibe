@@ -1153,6 +1153,8 @@ class ResolvedInvocation:
     # This hop's request asked for the vendor's fast tier, so its served response
     # confirms or not that it ran fast (``docs/plans/fast-mode.md``).
     fast_requested: bool = False
+    # A failed speculative Anthropic request says nothing about ordinary full-request Source health.
+    thread_attempt: bool = False
     # Frozen at final transport admission, including inventory/alias revalidation.
     inventory_member: bool = True
 
@@ -11199,7 +11201,7 @@ class ModelHubService:
         if decision.action != "surface" and not retry_overload:
             raise AssertionError("consumed streams cannot retry or fall through")
         source_transition_persisted: bool | None = None
-        if decision.reason is not None:
+        if decision.reason is not None and not resolved.thread_attempt:
             source_transition_persisted = False
             config = self.store.load()
             source = next(
@@ -11782,6 +11784,9 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         pinned_hop = _pinned_hop(request, backend)
+        thread_attempt = (pinned_hop is not None and getattr(request, 'protocol', None) == 'anthropic'
+                          and isinstance(request.get('thread'), Mapping)
+                          and request['thread'].get('type') in ('continue', 'create'))
         hosted = (
             # A walk of the whole history, so off the controller loop.
             await asyncio.to_thread(
@@ -12008,6 +12013,7 @@ class ModelHubService:
                     verification_pending=verification_pending,
                     origin=origin,
                     source_identity=identity,
+                    thread_attempt=thread_attempt,
                     hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                     fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                     inventory_member=inventory_member,
@@ -12078,7 +12084,8 @@ class ModelHubService:
                         verification_pending=verification_pending,
                         origin=origin,
                         source_identity=identity,
-                        hosted_calls=frozenset(tool for tool, _type in hosted.calls),
+                        thread_attempt=thread_attempt,
+                    hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                         fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                         inventory_member=inventory_member,
                     )
@@ -12155,7 +12162,7 @@ class ModelHubService:
             if decision.action == "surface":
                 self.recovery.release(source.id, settlement_generation)
                 source_transition_persisted: bool | None = None
-                if outcome.stream_started and decision.reason is not None:
+                if outcome.stream_started and decision.reason is not None and not thread_attempt:
                     source_transition_persisted = False
                     _reason, source_transition_persisted = await self._settle_fallback_source(
                         source,
@@ -12190,6 +12197,9 @@ class ModelHubService:
                     ),
                 )
             if decision.action == "fallback" and pinned_hop is not None:
+                if thread_attempt:
+                    self.recovery.release(source.id, settlement_generation)
+                    raise _pin_unavailable()
                 # A failure normal routing would fail over from. The Source's
                 # health is settled as usual; the request goes back to Vibey,
                 # which re-renders it in portable form and sends it unpinned.

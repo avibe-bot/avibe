@@ -172,6 +172,14 @@ class MediaSink(Protocol):
         ...
 
 
+@dataclass
+class ThreadObservation:
+    """One Anthropic request's wire attempts. Side requests have no reusable Session parent."""
+
+    session_id: str | None
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class ModelRequest:
     endpoint: ModelEndpoint
@@ -183,6 +191,7 @@ class ModelRequest:
     cache: Literal["default", "none"] = "default"
     supports_images: bool = False
     """Resolved by the loop from ``ModelCapabilities``; an unknown capability counts as False."""
+    thread_observation: ThreadObservation | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

@@ -81,6 +81,7 @@ from core.agent_core.ai.provider import (
     ModelRequest,
     ProviderError,
     Refusal,
+    ThreadObservation,
     TextDelta,
     ThinkingDelta,
 )
@@ -1072,6 +1073,11 @@ class Agent:
                         causes=self.cache_causes, fork=self._cache_fork,
                     ))
                     cache.update(prompt_pending=self.prompt_pending, prompt_notice=self.prompt_notice)
+                if request.endpoint.protocol == "anthropic":
+                    observation = ThreadObservation(self.session_id if purpose == "conversation" else None)
+                    request = replace(request, thread_observation=observation)
+                    if cache is not None:
+                        cache["thread_attempts"] = observation.attempts
                 stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
                 streamed = False
                 terminal = None

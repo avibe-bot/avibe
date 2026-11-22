@@ -7,7 +7,9 @@ httpx directly so Model Hub remains the only gateway boundary.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import time
 import json
 import logging
 import re
@@ -17,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from core.agent_core.ai import message_threads as threads
 from core.agent_core.ai.claude_thinking import is_claude_model, uses_adaptive_thinking
 from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
 from core.agent_core.ai.image_limits import LoadedImage
@@ -229,6 +232,15 @@ class AnthropicAdapter(ProviderAdapter):
         return self._stream(request, cancel)
 
     async def _stream(self, request: ModelRequest, cancel: CancelToken) -> AsyncIterator[Any]:
+        observation = request.thread_observation
+        session = observation.session_id if observation else None
+        # Claim before the first await: two requests can never continue the same response.
+        parent = threads.parents.pop(session, None) if session else None
+        route = threads.route_key(request.endpoint, self._gateway)
+        replay: str | None = None
+        attempt: threads.Attempt | None = None
+        response_id: str | None = None
+        fallback_model = False
         origin = endpoint_origin(request.endpoint)
 
         def new_assembler() -> StreamAssembler:
@@ -303,7 +315,7 @@ class AnthropicAdapter(ProviderAdapter):
         try:
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
-                nonlocal response_counts, refusal_detail
+                nonlocal response_counts, refusal_detail, response_id, fallback_model
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -369,7 +381,13 @@ class AnthropicAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
+                    if attempt and attempt.mode == 'continue' and not message_started and event_type not in ('message_start','ping'):
+                        yield assembler.error('thread_missing_start', kind='invalid_request')
+                        return
                     if event_type == "message_start":
+                        if message_started and attempt and attempt.mode == 'continue':
+                            yield assembler.error('thread_duplicate_start', kind='invalid_request')
+                            return
                         message_started = True
                         message = chunk.get("message")
                         if not isinstance(message, Mapping):
@@ -408,6 +426,13 @@ class AnthropicAdapter(ProviderAdapter):
                         # Each response's own usage: the last request's input already holds every paused part, so
                         # it is the context the merged response stands for (plan §4.3 as implemented).
                         response_usage = _anthropic_usage(message.get("usage"))
+                        response_id = message.get('id') if isinstance(message.get('id'), str) else None
+                        if attempt and attempt.mode == 'continue':
+                            counts = message.get('usage') or {}
+                            total = sum(counts.get(k) or 0 for k in ('input_tokens','cache_read_input_tokens','cache_creation_input_tokens'))
+                            if attempt.prior is None or total * 100 < attempt.prior.tokens * threads.MIN_USAGE_PERCENT:
+                                yield assembler.error('thread_usage_mismatch', kind='invalid_request')
+                                return
                         assembler.set_usage(response_usage)
                         start_usage = message.get("usage")
                         if isinstance(start_usage, Mapping) and "server_tool_use" in start_usage:
@@ -443,6 +468,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         if kind == "fallback":
+                            fallback_model = True
                             if assembler.has_content():
                                 terminal = assembler.terminal(
                                     assembler.exception(
@@ -872,6 +898,20 @@ class AnthropicAdapter(ProviderAdapter):
                 # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
                 prefix_ttl = _prefix_ttl(sending)
                 wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
+                full_wire = wire
+                if observation is not None:
+                    ordinary = replay
+                    if not ordinary:
+                        if continuations or not session: ordinary = 'side_or_pause'
+                        elif self._gateway and (not sending.endpoint.source_id or sending.endpoint.portable): ordinary = 'unbound_source'
+                        elif threads.failed_routes.get(route, 0) > time.monotonic(): ordinary = 'route_cooldown'
+                    attempt = await asyncio.to_thread(threads.prepare, wire, sending.endpoint, self._gateway, parent, route, ordinary)
+                    wire = attempt.wire
+                    observation.attempts.append(attempt.record)
+                speculative = bool(attempt and attempt.mode != 'full')
+                response_id = None
+                fallback_model = visible = False
+                failed = None
                 driver = drive_sse_stream(
                     self._client,
                     method="POST",
@@ -885,7 +925,7 @@ class AnthropicAdapter(ProviderAdapter):
                     gateway=self._gateway,
                     translate=translate,
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
-                    refused=_rejects_ttl if prefix_ttl is not None else None,
+                    refused=_rejects_ttl if prefix_ttl is not None and not speculative else None,
                 )
                 rejected = continued = paused = message_started = message_stopped = False
                 unavailable: PinUnavailable | None = None
@@ -893,6 +933,9 @@ class AnthropicAdapter(ProviderAdapter):
                 try:
                     async for event in driver:
                         if isinstance(event, PinUnavailable):
+                            if speculative:
+                                failed = 'pin_unavailable'
+                                break
                             unavailable = event
                             break
                         if event is PAUSE_TURN:
@@ -902,6 +945,13 @@ class AnthropicAdapter(ProviderAdapter):
                             rejected = True
                             break
                         if isinstance(event, ProviderError):
+                            if speculative and not cancel.cancelled and not visible:
+                                failed = (event.message if event.message.startswith('thread_') and event.message in
+                                          ('thread_usage_mismatch','thread_duplicate_start','thread_missing_start')
+                                          else f'http_{event.status}' if event.status else event.kind)
+                                if _rejects_ttl(event):
+                                    _remember_ttl_rejection(sending.endpoint)
+                                break
                             if event.status == 400:
                                 _log_refused_request_shape(sending, wire.body, continuations)
                             repair = search_replay_refusal(event, sending, wire.body)
@@ -911,9 +961,34 @@ class AnthropicAdapter(ProviderAdapter):
                                 # The Agent owns bounds and retries of uncommitted output. The adapter only
                                 # identifies a changed request, equally for HTTP refusals and streamed errors.
                                 event = replace(event, retryable=False, continuable=False, after_thinking=False)
+                        elif isinstance(event, Done):
+                            message = event.message
+                            if (speculative and session and response_id and message.usage and message_stopped and
+                                not fallback_model and message.stop_reason in ('stop','tool_use') and
+                                (not self._gateway or (assembler.verified_origin and assembler.source_id == sending.endpoint.source_id
+                                 and assembler.source_identity == sending.endpoint.source_identity))):
+                                assistant = _message_to_anthropic(message, sending.supports_images)
+                                u = message.usage
+                                threads.remember(threads.parents, session, threads.Parent(
+                                    route, attempt.fixed, len(full_wire.body['messages']), attempt.history,
+                                    threads.message_digest([assistant]), response_id,
+                                    u.input_tokens+u.cache_read_tokens+u.cache_write_tokens+u.output_tokens,
+                                    time.monotonic()+threads.PARENT_SECONDS))
+                        else:
+                            visible = True
                         yield event
                 finally:
                     await driver.aclose()
+                if failed is not None:
+                    threads.remember(threads.failed_routes, route, time.monotonic()+threads.COOLDOWN_SECONDS)
+                    attempt.record['failure'] = replay = failed
+                    assembler = new_assembler()
+                    assembler.hosted_render_omitted = prepared.hosted_render_omitted
+                    response_usage = None
+                    uses.clear()
+                    next_index = 0
+                    response_counts.clear()
+                    continue
                 if unavailable is not None and continuations == 0:
                     # The pinned Source cannot serve this content; nothing reached a model. The loop renders the
                     # request again for a fresh hop (§3.5).
