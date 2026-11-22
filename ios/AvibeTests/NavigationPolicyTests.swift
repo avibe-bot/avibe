@@ -937,7 +937,18 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     func testSignedInFixtureRejectsBootstrapFailureOnThePickerRoute() async throws {
         do {
-            _ = try await makePushTapAppModel(sessionResponse: .status(503))
+            // What `makePushTapAppModel` does, without recording the
+            // rejection this test expects as a failure.
+            let (appModel, requests) = try await makeFixtureAppModel(
+                sessionResponse: .status(503)
+            )
+            try await WebKitReadiness.waitForSignedInFixture(
+                appModel,
+                accountID: "account-1",
+                instanceIDs: ["instance-1", "instance-2"],
+                requests: requests,
+                recordsFailure: false
+            )
             XCTFail("A failed bootstrap must not admit a signed-in fixture")
         } catch let error as FixtureReadinessError {
             // A readiness timeout must not satisfy this regression: prove the
@@ -2471,6 +2482,12 @@ final class NavigationPolicyTests: XCTestCase {
         // Consume the parameterized call through RootView's real Runtime
         // bridge wiring, including factory/container callbacks.
         let runtimePage = try XCTUnwrap(runtimeController.livePrimaryWebView)
+        // The App's own first navigation of this page (to a host that does
+        // not exist) ends first, so the fixture document below always
+        // replaces a settled page, not a navigation still under way.
+        try await waitUntil("The App's first navigation of the runtime page settles") {
+            !runtimePage.isLoading
+        }
         let rootProbe = WebViewLoadProbe()
         runtimePage.navigationDelegate = rootProbe
         try await rootProbe.loadHTML(
@@ -3811,13 +3828,17 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     private func makePushTapAppModel(
         pushOpenedNow: @escaping () -> Date = Date.init,
-        sessionResponse: LocalHTTPResponse? = nil
+        sessionResponse: LocalHTTPResponse? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws -> AppModel {
         let (appModel, requests) = try await makeFixtureAppModel(
             pushOpenedNow: pushOpenedNow,
             sessionResponse: sessionResponse
         )
-        try await waitForSignedInInstances(appModel, requests: requests)
+        try await waitForSignedInInstances(
+            appModel, requests: requests, file: file, line: line
+        )
         return appModel
     }
 
@@ -3935,10 +3956,13 @@ final class NavigationPolicyTests: XCTestCase {
         _ appModel: AppModel,
         accountID: String = "account-1",
         instanceIDs: Set<String> = ["instance-1", "instance-2"],
-        requests: FixtureRequestLog
+        requests: FixtureRequestLog,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
         try await WebKitReadiness.waitForSignedInFixture(
-            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests
+            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests,
+            file: file, line: line
         )
     }
 
@@ -4538,6 +4562,7 @@ private final class KeyboardViewportFixture {
 
 private enum TestWaitError: Error {
     case timedOut
+    case navigationNotCreated
 }
 
 /// Holds the body of every account session read after the bootstrap's
@@ -4669,23 +4694,38 @@ private extension Result where Failure == NativeBridgeError {
 }
 
 @MainActor
+/// Loads a fixture document and waits for that load. It answers only for the
+/// navigation it started: a WebView the App is still loading reports the
+/// App's own navigation too (cancelled by this load), which is not this
+/// load's result. A cancellation of this load's own navigation still fails.
 private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<Void, Error>?
+    private var navigation: WKNavigation?
 
     func loadHTML(
         _ html: String,
         baseURL: URL,
-        in webView: WKWebView
+        in webView: WKWebView,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            webView.loadHTMLString(html, baseURL: baseURL)
+        do {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                navigation = webView.loadHTMLString(html, baseURL: baseURL)
+                if navigation == nil {
+                    finish(with: .failure(TestWaitError.navigationNotCreated))
+                }
+            }
+        } catch {
+            throw recordThrown(
+                "The fixture document did not load", error, file: file, line: line
+            )
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        continuation?.resume()
-        continuation = nil
+        finish(navigation, with: .success(()))
     }
 
     func webView(
@@ -4693,8 +4733,7 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
         didFail navigation: WKNavigation?,
         withError error: Error
     ) {
-        continuation?.resume(throwing: error)
-        continuation = nil
+        finish(navigation, with: .failure(error))
     }
 
     func webView(
@@ -4702,8 +4741,19 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation?,
         withError error: Error
     ) {
-        continuation?.resume(throwing: error)
+        finish(navigation, with: .failure(error))
+    }
+
+    private func finish(_ navigation: WKNavigation?, with result: Result<Void, Error>) {
+        guard let navigation, navigation === self.navigation else { return }
+        finish(with: result)
+    }
+
+    private func finish(with result: Result<Void, Error>) {
+        let pending = continuation
         continuation = nil
+        navigation = nil
+        pending?.resume(with: result)
     }
 }
 

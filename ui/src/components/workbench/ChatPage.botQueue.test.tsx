@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
 import 'fake-indexeddb/auto';
+import './ChatPage.duplicateKeyGuard';
 
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

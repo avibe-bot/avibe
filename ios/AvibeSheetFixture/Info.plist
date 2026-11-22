@@ -25,6 +25,8 @@
         <key>UIApplicationSupportsMultipleScenes</key>
         <false/>
     </dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>The fixture's hold-to-talk page opens the microphone as the App does.</string>
     <key>UILaunchScreen</key>
     <dict/>
 </dict>

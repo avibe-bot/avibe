@@ -101,6 +101,8 @@
 			1000000000000000000000C1 /* native-subscription-key.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C1 /* native-subscription-key.json */; };
 		910000000000000000000001 /* SheetFixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000001 /* SheetFixtureApp.swift */; };
 		910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000002 /* FixtureKeyboardViewport.swift */; };
+		910000000000000000000155 /* FixtureHoldPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000007 /* FixtureHoldPage.swift */; };
+		910000000000000000000156 /* HoldTouchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000004 /* HoldTouchUITests.swift */; };
 		910000000000000000000003 /* MobileAccount.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
@@ -302,6 +304,8 @@
 			2000000000000000000000C1 /* native-subscription-key.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = native-subscription-key.json; sourceTree = "<group>"; };
 		920000000000000000000001 /* SheetFixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetFixtureApp.swift; sourceTree = "<group>"; };
 		920000000000000000000002 /* FixtureKeyboardViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureKeyboardViewport.swift; sourceTree = "<group>"; };
+		920000000000000000000007 /* FixtureHoldPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureHoldPage.swift; sourceTree = "<group>"; };
+		930000000000000000000004 /* HoldTouchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoldTouchUITests.swift; sourceTree = "<group>"; };
 		920000000000000000000003 /* FixtureMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; path = FixtureMobile; sourceTree = "<group>"; };
 		920000000000000000000004 /* AvibeSheetFixture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AvibeSheetFixture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		920000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -596,6 +600,7 @@
 			children = (
 				920000000000000000000001 /* SheetFixtureApp.swift */,
 				920000000000000000000002 /* FixtureKeyboardViewport.swift */,
+				920000000000000000000007 /* FixtureHoldPage.swift */,
 				920000000000000000000006 /* FixtureNativeBridgeSupport.swift */,
 				920000000000000000000003 /* FixtureMobile */,
 				920000000000000000000005 /* Info.plist */,
@@ -606,6 +611,7 @@
 		70000000000000000000000A /* AvibeSheetFixtureTests */ = {
 			isa = PBXGroup;
 			children = (
+				930000000000000000000004 /* HoldTouchUITests.swift */,
 				930000000000000000000001 /* InstanceSheetGestureUITests.swift */,
 				930000000000000000000003 /* RealBundleCaptureUITests.swift */,
 			);
@@ -1150,6 +1156,7 @@
 				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,
 				3D0000000000000000000003 /* DirectPathPreference.swift in Fixture Sources */,
 				910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */,
+				910000000000000000000155 /* FixtureHoldPage.swift in Sources */,
 				910000000000000000000003 /* MobileAccount.swift in Fixture Sources */,
 				910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */,
 				910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */,
@@ -1165,6 +1172,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				910000000000000000000156 /* HoldTouchUITests.swift in Sources */,
 				910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */,
 				91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */,
 			);

@@ -947,8 +947,9 @@ const NON_KEY_LITERALS = [
   'haptics.notify',
   'haptics.selection',
   'liveActivity.openSettings',
-  'liveActivity.start',
-  'liveActivity.status',
+  'liveActivity.observe',
+  'liveActivity.setting',
+  'liveActivity.setSetting',
   'notifications.reconcile',
   'session.bootstrap',
   'session.logout',
@@ -969,6 +970,10 @@ const NON_KEY_LITERALS = [
   'voice.capturePrepare',
   'voice.captureStart',
   'voice.captureStop',
+  'voice.hold',
+  'voice.holdSurfaces',
+  'voice.holdAdopt',
+  'voice.holdReject',
 
   // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
   // so the server's own message shows when the client has no copy for the code.

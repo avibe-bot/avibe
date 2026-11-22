@@ -291,6 +291,7 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `voiceCapture: 1` | `voice.capturePrepare()`, `voice.captureStart({take})`, `voice.captureStop({take})` | The in-App hold's microphone, instance document only (`NativeHoldCapture.swift`). Prepare sets the audio session's category and starts nothing; start activates it and answers `{sampleRate: 16000, activateMs, engineMs}` once the input runs, or fails `permission`, `busy` or with the step; `take` is 1–64 letters, digits, `-` or `_`. Audio arrives as `avibe:native:voice.capture` events `{take, pcm}` (base64 Int16 little-endian mono, the first at once, then about 100 ms each), and the take's end as `{take, ended: true, reason?}` after its last audio. The App ends a take itself when it goes to the background, its page goes, or the system interrupts or changes the input |
+| `voiceHold: 2` | `voice.holdSurfaces({surfaces, holdMs?})`, `voice.holdAdopt({take})`, `voice.holdReject({take})` | The App recognises a hold itself, so the cue never waits for the page or the microphone. The page names up to eight surfaces `{id, x, y, width, height, start?}` (the WebView's own points) where a hold may record now, and its hold threshold `holdMs` (100–500, default 200; any other is `invalid_argument`); an empty list ends it. Only a consent-marked document (as for `voice.captureStart`) names a surface: another gets `failed` `consent`. Only the instance's own WebView is watched: a popup gets `failed` `unwatched`, and the page goes on recognising its holds itself. One WebView's list at a time, and its calls count in the order the page made them: a list overtaken by a later call, or by its document going, gets `failed` `superseded`. A passive recogniser sees each touch (it cancels and delays nothing). On a surface, at touch-down the App starts the input off the main thread, into its own memory; when other audio plays or the route is Bluetooth it opens nothing until the hold is recognised. A surface named with `start: "recognition"` opens no microphone on a touch either: its input is only prepared at touch-down and starts when the hold is recognised (`start: "touch"`, or none, is the default; any other value is `invalid_argument`). At the threshold (10 pt slop), once it has handled every touch event that reached it (a lift it had not yet heard of ends the press as a tap, with no cue; the touch itself is asked, since UIKit does not report the lift of a press the page took for itself), it fires the haptic and dispatches `avibe:native:voice.hold` `{phase: "recognised", take, surface}`. When the input cannot start for a take no page has taken, the page gets `{phase: "failed", take, surface, step}` instead of audio: the App is not following that press, and the page goes on recognising it itself. The take's audio waits in memory until the page calls `voice.holdAdopt` (answer `{sampleRate, timings}`; the same consent-marked document), then arrives as `voice.capture` events, what was recorded since touch-down first; the page ends it with `voice.captureStop`, and gets `{phase: "timings", take, timings}`. The audio of a touch that ends as a tap or a scroll is dropped when the touch ends and never leaves the App's memory (a touch shorter than the threshold by its own timestamps is a tap, even if its end was handled late); so is a take the page rejects or does not adopt within 1 s of recognition (`end=unadopted` in its timings), or whose input has passed on 2 s of audio before the page adopted it (the input counts this itself, on the thread its audio arrives on, and stops there: the bound holds while the main thread is stalled), and one cut off by App Lock, the background, an Action Button take or a withdrawn surface. After recognition the finger's slides are the page's: it gives the cancel haptics and decides what a release does (the App is not told of moves on a surface whose page took the press for itself, so at the cue it also asks the touch where it is, and gives none to a finger past the slop). Each hold's timings (numbers only), and counts of the touches that were not holds by duration (25 ms steps), are kept for the next Action Button message's `capture_earlier`. `avibe-diagnostics://voice/hold-quiet?on=1` (TestFlight and development builds) only prepares the input at touch-down and starts it at recognition. Version 1 (TestFlight 50.1 only) could give a tap the cue when the lift reached the App late; the page names surfaces from version 2 |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 | `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
 
@@ -1218,7 +1219,7 @@ builds with Xcode 27.2; adopting them is separate work).
 | `navigationAction:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `navigationResponse:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `shouldGoTo backForwardListItem` | Uses WebKit default continuation. The ordinary action-policy delegate still rejects a primary `.backForward` target outside the selected instance origin. | Hermetic SPA/auth-history XCTest on iOS 26.4.1 and 27.2; gesture feel remains a device check. |
-| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when the shell needs to see or stop a form submission. |
 
 ### `WKUIDelegate`
 
@@ -1236,7 +1237,7 @@ builds with Xcode 27.2; adopting them is separate work).
 | `showLockdownModeFirstUseMessage` | Uses WebKit's default Lockdown Mode message. | System-owned behavior; no shell test. |
 | `willPresentEditMenuWithAnimator`, `willDismissEditMenuWithAnimator` | Use WebKit's default edit menu. This preserves selection, copy, paste, and the Web UI clipboard fallback. | Existing Web UI clipboard tests plus manual copy/paste check. |
 | `runOpenPanelWith` | Uses WebKit's Safari-matching iOS file picker. The shell declares localized camera and photo-library-add usage descriptions. | Simulator build validates resources; Files, Camera, and Save Image remain device checks. |
-| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when a page of an instance needs location and the shell should decide. |
 | `insertInputSuggestion` | Uses WebKit's default keyboard insertion behavior. | Manual keyboard suggestion check. |
 
 ### `WKDownloadDelegate`
@@ -1718,35 +1719,39 @@ production instance is used.
 
 ## Turn Live Activities
 
-**Withdrawn (11-21, owner):** the App no longer announces `liveActivities`, the
-four `liveActivity.*` methods answer `unsupported`, the chat page renders no
-entry, and at launch the App ends every Turn Live Activity an earlier build
-left and forgets its ledger, with no instance request
-(`NativeShellMetadata.liveActivitiesAvailable`,
-`TurnActivityCoordinator.endAllLocally`). The code below stays, unreachable.
+The shell always announces `lockScreenProgress: 1`: `liveActivity.setting`,
+`setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
+`stop` calls return `unsupported`. The shell never announces `liveActivities`,
+so older Web bundles do not activate the retired entry's bridge observers. The
+new Web requires `lockScreenProgress`, so older TestFlight builds never show the
+setting or a conversation entry.
 
-The `liveActivities: 1` bridge exposes `liveActivity.status`, `start`, `stop`, and
-`openSettings`. A person explicitly tracks one running Turn. Its immutable Agent
-name and session title stay in local ActivityAttributes; only phase and Unix
-seconds reach the instance tracking API and APNs. The exact wire contract and
-shared vectors live in `docs/plans/2026-11-20-ios-live-activity-contract.md` and
+The device-only setting defaults off. On launch with it off, earlier cards end
+locally and their tokens are forgotten without contacting an instance. Turning
+it off explicitly ends cards and sends best-effort DELETE `disabled`.
+
+`TurnActivityCoordinator` keeps the latest visible conversation observation and
+prefetches its running Turn on observation changes and foreground entry. Only
+`UIScene.willDeactivateNotification` can create a card, while the App is active,
+with the device and system settings enabled, a matching prefetched Turn, and an
+active relay registration. Activity.request runs first; failure leaves the old
+card and its observers intact. On success, displaced observers stop and the
+replacement is persisted before the callback returns. A UIKit background task
+then ends the old card, sends DELETE `replaced`, waits up to ten
+seconds for the new token, and PUTs. No conversation control, toast, or hint is
+rendered. Agent names and titles stay in immutable phone-local attributes.
+
+The persisted shown-Turn ledger survives dismissal, replacement, timeout,
+logout, and relaunch. A Turn cannot create another card; entries are retained
+for up to 30 days, including Turns that outlive ActivityKit's eight-hour limit.
+The registration ledger separately tracks requested_at and whether the current
+token received a successful PUT. Token rotation and foreground reconciliation
+follow the shared contract. A 503 or lost PUT response leaves an unregistered
+card for a later foreground/token retry. Registered cards GET on foreground.
+Instance requests reuse the account-owned transport and its session authority
+checks. The normative contract and vectors are in
+`docs/plans/2026-11-20-ios-live-activity-contract.md` and
 `tests/fixtures/live_activity/contract_vectors.json`.
-
-`TurnActivityCoordinator` owns start admission, initial and rotated activity push
-tokens, foreground reconciliation, system dismissal, and account/instance
-cleanup. A phone-local ledger lets it retire server tracking for a card removed
-while the App was away. Only an explicit start can create a card, including after
-a prior dismissal or stop of the same still-running Turn. It uses the account's
-WebKit store and existing same-origin CSRF transport, and releases those WebViews
-through the account transition's existing release barriers. The ledger persists
-the Activity.request Unix second (requested_at on every PUT) and whether PUT has
-returned 200 for the current token. A token rotation clears that registration mark
-until its PUT succeeds. An unregistered card survives a 503 or lost response,
-retries PUT on foreground or token rotation, and ends if still unregistered eight
-hours after Activity.request. Registered cards only GET on foreground; actual
-token updates still PUT. A refused registration ends immediately, except a terminal
-Turn response retains its final card for one hour. Local HTTP responses never
-advance stale deadlines without instance confirmation.
 
 `TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
 renders the reviewed `ios/live-activity/*` frames in English and Simplified

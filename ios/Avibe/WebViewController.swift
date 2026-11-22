@@ -861,6 +861,8 @@ final class WebViewController: UIViewController {
         let created = makeWebViewFactory().makeWebView(delegate: self)
         retainedWebView = created
         observePrimaryNavigationState(created)
+        created.addGestureRecognizer(NativeHoldTouchObserver())
+        NativeHoldCapture.shared.watch(created)
         return created
     }
 

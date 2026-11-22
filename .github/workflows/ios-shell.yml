@@ -170,6 +170,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # The fixture's hold-to-talk page (HoldTouchUITests): the App follows a
+      # press only with the microphone allowed.
+      - name: Allow the fixture the simulator's microphone
+        if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
+        run: xcrun simctl privacy "$SIMULATOR_ID" grant microphone bot.avibe.ios.sheet-fixture
+
       - name: Run sheet gesture XCUITest fixture
         if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
         run: |
