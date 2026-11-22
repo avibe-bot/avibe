@@ -1882,6 +1882,7 @@ async def drive_sse_stream(
     gateway: bool,
     translate: WireTranslator,
     refused: Callable[[ProviderError], bool] | None = None,
+    on_send: Callable[[int], None] | None = None,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
 
@@ -1947,6 +1948,8 @@ async def drive_sse_stream(
                 # Retain the opening task even if cancellation wins the await:
                 # its successful result still belongs to this driver's finally.
                 sent_at = time.monotonic()
+                if on_send is not None:
+                    on_send(len(request.content))
                 opening = asyncio.create_task(client.send(request, stream=True))
                 response = await _await_network(
                     opening,

@@ -75,7 +75,19 @@ def remember(table, key, value):
 
 def route_key(ep: ModelEndpoint, gateway: bool) -> bytes:
     return digest(
-        [ep.base_url, ep.source_id, ep.source_identity, ep.provider, ep.model_id, None if gateway else ep.token]
+        [
+            ep.base_url,
+            ep.source_id,
+            ep.source_identity,
+            ep.provider,
+            ep.model_id,
+            None
+            if gateway
+            else [
+                ep.token,
+                sorted((k.lower(), v) for k, v in ep.request_headers.items() if k.lower() != "anthropic-beta"),
+            ],
+        ]
     )
 
 
@@ -148,13 +160,9 @@ def prepare(
             headers.setdefault(PIN_MODEL_HEADER, ep.model_id)
     if betas:
         headers["anthropic-beta"] = ",".join(betas)
-    full_size = len(encoded(full))
-    record = {
-        "mode": mode,
-        "reason": reason,
-        "body_bytes": full_size if body is full else len(encoded(body)),
-        "full_bytes": full_size,
-    }
+    # The transport records actual bytes only once a send is handed to HTTPX.
+    # A plain send needs no extra serialization to measure the counterfactual.
+    record = {"mode": mode, "reason": reason, "full_bytes": len(encoded(full)) if mode != "full" else 0}
     return Attempt(
         replace(wire, headers=headers, body=body),
         mode,

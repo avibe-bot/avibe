@@ -11784,9 +11784,12 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         pinned_hop = _pinned_hop(request, backend)
-        thread_attempt = (pinned_hop is not None and getattr(request, 'protocol', None) == 'anthropic'
-                          and isinstance(request.get('thread'), Mapping)
-                          and request['thread'].get('type') in ('continue', 'create'))
+        thread_attempt = (
+            pinned_hop is not None
+            and getattr(request, "protocol", None) == "anthropic"
+            and isinstance(request.get("thread"), Mapping)
+            and request["thread"].get("type") in ("continue", "create")
+        )
         hosted = (
             # A walk of the whole history, so off the controller loop.
             await asyncio.to_thread(
@@ -12085,7 +12088,7 @@ class ModelHubService:
                         origin=origin,
                         source_identity=identity,
                         thread_attempt=thread_attempt,
-                    hosted_calls=frozenset(tool for tool, _type in hosted.calls),
+                        hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                         fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                         inventory_member=inventory_member,
                     )
