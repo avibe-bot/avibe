@@ -330,13 +330,20 @@ impl Wiring {
 
     /// An app window that shows the instance of `account` at `origin` now
     /// exists. It is remembered until it closes, with or without a session.
-    pub fn app_window_created(&mut self, window: &str, account: &str, origin: &str) {
+    /// Where a route can be put on an open window it also joins the session
+    /// that instance has right now, whenever that session started: also one
+    /// that started while the window was being made.
+    pub fn app_window_created(&mut self, window: &str, account: &str, origin: &str) -> Vec<Effect> {
         if self.app_windows.iter().all(|open| open.window != window) {
             self.app_windows.push(AppWindow {
                 window: window.to_owned(),
                 account: account.to_owned(),
                 origin: origin.to_owned(),
             });
+        }
+        match self.shared(account, origin) {
+            Some(session) if self.routing == Routing::Live => self.window_created(session, window),
+            _ => Vec::new(),
         }
     }
 

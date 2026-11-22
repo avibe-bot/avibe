@@ -585,28 +585,37 @@ pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Opti
 pub(crate) fn window_created(app: &AppHandle, window: &str, route: AtCreation) {
     let Some(state) = direct(app) else { return };
     let effects = lock(&state.wiring).window_created(route.session, window);
-    for effect in effects {
-        // A new window is only ever routed; nothing else follows from it.
-        let _ = route_window(app, &state, effect);
-    }
+    route_windows(app, &state, effects);
 }
 
 /// An app window opened from the instance view at `origin` now exists, with
-/// the `route` it was created for if it had one. It is remembered with or
-/// without a session: one that starts later (after a listener ended, a
-/// change of the choice, or the system's proxy settings clearing) routes
-/// the app windows that are already open.
+/// the `route` it was created for if it had one. Called before the window
+/// is sent to its instance. It is remembered with or without a session: one
+/// that starts later (after a listener ended, a change of the choice, or the
+/// system's proxy settings clearing) routes the app windows that are already
+/// open; and where a route can be put on an open window, it joins the
+/// session its instance has now, even one that started while it was made.
 pub(crate) fn app_window_created(app: &AppHandle, window: &str, origin: &url::Url, route: Option<AtCreation>) {
     let Some(state) = direct(app) else { return };
     let account = app
         .try_state::<instance_client::Client>()
         .and_then(|client| client.coordinator.state().account.identity)
         .map(|identity| identity.id);
+    let mut effects = Vec::new();
     if let (Some(account), Some(origin)) = (account, origin_of(origin.as_str())) {
-        lock(&state.wiring).app_window_created(window, &account, &origin);
+        effects.extend(lock(&state.wiring).app_window_created(window, &account, &origin));
     }
+    // Where its route was given at creation, the session it was created for.
     if let Some(route) = route {
-        window_created(app, window, route);
+        effects.extend(lock(&state.wiring).window_created(route.session, window));
+    }
+    route_windows(app, &state, effects);
+}
+
+/// A new window is only ever routed; nothing else follows from it.
+fn route_windows(app: &AppHandle, state: &Arc<Direct>, effects: Vec<Effect>) {
+    for effect in effects {
+        let _ = route_window(app, state, effect);
     }
 }
 
