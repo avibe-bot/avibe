@@ -1019,6 +1019,19 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertEqual(tap?.wouldOpen, [50: false, 80: false, 100: false, 120: false])
         XCTAssertEqual(audio.calls, ["arm", "disarm"])
         audio.answer()
+
+        // A 120 ms tap whose touch reached the App 100 ms late, prepared 10 ms
+        // after that: by the App's clock the finger was down for 20 ms only,
+        // so no threshold would have opened it.
+        clock = 2_000
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 30, deliveredAfterMs: 100)
+        clock = 2_010
+        audio.answer()
+        clock = 2_020
+        capture.touchEnded(in: webView, timestamp: 30.12)
+        tap = tapRecords.last
+        XCTAssertEqual(tap?.ms, 120)
+        XCTAssertEqual(tap?.wouldOpen, [50: false, 80: false, 100: false, 120: false])
     }
 
     /// The counts keep `open` and each threshold's `w…`, and come back from

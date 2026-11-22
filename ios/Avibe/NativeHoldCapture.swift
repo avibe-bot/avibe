@@ -940,12 +940,18 @@ final class NativeHoldCapture {
     /// had not answered when it ended was shorter than its preparing. A
     /// press that moved away is not judged: when it left the slop is not
     /// kept.
+    ///
+    /// The threshold and "prepared" count from the App's handling of the
+    /// touch-down; a length by the touch's own times counts from the finger
+    /// meeting the glass. So such a length is compared after adding how long
+    /// the touch took to reach the App.
     private func tap(_ hold: Hold, ms: Int, moved: Bool) -> Tap {
         var tap = Tap(ms: ms, moved: moved, opened: hold.begun)
         guard !moved, hold.timings.variant != "late" else { return tap }
         let ready = hold.prepared ? hold.timings.armedAt : 0
+        let delivery = hold.tapMs != nil ? hold.timings.deliveryMs ?? 0 : 0
         for threshold in NativeHoldTaps.thresholds {
-            tap.wouldOpen[threshold] = ready.map { ms >= max($0, threshold) } ?? false
+            tap.wouldOpen[threshold] = ready.map { ms >= delivery + max($0, threshold) } ?? false
         }
         return tap
     }
