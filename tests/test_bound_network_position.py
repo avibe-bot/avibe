@@ -165,6 +165,44 @@ def test_registration_admitted_before_publish_is_fenced_at_write(monkeypatch, tm
         assert push.get_by_endpoint(conn, endpoint=_payload("late")["endpoint"]) is None
 
 
+def test_host_push_grant_survives_remote_off_and_cookie_rotation(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _bind(_unbound())
+    config.remote_access.vibe_cloud.enabled = True
+    config.save()
+    cutover.reconcile_startup(config)
+    client = ui_server.app.test_client()
+    headers = csrf_headers(client, HOST)
+
+    def register(device):
+        result = client.post(
+            "/api/web-push/subscriptions",
+            base_url=HOST,
+            headers=headers,
+            json={"subscription": _payload(device), "explicit_enable": True},
+        )
+        assert result.status_code == 200 and result.get_json()["accepted"]
+        return result.get_json()["subscription"]
+
+    engine = get_cached_sqlite_engine()
+    host = register("host")
+    assert cutover.may_dispatch(engine, host)
+    # Use the actual settings writer, without starting or stopping a connector.
+    before = config.remote_access.vibe_cloud.session_secret
+    ui_server._save_config_and_runtime_decisions({"remote_access": {"vibe_cloud": {"enabled": False}}})
+    off = V2Config.load()
+    assert not off.remote_access.vibe_cloud.enabled and off.remote_access.vibe_cloud.session_secret != before
+    assert cutover.may_dispatch(engine, host)
+    second = register("second")
+    cutover.reconcile_startup(off)
+    assert cutover.may_dispatch(engine, host) and cutover.may_dispatch(engine, second)
+
+    # A real replacement pairing still requires its own committed receipt.
+    off.remote_access.vibe_cloud.instance_secret = "replacement-pairing"
+    off.save()
+    assert not cutover.may_dispatch(engine, host)
+
+
 def test_published_file_with_rolled_back_receipt_blocks_delivery_until_reconciled(monkeypatch, tmp_path):
     from config.v2_config import config_file_lock
 
@@ -407,7 +445,8 @@ async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_idle_terminal_closes_on_first_tick_and_host_terminal_stays_open(monkeypatch, tmp_path):
+@pytest.mark.parametrize("unavailable", [False, True], ids=["bound", "snapshot-error"])
+async def test_idle_terminal_closes_on_first_tick_and_host_terminal_stays_open(monkeypatch, tmp_path, unavailable):
     from starlette.websockets import WebSocketDisconnect
     from vibe import setup_network_stream
 
@@ -455,7 +494,17 @@ async def test_idle_terminal_closes_on_first_tick_and_host_terminal_stays_open(m
         for _, _, sent in both:
             assert (await asyncio.wait_for(sent.get(), 3))["type"] == "websocket.accept"
             assert (await asyncio.wait_for(sent.get(), 3))["text"] == "ready"
-        _bind(V2Config.load()).save()
+        if unavailable:
+            from vibe import network_position
+
+            def failed_read(*args):
+                raise RuntimeError("snapshot reader unavailable")
+
+            monkeypatch.setattr(network_position, "_config_revision", failed_read)
+            response = ui_server.app.test_client().get("/api/session", base_url=LAN, environ_base=LAN_PEER)
+            assert response.status_code == 503 and response.get_json()["error"] == "remote_access_config_unavailable"
+        else:
+            _bind(V2Config.load()).save()
         _, _, idle_out = both[0]
         _, host_in, host_out = both[1]
         # No receive or protected send on the old origin can wake the guard.

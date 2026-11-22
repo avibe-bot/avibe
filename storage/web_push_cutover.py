@@ -8,6 +8,7 @@ without conflating it with an explicit opt-out. No schema upgrade is needed.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 
 from sqlalchemy import select
@@ -17,15 +18,17 @@ from config.v2_config import V2Config, config_file_lock
 from storage.db import get_cached_sqlite_engine
 from storage.models import state_meta, web_push_subscriptions as push
 from storage.web_push_service import RETIRED_LOCAL, _utc_now_iso, get_deliverable_by_endpoint
-from vibe.device_metadata import binding_key
 from vibe.network_position import BindingState, binding_state, position_snapshot
 
 _RECEIPT = "web_push.local_binding.v1"
 
 
 def _generation(config):
+    # This receipt belongs to the installation's pairing, not the browser
+    # sessions. Turning remote access off can rotate the session cookie key.
     cloud = config.remote_access.vibe_cloud
-    return json.dumps(binding_key(cloud.instance_id, cloud.session_secret))
+    identity = json.dumps([cloud.backend_url, cloud.instance_id, cloud.instance_secret], separators=(",", ":"))
+    return json.dumps(hashlib.sha256(identity.encode("utf-8")).hexdigest())
 
 
 def _receipt(conn):
