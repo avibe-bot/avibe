@@ -39,6 +39,7 @@ from collections.abc import Callable
 from importlib.machinery import ModuleSpec
 from types import CodeType, FunctionType, ModuleType
 
+from core.warm_gc_baseline import can_freeze
 from core.loop_watchdog_events import (
     EVENT_MARKER,
     MAX_EVENT_BYTES,
@@ -131,7 +132,7 @@ class EventLoopWatchdog:
         freeze is logged as context; it does not attribute what was retained.
         """
         with self._freeze_lock:
-            if self._freeze_state == "off" and not gc.get_freeze_count():
+            if self._freeze_state == "off" and can_freeze():
                 self._freeze_since = max(self._watchdog_birth + 7200, self._monotonic())
                 self._freeze_state = "armed"
             return self._freeze_state
@@ -149,11 +150,10 @@ class EventLoopWatchdog:
         return self._freeze_state
 
     def _apply_warm_freeze(self) -> None:
-        # On the loop thread. The count before freezing is cheap (empty unless another
-        # component froze first, which this trial must not take over); after freezing
-        # it would walk the whole permanent generation, so it is not logged.
+        # Recheck at the point of use: someone else can freeze after arming.
+        # Only our transition through gc.freeze() grants rollback ownership.
         with self._freeze_lock:
-            if self._freeze_state != "armed" or self._stopped.is_set() or gc.get_freeze_count():
+            if self._freeze_state != "armed" or self._stopped.is_set() or not can_freeze():
                 return
             gc.freeze()
             self._freeze_state = "frozen"
