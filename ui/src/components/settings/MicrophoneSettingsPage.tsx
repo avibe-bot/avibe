@@ -123,7 +123,7 @@ export const MicrophoneSettingsView: React.FC<MicrophoneSettingsViewProps> = ({
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
-                    className="h-auto min-h-12 w-full justify-between gap-3 px-3 py-3 text-left"
+                    className="h-auto min-h-12 w-fit max-w-full self-start justify-between gap-3 px-3 py-3 text-left [--press-scale:1]"
                     disabled={permission || testing}
                     aria-label={t('settings.microphone.chooseInput')}
                   >
