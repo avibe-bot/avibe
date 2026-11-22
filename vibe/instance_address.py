@@ -285,23 +285,9 @@ def _update_state(instance_id: str, mutate: Callable[[dict[str, Any]], None]) ->
 # --- receipts -----------------------------------------------------------------
 
 
-_receipt_key_cache: tuple[str, bytes] | None = None
-
-
 def _receipt_key() -> bytes:
-    global _receipt_key_cache
-
-    path = str(_state_path())
-    cached = _receipt_key_cache
-    if cached is not None and cached[0] == path:
-        return cached[1]
-    with _LOCK:
-        key = _stored_receipt_key()
-        _receipt_key_cache = (str(_state_path()), key)
-        return key
-
-
-def _stored_receipt_key() -> bytes:
+    # A reset in a separate process deletes this file. Do not retain its key
+    # across requests; a device snapshot reads it once before its DB transaction.
     with _LOCK:
         binding = current_binding()
         instance_id = binding.instance_id if binding else ""
@@ -323,7 +309,11 @@ def _stored_receipt_key() -> bytes:
 def receipt_for_session(session_id: str) -> str:
     """The keyed one-way value a browser posts back after clearing (rule F2)."""
 
-    digest = hmac.new(_receipt_key(), _RECEIPT_CONTEXT + session_id.encode("utf-8"), hashlib.sha256).digest()
+    return _receipt_with_key(_receipt_key(), session_id)
+
+
+def _receipt_with_key(key: bytes, session_id: str) -> str:
+    digest = hmac.new(key, _RECEIPT_CONTEXT + session_id.encode("utf-8"), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
@@ -1669,7 +1659,7 @@ def _snapshot_devices(binding: Binding, hostname: str) -> None:
     ensure_sqlite_state()
     _require_instance(binding.instance_id)
     registry_binding = remote_access.device_binding(_load_config())
-    _receipt_key()  # before the write transaction: the key's first read takes the role lock
+    key = _receipt_key()  # never take the role lock inside the DB write transaction
     with get_cached_sqlite_engine().begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         instance_address_clearing.snapshot(
@@ -1678,7 +1668,7 @@ def _snapshot_devices(binding: Binding, hostname: str) -> None:
             hostname=hostname,
             binding=registry_binding,
             now=int(_wall()),
-            receipt_hash_for=lambda session_id: receipt_hash(receipt_for_session(session_id)),
+            receipt_hash_for=lambda session_id: receipt_hash(_receipt_with_key(key, session_id)),
         )
 
 
@@ -1697,7 +1687,7 @@ def _end_sessions(binding: Binding, previous: str) -> None:
     registry_binding = remote_access.device_binding(config)
     now = int(_wall())
     ensure_sqlite_state()
-    _receipt_key()  # before the write transaction: the key's first read takes the role lock
+    key = _receipt_key()  # never take the role lock inside the DB write transaction
 
     def snapshot(conn: Any) -> None:
         if previous:
@@ -1707,7 +1697,7 @@ def _end_sessions(binding: Binding, previous: str) -> None:
                 hostname=previous,
                 binding=registry_binding,
                 now=now,
-                receipt_hash_for=lambda session_id: receipt_hash(receipt_for_session(session_id)),
+                receipt_hash_for=lambda session_id: receipt_hash(_receipt_with_key(key, session_id)),
             )
 
     from vibe.account_session_revoke import pairing_epoch

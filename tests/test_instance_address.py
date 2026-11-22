@@ -142,7 +142,7 @@ def address(monkeypatch):
     for name, value in (
         ("_authority", None), ("_quiet", set()), ("_quiet_loaded_for", None), ("_inflight", {}),
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
-        ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
+        ("_BINDING_CACHE", None), ("_hooks", {}),
         ("_last_read_failed", None), ("_known_cleanup", None), ("_binding_failure_logged", None),
         ("_read_refused", False),
     ):

@@ -357,6 +357,54 @@ def test_busy_connector_defers_identity_cutover_without_losing_work(cli_host, mo
     assert not gate.reset_in_progress() and remote._read_pending_pairing_record() == (None, None)
 
 
+def _receipt_in_ui_process(pipe):
+    from vibe import instance_address
+    with pipe:
+        while (session := pipe.recv()) is not None:
+            if session == 'snapshot':
+                instance_address._snapshot_devices(instance_address.current_binding(), 'fixture.avibe.bot')
+                pipe.send(True)
+            else:
+                pipe.send(instance_address.receipt_for_session(session))
+
+
+def test_cli_reset_does_not_leave_running_ui_with_an_unpersisted_receipt_key(cli_host):
+    import multiprocessing
+    from vibe import instance_address
+
+    ctx = multiprocessing.get_context('spawn')
+    parent, child = ctx.Pipe()
+    ui = ctx.Process(target=_receipt_in_ui_process, args=(child,))
+    ui.start()
+    child.close()
+    try:
+        def request(value):
+            parent.send(value)
+            assert parent.poll(15)
+            return parent.recv()
+        old = request('fixture-session')
+        assert reset.reset_interactively(confirm=lambda: True) == {'state': 'unpaired'}
+        assert not instance_address._state_path().exists()
+        assert remote.pair('key_B', 'https://backend.test')['ok']
+        from tests.test_instance_address import sign_in
+        cookie, sid = sign_in()
+        assert request('snapshot')
+        assert request('fixture-session') != old
+        after = request(sid)
+        # The parent has never read this key: like a restarted UI, it must
+        # serve the receipt in the child's snapshot and accept it exactly once.
+        assert instance_address.receipt_for_cleanup_request('fixture.avibe.bot', cookie) == after
+        assert instance_address.record_cleared('fixture.avibe.bot', after)
+        assert not instance_address.record_cleared('fixture.avibe.bot', after)
+    finally:
+        parent.send(None)
+        parent.close()
+        ui.join(5)
+        if ui.is_alive():
+            ui.terminate()
+            ui.join(5)
+
+
 def _hold_admission(pipe):
     with gate.admitted('reset'):
         pipe.send('held')
