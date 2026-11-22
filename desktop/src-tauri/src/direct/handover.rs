@@ -1,4 +1,10 @@
-use super::{connect::Authority, quiet::PublicLegs, transport::Link, SelectedPath};
+use super::{
+    connect::Authority,
+    credentials::{Grant, Windows},
+    quiet::PublicCensus,
+    transport::Link,
+    SelectedPath,
+};
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
 
@@ -43,7 +49,7 @@ pub struct Handover {
     pub(super) host: Authority,
     pub(super) links: watch::Receiver<Option<Arc<Link>>>,
     pub(super) health: watch::Receiver<()>,
-    pub(super) public: PublicLegs,
+    pub(super) windows: std::sync::Weak<Windows>,
 }
 impl Handover {
     /// The callback returns `None` for a stale/non-sole caller. Its guard
@@ -51,6 +57,24 @@ impl Handover {
     /// it is always dropped before sleeping. No window lock is needed for
     /// the entire three-second quiet interval.
     pub async fn close_quiet_public<G>(&self, host: &str, sole_document: impl Fn() -> Option<G>) -> HandoverResult {
+        let Some(grant) = self.windows.upgrade().map(|w| w.legacy_grant()) else {
+            return HandoverResult::NotUsable;
+        };
+        self.close(host, grant, sole_document).await
+    }
+    /// Only the trusted shell supplies the originating window label.
+    pub async fn close_quiet_public_for_window(&self, host: &str, window: &str) -> HandoverResult {
+        let Some(grant) = self.windows.upgrade().and_then(|w| w.window(window)) else {
+            return HandoverResult::NotUsable;
+        };
+        self.close(host, grant, || Some(())).await
+    }
+    pub fn window_census(&self, window: &str) -> Option<PublicCensus> {
+        let grant = self.windows.upgrade()?.window(window)?;
+        let valid = grant.valid.borrow();
+        (*valid).then(|| grant.legs.census())
+    }
+    async fn close<G>(&self, host: &str, grant: Grant, sole_document: impl Fn() -> Option<G>) -> HandoverResult {
         if host != self.host.host() {
             return HandoverResult::NotUsable;
         }
@@ -63,6 +87,10 @@ impl Handover {
                 let Some(_sole) = sole_document() else {
                     return HandoverResult::OtherDocuments;
                 };
+                let valid = grant.valid.borrow();
+                if !*valid {
+                    return HandoverResult::NotUsable;
+                }
                 let current = self.links.borrow();
                 if self.health.has_changed().is_err()
                     || !current.as_ref().is_some_and(|l| Arc::ptr_eq(l, &start))
@@ -73,7 +101,7 @@ impl Handover {
                 {
                     return HandoverResult::NotUsable;
                 }
-                if let Some((closed, kept)) = self.public.claim(deadline) {
+                if let Some((closed, kept)) = grant.legs.claim(deadline) {
                     return HandoverResult::Done { closed, kept };
                 }
             }
