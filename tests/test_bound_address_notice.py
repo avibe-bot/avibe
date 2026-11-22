@@ -96,22 +96,55 @@ def test_a_visitor_learns_nothing_from_it(bound):
     assert open_old_address("/", "zh").content == answer.content
 
 
-def test_a_declared_custom_domain_shows_the_same_page_and_not_its_own_name(bound):
-    """An operator's reverse-proxy domain no longer opens a bound Avibe: its visitors read this page too."""
+PROXY = {"REMOTE_ADDR": "192.168.2.9"}
+NAVIGATION = {"Accept": "text/html", "Accept-Language": "zh-CN", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
+
+
+def through_proxy(path, forwarded_host, headers=NAVIGATION):
+    """What the operator's reverse proxy sends on for a browser that asked for ``forwarded_host``."""
+    forwarded = {**headers, "X-Forwarded-Host": forwarded_host, "X-Forwarded-Proto": "https"}
+    return ui_server.app.test_client().get(path, base_url=LAN, environ_base=PROXY, headers=forwarded)
+
+
+def test_a_declared_proxy_and_domain_still_open_avibe_and_never_this_page(bound, monkeypatch):
+    """The operator wrote down both the proxy's address and the public origin: the exception to the rule."""
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "192.168.2.9")
     bound.ui.trusted_public_origins = ["https://home.example.test"]
     bound.save()
-    navigation = {"Accept": "text/html", "Accept-Language": "zh-CN", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
-    answer = ui_server.app.test_client().get(
-        "/sessions/abc?claim=secret-claim", base_url="https://home.example.test", environ_base=LAN_PEER, headers=navigation
-    )
-    assert answer.status_code == 200
-    assert answer.content == open_old_address("/", "zh-CN").content
-    title, body, action, local = SAID["zh"]
-    for sentence in (title, body, action, local):
-        assert sentence in html.unescape(answer.text)
-    for private in ("home.example.test", "secret-claim", "fixture"):
+
+    page = through_proxy("/sessions/abc", "home.example.test")
+    assert SAID["zh"][0] not in html.unescape(page.text) and SAID["en"][0] not in html.unescape(page.text)
+    session = through_proxy("/api/session", "home.example.test", {"Accept": "application/json"})
+    assert session.status_code == 200 and session.get_json()["instance_role"] == "owner"
+
+
+@pytest.mark.parametrize(
+    ("declared_proxy", "declared_origins", "asked_for", "shows_the_page"),
+    [
+        # The proxy is trusted, but nobody declared a public origin: it forwards the saved private address.
+        ("192.168.2.9", [], "192.168.2.3:15131", True),
+        # The origin is declared, but the request does not come from a declared proxy.
+        ("", ["https://home.example.test"], "home.example.test", True),
+        # A name nobody declared is told nothing, not even this page.
+        ("192.168.2.9", ["https://other.example.test"], "home.example.test", False),
+    ],
+    ids=["proxy-without-origin", "origin-without-proxy", "undeclared-name"],
+)
+def test_an_incomplete_proxy_declaration_never_opens_avibe(
+    bound, monkeypatch, declared_proxy, declared_origins, asked_for, shows_the_page
+):
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, declared_proxy)
+    bound.ui.trusted_public_origins = declared_origins
+    bound.save()
+
+    refusal = {"ok": False, "error": "remote_access_host_mismatch"}
+    session = through_proxy("/api/session", asked_for, {"Accept": "application/json"})
+    assert session.status_code == 503 and session.get_json() == refusal
+    answer = through_proxy("/sessions/abc?claim=secret-claim", asked_for)
+    if not shows_the_page:
+        assert answer.status_code == 503 and answer.get_json() == refusal
+        return
+    assert answer.status_code == 200 and answer.content == open_old_address("/", "zh-CN").content
+    for private in ("home.example.test", "secret-claim", "fixture", "192.168"):
         assert private not in answer.text, private
     assert "Set-Cookie" not in answer.headers and "Location" not in answer.headers
-    # Its scripts get the refusal a script can read, not a page.
-    api = ui_server.app.test_client().get("/api/session", base_url="https://home.example.test", environ_base=LAN_PEER)
-    assert api.status_code == 503 and api.get_json() == {"ok": False, "error": "remote_access_host_mismatch"}
