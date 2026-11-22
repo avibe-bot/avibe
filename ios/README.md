@@ -109,9 +109,13 @@ and Web resizing cannot both run.
   (`PageFocusTouchObserver`, a passive recogniser). A WebKit page has the
   focus only while its content view is first responder, and on iOS 27 a
   press the page takes for itself (the composer prevents the default on
-  `touchstart`) no longer makes it that, so a first tap on the composer
-  after a cold launch raised no keyboard. Nothing is done before a touch,
-  and nothing on iOS 26.
+  `touchstart`) no longer makes it that. So the first tap on the composer
+  raised no keyboard wherever the content view was not first responder: in
+  a fresh WebView (a cold launch, a push tap, an instance switch), and
+  after App Lock or the account cover ended editing. Nothing is done
+  before a touch, and nothing on iOS 26, so on CI's iOS 26 simulator only
+  the unit tests cover it; the real touches are checked on an iOS 27
+  simulator.
 - External application schemes from top-level browsing contexts use
   `UIApplication`.
 - JavaScript alerts, confirmations, and prompts use native alerts. Their

@@ -4887,7 +4887,7 @@ final class PageFocusTouchObserverTests: XCTestCase {
     }
 
     /// A view in a window with no first responder inside it is asked to
-    /// become it, once.
+    /// become it. It is asked, not its content: a WebView hands it on.
     @MainActor
     func testAViewWithNoFirstResponderInsideIsMadeFirstResponder() {
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
@@ -4900,9 +4900,18 @@ final class PageFocusTouchObserverTests: XCTestCase {
         XCTAssertEqual(view.asked, 1)
         XCTAssertEqual(inner.asked, 0)
 
-        // Now it is: the next touch asks nothing.
+        // The view kept it itself (a WebView does when its content view
+        // refused, and its page is then still unfocused): the next touch
+        // asks again.
+        XCTAssertTrue(view.isFirstResponder)
         PageFocusTouchObserver.focusPage(in: view)
-        XCTAssertEqual(view.asked, 1)
+        XCTAssertEqual(view.asked, 2)
+
+        // Its content has it now: the touch after that asks nothing.
+        inner.first = true
+        PageFocusTouchObserver.focusPage(in: view)
+        XCTAssertEqual(view.asked, 2)
+        XCTAssertEqual(inner.asked, 0)
     }
 
     /// The page's content view lies inside the WebView: while it is first

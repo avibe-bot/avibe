@@ -73,23 +73,32 @@ final class HoldTouchUITests: XCTestCase {
     func testTheFirstTapAfterAColdLaunchFocusesTheInputWithNoSurfaceNamed() {
         app.launchEnvironment["AVIBE_FIXTURE_HOLD_NO_SURFACES"] = "1"
         launch(warm: false, surfaces: "surfaces=control")
-        input.tap()
-        let focused = waitFor("focus=yes")
-        Thread.sleep(forTimeInterval: 2)
-        print("[hold smoke] first tap, no surface named, focused=\(focused): \(facts())")
-        XCTAssertTrue(focused, "The first tap did not focus the input; \(facts())")
+        requireTheFirstTapFocusesAndTypes("no surface named")
         XCTAssertEqual(kept(), "none", "The App followed a touch with no surface named; \(facts())")
     }
 
     private func firstTap(startsAtRecognition: Bool) {
         launch(startsAtRecognition: startsAtRecognition, warm: false)
+        requireTheFirstTapFocusesAndTypes("startsAtRecognition=\(startsAtRecognition)")
+        requireFollowedWithNoCue("The first tap after a cold launch")
+    }
+
+    /// The first tap on the input: it takes the focus, and typing reaches it. A focus event
+    /// alone is not the keyboard: the input must have its input session too.
+    private func requireTheFirstTapFocusesAndTypes(_ what: String) {
         input.tap()
         let focused = waitFor("focus=yes")
+        var typed = false
+        if focused {
+            // Typing reaches it: the keyboard is up, or a hardware keyboard stands in for it.
+            app.typeText("hi")
+            typed = waitFor("typed=2")
+        }
         // Long enough for a late cue to have come, and for the page's later reading of its focus.
         Thread.sleep(forTimeInterval: 2)
-        print("[hold smoke] first tap, startsAtRecognition=\(startsAtRecognition), focused=\(focused): \(facts())")
+        print("[hold smoke] first tap, \(what), focused=\(focused), typed=\(typed): \(facts())")
         XCTAssertTrue(focused, "The first tap did not focus the input; \(facts())")
-        requireFollowedWithNoCue("The first tap after a cold launch")
+        XCTAssertTrue(typed, "The first tap focused the input, but typing did not reach it; \(facts())")
     }
 
     private func tapTheInput(startsAtRecognition: Bool) {
