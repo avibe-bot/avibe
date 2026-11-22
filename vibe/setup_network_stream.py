@@ -9,7 +9,7 @@ from vibe.network_position import BindingState, position_snapshot
 CHECK_INTERVAL_SECONDS = 1.0
 
 
-async def serve_setup_connection(app, scope, receive, send):
+async def serve_setup_connection(app, scope, receive, send, still_admitted):
     """Ordinary finite HTTP responses need no watcher. WS and SSE outlive admission."""
     owner = asyncio.current_task()
     websocket = scope["type"] == "websocket"
@@ -19,9 +19,17 @@ async def serve_setup_connection(app, scope, receive, send):
     finished = False
     monitor = None
 
+    def lease_valid():
+        try:
+            config, state = position_snapshot()
+            return state is BindingState.UNBOUND and still_admitted(config)
+        except Exception:
+            # A failed admission read must close the lease, not just its watcher.
+            return False
+
     async def check():
         nonlocal revoked
-        if revoked or (await asyncio.to_thread(position_snapshot))[1] is not BindingState.UNBOUND:
+        if revoked or not await asyncio.to_thread(lease_valid):
             if not revoked:
                 revoked = True
                 if asyncio.current_task() is not owner:

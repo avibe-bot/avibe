@@ -2929,6 +2929,14 @@ def effective_ui_bind_host(config: V2Config, requested_host: str | None = None) 
     return setup_host
 
 
+def ui_server_argv(python: str, host: str, port: int) -> list[str]:
+    # Keep the entry-point prefix recognized by both current and older launchers.
+    # Only argv crosses the data boundary; the selected interpreter supplies its
+    # own installed run_ui_server (including during rollback).
+    command = _UI_SERVER_PAYLOAD + " import sys; run_ui_server(sys.argv[1], int(sys.argv[2]))"
+    return [python, "-c", command, host, str(port)]
+
+
 def start_ui(
     host,
     port,
@@ -2976,11 +2984,6 @@ def start_ui(
                 )
         pid_path.unlink(missing_ok=True)
 
-    # Named entry point, not a body of code: whatever release the launcher's
-    # interpreter belongs to supplies its own `run_ui_server`. A rollback that
-    # sent source text across the generation boundary would run the replacement's
-    # idea of startup inside the replaced install.
-    command = "from vibe.ui_server import run_ui_server; run_ui_server('{}', {})".format(host, port)
     spawn_kwargs = {}
     # `start_info` is captured inside the spawn, not after it returns: in between,
     # a signal left a live UI with a pid record that `cmd_start`'s rollback,
@@ -2988,7 +2991,7 @@ def start_ui(
     if start_info is not None:
         spawn_kwargs["start_info"] = start_info
     pid = spawn_background(
-        [(launcher or current_service_launcher()).python, "-c", command],
+        ui_server_argv((launcher or current_service_launcher()).python, host, port),
         pid_path,
         "ui_stdout.log",
         "ui_stderr.log",

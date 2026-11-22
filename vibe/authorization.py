@@ -597,6 +597,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("GET", r"^/api/slack/manifest$"),
         ("POST", r"^/api/control$"),
         ("POST", r"^/api/ui/reload$"),
+        ("POST", r"^/api/devices/host/network-access$"),
         ("POST", r"^/api/settings$"),
         ("POST", r"^/api/settings/thread$"),
         ("DELETE", r"^/api/settings/thread$"),
