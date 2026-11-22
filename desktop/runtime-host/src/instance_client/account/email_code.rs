@@ -102,7 +102,7 @@ enum Phase {
     Wait(Instant),
     // Set before I/O; if the submitting future disappears, require a fresh delivery.
     Spent(Option<Instant>),
-    Bound(NativeSession),
+    Bound(Box<NativeSession>),
 }
 fn retry_after(r: &Response) -> u64 {
     // Both pinned producers emit integral seconds, issuer forwarding accepts
@@ -247,7 +247,7 @@ impl PreparedCode {
         let body = r.json().unwrap_or(Value::Null);
         match (r.status, body["error"].as_str()) {
             (200, None) if body["bound"] == true && candidate.has_discovery_credentials() => {
-                delivery.set(Phase::Bound(candidate.clone()));
+                delivery.set(Phase::Bound(Box::new(candidate.clone())));
                 Ok(candidate)
             }
             (403, Some("verification_invalid")) => {

@@ -4,15 +4,12 @@ use super::*;
 use crate::instance_client::protocol::TotpMethod;
 use serde::{de::IgnoredAny, Deserialize};
 
+#[derive(Default)]
 pub(in crate::instance_client) enum EnrolledCodes {
+    #[default]
     NotIssued,
     Unavailable,
     Codes(Vec<String>),
-}
-impl Default for EnrolledCodes {
-    fn default() -> Self {
-        Self::NotIssued
-    }
 }
 fn read_codes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<EnrolledCodes, D::Error> {
     let codes = Vec::<String>::deserialize(d)?;

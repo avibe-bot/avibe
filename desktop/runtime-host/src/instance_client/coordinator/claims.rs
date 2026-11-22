@@ -401,7 +401,7 @@ impl Drop for Borrow<'_> {
 }
 enum ReadWork {
     First(oneshot::Receiver<()>),
-    Edit(HostedClaim, String),
+    Edit(Box<HostedClaim>, String),
 }
 impl Coordinator {
     /// Called under the actual view-role lock after shell admission. Never take `inner`
@@ -507,7 +507,7 @@ impl Coordinator {
                 }
                 ClaimAction::Check { revision, prefix } => {
                     let (receipt, claim) = owner.borrow_review(opaque(&revision)?, a, UseReview::Edit, interrupt)?;
-                    (receipt, ReadWork::Edit(claim, prefix))
+                    (receipt, ReadWork::Edit(Box::new(claim), prefix))
                 }
                 _ => return Err(changed()),
             };
@@ -525,7 +525,7 @@ impl Coordinator {
         };
         let read = async {
             let (mut claim, requested) = match work {
-                ReadWork::Edit(claim, prefix) => (claim, Some(prefix)),
+                ReadWork::Edit(claim, prefix) => (*claim, Some(prefix)),
                 ReadWork::First(stop) => {
                     let subject = state.identity.as_ref().ok_or_else(stale)?.id.clone();
                     let m = MachineAttempt::open(host, self.transport.clone(), subject, locale, stop).await?;

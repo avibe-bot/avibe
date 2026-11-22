@@ -159,7 +159,7 @@ pub(super) async fn echo<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
-pub(crate) async fn observe(
+pub(in crate::instance_client) async fn observe(
     source: ClaimSource,
     local_transport: Arc<dyn Transport>,
     account: &Account,

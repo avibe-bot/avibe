@@ -110,7 +110,7 @@ impl Publication {
             done,
         )
     }
-    pub(crate) async fn classify(
+    pub(in crate::instance_client) async fn classify(
         self,
         mut jar: NativeSession,
         account: &Account,
