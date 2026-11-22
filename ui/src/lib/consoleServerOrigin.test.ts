@@ -22,6 +22,9 @@ describe('where the page is after the console server host or port is saved', () 
     ['192.168.1.20', '192.168.1.30', 5123, 'http://192.168.1.30:5123', 'go'],
     ['192.168.1.20', '127.0.0.1', 5123, 'http://127.0.0.1:5123', 'tell'],
     ['192.168.1.20', '0.0.0.0', 5123, 'http://192.168.1.20:5123', 'stay'],
+    // `*` is every address too: never an address to go to.
+    ['192.168.1.20', '*', 5123, 'http://192.168.1.20:5123', 'stay'],
+    ['127.0.0.1', '*', 6000, 'http://127.0.0.1:6000', 'go'],
   ] as const)('page at %s, host saved as %s:%i', (hostname, host, port, origin, action) => {
     expect(consoleOriginAfterSave(at(hostname), { host, port })).toEqual({ origin, action });
   });

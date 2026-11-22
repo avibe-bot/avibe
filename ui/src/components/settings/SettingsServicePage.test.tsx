@@ -108,7 +108,10 @@ describe('the console server host on an Avibe bound to an account', () => {
 
 describe('saving the console server host', () => {
   const saveHost = async (host: string) => {
-    api.getConfig.mockResolvedValue({ ui: { setup_host: '127.0.0.1', setup_port: 5123 } });
+    api.getConfig.mockResolvedValue({
+      ui: { setup_host: '127.0.0.1', setup_port: 5123 },
+      remote_access: { vibe_cloud: { instance_id: 'fixture-instance' } },
+    });
     api.mutateConfig.mockResolvedValue({});
     renderPage();
     const field = await screen.findByLabelText(en.dashboard.host);
@@ -140,6 +143,8 @@ describe('saving the console server host', () => {
 
     expect(await screen.findByText(en.dashboard.uiRestartMessage)).toBeTruthy();
     expect(hostsWritten()).toEqual(['192.168.1.20']);
+    // The bound line stays beside the result: this is when it matters.
+    expect(screen.getByText(en.settings.consoleServerBound)).toBeTruthy();
     expect(JSON.parse(apiFetch.mock.calls[0][1].body)).toEqual({ host: '192.168.1.20', port: 5123 });
   });
 });

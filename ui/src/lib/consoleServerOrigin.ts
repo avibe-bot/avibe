@@ -33,7 +33,7 @@ export function consoleOriginAfterSave(
     return { origin: `http://${current.hostname}${current.port ? `:${current.port}` : ''}`, action: 'stay' };
   }
   const onThisComputer = isLoopback(currentHostname);
-  const bindsAll = savedHost === '0.0.0.0' || savedHost === '::' || savedHost === '';
+  const bindsAll = savedHost === '0.0.0.0' || savedHost === '::' || savedHost === '*' || savedHost === '';
   let hostname = savedHost;
   if (bindsAll) hostname = currentHostname;
   else if (onThisComputer && !isLoopback(savedHost)) {

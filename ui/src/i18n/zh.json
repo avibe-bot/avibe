@@ -3381,8 +3381,8 @@
     }
   },
   "accessBlocked": {
-    "title": "无法在此地址打开控制台",
-    "body": "Avibe 正在运行，但拒绝在当前地址打开控制台。",
+    "title": "这个地址打不开 Avibe",
+    "body": "Avibe 在运行，但不在这个地址打开。",
     "hint": "在 avibe.bot 登录后，从你的列表里打开它；也可以在运行 Avibe 的那台电脑上直接打开。",
     "code": "原因：{{code}}",
     "retry": "重试"

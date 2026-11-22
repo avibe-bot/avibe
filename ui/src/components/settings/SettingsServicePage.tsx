@@ -265,9 +265,10 @@ export const SettingsServicePage: React.FC = () => {
               {t('settings.consoleServerTitle')}
             </span>
           }
-          description={!canChangeListener ? t('settings.consoleServerOwnerOnly') : uiMessage || (
+          description={!canChangeListener ? t('settings.consoleServerOwnerOnly') : (
             <>
-              {t('settings.consoleServerHint')}
+              {uiMessage || t('settings.consoleServerHint')}
+              {/* Also beside the result of a save: that is when a network address was just chosen. */}
               {bound && <span className="block">{t('settings.consoleServerBound')}</span>}
             </>
           )}
