@@ -1995,8 +1995,10 @@ def test_disabling_remote_access_stops_remote_delivery(monkeypatch, tmp_path):
     """A paired-but-disabled remote access must not authorize remote records."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.web_push_cutover import reconcile_startup
+
     config = _paired_revision_config(41, instance_kind="personal")
-    ensure_sqlite_state()
+    reconcile_startup(config)  # The host registration below comes after the bound upgrade.
     engine = create_sqlite_engine()
     now = "2026-08-15T00:00:00Z"
 

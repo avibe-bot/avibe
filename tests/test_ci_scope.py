@@ -317,6 +317,15 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     assert result.returncode == 0 and output.read_text() == "ios=run\n"
 
 
+@pytest.mark.parametrize("path", ["vibe/ui_network_access.py", "vibe/desktop_runtime.py", "vibe/ui_server.py",
+                                  "tests/test_ui_listener_lifecycle.py"])
+def test_native_ui_listener_changes_run_on_all_three_operating_systems(path):
+    jobs = make_plan("PR", scope(path))["jobs"]
+    assert all(jobs[job] == "run" for job in ("unit-test-shards", "install-upgrade-shards", "windows-control-ipc"))
+    for job in ("install-upgrade-shards", "windows-control-ipc"):
+        assert any("tests/test_ui_listener_lifecycle.py" in step.get("run", "") for step in workflow()["jobs"][job]["steps"])
+
+
 def test_check_results_never_accepts_absent_results():
     plan = make_plan("MG_THIN")
     assert check_results(plan, {}, ("unit-test-shards", "ui-checks"))

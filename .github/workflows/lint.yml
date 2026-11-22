@@ -987,6 +987,10 @@ jobs:
       # Every matrix member must leave real test evidence for scenario-evidence.
       # Linux already runs the full installer suite; Mac owns the harness-safety
       # tests as well as the live 3.15 acceptance below.
+      - name: Verify the native UI listener lifecycle on macOS
+        if: runner.os == 'macOS'
+        run: python -m pytest -q tests/test_ui_listener_lifecycle.py
+
       - name: Verify Python 3.15 acceptance harness isolation on macOS
         if: runner.os == 'macOS'
         run: python -m pytest -q tests/test_python315_install_regression.py
@@ -1385,6 +1389,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "26.13.1"
+
+      - name: Verify the native UI listener lifecycle on Windows
+        run: python -m pytest -q tests/test_ui_listener_lifecycle.py
 
       - name: Verify Windows Computer Use process ownership and kernel pipes
         timeout-minutes: 5
