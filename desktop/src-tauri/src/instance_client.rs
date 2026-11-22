@@ -1123,6 +1123,12 @@ pub(crate) async fn desktop_claim_review(
         return Err(deny());
     }
     let cancel = request.action.cancels();
+    let opens_document = request.action.opens_document();
+    let locale = receipt
+        .destination
+        .query_pairs()
+        .find_map(|(k, v)| (k == "locale").then(|| v.into_owned()))
+        .ok_or_else(deny)?;
     let caller = {
         // Cancel only attenuates the matching receipt. Keep all the actual
         // role checks, without refusing revocation because presentation I/O
@@ -1146,25 +1152,27 @@ pub(crate) async fn desktop_claim_review(
             .as_mut()
             .filter(|a| a.claim_receipt(window.label(), &client.view.bundle).as_ref() == Some(&receipt))
             .ok_or_else(deny)?;
-        if request.action.opens() {
-            role.claim = Some(client.coordinator.claim_document(request.expected_generation)?);
+        if opens_document {
+            role.claim = Some(
+                client
+                    .coordinator
+                    .claim_document(request.expected_generation)
+                    .map_err(|_| deny())?,
+            );
         }
-        role.claim.as_ref().ok_or_else(deny)?.caller()?
+        role.claim.as_ref().ok_or_else(deny)?.caller().map_err(|_| deny())?
     };
-    let locale = receipt
-        .destination
-        .query_pairs()
-        .find_map(|(k, v)| (k == "locale").then(|| v.into_owned()))
-        .ok_or_else(deny)?;
-    let opened = request.action.opens();
+    // The short opening lease exists already, even before observation dispatch.
+    // Monitor the original physical window during I/O, not just after it returns.
+    if opens_document {
+        watch_claim_visibility(physical.clone(), caller.clone());
+    }
     let reply = client
         .coordinator
         .claim_review(&shell.host, &caller, &locale, request)
         .await;
-    // Open has now reserved native state (no helper or HTTP). Arm monitoring
-    // before handing off the receipt, even if the renderer never receives it.
-    if opened && reply.is_ok() {
-        watch_claim_visibility(physical.clone(), caller.clone());
+    if opens_document && reply.is_err() {
+        caller.retire(); // release only this failed opening, never a successor
     }
     // This read cannot carry a reply through a replacement or into a hidden window.
     if !visible()

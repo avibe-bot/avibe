@@ -12,6 +12,7 @@ use crate::instance_client::{
 };
 mod enroll;
 mod factor;
+mod observation;
 mod output;
 mod passkey;
 mod recovery;

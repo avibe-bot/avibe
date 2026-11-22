@@ -100,6 +100,7 @@ fn the_direct_review_command_has_separate_receipt_and_decision_inputs() {
     let body = |action| json!({"expected_generation":1,"action":action});
     for action in [
         json!({"type":"open"}),
+        json!({"type":"observe_current_binding"}),
         json!({"type":"read","receipt":"opaque"}),
         json!({"type":"cancel","receipt":"opaque"}),
         json!({"type":"check","revision":"opaque","prefix":"fixture"}),
@@ -111,6 +112,9 @@ fn the_direct_review_command_has_separate_receipt_and_decision_inputs() {
     for input in [
         body(json!({"type":"open","user_code":"private"})),
         body(json!({"type":"open","receipt":"chosen"})),
+        body(json!({"type":"observe_current_binding","receipt":"old"})),
+        body(json!({"type":"observe_current_binding","instance_id":"other"})),
+        body(json!({"type":"observe_current_binding","enable":true})),
         body(json!({"type":"read","revision":"x"})),
         body(json!({"type":"check","receipt":"x","prefix":"fixture"})),
         body(json!({"type":"check","revision":"x","prefix":"fixture","existing_instance_id":"other"})),

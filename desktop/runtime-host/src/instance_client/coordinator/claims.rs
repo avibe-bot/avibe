@@ -57,6 +57,7 @@ pub struct ClaimRequest {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClaimAction {
     Open {},
+    ObserveCurrentBinding {},
     Read {
         receipt: String,
     },
@@ -105,8 +106,8 @@ pub enum ClaimAction {
     },
 }
 impl ClaimAction {
-    pub fn opens(&self) -> bool {
-        matches!(self, Self::Open {})
+    pub fn opens_document(&self) -> bool {
+        matches!(self, Self::Open {} | Self::ObserveCurrentBinding {})
     }
     pub fn cancels(&self) -> bool {
         matches!(self, Self::Cancel { .. })
@@ -122,6 +123,8 @@ fn opaque(s: &str) -> Result<Uuid> {
 #[derive(Default)]
 pub(super) struct Claims {
     clock: Arc<AtomicU64>,
+    // Short physical admission, before account checks outside the shell lock.
+    opening_until: Option<Instant>,
     active: Option<Active>,
 }
 struct Active {
@@ -132,6 +135,9 @@ struct Active {
     _stop: Option<oneshot::Sender<()>>,
 }
 enum Stage {
+    Observing {
+        until: Instant,
+    },
     Reserved {
         until: Instant,
     },
@@ -155,22 +161,25 @@ enum UseReview {
 impl Claims {
     pub(super) fn retire(&mut self) {
         self.clock.fetch_add(1, Ordering::SeqCst);
+        self.opening_until = None;
         self.active.take();
     }
     fn epoch(&self) -> Epoch {
         Epoch::new(self.clock.clone(), self.clock.load(Ordering::SeqCst))
     }
     fn expire(&mut self) {
-        if self.active.as_ref().is_some_and(|a| match &a.stage {
-            Stage::Reserved { until } => Instant::now() >= *until,
-            Stage::Reading {
-                delivery: Delivery::Confirming(_, until),
-                ..
-            } => Instant::now() >= *until,
-            Stage::Reading { idle: Some(c), .. } => !c.machine_live(),
-            Stage::Proof(step) => !step.live(&a.account),
-            _ => false,
-        }) {
+        if self.opening_until.is_some_and(|until| Instant::now() >= until)
+            || self.active.as_ref().is_some_and(|a| match &a.stage {
+                Stage::Reserved { until } | Stage::Observing { until } => Instant::now() >= *until,
+                Stage::Reading {
+                    delivery: Delivery::Confirming(_, until),
+                    ..
+                } => Instant::now() >= *until,
+                Stage::Reading { idle: Some(c), .. } => !c.machine_live(),
+                Stage::Proof(step) => !step.live(&a.account),
+                _ => false,
+            })
+        {
             self.retire();
         }
     }
@@ -179,6 +188,7 @@ impl Claims {
             return Err(busy());
         }
         let receipt = Uuid::new_v4();
+        self.opening_until = None;
         self.active = Some(Active {
             receipt,
             account,
@@ -337,7 +347,7 @@ impl ClaimCaller {
             return false;
         }
         o.expire();
-        o.active.is_some()
+        o.opening_until.is_some() || o.active.is_some()
     }
     pub fn retire(&self) {
         let mut o = self.owner.lock().expect("claim owner");
@@ -354,6 +364,7 @@ pub struct ClaimReply<'a> {
     caller: ClaimCaller,
 }
 enum ReplyBody<'a> {
+    Observation(&'a Coordinator, Box<binding_observation::BindingObservation<'a>>),
     Decision(&'a Coordinator, Box<decision::DecisionOutcome<'a>>),
     Mail(Box<proof::PendingMail<'a>>),
     Submission(Box<proof::SubmittedReply>),
@@ -376,6 +387,7 @@ impl ClaimReply<'_> {
         // These owners revalidate the receipt, account, credential and document
         // themselves. Never hold the claim mutex across their final check or Drop.
         let body = match self.body {
+            ReplyBody::Observation(c, observation) => return observation.take(c).map(Some),
             ReplyBody::Decision(c, decision) => {
                 return Ok(Some(match *decision {
                     decision::DecisionOutcome::Terminal(reply) => {
@@ -503,10 +515,11 @@ impl Coordinator {
         let mut owner = self.claims.lock().expect("claim owner");
         Epoch::new(self.generation.clone(), expected).check()?;
         owner.expire();
-        if owner.active.is_some() {
+        if owner.opening_until.is_some() || owner.active.is_some() {
             return Err(busy());
         }
         owner.retire();
+        owner.opening_until = Some(Instant::now() + RECEIPT_TTL);
         Ok(ClaimDocument {
             owner: self.claims.clone(),
             epoch: owner.epoch(),
@@ -534,6 +547,7 @@ impl Coordinator {
         let inner = self.inner.try_lock().map_err(|_| busy())?;
         let mut owner = self.claims.lock().expect("claim owner");
         account_epoch.check()?;
+        owner.expire();
         caller.check()?;
         if inner.state.account.status != AccountStatus::SignedIn || !inner.account.session.is_account() {
             return Err(auth());
@@ -562,6 +576,14 @@ impl Coordinator {
         caller.check()?;
         match &r.action {
             ClaimAction::Open {} => return self.reserve_claim(caller, epoch),
+            ClaimAction::ObserveCurrentBinding {} => {
+                let obs = self.observe_current_binding(host, caller, epoch.clone()).await?;
+                return Ok(ClaimReply {
+                    body: ReplyBody::Observation(self, Box::new(obs)),
+                    account: epoch,
+                    caller: caller.clone(),
+                });
+            }
             ClaimAction::Confirm { receipt, revision } => {
                 let decision = self
                     .confirm_claim(caller, r.expected_generation, opaque(receipt)?, opaque(revision)?)
