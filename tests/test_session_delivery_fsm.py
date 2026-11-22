@@ -9046,6 +9046,33 @@ async def test_unlinked_turn_end_never_enters_successor_write_transaction(manage
     assert await manager._resume_linked_control_successor("ses_fsm", turn_id) is None
 
 
+def test_turn_end_probes_seek_only_live_rows_in_fifo_order(managers):
+    """A negative head/owner check must not read a Session's terminal history."""
+    from sqlalchemy import event
+
+    _, _, engine, *_ = managers
+    plans = []
+
+    def explain(_conn, cursor, statement, parameters, *_):
+        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+
+    with engine.connect() as conn:
+        event.listen(conn, "before_cursor_execute", explain)
+        for probe in (
+            delivery_store.ordering_head,
+            lambda c, s: delivery_store.ordering_head(c, s, include_claimable=False),
+            delivery_store.claimable_fifo_head,
+            delivery_store.claimable_fifo_prefix,
+            delivery_store.active_turn,
+        ):
+            assert not probe(conn, "ses_fsm")
+
+    assert len(plans) == 5
+    for details, index in zip(plans, ["ix_message_deliveries_session_order"] * 4 + ["uq_session_turns_live_session"]):
+        assert any("SEARCH" in d and f"{index} (session_id=?)" in d for d in details), details
+        assert not any("TEMP B-TREE" in d for d in details), details
+
+
 def test_control_predecessor_lookup_seeks_both_link_ids(managers):
     _, _, engine, *_ = managers
     with engine.connect() as conn:

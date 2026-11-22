@@ -133,7 +133,9 @@ export type NativeSystemScheduleReceipt = {
 
 interface AvibeNative {
   readonly contract: 1;
-  readonly platform: NativePlatform;
+  /** `desktop`: the desktop app, in a window of another computer's instance.
+   *  It answers `direct` only, and is not a native shell in any other sense. */
+  readonly platform: NativePlatform | 'desktop';
   readonly shellVersion: string;
   readonly capabilities: Readonly<Record<string, number>>;
   call<T>(method: string, params?: Record<string, unknown>): Promise<T>;
@@ -147,12 +149,12 @@ declare global {
   }
 }
 
-function bridge(): AvibeNative | null {
+function bridgeOn(platforms: readonly string[]): AvibeNative | null {
   if (typeof window === 'undefined') return null;
   const candidate = window.avibeNative;
   if (
     candidate?.contract !== 1
-    || (candidate.platform !== 'ios' && candidate.platform !== 'android')
+    || !platforms.includes(candidate.platform)
     || typeof candidate.call !== 'function'
     || typeof candidate.on !== 'function'
     || !candidate.capabilities
@@ -160,6 +162,13 @@ function bridge(): AvibeNative | null {
     return null;
   }
   return candidate;
+}
+
+const PHONE_PLATFORMS: readonly NativePlatform[] = ['ios', 'android'];
+
+/** The phone App's bridge. Everything that means "inside the App" asks this. */
+function bridge(): AvibeNative | null {
+  return bridgeOn(PHONE_PLATFORMS);
 }
 
 export function isNativeShell(): boolean {
@@ -1046,9 +1055,23 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
   return tracker;
 }
 
+/**
+ * The shell that answers `direct`: the phone App, or the desktop app in a
+ * window of another computer's instance. Only the functions below ask it, so
+ * `isNativeShell()` and every other capability stay the phone App's alone.
+ */
 function directBridge(): AvibeNative | null {
-  const native = bridge();
+  const native = bridgeOn([...PHONE_PLATFORMS, 'desktop']);
   return native && (native.capabilities.direct ?? 0) >= 1 ? native : null;
+}
+
+function directVersion(): number {
+  return directBridge()?.capabilities.direct ?? 0;
+}
+
+/** This page runs in a shell with a direct path of its own (any `direct` version). */
+export function nativeDirectAvailable(): boolean {
+  return directVersion() >= 1;
 }
 
 /**
@@ -1133,12 +1156,12 @@ export function nativeDirectPathKind(): NativeDirectPathKind | null {
 
 /** The shell reports its path and its changes (`direct` version 3). */
 export function nativeDirectPathReported(): boolean {
-  return hasNativeCapability('direct', 3);
+  return directVersion() >= 3;
 }
 
 /** The shell answers `direct.handover` (`direct` version 2). */
 export function nativeDirectHandoverAvailable(): boolean {
-  return hasNativeCapability('direct', 2);
+  return directVersion() >= 2;
 }
 
 export type NativeDirectHandoverResult = { closed: number; kept: number; skipped?: string };

@@ -634,6 +634,39 @@ impl Wiring {
             .map(|found| found.target.origin.as_str())
     }
 
+    /// Whether a window of the instance at `origin` could ever be routed:
+    /// this system and configuration can route, and the address is one the
+    /// direct path serves. Whatever the choice of path is now.
+    pub fn routable(&self, origin: &str) -> bool {
+        self.routing != Routing::Unsupported
+            && !self.proxy_configured
+            && origin
+                .strip_prefix("https://")
+                .is_some_and(|host| Authority::managed(host).is_some())
+    }
+
+    /// The session whose route is on `window`, if one is.
+    pub fn routed_by(&self, window: &str) -> Option<u64> {
+        self.sessions
+            .iter()
+            .find(|session| session.routed.iter().any(|label| label == window))
+            .map(|session| session.id)
+    }
+
+    /// Whether `window` is the only `open` window that has the session's
+    /// route: its instance view and the app windows opened from it share one
+    /// listener, so what is closed in it for one page is closed for all. A
+    /// window that is only between two documents still counts.
+    pub fn sole(&self, session: u64, window: &str, open: impl Fn(&str) -> bool) -> bool {
+        self.sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .is_some_and(|found| {
+                found.routed.iter().any(|label| label == window)
+                    && found.routed.iter().all(|label| label == window || !open(label))
+            })
+    }
+
     /// Whether any session exists, so the shell knows to keep looking for
     /// windows that closed.
     pub fn busy(&self) -> bool {

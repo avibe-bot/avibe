@@ -711,26 +711,59 @@ fn append_account_items<R: Runtime>(
     application: Option<&Submenu<R>>,
     connection: Option<&Submenu<R>>,
 ) -> tauri::Result<()> {
-    for (id, key) in [
-        ("desktop-client-account", "accountService"),
-        ("desktop-client-instances", "switchInstance"),
-        ("desktop-client-sign-out", "signOut"),
-    ] {
-        if let Some(label) = instance_client::native_copy(key) {
-            let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
-            tray.append(&item)?;
-            if let Some(submenu) = application {
-                submenu.append(&item)?;
+    for item in account_items(connection.is_some()) {
+        match (item, connection) {
+            (AccountItem::Copy { id, key }, _) => {
+                if let Some(label) = instance_client::native_copy(key) {
+                    let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
+                    tray.append(&item)?;
+                    if let Some(submenu) = application {
+                        submenu.append(&item)?;
+                    }
+                }
             }
-        }
-        if let Some(connection) = connection.filter(|_| id == "desktop-client-instances") {
-            tray.append(connection)?;
-            if let Some(submenu) = application {
-                submenu.append(connection)?;
+            (AccountItem::Connection, Some(connection)) => {
+                tray.append(connection)?;
+                if let Some(submenu) = application {
+                    submenu.append(connection)?;
+                }
             }
+            (AccountItem::Connection, None) => {}
         }
     }
     Ok(())
+}
+
+/// One of the account's items, before it is built.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountItem {
+    /// An item of the account's own, with the key of its text.
+    Copy { id: &'static str, key: &'static str },
+    /// The 「连接方式」 submenu.
+    Connection,
+}
+
+/// The account's items in order, on every system. With a `connection`
+/// submenu, it comes right after "Switch instance".
+fn account_items(connection: bool) -> Vec<AccountItem> {
+    let mut items = vec![
+        AccountItem::Copy {
+            id: "desktop-client-account",
+            key: "accountService",
+        },
+        AccountItem::Copy {
+            id: "desktop-client-instances",
+            key: "switchInstance",
+        },
+    ];
+    if connection {
+        items.push(AccountItem::Connection);
+    }
+    items.push(AccountItem::Copy {
+        id: "desktop-client-sign-out",
+        key: "signOut",
+    });
+    items
 }
 
 fn stop_is_available(owned: bool, activity: u8) -> bool {
@@ -2154,6 +2187,12 @@ fn build_main_child(
     if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
         builder = builder.additional_browser_args(arguments);
     }
+    // Its page is told this window's path, and may ask for a hand-over.
+    if disposable {
+        if let Some(script) = direct::shell::page_script(app, label, destination) {
+            builder = builder.initialization_script(script);
+        }
+    }
     if let Some(script) = instance_client::initial_script(app) {
         builder = builder.initialization_script(script);
     }
@@ -2901,6 +2940,7 @@ pub fn run() {
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
+                    direct::shell::page_loaded(webview);
                     if webview.label() == pet::PET_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Started {
                         pet::page_loading(webview.app_handle());
                     }

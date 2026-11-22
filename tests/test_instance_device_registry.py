@@ -469,8 +469,18 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
         assert row["group"] == "unattributed" and row["push_only"]
         assert row["account"] is None and row["display_name"] is None
         assert sign_out(current, row["id"] + "/sign-out").status_code == 404
-    assert_local_result(sign_out(current, proven["id"] + "/sign-out"), 0)
-    assert_local_result(sign_out(owner, legacy["id"] + "/sign-out"), 0)
+    stopped = sign_out(current, proven["id"] + "/sign-out")
+    assert_local_result(stopped, 0)
+    # A device left with notifications only is still known by its proven account and that account's role.
+    assert [row["group"] for row in stopped.get_json()["sign_out_results"]] == ["mine"]
+    from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
+
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.execute(select(receipts.c.subject, roles.c.login_role).join_from(
+            receipts, roles, roles.c.receipt == receipts.c.id)).all() == [("member", "owner")]
+    stopped = sign_out(owner, legacy["id"] + "/sign-out")
+    assert_local_result(stopped, 0)
+    assert [row["group"] for row in stopped.get_json()["sign_out_results"]] == [None]
     loop = "http://127.0.0.1:5123"
     unpaired = ui_server.app.test_client()
     (unproven,) = listing(unpaired, loop)["unattributed"]
@@ -500,3 +510,87 @@ def test_legacy_adoption_and_ordinary_requests_are_read_only_after_first_visit(i
         for sql, params in observed:
             plan = conn.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, params).all()
             assert not any("SCAN remote_device" in r[-1] or "SCAN web_push" in r[-1] for r in plan), plan
+
+
+def test_a_sign_out_receipt_says_whose_device_it_was_for_each_viewer(install):
+    from storage.device_account_signout import recent
+    from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
+    from storage.web_push_service import upsert_subscription
+    from vibe.account_session_revoke import pairing_epoch
+
+    loop = "http://127.0.0.1:5123"
+    owner = client(login(install, "owner", "owner", installation="owner-desk"))
+    member = client(login(install, "member", "member", installation="member-desk"))
+    login(install, "owner", "owner", installation="owner-spare")
+    login(install, "member", "member", installation="member-spare")
+    login(install, "partner", "owner", installation="partner-desk")  # a second account that signs in as Owner
+    with get_cached_sqlite_engine().begin() as conn:
+        upsert_subscription(conn, user_key="remote:member", device_id="unproven", payload={
+            "endpoint": "https://example.invalid/unproven", "keys": {"auth": "fixture", "p256dh": "fixture"}})
+
+    def other(view, group):
+        (row,) = [r for r in view[group] if not r["current"] and r["id"] != "host"]
+        return row["id"]
+
+    def groups(c, origin=ORIGIN):
+        return {row["device_id"]: row["group"] for row in listing(c, origin)["recent_sign_outs"]}
+
+    def answered(response):
+        assert response.status_code == 200, response.get_json()
+        (result,) = response.get_json()["sign_out_results"]
+        return result["group"]
+
+    own_spare, member_spare = other(listing(owner), "mine"), other(listing(member), "mine")
+    member_desk = next(r["id"] for r in listing(member)["mine"] if r["current"])
+    (partner,) = [r["id"] for r in listing(owner)["others"] if r["account"]["subject"] == "partner"]
+    (unproven,) = [r["id"] for r in listing(owner)["unattributed"]]
+    # A signed-in viewer: by account, in the answer to the request and when read later.
+    assert answered(sign_out(owner, own_spare + "/sign-out")) == "mine"
+    assert answered(sign_out(owner, member_spare + "/sign-out")) == "others"
+    assert groups(owner) == {own_spare: "mine", member_spare: "others"}
+    # A member sees only receipts of their own devices, and they are theirs.
+    assert groups(member) == {member_spare: "mine"}
+    # A receipt written before the role was recorded is not sorted for anyone, whatever its name or kind says.
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.execute(roles.delete().where(roles.c.receipt.in_(
+            select(receipts.c.id).where(receipts.c.device_id == own_spare))))
+    assert groups(owner) == {own_spare: None, member_spare: "others"}
+    for row in listing(owner)["recent_sign_outs"]:
+        assert set(row) == {"operation_id", "device_id", "kind", "display_name", "group", "local_status", "account_results"}
+    # A viewer on this computer itself has no account: by the role the device signed in with.
+    install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    local = ui_server.app.test_client()
+    assert answered(sign_out(local, partner + "/sign-out", loop)) == "mine"
+    assert answered(sign_out(local, member_desk + "/sign-out", loop)) == "others"
+    assert answered(sign_out(local, unproven + "/sign-out", loop)) is None  # no account was ever proven for it
+    assert groups(local, loop) == {partner: "mine", member_desk: "others", unproven: None}
+    # The same receipts read by the signed-in Owner: the other Owner's device is not theirs.
+    with get_cached_sqlite_engine().connect() as conn:
+        seen = recent(conn, pairing_epoch(install), "owner", True, int(time.time()))
+    assert {row["device_id"]: row["group"] for row in seen} == {partner: "others", member_desk: "others", unproven: None}
+
+
+def test_a_receipt_takes_the_role_the_list_showed_when_no_cookie_is_live(install, monkeypatch):
+    from tests.test_remote_access_vibe_cloud import _pin_clock
+
+    clock = _pin_clock(monkeypatch, int(time.time()))
+    loop = "http://127.0.0.1:5123"
+    first = login(install, "person", "member", installation="phone")
+    c = client(first)
+    payload = {"endpoint": "https://example.invalid/kept", "keys": {"auth": "fixture", "p256dh": "fixture"}}
+    assert c.post("/api/web-push/subscriptions", base_url=ORIGIN, headers=csrf_headers(c, ORIGIN),
+                  json={"subscription": payload, "device_id": "same-id"}).status_code == 200
+    # The same device signs in again as Owner and does not register notifications again.
+    second = login(install, "person", "owner", installation="phone")
+    assert len(listing(client(second))["mine"]) == 2  # this computer and the one device
+    clock["now"] = max(remote_access.parse_session_identity(install, cookie)["exp"] for cookie in (first, second))
+    # Both cookies have idled out, neither has reached its absolute end: the list shows the notification registration.
+    install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    local = ui_server.app.test_client()
+    view = listing(local, loop)
+    (row,) = [r for r in view["mine"] + view["others"] if r["push_only"]]
+    assert row["group"] == "others" and row["account"]["login_role"] == "member"
+    stopped = sign_out(local, row["id"] + "/sign-out", loop)
+    assert stopped.status_code == 200
+    assert [r["group"] for r in stopped.get_json()["sign_out_results"]] == ["others"]
+    assert [r["group"] for r in listing(local, loop)["recent_sign_outs"]] == ["others"]

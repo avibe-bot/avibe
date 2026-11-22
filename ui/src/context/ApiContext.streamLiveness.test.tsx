@@ -191,7 +191,10 @@ const networkBack = () => {
  * A native shell with the `direct` capability. Its `direct.status` answers are
  * held until the test gives them; `emit` is the shell's event.
  */
-const installDirectShell = (capabilities: Record<string, number> = { direct: 1 }) => {
+const installDirectShell = (
+  capabilities: Record<string, number> = { direct: 1 },
+  platform: 'ios' | 'desktop' = 'ios',
+) => {
   let deliver: (payload: unknown) => void = () => {};
   const answers: Array<(value: unknown) => void> = [];
   const call = vi.fn(
@@ -206,7 +209,7 @@ const installDirectShell = (capabilities: Record<string, number> = { direct: 1 }
     configurable: true,
     value: {
       contract: 1,
-      platform: 'ios',
+      platform,
       shellVersion: '1.0 (1)',
       capabilities,
       call,
@@ -926,8 +929,8 @@ describe('ApiProvider workbench stream liveness', () => {
 
   // A shell that reports its path (`direct` version 3).
 
-  const pathShell = async () => {
-    const shell = installDirectShell({ direct: 3 });
+  const pathShell = async (platform: 'ios' | 'desktop' = 'ios') => {
+    const shell = installDirectShell({ direct: 3 }, platform);
     await mountDirectPage();
     await shell.answer(0, 0);
     emitHandshake(1);
@@ -947,6 +950,24 @@ describe('ApiProvider workbench stream liveness', () => {
     expect(shell.handovers()).toBe(0);
 
     shell.emit({ preferred: 'direct', sequence: 3, closure: 0, path: 'ipv4' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell.handovers()).toBe(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+  });
+
+  // The desktop app answers `direct` in a window of another computer's
+  // instance, the main view and an app window alike: each is a document of
+  // its own with this same bridge.
+  it('in the desktop app, hands over on a direct address, and never on the relay or back on the tunnel', async () => {
+    const shell = await pathShell('desktop');
+    shell.emit({ preferred: 'direct', sequence: 1, closure: 0, path: 'relay' });
+    await vi.advanceTimersByTimeAsync(11_000);
+    shell.emit({ preferred: 'tunnel', sequence: 2, closure: 0 });
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(shell.handovers()).toBe(0);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    shell.emit({ preferred: 'direct', sequence: 3, closure: 0, path: 'ipv6' });
     await vi.advanceTimersByTimeAsync(0);
     expect(shell.handovers()).toBe(1);
     expect(FakeEventSource.instances).toHaveLength(2);
