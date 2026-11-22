@@ -252,14 +252,21 @@ impl Claims {
         if claim.revision() != expected {
             return Err(changed());
         }
+        // A released revision identifies a review, not permission for every action.
+        // Reject a mismatched action before taking the helper or spending the revision.
         *delivery = match usage {
-            UseReview::Edit => Delivery::Unreleased,
+            UseReview::Edit
+                if claim.can_edit()
+                    && (*delivery == Delivery::Released(expected) || *delivery == Delivery::EditOnly) =>
+            {
+                Delivery::Unreleased
+            }
             UseReview::Confirm { receipt }
-                if receipt == active.receipt && *delivery == Delivery::Released(expected) =>
+                if receipt == active.receipt && *delivery == Delivery::Released(expected) && claim.can_confirm() =>
             {
                 Delivery::Confirming(expected, claim.deadline()?)
             }
-            UseReview::Confirm { .. } => return Err(changed()),
+            _ => return Err(changed()),
         };
         *interrupt = Some(wake);
         Ok((active.receipt, idle.take().expect("checked review")))

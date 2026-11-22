@@ -987,7 +987,28 @@ async fn check_cut(cut: &'static str) {
                 json!({"revision":revision.to_string(),"account_email":"fixture@example.test",
                                     "device_name":"fixture computer","screen":{"state":"owner_conflict"}})
             );
-            assert!(c.confirm_claim(&caller, generation, receipt, revision).await.is_err());
+            // Delivering this revision did not authorize a decision or prefix edit.
+            // Both must refuse before borrowing the helper, not as a terminal reply
+            // which consumes the original receipt when the shell drops it.
+            for action in [
+                json!({"type":"confirm", "receipt":receipt.to_string(), "revision":revision.to_string()}),
+                json!({"type":"check", "revision":revision.to_string(), "prefix":"spare"}),
+            ] {
+                assert!(output::dispatch(&c, &caller, generation, action).await.is_err());
+                assert!(caller.monitoring());
+                peer.assert_unarmed();
+            }
+            assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 1);
+            let cancelled = output::dispatch(
+                &c,
+                &caller,
+                generation,
+                json!({"type":"cancel", "receipt":receipt.to_string()}),
+            )
+            .await
+            .unwrap();
+            assert!(cancelled.deliver().unwrap().is_none());
+            assert!(peer.arm().await.is_err());
         } else {
             assert!(delivered.is_err());
         }

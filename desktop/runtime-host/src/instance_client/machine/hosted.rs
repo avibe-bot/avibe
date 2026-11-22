@@ -285,6 +285,18 @@ impl HostedClaim {
         self.revision = Uuid::new_v4();
         Ok(())
     }
+    pub(in crate::instance_client) fn can_confirm(&self) -> bool {
+        self.review.as_ref().and_then(|r| r.target.as_ref()).is_some_and(|t| {
+            self.machine
+                .as_ref()
+                .is_some_and(|m| t.existing_id.is_none() || m.ticket.existing_readback)
+        })
+    }
+    pub(in crate::instance_client) fn can_edit(&self) -> bool {
+        self.review
+            .as_ref()
+            .is_some_and(|r| matches!(r.screen, Screen::New { .. } | Screen::Capacity { .. }))
+    }
     pub(crate) fn screen(&self, flow: &AccountFlow, state: &AccountState) -> Result<ReviewView<'_>> {
         let (machine, _) = self.current(flow, state)?;
         let review = self.review.as_ref().ok_or_else(changed)?;
@@ -293,10 +305,7 @@ impl HostedClaim {
             account_email: &self.identity.email,
             device_name: &machine.ticket.device_name,
             screen: &review.screen,
-            can_confirm: review
-                .target
-                .as_ref()
-                .is_some_and(|t| t.existing_id.is_none() || machine.ticket.existing_readback),
+            can_confirm: self.can_confirm(),
         })
     }
     // An edit invalidates the prior decision *before* awaiting anything, including failed
@@ -309,16 +318,13 @@ impl HostedClaim {
         requested: Option<&str>,
     ) -> Result<()> {
         self.consume_revision(expected)?;
-        let previous = self.review.take();
+        let editable = self.can_edit();
+        self.review = None;
         self.conflict_credential = None;
         if requested.is_some_and(|p| !projection::new_prefix(p)) {
             return Err(ClientError::new("invalid_prefix"));
         }
-        if requested.is_some()
-            && previous
-                .as_ref()
-                .is_none_or(|r| !matches!(r.screen, Screen::New { .. } | Screen::Capacity { .. }))
-        {
+        if requested.is_some() && !editable {
             return Err(changed());
         }
         self.current(flow, state)?;
