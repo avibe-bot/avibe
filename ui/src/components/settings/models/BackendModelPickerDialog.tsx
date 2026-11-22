@@ -301,7 +301,7 @@ export const BackendModelPickerDialog: React.FC<{
             />
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          <div className="model-hub-catalog-scroll flex min-h-0 flex-1 flex-col overflow-y-auto">
             {readState === 'loading' ? (
               <div className="model-hub-picker-empty">
                 <LoaderCircle className="size-5 animate-spin" aria-hidden="true" />

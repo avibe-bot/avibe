@@ -3454,9 +3454,14 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 
 .model-hub-catalog-body {
   --model-hub-catalog-body-gap: 12px;
+  --model-hub-catalog-body-pad-y: 16px;
   gap: var(--model-hub-catalog-body-gap);
-  padding: 16px var(--model-hub-catalog-pad-x) 0;
+  padding: var(--model-hub-catalog-body-pad-y) var(--model-hub-catalog-pad-x) 0;
 }
+/* The list scrolls up to the footer's rule, so the inset below its last row is
+ * the list's own: scrolled to the end, that row stands as far from the footer as
+ * the first control stands from the head. */
+.model-hub-catalog-scroll { padding-bottom: var(--model-hub-catalog-body-pad-y); }
 
 /* The one height search and 「Add model」 both answer to. */
 .model-hub-catalog-control {
