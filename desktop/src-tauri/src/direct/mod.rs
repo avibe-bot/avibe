@@ -34,6 +34,10 @@ pub(crate) mod shell;
 #[cfg(all(test, windows))]
 #[path = "../../tests/direct/menu.rs"]
 mod menu_tests;
+// What the shell keeps per WebView2 exists on Windows alone.
+#[cfg(all(test, windows))]
+#[path = "../../tests/direct/answering.rs"]
+mod answering_tests;
 mod transport;
 #[cfg(target_os = "macos")]
 pub mod webview_macos;
