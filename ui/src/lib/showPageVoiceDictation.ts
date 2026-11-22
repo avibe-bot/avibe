@@ -1,5 +1,6 @@
 import { desktopVoiceLock } from './desktopVoiceLock';
 import { adoptedCaptureFactory, emptyVoiceStream, nativeCaptureFactory } from './nativeVoiceCapture';
+import type { HoldMiss } from './nativeVoiceHold';
 import {
   finalizeVoiceDictation,
   VOICE_SEGMENT_MS,
@@ -66,6 +67,9 @@ export type ShowPageVoiceDictationInput = {
   nativeCapture?: boolean | { adopt: string };
   /** When the press that started this take began (`Date.now()`), for the capture trace. */
   pressedAt?: number;
+  /** In the iOS App, why the App did not follow the press this take came from (the trace's
+   *  `holdMiss`; lib/nativeVoiceHold). */
+  holdMiss?: HoldMiss;
 };
 
 /** Speech heard without one live preview for this long: the realtime path is taken as not
@@ -177,6 +181,7 @@ export class ShowPageVoiceDictation {
     };
     this.dictationId = this.dependencies.newDictationId();
     this.trace = new VoiceCaptureTrace(input.entry ?? 'show_page', this.dictationId);
+    if (input.holdMiss) this.trace.holdMiss = input.holdMiss;
     if (input.pressedAt !== undefined) this.trace.pressed(input.pressedAt);
     this.keeper = input.keep ? new VoiceTakeKeeper(this.dictationId, input.keep) : null;
     this.context = resolveVoiceContext(input.context);

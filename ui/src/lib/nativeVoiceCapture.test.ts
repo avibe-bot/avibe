@@ -175,6 +175,47 @@ describe('NativePcmCapture', () => {
     );
   });
 
+  // From TestFlight 52.1: when the microphone could start, and the App's counts of the touches
+  // that were not holds, which the App's last word on a hold carries (`taps`).
+  it('keeps when the App\'s microphone could start and its counts of the touches that were not holds', async () => {
+    const on = handlers();
+    const trace = new VoiceCaptureTrace('hold', 'dictation-2');
+    adoptAnswer = async () => ({ sampleRate: 16_000, timings: { variant: 'early', startAfterMs: 50, deliveryMs: 14 } });
+    const capture = adoptedCaptureFactory('n0123456789abcdef')(emptyVoiceStream(), 16_000, 0, on, 5_000, trace) as NativePcmCapture;
+    await capture.start();
+    capture.stop();
+    for (const listener of [...holdListeners]) {
+      listener({
+        phase: 'timings',
+        take: 'n0123456789abcdef',
+        timings: {
+          variant: 'early', startAfterMs: 50, deliveryMs: 14, armedAt: 66, beginAt: 66, categoryMs: 9, prepareMs: 28,
+          taps: '50:3 75:12 100:4 moved=2 open=1 w50=9 w80=4',
+        },
+      });
+    }
+    for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', ended: true });
+    const attempt = trace.toEvent('sent').attempts[0];
+    expect(attempt).toMatchObject({
+      holdT: 50, holdDlyMs: 14, holdArmMs: 66, holdBeginMs: 66, holdCatMs: 9, holdPrepMs: 28,
+      holdTaps: 19, holdTapsMoved: 2, holdTapsOpen: 1, holdTapsW50: 9, holdTapsW80: 4, holdTapsW100: 0, holdTapsW120: 0,
+    });
+  });
+
+  it('keeps none of the tap counts when the App\'s line is not what it writes', async () => {
+    for (const taps of ['50:3 secret=1', '50:3  75:1', 'hold taps 50:3', 42, 'x'.repeat(401)]) {
+      const on = handlers();
+      const trace = new VoiceCaptureTrace('hold', 'dictation-3');
+      adoptAnswer = async () => ({ sampleRate: 16_000, timings: { variant: 'early', taps } });
+      const capture = adoptedCaptureFactory('n0123456789abcdef')(emptyVoiceStream(), 16_000, 0, on, 5_000, trace) as NativePcmCapture;
+      await capture.start();
+      const attempt = trace.toEvent('sent').attempts[0];
+      expect(Object.keys(attempt).filter((key) => key.startsWith('holdTaps')), String(taps)).toEqual([]);
+      capture.stop();
+      for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', ended: true });
+    }
+  });
+
   it('hands on what was recorded before the take was taken 100 ms at a time, in order', async () => {
     const on = handlers();
     const capture = new NativePcmCapture(on, 5_000, undefined, 'n0123456789abcdef');

@@ -1,3 +1,4 @@
+import type { HoldMiss } from './nativeVoiceHold';
 import { isNativeShell } from './native';
 import { isDesktopShell } from './desktopShell';
 import { isStandalonePwa } from './platform';
@@ -178,6 +179,24 @@ export type VoiceCaptureAttempt = {
    *  the microphone. */
   holdActMs?: number;
   holdStartMs?: number;
+  /** When the App's microphone could start: the earliest time after touch-down, how long the
+   *  touch took to reach the App, when the input was prepared and asked to start (ms from the
+   *  App's handling of the touch), and the session's category and the engine's set-up. */
+  holdT?: number;
+  holdDlyMs?: number;
+  holdArmMs?: number;
+  holdBeginMs?: number;
+  holdCatMs?: number;
+  holdPrepMs?: number;
+  /** The App's counts of the touches on its surfaces that were not holds, since installation:
+   *  lifted, moved away, the microphone started for, and would have been with each judged time. */
+  holdTaps?: number;
+  holdTapsMoved?: number;
+  holdTapsOpen?: number;
+  holdTapsW50?: number;
+  holdTapsW80?: number;
+  holdTapsW100?: number;
+  holdTapsW120?: number;
 };
 
 export type VoiceNativeEnd = 'interrupted' | 'route' | 'background' | 'gone' | 'replaced' | 'action_button' | 'other';
@@ -197,6 +216,8 @@ export type VoiceCaptureTraceEvent = {
   /** A hold's take: how long before the take began the finger came down (its hold, the consent
    *  and permission checks), so the press's first captured audio is `pressMs` plus the capture's. */
   pressMs?: number;
+  /** In the iOS App, why the App did not follow the press this take came from (lib/nativeVoiceHold). */
+  holdMiss?: HoldMiss;
   micMs?: number;
   mic?: string;
   totalMs: number;
@@ -242,6 +263,8 @@ export type VoiceCaptureTraceEvent = {
 /** One take's capture, filled as it happens and logged once when the take's capture ends. */
 export class VoiceCaptureTrace {
   readonly entry: VoiceCaptureEntry;
+  /** In the iOS App, why the App did not follow the press this take came from. */
+  holdMiss: HoldMiss | undefined;
   private pressMs: number | undefined;
   dictationId: string | undefined;
   private readonly startedAt = now();
@@ -417,6 +440,7 @@ export class VoiceCaptureTrace {
       captureClass: this.captureClass(),
       ...(this.stopKind ? { stop: this.stopKind } : {}),
       ...(this.pressMs !== undefined ? { pressMs: this.pressMs } : {}),
+      ...(this.holdMiss ? { holdMiss: this.holdMiss } : {}),
       ...(this.micMs !== undefined ? { micMs: this.micMs, mic: this.micResult } : {}),
       totalMs: ms(now() - this.startedAt),
       pageAgeMs: ms(now()),

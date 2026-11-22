@@ -187,7 +187,7 @@ describe('ShowPageVoiceDictation', () => {
     const getUserMedia = vi.fn(async () => fakeStream().stream);
     let options: VoiceRecordingPipelineOptions | undefined;
     const pressedAt = Date.now() - 260;
-    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold', nativeCapture: true, pressedAt }, {
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold', nativeCapture: true, pressedAt, holdMiss: 'covered' }, {
       getUserMedia,
       createRealtime: () => ({
         start: async () => undefined,
@@ -210,6 +210,8 @@ describe('ShowPageVoiceDictation', () => {
     expect(options?.trace?.toEvent('sent').pressMs).toBeGreaterThanOrEqual(260);
     // No microphone of the page's was asked for: the App's capture settles it.
     expect(options?.trace?.toEvent('sent').micMs).toBeUndefined();
+    // Why the App did not follow the press this take came from.
+    expect(options?.trace?.toEvent('sent').holdMiss).toBe('covered');
     dictation.abort();
   });
 

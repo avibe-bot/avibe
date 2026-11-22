@@ -23,6 +23,7 @@ type Fake = {
     onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
     nativeCapture?: boolean | { adopt: string };
     pressedAt?: number;
+    holdMiss?: string;
   };
   done: Promise<string>;
   resolve: (text: string) => void;
@@ -1263,6 +1264,8 @@ describe('a hold the iOS App recognises', () => {
     });
     expect(pipeline.takes).toHaveLength(1);
     expect(pipeline.takes[0].input.nativeCapture).toEqual({ adopt: 'n1' });
+    // A take the App recorded says no miss.
+    expect(pipeline.takes[0].input.holdMiss).toBeUndefined();
     expect(pipeline.takes[0].input.pressedAt).toBe(pressedAt);
     expect(pipeline.takes[0].start).toHaveBeenCalledTimes(1);
     expect(native.permission).not.toHaveBeenCalled();
@@ -1318,6 +1321,8 @@ describe('a hold the iOS App recognises', () => {
     expect(pipeline.takes).toHaveLength(1);
     // Its own start, as in an App that does not recognise holds.
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The trace says the App followed it and never answered.
+    expect(pipeline.takes[0].input.holdMiss).toBe('unanswered');
     expect(hold.phase).toBe('listening');
     expect(native.impact).toHaveBeenCalledWith('medium');
 
@@ -1407,6 +1412,8 @@ describe('a hold the iOS App recognises', () => {
     await flush();
     expect(pipeline.takes).toHaveLength(1);
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The trace says why the App did not record it.
+    expect(pipeline.takes[0].input.holdMiss).toBe('failed');
   });
 
   it('refuses a hold the page does not see: no press, a press that already ended, or a take in the way', async () => {
@@ -1541,6 +1548,8 @@ describe('a hold the iOS App recognises', () => {
     await flush();
     expect(pipeline.takes).toHaveLength(1);
     expect(pipeline.takes[0].input.nativeCapture).toBe(true);
+    // The trace says why the App did not follow it.
+    expect(pipeline.takes[0].input.holdMiss).toBe('off');
     expect(hold.phase).toBe('listening');
     expect(native.impact).toHaveBeenCalledWith('medium');
     up(el);
