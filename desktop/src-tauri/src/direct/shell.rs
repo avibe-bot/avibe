@@ -546,8 +546,8 @@ pub(crate) fn window_arguments(route_argument: &str) -> String {
     format!("{WRY_DEFAULT_ARGUMENTS} {route_argument}")
 }
 
-/// A route for a window that is about to be created, where a route can only
-/// be given then.
+/// The session a window that is about to be created is routed to, so that
+/// its route is in place before its first load.
 pub(crate) struct AtCreation {
     session: u64,
     /// The whole of the window's browser arguments, where its route is given
@@ -556,20 +556,17 @@ pub(crate) struct AtCreation {
 }
 
 /// The main window's instance view for `destination` is about to be created,
-/// on the main thread. Where a route can only be given at creation, and this
-/// account's instance has answered a rendezvous before, this starts its
-/// client and returns the route; otherwise `None`, and the view is created
-/// as it always was.
+/// on the main thread. When this account's instance has answered a
+/// rendezvous before, this starts its client and returns the route, which
+/// `window_created` puts in place before the view's first load; otherwise
+/// `None`, and the view is created as it always was.
 pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Option<AtCreation> {
-    let state = direct(app)?;
-    if !lock(&state.wiring).routes_at_creation() {
-        return None;
-    }
+    let state = direct(app).filter(|state| state.available)?;
     let target = target_at(app, destination)?;
     let host = target.host()?.to_owned();
     // The system's settings are read, and the listener is bound, here and
-    // now, so its port is in the arguments. Never from a thread that is
-    // running the async runtime.
+    // now, so the route is there before the view asks for anything. Never
+    // from a thread that is running the async runtime.
     if tokio::runtime::Handle::try_current().is_ok() {
         return None;
     }
@@ -583,14 +580,15 @@ pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Op
     }
     let client = tauri::async_runtime::block_on(Client::new(&host, target.instance.clone()))?;
     let material = material(&client)?;
-    let arguments = native::arguments(&host, &material)?;
+    // Where the route is the window's arguments, there is none without them.
+    let arguments = native::arguments(&host, &material);
+    if arguments.is_none() && lock(&state.wiring).routes_at_creation() {
+        return None;
+    }
     let session = lock(&state.wiring).open(target, material, None, Instant::now());
     start(app, &state, session, client);
     state.wake.notify_one();
-    Some(AtCreation {
-        session,
-        arguments: Some(arguments),
-    })
+    Some(AtCreation { session, arguments })
 }
 
 /// The signed-in instance whose document `destination` is, by its origin.
