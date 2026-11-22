@@ -281,8 +281,10 @@ const designFrames = frames([
     { reach: on, devices: [...all('host'), pushOnly], activity, detail: 'push-ipad' }),
 
   // 5. Confirmations: asked only where something is lost.
-  frame('confirm-sign-out-health', '退出 iPhone：会删除健康数据，所以先确认', at(860),
+  frame('confirm-sign-out-health', '在运行 Avibe 的电脑上退出 iPhone：健康数据要确认所有者之后才删，照实说，按钮只是「退出」', at(860),
     { reach: on, devices: all('host'), activity, detail: 'iphone', confirm: 'remove' }),
+  frame('confirm-sign-out-health-remote', '从别的设备上退出 iPhone：会删除健康数据，所以先确认', at(860),
+    { ...remote, devices: all('mini'), activity, detail: 'iphone', confirm: 'remove' }),
   frame('confirm-health-off', '关闭 iPhone 的健康：会删除已同步的数据，所以先确认', at(860),
     { reach: on, devices: all('host'), activity, detail: 'iphone', confirm: 'health-off' }),
   frame('confirm-health-off-phone', '关闭健康 · 375 宽', PHONE, { reach: on, devices: all('host'), activity, detail: 'iphone', confirm: 'health-off' }),

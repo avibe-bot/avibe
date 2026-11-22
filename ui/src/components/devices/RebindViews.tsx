@@ -145,13 +145,11 @@ function List({ title, items }: { title: string; items: Array<string | null> }) 
   );
 }
 
-export function RebindDialogs({ dialog, state, host, account, busy, actions }: {
+export function RebindDialogs({ dialog, state, host, busy, actions }: {
   dialog: RebindDialog;
   state: RebindState;
   /** The domain this computer is bound to now, when known. */
   host?: string;
-  /** The account this computer is bound to, when this page knows it. */
-  account?: string;
   busy?: boolean;
   actions: RebindActions;
 }) {
@@ -165,7 +163,7 @@ export function RebindDialogs({ dialog, state, host, account, busy, actions }: {
           <DialogHeader>
             <DialogTitle className="text-balance">{t('devices.rebind.confirmTitle')}</DialogTitle>
             <DialogDescription>
-              <KeptTail text={account ? t('devices.rebind.confirmBody', { account, host: domain }) : t('devices.rebind.confirmBodyPlain', { host: domain })} />
+              <KeptTail text={t('devices.rebind.confirmBody')} />
             </DialogDescription>
           </DialogHeader>
           <p className="text-[13px] leading-relaxed text-foreground"><KeptTail text={t('devices.rebind.copiedData')} /></p>

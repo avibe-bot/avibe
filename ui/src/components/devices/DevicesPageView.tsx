@@ -682,6 +682,7 @@ export function DevicesPageView({
   const self = devices.find((each) => each.self);
   const host = devices.find((each) => each.kind === 'host');
   const selfName = self && self.kind !== 'host' ? deviceName(t, self) : null;
+  const atHost = self?.kind === 'host';
   const othersSyncHealth = (bulk === 'all_remote' ? remote : signedIn).some(signOutNeedsConfirm);
   // Until a device besides the computer that runs Avibe is listed, the way to add one is in the list.
   const onlyHost = mine.every((each) => each.kind === 'host');
@@ -694,10 +695,12 @@ export function DevicesPageView({
     : host?.name
       ? t('devices.confirm.turnOffLockedAlone', { host: host.name })
       : t('devices.confirm.turnOffLockedAloneHost');
+  // The domain is the owner's: only they are told it is kept for them.
+  const kept = t(owner ? 'devices.confirm.turnOffKept' : 'devices.confirm.turnOffKeptMember');
   // Who is turning it off is said only when this device is known, and by its name.
   const turnOffBody = selfName
-    ? t('devices.confirm.turnOffBodyFrom', { from: t('devices.confirm.turnOffFrom', { device: selfName }), locked: lockedText, kept: t('devices.confirm.turnOffKept') })
-    : t('devices.confirm.turnOffBodyPlain', { locked: lockedText, kept: t('devices.confirm.turnOffKept') });
+    ? t('devices.confirm.turnOffBodyFrom', { from: t('devices.confirm.turnOffFrom', { device: selfName }), locked: lockedText, kept })
+    : t('devices.confirm.turnOffBodyPlain', { locked: lockedText, kept });
   const unlinkedOpen = typeof confirm === 'object' ? unlinkedHealth.find((each) => each.id === confirm.unlinkedHealth) : undefined;
   const confirmProps = { busy, onConfirm: actions.onConfirm, onCancel: actions.onCancelConfirm };
   let bulkRow: ReactNode = null;
@@ -792,8 +795,9 @@ export function DevicesPageView({
       {opened && confirm === 'remove' && (
         <Confirm
           title={t('devices.confirm.removeTitle', { name: deviceName(t, opened) })}
-          body={t('devices.confirm.removeBody')}
-          action={t('devices.confirm.removeAction')}
+          // At the computer itself the data goes only once the owner is confirmed.
+          body={t(atHost ? 'devices.confirm.removeBodyAtHost' : 'devices.confirm.removeBody')}
+          action={t(atHost ? 'devices.confirm.removeActionAtHost' : 'devices.confirm.removeAction')}
           {...confirmProps}
         />
       )}

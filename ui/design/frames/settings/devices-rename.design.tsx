@@ -147,7 +147,7 @@ const designFrames = frames([
     { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, { canReset: false }),
 
   // Its dialogs.
-  rebind('rebind-confirm', '重新绑定 · 确认：旧的设备密钥立即作废；数据被整个复制过的话该怎么办', MID, { state: 'ready' }, { rebindDialog: { kind: 'confirm' } }),
+  rebind('rebind-confirm', '重新绑定 · 确认：完成后旧的设备密钥作废，地址通常不变；数据被整个复制过的话该怎么办', MID, { state: 'ready' }, { rebindDialog: { kind: 'confirm' } }),
   rebind('rebind-confirm-phone', '重新绑定 · 确认 · 375 宽', PHONE, { state: 'ready' }, { rebindDialog: { kind: 'confirm' } }),
   rebind('rebind-as-new', '作为一台新电脑重新绑定 · 确认：会失去什么、保留什么、不会改变什么', { width: 1440, height: 1200 },
     { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, { canReset: true, rebindDialog: { kind: 'asNew', healthConnected: true } }),

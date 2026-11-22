@@ -258,12 +258,29 @@ describe('DevicesPage · devices', () => {
     fireEvent.click(await screen.findByText('iPhone'));
     fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
     expect(signOut).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole('button', { name: '退出并删除健康数据' }));
+    // At the computer running Avibe the data goes only once the owner is confirmed: said so, and
+    // the button promises no deletion.
+    await screen.findByRole('button', { name: '退出' });
+    const asked = screen.getByRole('dialog');
+    expect(asked.textContent).toContain('会在确认这个 Avibe 的所有者之后删除；确认不了就不会删，可以之后在这里单独断开健康。');
+    expect(within(asked).queryByRole('button', { name: '退出并删除健康数据' })).toBeNull();
+    fireEvent.click(within(asked).getByRole('button', { name: '退出' }));
     await waitFor(() => expect(signOut).toHaveBeenCalledWith('iphone'));
     // The row the page acted on was one of the viewer's own: only that half is said.
     expect(await screen.findByText(said('在那台设备上退出 avibe.bot；设备不在手边'))).toBeTruthy();
     expect(screen.queryByText(said('就在「访问」里移除对方'))).toBeNull();
     expect(screen.getByText(said('它同步过的健康数据，清理尚未确认。'))).toBeTruthy();
+  });
+
+  it('says from another device that signing out deletes the Health data', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([{ ...macbook, self: undefined }, iphone, { ...chrome, self: true }]));
+    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({ signedOut: [], healthCleanupPending: false });
+    mount('/settings/remote-access', 'owner', true);
+
+    fireEvent.click(await screen.findByText('iPhone'));
+    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+    await screen.findByRole('button', { name: '退出并删除健康数据' });
+    expect(screen.getByRole('dialog').textContent).toContain('这台设备同步到这个 Avibe 的健康数据会被删除。');
   });
 
   it('turns Health off only after a confirmation, and disconnects an unproven pairing by its own id', async () => {
@@ -403,6 +420,9 @@ describe('DevicesPage · devices', () => {
     fireEvent.click(remoteAccess);
     expect(stop).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog').textContent).toContain('所有远程设备（包括这一台）都打不开');
+    // The domain is not a member's: it is kept, not kept for them.
+    expect(screen.getByRole('dialog').textContent).toContain('域名会保留。');
+    expect(screen.getByRole('dialog').textContent).not.toContain('为你保留');
     fireEvent.click(screen.getByRole('button', { name: '关闭远程访问' }));
     await waitFor(() => expect(stop).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.getByRole('switch', { name: '远程访问' }).getAttribute('aria-checked')).toBe('false'));
