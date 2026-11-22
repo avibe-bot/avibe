@@ -66,6 +66,34 @@ def restrict(client, origin=HOST, peer=None, **kwargs):
     return client.post(ACTION, base_url=origin, environ_base=peer or {}, **kwargs)
 
 
+@pytest.mark.parametrize(('peers', 'on', 'scope'), [
+    ('192.0.2.7,not-an-address', False, 'single_address'),
+    ('192.0.2.7/32', False, 'range'),
+    ('192.0.2.7,2001:db8::7', True, 'range'),
+    ('::1,127.0.0.0/8', True, None),
+    ('::ffff:127.0.0.1', True, None),
+    ('', False, None),
+])
+def test_devices_describes_only_effective_proxy_declarations(installation, monkeypatch, peers, on, scope):
+    client, _ = installation
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, peers)
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, 'https://work.example.test:8443,https://ONE.example.test:443/')
+    config = V2Config.load()
+    config.ui.trusted_public_origins = ['https://one.example.test', 'https://else-app.avibe.bot', 'https://user@invalid.test']
+    config.remote_access.vibe_cloud.enabled = on
+    config.save()
+    response = client.get('/api/devices', base_url=HOST)
+    assert response.status_code == 200
+    data = response.get_json()
+    if scope is None:
+        assert 'unauthenticated_proxy_access' not in data
+    else:
+        assert data['unauthenticated_proxy_access'] == {
+            'origins': ['https://one.example.test', 'https://work.example.test:8443'], 'peer_scope': scope,
+        }
+    assert [row['id'] for row in data['mine']] == ['host']
+
+
 def test_restrict_from_lan_changes_only_host_and_keeps_notification_grant(installation):
     client, servers = installation
     before = V2Config.load()._persisted_document()

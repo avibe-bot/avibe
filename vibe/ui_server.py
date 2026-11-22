@@ -90,7 +90,7 @@ from modules.agents.catalog import (
     supports_runtime_refresh,
 )
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
-from vibe import ui_network_access
+from vibe import declared_proxy, ui_network_access
 from vibe.network_position import BindingState, binding_state, position_snapshot
 from vibe.setup_network_stream import serve_setup_connection
 from vibe.http_request_diagnostics import RequestCounterMiddleware, RequestCounters
@@ -367,8 +367,8 @@ REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS = 300
 REMOTE_OAUTH_DEVICE_COOKIE_NAME = "__Host-vibe_oauth_device"
 REMOTE_OAUTH_DEVICE_TTL_SECONDS = 180 * 24 * 60 * 60
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-TRUSTED_PROXY_IPS_ENV = "VIBE_UI_TRUSTED_PROXY_IPS"
-TRUSTED_PUBLIC_ORIGINS_ENV = "VIBE_UI_TRUSTED_PUBLIC_ORIGINS"
+TRUSTED_PROXY_IPS_ENV = declared_proxy.PEERS_ENV
+TRUSTED_PUBLIC_ORIGINS_ENV = declared_proxy.ORIGINS_ENV
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
     ("ui", _UI_LOG_FILENAME, lambda: paths.get_logs_dir() / _UI_LOG_FILENAME),
@@ -642,14 +642,7 @@ def _forwarded_host_has_explicit_port(value: str) -> bool:
 
 
 def _trusted_public_origin_entries(config: V2Config | None) -> list[str]:
-    values: list[str] = []
-    configured = getattr(getattr(config, "ui", None), "trusted_public_origins", None)
-    if isinstance(configured, str):
-        values.extend(configured.split(","))
-    elif isinstance(configured, (list, tuple, set)):
-        values.extend(str(value) for value in configured)
-    values.extend(os.environ.get(TRUSTED_PUBLIC_ORIGINS_ENV, "").split(","))
-    return [value.strip() for value in values if value and value.strip()]
+    return list(declared_proxy.origin_entries(config, os.environ.get(TRUSTED_PUBLIC_ORIGINS_ENV, '')))
 
 
 def _trusted_public_origin_entry_matches(
@@ -9720,6 +9713,12 @@ async def restrict_host_network(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+def _owner_proxy_fields():
+    config, _ = position_snapshot()
+    policy = declared_proxy.listener_policy(config)
+    return policy.projection() if policy is not None else {}
+
+
 @app.route('/api/devices', methods=['GET'])
 async def device_list():
     from storage import device_catalog
@@ -9736,7 +9735,9 @@ async def device_list():
     if viewer is None:
         config = _load_remote_access_config()
         if config and binding_state(config) is BindingState.UNBOUND and _is_setup_host_request(config):
-            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': []})
+            context = _request_authorization_context()
+            fields = await asyncio.to_thread(_owner_proxy_fields) if context and context.is_instance_owner else {}
+            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': [], **fields})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
@@ -9770,7 +9771,8 @@ async def device_list():
         if effective=='ready' and await internal_client.health_identity() is None:
             effective = 'unavailable'
         host['functions'] = [{'kind':'computerUse','fixed':True,'can_change':False,'on':status.enabled,'status':effective}]
-    return jsonify({**groups, 'unlinked_health':unlinked, 'recent_sign_outs':history, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+    fields = await asyncio.to_thread(_owner_proxy_fields) if owner else {}
+    return jsonify({**groups, **fields, 'unlinked_health':unlinked, 'recent_sign_outs':history, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
 
 
 @app.route('/api/devices/<device_id>/notifications', methods=['PUT'])
