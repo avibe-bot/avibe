@@ -555,12 +555,62 @@ def test_status_start_and_pair_say_what_the_binding_needs(bound_terminal, monkey
         err = capsys.readouterr().err
         assert sentence in err and "vibe remote rebind" in err and error not in err
 
-    # Pairing over a computer whose remote access was off keeps it off: not a failed start.
-    monkeypatch.setattr(remote_access, "pair", lambda *_: {"ok": True, "paired": True, "enabled": False,
+    # Pairing over a computer whose remote access was switched off keeps it off: not a failed start.
+    monkeypatch.setattr(remote_access, "pair", lambda *_: {"ok": True, "paired": True, "enabled": True,
                                                            "pairing": {"ok": True}})
     args = SimpleNamespace(json=False, pairing_key="key_B", backend_url="https://backend.test", device_name="avibe")
     assert cli.cmd_remote_pair(args) == 0
     captured = capsys.readouterr()
     assert "Remote access was off on this computer and stays off." in captured.out and not captured.err
     assert captured.out.rstrip().endswith("vibe remote start")
+
+    # Disabled in settings is a different state: `vibe remote start` refuses it, so the
+    # hint names the setting and its file, and the start command says the same.
+    monkeypatch.setattr(remote_access, "pair", lambda *_: {"ok": True, "paired": True, "enabled": False,
+                                                           "pairing": {"ok": True}})
+    assert cli.cmd_remote_pair(args) == 0
+    out = capsys.readouterr().out
+    assert "is disabled in this computer's settings and stays disabled." in out and "Turn it on with" not in out
+    assert "vibe remote start does not turn it on." in out and "remote_access.vibe_cloud.enabled to true" in out
+    assert str(cli.paths.get_config_path()) in out and out.rstrip().endswith("vibe remote start")
+
+
+def test_a_completed_binding_on_a_computer_disabled_in_settings_does_not_point_at_start_alone(bound_terminal, monkeypatch, capsys):
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    monkeypatch.setattr(remote_rebind, "read_state", lambda: ("bound", False, None))
+
+    remote_rebind._say_bound_now()
+
+    out = capsys.readouterr().out
+    assert "Finished. This computer is bound:" in out and "The tunnel is not running yet" not in out
+    assert "is disabled in this computer's settings and stays disabled." in out
+    assert "vibe remote start does not turn it on." in out and out.rstrip().endswith("vibe remote start")
+
+
+@pytest.mark.parametrize("bound", [True, False])
+def test_start_on_a_computer_disabled_in_settings_names_the_setting_only_when_bound(monkeypatch, tmp_path, capsys, bound):
+    from tests.test_remote_access_vibe_cloud import _config
+
+    # The real start against a real settings file, with no connector to launch.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = False
+    cloud.tunnel_token = "fixture-tunnel" if bound else ""
+    if not bound:
+        cloud.instance_id = ""
+    config.save()
+
+    assert cli.cmd_remote_start(SimpleNamespace(json=False)) == 1
+
+    err = capsys.readouterr().err
+    if bound:
+        assert "Remote access was not started: it is disabled in this computer's settings." in err
+        assert "remote_access.vibe_cloud.enabled to true" in err and str(cli.paths.get_config_path()) in err
+        assert "remote_access_disabled" not in err
+    else:
+        # Nothing to enable on a computer that is not bound; that output is unchanged here.
+        assert "settings file" not in err and "remote_access_disabled" in err
     assert cli._CLI_COMMAND_FLOORS[("remote", "rebind")] == "owner"

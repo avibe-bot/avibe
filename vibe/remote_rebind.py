@@ -174,6 +174,7 @@ TEXT = {
     "bound": "Bound. This computer's Avibe is at https://{host}, owned by {email}.",
     "bound_sign_in": "Sign in at that address on your other devices.",
     "tunnel_not_running": "The tunnel is not running yet. Start it with:\n  vibe remote start",
+    "remote_disabled": "Remote access is disabled in this computer's settings and stays disabled.",
     "link_declined": "Not bound. You answered no, so nothing was bound. To try again:\n" + COMMAND,
     "link_stopped": "Stopped. Nothing was bound; this computer is not bound. To continue:\n" + COMMAND,
     "link_stopped_after_accept": (
@@ -767,8 +768,26 @@ def _after_reset_offer(ctx: _Context, outcome: str, *, live_attempt: str = "reco
 
 def _say_bound_now() -> None:
     _say("continue_finished", url=_context().url)
-    if not read_state()[1]:  # Completing a binding does not turn remote access back on.
+    if read_state()[1]:
+        return
+    # Completing a binding does not turn remote access back on. Name the command
+    # that does, or the setting that `vibe remote start` would refuse.
+    if _remote_access_disabled():
+        from vibe.cli import _remote_disabled_lines
+
+        _say("remote_disabled")
+        print("\n".join(_remote_disabled_lines()))
+    else:
         _say("tunnel_not_running")
+
+
+def _remote_access_disabled() -> bool:
+    try:
+        from config.v2_config import V2Config
+
+        return V2Config.load().remote_access.vibe_cloud.enabled is False
+    except Exception:
+        return False
 
 
 def _continue_unfinished(ctx: _Context, started_as: str) -> int:

@@ -750,6 +750,18 @@ The tunnel is not running yet. Start it with:
 隧道还没有运行。启动它：vibe remote start
 ```
 
+**H2d** · Codex: the start hint is wrong when remote access is disabled in settings · after H2 when the tunnel is not running and `remote_access.vibe_cloud.enabled` is false in the settings file. Then the five lines in section I. How a person gets here: they, a script or an Agent set that field to false in the settings file; no page and no `vibe remote` command writes it on a bound computer.
+
+```
+Remote access is disabled in this computer's settings and stays disabled.
+```
+
+中文说明：
+
+```
+这台电脑的设置里停用了远程访问，现在仍然停用。（接着是设置项、设置文件的位置和 vibe remote start）
+```
+
 **H3** · reviewer T-1: `idle` is never "Finished" · the step found nothing to continue (`idle`): for example the saved request had expired and the backend settled it. Section B is printed again for the state as it is now, and the ordinary flow for that state follows. How a person gets here: they approved a bind, it was cut short, and they came back after the key had expired.
 
 ```
@@ -971,6 +983,8 @@ To look again:
 | `vibe remote start` | `binding_rejected` | `Remote access was not started: avibe.bot is refusing this computer's binding.` + `See what can be done: vibe remote rebind` |
 | | `reset_in_progress` | `Remote access was not started: a reset of this computer's binding has not finished.` + `Continue it: vibe remote rebind` |
 | `vibe remote pair`, success on a computer whose remote access was off | pairing ok, no `start` in the result | `Pairing saved. Remote access was off on this computer and stays off.` + `Turn it on with:` + `  vibe remote start` (exit 0) |
+| `vibe remote pair`, success on a computer where remote access is disabled in settings | pairing ok, no `start`, `enabled` false | `Pairing saved. Remote access is disabled in this computer's settings and stays disabled.` + `vibe remote start does not turn it on. In the settings file, set` + `remote_access.vibe_cloud.enabled to true:` + `  {path of the settings file}` + `then run:` + `  vibe remote start` (exit 0) |
+| `vibe remote start` on a bound computer | `remote_access_disabled` | `Remote access was not started: it is disabled in this computer's settings.` + the same five lines |
 | `vibe remote pair` | `operation_in_progress` | `Another change to this computer's binding or domain is running. No pairing key was used.` + `When it has finished, run the command again.` |
 | `vibe remote` on a bound computer, last lines | already bound | `To bind this computer again, or to another account:` + `  vibe remote rebind` + `To change the domain, open Devices in Avibe.` |
 | a settings save that would change the binding (`vibe/api.py`, shown by the settings page as the error) | pairing identity changed in a generic save | `This computer's binding is not changed by saving settings. Bind it again from Devices, or run 'vibe remote rebind' on this computer.` (was: `Pairing identity must be changed through the remote access pairing flow`) |

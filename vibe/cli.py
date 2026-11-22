@@ -16464,6 +16464,21 @@ _REMOTE_START_BINDING_REFUSALS = {
 }
 
 
+def _remote_disabled_lines() -> tuple[str, ...]:
+    """The way out when a bound computer has remote access disabled in settings.
+
+    No page and no `vibe remote` command writes that setting, so the sentence
+    names it and the file it is in, then the command that works afterwards.
+    """
+    return (
+        "vibe remote start does not turn it on. In the settings file, set",
+        "remote_access.vibe_cloud.enabled to true:",
+        f"  {paths.get_config_path()}",
+        "then run:",
+        "  vibe remote start",
+    )
+
+
 def _read_pairing_key_from_args(args) -> str:
     pairing_key = (getattr(args, "pairing_key", None) or "").strip()
     if pairing_key:
@@ -16742,6 +16757,12 @@ def _run_remote_pair(args, *, guided: bool) -> int:
 
     if kept_off:
         print("")
+        if result.get("enabled") is False:
+            # Disabled in settings, not switched off: `vibe remote start` refuses it.
+            print("Pairing saved. Remote access is disabled in this computer's settings and stays disabled.")
+            for line in _remote_disabled_lines():
+                print(line)
+            return 0
         print("Pairing saved. Remote access was off on this computer and stays off.")
         print("Turn it on with:")
         print("  vibe remote start")
@@ -16799,6 +16820,10 @@ def cmd_remote_start(args):
                 print(f"Remote URL: {result['public_url']}")
         elif result.get("error") in _REMOTE_START_BINDING_REFUSALS:
             for line in _REMOTE_START_BINDING_REFUSALS[result["error"]]:
+                print(line, file=sys.stderr)
+        elif result.get("error") == "remote_access_disabled" and remote_access.status().get("paired"):
+            print("Remote access was not started: it is disabled in this computer's settings.", file=sys.stderr)
+            for line in _remote_disabled_lines():
                 print(line, file=sys.stderr)
         else:
             print(f"Remote access failed to start: {result.get('error') or 'unknown_error'}", file=sys.stderr)
