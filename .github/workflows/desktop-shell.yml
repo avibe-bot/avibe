@@ -303,6 +303,7 @@ jobs:
             > "$RUNNER_TEMP/composer-caret-ui.log" 2>&1 & echo $! > "$RUNNER_TEMP/composer-caret-ui.pid")
           page='http://127.0.0.1:5219/e2e/voice-shortcut/fixture.html?transcript=long'
           for _ in $(seq 1 60); do curl -sf "$page" > /dev/null && break; sleep 1; done
+          curl -sf "$page" > /dev/null || { cat "$RUNNER_TEMP/composer-caret-ui.log"; exit 1; }
           status=0
           python src-tauri/tests/run_cookie_probe.py target/debug/examples/composer_caret_probe \
             --timeout 120 --log "$RUNNER_TEMP/composer-caret-probe.log" \
