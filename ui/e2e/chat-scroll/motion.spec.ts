@@ -702,7 +702,7 @@ type Disclosed = {
   /** WebKit samples an animation it has run before at the time of the read, and one started since the last frame
    *  was drawn at that frame's time: the two agree in a read taken within a millisecond of its frame's time, or
    *  where nothing in the transcript started since the last frame read (`onTime`). Chromium samples every
-   *  animation at its frame's time. */
+   *  animation at its frame's time. Never set before the first frame read: the clock is not drawn until then. */
   onTime: boolean;
   /** Read at an animation frame (not at a change in between): that frame's time, else null. */
   frame: number | null;
@@ -786,6 +786,9 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
     ticking.startTime = document.timeline.currentTime;
     const clockAt = () => clock.getBoundingClientRect().top;
     const clockStart = Number(ticking.startTime);
+    // The clock vouches for a read only once a frame has drawn it: until then it reads 0 at any moment, and so
+    // does the time since it started, however long the task that taps runs and whatever WebKit samples in it.
+    let framed = false;
     // The transcript's animations a frame read has already seen: drawn since, so WebKit samples them like the clock.
     const seen = new WeakSet<Animation>();
     const ours = () => document.getAnimations().filter((animation) => {
@@ -811,7 +814,8 @@ async function discloseAndWatch(page: Page, control: string, { summary = null, t
         value.at = (before + after) / 2;
         value.exact = before === after;
         const running = ours();
-        value.onTime = value.exact && (Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5 || running.every((animation) => seen.has(animation)));
+        framed ||= frame !== null;
+        value.onTime = framed && value.exact && (Math.abs(before - (Number(document.timeline.currentTime) - clockStart)) < 0.5 || running.every((animation) => seen.has(animation)));
         if (value.exact || attempt === 7) {
           out.push(value);
           // Seen once the frame's read is done (its retries run in the same frame, before anything is drawn).
