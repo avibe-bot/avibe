@@ -312,6 +312,10 @@ impl Transport for Hosted {
                     Some(json!({"email":"fixture@example.test","create_user":false}))
                 );
                 assert_eq!(self.mails.fetch_add(1, Ordering::SeqCst), 0);
+                if self.publication_case.starts_with("proof_mail_limited") {
+                    status = 429;
+                    headers.insert(reqwest::header::RETRY_AFTER, "47".parse().unwrap());
+                }
                 json!({})
             }
             "https://avibe.bot/api/auth/first-party/start" => {
@@ -655,6 +659,12 @@ async fn a_qualified_proof_refusal_needs_its_original_delivery_and_a_separate_ma
         "proof_offer_expired",
         "proof_offer_refreshed",
         "proof_offer_before_mail",
+        "proof_mail_drop",
+        "proof_mail_replaced",
+        "proof_mail_credential",
+        "proof_mail_limited",
+        "proof_mail_limited_replaced",
+        "proof_mail_limited_credential",
     ] {
         // The fixture ticket lasts five minutes. Advancing only Tokio's clock
         // exercises its real monotonic deadline, without sleeping or changing the ticket.
@@ -1084,15 +1094,53 @@ async fn check_cut(cut: &'static str) {
         } else if cut == "proof_offer_before_mail" {
             replace_credential();
             config_reply.send(()).unwrap();
-            assert!(sending.await.is_err());
+            assert_eq!(sending.await.unwrap().deliver().unwrap_err().code, "stale_generation");
             assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
         } else if cut == "proof_busy" {
             let _ordinary_transaction = c.operation.try_lock().unwrap();
             config_reply.send(()).unwrap();
-            assert!(sending.await.is_err());
+            assert_eq!(sending.await.unwrap().deliver().unwrap_err().code, "stale_generation");
         } else {
             config_reply.send(()).unwrap();
-            let delivery = sending.await.unwrap();
+            let mail = sending.await.unwrap();
+            // No code submission is admitted on the mail handle, including while
+            // the issuer has already answered but the shell has not released it.
+            assert!(c
+                .prepare_proof_code(&caller, generation, receipt, offer, "000001")
+                .await
+                .is_err());
+            assert!(send(offer).await.is_err());
+            if cut.starts_with("proof_mail_") {
+                assert!(hosted.start.lock().unwrap().is_some());
+                if cut == "proof_mail_drop" {
+                    drop(mail);
+                } else if cut.ends_with("replaced") {
+                    caller.retire();
+                    let next = c.claim_document(generation).unwrap();
+                    let successor = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
+                    let err = mail.deliver().unwrap_err();
+                    assert_eq!((err.code.as_str(), err.retry_after_seconds), ("stale_generation", None));
+                    assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
+                    drop(next);
+                } else {
+                    if cut.ends_with("credential") {
+                        replace_credential();
+                    }
+                    let err = mail.deliver().unwrap_err();
+                    let expected = if cut == "proof_mail_limited" {
+                        ("rate_limited", Some(47))
+                    } else {
+                        ("stale_generation", None)
+                    };
+                    assert_eq!((err.code.as_str(), err.retry_after_seconds), expected);
+                }
+                assert!(send(offer).await.is_err());
+                assert!(!caller.monitoring());
+                assert!(peer.arm().await.is_err());
+                assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
+                return;
+            }
+            let delivery = mail.deliver().unwrap();
             assert_ne!(delivery, offer);
             assert!(send(offer).await.is_err());
             assert!(send(delivery).await.is_err());

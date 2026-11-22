@@ -11,6 +11,7 @@ use crate::instance_client::{
 
 pub(super) struct StepUp {
     proof: ProofNeeded,
+    initial_credential: FactorCookies,
     correlation: Uuid,
     phase: Phase,
     // Only the original final POST's native reply can take this; retirement
@@ -24,7 +25,6 @@ enum OfferState {
 }
 enum Phase {
     Offer {
-        cookies: FactorCookies,
         state: OfferState,
     },
     Delivered(Box<AccountFlow>),
@@ -98,6 +98,49 @@ impl<'a> PendingProofOffer<'a> {
     }
 }
 
+/// No next-step handle exists while an issuer result is in transit. Dropping
+/// this value spends the offer, even if the issuer already sent the message.
+#[must_use]
+pub(super) struct PendingMail<'a> {
+    coordinator: &'a Coordinator,
+    caller: ClaimCaller,
+    epoch: Epoch,
+    offer: Uuid,
+    borrow: Borrow<'a>,
+    result: Result<Box<AccountFlow>>,
+}
+impl PendingMail<'_> {
+    pub(super) fn deliver(mut self) -> Result<Uuid> {
+        let result = self.result;
+        let delivery = self
+            .coordinator
+            .with_proof(
+                &self.caller,
+                &self.epoch,
+                self.borrow.receipt,
+                self.offer,
+                |_, _, step| {
+                    if !matches!(
+                        step.phase,
+                        Phase::Offer {
+                            state: OfferState::Sending { .. }
+                        }
+                    ) {
+                        return Err(stale());
+                    }
+                    Ok(result.map(|flow| {
+                        step.phase = Phase::Delivered(flow);
+                        step.correlation = Uuid::new_v4();
+                        step.correlation
+                    }))
+                },
+            )
+            .map_err(|_| stale())??;
+        self.borrow.returned = true;
+        Ok(delivery)
+    }
+}
+
 /// Owns a code-free start, not permission to forward. Dropping it releases this
 /// receipt; the credential handoff must recheck the original owner before send.
 #[must_use]
@@ -149,9 +192,9 @@ impl Claims {
         proof.check(account)?;
         a.stage = Stage::Proof(StepUp {
             proof,
+            initial_credential: cookies,
             correlation: revision,
             phase: Phase::Offer {
-                cookies,
                 state: OfferState::Unreleased,
             },
             enrolled: None,
@@ -199,15 +242,13 @@ impl Coordinator {
             return Err(changed());
         }
         step.proof.check(a)?;
-        if let Phase::Offer { cookies, .. } = &step.phase {
-            // Compare the ordinary credential retained after the exact refusal,
-            // including its allowed refresh. This also runs immediately before mail.
-            if inner.record.account_id.as_ref() != Some(&a.id)
-                || inner.account.resumes.as_ref() != Some(&a.id)
-                || inner.account.session.factor_cookies().as_ref() != Some(cookies)
-            {
-                return Err(stale());
-            }
+        // This gate is only for the initial signed-in account, up to handoff
+        // to the ordinary owner. The refusal's own refresh is already included.
+        if inner.record.account_id.as_ref() != Some(&a.id)
+            || inner.account.resumes.as_ref() != Some(&a.id)
+            || inner.account.session.factor_cookies().as_ref() != Some(&step.initial_credential)
+        {
+            return Err(stale());
         }
         f(&inner, a, step)
     }
@@ -379,7 +420,7 @@ impl Coordinator {
         expected_generation: u64,
         receipt: Uuid,
         offer: Uuid,
-    ) -> Result<Uuid> {
+    ) -> Result<PendingMail<'_>> {
         let epoch = Epoch::new(self.generation.clone(), expected_generation);
         let (wake, mut interrupted) = oneshot::channel();
         let (account, deadline) = self.with_proof(caller, &epoch, receipt, offer, |_, a, step| {
@@ -392,7 +433,7 @@ impl Coordinator {
             *state = OfferState::Sending { _interrupt: wake };
             Ok((a.clone(), step.proof.deadline()))
         })?;
-        let mut borrow = Borrow {
+        let borrow = Borrow {
             owner: &self.claims,
             receipt,
             returned: false,
@@ -414,26 +455,18 @@ impl Coordinator {
                 }
             })
         };
-        tokio::select! { biased;
+        let result = tokio::select! { biased;
             _ = &mut interrupted => return Err(stale()),
-            _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
-            sent = flow.send_claim_code(&account, caller.epoch.clone(), before_mail) => sent?,
-        }
-        let delivery = self.with_proof(caller, &epoch, receipt, offer, |_, _, step| {
-            if !matches!(
-                step.phase,
-                Phase::Offer {
-                    state: OfferState::Sending { .. },
-                    ..
-                }
-            ) {
-                return Err(stale());
-            }
-            step.correlation = Uuid::new_v4();
-            step.phase = Phase::Delivered(Box::new(flow));
-            Ok(step.correlation)
-        })?;
-        borrow.returned = true;
-        Ok(delivery)
+            _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+            sent = flow.send_claim_code(&account, caller.epoch.clone(), before_mail) => sent,
+        };
+        Ok(PendingMail {
+            coordinator: self,
+            caller: caller.clone(),
+            epoch,
+            offer,
+            borrow,
+            result: result.map(|()| Box::new(flow)),
+        })
     }
 }
