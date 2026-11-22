@@ -227,7 +227,7 @@ export const MicrophoneSettingsView: React.FC<MicrophoneSettingsViewProps> = ({
             </div>
           ) : (
             <div className="flex flex-col gap-4 border-t border-border pt-5">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className={clsx('flex flex-col gap-3', ios && 'sm:flex-row sm:items-center sm:justify-between')}>
                 <div className="flex flex-col gap-2" role="status" aria-live="polite">
                   <span className={clsx('text-sm font-medium', state === 'testing' && 'text-mint-ink')}>
                     {status}
@@ -238,7 +238,7 @@ export const MicrophoneSettingsView: React.FC<MicrophoneSettingsViewProps> = ({
                 </div>
                 <Button
                   variant={testing ? 'secondary' : 'default'}
-                  className="min-h-11 self-start sm:self-center"
+                  className={clsx('min-h-11 self-start', ios && 'sm:self-center')}
                   onClick={testing ? onStop : onStart}
                 >
                   {testing ? <Square className="size-3.5" /> : <Mic className="size-3.5" />}

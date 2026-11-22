@@ -84,6 +84,12 @@ for (const lang of ['en', 'zh'] as const) {
       const initial = await geometry();
       expect(initial.width).toBeLessThan(initial.parentWidth - 80);
       expect(initial.left).toBeCloseTo(initial.parentLeft, 0);
+      // Desktop actions share the input control's left edge, below the test status.
+      const start = page.getByRole('button', { name: copy.startTest, exact: true });
+      const startBox = await start.boundingBox();
+      expect(startBox!.x).toBeCloseTo(initial.left, 0);
+      const statusBox = await page.getByText(copy.notTested, { exact: true }).boundingBox();
+      expect(startBox!.y).toBeGreaterThan(statusBox!.y + statusBox!.height);
       await trigger.hover();
       await page.mouse.down();
       // Wait through the shared Button press animation so a delayed scale cannot pass.
