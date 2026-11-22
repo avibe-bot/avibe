@@ -20,6 +20,8 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>The fixture's hold-to-talk page opens the microphone as the App does.</string>
     <key>UILaunchScreen</key>
     <dict/>
 </dict>

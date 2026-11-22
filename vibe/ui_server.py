@@ -1,5 +1,6 @@
 import base64
 import asyncio
+import functools
 import gzip
 import hashlib
 import hmac
@@ -19,6 +20,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
@@ -90,6 +92,7 @@ from modules.agents.catalog import (
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
 from vibe.http_request_diagnostics import RequestCounterMiddleware, RequestCounters
 from vibe.ui_mobile_routes import register_mobile_routes
+from vibe.ui_connection_routes import register_connection_routes
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -105,7 +108,7 @@ from vibe.service_logging import (
     configure_service_logging,
     shutdown_service_logging,
 )
-from vibe import ui_asset_archive
+from vibe import instance_address, instance_address_responses, ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
 if TYPE_CHECKING:
@@ -179,6 +182,7 @@ mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
 register_mobile_routes(app)
+register_connection_routes(app)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -1566,14 +1570,7 @@ def _resolved_remote_session_payload(config: V2Config) -> dict[str, Any] | None:
 
 
 def _normalized_host(value: str | None) -> str:
-    raw_host = (value or "").lower().strip()
-    if raw_host.startswith("[") and "]" in raw_host:
-        host = raw_host[1 : raw_host.index("]")]
-    elif raw_host.count(":") > 1:
-        host = raw_host
-    else:
-        host = raw_host.split(":", 1)[0]
-    return host.rstrip(".")
+    return instance_address.normalize_host(value)
 
 
 def _is_remote_access_request(config: V2Config) -> bool:
@@ -2093,6 +2090,7 @@ def _restart_vibe_cloud_login_from_state(config: V2Config, state: str | None):
 # other code falls back to the generic "default_*" strings so an unexpected failure
 # still renders a usable page.
 _OAUTH_ERROR_PAGE_CODES = {
+    "account_session_signed_out",
     "invalid_oauth_state",
     "oauth_exchange_failed",
     "remote_pairing_mismatch",
@@ -2540,6 +2538,12 @@ def enforce_remote_access_cookie():
         if not _is_direct_loopback_connection():
             return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
     config = _load_remote_access_config()
+    if request.path == "/remote/claim/callback":
+        # Never route a credential-bearing callback through ordinary login's `next` URL.
+        from vibe.personal_claim_client import local_origin
+
+        if not local_origin(request.host_url.rstrip("/")) or not _is_local_request(config):
+            return jsonify({"state": "error", "code": "invalid_return"}), 403
     markdown_show_request = _is_private_show_page_markdown_request()
     if _remote_auth_exempt_before_host_validation():
         return None
@@ -3192,6 +3196,9 @@ def protect_mutating_ui_requests():
 
 @app.after_request
 def prevent_desktop_enrollment_caching(response: Response) -> Response:
+    if request.path == "/remote/claim/callback" or request.path.startswith("/api/remote-access/claims"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
         "/api/desktop/local-instance", "/api/desktop/local-instance/prepare",
         "/api/remote-access/vibe-cloud/pair",
@@ -3341,6 +3348,274 @@ def _is_valid_host_header(value: str) -> bool:
 
     port = port.lstrip("0")
     return len(port) <= 5 and int(port or "0") <= 65535
+
+
+_address_connections: dict[str, set[Any]] = {}
+# Requests this module itself ended because their Host stopped being the address.
+_address_closed: set[Any] = set()
+# Reading the state from avibe.bot for a cleanup name has a thread of its own, so
+# a slow control plane can never use up the threads ordinary requests share.
+_ADDRESS_STATE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="instance-address-state")
+_ADDRESS_STATE_WAITERS_MAX = 32
+_ADDRESS_STATE_WAIT_SECONDS = 10.0
+_address_state_reads: dict[Any, Any] = {}
+_address_state_waiters = 0
+
+
+def _close_address_connections(hosts: set[str]) -> None:
+    """End every request, stream and socket still open on these Hosts (any thread)."""
+
+    for host in hosts:
+        for task in list(_address_connections.get(host, ())):
+            _address_closed.add(task)
+            try:
+                task.get_loop().call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                _address_closed.discard(task)  # its loop is already closed, and the request with it
+
+
+async def _await_address_state_read() -> None:
+    """Let one state read finish before answering a cleanup name, without parking a thread.
+
+    Every waiter shares the one read in flight on this loop. Beyond a bound, or
+    when a read would not help, the request is answered at once with nothing.
+    """
+
+    global _address_state_waiters
+
+    if _address_state_waiters >= _ADDRESS_STATE_WAITERS_MAX:
+        return
+    loop = asyncio.get_running_loop()
+    read = _address_state_reads.get(loop)
+    if read is None or read.done():
+        read = loop.run_in_executor(
+            _ADDRESS_STATE_EXECUTOR, functools.partial(instance_address.refresh_state, wait=False)
+        )
+        _address_state_reads[loop] = read
+        read.add_done_callback(lambda done, loop=loop: _address_state_reads.pop(loop, None) if _address_state_reads.get(loop) is done else None)
+    _address_state_waiters += 1
+    try:
+        await asyncio.wait_for(asyncio.shield(read), timeout=_ADDRESS_STATE_WAIT_SECONDS)
+    except Exception:
+        pass  # no state, no cleaning
+    finally:
+        _address_state_waiters -= 1
+
+
+def _wake_address_streams() -> None:
+    from vibe.sse_broker import broker
+
+    broker.publish(instance_address.ADDRESS_CHANGED_EVENT, {})
+
+
+def _start_instance_address() -> None:
+    try:
+        instance_address.start(wake_pages=_wake_address_streams, close_connections=_close_address_connections)
+    except Exception:
+        logger.warning("Failed to start the instance address worker", exc_info=True)
+
+
+class _InstanceAddressRoleMiddleware:
+    """Give every request's Host its role before anything else sees the request.
+
+    ``docs/plans/instance-address-change.md``: content only on the managed name
+    this computer recorded as active; cleaning only on a former name that a
+    fresh state from avibe.bot lists; one empty answer for every other managed
+    name, on every path. It sits outside routing, authentication and the paths
+    that skip host validation, and inside the invalid-Host and direct-ingress
+    guards (the direct listener already answers only for the active name).
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] not in {"http", "websocket"} or scope.get(DIRECT_INGRESS_SCOPE_KEY) is not None:
+            await self.app(scope, receive, send)
+            return
+        host = forwarded = ""
+        for key, value in scope.get("headers") or ():
+            if key == b"host" and not host:
+                host = value.decode("latin-1")
+            elif key == b"x-forwarded-host" and not forwarded:
+                forwarded = value.decode("latin-1").split(",")[0].strip()
+        # A request can be admitted under either name: its own Host, or the public
+        # name a trusted proxy forwards while it rewrites Host to a local address.
+        managed = {
+            name
+            for name in (instance_address.normalize_host(host), instance_address.normalize_host(forwarded))
+            if instance_address.is_managed_name(name)
+        }
+        if not managed:
+            await self.app(scope, receive, send)
+            return
+        decision = await asyncio.to_thread(instance_address.decide, host, forwarded)
+        if decision == "pass":
+            task = asyncio.current_task()
+            for name in managed:
+                _address_connections.setdefault(name, set()).add(task)
+            try:
+                await self.app(scope, receive, send)
+            except asyncio.CancelledError:
+                # Ended by the address change: nothing more is sent on the old Host.
+                # Any other cancellation (a client that left, shutdown) is not ours.
+                if task not in _address_closed:
+                    raise
+                uncancel = getattr(task, "uncancel", None)  # Python 3.11+
+                if uncancel is not None:
+                    uncancel()
+                if scope["type"] == "websocket":
+                    try:
+                        await send({"type": "websocket.close", "code": 1001})
+                    except Exception:
+                        pass
+            finally:
+                _address_closed.discard(task)
+                for name in managed:
+                    _address_connections.get(name, set()).discard(task)
+            return
+        if decision == "cleanup":
+            ready = await asyncio.to_thread(instance_address.cleanup_ready, host)
+            if not ready and await asyncio.to_thread(instance_address.cleanup_read_worthwhile, host):
+                await _await_address_state_read()
+                ready = await asyncio.to_thread(instance_address.cleanup_ready, host)
+            if ready and await self._clean(scope, receive, send, host):
+                return
+        await self._refuse(scope, send)
+
+    @staticmethod
+    async def _begin_cleanup(host: str) -> bool:
+        """The last role check before the headers; a busy role lock is asked again a few times, never waited on."""
+
+        for _ in range(10):
+            begun = instance_address.begin_cleanup_response(host)
+            if begun is not None:
+                return begun
+            await asyncio.sleep(0.01)
+        return False
+
+    @staticmethod
+    async def _refuse(scope: Any, send: Any) -> None:
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await send({
+            "type": "http.response.start",
+            "status": 503,
+            "headers": [(b"content-type", b"application/json"), (b"cache-control", b"no-store")],
+        })
+        await send({"type": "http.response.body", "body": b"" if scope["method"] == "HEAD" else instance_address_responses.REFUSAL_BODY})
+
+    async def _clean(self, scope: Any, receive: Any, send: Any, host: str) -> bool:
+        """Answer a cleanup Host. ``False`` when the permission lapsed before the headers."""
+
+        if scope["type"] == "websocket":
+            if not await self._begin_cleanup(host):
+                return False
+            try:
+                await send({"type": "websocket.close", "code": 1008})
+            finally:
+                instance_address.end_cleanup_response(host)
+            return True
+        from vibe.ui_mobile_routes import DEVICE_PREFIX
+
+        path = scope.get("path") or "/"
+        method = scope["method"]
+        raw_path = (scope.get("raw_path") or path.encode("utf-8", "ignore")).decode("latin-1")
+        request_headers = {key: value.decode("latin-1") for key, value in scope.get("headers") or ()}
+        cookie_header = "; ".join(
+            value.decode("latin-1") for key, value in scope.get("headers") or () if key == b"cookie"
+        )
+        status, content_type, body = 410, "text/html; charset=utf-8", b""
+        clear = instance_address_responses.CLEAR_SITE_DATA
+        if path == DEVICE_PREFIX or path.startswith(f"{DEVICE_PREFIX}/"):
+            # The phone stops and clears locally on 401. Its body is never read.
+            if not await self._begin_cleanup(host):
+                return False
+            try:
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"application/json"), (b"cache-control", b"no-store")],
+                })
+                await send({"type": "http.response.body", "body": instance_address_responses.DEVICE_REFUSAL_BODY})
+            finally:
+                instance_address.end_cleanup_response(host)
+            return True
+        reported_receipt = ""
+        if method == "POST" and path == instance_address.CLEARED_REPORT_PATH:
+            reported_receipt = (await _bounded_request_text(receive, 256)).strip()
+            status, content_type = 204, None
+            clear = instance_address_responses.CLEAR_HTTP_CACHE
+        elif method in {"GET", "HEAD"} and path == "/push-sw.js":
+            status, content_type = 200, "text/javascript; charset=utf-8"
+            body = instance_address_responses.REPLACEMENT_WORKER.encode("utf-8")
+        else:
+            # Split by hand: a parser that stops at the first cookie it dislikes
+            # (a share guest's JSON one, say) would cost this visit its receipt.
+            session_cookie = None
+            wanted = remote_access_session_cookie_name()
+            for part in cookie_header.split(";"):
+                name, separator, value = part.strip().partition("=")
+                if separator and name == wanted:
+                    session_cookie = value.strip().strip('"')
+                    break
+            receipt = await asyncio.to_thread(
+                instance_address.receipt_for_cleanup_request, instance_address.normalize_host(host), session_cookie
+            ) if session_cookie else None
+            binding = await asyncio.to_thread(instance_address.current_binding)
+            body = instance_address_responses.cleaning_document(
+                language=instance_address_responses.response_language(request_headers.get(b"accept-language", "")),
+                control_plane_origin=binding.backend_origin if binding is not None else "",
+                receipt=receipt,
+            )
+        headers = instance_address_responses.cleanup_headers(
+            raw_path, cookie_header, content_type=content_type, clear=clear
+        )
+        # The role is checked again, under its lock, immediately before the headers.
+        if not await self._begin_cleanup(host):
+            return False
+        try:
+            await send({"type": "http.response.start", "status": status, "headers": headers})
+            await send({"type": "http.response.body", "body": b"" if method == "HEAD" or status == 204 else body})
+            if reported_receipt:
+                # Only now: the page's HTTP cache is cleared by this very answer,
+                # so "cleared" is recorded once it was admitted and sent, never
+                # for a report that ended in the plain 503.
+                await asyncio.to_thread(
+                    instance_address.record_cleared, instance_address.normalize_host(host), reported_receipt
+                )
+        finally:
+            instance_address.end_cleanup_response(host)
+        return True
+
+
+def remote_access_session_cookie_name() -> str:
+    from vibe import remote_access
+
+    return remote_access.SESSION_COOKIE_NAME
+
+
+async def _bounded_request_text(receive: Any, limit: int) -> str:
+    """Read at most ``limit`` bytes of a request body; a longer body yields nothing."""
+
+    received = bytearray()
+    while True:
+        message = await receive()
+        if message["type"] != "http.request":
+            return ""
+        received.extend(message.get("body") or b"")
+        if len(received) > limit:
+            return ""
+        if not message.get("more_body"):
+            break
+    try:
+        return received.decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+
+
+app.add_middleware(_InstanceAddressRoleMiddleware)
 
 
 class _RejectInvalidHostMiddleware:
@@ -5000,7 +5275,11 @@ def _config_payload_for_context(config: Any, authorization_context: Any) -> dict
     from vibe import api
 
     if authorization_context is None or authorization_context.can_manage_instance:
-        return api.client_config_payload(config)
+        result = api.client_config_payload(config)
+        if authorization_context is None or not authorization_context.is_instance_owner:
+            for key in ("direct", "public_relay_trial"):
+                result["remote_access"]["vibe_cloud"].pop(key, None)
+        return result
     return api.non_owner_config_payload(config)
 
 
@@ -7626,6 +7905,8 @@ def system_schedule_claim():
             device_id=payload.get("device_id"),
             exclude_lease_tokens=payload.get("exclude_lease_tokens"),
             allow_create=payload["allow_create"],
+            claimant=_request_authorization_context(),
+            device_viewer=_device_viewer(),
             **({"kinds": payload["kinds"]} if "kinds" in payload else {}),
         )
     except system_schedule_service.SystemScheduleServiceError as exc:
@@ -7711,6 +7992,7 @@ def web_push_status():
             else None
         )
         current_subscription_enabled = bool(current_subscription and current_subscription["enabled"])
+        paused = bool(current_subscription_enabled and not web_push_service.get_deliverable_by_endpoint(conn, endpoint=endpoint,user_key=user_key))
         current_subscription_repairable = bool(
             current_subscription
             and not current_subscription_enabled
@@ -7723,6 +8005,7 @@ def web_push_status():
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
             "current_subscription_enabled": current_subscription_enabled,
+            "device_delivery_paused": paused,
             "current_subscription_repairable": current_subscription_repairable,
             "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
@@ -7876,7 +8159,7 @@ def web_push_test():
     )
     with web_push_notifications._owner_delivery_lock(user_key):
         with engine.connect() as conn:
-            subscription = web_push_service.get_enabled_by_endpoint(
+            subscription = web_push_service.get_deliverable_by_endpoint(
                 conn,
                 endpoint=endpoint,
                 user_key=user_key,
@@ -8297,9 +8580,33 @@ _UI_RUNTIME_ACTIVE = False
 def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
     if not _UI_RUNTIME_ACTIVE:
         return
-    from vibe import remote_access
+    try:
+        _start_remote_monitors(config)
+    finally:
+        _start_instance_address()
 
-    remote_access.start_runtime_monitoring(config)
+
+def _start_remote_monitors(config, *, startup=False):
+    from vibe import connection_runtime, connection_settings, remote_access
+
+    try:
+        if startup:
+            try:
+                connection_settings.adopt_host_enrollment()
+            except (OSError, ValueError, connection_settings.ConnectionError):
+                logger.warning('Could not adopt host relay enrollment; leaving relay eligibility unchanged')
+            try:
+                connection_runtime.recover_startup()
+                config = V2Config.load()  # storage may have been repaired
+            except (OSError, ValueError, connection_settings.ConnectionError):
+                logger.warning('Could not read connection recovery state during UI startup')
+    finally:
+        # An optional settings artifact must not disable the recovery worker,
+        # heartbeat or auth polling. The worker guards each tick itself.
+        try:
+            connection_runtime.start()
+        finally:
+            remote_access.start_runtime_monitoring(config)
 
 
 @app.route("/api/control", methods=["POST"])
@@ -8516,7 +8823,7 @@ async def config_post():
     authorization_context = getattr(g, "authorization_context", None)
     response_payload = _config_api_payload_for_context(config, authorization_context)
     if remote_access_runtime is not None:
-        response_payload["remote_access_runtime"] = remote_access_runtime
+        response_payload["remote_access_runtime"] = _remote_status_for_viewer(remote_access_runtime)
     if platform_runtime is not None:
         response_payload["platform_runtime"] = platform_runtime
     if activity_streaming_runtime is not None:
@@ -8537,6 +8844,12 @@ def remote_access_direct_suspend():
     if direct_lifecycle.stop_for_pairing_change(timeout_seconds=10.0):
         return jsonify({"ok": True, "stopped": True})
     return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
+
+
+def _remote_status_for_viewer(payload: dict) -> dict:
+    """Only the Owner sees the instance opt-in; rendezvous and stream path are separate."""
+    context = _request_authorization_context()
+    return payload if context and context.is_instance_owner else {k: v for k, v in payload.items() if k != "direct"}
 
 
 @app.route("/api/remote-access/status", methods=["GET"])
@@ -8576,7 +8889,7 @@ def remote_access_status():
     authorization_context = getattr(g, "authorization_context", None)
     if authorization_context is not None and authorization_context.can_manage_access_members:
         status_payload["pending_pairing"] = remote_access.pending_pairing_status(config)
-    return jsonify(status_payload)
+    return jsonify(_remote_status_for_viewer(status_payload))
 
 
 @app.route("/api/direct/rendezvous", methods=["POST"])
@@ -8617,7 +8930,12 @@ def direct_rendezvous():
         )
     else:
         auth = getattr(g, "authorization_context", None)
+        identity = getattr(g, "remote_session_identity", None)
+        registered_session = None
+        if identity and identity.get("sub") == subject and identity.get("browser_session_id") and identity.get("_device_binding"):
+            registered_session = (identity["_device_binding"], identity["browser_session_id"])
         result = rendezvous_state.rendezvous.offer(
+            session=registered_session,
             is_owner=auth is not None and auth.has_role("owner"),
             instance_id=instance_id,
             hostname=hostname,
@@ -8666,6 +8984,94 @@ def desktop_local_instance_prepare():
     ))
 
 
+def _claim_route(operation):
+    from vibe.desktop_local_instance import LocalInstanceError
+    from vibe.personal_claim_client import ClaimError
+    from vibe.personal_claims import redirect_claims
+
+    denied = _access_administration_forbidden()
+    if denied is not None:
+        return denied
+    try:
+        return operation(redirect_claims)
+    except LocalInstanceError as exc:
+        return jsonify({"state": "error", "code": exc.code}), exc.status
+    except ClaimError as exc:
+        status = {"invalid_request": 400, "invalid_return": 403, "claim_unavailable": 404,
+                  "rate_limited": 429, "control_plane_unreachable": 503}.get(exc.code, 409)
+        body = {"state": "error", "code": exc.code}
+        if exc.code == "claim_in_progress" and exc.claim_id:
+            body.update(claim_id=exc.claim_id, expires_at=exc.expires_at)
+        if exc.retry_after:
+            body["retry_after_seconds"] = exc.retry_after
+        response = jsonify(body)
+        if exc.retry_after:
+            response.headers["Retry-After"] = str(exc.retry_after)
+        return response, status
+
+
+@app.route("/api/remote-access/claims", methods=["POST"])
+def personal_claim_start():
+    from vibe.personal_claim_client import ClaimError
+
+    def start(service):
+        origin = request.host_url.rstrip("/")
+        if request.headers.get("Origin") != origin:
+            raise ClaimError("invalid_request")
+        if not isinstance(request.json, dict) or set(request.json) - {"locale"}:
+            raise ClaimError("invalid_request")
+        # Loopback or an admitted private setup host; any forwarding (proxy, tunnel) needs link mode.
+        admitted = _is_local_request(_load_remote_access_config()) and not _has_forwarded_metadata()
+        body, nonce = service.start(origin, request.json.get("locale", "en"), admitted_owner=admitted,
+                                    on_bound=_ensure_remote_access_monitoring)
+        response = jsonify(body)
+        response.set_cookie("avibe_claim_browser", nonce, httponly=True, samesite="lax", path="/remote/claim/callback",
+                            expires=datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")))
+        return response, 201
+
+    return _claim_route(start)
+
+
+@app.route("/api/remote-access/claims/<claim_id>", methods=["GET"])
+def personal_claim_state(claim_id):
+    return _claim_route(lambda service: jsonify(service.state(claim_id)))
+
+
+@app.route("/api/remote-access/claims/<claim_id>/cancel", methods=["POST"])
+def personal_claim_cancel(claim_id):
+    from vibe.personal_claim_client import ClaimError
+
+    def cancel(service):
+        if request.headers.get("Origin") != request.host_url.rstrip("/") or request.json != {}:
+            raise ClaimError("invalid_request")
+        return jsonify(service.cancel(claim_id))
+
+    return _claim_route(cancel)
+
+
+@app.route("/remote/claim/callback", methods=["GET"])
+def personal_claim_callback():
+    from vibe.personal_claim_client import ClaimError
+
+    def callback(service):
+        fields = request.args.multi_items()
+        cookies = [v.strip().partition("=")[2] for line in request.headers.getlist("cookie")
+                   for v in line.split(";") if v.strip().partition("=")[0] == "avibe_claim_browser"]
+        try:
+            if len(fields) != 2 or set(request.args) != {"claim_id", "state"} or len(cookies) != 1:
+                raise ClaimError("invalid_return")
+            service.callback(request.args["claim_id"], request.host_url.rstrip("/"), cookies[0], request.args["state"])
+        except ClaimError as exc:
+            # Never echo browser inputs or clear the real initiator's nonce on a bad navigation.
+            code = "claim_unavailable" if exc.code == "claim_unavailable" else "invalid_return"
+            return redirect("/settings/remote-access?claim_error=" + code, code=303)
+        response = redirect("/settings/remote-access", code=303)
+        response.delete_cookie("avibe_claim_browser", path="/remote/claim/callback")
+        return response
+
+    return _claim_route(callback)
+
+
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])
 def remote_access_vibe_cloud_pair():
     from vibe import remote_access
@@ -8711,7 +9117,7 @@ def remote_access_start():
     result = remote_access.start()
     if result.get("ok"):
         _ensure_remote_access_monitoring()
-    return jsonify(result), 200 if result.get("ok") else 400
+    return jsonify(_remote_status_for_viewer(result)), 200 if result.get("ok") else 400
 
 
 @app.route("/api/remote-access/stop", methods=["POST"])
@@ -8719,7 +9125,7 @@ def remote_access_stop():
     from vibe import remote_access
 
     result = remote_access.stop()
-    return jsonify(result), 200 if result.get("ok") else 400
+    return jsonify(_remote_status_for_viewer(result)), 200 if result.get("ok") else 400
 
 
 @app.route("/api/remote-access/optimize-route", methods=["POST"])
@@ -8727,7 +9133,7 @@ def remote_access_optimize_route():
     from vibe import remote_access
 
     result = remote_access.optimize_route()
-    return jsonify(result), 202 if result.get("ok") else 409
+    return jsonify(_remote_status_for_viewer(result)), 202 if result.get("ok") else 409
 
 
 @app.route("/api/remote-access/network-interfaces", methods=["GET"])
@@ -8742,7 +9148,7 @@ async def remote_access_settings():
     from vibe import remote_access
 
     payload = request.json or {}
-    result = await asyncio.to_thread(remote_access.apply_settings, payload)
+    result = _remote_status_for_viewer(await asyncio.to_thread(remote_access.apply_settings, payload))
     if result.get("ok"):
         await asyncio.to_thread(_ensure_remote_access_monitoring)
         return jsonify(result)
@@ -8813,8 +9219,10 @@ def remote_access_login():
 
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
+    from storage.device_account_signout import AccountSessionSignedOut
     from vibe import remote_access
 
+    callback_started = int(time.time())
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
         return jsonify({"error": "remote_access_not_enabled"}), 400
@@ -8889,6 +9297,7 @@ def remote_access_auth_callback():
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
+    from vibe.account_session_revoke import verified_reference
     try:
         session_cookie = remote_access.make_session_cookie(
             config,
@@ -8896,7 +9305,11 @@ def remote_access_auth_callback():
             str(claims.get("sub", "")),
             session_claims=session_claims,
             device_headers=request.headers,
+            account_session_ref=verified_reference(claims),
+            account_enroll_before=callback_started + remote_access.OAUTH_HANDSHAKE_TTL_SECONDS,
         )
+    except AccountSessionSignedOut:
+        return _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
     except Exception as exc:
         _log_oauth_callback_failure("session_cookie", exc)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
@@ -8938,34 +9351,143 @@ def _device_viewer():
     return None
 
 
+def _device_issuer_scope(viewer):
+    from vibe.account_session_revoke import pairing_epoch
+    from vibe.remote_access import device_binding
+    binding, _, _, caller = viewer
+    config = _load_remote_access_config()
+    if config and (binding == device_binding(config) or (not binding and not caller)):
+        return pairing_epoch(config)
+    return None
+
+
+def _device_owner_scope(viewer):
+    config = _load_remote_access_config()
+    if not config or not viewer[0]:
+        return None,None
+    instance = config.remote_access.vibe_cloud.instance_id
+    if not viewer[2]:
+        return instance,None
+    context = _request_authorization_context()
+    if viewer[3]:
+        return instance,context.email.casefold() if context.email and context.instance_id==instance else None
+    from vibe import permissions
+    try:
+        answer = permissions.get_current_permissions(config)
+        if answer.source == 'live' and answer.projection['instance']['id']==instance:
+            return instance,(answer.projection['access']['owner'].get('email') or '').casefold() or None
+    except permissions.PermissionsError:
+        pass
+    return instance,None
+
+
 @app.route('/api/devices', methods=['GET'])
-def device_list():
-    from storage import device_registry
+async def device_list():
+    from storage import device_catalog
+    from storage.device_functions import DeviceError
     from vibe import __version__
 
     viewer = _device_viewer()
     host = {'id': 'host', 'kind': 'host', 'group': 'mine', 'display_name': socket.gethostname(), 'app_version': __version__,
             'account': None, 'system_version': None, 'signed_in_at': None, 'last_active_at': None,
             'push_only': False, 'current_path': None, 'current': bool(viewer and not viewer[3]), 'capabilities': {'push_enabled': False}}
+    host['functions'] = []
     if viewer is None:
         config = _load_remote_access_config()
         if config and not config.remote_access.vibe_cloud.is_runtime_paired() and _is_setup_host_request(config):
-            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None})
+            return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': []})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
     groups = {'mine': [host] if owner else [], 'others': [], 'unattributed': []}
-    from storage.importer import ensure_sqlite_state
-    ensure_sqlite_state()
-    for row in device_registry.list_devices(binding, subject, owner=owner, caller=caller, now=int(time.time())):
-        account = row['account']
-        if account is None:
-            group = 'unattributed'
-        else:
-            is_mine = account['subject'] == subject if subject else account['login_role'] == 'owner'
-            group = 'mine' if is_mine else 'others'
-        row['group'] = group
-        groups[group].append(row)
-    return jsonify({**groups, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+    from storage.db import get_cached_sqlite_engine
+    from vibe.direct_rendezvous import rendezvous
+    from vibe.sse_broker import broker
+
+    paths = rendezvous.session_paths(binding)
+    for key in broker.tunnel_sessions(binding):
+        paths.setdefault(key, {"kind": "tunnel", "family": None, "rtt_ms": None})
+
+    def load():
+        from storage.importer import ensure_sqlite_state
+        ensure_sqlite_state()
+        scope = _device_owner_scope(viewer)
+        with get_cached_sqlite_engine().connect() as conn:
+            conn.exec_driver_sql('BEGIN')
+            from storage.device_account_signout import recent
+            now = int(time.time())
+            return (*device_catalog.snapshot(conn, viewer, *scope, now, paths=paths), recent(conn, _device_issuer_scope(viewer) or binding, subject, owner, now))
+    try:
+        rows, _, unlinked, history = await asyncio.to_thread(load)
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
+    for row in rows.values():
+        groups[row['group']].append(row)
+    if owner and _desktop_computer_use_supported():
+        from vibe import internal_client
+        status = await asyncio.to_thread(effective_computer_use_status)
+        effective = status.status if status.status in ('ready','off','needs_permission') else 'unavailable'
+        if effective=='ready' and await internal_client.health_identity() is None:
+            effective = 'unavailable'
+        host['functions'] = [{'kind':'computerUse','fixed':True,'can_change':False,'on':status.enabled,'status':effective}]
+    return jsonify({**groups, 'unlinked_health':unlinked, 'recent_sign_outs':history, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
+
+
+@app.route('/api/devices/<device_id>/notifications', methods=['PUT'])
+@app.route('/api/devices/<device_id>/schedule', methods=['PUT'])
+@app.route('/api/devices/<device_id>/health', methods=['GET'])
+@app.route('/api/devices/<device_id>/health/revoke', methods=['POST'])
+@app.route('/api/devices/unlinked-health/<device_id>/revoke', methods=['POST'])
+def device_function(device_id):
+    from storage import device_catalog
+    from storage.db import get_cached_sqlite_engine
+    from storage.device_functions import DeviceError
+    viewer = _device_viewer()
+    if not viewer or not viewer[0]:
+        return jsonify({'error':'device_access_forbidden'}),403
+    scope = _device_owner_scope(viewer)
+    if request.method=='PUT' and (not isinstance(request.json,dict) or set(request.json)!={'on'} or type(request.json['on']) is not bool):
+        return jsonify({'error':'invalid_device_function'}),400
+    kind = 'unlinkedHealth' if request.path.startswith('/api/devices/unlinked-health/') else request.path.split('/')[4]
+    try:
+        with get_cached_sqlite_engine().begin() as conn:
+            now = int(time.time())
+            conn.exec_driver_sql('BEGIN' if request.method=='GET' else 'BEGIN IMMEDIATE')
+            if request.method=='GET':
+                rows,_,_ = device_catalog.snapshot(conn,viewer,*scope,now)
+                feature = next((x for x in rows.get(device_id,{}).get('functions',[]) if x['kind']=='health'),None)
+                if not feature:
+                    raise DeviceError('device_not_found',404)
+                result = {'function':feature}
+            else:
+                result = device_catalog.change(conn,viewer,*scope,device_id,kind,request.json['on'] if request.method=='PUT' else False,now)
+        return jsonify(result)
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
+
+
+@app.route('/api/devices/activity', methods=['GET'])
+@app.route('/api/devices/<device_id>/health/reads', methods=['GET'])
+def device_activity_list(device_id=None):
+    from storage import device_activity_feed
+    from storage.db import get_cached_sqlite_engine
+    from storage.device_functions import DeviceError
+    viewer = _device_viewer()
+    if not viewer or not viewer[0]:
+        return jsonify({'error':'device_access_forbidden'}),403
+    try:
+        limit = int(request.args.get('limit','25'))
+    except ValueError:
+        return jsonify({'error':'invalid_activity_limit'}),400
+    try:
+        with get_cached_sqlite_engine().connect() as conn:
+            conn.exec_driver_sql('BEGIN')
+            result = device_activity_feed.list_page(conn,viewer,_request_authorization_context(),*_device_owner_scope(viewer),
+                limit=limit,raw_cursor=request.args.get('cursor'),device=device_id or request.args.get('device_id'),health_only=device_id is not None)
+        response = jsonify(result)
+        response.headers['Cache-Control']='no-store'
+        return response
+    except DeviceError as exc:
+        return jsonify({'error':exc.code}),exc.status
 
 
 @app.route('/api/devices/self', methods=['POST'])
@@ -8976,11 +9498,33 @@ def device_self_description():
     viewer = _device_viewer()
     if viewer is None or not viewer[3]:
         return jsonify({'error': 'remote_session_required'}), 403
+    body = request.json
+    has_ticket = isinstance(body, dict) and 'health_binding_ticket' in body
     try:
-        report = self_description(request.json)
+        report = self_description({k: v for k, v in body.items() if k != 'health_binding_ticket'} if has_ticket else body)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     binding, subject, _, caller = viewer
+    if has_ticket:
+        from core.mobile_health_contract import MobileError
+        from sqlalchemy.exc import SQLAlchemyError
+        from storage import device_health_tickets
+        from storage.mobile_store import MobileStore, mobile_store_path
+        import sqlite3
+
+        try:
+            if not mobile_store_path().exists():
+                return jsonify({'error': 'health_binding_not_accepted'}), 403
+            status, code = device_health_tickets.redeem(MobileStore(), viewer, _request_authorization_context(),
+                report, body['health_binding_ticket'], int(time.time()))
+        except (MobileError, sqlite3.Error, SQLAlchemyError, OSError):
+            return jsonify({'error': 'health_binding_unavailable'}), 503
+        if code:
+            response = jsonify({'error': code})
+            if status == 429:
+                response.headers['Retry-After'] = '60'
+            return response, status
+        return jsonify({'ok': True})
     status = device_registry.describe_self(binding, subject, caller, report, int(time.time()))
     if status != 200:
         return jsonify({'error': {404:'device_not_found', 409:'installation_mismatch', 429:'device_report_rate_limited'}[status]}), status
@@ -9003,19 +9547,89 @@ def device_sign_out(device_id=None):
     if device_id == 'host':
         return jsonify({'error': 'host_has_no_session'}), 400
     ensure_sqlite_state()
+    issuer_scope = _device_issuer_scope(viewer)
+    host_epoch = issuer_scope if binding and not caller else None
     try:
-        ids, count, stopped = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
-                                      now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS)
+        context = _request_authorization_context()
+        delegate = bool(binding and owner and (not caller or context.instance_access_source == 'owner'))
+        ids, count, results, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
+                                      now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
+                                      delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
-    if device_id is not None and not (ids or stopped):
+    if device_id is not None and not (ids or results):
         return jsonify({'error': 'device_not_found'}), 404
     for sid in ids:
         remote_access.publish_browser_session_revoked(sid)
-    response = jsonify({'ok': True, 'revoked_sessions': count})
+    result = {'ok': True, 'revoked_sessions': count, 'sign_out_results': results}
+    if deferred or (binding and not caller and ids):
+        # Conditional local cleanup is unconfirmed; never reveal whether this scope had a Health pairing.
+        result['health_cleanup_pending'] = True
+    response = jsonify(result)
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
+
+
+def _instance_address_actor() -> tuple[str, ...] | None:
+    """Who may change this Avibe's address: its current Owner, or this computer itself.
+
+    The Owner by current authorization, not the role at sign-in; or a direct
+    loopback connection. Never the LAN setup host, a forwarding proxy or the
+    Docker probe (docs/plans/instance-address-change.md A1).
+    """
+
+    viewer = _device_viewer()
+    if viewer is None or not viewer[2]:
+        return None
+    return ("remote", viewer[3]) if viewer[3] else ("loopback",)
+
+
+def _instance_address_response(payload: dict, status: int = 200):
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
+def _instance_address_error(error: instance_address.AddressError):
+    return _instance_address_response({"ok": False, "error": error.code, **error.extra}, error.status)
+
+
+@app.route("/api/instance-address", methods=["GET"])
+def instance_address_get():
+    if _instance_address_actor() is None:
+        return _instance_address_response({"ok": False, "error": "owner_required"}, 403)
+    return _instance_address_response(instance_address.describe())
+
+
+@app.route("/api/instance-address/preview", methods=["POST"])
+def instance_address_preview():
+    actor = _instance_address_actor()
+    if actor is None:
+        return _instance_address_response({"ok": False, "error": "owner_required"}, 403)
+    payload = request.json
+    try:
+        return _instance_address_response(
+            instance_address.preview(payload.get("prefix") if isinstance(payload, dict) else None, actor)
+        )
+    except instance_address.AddressError as error:
+        return _instance_address_error(error)
+
+
+@app.route("/api/instance-address/change", methods=["POST"])
+def instance_address_change():
+    actor = _instance_address_actor()
+    if actor is None:
+        return _instance_address_response({"ok": False, "error": "owner_required"}, 403)
+    _start_instance_address()
+    payload = request.json
+    try:
+        status, body = instance_address.change(
+            payload.get("confirmation_id") if isinstance(payload, dict) else None, actor
+        )
+    except instance_address.AddressError as error:
+        return _instance_address_error(error)
+    return _instance_address_response(body, status)
 
 
 @app.route("/api/session", methods=["GET"])
@@ -9217,11 +9831,12 @@ def remote_access_logout():
         else None
     )
     revocation_recorded = True
+    deferred = False
     signed_in = False
     if identity is not None:
         # Read before recording: a session already signed out keeps its Push.
         signed_in = remote_access.session_identity_is_current(identity)
-        revocation_recorded = remote_access.revoke_browser_session(identity)
+        revocation_recorded, deferred = remote_access.revoke_browser_session_with_cleanup(identity)
     if signed_in:
         body = request.json if isinstance(request.json, dict) else {}
         device_id = body.get("device_id")
@@ -9242,7 +9857,7 @@ def remote_access_logout():
     # The cookie is cleared either way; a sign-out that could not be recorded
     # says so, because a copy of the cookie would still be accepted.
     if revocation_recorded:
-        response = jsonify({"ok": True})
+        response = jsonify({"ok": True, **({"health_cleanup_pending": True} if deferred else {})})
     else:
         response = jsonify({"ok": False, "error": "remote_logout_unavailable"})
         response.status_code = 503
@@ -13817,6 +14432,9 @@ _VOICE_CAPTURE_ATTEMPT_ENUMS = {
     "engine": {"healthy", "stalled", "unknown"},
     # Why the iOS App ended a take it recorded (ios/Avibe/NativeHoldCapture.swift).
     "nativeEnd": {"interrupted", "route", "background", "gone", "replaced", "action_button", "other"},
+    # A hold the iOS App recognised itself: whether its microphone opened at touch-down
+    # ("early"), was only prepared then ("quiet"), or opened at recognition ("late").
+    "hold": {"early", "quiet", "late"},
 }
 _VOICE_CAPTURE_ATTEMPT_INTS = {
     "atMs",
@@ -13830,6 +14448,17 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     "clockAdvanceMs",
     "renderCalls",
     "emptyInputs",
+    # The App's own timings of a hold it recognised, in ms from touch-down: the cue, the live
+    # microphone, its first audio, the page taking the take, the release.
+    "holdRecMs",
+    "holdLiveMs",
+    "holdBufMs",
+    "holdAdoptMs",
+    "holdUpMs",
+    # The App's two durations of any take it records: activating its audio session, and
+    # starting the microphone.
+    "holdActMs",
+    "holdStartMs",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8
@@ -14113,6 +14742,13 @@ def asr_status():
                 # This account's answer to the voice disclosure: "granted",
                 # "declined", or null when it has not been asked.
                 "consent": _voice_consent_for(_voice_consent_user_key()),
+                # Whether, in the iOS App, the App recognises holds and records
+                # every take (``audio_asr.app_hold``); false is the off switch.
+                "app_hold": getattr(audio_asr_config, "app_hold", True) is not False,
+                # Whether a touch on the main Bot's button opens the microphone
+                # there at once (``audio_asr.app_hold_main_at_touch``); false
+                # makes that button open it when the hold is recognised.
+                "app_hold_main_at_touch": getattr(audio_asr_config, "app_hold_main_at_touch", True) is not False,
             }
         )
     except Exception:
@@ -14979,7 +15615,7 @@ def _workbench_event_heartbeat_interval_ms() -> int:
     return int(WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S * 1000)
 
 
-def _workbench_event_connected_frame(sub_id: int, *, via: str = "other") -> str:
+def _workbench_event_connected_frame(sub_id: int, *, via: str = "other", address_receipt: str | None = None) -> str:
     """The handshake: this subscription's id, and the cadence it is owed.
 
     Carrying the cadence here is what lets a client hold a brand-new stream to a
@@ -14998,7 +15634,25 @@ def _workbench_event_connected_frame(sub_id: int, *, via: str = "other") -> str:
     that; it holds for this stream alone and is reported again on reconnect.
     """
     interval_ms = _workbench_event_heartbeat_interval_ms()
-    return f'event: connected\ndata: {{"sub_id":{sub_id},"interval_ms":{interval_ms},"via":"{via}"}}\n\n'
+    data: dict[str, Any] = {"sub_id": sub_id, "interval_ms": interval_ms, "via": via}
+    if address_receipt:
+        # What this session posts back after clearing a retired address; held in
+        # page memory so a tab that sleeps through the change can still report.
+        data["address_receipt"] = address_receipt
+    return f"event: connected\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+def _address_retired_frame(destination: str, receipt: str | None) -> str:
+    """The last frame of a stream whose Host stopped being this Avibe's address.
+
+    Produced by the stream itself for its own connection, never published: only
+    a page that held an authorized session at the switch learns the new origin.
+    """
+
+    data: dict[str, Any] = {"moved_to": destination}
+    if receipt:
+        data["receipt"] = receipt
+    return f"event: {instance_address.ADDRESS_RETIRED_EVENT}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
 
 def _workbench_event_heartbeat_frame() -> str:
@@ -15265,11 +15919,26 @@ async def workbench_events():
     remote_config = _load_remote_access_config() if remote_session_payload is not None else None
     remote_session_cookie = None
     remote_request_host = None
+    # The public name this stream was admitted under: its own Host, or the one a
+    # trusted proxy forwards while it rewrites Host to a local address.
+    stream_host = _effective_normalized_host()
+    address_receipt = None
     if remote_session_payload is not None:
         from vibe import remote_access
 
         remote_session_cookie = request.cookies.get(remote_access.SESSION_COOKIE_NAME)
         remote_request_host = _effective_normalized_host()
+        browser_session_id = (remote_session_identity or {}).get("browser_session_id")
+        if isinstance(browser_session_id, str) and instance_address.is_managed_name(stream_host):
+            address_receipt = await asyncio.to_thread(instance_address.receipt_for_session, browser_session_id)
+
+    def address_retired_frame() -> str | None:
+        # Checked before the session, and again after every wait for the
+        # session's authorization (the address can change during that wait, and
+        # the session then fails for that very reason): at an address change the
+        # page must be told where this Avibe went, not that it was signed out.
+        destination = instance_address.retired_destination(stream_host)
+        return _address_retired_frame(destination, address_receipt) if destination else None
 
     async def authorization_state() -> str:
         if remote_session_payload is None:
@@ -15295,14 +15964,23 @@ async def workbench_events():
         # would then become the baseline and never be reported.
         last_dropped = broker.dropped_count(sub_id)
         try:
+            retired = address_retired_frame()
+            if retired is not None:
+                yield retired
+                return
             state = await authorization_state()
             if state != "current":
-                yield _remote_authorization_sse_frame(state)
+                yield address_retired_frame() or _remote_authorization_sse_frame(state)
                 return
+            if (stream_via == "other" and remote_session_payload and remote_session_identity
+                    and remote_session_identity.get("sub") == remote_session_payload.get("sub")
+                    and remote_session_identity.get("_device_binding") and remote_session_identity.get("browser_session_id")):
+                broker.mark_remote_tunnel(sub_id, remote_session_identity["_device_binding"],
+                                         remote_session_identity["sub"], remote_session_identity["browser_session_id"])
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
-            yield _workbench_event_connected_frame(sub_id, via=stream_via)
+            yield _workbench_event_connected_frame(sub_id, via=stream_via, address_receipt=address_receipt)
             payload = json.dumps(
                 {
                     "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,
@@ -15314,9 +15992,13 @@ async def workbench_events():
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
             last_heartbeat_at = time.monotonic()
             while True:
+                retired = address_retired_frame()
+                if retired is not None:
+                    yield retired
+                    return
                 state = await authorization_state()
                 if state != "current":
-                    yield _remote_authorization_sse_frame(state)
+                    yield address_retired_frame() or _remote_authorization_sse_frame(state)
                     return
                 # A subscriber that lost an event is not a subscriber any more,
                 # so end its stream and let it reconnect: the fresh subscription
@@ -15358,9 +16040,17 @@ async def workbench_events():
                     )
                     if event_type == SSE_BROKER_CLOSED_EVENT:
                         return
+                    if event_type == instance_address.ADDRESS_RETIRED_EVENT:
+                        # Only this stream itself may say so, for its own Host; a
+                        # published event of this name is never delivered.
+                        continue
+                    retired = address_retired_frame()
+                    if retired is not None:
+                        yield retired
+                        return
                     state = await authorization_state()
                     if state != "current":
-                        yield _remote_authorization_sse_frame(state)
+                        yield address_retired_frame() or _remote_authorization_sse_frame(state)
                         return
                     if not can_receive_workbench_event(authorization_context, event_type):
                         continue
@@ -18164,7 +18854,8 @@ async def _show_page_runtime_response(
     request_started = time.monotonic()
     manager = get_show_runtime_manager()
     request_options: dict[str, float] = {}
-    if _is_show_page_api_handler_path(asset_path):
+    is_handler = _is_show_page_api_handler_path(asset_path)
+    if is_handler:
         from core.services import settings as settings_service
 
         config = await asyncio.to_thread(settings_service.load_config_or_default)
@@ -18208,6 +18899,9 @@ async def _show_page_runtime_response(
     )
     response_headers["X-Content-Type-Options"] = "nosniff"
     response_headers["Referrer-Policy"] = "no-referrer"
+    if is_handler:
+        # A handler supplies data, not an app entry document, regardless of MIME type.
+        response_headers["Content-Security-Policy"] = "sandbox"
     content = proxied.content
     if proxied.status_code == 200 and external_prefix:
         # Public `/p/<share>/` surface only: rewrite the runtime's internal
@@ -18838,12 +19532,19 @@ def _is_local_show_runtime_url(parsed) -> bool:
         return False
 
 
+def _add_show_frame_ancestors(response: Response, ancestors: str) -> None:
+    # Keep any instance-owned document sandbox when applying the route's framing policy.
+    policy = response.headers.get("Content-Security-Policy")
+    directive = f"frame-ancestors {ancestors}"
+    response.headers["Content-Security-Policy"] = f"{policy}; {directive}" if policy else directive
+
+
 def _with_show_event_write_cookie(response: Response, session_id: str, *, enabled: bool) -> Response:
     # 'self' (not 'none') so the workbench can frame a Show Page in the chat
     # view — same origin as the page — while cross-origin clickjacking stays
     # blocked. Direct navigation is unaffected (frame-ancestors only governs
     # framing).
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+    _add_show_frame_ancestors(response, "'self'")
     if enabled:
         response.set_cookie(
             SHOW_EVENT_WRITE_TOKEN_COOKIE,
@@ -19144,7 +19845,7 @@ def _with_limited_show_policy(response: Response) -> Response:
     response.headers["Vary"] = ", ".join(sorted(vary_values))
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    _add_show_frame_ancestors(response, "'none'")
     return response
 
 
@@ -19869,6 +20570,29 @@ async def _stop_inbox_bridge() -> None:
             logger.debug("inbox bridge shutdown raised", exc_info=True)
 
 
+_account_signout_task: asyncio.Task | None = None
+
+
+async def _start_account_signout_worker():
+    from vibe.account_signout_worker import serve
+    global _account_signout_task
+    if _account_signout_task is None or _account_signout_task.done():
+        _account_signout_task = asyncio.create_task(serve(_load_remote_access_config), name='account-session-sign-out')
+
+
+async def _stop_account_signout_worker():
+    global _account_signout_task
+    task, _account_signout_task = _account_signout_task, None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app.add_event_handler('startup', _start_account_signout_worker)
+app.add_event_handler('shutdown', _stop_account_signout_worker)
 app.add_event_handler("startup", _start_direct_lifecycle)
 app.add_event_handler("shutdown", _stop_direct_lifecycle)
 app.add_event_handler("startup", _start_inbox_bridge)
@@ -20133,11 +20857,21 @@ def run_ui_server(host: str, port: int) -> None:
             logger.warning("Skipping UI startup reconciliation because config load failed: %s", config_load_error)
         if config is not None:
             try:
-                from vibe import remote_access
-
-                remote_access.start_runtime_monitoring(config)
+                _start_remote_monitors(config, startup=True)
             except Exception:
                 logger.warning("Failed to start remote access status heartbeat", exc_info=True)
+            _start_instance_address()
+        elif config_load_error is None:
+            # A fresh UI can precede its first config file. Link/Desktop may publish
+            # from another process; policy workers must notice before any UI restart.
+            from vibe import connection_runtime, remote_access
+            connection_runtime.start()  # an external Link does not call the UI setup hook
+            remote_access.start_authorization_revision_polling()
+            remote_access.start_resource_acl_sync_polling()
+            # The pollers above forward address hints; without its worker a
+            # pairing published later by another process would never have an
+            # address change applied.
+            _start_instance_address()
         print(f"UI Server running at http://{host}:{port}")
 
         # Retry binding in case of TIME_WAIT or port still held by old server during reload

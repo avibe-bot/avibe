@@ -407,7 +407,8 @@ def count_enabled(conn: Connection, *, user_key: str | None = None) -> int:
 
 
 def list_enabled(conn: Connection, *, user_key: str | None = None) -> list[dict[str, Any]]:
-    stmt = select(web_push_subscriptions).where(web_push_subscriptions.c.enabled == 1)
+    from storage.device_functions import delivery_allowed
+    stmt = select(web_push_subscriptions).where(web_push_subscriptions.c.enabled == 1, delivery_allowed())
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     rows = conn.execute(stmt).mappings().all()
@@ -453,6 +454,13 @@ def get_enabled_by_endpoint(
 ) -> dict[str, Any] | None:
     row = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
     return row if row and row["enabled"] else None
+
+
+def get_deliverable_by_endpoint(conn: Connection, *, endpoint: str, user_key: str):
+    from storage.device_functions import delivery_allowed
+    row = conn.execute(select(web_push_subscriptions).where(web_push_subscriptions.c.endpoint==endpoint,
+        web_push_subscriptions.c.user_key==user_key, web_push_subscriptions.c.enabled==1, delivery_allowed())).mappings().first()
+    return _row_to_dict(row) if row else None
 
 
 def mark_send_success(

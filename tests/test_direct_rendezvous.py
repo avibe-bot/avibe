@@ -201,7 +201,7 @@ def test_admission_listener_notifies_before_offer_return_and_on_extension():
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
     events: list[tuple[str, int]] = []
     order: list[str] = []
-    rendezvous.set_admission_listener(lambda endpoint_id, ttl: (events.append((endpoint_id, ttl)), order.append("notice")))
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl, _epoch: (events.append((endpoint_id, ttl)), order.append("notice")))
 
     _offer(rendezvous)
     order.append("answer")
@@ -217,7 +217,7 @@ def test_admission_listener_reports_early_drops_and_no_listener_is_optional():
     rendezvous = DirectRendezvous(_Clock())
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
     events: list[tuple[str, int]] = []
-    rendezvous.set_admission_listener(lambda endpoint_id, ttl: events.append((endpoint_id, ttl)))
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl, _epoch: events.append((endpoint_id, ttl)))
     clients = [f"{index:064x}" for index in range(9)]
     for client in clients:
         _offer(rendezvous, client=client, subject="same-subject")
@@ -353,6 +353,12 @@ def test_trial_consent_only_changes_from_host_shell(instance):
     from vibe.authorization import AuthorizationContext, invocation_authority
     from config.v2_config import V2Config
 
+    from vibe import connection_settings as cs
+
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.instance_secret = 'test-pairing-credential'
+    config.save()
+    assert not cs.relay_enrolled(config)
     parser = cli.build_parser()
     def args(state):
         return parser.parse_args(["remote", "direct", "relay", "public-trial", state])
@@ -369,6 +375,7 @@ def test_trial_consent_only_changes_from_host_shell(instance):
         api.save_config({"remote_access": {"vibe_cloud": {"public_relay_trial": False}}})
     assert cli.cmd_remote_direct(args("off")) == 0
     assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    assert cs.relay_enrolled(V2Config.load())
 
 
 def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
@@ -388,7 +395,9 @@ def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
         "addresses": [{"kind": "lan", "address": "192.168.1.20:51234"}],
         "relay": None,
     }
-    assert rendezvous._admissions == {CLIENT_ENDPOINT: ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)}
+    (grant,) = rendezvous._admissions.values()
+    assert rendezvous.is_admitted(CLIENT_ENDPOINT)
+    assert (grant.subject, grant.until) == ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)
 
 
 def test_before_a_transport_exists_the_answer_is_unavailable(instance):

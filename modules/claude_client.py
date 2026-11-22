@@ -1,17 +1,22 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import logging
 import os
 from typing import Optional, Callable
-from modules.claude_sdk_compat import (
-    CLAUDE_SDK_MAX_BUFFER_SIZE,
-    ClaudeAgentOptions,
-    SystemMessage,
-    AssistantMessage,
-    UserMessage,
-    ResultMessage,
-    TextBlock,
-    ToolUseBlock,
-    ToolResultBlock,
-)
+from modules import claude_sdk_compat as claude_sdk
+from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
+
+if TYPE_CHECKING:
+    from modules.claude_sdk_compat import (
+        AssistantMessage,
+        ResultMessage,
+        SystemMessage,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
 from config.v2_compat import ClaudeCompatConfig
 from vibe.claude_config import CLAUDE_NATIVE_MCP_DISABLED
 from modules.im.formatters import BaseMarkdownFormatter, SlackFormatter
@@ -24,13 +29,22 @@ class ClaudeClient:
     def __init__(self, config: ClaudeCompatConfig, formatter: Optional[BaseMarkdownFormatter] = None):
         self.config = config
         self.formatter = formatter or SlackFormatter()
-        self.options = ClaudeAgentOptions(
-            permission_mode=config.permission_mode,  # type: ignore[arg-type]
-            cwd=config.cwd,
-            system_prompt=config.system_prompt,
-            max_buffer_size=CLAUDE_SDK_MAX_BUFFER_SIZE,
-            **CLAUDE_NATIVE_MCP_DISABLED,
-        )  # type: ignore[arg-type]
+        self._options = None
+
+    @property
+    def options(self):
+        # Built on first use: building it loads the Claude Agent SDK, which a
+        # controller that never runs the Claude Code backend should not pay for.
+        if self._options is None:
+            config = self.config
+            self._options = claude_sdk.ClaudeAgentOptions(
+                permission_mode=config.permission_mode,  # type: ignore[arg-type]
+                cwd=config.cwd,
+                system_prompt=config.system_prompt,
+                max_buffer_size=CLAUDE_SDK_MAX_BUFFER_SIZE,
+                **CLAUDE_NATIVE_MCP_DISABLED,
+            )  # type: ignore[arg-type]
+        return self._options
 
     def format_message(
         self,
@@ -41,13 +55,13 @@ class ClaudeClient:
         """Format different types of messages according to specified rules"""
         active_formatter = formatter or self.formatter
         try:
-            if isinstance(message, SystemMessage):
+            if isinstance(message, claude_sdk.SystemMessage):
                 return self._format_system_message(message, active_formatter)
-            elif isinstance(message, AssistantMessage):
+            elif isinstance(message, claude_sdk.AssistantMessage):
                 return self._format_assistant_message(message, active_formatter, get_relative_path)
-            elif isinstance(message, UserMessage):
+            elif isinstance(message, claude_sdk.UserMessage):
                 return self._format_user_message(message, active_formatter, get_relative_path)
-            elif isinstance(message, ResultMessage):
+            elif isinstance(message, claude_sdk.ResultMessage):
                 return self._format_result_message(message, active_formatter)
             else:
                 return active_formatter.format_warning(f"Unknown message type: {type(message)}")
@@ -65,14 +79,14 @@ class ClaudeClient:
         formatted_parts = []
 
         for block in content_blocks:
-            if isinstance(block, TextBlock):
+            if isinstance(block, claude_sdk.TextBlock):
                 # Don't escape here - let the formatter handle it during final formatting
                 # This avoids double escaping
                 formatted_parts.append(block.text)
-            elif isinstance(block, ToolUseBlock):
+            elif isinstance(block, claude_sdk.ToolUseBlock):
                 tool_info = self._format_tool_use_block(block, formatter, get_relative_path)
                 formatted_parts.append(tool_info)
-            elif isinstance(block, ToolResultBlock):
+            elif isinstance(block, claude_sdk.ToolResultBlock):
                 result_info = self._format_tool_result_block(block, formatter)
                 formatted_parts.append(result_info)
 
@@ -152,10 +166,10 @@ class ClaudeClient:
 
     def _is_skip_message(self, message) -> bool:
         """Check if the message should be skipped"""
-        if isinstance(message, AssistantMessage):
+        if isinstance(message, claude_sdk.AssistantMessage):
             if not message.content:
                 return True
-        elif isinstance(message, UserMessage):
+        elif isinstance(message, claude_sdk.UserMessage):
             if not message.content:
                 return True
         return False

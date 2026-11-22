@@ -142,6 +142,19 @@ export const TerminalTabs: React.FC<{
     setActive(tab.key);
   }, [windowed, launchCwd, launchKey]);
 
+  // The first windowed tab consumed the initial cwd. Reuse appends a context
+  // for a distinct request without replacing any running shell.
+  const handledWindowLaunch = useRef(params?.launchRequestId);
+  useEffect(() => {
+    const key = params?.launchRequestId;
+    if (!windowed || !key || handledWindowLaunch.current === key) return;
+    handledWindowLaunch.current = key;
+    if (typeof params?.cwd !== 'string' || !params.cwd) return;
+    const tab: Tab = { key: ++tabSeq.current, slot: acquireTerminalSlot(), cwd: params.cwd };
+    setTabs((current) => [...current, tab]);
+    setActive(tab.key);
+  }, [windowed, params?.launchRequestId, params?.cwd]);
+
   const sessionIdFor = (tab: Tab): string | null =>
     identity === undefined ? null : getSessionId(identity, tab.slot != null ? `${TAB_TOKEN}-w${tab.slot}` : undefined);
 
@@ -184,7 +197,9 @@ export const TerminalTabs: React.FC<{
   // Dispose every ephemeral session on unmount (window close) + on tab/page unload, reading
   // the live tabs from a ref so the listeners don't churn as tabs change.
   const liveRef = useLatestRef({ tabs, resolve: sessionIdFor });
+  const lifetimeEpoch = useRef(0);
   useEffect(() => {
+    const epoch = ++lifetimeEpoch.current;
     const onHide = () => {
       for (const tab of liveRef.current.tabs) {
         if (tab.slot == null) continue;
@@ -195,12 +210,17 @@ export const TerminalTabs: React.FC<{
     window.addEventListener('pagehide', onHide);
     return () => {
       window.removeEventListener('pagehide', onHide);
-      for (const tab of liveRef.current.tabs) {
-        if (tab.slot == null) continue;
-        const sid = liveRef.current.resolve(tab);
-        if (sid == null) releaseTerminalSlot(tab.slot);
-        else deleteTerminalSession(sid, tab.slot);
-      }
+      // StrictMode's cleanup/setup replay retains these tabs. Disposing their
+      // slots during that replay would let the next launch reuse a live session.
+      queueMicrotask(() => {
+        if (lifetimeEpoch.current !== epoch) return;
+        for (const tab of liveRef.current.tabs) {
+          if (tab.slot == null) continue;
+          const sid = liveRef.current.resolve(tab);
+          if (sid == null) releaseTerminalSlot(tab.slot);
+          else deleteTerminalSession(sid, tab.slot);
+        }
+      });
     };
   }, []);
 

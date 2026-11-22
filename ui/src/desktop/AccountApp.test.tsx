@@ -161,7 +161,7 @@ it("a member's check reads the instance again instead of asking for a check the 
 
 it("a failed install of the instance is told by its section, not also by this page's connection notice", async () => {
   // The shell's receipt says the install failed; the client reports the same refusal as an error code.
-  shown.instance = instanceReady({ request: { action: 'install', phase: 'failed', target: '3.2.7', error_code: 'install_failed', updated_at: new Date(Date.now() + 60_000).toISOString() } });
+  shown.instance = instanceReady({ request: { action: 'install', phase: 'failed', target: '3.2.7', error_code: 'install_failed', updated_at: new Date(Date.now() + 60_000).toISOString(), following: false, installed_from: '3.2.5' } });
   bridge.error = 'install_failed';
   const { instance } = await openPopup();
   expect(instance!.textContent).toContain(en.update.failure.install.title);
@@ -170,20 +170,28 @@ it("a failed install of the instance is told by its section, not also by this pa
   expect(screen.queryByText(en.desktopClient.errors.request)).toBeNull();
 });
 
-it('while the shell still follows an install that changed nothing, the instance section offers no retry', async () => {
-  // Accepted six minutes ago; the instance still answers on the same version and offer.
-  shown.instance = instanceReady({ request: { action: 'install', phase: 'accepted', target: '3.2.7', error_code: null, updated_at: new Date(Date.now() - 6 * 60_000).toISOString() } });
+const accepted = (following: boolean) => ({ action: 'install', phase: 'accepted', target: '3.2.7', error_code: null, updated_at: '2026-11-20T07:03:17Z', following, installed_from: '3.2.5' });
+
+it('while the shell follows an accepted install, the instance section offers nothing the shell would refuse', async () => {
+  shown.instance = instanceReady({ request: accepted(true) });
+  const { instance } = await openPopup();
+  expect(instance!.textContent).toContain(en.update.status.restarting);
+  expect(instance!.querySelector('button:not([aria-expanded])')).toBeNull();
+  expect((screen.getByRole('button', { name: en.update.action.check }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('once the shell has stopped following an install that changed nothing, the retry is offered and sent', async () => {
+  // The instance still runs the version it had when the install was accepted.
+  shown.instance = instanceReady({ request: accepted(false) });
   const { instance } = await openPopup();
   expect(instance!.textContent).toContain(en.update.failure.install.title);
-  expect(instance!.querySelector('button:not([aria-expanded])')).toBeNull();
-  // The header's check still reads the instance again, which the shell admits.
-  fireEvent.click(screen.getByRole('button', { name: en.update.action.check }));
-  await waitFor(() => expect(send.mock.calls.map(([action]) => (action as { type: string }).type)).toEqual(['update_check', 'instance_update_refresh']));
+  fireEvent.click(screen.getByRole('button', { name: en.update.action.retry }));
+  await waitFor(() => expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'instance_update_install', target_version: '3.2.7' }));
 });
 
 it("a refusal that leaves no receipt keeps this page's notice: the section has nothing to tell", async () => {
   // An older failed install is still the shell's last receipt; this click is refused before any new one.
-  shown.instance = instanceReady({ request: { action: 'install', phase: 'failed', target: '3.2.7', error_code: 'install_failed', updated_at: '2026-11-20T07:03:17Z' } });
+  shown.instance = instanceReady({ request: { action: 'install', phase: 'failed', target: '3.2.7', error_code: 'install_failed', updated_at: '2026-11-20T07:03:17Z', following: false, installed_from: '3.2.5' } });
   bridge.error = 'busy';
   await openPopup();
   fireEvent.click(screen.getByRole('button', { name: en.update.action.retry }));
@@ -192,7 +200,7 @@ it("a refusal that leaves no receipt keeps this page's notice: the section has n
 });
 
 it("a failed check or switch on the instance, which no section tells, keeps this page's notice", async () => {
-  shown.instance = instanceReady({ request: { action: 'prereleases', phase: 'failed', target: null, error_code: 'request_failed', updated_at: '2026-11-20T07:03:17Z' } });
+  shown.instance = instanceReady({ request: { action: 'prereleases', phase: 'failed', target: null, error_code: 'request_failed', updated_at: '2026-11-20T07:03:17Z', following: false, installed_from: null } });
   bridge.error = 'request_failed';
   await openPopup();
   fireEvent.click(screen.getByRole('button', { name: 'Studio' }));
@@ -208,7 +216,7 @@ it('the update popup does not tell an enrollment failure', async () => {
 });
 
 it('an instance install sent from the popup shows as running, with no second Update for it', async () => {
-  shown.instance = instanceReady({ request: { action: 'install', phase: 'sending', target: '3.2.7', error_code: null, updated_at: '2026-11-20T07:03:17Z' } });
+  shown.instance = instanceReady({ request: { action: 'install', phase: 'sending', target: '3.2.7', error_code: null, updated_at: '2026-11-20T07:03:17Z', following: true, installed_from: null } });
   const { instance } = await openPopup();
   expect(instance!.textContent).toContain(en.update.status.installing);
   expect(screen.queryByRole('button', { name: 'Update Studio' })).toBeNull();
@@ -230,3 +238,14 @@ it("on this computer's own instance, or under a shell that reports no instance, 
   expect(screen.getByRole('button', { name: en.update.action.update })).toBeTruthy();
 });
 
+// The back button's edge follows the native logical origin and keeps its own inset; missing projection retains web/nonmac spacing.
+it.each(['12px', '19.5px', ''])('uses the configured back-header inset %s without changing the content column', async value => {
+  document.documentElement.style.setProperty('--shell-window-controls-left', value);
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  const { container } = render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
+  const button = screen.getByRole('button', { name: en.desktopClient.backWorkbench });
+  expect(button.closest('header')!.style.paddingLeft).toBe(value ? 'var(--shell-window-controls-left)' : '');
+  expect(button.classList.contains('pl-0')).toBe(false);
+  expect(container.querySelector('main')!.classList.contains('px-10')).toBe(true);
+  document.documentElement.style.removeProperty('--shell-window-controls-left');
+});

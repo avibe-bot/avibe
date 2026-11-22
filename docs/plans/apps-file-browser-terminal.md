@@ -188,8 +188,12 @@ Mechanism (mirrors show-runtime):
   OIDC + Cloudflare-tunnel gated (`enforce_remote_access_cookie`). These expose an existing
   capability to the authenticated owner.
 - But a terminal raises the blast radius of any auth bug to "remote shell". Hardening:
-  - opt-in / feature flag;
-  - **never reachable via public `/p/` share links** — Workbench + private `/show` only;
+  - feature flag (`VIBE_UI_ENABLE_TERMINAL`; the terminal has since shipped on by default);
+  - the Terminal app is not served on public `/p/` share links, and an anonymous visitor of one
+    has no session to open the socket with. This is not isolation from Show Pages: `/p/` and
+    `/show` pages share the Workbench's origin, so a page's script passes the socket's `Origin`
+    check and opens a terminal whenever the person viewing the page could. See "A page's script
+    acts as the person viewing it" in `show-page.md`;
   - WebSocket `Origin` check (codebase already rejects `X-Forwarded-*`);
   - audit log of file writes/deletes and terminal commands;
   - idle timeout on terminal sessions.
@@ -211,7 +215,7 @@ Mechanism (mirrors show-runtime):
 - Terminal backend: `/api/terminal/<session>` WS + PTY + tmux own-socket persistence + resize +
   lifecycle/reaper + UTF-8 locale + `TERM`.
 - Frontend: `TerminalApp` + `xterm.js` + addons; mobile accessory key bar + iOS viewport reuse.
-- Security: flag, never-on-`/p/`, Origin check, audit, idle timeout.
+- Security: flag, no Terminal app on `/p/`, Origin check, audit, idle timeout.
 - Regression: verify terminal across platforms in the Incus environment.
 
 ## 11. Testing & validation

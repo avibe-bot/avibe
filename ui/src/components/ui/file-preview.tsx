@@ -133,7 +133,10 @@ const ImageBody: React.FC<{ src: string; name?: string; className?: string; onDo
   const pinch = React.useRef<{ dist: number; midX: number; midY: number } | null>(null);
 
   React.useEffect(() => {
-    setStatus('loading');
+    // A cached image can finish before this effect (including StrictMode replay).
+    // Do not overwrite its already-delivered load event with a permanent spinner.
+    const image = imgRef.current;
+    setStatus(image?.complete ? (image.naturalWidth > 0 ? 'ready' : 'error') : 'loading');
     setView(FIT_VIEW);
   }, [src]);
 

@@ -39,6 +39,14 @@ last-tab navigation, and no page-level horizontal overflow in
 EN/ZH at 320–402px mobile widths and desktop/tablet widths. This is browser layout
 coverage, not evidence of a live provider connection.
 
+`reset-cards.spec.ts` extends `MH-QUOTA-078` on the complete Models page with
+`getQuota`, `refreshQuota` and `redeemResetCard` answered in memory by
+`resetCardsFixture.tsx`. It reaches each reset-card state (none, an account's own
+refresh, one and two kinds, the confirm line, using, used, not used, unconfirmed,
+not usable now) by clicking, in EN/ZH and light/dark on desktop and mobile. A card's
+expiry stays on one line, the status chip sits under the account name at phone
+width, and nothing overflows. `RESET_CARDS_SHOT_DIR` saves each state's panel.
+
 `gateway-status.spec.ts` consumes `MH-GATEWAY-STATUS-001`. It renders the real
 Agent card with isolated catalog and Agent supply data. The route summary and
 collapsible Agent footer remain separate, and long identifiers wrap inside the

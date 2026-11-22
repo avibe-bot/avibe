@@ -4,17 +4,19 @@ export type NativeCapability =
   | 'appLock'
   | 'app'
   | 'badge'
+  | 'device'
   | 'health'
   | 'haptics'
   | 'instancePresentation'
   | 'keyboardResizesViewport'
-  | 'liveActivities'
+  | 'lockScreenProgress'
   | 'notifications'
   | 'push'
   | 'systemSchedule'
   | 'viewport'
   | 'voice'
-  | 'voiceCapture';
+  | 'voiceCapture'
+  | 'voiceHold';
 export type NativeImpactStyle = 'light' | 'medium' | 'heavy' | 'soft' | 'rigid';
 export type NativeNotificationType = 'success' | 'warning' | 'error';
 export type NativeVoicePermission = 'granted' | 'denied' | 'prompt';
@@ -72,6 +74,20 @@ export type NativeAppInfo = {
   instance?: { id?: string; name?: string };
   /** With `systemSchedule`: the stable identity of this App installation. */
   device?: { id?: string };
+};
+
+/**
+ * `device.describe`: who this iPhone is, as the page reports it to the
+ * instance's device list (`POST /api/devices/self`). Display and grouping
+ * only. `installation_id` is derived per instance by the App.
+ */
+export type NativeDeviceDescription = {
+  kind: 'iphone_app';
+  display_name: string;
+  installation_id?: string;
+  aliases: Array<{ source: 'health' | 'schedule'; id: string }>;
+  app_version: string;
+  system_version: string;
 };
 
 export type NativeSystemScheduleRequest = {
@@ -187,9 +203,55 @@ export type NativeShareResult = {
 const NATIVE_SHARE_STATUSES: readonly NativeShareStatus[] = ['completed', 'cancelled', 'failed', 'expired'];
 const NATIVE_SHARE_MAX_SESSION_ID_LENGTH = 200;
 
+type ShareShell = { call<T>(method: string, params?: Record<string, unknown>): Promise<T> };
+
+function phoneShare(): ShareShell | null {
+  const native = bridge();
+  return native && (native.capabilities[NATIVE_SHARE_CAPABILITY] ?? 0) >= 1 ? native : null;
+}
+
+/**
+ * The desktop app marks a window that can share its Show: a display capability, checked again
+ * natively. The Workbench carries the shell marker; a native Show window carries the app-window
+ * marker instead (`app_windows.rs`), never the shell's.
+ */
+function desktopShareMarked(): boolean {
+  return typeof window !== 'undefined'
+    && (window.__AVIBE_DESKTOP_SHELL__ === true || window.__AVIBE_NATIVE_APP_WINDOW__ === true)
+    && window.__AVIBE_DESKTOP_SHOW_SHARE__ === 1;
+}
+
+/**
+ * Who answers `share.capabilities` and `share.present`: the phone app's bridge, or the macOS
+ * desktop app's one share command, which takes the same requests and gives the same answers.
+ */
+function shareShell(): ShareShell | null {
+  const native = phoneShare();
+  if (native) return native;
+  if (!desktopShareMarked()) return null;
+  const internals = (window as unknown as {
+    __TAURI_INTERNALS__?: { invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
+  }).__TAURI_INTERNALS__;
+  const invoke = internals?.invoke?.bind(internals);
+  if (!invoke) return null;
+  return {
+    call: async <T>(method: string, params: Record<string, unknown> = {}) =>
+      (await invoke('desktop_show_share', { request: { ...params, method } })) as T,
+  };
+}
+
 /** Whether this shell can share a Show through `share.present` (any kind). */
 export function hasNativeShare(): boolean {
-  return hasNativeCapability(NATIVE_SHARE_CAPABILITY);
+  return phoneShare() !== null || desktopShareMarked();
+}
+
+/**
+ * Whether this shell can also export the Show as a PDF or image: the phone app (which says
+ * which kinds when asked), or a desktop Show window. The desktop Workbench shares links only.
+ */
+export function hasNativeShareExport(): boolean {
+  if (phoneShare() !== null) return true;
+  return desktopShareMarked() && window.__AVIBE_DESKTOP_SHOW_EXPORT__ === 1;
 }
 
 function newShareOperationId(): string | null {
@@ -238,11 +300,9 @@ export async function nativeSharePresent(
     status: 'failed',
     error: { code },
   });
-  const native = bridge();
-  if (!native || (native.capabilities[NATIVE_SHARE_CAPABILITY] ?? 0) < 1) {
-    return failed('capability_mismatch');
-  }
-  if (!operationId) return failed('unavailable');
+  if (!hasNativeShare()) return failed('capability_mismatch');
+  const native = shareShell();
+  if (!native || !operationId) return failed('unavailable');
   if (!sessionId || sessionId.length > NATIVE_SHARE_MAX_SESSION_ID_LENGTH) {
     return failed('invalid_request');
   }
@@ -286,6 +346,10 @@ export async function nativeSharePresent(
 
 export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
   return callNative<NativeAppInfo>('app', 'app.info');
+}
+
+export async function nativeDeviceDescribe(params: { health_binding?: true } = {}): Promise<unknown> {
+  return callNative<unknown>('device', 'device.describe', params);
 }
 
 /** Establishes a connection only; request completion comes from the instance API. */
@@ -559,6 +623,100 @@ export function onNativeVoiceCapture(handler: (event: NativeVoiceCaptureEvent) =
       ...(typeof event.pcm === 'string' ? { pcm: event.pcm } : {}),
       ...(event.ended === true ? { ended: true } : {}),
       ...(typeof event.reason === 'string' ? { reason: event.reason } : {}),
+    });
+  });
+}
+
+/** The first `voiceHold` the page names surfaces for. The one build that announced 1
+ *  (TestFlight 50.1) could take a tap on the composer for a hold and give it the cue, when it
+ *  learnt late that the finger had lifted; from 2 on the App asks the touch itself first. */
+export const NATIVE_VOICE_HOLD_VERSION = 2;
+
+/** The App recognises a hold on the surfaces the page names (ios/Avibe/NativeHoldCapture.swift):
+ *  it gives the cue at the threshold and has the microphone open from touch-down. */
+export function hasNativeVoiceHold(): boolean {
+  return hasNativeCapability('voiceHold', NATIVE_VOICE_HOLD_VERSION) && hasNativeVoiceCapture();
+}
+
+/** A place where a hold may record now, in the WebView's own points. */
+export type NativeVoiceHoldSurface = {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** A touch here opens no microphone: the App starts its input when it recognises the hold.
+   *  Unsaid, the App's default (at touch-down). */
+  start?: 'recognition';
+};
+
+/** The App's answer to a list of surfaces: `ok` (it follows presses there), or why it does not.
+ *  `superseded` is a list overtaken by a later one, which stands instead. */
+export type NativeVoiceHoldSurfacesAnswer = 'ok' | 'consent' | 'unwatched' | 'superseded' | 'failed';
+
+/** Names the surfaces where a hold may record now (none: the App follows no press), and the
+ *  page's hold threshold. */
+export async function nativeVoiceHoldSurfaces(
+  surfaces: NativeVoiceHoldSurface[],
+  holdMs: number,
+): Promise<NativeVoiceHoldSurfacesAnswer> {
+  try {
+    const native = bridge();
+    if (!native || !hasNativeVoiceHold()) return 'failed';
+    await native.call('voice.holdSurfaces', surfaces.length > 0 ? { surfaces, holdMs } : { surfaces });
+    return 'ok';
+  } catch (error) {
+    const { code, message } = (error ?? {}) as Partial<NativeBridgeError>;
+    if (code === 'failed' && (message === 'consent' || message === 'unwatched' || message === 'superseded')) return message;
+    return 'failed';
+  }
+}
+
+/** The App's own timings of a hold (ms from touch-down unless a duration), numbers and states only. */
+export type NativeVoiceHoldTimings = Record<string, unknown>;
+
+/** What the App says of a press it follows: a hold was `recognised` (the cue was given, its take
+ *  waits to be taken), the microphone `failed` to start for it, or a taken take's `timings` at its end. */
+export type NativeVoiceHoldEvent = {
+  phase: 'recognised' | 'failed' | 'timings';
+  take: string;
+  surface?: string;
+  step?: string;
+  timings?: NativeVoiceHoldTimings;
+};
+
+/** Takes a recognised hold's take: its audio, from touch-down, then comes as capture events.
+ *  Rejects with the bridge's error when the take is gone. */
+export async function nativeVoiceHoldAdopt(take: string): Promise<{ sampleRate: number; timings?: NativeVoiceHoldTimings }> {
+  const adopted = await callNative<{ sampleRate: number; timings?: NativeVoiceHoldTimings }>('voiceHold', 'voice.holdAdopt', { take });
+  if (!adopted) throw { code: 'unavailable', message: 'The App cannot record.' } satisfies NativeBridgeError;
+  return adopted;
+}
+
+/** Refuses a hold the page does not see as its own: the App drops what it recorded. */
+export async function nativeVoiceHoldReject(take: string): Promise<void> {
+  try {
+    await callNative('voiceHold', 'voice.holdReject', { take });
+  } catch {
+    // The App drops a take nobody takes on its own.
+  }
+}
+
+/** Listens to the App's hold events; null without a native shell. */
+export function onNativeVoiceHold(handler: (event: NativeVoiceHoldEvent) => void): (() => void) | null {
+  const native = bridge();
+  if (!native) return null;
+  return native.on('voice.hold', (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const event = payload as Partial<NativeVoiceHoldEvent>;
+    if (typeof event.take !== 'string') return;
+    if (event.phase !== 'recognised' && event.phase !== 'failed' && event.phase !== 'timings') return;
+    handler({
+      phase: event.phase,
+      take: event.take,
+      ...(typeof event.surface === 'string' ? { surface: event.surface } : {}),
+      ...(typeof event.step === 'string' ? { step: event.step } : {}),
+      ...(event.timings && typeof event.timings === 'object' ? { timings: event.timings } : {}),
     });
   });
 }
@@ -1091,23 +1249,23 @@ export async function nativeAppLockSetPolicy(policy: string): Promise<unknown> {
 }
 
 
-export type NativeLiveActivityStatus = { enabled: boolean; tracking: boolean };
-export type NativeLiveActivityResult = { ok: true } | {
-  ok: false; code: 'disabled' | 'no_active_turn' | 'push_unavailable' | 'failed';
-};
+export type NativeLiveActivitySetting = { enabled: boolean; systemEnabled: boolean };
+export type NativeLiveActivityObservation = {
+  sessionId: string; agentName: string; sessionTitle: string | null; running: boolean;
+} | { sessionId: null };
 
-export function nativeLiveActivityStatus(sessionId: string) {
-  return callNative<NativeLiveActivityStatus>('liveActivities', 'liveActivity.status', { sessionId });
+export function nativeLiveActivitySetting() {
+  return callNative<NativeLiveActivitySetting>('lockScreenProgress', 'liveActivity.setting');
 }
 
-export function nativeLiveActivityStart(sessionId: string, agentName: string, sessionTitle: string | null) {
-  return callNative<NativeLiveActivityResult>('liveActivities', 'liveActivity.start', { sessionId, agentName, sessionTitle });
+export function nativeLiveActivitySetSetting(enabled: boolean) {
+  return callNative<NativeLiveActivitySetting>('lockScreenProgress', 'liveActivity.setSetting', { enabled });
 }
 
-export function nativeLiveActivityStop(sessionId: string) {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.stop', { sessionId });
+export function nativeLiveActivityObserve(observation: NativeLiveActivityObservation) {
+  return callNative<{ ok: true }>('lockScreenProgress', 'liveActivity.observe', observation);
 }
 
 export function nativeLiveActivityOpenSettings() {
-  return callNative<{ ok: true }>('liveActivities', 'liveActivity.openSettings');
+  return callNative<{ ok: true }>('lockScreenProgress', 'liveActivity.openSettings');
 }

@@ -1,4 +1,5 @@
 import { DesktopCompose } from '../desktop/DesktopCompose';
+import { NativeAppLaunchFallback } from './apps/NativeAppLaunchFallback';
 import { DesktopAccountRow } from '../desktop/DesktopAccountRow';
 import { DesktopClientPresentation } from '../desktop/useDesktopClient';
 import { hasDesktopClient } from '../desktop/bridge';
@@ -63,6 +64,7 @@ import { DesktopSettingsCommand } from './DesktopSettingsCommand';
 import { VaultHandoffReturn } from './VaultHandoffReturn';
 import { prefetchRoutePages } from '../routePages';
 import { WebPushReconciler } from './workbench/WebPushReconciler';
+import { NativeDeviceReporter } from './workbench/NativeDeviceReporter';
 import { SystemScheduleForwarder } from './workbench/SystemScheduleForwarder';
 
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
@@ -442,6 +444,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
       <ShellSidebarContext.Provider value={shellDrawsSidebar}>
         <WebPushReconciler />
         <SystemScheduleForwarder />
+        <NativeDeviceReporter />
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <DesktopSettingsCommand />
@@ -512,6 +515,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <WebPushReconciler />
     <SystemScheduleForwarder />
+    <NativeDeviceReporter />
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <DesktopSettingsCommand />
     <DesktopClientPresentation />
@@ -522,6 +526,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     {!standaloneAppTab && <DesktopCompose />}
     <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
+    {canUseApps && <RouteSurfaceActivityBoundary active={!settingsOpen}><NativeAppLaunchFallback /></RouteSurfaceActivityBoundary>}
     <DesktopWindowChrome enabled={windowChrome} hidden={settingsOpen}>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}

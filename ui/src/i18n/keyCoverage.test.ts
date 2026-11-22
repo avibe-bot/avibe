@@ -939,6 +939,7 @@ const NON_KEY_LITERALS = [
   'badge.set',
   // A native capability key; the shell advertises it beside the method names.
   'c1.share_draft',
+  'device.describe',
   'direct.handover',
   'direct.status',
   'direct.transportChanged',
@@ -946,8 +947,9 @@ const NON_KEY_LITERALS = [
   'haptics.notify',
   'haptics.selection',
   'liveActivity.openSettings',
-  'liveActivity.start',
-  'liveActivity.status',
+  'liveActivity.observe',
+  'liveActivity.setting',
+  'liveActivity.setSetting',
   'notifications.reconcile',
   'session.bootstrap',
   'session.logout',
@@ -968,6 +970,10 @@ const NON_KEY_LITERALS = [
   'voice.capturePrepare',
   'voice.captureStart',
   'voice.captureStop',
+  'voice.hold',
+  'voice.holdSurfaces',
+  'voice.holdAdopt',
+  'voice.holdReject',
 
   // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
   // so the server's own message shows when the client has no copy for the code.
@@ -997,6 +1003,7 @@ const NON_KEY_LITERALS = [
   'avibe.vault.addTier',
   'avibe.vault.crypto',
   'avibe.vault.hdAddressCheckFailed',
+  'avibe.voiceInput.deviceId',
   'avibe.workbench.windows.v1',
   'vibe.nativePush.pendingRegistration',
   'vibe.nativePush.disabledIntent',

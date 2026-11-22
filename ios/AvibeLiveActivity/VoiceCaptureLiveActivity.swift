@@ -152,6 +152,16 @@ enum VoiceCaptureCopy {
         return reasonLine(reason, errorCode: state.errorCode, step: state.failedStep, errorText: state.errorText)
     }
 
+    /// Whether a state has a reason line under its phase line: not for
+    /// `confirmPending`, which the phase line (打开 Avibe 继续) says in full.
+    static func showsReasonLine(_ state: VoiceCaptureAttributes.ContentState) -> Bool {
+        state.reason.map(showsLine(for:)) ?? false
+    }
+
+    static func showsLine(for reason: VoiceCaptureAttributes.Reason) -> Bool {
+        reason != .confirmPending
+    }
+
     static func reason(_ reason: VoiceCaptureAttributes.Reason) -> LocalizedStringResource {
         switch reason {
         case .offline: return text("voiceCapture.reason.offline")
@@ -161,6 +171,9 @@ enum VoiceCaptureCopy {
         case .sendFailed: return text("voiceCapture.reason.sendFailed")
         case .sendUnknown: return text("voiceCapture.reason.sendUnknown")
         case .signIn: return text("voiceCapture.reason.signIn")
+        // Never shown as a line of its own (`showsReasonLine`); the phase
+        // line already says it.
+        case .confirmPending: return text("voiceCapture.phase.needsApp")
         case .microphone: return text("voiceCapture.reason.microphone")
         case .consent: return text("voiceCapture.reason.consent")
         case .updateAvibe: return text("voiceCapture.reason.updateAvibe")
@@ -280,7 +293,7 @@ struct VoiceCaptureDetail: View {
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            } else if state.reason != nil {
+            } else if VoiceCaptureCopy.showsReasonLine(state) {
                 Text(VoiceCaptureCopy.failureLine(state))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

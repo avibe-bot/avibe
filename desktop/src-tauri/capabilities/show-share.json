@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "show-share",
+  "description": "The one Show share command (C1 v1 outbound) for the Workbench and for Show app windows, on the loopback Runtime origin only. Every other app window and every other origin receives nothing. Rust admits the Workbench, or a Show app window only for the Show it was opened for, by the window's registered identity and current document, and ends the operation when that document goes.",
+  "local": false,
+  "windows": ["main", "avibe-app-show-*"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": ["allow-desktop-show-share"]
+}

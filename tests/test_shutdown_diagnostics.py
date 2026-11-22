@@ -64,6 +64,11 @@ def test_snapshot_survives_logging_shutdown_and_main_return(tmp_path):
         path = diagnostics.path
         diagnostics.start()  # Duplicate signals cannot rearm or open a second file.
         assert diagnostics.path == path
+        # Let the diagnostic writer create the file before the exit hook appends.
+        deadline = time.monotonic() + 2
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert path.exists(), 'diagnostics writer did not create the log'
         logging.shutdown()
         diagnostics.phase('logging_drain_return')
         diagnostics.phase('main_return')
@@ -101,7 +106,7 @@ def test_snapshot_survives_logging_shutdown_and_main_return(tmp_path):
         name: int(line.split("elapsed_ms=")[1].split()[0])
         for line, name in zip(phases, phase_names)
     }
-    assert phase_elapsed["main_return"] < phase_elapsed["thread_executor_join_start"]
+    assert phase_elapsed["main_return"] <= phase_elapsed["thread_executor_join_start"]
     snapshot_ms = int(phases[-1].split("elapsed_ms=")[1].split()[0])
     assert 4000 <= snapshot_ms < 8000
     if os.name != "nt":

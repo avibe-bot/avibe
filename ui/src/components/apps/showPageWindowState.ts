@@ -24,3 +24,13 @@ export function showPageWindowSource(
   if (!sessionId || status === 'missing' || archived) return null;
   return showPageEmbeddedPath(showPagePrivatePath(sessionId));
 }
+
+/**
+ * A native Show window's title, which the shell takes from the document title: the Show's title as
+ * last read or renamed, else the launcher's. `undefined` means the Show is not known yet; `null` or
+ * blank means it is and has no title, which reads as `untitled`. `null` here leaves the title as is.
+ */
+export function showPageWindowTitle(known: string | null | undefined, launched: unknown, untitled: string): string | null {
+  if (known !== undefined) return known?.trim() || untitled;
+  return typeof launched === 'string' && launched.trim() ? launched.trim() : null;
+}

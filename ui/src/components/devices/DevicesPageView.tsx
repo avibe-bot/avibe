@@ -21,6 +21,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { KeptTail } from '../ui/kept-tail';
 import { SegmentedRadio } from '../ui/segmented';
 import { clientText, connectionText, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
 import {
@@ -88,6 +89,10 @@ export type DevicesPageViewProps = DevicesPageActions & {
   view?: 'page' | 'activity';
   /** 「添加设备」 on one of its tabs: inline while this computer is the only device, else a dialog. */
   add?: AddKind;
+  /** Owner-only content under how this Avibe is reached (a row a later change adds there). */
+  afterReach?: ReactNode;
+  /** Content under the device lists, above recent activity (a panel a later change adds there). */
+  afterDevices?: ReactNode;
 };
 
 const noop = () => undefined;
@@ -430,9 +435,9 @@ function DeviceDetail({ device, account, member, actions }: {
         {device.kind !== 'host' && (
           <div className="flex flex-col gap-2 border-t border-border px-6 py-4 max-md:px-5 md:flex-row md:items-center md:justify-between">
             <p className="text-[11px] leading-relaxed text-muted md:max-w-[250px]">
-              {device.group === 'others'
+              <KeptTail text={device.group === 'others'
                 ? t('devices.detail.signOutPerson', { person: device.person ?? '' })
-                : t(member ? 'devices.detail.signOutMember' : 'devices.detail.signOutOwn', { account })}
+                : t(member ? 'devices.detail.signOutMember' : 'devices.detail.signOutOwn', { account })} />
             </p>
             <Button variant="destructive-soft" size="sm" className="shrink-0" onClick={() => actions.onSignOutDevice?.(device.id)}>
               <LogOut />{t('devices.detail.signOut')}
@@ -500,7 +505,7 @@ function AddDevice({ kind, host, account, inline = false, actions }: {
           <ol className="flex list-decimal flex-col gap-1.5 pl-4 text-[13px] leading-relaxed text-foreground">
             {steps[kind].map((step) => <li key={step}>{step}</li>)}
           </ol>
-          <p className="mt-2.5 text-[11px] leading-relaxed text-muted">{note[kind]}</p>
+          <p className="mt-2.5 text-[11px] leading-relaxed text-muted"><KeptTail text={note[kind]} /></p>
         </div>
       </div>
     </div>
@@ -525,7 +530,7 @@ function Confirm({ title, body, action, actions }: { title: string; body: string
       <DialogContent className="max-w-md" closeLabel={t('common.close')}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{body}</DialogDescription>
+          <DialogDescription><KeptTail text={body} /></DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="ghost" onClick={actions.onCancelConfirm}>{t('common.cancel')}</Button>
@@ -537,7 +542,7 @@ function Confirm({ title, body, action, actions }: { title: string; body: string
 }
 
 export function DevicesPageView({
-  reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, ...actions
+  reach, devices, activity = [], viewer = 'owner', ownerEmail, viewerAccount, detail, confirm, view = 'page', add, afterReach, afterDevices, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
   // Each device says which list it belongs to; push rows whose origin cannot be shown
@@ -589,6 +594,7 @@ export function DevicesPageView({
       activeTab="remote-access"
     >
       {owner && <ReachCard reach={reach} actions={actions} />}
+      {owner && afterReach}
 
       <SettingsPanel
         title={t('devices.list.mine')}
@@ -622,6 +628,8 @@ export function DevicesPageView({
           {others.map((each) => <DeviceRow key={each.id} device={each} onOpen={actions.onOpenDevice} />)}
         </SettingsPanel>
       )}
+
+      {afterDevices}
 
       {owner && latest.length > 0 && (
         <SettingsPanel

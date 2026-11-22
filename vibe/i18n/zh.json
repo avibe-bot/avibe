@@ -1,6 +1,7 @@
 {
   "systemSchedule": {
-    "waitingForDevice": "正在等待设备返回结果。"
+    "waitingForDevice": "正在等待设备返回结果。",
+    "enableOnDevice": "能接收这条的手机都关着「闹钟与提醒」。先请用户在「设备」中打开，再发新的闹钟或提醒。"
   },
   "storage": {
     "notice": {
@@ -1245,6 +1246,9 @@
     }
   },
   "remote_access": {
+    "address_retired": {
+      "line": "这个 Avibe 换了新地址。能访问它的人，在 avibe.bot 登录后可以打开。"
+    },
     "oauth_error": {
       "sign_in_again": "重新登录",
       "diagnostics_summary": "技术细节",
@@ -1252,6 +1256,8 @@
       "cookie_hint": "重试后仍然卡住?请确认浏览器允许本站使用 Cookie。",
       "default_title": "重新登录一下",
       "default_body": "登录未完成,请重试。",
+      "account_session_signed_out_title": "这台设备已被退出",
+      "account_session_signed_out_body": "请过几分钟再登录。一直不行的话，先在 avibe.bot 退出登录，再回来登录。",
       "invalid_oauth_state_title": "登录会话已过期",
       "invalid_oauth_state_body": "安全登录链接已过期,或无法与当前浏览器匹配。这通常是因为登录链接闲置了几分钟,或在另一个标签页/窗口中打开。重新登录即可继续。",
       "oauth_exchange_failed_title": "登录未能完成",

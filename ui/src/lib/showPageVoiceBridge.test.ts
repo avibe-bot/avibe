@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { noteAppVoice } from './appVoice';
+
 import {
   ANNOTATION_VOICE_EVENT_MESSAGE,
   ANNOTATION_VOICE_REQUEST_MESSAGE,
@@ -135,6 +137,62 @@ describe('ShowPageVoiceHost', () => {
       requestId: 'voice-1',
       text: 'final words',
     }));
+  });
+
+  it('has the iOS App record the take where it does, and the page elsewhere', async () => {
+    const request = {
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'start',
+      requestId: 'voice-1',
+      before: '',
+      after: '',
+    } as const;
+    // An App that records with its microphone allowed; one still to be asked (WebKit asks);
+    // an App that does not record; and a browser.
+    const shells = [
+      [{ voice: 1, voiceCapture: 1 }, 'granted', true, true],
+      [{ voice: 1, voiceCapture: 1 }, 'prompt', true, undefined],
+      [{ voice: 1 }, 'granted', true, undefined],
+      [null, 'granted', true, undefined],
+      // The instance's off switch (`audio_asr.app_hold`): the page records, in the same App.
+      [{ voice: 1, voiceCapture: 1 }, 'granted', false, undefined],
+    ] as const;
+    try {
+      for (const [capabilities, permission, appHold, expected] of shells) {
+        noteAppVoice({ app_hold: appHold });
+        vi.unstubAllGlobals();
+        if (capabilities) {
+          vi.stubGlobal('window', {
+            avibeNative: {
+              contract: 1,
+              platform: 'ios',
+              shellVersion: '1.0 (1)',
+              capabilities,
+              call: async (method: string) => (method === 'voice.permission' ? { state: permission } : null),
+              on: () => () => undefined,
+            },
+          });
+        }
+        const inputs: { nativeCapture?: unknown }[] = [];
+        const events: ShowPageVoiceEvent[] = [];
+        const host = new ShowPageVoiceHost({
+          post: (event) => events.push(event),
+          availability: async () => ({ available: true, maxFileBytes: 1_000_000 }),
+          createSession: (input) => {
+            inputs.push(input);
+            return new FakeVoiceSession();
+          },
+        });
+        host.handle(request);
+        await vi.waitFor(() => expect(events).toContainEqual({ type: ANNOTATION_VOICE_EVENT_MESSAGE, kind: 'started', requestId: 'voice-1' }));
+        expect(inputs).toHaveLength(1);
+        expect(inputs[0].nativeCapture, `${JSON.stringify(capabilities)} ${permission}`).toBe(expected);
+        host.dispose();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      noteAppVoice({ app_hold: true });
+    }
   });
 
   // ui/design: composer/voice-consent/*

@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import and_, func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from vibe.i18n import t
 
@@ -20,7 +21,7 @@ from storage.models import (
     agent_sessions,
     system_schedule_attempts,
     system_schedule_operations,
-)
+    device_schedule_links as schedule_links,)
 
 CONTRACT_VERSION = 1
 DEFAULT_REQUEST_TTL_SECONDS = 300
@@ -228,7 +229,9 @@ def _receipt_value(value: str | None) -> dict[str, Any] | None:
 
 def _load_operation(conn, operation_id: str) -> Mapping[str, Any] | None:
     return conn.execute(
-        select(system_schedule_operations).where(
+        select(system_schedule_operations, schedule_links.c.schedule_probe_binding).select_from(
+            system_schedule_operations.outerjoin(schedule_links, schedule_links.c.operation_id == system_schedule_operations.c.operation_id)
+        ).where(
             system_schedule_operations.c.operation_id == operation_id
         )
     ).mappings().one_or_none()
@@ -319,6 +322,10 @@ def _operation_public(conn, row: Mapping[str, Any], now: datetime) -> dict[str, 
         if state == "awaiting_device"
         else None
     )
+    if row.get('schedule_probe_binding') and row['bound_device_id'] is None and state in ('pending', 'expired'):
+        from storage.device_schedule_status import all_eligible_off
+        if all_eligible_off(conn, row, int(now.timestamp())):
+            status_message = t('systemSchedule.enableOnDevice')
     return {
         "contract": CONTRACT_VERSION,
         "operation_id": row["operation_id"],
@@ -701,6 +708,7 @@ def _pending_attempt(
     instance_id: str,
     device_id: str | None,
     kinds: tuple[str, ...] | None = None,
+    claimant=None,
 ) -> Mapping[str, Any] | None:
     query = (
         select(system_schedule_attempts)
@@ -726,12 +734,32 @@ def _pending_attempt(
         query = query.where(system_schedule_attempts.c.device_id.is_(None))
     else:
         query = query.where(system_schedule_attempts.c.device_id == device_id)
-    return conn.execute(
-        query.order_by(
-            system_schedule_attempts.c.created_at,
-            system_schedule_attempts.c.request_id,
-        ).limit(1)
-    ).mappings().one_or_none()
+    ordered = query.order_by(system_schedule_attempts.c.created_at, system_schedule_attempts.c.request_id)
+    if claimant is not None and action == "create" and device_id is None:
+        from storage.workbench_sessions_service import get_active_session
+
+        # Read authorization and first lease share this transaction. An invisible
+        # queue head must not block the phone's next eligible proposal.
+        for row in conn.execute(ordered).mappings():
+            operation = _load_operation(conn, row["operation_id"])
+            try:
+                get_active_session(conn, operation["session_id"], authorization_context=claimant)
+            except LookupError:
+                continue
+            return row
+        return None
+    return conn.execute(ordered.limit(1)).mappings().one_or_none()
+
+
+def _new_registry_activity_id(conn) -> int:
+    # claim_next has already performed a deadline UPDATE in this transaction:
+    # SQLite serializes this allocation with all other first claims. Keep the
+    # public ID opaque without imposing a new unique constraint on old writers.
+    key = schedule_links.c.registry_activity_id
+    while True:
+        candidate = secrets.randbelow(2**62) + 1
+        if conn.scalar(select(key).where(key == candidate).limit(1)) is None:
+            return candidate
 
 
 def claim_next(
@@ -741,6 +769,8 @@ def claim_next(
     exclude_lease_tokens: object = None,
     allow_create: bool = True,
     kinds: object = None,
+    claimant=None,
+    device_viewer=None,
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
     instance_id = _bounded_identifier(instance_id, field="instance_id")
@@ -765,6 +795,15 @@ def claim_next(
     def write() -> dict[str, Any] | None:
         with engine.begin() as conn:
             _advance_pending_deadlines(conn, now)
+            registration, gate = None, True
+            if device_viewer and device_viewer[3]:
+                from storage.device_functions import DeviceError, schedule_claimant
+                try:
+                    registration, gate = schedule_claimant(conn, device_viewer, int(now.timestamp()), claimant)
+                except DeviceError as exc:
+                    if exc.code != 'session_revoked':
+                        raise
+                    return None
             attempt = _sticky_attempt(
                 conn,
                 action="cancel",
@@ -794,7 +833,14 @@ def claim_next(
                     instance_id=instance_id,
                     device_id=None,
                     kinds=allowed_kinds,
+                    claimant=claimant,
                 )
+                if attempt and not gate:
+                    binding = registration['registry_binding']
+                    stmt = sqlite_insert(schedule_links).values(operation_id=attempt['operation_id'], schedule_probe_binding=binding)
+                    conn.execute(stmt.on_conflict_do_update(index_elements=[schedule_links.c.operation_id],
+                        set_={'schedule_probe_binding': binding}, where=schedule_links.c.schedule_probe_binding.is_distinct_from(binding)))
+                    return None
             if attempt is None:
                 return None
             operation = _load_operation(conn, attempt["operation_id"])
@@ -814,8 +860,15 @@ def claim_next(
                             == operation["operation_id"]
                         )
                         .where(system_schedule_operations.c.bound_device_id.is_(None))
-                        .values(bound_device_id=device_id, updated_at=_iso(now))
+                        .values(
+                            bound_device_id=device_id,
+                            updated_at=_iso(now),
+                        )
                     )
+                    if registration:
+                        provenance = dict(**registration, schedule_probe_binding=None, registry_activity_id=_new_registry_activity_id(conn))
+                        stmt = sqlite_insert(schedule_links).values(operation_id=operation['operation_id'], **provenance)
+                        conn.execute(stmt.on_conflict_do_update(index_elements=[schedule_links.c.operation_id], set_=provenance))
                 conn.execute(
                     system_schedule_attempts.update()
                     .where(

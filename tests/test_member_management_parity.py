@@ -110,8 +110,13 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("POST", "/api/remote-access/claims"),
+    ("GET", "/api/remote-access/claims/{claim_id}"),
+    ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
     ("GET", "/api/desktop/local-instance"),
     ("POST", "/api/desktop/local-instance/prepare"),
+    ("GET", "/api/devices/connection"),
+    ("PATCH", "/api/devices/connection"),
     ("POST", "/api/remote-access/direct/suspend"),
     ("POST", "/api/wechat/qr_login/start"),
     ("POST", "/api/wechat/qr_login/poll"),
@@ -135,6 +140,9 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mobile/pairings"),
     ("GET", "/api/mobile/requests/{request_id}"),
     ("POST", "/api/mobile/device/v1/pair"),
+    ("POST", "/api/mobile/device/v1/binding-ticket"),
+    ("POST", "/api/devices/{device_id}/health/revoke"),
+    ("POST", "/api/devices/unlinked-health/{device_id}/revoke"),
     ("PUT", "/api/mobile/device/v1/manifest"),
     ("PUT", "/api/mobile/device/v1/health/days"),
     ("POST", "/api/mobile/device/v1/requests/claim"),
@@ -144,6 +152,11 @@ _RETAINED_OWNER_ROUTES = {
     # Using a reset card spends a consumable that cannot be given back: a signed-in
     # Member manages the rest of the Model Hub, not this.
     ("POST", "/api/models/sources/{source_id}/reset-cards/use"),
+    # Changing this Avibe's address ends every session and gives the old name
+    # away after its waiting period (docs/plans/instance-address-change.md A1).
+    ("GET", "/api/instance-address"),
+    ("POST", "/api/instance-address/preview"),
+    ("POST", "/api/instance-address/change"),
 }
 
 
@@ -184,7 +197,11 @@ def test_complete_registered_api_management_inventory():
     # + 4 account-scoped registry list, self-report and sign-out routes.
     # + 4 personal Live Activity methods (Viewer; controller enforces ownership and session access).
     # + 1 Model Hub reset card use (Owner role, classified in _RETAINED_OWNER_ROUTES).
-    assert len(endpoints) == 358
+    # + 3 personal installation claim methods (Owner; browser return is not an API route).
+    # + 8 device function, activity and Health ticket methods.
+    # + 2 Owner-only connection settings methods.
+    # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
+    assert len(endpoints) == 374
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),
@@ -253,6 +270,11 @@ def test_complete_registered_api_management_inventory():
         (Path(__file__).parent / "fixtures/member_management_existing_read_roles.json").read_text()
     )
     baseline_read_roles.update({
+        "GET /api/devices/activity": "viewer",
+        "GET /api/devices/example/health": "viewer",
+        "GET /api/devices/example/health/reads": "viewer",
+        "PUT /api/devices/example/notifications": "viewer",
+        "PUT /api/devices/example/schedule": "viewer",
         "GET /api/web-push/live-activities/turn": "viewer",
         "GET /api/web-push/live-activities/example": "viewer",
         "PUT /api/web-push/live-activities/example": "viewer",
@@ -432,6 +454,23 @@ def test_vault_settings_patch_http_splits_field_authority(management_http, role,
         assert body["settings"] == after.get_json()["settings"] == expected
 
 
+@pytest.mark.parametrize('role,expected', [(None, 401), ('viewer', 403), ('editor', 403), ('member', 403), ('owner', 200)])
+def test_connection_page_role_gate(management_http, role, expected):
+    request = management_http(role, authenticated=role is not None)
+    route = '/api/devices/connection'
+    result = request('GET', route)
+    assert result.status_code == expected
+    if expected != 200:
+        assert 'settings' not in result.get_json()
+    else:
+        assert 'operation' in result.get_json() and 'relay' not in result.get_json()
+        assert request('PATCH', route, payload={'setting':'direct','to':True}, csrf=False).status_code == 403
+    denied = request('PATCH', route, payload={'setting':'relay','to':False})
+    assert denied.status_code == (403 if expected == 200 else expected)
+    if expected == 200:
+        assert denied.get_json()['error'] == 'relay_not_enrolled'
+
+
 @pytest.mark.parametrize("role", ["member", "owner"])
 def test_manager_saves_config_credentials_and_reads_masked_result(management_http, role):
     request = management_http(role)
@@ -453,6 +492,9 @@ def test_manager_saves_config_credentials_and_reads_masked_result(management_htt
     assert response.status_code == 200
     assert "xoxb-test-member-token" not in json.dumps(response.get_json())
     assert response.get_json()["runtime"]["log_level"] == "DEBUG"
+    switches = response.get_json()["remote_access"]["vibe_cloud"]
+    assert ("direct" in switches) is (role == "owner")
+    assert ("public_relay_trial" in switches) is (role == "owner")
 
 
 @pytest.mark.parametrize(

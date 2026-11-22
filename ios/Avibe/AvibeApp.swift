@@ -180,6 +180,8 @@ struct AvibeApp: App {
                 .onOpenURL { url in
                     // The hidden diagnostics switch (VoiceCaptureEndSwitch).
                     VoiceCaptureEndSwitch.handle(url)
+                    // And the hold's "start at recognition" variant (NativeHoldQuietSwitch).
+                    NativeHoldQuietSwitch.handle(url)
                     appModel.openLiveActivity(url)
                 }
                 .task {

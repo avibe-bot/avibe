@@ -225,8 +225,8 @@ def test_selected_agent_launch_uses_cli_skill_path_without_computer_use_mcp(
             agent["tools"] = allowed_tools
         return agent
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     monkeypatch.setattr(
         session_handler_module,
         "build_system_prompt_injection",
@@ -293,8 +293,8 @@ def test_cold_and_cached_launches_build_the_prompt_for_the_launch_model(
         rendered_prompts.append(prompt)
         return prompt
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     monkeypatch.setattr(session_handler_module, "build_system_prompt_injection", build_prompt)
     handler = SessionHandler(_Controller(tmp_path))
     monkeypatch.setattr(handler, "_load_agent_file", lambda *_args: {"prompt": "Agent file prompt.", "model": "inherit"})
@@ -380,8 +380,8 @@ async def test_web_auth_uses_configured_claude_cli_path_without_session_handler(
         def apply_to_pid(_pid, label="agent"):
             captured["governor_label"] = label
 
-    monkeypatch.setattr(agent_auth_service_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(agent_auth_service_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(agent_auth_service_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(agent_auth_service_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(agent_auth_service_module, "get_claude_client_pid", lambda _client: None)
     monkeypatch.setattr(agent_auth_service_module, "governor_from_controller", lambda _controller: _Governor())
 
@@ -525,8 +525,8 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -579,8 +579,8 @@ def test_session_handler_uses_exact_launch_reasoning_catalog(
                 reasoning_efforts=("none", "medium", "max", "custom-effort"),
             )
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(
         "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
         lambda *_args: ["low"],
@@ -643,8 +643,8 @@ def test_session_handler_turns_thinking_off_only_when_the_model_declares_none(
         async def connect(self) -> None:
             return None
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(
         "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
         lambda *_args: ["low", "none"] if declared else ["low"],
@@ -720,8 +720,8 @@ def test_cached_claude_rechecks_effective_reasoning_and_preserves_resume(
                 reasoning_efforts=tuple(catalogs[requested_model]),
             )
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     monkeypatch.setattr(
         "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
         lambda _backend, model: catalogs.get(model),
@@ -809,8 +809,8 @@ def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monk
                 gateway_token=tokens[0], reasoning_efforts=("none", "medium"),
             )
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     monkeypatch.setattr(
         "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
         lambda *_args: ["none", "medium"],
@@ -876,8 +876,8 @@ def test_a_renewal_during_client_creation_leaves_one_coherent_launch_config(monk
         async def connect(self):
             pass
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
     build_prompt = handler._build_claude_system_prompt
@@ -913,8 +913,8 @@ def test_a_renewal_during_hub_launch_resolution_leaves_one_coherent_launch_confi
         async def connect(self):
             pass
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
     resolve = model_hub_module.resolve_model_hub_launch
@@ -996,8 +996,8 @@ def test_session_handler_preserves_explicit_limits_and_passes_alias_planning_met
                 max_output_tokens=32_000 if has_metadata else None,
             )
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     controller = _Controller(tmp_path)
     controller.model_hub_runtime = Runtime()
     controller.settings_manager.get_channel_routing = lambda _: RoutingSettings(model="planning-alias")
@@ -1036,8 +1036,8 @@ def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp
                 gateway_token="hub-settings-fixture-token",
             )
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", Client)
     controller = _Controller(tmp_path)
     controller.model_hub_runtime = Runtime()
     controller.settings_manager.get_channel_routing = lambda _: RoutingSettings(model="claude-opus-5")
@@ -1093,8 +1093,8 @@ def test_session_handler_recreates_cached_claude_client_when_catalog_limits_chan
                 reasoning_efforts=("high",),
             )
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.model_hub_runtime = _Runtime()
@@ -1135,8 +1135,8 @@ def test_session_handler_injects_vendored_git_into_gitless_child_env(
         env["PATH"] = "/managed/git/bin"
         return True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(git_runtime_module, "prepend_vendored_git_to_path", inject_git)
 
     _run_session(
@@ -1157,8 +1157,8 @@ def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp
         async def connect(self) -> None:
             return None
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -1188,8 +1188,8 @@ def test_session_handler_keeps_sdk_default_for_default_claude_binary(monkeypatch
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.config.claude.cli_path = "claude"
@@ -1217,8 +1217,8 @@ def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkey
         def get_claude_session_id(settings_key, base_session_id):
             return None
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager.sessions = _ForkSessions()
@@ -1274,8 +1274,8 @@ def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_p
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -1285,7 +1285,7 @@ def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_p
 
     assert captured["connected"] is True
     expected = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "Skill"]
-    if not session_handler_module.CLAUDE_SDK_HOOKS_AVAILABLE or session_handler_module.HookMatcher is None:
+    if not session_handler_module.claude_sdk.CLAUDE_SDK_HOOKS_AVAILABLE or session_handler_module.claude_sdk.HookMatcher is None:
         expected.append("Workflow")
     assert captured["options"].disallowed_tools == expected
 
@@ -1337,8 +1337,8 @@ def test_session_handler_ensures_agent_session_id_before_prompt(
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager.sessions = _PromptSessions()
@@ -1373,8 +1373,8 @@ def test_session_handler_preserves_passed_agent_system_prompt(monkeypatch, tmp_p
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager.sessions = _PromptSessions()
@@ -1408,8 +1408,8 @@ def test_session_handler_includes_show_pages_despite_legacy_opt_out(
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.config.show_pages_prompt = False
@@ -1455,8 +1455,8 @@ def test_session_handler_recreates_cached_claude_client_when_prompt_changes(
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager.sessions = _PromptSessions()
@@ -1510,8 +1510,8 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
         async def set_model(self, model: str | None) -> None:
             self.model = model
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager.sessions = _PromptSessions()
@@ -1560,8 +1560,8 @@ def test_session_handler_recreates_cached_claude_client_when_skill_bindings_chan
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(
         session_handler_module,
         "managed_skill_environment",
@@ -1604,8 +1604,8 @@ def test_session_handler_recreates_terminated_cached_client_before_dispatch(
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -1655,8 +1655,8 @@ def test_session_handler_waits_for_receiver_cleanup_outside_generation_lock(
             async def disconnect(self) -> None:
                 self.disconnects += 1
 
-        monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-        monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+        monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+        monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
         context = MessageContext(user_id="U123", channel_id="C123")
         first_client = await handler.get_or_create_claude_session(context)
         first_client._transport._process.returncode = -6
@@ -1724,8 +1724,8 @@ def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(
         session_handler_module,
         "register_claude_owned_process",
@@ -1753,8 +1753,8 @@ def test_session_handler_injects_caller_context_env(monkeypatch, tmp_path: Path)
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -1820,8 +1820,8 @@ def test_session_handler_injects_only_session_stable_creation_origin(
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     # Keep the base session anchor at ``slack_C123`` (this file's session stub asserts
@@ -1888,8 +1888,8 @@ def test_session_handler_coalesces_concurrent_claude_client_creates(
             async def set_model(self, model: str | None) -> None:
                 self.model = model
 
-        monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-        monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+        monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+        monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
         controller = _Controller(tmp_path)
         handler = SessionHandler(controller)
@@ -1945,8 +1945,8 @@ def test_session_handler_retries_waiting_claude_create_after_cancellation(
             async def set_model(self, model: str | None) -> None:
                 self.model = model
 
-        monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-        monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+        monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+        monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
         controller = _Controller(tmp_path)
         handler = SessionHandler(controller)
@@ -2021,8 +2021,8 @@ def test_session_handler_does_not_resume_main_native_session_for_new_routing_sub
         async def disconnect(self) -> None:
             return None
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(
         model_hub_module,
         "resolve_model_hub_launch",
@@ -2060,8 +2060,8 @@ def test_session_handler_forces_bypass_mode_and_auto_approves_claude_tool_permis
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.config.claude.permission_mode = "default"
@@ -2102,8 +2102,8 @@ def test_session_handler_does_not_repeat_claude_model_control_request(monkeypatc
         async def set_model(self, model) -> None:
             self.model_calls.append(model)
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -2151,8 +2151,8 @@ def test_session_handler_recreates_cached_client_when_git_path_changes(
         return False
 
     monkeypatch.setenv("PATH", "/gitless/bin")
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(git_runtime_module, "prepend_vendored_git_to_path", inject_git)
     handler = SessionHandler(_Controller(tmp_path))
     context = MessageContext(user_id="U123", channel_id="C123")
@@ -2185,8 +2185,8 @@ def test_session_handler_recreates_cached_claude_client_when_caller_env_changes(
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -2233,8 +2233,8 @@ def test_session_handler_recreates_cached_claude_subagent_when_caller_env_change
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager = _RoutingSettingsManager()
@@ -2300,8 +2300,8 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager = _RoutingSettingsManager()
@@ -2366,8 +2366,8 @@ def test_session_handler_recreates_terminated_cached_subagent_before_dispatch(
         async def disconnect(self) -> None:
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager = _RoutingSettingsManager()
@@ -2402,8 +2402,8 @@ def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypat
         async def set_model(self, model) -> None:
             self.model_calls.append(model)
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -2439,8 +2439,8 @@ def test_session_handler_does_not_send_none_model_control_request_for_cached_def
         async def set_model(self, model) -> None:
             self.model_calls.append(model)
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -2463,8 +2463,8 @@ def test_session_handler_passes_non_default_claude_command_name(monkeypatch, tmp
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.config.claude.cli_path = "claude-proxy"
@@ -2487,8 +2487,8 @@ def test_session_handler_expands_tilde_in_claude_cli_path(monkeypatch, tmp_path:
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.config.claude.cli_path = "~/bin/claude"
@@ -2531,8 +2531,8 @@ def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp
             captured["options"].stderr(f"No conversation found with session ID: {stale_session_id}")
             raise RuntimeError("Command failed with exit code 1")
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.settings_manager.sessions = _StaleSessions()
@@ -2596,8 +2596,8 @@ def test_claude_startup_failure_is_recorded_before_scope_retirement(
                 )
             )
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     controller.model_hub_runtime = _Runtime()
@@ -2695,8 +2695,8 @@ def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, t
         async def connect(self) -> None:
             captured["connected"] = True
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _ScheduledController(tmp_path)
     handler = SessionHandler(controller)
@@ -2742,8 +2742,8 @@ def test_runtime_gen_005_a_client_from_before_a_renewal_is_reclaimed_once_idle(m
         async def disconnect(self) -> None:
             disconnects.append("disconnect")
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -2788,8 +2788,8 @@ def test_runtime_gen_006_disabling_claude_closes_its_busy_clients_and_only_those
         async def disconnect(self) -> None:
             disconnects.append("disconnect")
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     controller = _Controller(tmp_path)
     controller.runtime_activation = RuntimeActivationRegistry()
     controller.agent_service = SimpleNamespace(
@@ -2832,8 +2832,8 @@ def test_runtime_gen_006_a_disabled_claude_client_whose_disconnect_fails_still_e
         async def disconnect(self) -> None:
             raise RuntimeError("transport wedged")
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     controller = _Controller(tmp_path)
     controller.runtime_activation = RuntimeActivationRegistry()
     controller.agent_service = SimpleNamespace(force_end_runtime_activities=lambda *_args, **_kwargs: None)
@@ -2878,8 +2878,8 @@ def test_runtime_gen_006_a_client_connecting_when_claude_is_disabled_never_serve
         async def disconnect(self) -> None:
             disconnects.append("disconnect")
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     controller = _Controller(tmp_path)
     controller.runtime_activation = RuntimeActivationRegistry()
     handler = SessionHandler(controller)
@@ -2931,8 +2931,8 @@ def test_runtime_gen_006_a_turn_cancelled_while_its_client_connects_stops_the_cl
         async def disconnect(self) -> None:
             self._transport = None
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     controller = _Controller(tmp_path)
     controller.runtime_activation = RuntimeActivationRegistry()
     handler = SessionHandler(controller)
@@ -2973,8 +2973,8 @@ def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path)
         async def disconnect(self) -> None:
             captured["disconnects"] += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3063,8 +3063,8 @@ def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path
         async def disconnect(self) -> None:
             captured["disconnects"] += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3091,8 +3091,8 @@ def test_silent_owned_claude_turn_survives_both_reclamation_checks(
     ownership_arrives_during_check: bool,
 ) -> None:
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _disconnect_counting_client(captured))
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
     _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
@@ -3142,8 +3142,8 @@ def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_
     """
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3185,8 +3185,8 @@ def test_evict_idle_sessions_keeps_stuck_active_below_cap(monkeypatch, tmp_path:
     """An active session below the absolute cap is still protected."""
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3212,8 +3212,8 @@ def test_evict_idle_sessions_stuck_cap_floor_dominates_small_timeout(monkeypatch
     """A tiny idle timeout must not shrink the active-turn grace below 30min."""
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3240,8 +3240,8 @@ def test_evict_idle_sessions_stuck_active_backstop_can_be_disabled(monkeypatch, 
     """``stuck_active_multiplier <= 0`` restores the absolute active veto."""
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3269,8 +3269,8 @@ def test_evict_idle_sessions_spares_session_refreshed_between_passes(monkeypatch
     """
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3305,8 +3305,8 @@ def test_evict_idle_sessions_evicts_stuck_active_deactivated_between_passes(monk
     """
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3494,12 +3494,12 @@ def test_cleanup_session_logs_exact_runtime_generation(
     captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
-        session_handler_module,
+        session_handler_module.claude_sdk,
         "ClaudeAgentOptions",
         _StubClaudeAgentOptions,
     )
     monkeypatch.setattr(
-        session_handler_module,
+        session_handler_module.claude_sdk,
         "ClaudeSDKClient",
         _disconnect_counting_client(captured),
     )
@@ -3550,8 +3550,8 @@ def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path:
             events.append("disconnect")
             self.disconnects += 1
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3594,12 +3594,12 @@ def test_cleanup_session_retires_model_hub_process_scope(
             return None
 
     monkeypatch.setattr(
-        session_handler_module,
+        session_handler_module.claude_sdk,
         "ClaudeAgentOptions",
         _StubClaudeAgentOptions,
     )
     monkeypatch.setattr(
-        session_handler_module,
+        session_handler_module.claude_sdk,
         "ClaudeSDKClient",
         _StubClaudeSDKClient,
     )
@@ -3637,8 +3637,8 @@ def test_cleanup_session_swallows_receiver_task_failure(monkeypatch, tmp_path: P
             self.disconnects += 1
             disconnected.set()
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3686,8 +3686,8 @@ def test_cleanup_session_drains_finished_receiver_task_failure(monkeypatch, tmp_
             self.drained = True
             return RuntimeError("receiver already failed")
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3720,8 +3720,8 @@ def test_cleanup_session_cancels_receiver_when_disconnect_is_cancelled(monkeypat
             events["disconnect_started"].set()
             await asyncio.Future()
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3775,8 +3775,8 @@ def test_cleanup_session_preserves_new_receiver_during_disconnect(monkeypatch, t
             events["disconnect_started"].set()
             await asyncio.Future()
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3842,8 +3842,8 @@ def test_cleanup_session_defers_disconnect_for_current_receiver(monkeypatch, tmp
             events["disconnect_started"].set()
             await events["release_disconnect"].wait()
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3904,8 +3904,8 @@ def test_evict_idle_sessions_rechecks_active_state_before_cleanup(monkeypatch, t
                 return self._checks >= 2
             return super().__contains__(item)
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -3962,8 +3962,8 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
         captured["exclude_pids"] = exclude_pids
         return 2
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
@@ -4017,8 +4017,8 @@ def test_cleanup_defers_duplicate_reap_while_a_client_create_is_in_flight(
         captured["reap_calls"] += 1
         return 0
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
@@ -4073,8 +4073,8 @@ def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, t
         captured["exclude_pids"] = exclude_pids
         return 0
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
@@ -4129,8 +4129,8 @@ def test_cleanup_defers_duplicate_reap_when_a_live_client_pid_is_unresolved(
         captured["reap_calls"] += 1
         return 0
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
@@ -4184,8 +4184,8 @@ def test_cleanup_skips_a_generation_a_replacement_already_took_over(
         captured["reap_calls"] += 1
         return 0
 
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeSDKClient", _StubClaudeSDKClient)
     monkeypatch.setattr(session_handler_module, "reap_duplicate_claude_resume_processes", fake_reap)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
@@ -4216,7 +4216,7 @@ def test_cleanup_records_no_teardown_intent_for_an_empty_key(monkeypatch, tmp_pa
     client's genuine ``-9`` — dying inside ``connect()``, before registration
     can clear the record — is suppressed as a service teardown.
     """
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -4236,7 +4236,7 @@ def test_tracking_a_create_retires_the_previous_teardown_record(monkeypatch, tmp
     would leave the previous teardown's key-level marker standing to classify
     that genuine crash as our own cleanup and swallow the user-facing error.
     """
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module.claude_sdk, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)

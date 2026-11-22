@@ -1,6 +1,9 @@
-import { LiveActivityEntry } from './LiveActivityEntry';
+import { useLiveActivityObservation } from '../../lib/useLiveActivityObservation';
 import { HealthRequestCard } from '../health/HealthRequest';
 import { readHealthRequest } from '../../lib/healthRequests';
+import { isNativeAppWindow } from '../../lib/desktopShell';
+import { useWindowManager } from '../../context/WindowManagerContext';
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { desktopDragRegion } from '../../lib/desktopShell';
 import { createPortal } from 'react-dom';
 import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
@@ -26,7 +29,6 @@ import { VoiceMark } from '../voice/VoiceMark';
 import type { VoiceTarget } from '../voice/VoiceCard';
 import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposeTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
-import { useWindowManager } from '../../context/WindowManagerContext';
 import { composeReady } from './composeReady';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
@@ -58,7 +60,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
+import { canMarkConversationRead, usePageActive, usePagePresented } from '../../lib/pageActivity';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
@@ -388,6 +390,7 @@ export const ChatPage: React.FC = () => {
   const routeSurfaceActive = useRouteSurfaceActive();
   const windowChrome = useDesktopWindowChrome();
   const pageActive = usePageActive();
+  const pagePresented = usePagePresented();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
@@ -3195,7 +3198,7 @@ export const ChatPage: React.FC = () => {
     // consume the owner's unread state.
     if (!canChat) return;
     if (!canMarkConversationRead({
-      pageActive,
+      pageActive: pagePresented,
       routeSurfaceActive,
       sessionReady: !loading && session?.id === sessionId,
       viewResolved: showPageViewResolved,
@@ -3225,7 +3228,7 @@ export const ChatPage: React.FC = () => {
     session?.id,
     showPageViewResolved,
     historicalWindow,
-    pageActive,
+    pagePresented,
     routeSurfaceActive,
     showPageActive,
     isDesktop,
@@ -3448,20 +3451,29 @@ export const ChatPage: React.FC = () => {
     [expandedActivity, loadActivityDetail],
   );
 
-  if (!sessionId) {
-    return <ChatMissing onBack={goBack} />;
-  }
-
   // A direct session→session switch reuses this ChatPage instance. Until the
   // current row arrives, the state can still hold the previous row or be empty
   // while a newer recovery read supersedes bootstrap. Neither means not-found.
   const viewState = chatSessionViewState({
-    routeSessionId: sessionId,
+    routeSessionId: sessionId ?? '',
     loadedSessionId: session?.id ?? null,
     hydratedTranscriptSessionId,
     failedBootstrapSessionId,
     snapshotSessionId: chatSnapshotView?.sessionId ?? null,
   });
+  const agentDisplayName = session ? sessionAgentDisplayName(session, agents) : '';
+  const conversationBot = botConversation ? botForSession(sessionId) : undefined;
+  const conversationBotName = conversationBot
+    ? botDisplayName(conversationBot)
+    : botConversation ? session?.title?.trim() || t('bots.mainDefaultName') : null;
+  const observationAgentName = conversationBotName ?? agentDisplayName;
+  useLiveActivityObservation(routeSurfaceActive && observationAgentName && session && session.id === sessionId && viewState !== 'loading' && viewState !== 'failed' ? {
+    sessionId: session.id,
+    agentName: observationAgentName,
+    sessionTitle: botConversation ? null : session.title || t('chat.untitled'),
+    running: runtimeState.foreground === 'running',
+  } : { sessionId: null });
+  if (!sessionId) return <ChatMissing onBack={goBack} />;
   // Nothing is known of this chat yet, not even its row (opened by a link, or
   // before any list has it): a skeleton of the whole chat, never a spinner.
   if (viewState === 'loading') return <ChatPageSkeleton onBack={goBack} />;
@@ -3488,15 +3500,8 @@ export const ChatPage: React.FC = () => {
     );
   }
 
-  const agentDisplayName = sessionAgentDisplayName(session, agents);
   // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
   const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
-  // Who the conversation is with: the Bot, by the name the user gave it, or its
-  // Session title (which follows that name) until the Bot list has answered.
-  const conversationBot = botConversation ? botForSession(sessionId) : undefined;
-  const conversationBotName = conversationBot
-    ? botDisplayName(conversationBot)
-    : botConversation ? session.title?.trim() || t('bots.mainDefaultName') : null;
   // A Bot's conversation reads like talking to a person while its "Hide details"
   // is on (docs/plans/bots.md D5): on unless the Bot turned it off, including
   // before the Bot list has answered. Anything else shows what it always has.
@@ -3697,13 +3702,6 @@ export const ChatPage: React.FC = () => {
             ) : null
           }
         />
-        {sessionId && <LiveActivityEntry
-          key={sessionId}
-          sessionId={sessionId}
-          running={runtimeState.foreground === 'running'}
-          agentName={conversationBotName || agentDisplayName || session.agent_name || ''}
-          sessionTitle={botConversation ? null : session.title || null}
-        />}
         <ActivityStrip
           state={runtimeState}
           sessionId={sessionId ?? ''}
@@ -5046,14 +5044,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const { botForSession, displayName: botDisplayName } = useBots();
   const conversationBot = botForSession(session.id);
   const navigate = useNavigate();
-  const { openApp } = useWindowManager();
+  const launchApp = useAppLaunch('chat-attachment');
   const fileViewer = useFileViewer();
   const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
     const pathLabel = recentPathLabel(target.path);
-    const desktop = isDesktopViewport();
+    const desktop = isDesktopViewport() || isNativeAppWindow();
     const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
       if (desktop) {
-        openApp('preview', { title: name, params: { path: target.path, name } });
+        void launchApp({ appId: 'preview', title: name, params: { path: target.path, name, ...(mime ? { mime } : {}) } });
       } else if (fileViewer) {
         fileViewer.open({ kind: 'local', path: target.path, name, size, mime, ext });
       } else {
@@ -5062,7 +5060,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     };
     const openEditor = (filename: string, mtime: number | null) => {
       const launch = { ...target, filename, mtime };
-      if (desktop) openApp('editor', { title: filename, params: launch });
+      if (desktop) void launchApp({ appId: 'editor', title: filename, params: launch });
       else navigate('/apps/editor', { state: launch });
     };
 
@@ -5082,7 +5080,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       else if (isEditableFile(fallback)) openEditor(pathLabel, null);
       else downloadFile(target.path);
     }
-  }, [fileViewer, navigate, openApp]);
+  }, [fileViewer, navigate, launchApp]);
   const selectionActions = transcriptSelectionActions(session, readOnly);
   const latestRetryBoundary = messages.reduce((last, message, index) =>
     message.type === 'user' || message.type === 'harness' || isRetryableFailureNotice(message)

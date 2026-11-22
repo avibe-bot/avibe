@@ -96,8 +96,9 @@ a removed paired instance without treating another instance's removal as logout.
 On each such answer, and before each device request, the list avibe.bot last
 confirmed in this process must still list the paired instance at its origin;
 otherwise (renamed, or removed while no connection is loaded) the connection
-ends locally with no further request to that origin. An unknown or empty list
-decides nothing.
+ends locally with no further request to that origin. A confirmed empty list
+counts too (a deleted instance's name can later belong to another account); an
+unconfirmed list decides nothing.
 The existing named WebKit store UUID is captured in the private Health Keychain
 identity; missing or mismatching bindings fail closed after account/protected-start
 validation. Account UUID generation, rotation timing and transactions are unchanged.

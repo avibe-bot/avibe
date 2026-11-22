@@ -1,3 +1,4 @@
+import { isRetiredAddressResponse, noteRetiredAddressResponse } from './addressRetired';
 import { reportRemoteAuthorizationState } from './remoteAuth';
 
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
@@ -267,6 +268,9 @@ export async function apiFetch(
   // answering /api/* with a remote login/authorization-refresh 401. Detect it
   // here and trigger the same full-page login redirect the guard uses, so the
   // user lands on the login flow instead of a wall of silently-failing fetches.
+  // This address is no longer this Avibe's: the page clears itself and leaves
+  // (docs/plans/instance-address-change.md D3).
+  if (isRetiredAddressResponse(response)) noteRetiredAddressResponse();
   if (response.status === 401 || response.status === 403 || response.status === 503) {
     void maybeReportRemoteAuthorizationResponse(response.clone());
   }

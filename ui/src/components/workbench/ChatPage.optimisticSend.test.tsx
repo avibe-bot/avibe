@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
 import 'fake-indexeddb/auto';
+import './ChatPage.duplicateKeyGuard';
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -90,7 +91,8 @@ vi.mock('../../context/ComposerBridgeContext', () => ({
   useRegisterComposerTarget: vi.fn(),
 }));
 
-vi.mock('../../context/WindowManagerContext', () => ({
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()),
   useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
 }));
 

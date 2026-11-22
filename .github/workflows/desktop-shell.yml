@@ -137,6 +137,39 @@ jobs:
       - name: Test Rust
         run: cargo test --locked --workspace --all-features
 
+      - name: Verify real Windows account credential storage (must run exactly once)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $case = 'instance_credentials::windows::tests::windows_native_account_jar_lifecycle'
+          $output = cargo test --locked -p avibe-desktop --lib --all-features $case -- --ignored --exact 2>&1
+          $code = $LASTEXITCODE
+          $output | Write-Output
+          if ($code -ne 0) { exit $code }
+          $lines = @($output | ForEach-Object { $_.ToString() })
+          if (@($lines | Where-Object { $_ -ceq "test $case ... ok" }).Count -ne 1 -or
+              -not ($lines -match '^test result: ok\. 1 passed; 0 failed; 0 ignored;')) {
+            throw 'The native account credential case did not run and pass exactly once.'
+          }
+
+      - name: Verify released direct sidecar interop on loopback
+        timeout-minutes: 5
+        run: python src-tauri/tests/direct_sidecar_fixture.py
+
+      - name: Test authenticated Desktop CONNECT against the verified sidecar
+        timeout-minutes: 5
+        run: cargo test --locked -p avibe-desktop --all-features direct::interop::desktop_direct_real_sidecar -- --ignored --exact
+
+      # A real WebView with no window (WKWebView on macOS, WebView2 on
+      # Windows) on loopback pages: the rendezvous is the instance's own and
+      # out of page script's reach, a service worker and a redirect are
+      # refused, only the instance's host reaches the listener, and the
+      # listener's credential reaches nothing else.
+      - name: Verify the direct path's WebView adapters in a real WebView
+        timeout-minutes: 10
+        run: cargo run --locked -p avibe-desktop --example direct_webview_probe --all-features
+
       # Real WebKit windows on loopback pages, with disposable browsing data.
       # The first run activates the app, as a user in the Workbench has: sandbox
       # windows may appear, and everything a window on screen must satisfy is
@@ -254,4 +287,4 @@ jobs:
           set -euo pipefail
           cargo build --locked -p avibe-desktop --example retired_workbench_probe --all-features
           python src-tauri/tests/run_cookie_probe.py target/debug/examples/retired_workbench_probe \
-            --log "$RUNNER_TEMP/retired-workbench-probe.log"
+            --timeout 120 --log "$RUNNER_TEMP/retired-workbench-probe.log"

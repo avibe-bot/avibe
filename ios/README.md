@@ -49,6 +49,30 @@ and Web resizing cannot both run.
   older than that question) is refused with a native alert saying to update the
   instance. Any other page, such as a Show Page opened on its own under
   `/show/` or `/p/`, is refused without that alert.
+- A cold start opens the account's last instance before asking avibe.bot
+  (the session is checked behind it), but only while avibe.bot's last signed-in
+  answer for that session is at most 14 days old. Past that, with no record of
+  one, or with one dated in the future, nothing of an instance is loaded until
+  avibe.bot has answered: the App asks first and then opens, and with no answer
+  it stops at the instance list. The same holds for any open, for a page still
+  open when the App returns to the foreground, for the Action Button's
+  background take (past the limit it asks for the App instead), and for a Live
+  Activity's requests (sent only to an address the session lists, within the
+  limit). An App that keeps running renews the confirmation itself: from 7 days
+  on, a return to the foreground reads the session quietly behind the open
+  page. Reason: an instance address
+  that leaves an account cannot become another account's for 30 days, so within
+  14 days of a confirmation the address still leads to the instance avibe.bot
+  listed. The limit trusts the phone's clock.
+- The App records which instance addresses an account has opened. When
+  avibe.bot has answered, signed in, twice at least a day apart without listing
+  one of them, what that address left on the phone is removed: its site data in
+  the account's WebKit store (localStorage, IndexedDB, Cache Storage, cookies of
+  that host), its cached page, and this device's path choice for it. WebKit's
+  own removal works per registrable domain (all of `avibe.bot`), so the App
+  shows a page of its own at the address instead, without the network, and
+  deletes that origin's storage from it. Other instances and the avibe.bot
+  sign-in are untouched.
 - On a cold start the App may show the instance's last page from its own
   cache (stored per store, account and origin, at most a day old). A cached page
   whose bytes carry `<meta name="avibe-cached-shell" content="1">` comes from a
@@ -256,6 +280,7 @@ The native bridge method surface is fixed:
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
 | `appLock: 1` | `appLock.status()`, `appLock.setPolicy({policy})` | The contract in `ui/src/lib/appLockContract.ts`: `{policy, available, biometry, biometryState}`, and for a change `{ok, reason?, status}`. A change is saved only after one `.deviceOwnerAuthentication`; see App Lock below |
+| `device: 1` | `device.describe()` | `{kind: "iphone_app", display_name, installation_id?, aliases, app_version, system_version}` for the selected instance's main frame only, else `forbidden`; the page sends it to that instance's `POST /api/devices/self` once per load. `display_name` is the model ("iPhone 16 Pro"; "iPhone" for one the App doesn't know yet); `installation_id` is HMAC-SHA256(push installation secret, `avibe-device:v1:` + instance id), 16 bytes hex, so it is new after a reinstall and can't be linked across instances; `aliases` are `{source: "health", id}` (only to the instance Health is paired with) and `{source: "schedule", id}`. Display and grouping only. `device.describe({health_binding: true})`, used by the page's report alone, also asks the paired instance for a one-use Health binding ticket (`POST /api/mobile/device/v1/binding-ticket`, at most 3 seconds, one every 30 seconds, only for a description with an installation id; after a 404, a 405 or an older tunnel's code-less 401 that instance is not asked again in this process) and adds it as `health_binding_ticket` only in front, on the current account, while Health is paired with this instance; otherwise, and on any failure, the property is left out. The ticket is kept nowhere, and no answer to that request changes the Health connection |
 | `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
 | `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
 | `haptics: 1` | `haptics.selection()` | `null` |
@@ -266,6 +291,7 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `voiceCapture: 1` | `voice.capturePrepare()`, `voice.captureStart({take})`, `voice.captureStop({take})` | The in-App hold's microphone, instance document only (`NativeHoldCapture.swift`). Prepare sets the audio session's category and starts nothing; start activates it and answers `{sampleRate: 16000, activateMs, engineMs}` once the input runs, or fails `permission`, `busy` or with the step; `take` is 1–64 letters, digits, `-` or `_`. Audio arrives as `avibe:native:voice.capture` events `{take, pcm}` (base64 Int16 little-endian mono, the first at once, then about 100 ms each), and the take's end as `{take, ended: true, reason?}` after its last audio. The App ends a take itself when it goes to the background, its page goes, or the system interrupts or changes the input |
+| `voiceHold: 2` | `voice.holdSurfaces({surfaces, holdMs?})`, `voice.holdAdopt({take})`, `voice.holdReject({take})` | The App recognises a hold itself, so the cue never waits for the page or the microphone. The page names up to eight surfaces `{id, x, y, width, height, start?}` (the WebView's own points) where a hold may record now, and its hold threshold `holdMs` (100–500, default 200; any other is `invalid_argument`); an empty list ends it. Only a consent-marked document (as for `voice.captureStart`) names a surface: another gets `failed` `consent`. Only the instance's own WebView is watched: a popup gets `failed` `unwatched`, and the page goes on recognising its holds itself. One WebView's list at a time, and its calls count in the order the page made them: a list overtaken by a later call, or by its document going, gets `failed` `superseded`. A passive recogniser sees each touch (it cancels and delays nothing). On a surface, at touch-down the App starts the input off the main thread, into its own memory; when other audio plays or the route is Bluetooth it opens nothing until the hold is recognised. A surface named with `start: "recognition"` opens no microphone on a touch either: its input is only prepared at touch-down and starts when the hold is recognised (`start: "touch"`, or none, is the default; any other value is `invalid_argument`). At the threshold (10 pt slop), once it has handled every touch event that reached it (a lift it had not yet heard of ends the press as a tap, with no cue; the touch itself is asked, since UIKit does not report the lift of a press the page took for itself), it fires the haptic and dispatches `avibe:native:voice.hold` `{phase: "recognised", take, surface}`. When the input cannot start for a take no page has taken, the page gets `{phase: "failed", take, surface, step}` instead of audio: the App is not following that press, and the page goes on recognising it itself. The take's audio waits in memory until the page calls `voice.holdAdopt` (answer `{sampleRate, timings}`; the same consent-marked document), then arrives as `voice.capture` events, what was recorded since touch-down first; the page ends it with `voice.captureStop`, and gets `{phase: "timings", take, timings}`. The audio of a touch that ends as a tap or a scroll is dropped when the touch ends and never leaves the App's memory (a touch shorter than the threshold by its own timestamps is a tap, even if its end was handled late); so is a take the page rejects or does not adopt within 1 s of recognition (`end=unadopted` in its timings), or whose input has passed on 2 s of audio before the page adopted it (the input counts this itself, on the thread its audio arrives on, and stops there: the bound holds while the main thread is stalled), and one cut off by App Lock, the background, an Action Button take or a withdrawn surface. After recognition the finger's slides are the page's: it gives the cancel haptics and decides what a release does (the App is not told of moves on a surface whose page took the press for itself, so at the cue it also asks the touch where it is, and gives none to a finger past the slop). Each hold's timings (numbers only), and counts of the touches that were not holds by duration (25 ms steps), are kept for the next Action Button message's `capture_earlier`. `avibe-diagnostics://voice/hold-quiet?on=1` (TestFlight and development builds) only prepares the input at touch-down and starts it at recognition. Version 1 (TestFlight 50.1 only) could give a tap the cue when the lift reached the App late; the page names surfaces from version 2 |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 | `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
 
@@ -1559,9 +1585,11 @@ device request (restoration and HealthKit delivery included), the list it last
 confirmed in this process must still list the paired instance at its origin.
 If it does not (the instance was renamed, or removed while no connection was
 loaded), the connection ends locally and nothing more is sent to that origin,
-not even a revoke; a later connect starts over. A removal seen while the
-connection is loaded revokes it, as before. An unknown or empty list changes
-nothing.
+not even a revoke; a later connect starts over. A removal seen in a nonempty
+list while the connection is loaded revokes it, as before. A confirmed empty
+list (the account has no instance left) ends it locally like a rename, with no
+revoke: a deleted instance's name can later belong to another account. A list
+avibe.bot has not confirmed in this process changes nothing.
 
 Both HealthKit entitlements and the localized read-purpose description belong
 only to the main app. The archive checker requires boolean grants and rejects
@@ -1691,28 +1719,39 @@ production instance is used.
 
 ## Turn Live Activities
 
-The `liveActivities: 1` bridge exposes `liveActivity.status`, `start`, `stop`, and
-`openSettings`. A person explicitly tracks one running Turn. Its immutable Agent
-name and session title stay in local ActivityAttributes; only phase and Unix
-seconds reach the instance tracking API and APNs. The exact wire contract and
-shared vectors live in `docs/plans/2026-11-20-ios-live-activity-contract.md` and
-`tests/fixtures/live_activity/contract_vectors.json`.
+The shell always announces `lockScreenProgress: 1`: `liveActivity.setting`,
+`setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
+`stop` calls return `unsupported`. The shell never announces `liveActivities`,
+so older Web bundles do not activate the retired entry's bridge observers. The
+new Web requires `lockScreenProgress`, so older TestFlight builds never show the
+setting or a conversation entry.
 
-`TurnActivityCoordinator` owns start admission, initial and rotated activity push
-tokens, foreground reconciliation, system dismissal, and account/instance
-cleanup. A phone-local ledger lets it retire server tracking for a card removed
-while the App was away. Only an explicit start can create a card, including after
-a prior dismissal or stop of the same still-running Turn. It uses the account's
-WebKit store and existing same-origin CSRF transport, and releases those WebViews
-through the account transition's existing release barriers. The ledger persists
-the Activity.request Unix second (requested_at on every PUT) and whether PUT has
-returned 200 for the current token. A token rotation clears that registration mark
-until its PUT succeeds. An unregistered card survives a 503 or lost response,
-retries PUT on foreground or token rotation, and ends if still unregistered eight
-hours after Activity.request. Registered cards only GET on foreground; actual
-token updates still PUT. A refused registration ends immediately, except a terminal
-Turn response retains its final card for one hour. Local HTTP responses never
-advance stale deadlines without instance confirmation.
+The device-only setting defaults off. On launch with it off, earlier cards end
+locally and their tokens are forgotten without contacting an instance. Turning
+it off explicitly ends cards and sends best-effort DELETE `disabled`.
+
+`TurnActivityCoordinator` keeps the latest visible conversation observation and
+prefetches its running Turn on observation changes and foreground entry. Only
+`UIScene.willDeactivateNotification` can create a card, while the App is active,
+with the device and system settings enabled, a matching prefetched Turn, and an
+active relay registration. Activity.request runs first; failure leaves the old
+card and its observers intact. On success, displaced observers stop and the
+replacement is persisted before the callback returns. A UIKit background task
+then ends the old card, sends DELETE `replaced`, waits up to ten
+seconds for the new token, and PUTs. No conversation control, toast, or hint is
+rendered. Agent names and titles stay in immutable phone-local attributes.
+
+The persisted shown-Turn ledger survives dismissal, replacement, timeout,
+logout, and relaunch. A Turn cannot create another card; entries are retained
+for up to 30 days, including Turns that outlive ActivityKit's eight-hour limit.
+The registration ledger separately tracks requested_at and whether the current
+token received a successful PUT. Token rotation and foreground reconciliation
+follow the shared contract. A 503 or lost PUT response leaves an unregistered
+card for a later foreground/token retry. Registered cards GET on foreground.
+Instance requests reuse the account-owned transport and its session authority
+checks. The normative contract and vectors are in
+`docs/plans/2026-11-20-ios-live-activity-contract.md` and
+`tests/fixtures/live_activity/contract_vectors.json`.
 
 `TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
 renders the reviewed `ios/live-activity/*` frames in English and Simplified

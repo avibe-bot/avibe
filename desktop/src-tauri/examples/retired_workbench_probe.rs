@@ -13,6 +13,17 @@
 //! WKWebView goes nil), its event stream must close, and its page, iframe and
 //! event handler must go silent.
 //!
+//! A page told to close can act once more in the moment after: its process
+//! hears of the close a little later, and a hidden page's throttled timer may
+//! fire once in between (measured on macos-26: the last sign at most 1.16 s
+//! after `retire` returned, in 600 retirements, and never more than one ping
+//! per view). So a sign is a failure only when it is later than [`BOUND`]
+//! after `retire` returned, or when a view sends more than [`LATE_SIGNS`]
+//! of them, or reopens its event stream; a page that kept running would ping
+//! every 200 ms and reconnect. Each sign is dated by the page's own clock,
+//! carried in the ping, so a ping handled late is not mistaken for one sent
+//! late. The last sign's lag is printed for the record.
+//!
 //! WebKit throttles timers in a hidden page, nearly to nothing within seconds,
 //! so silence alone proves nothing; the weak reference and the stream decide.
 //! A hidden control view that is not retired must keep its WKWebView and its
@@ -23,17 +34,27 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{webview::WebviewBuilder, AppHandle, LogicalPosition, Manager, Webview, WebviewUrl};
 
-const GRACE: Duration = Duration::from_millis(250);
-const QUIET: Duration = Duration::from_millis(1500);
+/// No sign of a retired page later than this after `retire` returned.
+const BOUND: f64 = 5000.0;
+/// Signs a dying page may still give after `retire` returned.
+const LATE_SIGNS: usize = 5;
+/// The control view's ping counts are printed over this window.
+const CONTROL_WINDOW: f64 = 1500.0;
+
+/// Wall-clock milliseconds, the clock the page's `Date.now()` uses.
+fn now() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0
+}
 
 #[derive(Default)]
 struct Seen {
-    pings: HashMap<String, Vec<Instant>>,
-    streams_open: HashMap<String, usize>,
+    /// Per ping: when the page sent it (its own clock), or when it was handled.
+    pings: HashMap<String, Vec<f64>>,
+    streams_open: HashMap<String, Vec<f64>>,
     streams_closed: HashMap<String, usize>,
 }
 
@@ -42,8 +63,8 @@ type Shared = Arc<Mutex<Seen>>;
 fn page(name: &str) -> String {
     format!(
         "<!doctype html><title>{name}</title><script>\
-         setInterval(() => fetch('/ping/{name}', {{cache: 'no-store'}}).catch(() => {{}}), 200);\
-         new EventSource('/events/{name}').onmessage = () => fetch('/ping/{name}-stream', {{cache: 'no-store'}}).catch(() => {{}});\
+         setInterval(() => fetch('/ping/{name}?t=' + Date.now(), {{cache: 'no-store'}}).catch(() => {{}}), 200);\
+         new EventSource('/events/{name}').onmessage = () => fetch('/ping/{name}-stream?t=' + Date.now(), {{cache: 'no-store'}}).catch(() => {{}});\
          </script><iframe src='/frame/{name}'></iframe>"
     )
 }
@@ -51,7 +72,7 @@ fn page(name: &str) -> String {
 fn frame(name: &str) -> String {
     format!(
         "<!doctype html><script>\
-         setInterval(() => fetch('/ping/{name}-frame', {{cache: 'no-store'}}).catch(() => {{}}), 200);\
+         setInterval(() => fetch('/ping/{name}-frame?t=' + Date.now(), {{cache: 'no-store'}}).catch(() => {{}}), 200);\
          </script>"
     )
 }
@@ -76,6 +97,7 @@ fn serve(mut stream: TcpStream, seen: Shared) {
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/")
         .to_owned();
+    let (path, query) = path.split_once('?').unwrap_or((&path, ""));
     let mut parts = path.trim_start_matches('/').splitn(2, '/');
     let (kind, name) = (parts.next().unwrap_or(""), parts.next().unwrap_or("").to_owned());
     let html = |body: String| {
@@ -92,7 +114,13 @@ fn serve(mut stream: TcpStream, seen: Shared) {
             let _ = stream.write_all(html(frame(&name)).as_bytes());
         }
         "ping" => {
-            seen.lock().unwrap().pings.entry(name).or_default().push(Instant::now());
+            // Date the sign by when the page sent it; a request handled late
+            // is not a page acting late.
+            let sent = query
+                .strip_prefix("t=")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or_else(now);
+            seen.lock().unwrap().pings.entry(name).or_default().push(sent);
             let _ =
                 stream.write_all(b"HTTP/1.1 204 No Content\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n");
         }
@@ -102,7 +130,12 @@ fn serve(mut stream: TcpStream, seen: Shared) {
             if stream.write_all(head.as_bytes()).is_err() {
                 return;
             }
-            *seen.lock().unwrap().streams_open.entry(name.clone()).or_default() += 1;
+            seen.lock()
+                .unwrap()
+                .streams_open
+                .entry(name.clone())
+                .or_default()
+                .push(now());
             // The client never sends more; a read returns only when it closes.
             let _ = stream.set_read_timeout(None);
             let mut reader = stream.try_clone().unwrap();
@@ -123,7 +156,7 @@ fn serve(mut stream: TcpStream, seen: Shared) {
     }
 }
 
-fn pings_since(seen: &Shared, name: &str, since: Instant) -> usize {
+fn pings_since(seen: &Shared, name: &str, since: f64) -> usize {
     seen.lock()
         .unwrap()
         .pings
@@ -167,13 +200,13 @@ fn workbench(app: &AppHandle, label: &str, disposable: bool, directory: Option<P
 
 fn start(view: &Webview, address: SocketAddr, seen: &Shared) {
     let name = view.label().to_owned();
-    let started = Instant::now();
+    let started = now();
     view.navigate(format!("http://{address}/page/{name}").parse().unwrap())
         .unwrap();
     wait_for(&format!("{name} to run"), Duration::from_secs(20), || {
         pings_since(seen, &name, started) >= 3
             && pings_since(seen, &format!("{name}-frame"), started) >= 3
-            && seen.lock().unwrap().streams_open.get(&name).copied().unwrap_or(0) >= 1
+            && seen.lock().unwrap().streams_open.get(&name).map_or(0, Vec::len) >= 1
     });
     #[cfg(target_os = "macos")]
     native::track(view);
@@ -181,12 +214,22 @@ fn start(view: &Webview, address: SocketAddr, seen: &Shared) {
 
 fn stream_open(seen: &Shared, name: &str) -> bool {
     let seen = seen.lock().unwrap();
-    seen.streams_open.get(name).copied().unwrap_or(0) > seen.streams_closed.get(name).copied().unwrap_or(0)
+    seen.streams_open.get(name).map_or(0, Vec::len) > seen.streams_closed.get(name).copied().unwrap_or(0)
 }
 
-/// After retirement returns, the web view is freed and its page, its iframe
-/// and its event stream stop.
-fn assert_stopped(app: &AppHandle, name: &str, seen: &Shared) {
+/// Retires a view through the shell's own helper; returns when it returned.
+fn retire(app: &AppHandle, view: &Webview) -> f64 {
+    avibe_desktop_lib::instance_store::retire(view).unwrap();
+    let returned = now();
+    assert!(app.get_webview(view.label()).is_none());
+    returned
+}
+
+/// After retirement returns, the web view is freed, its event stream closes,
+/// and no sign of its page, iframe or event handler comes later than [`BOUND`]
+/// after `returned`. Watches until just past the bound, failing at the first
+/// sign of a page that kept running.
+fn assert_stopped(app: &AppHandle, name: &str, seen: &Shared, returned: f64) {
     #[cfg(target_os = "macos")]
     wait_for(
         &format!("{name}'s WKWebView to be freed"),
@@ -195,24 +238,50 @@ fn assert_stopped(app: &AppHandle, name: &str, seen: &Shared) {
     );
     #[cfg(not(target_os = "macos"))]
     let _ = app;
-    std::thread::sleep(GRACE);
-    let quiet = Instant::now();
-    std::thread::sleep(QUIET);
-    let page = pings_since(seen, name, quiet);
-    let frame = pings_since(seen, &format!("{name}-frame"), quiet);
-    assert_eq!(
-        (page, frame),
-        (0, 0),
-        "{name} kept running after retirement (page, iframe pings in {QUIET:?})"
-    );
-    assert_eq!(
-        pings_since(seen, &format!("{name}-stream"), quiet),
-        0,
-        "{name} answered events after retirement"
-    );
     wait_for(&format!("{name} event stream to close"), Duration::from_secs(5), || {
         !stream_open(seen, name)
     });
+    let signals = [name.to_owned(), format!("{name}-frame"), format!("{name}-stream")];
+    let late = || {
+        let seen = seen.lock().unwrap();
+        let signs: Vec<f64> = signals
+            .iter()
+            .filter_map(|signal| seen.pings.get(signal))
+            .flatten()
+            .copied()
+            .filter(|at| *at > returned)
+            .collect();
+        let reopened = seen
+            .streams_open
+            .get(name)
+            .map_or(0, |opened| opened.iter().filter(|at| **at > returned).count());
+        (signs, reopened)
+    };
+    let check = || {
+        let (signs, reopened) = late();
+        let last = signs.iter().copied().fold(0.0_f64, f64::max).max(returned) - returned;
+        assert!(
+            last <= BOUND,
+            "{name} kept running after retirement: a sign {last:.0} ms after retire returned"
+        );
+        assert!(
+            signs.len() <= LATE_SIGNS,
+            "{name} kept running after retirement: {} signs after retire returned",
+            signs.len()
+        );
+        assert_eq!(reopened, 0, "{name} reopened its event stream after retirement");
+        (signs.len(), last)
+    };
+    while now() < returned + BOUND + 250.0 {
+        check();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (count, last) = check();
+    if count == 0 {
+        println!("{name}: no sign after retire returned");
+    } else {
+        println!("{name}: {count} late sign(s), the last {last:.0} ms after retire returned");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -297,17 +366,14 @@ fn main() {
 
                 // A disposable store is retired the way sign-out, an
                 // instance switch and a rebind retire it.
-                avibe_desktop_lib::instance_store::retire(&disposable).unwrap();
-                assert!(handle.get_webview("disposable").is_none());
-                assert_stopped(&handle, "disposable", &seen);
-                println!("item 2: instance_store::retire freed the WKWebView and stopped the page, its iframe and its event stream");
-
+                let disposable_returned = retire(&handle, &disposable);
                 // A persistent store goes through the same destruction
                 // (`destroy_completed`, which `retire` ends with and which the
                 // local Runtime and the account view use directly).
-                avibe_desktop_lib::instance_store::retire(&persistent).unwrap();
-                assert!(handle.get_webview("persistent").is_none());
-                assert_stopped(&handle, "persistent", &seen);
+                let persistent_returned = retire(&handle, &persistent);
+                assert_stopped(&handle, "disposable", &seen, disposable_returned);
+                println!("item 2: instance_store::retire freed the WKWebView and stopped the page, its iframe and its event stream");
+                assert_stopped(&handle, "persistent", &seen, persistent_returned);
                 println!("item 2: retiring a persistent-store view freed the WKWebView and stopped the page, its iframe and its event stream");
 
                 // The silence above is not WebKit idling a hidden page: the
@@ -316,22 +382,22 @@ fn main() {
                 #[cfg(target_os = "macos")]
                 assert!(!native::freed(&handle, "control"), "the control WKWebView was freed");
                 assert!(stream_open(&seen, "control"), "the control event stream closed");
-                let asked = Instant::now();
+                let asked = now();
                 control
                     .eval("fetch('/ping/control-eval', {cache: 'no-store'})")
                     .unwrap();
                 wait_for("the hidden control page to run script", Duration::from_secs(10), || {
                     pings_since(&seen, "control-eval", asked) >= 1
                 });
-                let since = Instant::now() - QUIET;
+                let since = now() - CONTROL_WINDOW;
                 println!(
-                    "control: hidden and unretired, WKWebView alive, event stream open, script runs; in the last {QUIET:?} its timers pinged {} times (iframe {}) and it answered {} events",
+                    "control: hidden and unretired, WKWebView alive, event stream open, script runs; in the last {CONTROL_WINDOW} ms its timers pinged {} times (iframe {}) and it answered {} events",
                     pings_since(&seen, "control", since),
                     pings_since(&seen, "control-frame", since),
                     pings_since(&seen, "control-stream", since),
                 );
-                avibe_desktop_lib::instance_store::retire(&control).unwrap();
-                assert_stopped(&handle, "control", &seen);
+                let control_returned = retire(&handle, &control);
+                assert_stopped(&handle, "control", &seen, control_returned);
 
                 println!("retired workbench probe passed");
             }));

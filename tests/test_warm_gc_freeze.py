@@ -1,5 +1,5 @@
 """The warm freeze: armed once, fires at the first natural full collection after
-the warm-up that ends with no model stream open, and rolls back without restart.
+the warm-up whatever is streaming, and rolls back without restart.
 GC operations are faked; the process heap is never frozen by these tests."""
 
 from types import SimpleNamespace
@@ -7,12 +7,15 @@ from types import SimpleNamespace
 from core import loop_watchdog as wd
 
 
-def test_freeze_fires_on_warm_full_collection_without_open_streams_even_with_live_turns(monkeypatch):
+def test_freeze_fires_on_the_first_warm_full_collection_even_with_open_streams(monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="core.loop_watchdog")
     calls = []
     monkeypatch.setattr(wd.gc, "freeze", lambda: calls.append("freeze"))
     monkeypatch.setattr(wd.gc, "unfreeze", lambda: calls.append("unfreeze"))
     monkeypatch.setattr(wd.gc, "get_freeze_count", lambda: 0)
-    monkeypatch.setattr(wd, "_active_requests", 0)
+    monkeypatch.setattr(wd, "_active_requests", 3)
     clock = [0.0]
     w = wd.EventLoopWatchdog(SimpleNamespace(), monotonic=lambda: clock[0])
 
@@ -29,21 +32,10 @@ def test_freeze_fires_on_warm_full_collection_without_open_streams_even_with_liv
     collect()  # before the warm-up
     clock[0] = 7201
     collect(1)  # not a full collection
-    monkeypatch.setattr(wd, "_active_requests", 1)
-    collect()  # a model stream is open
     assert not calls
-    # A stream that opened between the collection and the loop's answer cancels this attempt.
-    monkeypatch.setattr(wd, "_active_requests", 0)
-    info = dict(generation=2, collected=0, uncollectable=0)
-    w._observe_gc("start", info)
-    w._observe_gc("stop", info)
-    monkeypatch.setattr(wd, "_active_requests", 1)
-    w._answer()
-    assert not calls and w._freeze_state == "armed"
-    # Live Turns without an open stream do not hold it back.
-    monkeypatch.setattr(wd, "_active_requests", 0)
-    collect()
+    collect()  # three model streams open: it fires anyway
     assert calls == ["freeze"] and w._freeze_state == "frozen"
+    assert "Warm GC trial frozen: open_streams=3" in caplog.text
     collect()
     assert calls == ["freeze"]  # one shot
     assert w.arm_warm_freeze() == "frozen"

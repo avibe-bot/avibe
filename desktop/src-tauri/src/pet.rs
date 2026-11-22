@@ -31,7 +31,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use url::Url;
 
-use crate::pet_native::{primary_button_down, set_frame, start_drag};
+use crate::pet_native::{follow_pointer, primary_button_down, set_frame, start_drag, Drag, PointerOffset};
 use crate::{native_catalog_for_locales, Shell, DESKTOP_SHELL_MARKER, MAIN_WINDOW};
 
 pub const PET_WINDOW: &str = "pet";
@@ -108,6 +108,9 @@ pub struct Pet {
     /// change nothing.
     drag_generation: AtomicU64,
     hit_regions: Mutex<Vec<HitRect>>,
+    /// While the shell itself moves the window for a drag (macOS), the
+    /// pointer's offset in it; `None` otherwise.
+    drag_follow: Mutex<Option<PointerOffset>>,
     poll_generation: AtomicU64,
     poll_wake: Arc<tokio::sync::Notify>,
 }
@@ -128,6 +131,7 @@ impl Pet {
             move_generation: Arc::new(AtomicU64::new(0)),
             drag_generation: AtomicU64::new(0),
             hit_regions: Mutex::new(Vec::new()),
+            drag_follow: Mutex::new(None),
             poll_generation: AtomicU64::new(0),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
         }
@@ -1221,15 +1225,21 @@ fn set_expanded(window: &WebviewWindow, expanded: bool) -> Result<PetLayout, Str
 /// revision's `pet_settle` (or after `SETTLE_TIMEOUT`); the reply carries no
 /// layout, so the page has one source for it.
 #[tauri::command]
-pub async fn pet_drag(window: WebviewWindow) -> Result<(), String> {
+pub async fn pet_drag(window: WebviewWindow, x: Option<f64>, y: Option<f64>) -> Result<(), String> {
     ensure_pet_page(&window)?;
     let app = window.app_handle().clone();
+    // Where the press was, in the window's points (pages since 2026-11-20).
+    let press = match (x, y) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some((x, y)),
+        _ => None,
+    };
     let generation = on_main_thread(&app, {
         let window = window.clone();
-        move |app| begin_drag(app, &window)
+        move |app| begin_drag(app, &window, press)
     })
     .await??;
     wait_for_release(&app, generation).await;
+    *lock(&app.state::<Pet>().drag_follow) = None;
     let placed = on_main_thread(&app, {
         let window = window.clone();
         move |app| end_drag(app, &window, generation)
@@ -1241,6 +1251,38 @@ pub async fn pet_drag(window: WebviewWindow) -> Result<(), String> {
         let _ = on_main_thread(&app, move |app| abandon_drag(app, generation)).await;
     }
     placed?
+}
+
+/// Where the pointer is in the pet window (its points from the top-left) and
+/// whether the primary button is down (`None` where the shell cannot tell).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PetPointer {
+    x: f64,
+    y: f64,
+    down: Option<bool>,
+}
+
+/// The pointer as the shell sees it. The page asks before it treats a press
+/// as a hold: a freshly shown window can get the press but none of the moves
+/// that follow it, so the page cannot tell a drag from a hold by itself.
+#[tauri::command]
+pub fn pet_pointer(window: WebviewWindow) -> Result<Option<PetPointer>, String> {
+    ensure_pet_page(&window)?;
+    let app = window.app_handle();
+    let (Ok(cursor), Ok(origin), Ok(window_scale), Ok(size)) = (
+        app.cursor_position(),
+        window.outer_position(),
+        window.scale_factor(),
+        window.inner_size(),
+    ) else {
+        return Ok(None);
+    };
+    let pointer = cursor_in_window(cursor, cursor_scale(app, window_scale), origin, window_scale, size);
+    Ok(Some(PetPointer {
+        x: pointer.x,
+        y: pointer.y,
+        down: primary_button_down(),
+    }))
 }
 
 fn abandon_drag(app: &AppHandle, generation: u64) {
@@ -1305,10 +1347,11 @@ async fn on_main_thread<T: Send + 'static>(
     receive.await.map_err(|_| WINDOW_GONE.to_owned())
 }
 
-fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
+fn begin_drag(app: &AppHandle, window: &WebviewWindow, press: Option<(f64, f64)>) -> Result<u64, String> {
     let pet = app.state::<Pet>();
     let mut frame = lock(&pet.frame);
-    let anchor = window_anchor(window, frame.state.current()).ok_or(WINDOW_GONE)?;
+    let before = frame.state.current();
+    let anchor = window_anchor(window, before).ok_or(WINDOW_GONE)?;
     let Some(strip) = frame.state.begin_drag(anchor) else {
         // Placing it already, or its page has not said it draws the top
         // layout (it drags the window natively then).
@@ -1317,17 +1360,32 @@ fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
     set_frame(window, strip.origin(anchor, 1.0), strip.size());
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
     drop(frame);
-    if let Err(error) = start_drag(window) {
-        // No drag will end: the drag finaliser puts the window back.
-        let step = lock(&pet.frame).state.abort_drag();
-        perform(app, window, step);
-        return Err(error);
+    // The press, moved with Vibey from the frame it was in to the strip.
+    let hold = press.map(|(x, y)| {
+        let (from, to) = (before.pet_offset(), strip.pet_offset());
+        PointerOffset {
+            x: x - from.0 + to.0,
+            y: y - from.1 + to.1,
+        }
+    });
+    match start_drag(window, hold) {
+        Ok(Drag::Follow(offset)) => *lock(&pet.drag_follow) = Some(offset),
+        Ok(Drag::Native) => *lock(&pet.drag_follow) = None,
+        Err(error) => {
+            *lock(&pet.drag_follow) = None;
+            // No drag will end: the drag finaliser puts the window back.
+            let step = lock(&pet.frame).state.abort_drag();
+            perform(app, window, step);
+            return Err(error);
+        }
     }
     Ok(generation)
 }
 
-/// Until the primary button is up. Where the shell cannot read the button, a
-/// drag is over once the window has stopped moving for `MOVE_SETTLE`.
+/// Until the primary button is up, moving the window with the pointer when the
+/// shell drags it itself (each poll, and once more as the button comes up).
+/// Where the shell cannot read the button, a drag is over once the window has
+/// stopped moving for `MOVE_SETTLE`.
 async fn wait_for_release(app: &AppHandle, generation: u64) {
     let pet = app.state::<Pet>();
     let moves = pet.move_generation.clone();
@@ -1337,7 +1395,14 @@ async fn wait_for_release(app: &AppHandle, generation: u64) {
         if pet.drag_generation.load(Ordering::SeqCst) != generation {
             return;
         }
-        match on_main_thread(app, |_| primary_button_down()).await {
+        let step = on_main_thread(app, |app| {
+            let follow = *lock(&app.state::<Pet>().drag_follow);
+            if let (Some(offset), Some(window)) = (follow, app.get_webview_window(PET_WINDOW)) {
+                follow_pointer(&window, offset);
+            }
+            primary_button_down()
+        });
+        match step.await {
             Err(_) | Ok(Some(false)) => return,
             Ok(Some(true)) => {}
             Ok(None) => {
@@ -1733,7 +1798,7 @@ mod tests {
                 "{case}"
             );
             assert!((DRAG_HEIGHT..=WINDOW_HEIGHT).contains(&frame.height), "{case}");
-            assert_eq!(frame.size().0, 460.0);
+            assert_eq!(frame.size().0, 500.0);
         }
         assert_eq!(
             initial_anchor(None, &[]),

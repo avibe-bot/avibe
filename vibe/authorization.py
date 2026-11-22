@@ -452,6 +452,8 @@ _VIEWER_HTTP_RULES = tuple(
     for pattern in (
         r"^/api/session$",
         r"^/api/devices$",
+        r"^/api/devices/activity$",
+        r"^/api/devices/[^/]+/health(?:/reads)?$",
         r"^/api/csrf-token$",
         r"^/api/config$",
         r"^/api/version(?:/local)?$",
@@ -494,6 +496,7 @@ _VIEWER_HTTP_NAMESPACES = (
     "/api/web-push",
 )
 _VIEWER_HTTP_MUTATION_RULES = (
+    ("PUT", re.compile(r"^/api/devices/[^/]+/(?:notifications|schedule)$")),
     ("POST", re.compile(r"^/api/devices/(?:self|sign-out-others|[^/]+/sign-out)$")),
     ("PUT", re.compile(r"^/api/notifications/preferences$")),
     ("PUT", re.compile(r"^/api/home/preferences$")),

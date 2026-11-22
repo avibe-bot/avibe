@@ -493,7 +493,6 @@ def test_service_main_owns_monitor_shutdown(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(service_main, "load_config", lambda: loaded_config)
     monkeypatch.setattr(service_main, "get_logs_dir", lambda: tmp_path)
     monkeypatch.setenv("VIBE_DISABLE_STDOUT_LOGGING", "1")
-    monkeypatch.setattr(service_main, "apply_claude_sdk_patches", lambda: None)
     monkeypatch.setattr(
         service_main,
         "prepare_sqlite_state",

@@ -390,6 +390,44 @@ async def test_stream_log_budget_pairs_and_summarizes_across_windows(caplog):
 
 
 @pytest.mark.asyncio
+async def test_device_sideband_projection_is_independent_of_log_budget(caplog):
+    rv = RecordingRendezvous()
+    rv.publish(DirectEndpoint(ENDPOINT_ONE, ("192.168.1.2:3210",)))
+    epochs = []
+    rv.set_admission_listener(lambda _peer, _ttl, epoch: epochs.append(epoch))
+    rv.offer(instance_id="instance", hostname="test", subject="owner", client_endpoint_id=PEER, session=("binding", "sid"))
+    supervisor = DirectTransportSupervisor("unused", RecordingIngress(), rv)
+    supervisor._endpoint_id = ENDPOINT_ONE
+    supervisor._path_reports = supervisor._device_reports = True
+    caplog.set_level(logging.INFO, logger="vibe.direct_transport")
+    fields = ("open", "rx_bytes", "tx_bytes", "challenge_tx", "challenge_rx", "response_tx", "response_rx")
+    msg = dict(type="path_report", ordinal=1, phase="open", selected="relay", partial=False,
+               families=[dict.fromkeys(fields, 0) for _ in range(4)], peer=PEER, epoch=epochs[-1], scope=None, rtt_ms=19)
+    legacy_msg = {k: v for k, v in msg.items() if k not in ("peer", "epoch", "scope", "rtt_ms")}
+    supervisor._device_reports = False
+    for phase in ("open", "change", "close"):
+        supervisor._handle_path_report({**legacy_msg, "phase": phase})
+        assert rv.is_admitted(PEER) and not rv.session_paths("binding")
+    supervisor._device_reports = True
+    supervisor._handle_path_report(msg)
+    for family, scope, kind in (("relay", None, "relay"), ("ipv4", "local", "lan"), ("ipv6", "global", "punched")):
+        supervisor._handle_path_report({**msg, "phase": "change", "selected": family, "scope": scope})
+        assert rv.session_paths("binding") == {("owner", "sid"): {"kind": kind, "family": None if kind == "relay" else family, "rtt_ms": 19}}
+    for ordinal in range(2, 100):
+        supervisor._handle_path_report({**msg, "ordinal": ordinal})
+    assert len(rv._admissions[PEER].connections) == 32
+    for ordinal in range(1, 100):
+        supervisor._handle_path_report({**msg, "phase": "close", "ordinal": ordinal})
+    assert not rv.session_paths("binding") and PEER not in caplog.text
+    supervisor._handle_path_report(msg)
+    assert rv.session_paths("binding")
+    reader = asyncio.StreamReader()
+    reader.feed_eof()
+    await supervisor._drain_stderr(reader)
+    assert rv.is_admitted(PEER) and not rv.session_paths("binding")
+
+
+@pytest.mark.asyncio
 async def test_path_budget_reserves_terminal_ipv6_evidence(caplog):
     supervisor = DirectTransportSupervisor("unused", RecordingIngress(), RecordingRendezvous())
     supervisor._endpoint_id = ENDPOINT_ONE

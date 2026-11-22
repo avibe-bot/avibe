@@ -98,11 +98,11 @@ describe('appTabHref', () => {
     }
   });
 
-  it('has no tab surface for a built-in whose route is not standalone on desktop', () => {
-    // /apps/library opens a Library WINDOW and redirects the tab to `/`; preview has
-    // no route at all. Both must fall back to a workbench window.
-    expect(appTabHref({ appId: 'library' })).toBeNull();
-    expect(appTabHref({ appId: 'preview' })).toBeNull();
+  it('includes Preview and Library now that their standalone bodies exist', () => {
+    // The explicit standalone flag selects their shipped bodies, bypassing the
+    // ordinary Library command route. Unknown built-ins still cannot open tabs.
+    expect(appTabHref({ appId: 'library' })).toBe('/apps/library?standalone=1');
+    expect(appTabHref({ appId: 'preview' })).toBe('/apps/preview?standalone=1');
     expect(appTabHref({ appId: 'not-an-app' })).toBeNull();
   });
 
@@ -160,8 +160,8 @@ describe('isStandaloneAppRoutePath', () => {
     expect(isStandaloneAppRoutePath('/apps/files')).toBe(true);
     expect(isStandaloneAppRoutePath('/apps/editor')).toBe(true);
     // The Library opens a WINDOW (and redirects the tab), so it never goes chromeless.
-    expect(isStandaloneAppRoutePath('/apps/library')).toBe(false);
-    expect(isStandaloneAppRoutePath('/apps/show/sess42')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps/library')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/show/sess42')).toBe(true);
   });
 
   it('accepts the route variants React Router still mounts', () => {
@@ -171,8 +171,8 @@ describe('isStandaloneAppRoutePath', () => {
     expect(isStandaloneAppRoutePath('/apps/files//')).toBe(true);
     expect(isStandaloneAppRoutePath('/Apps/Files')).toBe(true);
     expect(isStandaloneAppRoutePath('/APPS/TERMINAL/')).toBe(true);
-    expect(isStandaloneAppRoutePath('/apps/library/')).toBe(false);
-    expect(isStandaloneAppRoutePath('/Apps/Library')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps/library/')).toBe(true);
+    expect(isStandaloneAppRoutePath('/Apps/Library')).toBe(true);
   });
 
   it('is false off the app routes', () => {
@@ -188,7 +188,7 @@ describe('appTabHrefForDockId', () => {
   it('resolves both Dock id kinds', () => {
     expect(appTabHrefForDockId('terminal')).toBe('/apps/terminal?standalone=1');
     expect(appTabHrefForDockId(showDockId('sess42'))).toBe('/show/sess42/');
-    expect(appTabHrefForDockId('library')).toBeNull();
+    expect(appTabHrefForDockId('library')).toBe('/apps/library?standalone=1');
   });
 
   it('withdraws new-tab targets for every Dock app in the installed iOS PWA', () => {

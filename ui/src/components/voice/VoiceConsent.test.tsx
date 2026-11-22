@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastContext } from '../../context/ToastContext';
+import { appVoiceEnabled, mainBotStartsAtRecognition } from '../../lib/appVoice';
 import {
   answerVoiceConsent,
   askVoiceConsent,
@@ -138,6 +139,26 @@ describe('voice consent', () => {
     noteVoiceStatus({ available: true, consent: 'declined' }, newer);
     noteVoiceStatus({ available: true, consent: 'granted' }, older);
     expect(knownVoiceConsent()).toBe('declined');
+  });
+
+  // The same body says what the instance set for the iOS App's voice (lib/appVoice): an older
+  // read that answers late cannot undo what a newer one said, the off switch least of all.
+  it('an older status read cannot undo what a newer one said of the App\'s voice', async () => {
+    const older = beginVoiceConsentRead();
+    const newer = beginVoiceConsentRead();
+    noteVoiceStatus({ available: true, consent: 'granted', app_hold: false, app_hold_main_at_touch: false }, newer);
+    noteVoiceStatus({ available: true, consent: 'granted', app_hold: true, app_hold_main_at_touch: true }, older);
+    expect(appVoiceEnabled()).toBe(false);
+    expect(mainBotStartsAtRecognition()).toBe(true);
+
+    // A saved answer says nothing of them: a read that started before it still tells them,
+    // though its answer to the question is the older one.
+    const slowRead = beginVoiceConsentRead();
+    expect(await answerVoiceConsent('declined')).toBe(true);
+    noteVoiceStatus({ available: true, consent: 'granted', app_hold: true, app_hold_main_at_touch: true }, slowRead);
+    expect(knownVoiceConsent()).toBe('declined');
+    expect(appVoiceEnabled()).toBe(true);
+    expect(mainBotStartsAtRecognition()).toBe(false);
   });
 
   it('shows the small print, with where speech goes, only on Learn more', () => {

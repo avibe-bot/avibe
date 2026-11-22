@@ -153,6 +153,8 @@ vi.mock('./VersionBadge', () => ({ VersionBadge: () => <div data-testid="version
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
+// The native launch fallback reads the real window manager, which this suite replaces.
+vi.mock('./apps/NativeAppLaunchFallback', () => ({ NativeAppLaunchFallback: () => null }));
 vi.mock('./apps/WindowLayer', () => ({
   WindowLayer: ({ active }: { active: boolean }) => (
     <div data-testid="window-layer" data-active={String(active)} />

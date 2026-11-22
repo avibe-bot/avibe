@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
+import app_bodies
 import proxy
 
 
@@ -48,7 +49,10 @@ def account_native(tmp_path, request):
             status, value, cookie = 200, {}, None
             location = None
             content_type = "application/json"
-            if path == "/api/config/auth":
+            app_response = app_bodies.response(self.command, self.path) if options.get("actual_ui") else None
+            if app_response is not None:
+                status, content_type, value = app_response
+            elif path == "/api/config/auth":
                 value = {"supabase_url": "https://provider.fixture.test", "supabase_anon_key": "public-fixture"}
                 if policy.get("failure") == "config":
                     status, value = 400, {"error": "synthetic_secret_lowercase"}
@@ -115,6 +119,9 @@ def account_native(tmp_path, request):
                 value = {"remote": True, "authenticated": True, "authorization_state": "current",
                          "sub": "synthetic-account", "instance_id": headers["host"].split(".")[0],
                          "capabilities": {"can_read_instance": True}}
+                if options.get("actual_ui"):
+                    value.update({"remote": not headers["host"].startswith("127.0.0.1:"),
+                                  "instance_kind": "personal", "instance_role": "owner"})
             elif path == "/api/desktop/local-instance":
                 if policy.get("paired"):
                     value = local_descriptor()
@@ -133,7 +140,7 @@ def account_native(tmp_path, request):
             elif path == "/fixture-version.js" and options.get("version"):
                 content_type = "application/javascript"
                 value = Path(os.environ["DESKTOP_VERSION_FIXTURE"]).joinpath("version.js").read_text()
-            elif path == "/fixture-load-blocker.gif" and options.get("version"):
+            elif path == "/fixture-load-blocker.gif" and (options.get("version") or options.get("apps")):
                 # React and its native IPC execute while this subresource keeps
                 # the genuine candidate's Finished callback pending.
                 if policy.get("hold_version_document"):
@@ -145,6 +152,16 @@ def account_native(tmp_path, request):
                 value = {"current": "0.1.0", "latest": None, "update_available": False, "managed_by": "desktop",
                          "phase": "idle", "host_actions": ["check", "prereleases", "auto_update"],
                          "auto_update": True, "prereleases": False}
+            elif options.get("apps") and path.startswith("/apps/"):
+                content_type = "text/html"
+                value = """<!doctype html><html><body><textarea id="app-draft"></textarea>
+<script>window.fixtureAppDocument=crypto.randomUUID();window.fixtureLaunches=[];
+window.fixtureInitialLaunch=window.__AVIBE_APP_LAUNCH__;
+window.addEventListener('avibe:app-launch',event=>window.fixtureLaunches.push(event.detail));</script>
+</body></html>"""
+            elif options.get("apps") and path == "/fixture-app-state":
+                value = {"remote_session": "__Host-vibe_remote_session=fixture" in headers.get("cookie", ""),
+                         "account_cookie": "account=synthetic" in headers.get("cookie", "")}
             elif path in ("/", "/settings/general", "/settings/shortcuts", "/settings/notifications"):
                 if policy.get("hold_local_document") and path == "/" and headers["host"] == urlsplit(alternate_origin).netloc:
                     local_document_entered.set()
@@ -155,6 +172,8 @@ def account_native(tmp_path, request):
                          else Path(os.environ["DESKTOP_VERSION_FIXTURE"]).joinpath("index.html").read_text()
                          if options.get("version")
                          else "<!doctype html><html><body>Isolated local Workbench</body></html>")
+                if options.get("apps"):
+                    value = value.replace("</body>", '<img src="/fixture-load-blocker.gif"></body>')
                 if policy.get("document_redirect") and headers["host"] == "studio.avibe.bot":
                     status, location = 302, "https://other.avibe.bot/"
             else:
@@ -278,6 +297,10 @@ def account_native(tmp_path, request):
         deadline = time.monotonic() + 8
         while not js("return Boolean(document.querySelector('h1'));"):
             assert time.monotonic() < deadline, "actual AccountApp has not rendered"
+        if options.get("apps") or options.get("actual_ui"):
+            send(action="presentation_snapshot")
+            snapshot = wait("presentation_snapshot")
+            assert snapshot["runtime"]["window"] == snapshot["window"], snapshot
         yield {"send": send, "wait": wait, "js": js, "state": state, "request": request, "present": present,
                "calls": calls, "policy": policy, "root": tmp_path, "history": history,
                "identity": identity, "hold": hold, "foreground": foreground,
@@ -1899,3 +1922,463 @@ def test_retained_local_return_receipt_survives_lifecycle_retry_after_retirement
     assert account_return_action(f, "back")["error"] == "untrusted_desktop_caller"
     eventually(f, lambda state: len(state["views"]) == 1 and active(f)["label"] == published["runtime"]["label"])
     assert active(f)["url"] == f["local_origin"] + "/"
+
+
+# W1 owns native admission, state delivery and stores here. The fixture body is
+# deliberately a small receiver. The separate actual_ui case serves the exact
+# UI lane build; both modes suppress physical presentation in this archive.
+def w1_control(f, operation, **values):
+    f["send"](action="app_control", operation=operation, **values)
+    return f["wait"]("app_control_ready")
+
+
+def w1_windows(f):
+    f["send"](action="app_control", operation="snapshot")
+    return f["wait"]("app_snapshot")["windows"]
+
+
+def w1_launch(f, app="editor", params=None, label=None, new=False, request_id="launch-1", origin=None, title=None):
+    request = {"appId": app, "source": "file-browser", "mode": "newWindow" if new else "activate",
+               "newWindow": new, "origin": origin or f["js"]("return location.origin;", label),
+               "requestId": request_id}
+    if params is not None:
+        request["params"] = params
+    if title is not None:
+        request["title"] = title
+    if app == "showpage":
+        request["sessionId"] = "fixture-session"
+    return f["js"]("const request=" + json.dumps(request) + ";return await new Promise(resolve=>{"
+                   "const receive=event=>{if(event.detail.requestId===request.requestId){"
+                   "window.removeEventListener('avibe:app-launch-result',receive);resolve(event.detail);}};"
+                   "window.addEventListener('avibe:app-launch-result',receive);"
+                   "location='avibe-app://launch?request='+encodeURIComponent(JSON.stringify(request));});", label)
+
+
+def w1_body(f, label):
+    deadline = time.monotonic() + 10
+    while not f["js"]("return Boolean(window.fixtureAppDocument);", label):
+        assert time.monotonic() < deadline, "App body did not mount"
+    return f["js"]("return {document:window.fixtureAppDocument,snapshot:window.__AVIBE_APP_LAUNCH__,"
+                   "draft:document.querySelector('#app-draft').value,initial:window.fixtureInitialLaunch};", label)
+
+
+def w1_dom(f, expression, label=None):
+    deadline = time.monotonic() + 20
+    while True:
+        value = f["js"]("return Boolean(" + expression + ");", label)
+        assert not (isinstance(value, dict) and "error" in value), value
+        if value is True:
+            return value
+        assert time.monotonic() < deadline, f["js"]("return document.body.innerText;", label)
+        time.sleep(.02)
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+def test_w1_six_targets_reuse_metadata_and_child_entries_preserve_buffers(account_native):
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    main = active(f)["label"]
+    marker = f["js"]("window.w1Draft='unsent main';window.w1Id=crypto.randomUUID();return [window.w1Id,location.href];")
+    for app, params in [("files", {"path": "/tmp/files"}), ("terminal", {"cwd": "/tmp/terminal"}),
+                        ("editor", {"path": "/tmp/first", "mtime": None, "column": 0}),
+                        ("showpage", {}), ("preview", {"path": "/tmp/image", "name": "image"}),
+                        ("library", {"initialTab": "showpages"})]:
+        assert w1_launch(f, app, params, request_id="first-" + app, title="first-" + app)["status"] == "opened"
+        entry = next(window for window in w1_windows(f) if window["snapshot"]["appId"] == app)
+        body = w1_body(f, entry["label"])
+        assert body["initial"]["params"] == params
+        assert body["snapshot"]["params"] == params
+        assert entry["visible"] is False and entry["focused"] is False
+    editor = next(window for window in w1_windows(f) if window["snapshot"]["appId"] == "editor")
+    before = f["js"]("document.querySelector('#app-draft').value='unsaved editor';return window.fixtureAppDocument;", editor["label"])
+    assert w1_launch(f, "editor", {"path": "/tmp/second"}, label=editor["label"], request_id="from-child",
+                     title="second-editor")["status"] == "opened"
+    after = w1_body(f, editor["label"])
+    assert after["document"] == before and after["draft"] == "unsaved editor"
+    assert after["snapshot"]["params"]["path"] == "/tmp/second"
+    assert next(entry["title"] for entry in w1_windows(f) if entry["label"] == editor["label"]) == "second-editor"
+    assert w1_launch(f, request_id="without-title")["status"] == "opened"
+    assert next(entry["title"] for entry in w1_windows(f) if entry["label"] == editor["label"]) == "second-editor"
+    assert len(w1_windows(f)) == 6
+    assert w1_launch(f, "editor", new=True, request_id="duplicate")["status"] == "opened"
+    assert len(w1_windows(f)) == 7
+    assert w1_launch(f, "editor", new=True, request_id="duplicate")["status"] == "opened"
+    assert len(w1_windows(f)) == 7, "same request must not create another explicit window"
+    assert w1_launch(f, origin="https://foreign.example.test", request_id="foreign-origin")["status"] == "fallback"
+    assert len(w1_windows(f)) == 7
+    denied = f["js"]("return window.__TAURI_INTERNALS__.invoke('open_app_window',{request:{appId:'files',newWindow:false}}).then(()=>null,error=>String(error));", editor["label"])
+    assert denied and "not found" not in denied.lower(), denied
+    assert f["js"]("return window.__TAURI_INTERNALS__.invoke('open_app_window',{request:{appId:'files',newWindow:false}}).then(()=>true,error=>String(error));", main) is True
+    assert f["js"]("return [window.w1Id,location.href];", main) == marker
+    assert f["js"]("return window.w1Draft;", main) == "unsent main"
+    f["send"](action="app_control", operation="cleanup")
+    assert all(result == {"Ok": None} for _, result in f["wait"]("app_cleanup")["results"])
+    assert w1_windows(f) == []
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+def test_w1_remote_session_is_projected_to_disposable_app_and_direct_close_completes(account_native):
+    f = account_native
+    remote, marker = committed_remote(f)
+    assert w1_launch(f, "terminal", {"cwd": "/tmp/remote"})["status"] == "opened"
+    entry = w1_windows(f)[0]
+    w1_body(f, entry["label"])
+    assert Path(entry["directory"]).is_relative_to(f["root"])
+    state = f["js"]("return await fetch('/fixture-app-state').then(response=>response.json());", entry["label"])
+    assert state == {"remote_session": True, "account_cookie": False}
+    f["send"](action="app_control", operation="cookies", label=entry["label"], url="https://studio.avibe.bot/")
+    assert "__Host-vibe_remote_session" in f["wait"]("app_cookies")["names"]
+    f["send"](action="eval", label=entry["label"], script="location='https://other.avibe.bot/apps/terminal';")
+    refused = f["wait"]("app_navigation", lambda event: "other.avibe.bot" in event["url"])
+    assert refused["allowed"] is False
+    assert f["js"]("return location.origin;", entry["label"]) == "https://studio.avibe.bot"
+    assert f["js"]("return [window.retainedMarker,location.href,history.length,document.querySelector('#retained-draft').value];", remote) == marker
+    w1_control(f, "close", label=entry["label"])
+    deadline = time.monotonic() + 15
+    while w1_windows(f):
+        assert time.monotonic() < deadline, "child store retirement did not complete"
+    assert not Path(entry["directory"]).exists()
+    assert f["state"]()["state"]["connection"]["committed"]["kind"] == "remote"
+    assert w1_launch(f, request_id="parent-retirement")["status"] == "opened"
+    replacement = w1_windows(f)[0]
+    w1_body(f, replacement["label"])
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    assert w1_windows(f) == []
+    assert not Path(replacement["directory"]).exists()
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+@pytest.mark.parametrize("fault", ["projection", "destroy"])
+def test_w1_store_failure_disposes_or_keeps_the_exact_cleanup_receipt(account_native, fault):
+    f = account_native
+    committed_remote(f)
+    if fault == "projection":
+        w1_control(f, "fail", phase=fault)
+        assert w1_launch(f)["status"] == "fallback"
+        assert w1_windows(f) == []
+    else:
+        assert w1_launch(f)["status"] == "opened"
+        entry = w1_windows(f)[0]
+        w1_body(f, entry["label"])
+        w1_control(f, "fail", phase=fault)
+        f["send"](action="app_control", operation="cleanup")
+        result = f["wait"]("app_cleanup")
+        assert result["results"][0][1] == {"Err": "fixture native window destruction"}
+        retained = w1_windows(f)[0]
+        assert retained["retired"] is True and retained["directory"] == entry["directory"]
+        assert Path(retained["directory"]).exists(), "failed destruction lost its owning TempDir"
+        f["send"](action="escape")
+        assert f["wait"]("escaped")["ok"] is False, "parent retirement must await its child store completion"
+        assert w1_windows(f)[0]["directory"] == entry["directory"]
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+@pytest.mark.parametrize("phase", ["launch", "projected"])
+def test_w1_held_launch_cannot_cross_main_document_retirement(account_native, phase):
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    w1_control(f, "hold", phase=phase)
+    request = {"appId": "editor", "source": "dock", "mode": "activate", "newWindow": False,
+               "origin": f["local_origin"], "requestId": "retired-request"}
+    f["send"](action="eval", script="location='avibe-app://launch?request='+encodeURIComponent(" + json.dumps(json.dumps(request)) + ");")
+    f["wait"]("app_held", lambda event: event["phase"] == phase)
+    if phase == "projected":
+        assert w1_windows(f)[0]["visible"] is False
+    f["send"](action="eval", script="location.reload();")
+    f["wait"]("loaded", lambda event: event["url"].startswith(f["local_origin"]))
+    w1_control(f, "release")
+    assert f["wait"]("app_launch_finished")["status"] == "stale"
+    assert w1_windows(f) == []
+    assert w1_launch(f, request_id="fresh-request")["status"] == "opened"
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+def test_w1_retired_child_cannot_replay_into_a_same_label_successor(account_native):
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    assert w1_launch(f)["status"] == "opened"
+    label = w1_windows(f)[0]["label"]
+    old_document = w1_body(f, label)["document"]
+    w1_control(f, "hold", phase="launch")
+    request = {"appId": "terminal", "source": "dock", "mode": "activate", "newWindow": False,
+               "origin": f["local_origin"], "requestId": "old-child"}
+    f["send"](action="eval", label=label,
+              script="location='avibe-app://launch?request='+encodeURIComponent(" + json.dumps(json.dumps(request)) + ");")
+    f["wait"]("app_held", lambda event: event["phase"] == "launch")
+    w1_control(f, "close", label=label)
+    deadline = time.monotonic() + 15
+    while w1_windows(f):
+        assert time.monotonic() < deadline
+    w1_control(f, "release")
+    assert f["wait"]("app_launch_finished")["status"] == "stale"
+    assert w1_launch(f, request_id="new-child")["status"] == "opened"
+    assert w1_windows(f)[0]["label"] == label
+    assert w1_body(f, label)["document"] != old_document
+    assert len(w1_windows(f)) == 1
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True, "lifecycle": True}], indirect=True)
+def test_w1_account_candidate_and_retained_runtime_cannot_borrow_app_admission(account_native):
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    original = active(f)["label"]
+    f["present"]("account")
+    account = active(f)["label"]
+    before = presentation_snapshot(f)
+    assert before["returning"] == {key: before["runtime"][key] for key in ["label", "document"]}, before
+    f["policy"]["hold_version_document"] = True
+    f["send"](action="runtime_rebind", origin=f["alternate_origin"])
+    f["wait"]("runtime_rebind")
+    assert f["version_document_entered"].wait(10)
+    candidate = next(view["label"] for view in f["state"]()["views"] if view["label"] not in [original, account])
+    for label in [account, candidate, original]:
+        request = {"appId": "editor", "source": "dock", "mode": "activate", "newWindow": False,
+                   "origin": f["alternate_origin"], "requestId": "denied-" + label}
+        f["send"](action="eval", label=label,
+                  script="location='avibe-app://launch?request='+encodeURIComponent(" + json.dumps(json.dumps(request)) + ");")
+        assert f["wait"]("app_source_rejected")["label"] == label
+        retained = presentation_snapshot(f)
+        assert retained["returning"] == before["returning"], retained
+        assert retained["runtime"] == before["runtime"], retained
+    assert w1_windows(f) == []
+    f["policy"]["hold_version_document"] = False
+    f["version_document_release"].set()
+    assert f["wait"]("replacement_finished")["ok"]
+    published = presentation_snapshot(f)
+    assert published["returning"] == {key: published["runtime"][key] for key in ["label", "document"]}, published
+    reply = account_return_action(f, "back")
+    assert reply["error"] == "untrusted_desktop_caller"
+    eventually(f, lambda _: active(f)["label"] == candidate)
+    assert w1_launch(f, request_id="published")["status"] == "opened"
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+def test_w1_show_link_success_and_confirmed_failure_preserve_warm_workbench(account_native):
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    marker = f["js"]("window.w1Id=crypto.randomUUID();window.w1Draft='unsent';history.pushState({},'', '/?chat=draft');return [window.w1Id,location.href];")
+    f["send"](action="native_link", url="avibe://show/first")
+    assert f["wait"]("app_launch_finished")["status"] == "opened"
+    assert f["js"]("return window.__AVIBE_APP_LAUNCH__??null;") is None
+    assert f["js"]("return [window.w1Id,location.href];") == marker
+    w1_control(f, "fail", phase="build")
+    f["send"](action="native_link", url="avibe://show/failed")
+    assert f["wait"]("app_launch_finished")["status"] == "fallback"
+    deadline = time.monotonic() + 10
+    while not f["js"]("return window.__AVIBE_APP_LAUNCH__?.sessionId==='failed';"):
+        assert time.monotonic() < deadline
+    deposited = f["js"]("return window.__AVIBE_APP_LAUNCH__;")
+    assert deposited["source"] == "deep-link" and deposited["windowId"] == active(f)["label"]
+    assert f["js"]("return [window.w1Id,location.href];") == marker
+    assert f["js"]("return window.w1Draft;") == "unsent"
+    assert len(w1_windows(f)) == 1
+    w1_control(f, "hold", phase="launch")
+    f["send"](action="native_link", url="avibe://show/ordered")
+    f["wait"]("app_held", lambda event: event["phase"] == "launch")
+    f["send"](action="native_link", url="avibe://show/ordered")
+    f["wait"]("link_received")
+    w1_control(f, "release")
+    assert f["wait"]("app_launch_finished")["status"] == "stale"
+    assert f["wait"]("app_launch_finished")["status"] == "opened"
+    assert len([entry for entry in w1_windows(f) if entry["snapshot"].get("sessionId") == "ordered"]) == 1
+    assert f["js"]("return window.__AVIBE_APP_LAUNCH__;") == deposited
+    assert f["js"]("return [window.w1Id,location.href];") == marker
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "actual_ui": True}], indirect=True)
+def test_w1_complete_react_bodies_consume_native_launches_and_preserve_live_state(account_native):
+    """Exact built UI + real native owner; Runtime data is private synthetic HTTP."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    w1_dom(f, "[...document.querySelectorAll('button')].some(button=>button.textContent==='Apps')")
+    main = active(f)["label"]
+    main_document = f["js"]("window.w1Id=crypto.randomUUID();return window.w1Id;")
+    targets = [
+        ("files", {"path": "/fixture/files"}, "document.body.innerText.includes('fixture.txt')"),
+        ("terminal", {"cwd": "/fixture/one"}, "document.querySelector('.xterm')!==null"),
+        ("editor", {"newFileDir": "/fixture"}, "document.querySelector('.monaco-editor textarea')!==null"),
+        ("preview", {"path": "/fixture/one.svg", "name": "one.svg", "mime": "image/svg+xml"},
+         "document.querySelector('img[alt=\"one.svg\"]')?.complete===true && document.querySelector('img[alt=\"one.svg\"]').naturalWidth>0"),
+        ("showpage", {}, "Boolean(document.querySelector('iframe')?.contentDocument?.querySelector('#show-draft'))"),
+        ("library", {"initialTab": "showpages"},
+         "[...document.querySelectorAll('button')].some(button=>button.textContent.startsWith('ShowPage')&&button.getAttribute('aria-pressed')==='true')"),
+    ]
+    windows = {}
+    for app, params, ready in targets:
+        assert w1_launch(f, app, params, request_id="react-" + app)["status"] == "opened"
+        window = next(entry for entry in w1_windows(f) if entry["snapshot"]["appId"] == app)
+        label = windows[app] = window["label"]
+        w1_dom(f, ready, label)
+        assert f["js"]("return window.__AVIBE_APP_LAUNCH__.params;", label) == params
+        assert window["visible"] is False and window["focused"] is False
+        f["js"]("window.w1Id=crypto.randomUUID();return true;", label)
+    editor = windows["editor"]
+    # Use the shipped accessory action's real executeEdits/onChange path.
+    # Hidden WebViews do not establish keyboard or painted-line acceptance.
+    # Replace only Copy all's final clipboard effect; its real handler reads
+    # the live Monaco model, without touching the operator's clipboard.
+    f["js"]("Object.defineProperty(navigator,'clipboard',{configurable:true,value:{"
+            "writeText:async text=>{window.fixtureCopiedBuffer=text;}}});"
+            "const insert=[...document.querySelectorAll('button')].find(button=>button.textContent==='(');"
+            "insert.click();insert.click();return true;", editor)
+    read_buffer = ("window.fixtureCopiedBuffer=null;"
+                   "[...document.querySelectorAll('button')].filter(button=>button.textContent.trim()==='Copy all')[0].click();"
+                   "return window.fixtureCopiedBuffer;")
+    assert f["js"](read_buffer, editor) == "(("
+    w1_dom(f, "document.querySelector('button .bg-mint')!==null", editor)
+    identity = f["js"]("return window.w1Id;", editor)
+    assert w1_launch(f, "editor", {"path": "/fixture/two.txt", "filename": "two.txt", "mtime": 1},
+                     request_id="react-editor-reuse")["status"] == "opened"
+    w1_dom(f, "document.querySelectorAll('.monaco-editor').length===2", editor)
+    assert f["js"]("return window.w1Id;", editor) == identity
+    assert f["js"](read_buffer, editor) == "(("
+    assert f["js"]("return Boolean(document.querySelector('button .bg-mint'));", editor)
+    terminal = windows["terminal"]
+    assert w1_launch(f, "terminal", {"cwd": "/fixture/two"}, request_id="react-terminal-reuse")["status"] == "opened"
+    w1_dom(f, "document.querySelectorAll('.xterm').length===2", terminal)
+    assert w1_launch(f, "terminal", {"cwd": "/fixture/two"}, request_id="react-terminal-reuse")["status"] == "opened"
+    assert f["js"]("return document.querySelectorAll('.xterm').length;", terminal) == 2
+    show = windows["showpage"]
+    f["js"]("document.querySelector('iframe').contentDocument.querySelector('#show-draft').value='retained Show draft';return true;", show)
+    assert w1_launch(f, "showpage", {}, request_id="react-show-reuse")["status"] == "opened"
+    assert f["js"]("return document.querySelector('iframe').contentDocument.querySelector('#show-draft').value;", show) == "retained Show draft"
+    assert w1_launch(f, "preview", {"path": "/fixture/two.svg", "name": "two.svg"},
+                     request_id="react-preview-reuse")["status"] == "opened"
+    w1_dom(f, "document.querySelector('img[alt=\"two.svg\"]')?.complete===true && document.querySelector('img[alt=\"two.svg\"]').naturalWidth>0", windows["preview"])
+    assert w1_launch(f, "library", {"initialTab": "apps"}, request_id="react-library-reuse")["status"] == "opened"
+    library = windows["library"]
+    w1_dom(f, "[...document.querySelectorAll('button')].some(button=>button.textContent.startsWith('Apps')&&button.getAttribute('aria-pressed')==='true')", library)
+    # The real Library consumer is also a real child producer. This click must
+    # reach native mediation, reuse Files, and leave both documents alive.
+    result = f["js"]("const row=[...document.querySelectorAll('[role=\"button\"]')]"
+                     ".find(row=>row.textContent.trim().startsWith('Files'));"
+                     "if(!row)throw new Error('Files launch row missing');"
+                     "return await new Promise(resolve=>{"
+                     "window.addEventListener('avibe:app-launch-result',event=>resolve(event.detail),{once:true});"
+                     "row.click();});", library)
+    assert result["status"] == "opened"
+    current = w1_windows(f)
+    assert len(current) == 6
+    assert next(entry for entry in current if entry["label"] == windows["files"])["snapshot"]["source"] == "library"
+    assert f["js"]("return window.w1Id;", main) == main_document
+    (f["root"] / "react-dom.json").write_text(json.dumps({
+        app: f["js"]("return {url:location.href,snapshot:window.__AVIBE_APP_LAUNCH__,text:document.body.innerText};", label)
+        for app, label in windows.items()
+    }, indent=2))
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+def test_w1_missing_document_token_consumes_show_failure_without_claiming_delivery(account_native):
+    """A genuine late eval response cannot turn an unconfirmed deposit into fallback."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    w1_control(f, "hold", phase="token")
+    w1_control(f, "fail", phase="build")
+    f["send"](action="native_link", url="avibe://show/token-timeout")
+    f["wait"]("app_held", lambda event: event["phase"] == "token")
+    assert f["wait"]("show_launch_finished")["status"] == "stale"
+    assert w1_windows(f) == []
+    assert f["js"]("return window.__AVIBE_APP_LAUNCH__??null;") is None
+    w1_control(f, "release")
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending"] is False
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+def test_w1_main_request_waits_for_app_serializer_without_losing_its_source(account_native):
+    """A live main document is not stale merely because its first App is building."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    main = active(f)["label"]
+    w1_control(f, "hold", phase="projected")
+    for app, request_id in [("editor", "held-first"), ("files", "queued-second")]:
+        request = {"appId": app, "source": "dock", "mode": "activate", "newWindow": False,
+                   "origin": f["local_origin"], "requestId": request_id}
+        f["send"](action="eval", label=main,
+                  script="location='avibe-app://launch?request='+encodeURIComponent(" +
+                  json.dumps(json.dumps(request)) + ");")
+        if request_id == "held-first":
+            f["wait"]("app_held", lambda event: event["phase"] == "projected")
+    # Observe the native source decision while the first build still owns A5,
+    # rather than releasing immediately after asynchronous eval submission.
+    deadline = time.monotonic() + 5
+    try:
+        while True:
+            captured = next((event for event in f["history"]
+                             if event.get("requestId") == "queued-second"
+                             and event["event"] in ["app_source_rejected", "app_source_captured"]), None)
+            if captured is not None:
+                break
+            assert time.monotonic() < deadline, "second request never reached native source capture"
+            time.sleep(.01)
+    finally:
+        w1_control(f, "release")
+    assert captured["event"] == "app_source_captured", captured
+    for request_id in ["held-first", "queued-second"]:
+        assert f["wait"]("app_launch_finished", lambda event: event["requestId"] == request_id,
+                         timeout=5)["status"] == "opened"
+    assert {window["snapshot"]["appId"] for window in w1_windows(f)} == {"editor", "files"}
+
+
+@pytest.mark.parametrize("account_native", [{"shell": True, "apps": True}], indirect=True)
+def test_w1_pending_show_resumes_after_app_serializer_without_another_user_action(account_native):
+    """Existing pending-link owner must be woken when an App releases A5 serialization."""
+    f = account_native
+    f["send"](action="escape")
+    assert f["wait"]("escaped")["ok"]
+    marker = f["js"]("window.w1Id=crypto.randomUUID();return [window.w1Id,location.href];")
+    w1_control(f, "hold", phase="projected")
+    request = {"appId": "editor", "source": "dock", "mode": "activate", "newWindow": False,
+               "origin": f["local_origin"], "requestId": "held-before-show"}
+    f["send"](action="eval", script="location='avibe-app://launch?request='+encodeURIComponent(" +
+              json.dumps(json.dumps(request)) + ");")
+    f["wait"]("app_held", lambda event: event["phase"] == "projected")
+    f["send"](action="native_link", url="avibe://show/while-app-builds")
+    f["wait"]("link_received")
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending"] is True
+    w1_control(f, "release")
+    assert f["wait"]("app_launch_finished", lambda event: event["requestId"] == "held-before-show")["status"] == "opened"
+    assert f["wait"]("show_launch_finished", timeout=5)["status"] == "opened"
+    assert f["js"]("return [window.w1Id,location.href];") == marker
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending"] is False
+
+    # Show fallback has a separate A5 guard. Hold the genuine deposit callback
+    # after JS ran, then receive a distinct same-URL delivery under that guard.
+    start = len(f["history"])
+    w1_control(f, "hold", phase="deposit")
+    w1_control(f, "fail", phase="build")
+    f["send"](action="native_link", url="avibe://show/during-deposit")
+    f["wait"]("app_held", lambda event: event["phase"] == "deposit")
+    deposited = f["js"]("return window.__AVIBE_APP_LAUNCH__;")
+    assert deposited["sessionId"] == "during-deposit"
+    f["send"](action="native_link", url="avibe://show/during-deposit")
+    f["wait"]("link_received")
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending"] is True
+    w1_control(f, "release")
+    deadline = time.monotonic() + 5
+    while True:
+        outcomes = [event["status"] for event in f["history"][start:]
+                    if event["event"] == "show_launch_finished"]
+        if len(outcomes) >= 2:
+            break
+        assert time.monotonic() < deadline, outcomes
+        time.sleep(.01)
+    assert outcomes == ["stale", "opened"]
+    assert f["js"]("return window.__AVIBE_APP_LAUNCH__;") == deposited
+    assert f["js"]("return [window.w1Id,location.href];") == marker
+    assert len([entry for entry in w1_windows(f)
+                if entry["snapshot"].get("sessionId") == "during-deposit"]) == 1
+    f["send"](action="shell_status")
+    assert f["wait"]("shell_status")["pending"] is False

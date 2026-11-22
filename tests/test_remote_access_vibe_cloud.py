@@ -320,7 +320,10 @@ def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monk
     assert remote_response.status_code == 200
     remote_body = remote_response.get_json()
     owner_fields = {"pending_pairing"} if role == "owner" else set()
-    assert set(remote_body) == set(ui_server._REMOTE_ACCESS_STATUS_PUBLIC_FIELDS) | owner_fields
+    expected = set(ui_server._REMOTE_ACCESS_STATUS_PUBLIC_FIELDS) | owner_fields
+    if role != "owner":
+        expected.remove("direct")
+    assert set(remote_body) == expected
     if role == "owner":
         assert remote_body["pending_pairing"] is None
     for sensitive in ("pid", "binary_found", "binary_path", "binary_version"):

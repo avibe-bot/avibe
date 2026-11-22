@@ -1823,7 +1823,8 @@ other clients of the same endpoints.
   a status other than 200, a body that is not recognised, names a member twice or contradicts
   itself, a refusal that carries anything that could be evidence of a redemption (a credit, a
   cleared limit, or a member this client does not know), an acknowledgement that names
-  another credit than the one sent or carries a status other than `redeemed`, a count that
+  another account, organization, grant, credit or request than the one it answers or
+  carries a status other than `redeemed`, a count that
   could not be read, that is another account's, or that disagrees with the statement.
   `cleared` lists the known limits the vendor reported as cleared (`five_hour`, `seven_day`,
   `seven_day_overage_included`) and is empty unless `used`.

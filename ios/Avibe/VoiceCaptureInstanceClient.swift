@@ -49,7 +49,23 @@ struct VoiceCaptureTarget: Equatable {
     static let selectionKey = "avibe.mobile.selection"
     static let storeIdentifierKey = "avibe.mobile.websiteDataStoreIdentifier"
 
+    /// Nil too once avibe.bot's last confirmation of the stored session is
+    /// past its lifetime: the stored address may no longer lead to this
+    /// account's instance, so nothing is loaded from it or sent to it until
+    /// the App has asked avibe.bot again (the take then asks for the App).
     static func current(defaults: UserDefaults = .standard) -> VoiceCaptureTarget? {
+        guard MobileSessionConfirmation.isCurrent(in: defaults) else { return nil }
+        return stored(defaults: defaults)
+    }
+
+    /// Whether a target is stored that `current` withholds only because the
+    /// session's confirmation is past its lifetime: opening Avibe confirms
+    /// it again, with no sign-in.
+    static func waitsForConfirmation(defaults: UserDefaults = .standard) -> Bool {
+        !MobileSessionConfirmation.isCurrent(in: defaults) && stored(defaults: defaults) != nil
+    }
+
+    private static func stored(defaults: UserDefaults) -> VoiceCaptureTarget? {
         guard
             let data = defaults.data(forKey: selectionKey),
             let selection = try? JSONDecoder().decode(StoredSelection.self, from: data),

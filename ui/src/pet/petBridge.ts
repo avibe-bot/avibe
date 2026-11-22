@@ -10,6 +10,9 @@ export type PetIntent = 'listen' | 'show' | 'release';
 export type PetLayout = {
   panel_side: 'left' | 'right';
   panel_edge: 'top' | 'bottom';
+  /** How far (CSS px) the column moves right (negative: left) of its place
+   * centred on Vibey, so a pet near a display's side opens it whole there. */
+  column_offset: number;
 };
 
 /** The shell's binding, and the revision it was at. */
@@ -42,7 +45,7 @@ export type PetHitRect = { x: number; y: number; width: number; height: number; 
 // Outside the shell, `{ binding, revision }` as JSON: the dev stand-in for
 // `pet.json` and the shell's revision counter.
 const DEV_BINDING_KEY = 'avibe.pet.devBinding';
-const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom' };
+const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom', column_offset: 0 };
 
 type TauriInternals = { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
 
@@ -59,6 +62,8 @@ const parseLayout = (value: unknown): PetLayout => {
   return {
     panel_side: layout?.panel_side === 'right' ? 'right' : 'left',
     panel_edge: layout?.panel_edge === 'top' ? 'top' : 'bottom',
+    // Older shells send none: the column stays centred on Vibey.
+    column_offset: typeof layout?.column_offset === 'number' && Number.isFinite(layout.column_offset) ? Math.round(layout.column_offset) : 0,
   };
 };
 
@@ -177,14 +182,26 @@ export const petBridge = {
    * the pet (resolves once the drop is placed; its layout arrives as a
    * snapshot), else with the window's own `start_dragging`.
    */
-  drag: async (): Promise<void> => {
+  /** Where the pointer is in this window and whether the primary button is
+   * down, as the shell sees it; `null` from a shell that cannot say. */
+  pointer: async (): Promise<{ x: number; y: number; down: boolean | null } | null> => {
+    const invoke = shellInvoke();
+    if (!invoke) return null;
+    const value = await invoke('pet_pointer') as { x?: unknown; y?: unknown; down?: unknown } | null;
+    if (!value || typeof value.x !== 'number' || typeof value.y !== 'number') return null;
+    return { x: value.x, y: value.y, down: typeof value.down === 'boolean' ? value.down : null };
+  },
+
+  /** `press`: where the press was, in the window's CSS px; the shell keeps
+   * that point of Vibey under the pointer for the whole drag. */
+  drag: async (press?: { x: number; y: number }): Promise<void> => {
     const invoke = shellInvoke();
     if (!invoke) return;
     if (!petBridge.shellDrags()) {
       void invoke('plugin:window|start_dragging');
       return;
     }
-    await invoke('pet_drag');
+    await invoke('pet_drag', press ? { x: press.x, y: press.y } : undefined);
   },
 
   /**

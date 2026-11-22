@@ -1489,4 +1489,20 @@ scenarios:
     backend: mobile
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
     reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
+  - id: AUTH-SETUP-914
+    name: The initiating owner browser completes a personal installation claim without disclosing the pairing key
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_claim_redirect_through_pairing_journal
+    reason: Owner browser on loopback or an admitted private-network origin. Actual owner routes, browser cookie, return gate, guarded redemption, credentials publication and connector start. Only the control plane and connector are peers.
+  - id: AUTH-SETUP-915
+    name: Signing out a device revokes its Runtime cookie before the issuer accepts its account sign-out
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_device_account_signout_from_verified_exchange
+    reason: Two signed exchanges, real callbacks, local sign-out, pending fence and receipt; fake issuer wire response, not evidence of provider deletion.
 next_priority: []

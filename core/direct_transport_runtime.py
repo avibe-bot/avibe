@@ -111,6 +111,7 @@ class DirectTransportRuntimeManager(ManagedRuntimeManager):
         if require_public_trial and (manifest.payload.get("provenance") or {}).get("source_sha") not in (
             "578659184dfa38bc87261a6fa832f9b4c65a1c90",  # v0.1.0-2
             "4e8d24e55583738e5bbf443d4e40e721e43b9a3f",  # v0.1.0-3
+            "9d382198906d3e7ae92d02453efbdc5e0db33fea",  # v0.1.0-4
         ):
             # Only reviewed sources support the public-trial protocol.
             return None

@@ -11,6 +11,45 @@ from storage.models import live_activity_trackings
 
 
 @pytest.mark.no_sqlite_template
+def test_account_signout_migration_keeps_older_session_and_adds_no_account_work(tmp_path):
+    path = tmp_path / 'registry.sqlite'
+    prev, head = '20261121_0095', '20261121_0096'
+    migrations.run_migrations(path, revision=prev)
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO remote_device_sessions(session_id,binding,subject,email,login_role,device_id,identity_source,kind,"
+                   "signed_in_at,last_active_at,cookie_exp,expires_at) VALUES ('old','binding','person','fixture','owner','device','session','browser',1,1,10,50)")
+    migrations.run_migrations(path, revision=head)
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT version_num FROM alembic_version').fetchone() == (head,)
+        assert db.execute('SELECT session_id FROM remote_device_sessions').fetchall() == [('old',)]
+        assert db.execute('SELECT count(*) FROM remote_account_refs').fetchone() == (0,)
+        assert db.execute('SELECT count(*) FROM remote_account_revocations').fetchone() == (0,)
+    command.downgrade(migrations.alembic_config(path), prev)
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT session_id FROM remote_device_sessions').fetchall() == [('old',)]
+
+
+@pytest.mark.no_sqlite_template
+def test_device_functions_migration_round_trip_preserves_prior_operations(tmp_path):
+    path = tmp_path / "state.sqlite"
+    previous, current = "20261120_0094", "20261121_0095"
+    migrations.run_migrations(path, revision=previous)
+    original = ("op-old", 1, "session", "instance", "alarm", "fixture", "2030-01-01", "UTC", None, "2026-01-01", "2026-01-01")
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO system_schedule_operations VALUES (?,?,?,?,?,?,?,?,?,?,?)", original)
+    migrations.run_migrations(path, revision=current)
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT * FROM system_schedule_operations').fetchall() == [original]
+        assert db.execute('SELECT count(*) FROM device_schedule_links').fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM device_activity_events").fetchone() == (0,)
+    command.downgrade(migrations.alembic_config(path), previous)
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT * FROM system_schedule_operations").fetchall() == [original]
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='device_health_links'").fetchone() is None
+    migrations.run_migrations(path, revision=current)
+
+
+@pytest.mark.no_sqlite_template
 def test_registry_upgrade_and_downgrade_preserve_live_activity_and_subscription(tmp_path):
     path = tmp_path / "state.sqlite"
     previous, registry = "20261120_0093", "20261120_0094"

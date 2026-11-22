@@ -45,11 +45,49 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
     response = client.get("/api/asr/status")
 
     assert response.status_code == 200
-    assert response.get_json() == {"available": True, "max_file_bytes": 160_044, "consent": "granted"}
+    assert response.get_json() == {
+        "available": True,
+        "max_file_bytes": 160_044,
+        "consent": "granted",
+        "app_hold": True,
+        "app_hold_main_at_touch": True,
+    }
 
     config.audio_asr.max_file_bytes = 160_043
     response = client.get("/api/asr/status")
-    assert response.get_json() == {"available": False, "max_file_bytes": 160_043, "consent": "granted"}
+    assert response.get_json() == {
+        "available": False,
+        "max_file_bytes": 160_043,
+        "consent": "granted",
+        "app_hold": True,
+        "app_hold_main_at_touch": True,
+    }
+
+    # The off switch for the iOS App's own hold recognition: the next read says so,
+    # with no restart, and voice itself stays available.
+    config.audio_asr.max_file_bytes = 160_044
+    config.audio_asr.app_hold = False
+    response = client.get("/api/asr/status")
+    assert response.get_json() == {
+        "available": True,
+        "max_file_bytes": 160_044,
+        "consent": "granted",
+        "app_hold": False,
+        "app_hold_main_at_touch": True,
+    }
+
+    # Where the main Bot's button opens the microphone in the iOS App: the next read
+    # says so too, on its own.
+    config.audio_asr.app_hold = True
+    config.audio_asr.app_hold_main_at_touch = False
+    response = client.get("/api/asr/status")
+    assert response.get_json() == {
+        "available": True,
+        "max_file_bytes": 160_044,
+        "consent": "granted",
+        "app_hold": True,
+        "app_hold_main_at_touch": False,
+    }
 
 
 def test_asr_transcribe_preserves_compatibility_timeout(monkeypatch):

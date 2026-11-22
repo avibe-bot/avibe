@@ -25,14 +25,10 @@
     }
   },
   "liveActivity": {
-    "offer": "在锁屏上显示进度",
-    "tracking": "已在锁屏上显示",
-    "stop": "停止显示",
+    "title": "在锁屏上显示进度",
+    "description": "离开 Avibe 时，如果正在看的会话还在处理，就在锁屏和灵动岛上显示进度。",
     "systemOff": "实时活动在系统设置里关着",
-    "settings": "去设置",
-    "no_active_turn": "这一轮已结束。",
-    "push_unavailable": "开启通知后才能在锁屏上显示。",
-    "failed": "未能更新锁屏显示，请重试。"
+    "settings": "去设置"
   },
   "desktopBootstrap": {
     "askVibey": {
@@ -714,6 +710,7 @@
       "platformConnections": "平台接入",
       "remoteAccess": "远程访问",
       "shortcuts": "快捷键",
+      "microphone": "麦克风",
       "computerUse": "电脑操作",
       "service": "服务",
       "dependencies": "依赖",
@@ -845,6 +842,50 @@
         "tab": "Tab"
       },
       "reset": "恢复默认"
+    },
+    "microphone": {
+      "title": "麦克风",
+      "subtitle": "选择语音输入使用的麦克风，并检查收声。",
+      "iosSubtitle": "检查麦克风是否正常收声",
+      "inputTitle": "输入设备",
+      "systemDefault": "系统默认",
+      "systemInput": "系统输入",
+      "followSystem": "跟随系统的输入选择",
+      "iosInputDescription": "由 iOS 选择当前输入",
+      "inputDevice": "可用输入设备",
+      "deviceFallback": "未命名麦克风",
+      "chooseInput": "选择输入设备",
+      "deviceList": "麦克风设备",
+      "chooseThenTest": "选择设备后，点击“开始测试”检查收声。",
+      "systemDefaultDescription": "系统更改输入时，下一次录音会跟随更改。",
+      "selectedDescription": "优先使用此设备；不可用时会提示你。",
+      "unavailable": "不可用",
+      "missingTitle": "所选麦克风当前不可用",
+      "missingDescription": "已保留你的选择。下一次测试或录音将使用系统输入；设备重新连接后可恢复使用。",
+      "recordingFallbackDescription": "这次录音改用系统输入。",
+      "notTested": "尚未测试",
+      "microphoneOff": "麦克风未开启",
+      "testingHeard": "正在测试 · 已收到声音",
+      "testingQuiet": "正在测试 · 暂未检测到声音",
+      "testingDescription": "说句话，看看音量条是否随声音变化。",
+      "quietDescription": "对着麦克风说句话。若音量条没有变化，请检查设备是否静音或连接正常。",
+      "startTest": "开始测试",
+      "stopTest": "停止测试",
+      "testStopped": "测试已停止",
+      "permissionPromptTitle": "先允许麦克风访问",
+      "permissionPromptDescription": "允许后即可开始收声测试。",
+      "permissionRequestingTitle": "等待你的授权",
+      "permissionRequestingDescription": "请在弹出的权限提示中选择允许。",
+      "permissionDeniedTitle": "麦克风权限未开启",
+      "permissionDeniedIos": "在 iPhone 的“设置”中允许 Avibe 使用麦克风，再返回重试。",
+      "permissionWaiting": "等待权限结果",
+      "allowPermission": "允许麦克风访问",
+      "recheckPermission": "重新检查权限",
+      "localOnly": "测试不转写、不保存、不上传。离开此页或切到后台即停止。",
+      "localPreference": "此偏好仅用于本机当前实例，不随账号同步。",
+      "iosManaged": "输入由这台 iPhone 的系统管理。",
+      "startFailed": "无法开始麦克风测试，请检查输入设备后重试。",
+      "saveFailed": "无法保存麦克风设置，请重试。"
     },
     "computerUse": {
       "title": "电脑操作",
@@ -1924,6 +1965,55 @@
             "max_20x": "Max 20x",
             "team": "Team",
             "enterprise": "Enterprise"
+          }
+        },
+        "refreshThisAccount": "刷新这个账号",
+        "resetCards": {
+          "title": "重置卡",
+          "kind": {
+            "all": "全部额度重置卡",
+            "fable": "Fable 重置卡",
+            "session": "5 小时重置卡",
+            "weekly": "每周重置卡",
+            "account": "重置卡"
+          },
+          "effect": {
+            "all": "5 小时额度和每周额度回满",
+            "fable": "退回本周用在 Fable 上的额度，其他模型用掉的不退；5 小时额度回满",
+            "session": "5 小时额度回满",
+            "weekly": "每周额度回满"
+          },
+          "count": "×{{number}}",
+          "expires": "最早 {{date}} 到期",
+          "use": "使用",
+          "useNamed": "使用 {{name}}",
+          "confirm": "确认使用",
+          "cancel": "取消",
+          "confirmNote": "用掉 1 张，不能撤销。",
+          "using": "使用中…",
+          "used": "用了 1 张。",
+          "usedDone": "用了 1 张。{{done}}。",
+          "done": {
+            "all": "5 小时额度和每周额度已回满",
+            "fable": "本周用在 Fable 上的额度已退回，5 小时额度已回满",
+            "session": "5 小时额度已回满",
+            "weekly": "每周额度已回满"
+          },
+          "notUsed": {
+            "not_limited": "没有用掉：这个账号现在没到限额。",
+            "cooldown": "没有用掉：刚用过一张，要等一会儿才能再用。",
+            "refused": "没有用掉：供应商拒绝了这次请求。",
+            "unavailable": "没有用掉：供应商现在不让用这张卡。",
+            "held": "没有用掉：这个账号现在不能用这种卡。",
+            "other": "没有用掉。"
+          },
+          "recounted": "张数变了，已刷新。",
+          "unconfirmed": "没收到供应商的结果，这张卡可能已经用掉。先别再用，一分钟后再刷新这个账号看张数。",
+          "blocked": {
+            "needs_limit": "到限额后才能用",
+            "cooldown": "{{duration}}后可用",
+            "cooldownUnknown": "过一会儿才能用",
+            "unavailable": "供应商现在不让用"
           }
         }
       },
@@ -3486,6 +3576,7 @@
       "openInWindow": "在编辑器窗口中打开",
       "saveBeforePopOut": "请先保存，再在新窗口中打开",
       "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
+      "discardAndClose": "放弃并关闭",
       "confirmDiscardSwitch": "放弃未保存的更改？",
       "conflict": {
         "message": "打开后该文件在磁盘上已被改动，可能是 agent 修改了它。",

@@ -12,6 +12,7 @@ import {
   type AwayReason,
   type PageActivitySnapshot,
   useDocumentVisible,
+  usePagePresented,
 } from './pageActivity';
 
 describe('isPageActive', () => {
@@ -454,5 +455,53 @@ describe('useDocumentVisible', () => {
     expect(result.current).toBe(false);
     act(() => setVisibility('visible'));
     expect(result.current).toBe(true);
+  });
+});
+
+describe('usePagePresented', () => {
+  afterEach(() => {
+    delete (document as { visibilityState?: unknown }).visibilityState;
+    delete (document as { hasFocus?: unknown }).hasFocus;
+    Reflect.deleteProperty(window, 'avibeNative');
+  });
+
+  const setVisibility = (state: DocumentVisibilityState) => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  const touch = () => document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+
+  it('counts a touch since the App page was shown, until a blur or a hide takes it away', () => {
+    // The App's web view has no focus until a tap makes it first responder. A blur
+    // (App Lock taking focus) or a hide (the App in the background) ends the touch,
+    // so a chat behind the lock is not read.
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: { contract: 1, platform: 'ios', shellVersion: '1.0 (1)', capabilities: {}, call: vi.fn(), on: vi.fn(() => () => undefined) },
+    });
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+    setVisibility('visible');
+    const { result } = renderHook(() => usePagePresented());
+    expect(result.current).toBe(false);
+    act(touch);
+    expect(result.current).toBe(true);
+    act(() => { window.dispatchEvent(new Event('blur')); });
+    expect(result.current).toBe(false);
+    act(touch);
+    expect(result.current).toBe(true);
+    act(() => setVisibility('hidden'));
+    expect(result.current).toBe(false);
+    act(() => setVisibility('visible'));
+    expect(result.current).toBe(false);
+    act(touch);
+    expect(result.current).toBe(true);
+  });
+
+  it('is page activity alone in a browser, touched or not', () => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false });
+    setVisibility('visible');
+    const { result } = renderHook(() => usePagePresented());
+    act(touch);
+    expect(result.current).toBe(false);
   });
 });

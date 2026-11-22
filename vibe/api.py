@@ -1241,10 +1241,14 @@ def save_config(
         # This settings writer does not change relay consent. Ordinary host file
         # and shell access can still modify local config, including via Web Terminal.
         # Compare against the locked base, not a prior read or the request's role.
+        if generic_remote_access and config.remote_access.vibe_cloud.direct != bool(
+            base_config and base_config.remote_access.vibe_cloud.direct
+        ):
+            raise ValueError("Direct consent must be changed through connection settings")
         if config.remote_access.vibe_cloud.public_relay_trial != bool(
             base_config and base_config.remote_access.vibe_cloud.public_relay_trial
         ):
-            raise ValueError("Public relay trial consent must be changed from the instance host shell")
+            raise ValueError("Public relay trial consent must be changed from the instance host shell or connection settings")
         if base_config is not None:
             # A recovered base section must reach the file as stored, never as
             # the defaults merged in above. Refuse before any side effect below.
@@ -1280,6 +1284,20 @@ def save_config(
                     and remote_access_runtime_changed(base_config, config)
                 ),
             )
+        if generic_remote_access and base_config is not None:
+            # The address has one writer: the journaled change in
+            # ``vibe.instance_address`` (and pairing). A stale client or a script
+            # writing a former name back here would have this Avibe serve content
+            # on a name in its waiting period. Nothing sets them here from empty
+            # either; clearing them (turning the pairing off) stays possible.
+            for field in ("public_url", "redirect_uri", "client_id"):
+                before = str(getattr(base_config.remote_access.vibe_cloud, field) or "")
+                after = str(getattr(config.remote_access.vibe_cloud, field) or "")
+                if after and before != after:
+                    raise ValueError(
+                        f"Config 'remote_access.vibe_cloud.{field}' is changed by pairing "
+                        "or through '/api/instance-address', not by a settings save"
+                    )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         from vibe import remote_access
 

@@ -43,6 +43,8 @@ import { FencedSource } from './fencedSource';
 import './pet-mini.css';
 
 const HOLD_MS = 320;
+/** How far (CSS px) a press moves before it is a drag rather than a click or hold. */
+const DRAG_SLOP = 4;
 const DOUBLE_CLICK_DETECTION_MS = 450;
 const DISMISS_EXIT_MS = 500;
 const STOP_CONFIRM_MS = 3000;
@@ -162,6 +164,10 @@ export const PetPage: React.FC = () => {
   return <PetSurface />;
 };
 
+/** The shell's sideways move of the column (and the setup card) off Vibey's
+ * centre, for a pet near a display's side; pet-mini.css reads it. */
+const columnOffsetStyle = (layout: PetLayout) => ({ '--pet-column-offset': `${layout.column_offset}px` }) as CSSProperties;
+
 const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const { t } = useTranslation();
   useOnSummon(recheck);
@@ -169,7 +175,7 @@ const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const rootRef = useRef<HTMLDivElement>(null);
   useHitRegions(rootRef);
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-edge={layout.panel_edge} data-layout-pending={awaiting || undefined}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-edge={layout.panel_edge} data-layout-pending={awaiting || undefined} style={columnOffsetStyle(layout)}>
       <div className="pet-mini-setup" data-pet-hit>
         <p>{t('pet.setupPending')}</p>
         <Button size="sm" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openAvibe')}</Button>
@@ -322,6 +328,15 @@ const PetSurface: React.FC = () => {
   const composerBeforeClickRef = useRef(false);
   const doubleOpenedRef = useRef(false);
   const allowDoubleEventRef = useRef(false);
+  const beginDrag = (press: { dragged: boolean; x: number; y: number; timer: number }) => {
+    press.dragged = true;
+    window.clearTimeout(press.timer);
+    lastClickAtRef.current = 0;
+    doubleOpenedRef.current = false;
+    allowDoubleEventRef.current = false;
+    // The drop's layout arrives as the shell's snapshot (petShell).
+    void petBridge.drag({ x: press.x, y: press.y }).catch(() => undefined);
+  };
   const dismissTimers = useRef<Record<string, number>>({});
   const closeComposer = useCallback(() => {
     setComposing(false);
@@ -1020,10 +1035,18 @@ const PetSurface: React.FC = () => {
             double: isSecondClick,
             x: event.clientX,
             y: event.clientY,
-            timer: window.setTimeout(() => {
-              if (!epoch.isCurrent()) return;
+            timer: window.setTimeout(() => void (async () => {
+              // A freshly shown window can get the press but none of the moves
+              // after it, so before calling this a hold, ask the shell where the
+              // pointer is: moved means a drag, released means nothing. The
+              // answer belongs to this press only: a release and a new press
+              // while it is on its way discard it.
               const press = pressRef.current;
-              if (!press) return;
+              if (!press || press.held || press.dragged) return;
+              const pointer = petBridge.shellDrags() ? await petBridge.pointer().catch(() => null) : null;
+              if (!epoch.isCurrent() || pressRef.current !== press || press.held || press.dragged) return;
+              if (pointer?.down === false) { pressRef.current = null; return; }
+              if (pointer && Math.hypot(pointer.x - press.x, pointer.y - press.y) >= DRAG_SLOP) { beginDrag(press); return; }
               press.held = true;
               lastClickAtRef.current = 0;
               doubleOpenedRef.current = false;
@@ -1033,7 +1056,7 @@ const PetSurface: React.FC = () => {
               if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
               if (voice.available) voice.start();
               else openComposer(draft);
-            }, HOLD_MS),
+            })(), HOLD_MS),
           };
         }}
         onMouseDown={(event) => {
@@ -1056,14 +1079,8 @@ const PetSurface: React.FC = () => {
         onPointerMove={(event) => {
           const press = pressRef.current;
           if (!press || press.held || press.dragged || event.buttons !== 1) return;
-          if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < 4) return;
-          press.dragged = true;
-          window.clearTimeout(press.timer);
-          lastClickAtRef.current = 0;
-          doubleOpenedRef.current = false;
-          allowDoubleEventRef.current = false;
-          // The drop's layout arrives as the shell's snapshot (petShell).
-          void petBridge.drag().catch(() => undefined);
+          if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < DRAG_SLOP) return;
+          beginDrag(press);
         }}
         onPointerCancel={() => {
           const press = pressRef.current;
@@ -1136,7 +1153,7 @@ const PetSurface: React.FC = () => {
   );
 
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-layout-pending={awaitingLayout || undefined}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-layout-pending={awaitingLayout || undefined} style={columnOffsetStyle(layout)}>
       {composing && canChat && !uncertain && !voice.busy && (
         // Capture blank-space clicks only while typing. Keep this outside the
         // avatar's hover zone and below every control; the existing document
@@ -1145,7 +1162,7 @@ const PetSurface: React.FC = () => {
       )}
       <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div
-          className={clsx('pet-mini-cards max-w-79', voice.busy && 'is-hidden')}
+          className={clsx('pet-mini-cards', voice.busy && 'is-hidden')}
           inert={voice.busy || undefined}
           aria-label={cardsExpanded ? t('pet.panel') : undefined}
           style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}
@@ -1232,32 +1249,16 @@ const PetSurface: React.FC = () => {
           {inputShown && <div ref={inputAreaRef}>{voice.busy ? <Marquee text={voice.finishing ? '' : voice.preview} listeningLabel={t(voice.finishing ? 'pet.voice.finishing' : 'pet.voice.listening')} /> : (
           <>
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
-          <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-            {draftReferences.length > 0 && <div className="pet-mini-references">
-              {draftReferences.map((reference) => <span key={reference.session_id} className="pet-mini-reference-chip">
-                <span title={reference.title ?? reference.session_id}># {reference.title ?? reference.session_id}</span>
-                <button type="button" aria-label={t('pet.removeReference', { title: reference.title ?? reference.session_id })} onClick={() => setDraft(draft.replaceAll(referenceToMarker(reference), '').trim())}><X size={12} /></button>
-              </span>)}
-            </div>}
-            <div className="pet-mini-input-row">
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={inputDraft}
-              onChange={(event) => setDraft([...draftMarkers, event.target.value].join(' '))}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !isComposingKey(event)) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder={t('pet.inputPlaceholder')}
-              aria-label={t('pet.inputPlaceholder')}
-            />
-            {voice.available && <button type="button" className="pet-mini-input-button" onClick={() => voice.start()} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
-            <button type="submit" className="pet-mini-send" disabled={!draft.trim() || sending || uncertain} aria-label={t('pet.send')}><SendIcon /></button>
-            </div>
-          </form>
+          <PetComposerInput
+            inputRef={inputRef}
+            references={draftReferences}
+            value={inputDraft}
+            onValueChange={(value) => setDraft([...draftMarkers, value].join(' '))}
+            onRemoveReference={(reference) => setDraft(draft.replaceAll(referenceToMarker(reference), '').trim())}
+            onSubmit={() => void submit()}
+            onVoice={voice.available ? () => voice.start() : null}
+            sendDisabled={!draft.trim() || sending || uncertain}
+          />
           </>
           )}</div>}
         </SpeechSlot>
@@ -1267,6 +1268,49 @@ const PetSurface: React.FC = () => {
   );
 };
 
+
+/** The Mini's composer, drawn from props alone so a design frame can render it. */
+export const PetComposerInput: React.FC<{
+  inputRef?: React.Ref<HTMLTextAreaElement>;
+  references: SessionReference[];
+  value: string;
+  onValueChange: (value: string) => void;
+  onRemoveReference: (reference: SessionReference) => void;
+  onSubmit: () => void;
+  /** Null when voice input is unavailable. */
+  onVoice: (() => void) | null;
+  sendDisabled: boolean;
+}> = ({ inputRef, references, value, onValueChange, onRemoveReference, onSubmit, onVoice, sendDisabled }) => {
+  const { t } = useTranslation();
+  return (
+    <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      {references.length > 0 && <div className="pet-mini-references">
+        {references.map((reference) => <span key={reference.session_id} className="pet-mini-reference-chip">
+          <span title={reference.title ?? reference.session_id}># {reference.title ?? reference.session_id}</span>
+          <button type="button" aria-label={t('pet.removeReference', { title: reference.title ?? reference.session_id })} onClick={() => onRemoveReference(reference)}><X size={12} /></button>
+        </span>)}
+      </div>}
+      <div className="pet-mini-input-row">
+      <textarea
+        ref={inputRef}
+        rows={1}
+        value={value}
+        onChange={(event) => onValueChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !isComposingKey(event)) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
+        placeholder={t('pet.inputPlaceholder')}
+        aria-label={t('pet.inputPlaceholder')}
+      />
+      {onVoice && <button type="button" className="pet-mini-input-button" onClick={onVoice} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
+      <button type="submit" className="pet-mini-send" disabled={sendDisabled} aria-label={t('pet.send')}><SendIcon /></button>
+      </div>
+    </form>
+  );
+};
 
 function useReducedMotion() {
   const [reduced, setReduced] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
@@ -1796,7 +1840,7 @@ export const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open
   // bubble lays out bottom-up: the toggle keeps its place at the bottom and
   // the history opens above it, so expanding never moves what was clicked.
   return (
-    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main max-w-70', compact && 'is-compact')} data-pet-hit>
+    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main', compact && 'is-compact')} data-pet-hit>
       <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open} aria-controls={detailId}>
         <span className="pet-mini-bubble-speaker">{speaker}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
         <p title={summary}>{props.running && <span className="pet-mini-running-dot" aria-hidden />}<span className="pet-mini-reply-summary">{summary}</span></p>

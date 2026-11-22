@@ -1,8 +1,9 @@
 # The update panel names whose version it shows
 
-Status: **approved** by the owner on 2026-11-20 and built (`ui/design:
-update/instance-and-app`, drawn by the shipped components). Not yet run on a
-real desktop app: see the last Todo item.
+Status: **approved** by the owner on 2026-11-20, built (`ui/design:
+update/instance-and-app`, drawn by the shipped components), and exercised once
+on a real desktop app by the owner on 2026-11-21: see the last Todo item for
+what was and was not observed.
 
 ## Background
 
@@ -125,15 +126,31 @@ page, a new desktop app can update an old instance.
 Implementation gate: confirm the native client's session passes the instance's
 origin and CSRF checks for these POSTs without weakening them.
 
-## A later shell change worth making
+## The shell says whether it follows an install
 
-The popup decides whether an install the shell sent is still under way from the
-shell's receipt, the instance's last answer and the time elapsed
-(`ui/src/desktop/instanceUpdateModel.ts`), mirroring the shell's own rule
-(`unsettled` in `instance_update.rs`) from less than the shell knows: it is not
-told the version the install started from. A test walks every combination and
-holds the section to that rule as far as the page can know it. Having the shell
-state it (`request.following: boolean`) would replace the mirror with the fact.
+The popup offers the instance's Update, check and switches exactly when the
+shell would take them, on the shell's own word: `instance_update.request`
+carries `following` (the shell would refuse another action for this instance
+now, because what it sent is still on its way or still being followed) and,
+for an install, `installed_from` (the version the instance ran when the
+install was accepted). The page no longer works either out from the receipt,
+the last answer and the time elapsed (`ui/src/desktop/instanceUpdateModel.ts`).
+
+The shell stops following a standalone install that evidently did not take:
+when the Runtime has answered on `installed_from`, with no `install` report of
+its own, five minutes after acceptance. The section then says the update did
+not finish, and its retry is one the shell takes. A test walks every
+combination of what the shell can report and holds the section to those rules.
+
+One thing the page still cannot tell: whether a receipt a desktop-managed host
+relays (`remote_request`) is the receipt of this shell's install or of a later
+one from another surface; the shell can, by request id. So the section relays
+an unsettled receipt as the host reports it, and waits with it. A host whose
+receipt stays `completed` without ever reaching its target therefore reads
+"confirming", with Update, the check and the switches off, until the host
+reports another receipt or reaches that version; a `completed` receipt does
+not expire, and nothing in the section ends it. If that shows up in practice,
+the shell should say which receipt is its own.
 
 ## Also needed
 
@@ -294,4 +311,14 @@ instance runs a build that contains 3.
 - [x] Shell: instance update actions on the account bridge; popup sizing (B1).
 - [x] Interface: `UpdatePanel` sections, bottom row, narrow-window badge, i18n;
       the frames switch to the shipped components and the kit copy is deleted (B2).
-- [ ] One run on a real desktop app connected to a remote instance.
+- [x] One run on a real desktop app connected to a remote instance. The owner,
+      2026-11-21, in his desktop app connected to his own standalone instance:
+      one click on the instance's Update in the panel. Observed on the
+      instance's computer: one update request, a 62 s install, a 21 s restart,
+      85 s from the request to ready, the instance from 3.2.8rc5 to 3.2.8rc8
+      (the latest when it ran; a standalone install is not pinned). Not
+      observed by anyone but him: the panel and the bottom row during that
+      minute, and whether other surfaces showed the install as running. He
+      then reported the bottom row's dot and name sitting behind an empty
+      stretch, centred in their trigger since #4034; they start at the
+      trigger's left inset again.

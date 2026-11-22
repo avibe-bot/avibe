@@ -6,7 +6,7 @@ import clsx from 'clsx';
 
 import { Dock } from './apps/Dock';
 import { ContextMenu, ContextMenuItem } from './ui/context-menu';
-import { useWindowManager } from '../context/WindowManagerContext';
+import { useAppLaunch } from '../apps/useAppLaunch';
 import { useShowPageDrag } from '../context/showPageDrag';
 import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 
@@ -32,7 +32,7 @@ const LauncherPresentation = ({ pinned, setPinned }: {
   setPinned: (value: boolean) => void;
 }) => {
   const { t } = useTranslation();
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('apps-launcher');
   const showPageDrag = useShowPageDrag();
   const [hovering, setHovering] = useState(false);
   const [dragHovering, setDragHovering] = useState(false);
@@ -117,7 +117,7 @@ const LauncherPresentation = ({ pinned, setPinned }: {
   };
 
   const openLibrary = () => {
-    wm.openApp('library');
+    void launchApp({ appId: 'library' });
     setMenu(null);
   };
 

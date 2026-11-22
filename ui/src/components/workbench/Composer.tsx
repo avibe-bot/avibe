@@ -17,7 +17,8 @@ import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { isComposingKey } from '../../lib/imeComposition';
-import { nativeHapticImpact } from '../../lib/native';
+import { hasNativeVoiceCapture, nativeHapticImpact } from '../../lib/native';
+import { appRecordsEveryTake, emptyVoiceStream, nativeCaptureAllowed, nativeCaptureFactory } from '../../lib/nativeVoiceCapture';
 import { dismissSoftKeyboard, isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
@@ -94,6 +95,7 @@ import type {
 import { DeferredMentionEditor } from './deferredMentionEditor';
 import type { MentionReference } from '../../lib/mentions';
 import { beginVoiceStatusRead, knownVoiceStatus } from '../../lib/voiceAvailability';
+import { requestVoiceInputStream } from '../../lib/voiceInput';
 import { beginVoiceConsentRead, noteVoiceStatus, resolveVoicePress, voiceConsentForPress } from '../../lib/voiceConsent';
 
 export type ComposerAttachment = {
@@ -769,7 +771,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (!mediaEnabled) return;
     // Prepare the AudioWorklet while the Chat page is idle. No microphone is
     // opened here; this only removes worklet compilation from the first word.
-    void prewarmVoiceCapture().catch(() => undefined);
+    // Not in the iOS App, which records every take itself: an audio context of the page's
+    // there shares the App's audio session, and made the next take's microphone open a second late.
+    // Whether it does is known with the status below (the instance can turn it off).
+    if (!hasNativeVoiceCapture()) void prewarmVoiceCapture().catch(() => undefined);
     let alive = true;
     const statusRead = beginVoiceStatusRead();
     const consentRead = beginVoiceConsentRead();
@@ -789,6 +794,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         setAsrMaxFileBytes(maxFileBytes);
         statusRead.remember({ available, maxFileBytes });
         noteVoiceStatus(data, consentRead);
+        // In the App with its own recording turned off, tap takes are the page's again.
+        if (hasNativeVoiceCapture() && !appRecordsEveryTake()) void prewarmVoiceCapture().catch(() => undefined);
         // Prewarm the cloud token so the first recording uploads straight to
         // avibe.bot with no mint latency (no-op when the cloud is unavailable).
         // The instance mints none before this account allowed voice input.
@@ -1305,7 +1312,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (recordingStartRef.current || voiceSessionsById.has(voiceKey)) return;
     // Start compiling the capture graph in parallel with the permission and
     // lock steps. The microphone is still requested only by getUserMedia below.
-    void prewarmVoiceCapture().catch(() => undefined);
+    if (!appRecordsEveryTake()) void prewarmVoiceCapture().catch(() => undefined);
     recordingStartRef.current = true;
     setRecordingStarting(true);
     let stream: MediaStream | null = null;
@@ -1327,9 +1334,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     let micRequestedAt: number | null = null;
     try {
       await captureClaim.ready;
+      // In the iOS App the App records this take too, once its microphone is allowed
+      // (lib/nativeVoiceCapture): one owner of the audio session, and no microphone of the page's.
+      const nativeCapture = await nativeCaptureAllowed();
       micRequestedAt = trace.mark();
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      trace.micSettled(micRequestedAt);
+      stream = nativeCapture ? emptyVoiceStream() : await requestVoiceInputStream();
+      // The App's capture settles its own microphone.
+      if (!nativeCapture) trace.micSettled(micRequestedAt);
       if (!captureClaim.isCurrent() || unmountedRef.current || disabledRef.current) {
         stream.getTracks().forEach((track) => track.stop());
         trace.finish('cancelled');
@@ -1390,6 +1401,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const pipeline = new VoiceRecordingPipeline({
         stream,
         trace,
+        ...(nativeCapture ? { createCapture: nativeCaptureFactory } : {}),
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: asrMaxFileBytes,
         onSegment: (blob, metadata) => {
@@ -1748,6 +1760,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}),
     bounds: () => boxRef.current?.getBoundingClientRect() ?? null,
+    // The iOS App may recognise a hold on the input itself: the box's buttons are not a hold.
+    surface: () => boxRef.current?.querySelector<HTMLElement>('textarea, [contenteditable="true"]') ?? null,
     onSystemInterrupt: 'interrupt',
     context: () => readVoiceContext?.(),
     keep: () => (voiceKeepTarget ? { target: voiceKeepTarget } : null),
@@ -2196,7 +2210,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           variant="ghost"
           size="icon"
           onPointerDown={() => {
-            void prewarmVoiceCapture().catch(() => undefined);
+            if (!appRecordsEveryTake()) void prewarmVoiceCapture().catch(() => undefined);
             pendingVoiceInsertionRef.current = captureVoiceInsertion();
           }}
           onPointerCancel={() => {

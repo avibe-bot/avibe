@@ -7,6 +7,8 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceContextSource } from '../../lib/voiceContext';
+import { closeVoiceConsent, noteVoiceStatus, voiceConsentAsking } from '../../lib/voiceConsent';
+import { writeVoiceInputSelection } from '../../lib/voiceInput';
 
 type VoiceStopped = (
   reason: 'finish' | 'abort' | 'error',
@@ -25,6 +27,9 @@ const voiceMocks = vi.hoisted(() => ({
   trace: undefined as { entry: string; dictationId?: string; observePcm: (samples: Int16Array) => void } | undefined,
   onCaptureState: undefined as ((state: 'live' | 'recorder' | 'no_sound') => void) | undefined,
   pipelineStart: vi.fn(),
+  /** What records the take, when it is not the page's own capture. */
+  createCapture: undefined as unknown,
+  prewarm: vi.fn(async () => undefined),
   realtimeAbort: vi.fn(),
   realtimeFinish: vi.fn(),
   realtimeStart: vi.fn(),
@@ -49,8 +54,10 @@ vi.mock('../../lib/avibeFetch', async (importOriginal) => ({
 }));
 vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../lib/voiceRecording')>(),
+  prewarmVoiceCapture: voiceMocks.prewarm,
   VoiceRecordingPipeline: class {
     constructor(options: {
+      createCapture?: unknown;
       onStopped: VoiceStopped;
       onSegment: VoiceSegment;
       onError?: (error: unknown) => void;
@@ -59,6 +66,7 @@ vi.mock('../../lib/voiceRecording', async (importOriginal) => ({
       onCaptureState?: (state: 'live' | 'recorder' | 'no_sound') => void;
     }) {
       voiceMocks.trace = options.trace;
+      voiceMocks.createCapture = options.createCapture;
       voiceMocks.onCaptureState = options.onCaptureState;
       voiceMocks.onSegment = options.onSegment;
       voiceMocks.onStopped = options.onStopped;
@@ -95,6 +103,7 @@ import {
   defaultActionShortcuts,
   writeActionShortcuts,
 } from '../../lib/actionShortcuts';
+import { nativeCaptureFactory } from '../../lib/nativeVoiceCapture';
 import { Composer, type ComposerHandle } from './Composer';
 import { DeferredMentionEditor } from './deferredMentionEditor';
 
@@ -179,6 +188,8 @@ beforeEach(() => {
   voiceMocks.onError = undefined;
   voiceMocks.onPcm = undefined;
   voiceMocks.pipelineStart.mockReset().mockResolvedValue(true);
+  voiceMocks.createCapture = undefined;
+  voiceMocks.prewarm.mockReset().mockResolvedValue(undefined);
   voiceMocks.realtimeAbort.mockReset();
   voiceMocks.realtimeFinish.mockReset();
   voiceMocks.realtimeStart.mockReset().mockReturnValue(new Promise(() => undefined));
@@ -216,6 +227,107 @@ describe('Composer voice shortcut', () => {
   const telemetrySent = () => apiFetch.mock.calls
     .filter(([path]) => path === '/api/asr/telemetry')
     .map(([, init]) => JSON.parse((init as RequestInit).body as string) as Record<string, unknown>);
+
+  // Composition contract: a saved input changes capture constraints, never consent admission.
+  // Existing shortcut cases use legacy status without consent and the system-default input.
+  it('requests the selected microphone only on a newly granted voice press', async () => {
+    writeVoiceInputSelection('usb-selected');
+    renderComposer();
+    const textbox = await screen.findByRole('textbox');
+    await act(async () => undefined);
+    for (const consent of [null, 'declined'] as const) {
+      act(() => { noteVoiceStatus({ consent }); });
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await act(async () => undefined);
+      expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+      if (consent === null) expect(voiceConsentAsking()).toBe(true);
+      act(() => { closeVoiceConsent(); });
+    }
+    act(() => { noteVoiceStatus({ consent: 'granted' }); });
+    expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce());
+    expect(voiceMocks.getUserMedia).toHaveBeenCalledWith({ audio: { deviceId: { exact: 'usb-selected' } } });
+    await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledOnce());
+    fireEvent.keyDown(textbox, { code: 'Escape' });
+    await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+  });
+
+  // In the iOS App the App records every take (lib/nativeVoiceCapture): a tap take too, so the
+  // App's audio session has one owner. A page audio context there made the next hold's
+  // microphone open a second late (measured 2026-11-21).
+  it('lets the iOS App record a tap take once its microphone is allowed, and warms no page audio there', async () => {
+    let permission = 'granted';
+    const call = vi.fn(async (method: string) => (method === 'voice.permission' ? { state: permission } : null));
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: { contract: 1, platform: 'ios', shellVersion: '1.0 (1)', capabilities: { voice: 1, voiceCapture: 1 }, call, on: () => () => undefined },
+    });
+    try {
+      renderComposer();
+      const textbox = await screen.findByRole('textbox');
+      await act(async () => undefined);
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledOnce());
+      // The App's capture, and no microphone of the page's.
+      expect(voiceMocks.createCapture).toBe(nativeCaptureFactory);
+      expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+      expect(voiceMocks.prewarm).not.toHaveBeenCalled();
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+
+      // Until the user has answered the microphone question, the take is WebKit's, which asks it.
+      permission = 'prompt';
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledTimes(2));
+      expect(voiceMocks.createCapture).toBeUndefined();
+      expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce();
+      expect(voiceMocks.prewarm).not.toHaveBeenCalled();
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+    } finally {
+      delete (window as { avibeNative?: unknown }).avibeNative;
+    }
+  });
+
+  // The off switch (`audio_asr.app_hold`, said by the status): the same App, the page's own way.
+  it('records a tap take through the page in the iOS App while the instance has the App\'s recording turned off', async () => {
+    const call = vi.fn(async (method: string) => (method === 'voice.permission' ? { state: 'granted' } : null));
+    Object.defineProperty(window, 'avibeNative', {
+      configurable: true,
+      value: { contract: 1, platform: 'ios', shellVersion: '1.0 (1)', capabilities: { voice: 1, voiceCapture: 1 }, call, on: () => () => undefined },
+    });
+    apiFetch.mockResolvedValue({ ok: true, json: async () => ({ available: true, max_file_bytes: 10_000_000, app_hold: false }) });
+    try {
+      renderComposer();
+      const textbox = await screen.findByRole('textbox');
+      await act(async () => undefined);
+      // Its audio is warmed again, once the status has said so.
+      await waitFor(() => expect(voiceMocks.prewarm).toHaveBeenCalled());
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledOnce());
+      expect(voiceMocks.createCapture).toBeUndefined();
+      expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce();
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+    } finally {
+      delete (window as { avibeNative?: unknown }).avibeNative;
+      act(() => { noteVoiceStatus({ app_hold: true }); });
+    }
+  });
+
+  it('records a tap take through the page, its audio warmed, where no App records', async () => {
+    renderComposer();
+    const textbox = await screen.findByRole('textbox');
+    await act(async () => undefined);
+    expect(voiceMocks.prewarm).toHaveBeenCalled();
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalledOnce());
+    expect(voiceMocks.createCapture).toBeUndefined();
+    expect(voiceMocks.getUserMedia).toHaveBeenCalledOnce();
+    fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+    await act(async () => voiceMocks.onStopped?.('abort', { pendingSegmentCount: 0 }));
+  });
 
   it('traces a tap take from its microphone request, and logs a microphone that never opened', async () => {
     renderComposer();
