@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::time::Duration;
 
 #[test]
-fn only_a_current_bound_offer_can_bootstrap_a_lan_path() {
+fn only_a_current_bound_offer_can_bootstrap() {
     let client = SecretKey::from_bytes(&[1; 32]).public();
     let peer = SecretKey::from_bytes(&[2; 32]).public();
     let host = Authority::managed("one-app.avibe.bot").unwrap();
@@ -18,6 +18,7 @@ fn only_a_current_bound_offer_can_bootstrap_a_lan_path() {
         offer.candidates,
         vec![
             "192.168.1.4:345".parse::<std::net::SocketAddr>().unwrap(),
+            "[2606:4700::1]:345".parse().unwrap(),
             "[fd00::1]:345".parse().unwrap()
         ]
     );

@@ -353,6 +353,12 @@ def test_trial_consent_only_changes_from_host_shell(instance):
     from vibe.authorization import AuthorizationContext, invocation_authority
     from config.v2_config import V2Config
 
+    from vibe import connection_settings as cs
+
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.instance_secret = 'test-pairing-credential'
+    config.save()
+    assert not cs.relay_enrolled(config)
     parser = cli.build_parser()
     def args(state):
         return parser.parse_args(["remote", "direct", "relay", "public-trial", state])
@@ -369,6 +375,7 @@ def test_trial_consent_only_changes_from_host_shell(instance):
         api.save_config({"remote_access": {"vibe_cloud": {"public_relay_trial": False}}})
     assert cli.cmd_remote_direct(args("off")) == 0
     assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    assert cs.relay_enrolled(V2Config.load())
 
 
 def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):

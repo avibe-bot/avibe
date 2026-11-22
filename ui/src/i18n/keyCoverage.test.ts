@@ -972,6 +972,10 @@ const NON_KEY_LITERALS = [
   'voice.capturePrepare',
   'voice.captureStart',
   'voice.captureStop',
+  'voice.hold',
+  'voice.holdSurfaces',
+  'voice.holdAdopt',
+  'voice.holdReject',
 
   // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
   // so the server's own message shows when the client has no copy for the code.
