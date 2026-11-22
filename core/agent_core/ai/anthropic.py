@@ -981,6 +981,7 @@ class AnthropicAdapter(ProviderAdapter):
                     gateway=self._gateway,
                     translate=translate,
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
+                    bound_pin_handback=speculative,
                     on_send=record_send if attempt else None,
                     refused=_rejects_ttl if prefix_ttl is not None and not speculative else None,
                 )
@@ -1110,8 +1111,9 @@ class AnthropicAdapter(ProviderAdapter):
                 elif unavailable is not None or (
                     continued
                     and self._gateway
-                    and (PIN_SOURCE_HEADER not in wire.headers or not assembler.verified_origin)
+                    and (PIN_SOURCE_HEADER not in full_wire.headers or not assembler.verified_origin)
                 ):
+                    # A pin added only to try threads must never authorize an ordinary pause follow-up.
                     # A paused response continues only on the Source that served it, pinned, so it stays one origin's
                     # message: a continuation that Source cannot serve, a send no pin held there, or a response whose
                     # Source is unknown (no served-hop report, so its hosted calls could not be kept and sent back) ends

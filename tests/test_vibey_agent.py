@@ -4537,8 +4537,9 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     from modules.agents.vibey.models import registry_providers
 
     path, body = _TEXT_STREAMS[hub_protocol]
+    source = "src_nativepin01"
     served = json.dumps(
-        {"provider": "upstream", "api": hub_protocol, "model": "served-model", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": hub_protocol, "model": "test-model", "source": source},
         separators=(",", ":"),
     )
     seen: list[httpx.Request] = []
@@ -4553,6 +4554,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
         harness = _Harness(
             engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
         )
+        harness.controller.hub_source_id = source
         harness.controller.hub_protocol = hub_protocol
         harness.controller.hub_hosted_tools = {
             "web_search": {"native": "assumed", "declaration": declaration, "include": include, "replay": "assumed"},
@@ -4563,7 +4565,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     (request,) = seen
     sent = json.loads(request.content)
     assert request.url.path == path
-    assert request.headers["x-avibe-pin-source"] == "src_test"
+    assert request.headers["x-avibe-pin-source"] == source
     # The hosted tools lead the Turn's tools: the native one as the provider's declaration, the proxied one as its
     # canonical function.
     assert sent["tools"][0] == declaration

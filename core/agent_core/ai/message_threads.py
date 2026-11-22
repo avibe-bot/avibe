@@ -77,7 +77,8 @@ def remember(table, key, value):
 def route_key(ep: ModelEndpoint, gateway: bool) -> bytes:
     return digest(
         [
-            ep.base_url,
+            # A gateway launch and its read-only preview have different transport URLs, not different Sources.
+            None if gateway else ep.base_url,
             ep.source_id,
             ep.source_identity,
             ep.provider,
@@ -201,6 +202,16 @@ def _cache_plan(full: dict) -> tuple[str | None, int | None]:
     return None, marks[0][1]
 
 
+def _contains_image(messages: list) -> bool:
+    def has_image(content) -> bool:
+        return isinstance(content, list) and any(
+            block.get("type") == "image" or (block.get("type") == "tool_result" and has_image(block.get("content")))
+            for block in content
+        )
+
+    return any(has_image(message["content"]) for message in messages)
+
+
 async def plan_send(
     wire,
     ep,
@@ -268,9 +279,13 @@ def prepare(
             reason = "small_parent"
         else:
             suffix = msgs[n + 1 :]
-            # UTF-8 bytes conservatively bound the text tokens; images or large tools simply cost a full send.
-            static = len(encoded([full.get("tools"), full.get("system"), suffix]))
-            if parent.tokens < MIN_PARENT_TO_STATIC_RATIO * static:
+            # Encoded bytes bound text, not the tokens billed for decoded pixels. Never rely on the
+            # usage heuristic for a suffix containing images, including a tool's returned images.
+            if _contains_image(suffix):
+                mode, reason = "full", "image_delta"
+            elif parent.tokens < MIN_PARENT_TO_STATIC_RATIO * len(
+                encoded([full.get("tools"), full.get("system"), suffix])
+            ):
                 reason = "large_static_or_delta"
             else:
                 mode = "continue"

@@ -112,6 +112,17 @@ async def test_two_vibey_turns_use_same_parent_through_real_hub(tmp_path, model_
                 thread_observation=ThreadObservation("closed-loop"),
                 tools=(ToolSpec("web_search", "Search", {"type": "object"}),),
             )
+            if i == 1:
+                from core.agent_core.ai.preview import preview_wire_request
+
+                inert = await router.describe_vibey_request("menu-alias")
+                preview_ep = selection_from_hop(inert.to_hop_resolution()).endpoint
+                assert preview_ep.base_url != ep.base_url
+                preview = await preview_wire_request(
+                    replace(req, endpoint=preview_ep), gateway=True, session_id="closed-loop"
+                )
+                assert preview.wire.body["thread"] == {"type": "continue", "previous_message_id": "msg_wire"}
+                assert len(svc.adapter.requests) == 1
             events = [e async for e in adapter.stream(req, CancelToken())]
             assert isinstance(events[-1], Done), (
                 i,

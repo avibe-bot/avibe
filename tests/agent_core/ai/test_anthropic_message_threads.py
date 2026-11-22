@@ -229,7 +229,8 @@ async def test_resume_preserves_overlapping_lookup_windows():
     assert request.thread_observation.attempts[0]["reason"] == "preserve_cache_breakpoints"
 
 
-async def test_silence_outlasts_speculative_send_without_replay(monkeypatch):
+@pytest.mark.parametrize("handback", [False, True])
+async def test_silence_outlasts_speculative_send_without_replay(monkeypatch, handback):
     import time
     from types import SimpleNamespace
     from core.agent_core.ai import _common
@@ -242,10 +243,68 @@ async def test_silence_outlasts_speculative_send_without_replay(monkeypatch):
     def handle(wire):
         seen.append(json.loads(wire.content))
         now[0] += 601
+        if handback:
+            return httpx.Response(
+                409, json={"type": "error", "error": {"type": "model_hub_pin_unavailable", "code": "pin_unavailable"}}
+            )
         return httpx.Response(502, json={"error": {"message": "upstream timed out"}})
 
-    request = replace(_request(), thread_observation=ThreadObservation("silent"))
+    request = replace(_request(source_id="src_silent001"), thread_observation=ThreadObservation("silent"))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        events = [e async for e in AnthropicAdapter(client).stream(request, CancelToken())]
+        events = [e async for e in AnthropicAdapter(client, gateway=handback).stream(request, CancelToken())]
     assert len(seen) == 1 and seen[0]["thread"] == {"type": "create"}
     assert isinstance(events[-1], ProviderError) and events[-1].silence_exhausted
+    assert not events[-1].retryable and not events[-1].continuable and events[-1].refusal is None
+
+
+@pytest.mark.parametrize("nested", [False, True])
+async def test_image_suffix_uses_ordinary_even_when_wire_is_tiny(nested):
+    import time
+    from core.agent_core.ai import message_threads as threads
+    from core.agent_core.ai._common import WireRequest
+
+    ep = _request().endpoint
+    route = threads.route_key(ep, False)
+    history = [{"role": "user", "content": "long " * 16000}]
+    assistant = {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "A" * 116}}
+    images = [image] * 15
+    suffix = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "x", "content": images}] if nested else images,
+    }
+    wire = WireRequest("https://model.invalid/messages", {}, {"messages": [*history, assistant, suffix]})
+    create = threads.prepare(wire, ep, False, None, route, None)
+    parent = threads.Parent(
+        route,
+        create.fixed,
+        1,
+        threads.message_digest(history),
+        threads.message_digest([assistant]),
+        "parent",
+        22002,
+        time.monotonic() + 300,
+    )
+    assert len(threads.encoded(suffix)) * 3 < parent.tokens
+    send = threads.prepare(wire, ep, False, parent, route, None)
+    assert (send.mode, send.reason) == ("full", "image_delta") and send.wire.body == wire.body
+
+
+async def test_speculative_create_pin_does_not_authorize_unpinned_pause_followup():
+    from tests.agent_core.ai import test_hosted_pause_turn as pause
+    from core.agent_core.ai.provider import ProviderError
+
+    req = replace(pause._request(), tools=(), thread_observation=ThreadObservation("pause-test"))
+
+    def reply(number):
+        assert number == 1
+        return httpx.Response(
+            200,
+            headers=pause._served(),
+            text=pause._response(pause._text("first"), stop_reason="pause_turn", input_tokens=100, output_tokens=1),
+        )
+
+    sent, events = await pause._stream(reply, req)
+    assert len(sent) == 1 and json.loads(sent[0].content)["thread"] == {"type": "create"}
+    assert isinstance(events[-1], ProviderError) and events[-1].message == pause.PAUSE_UNSERVED_MESSAGE
+    assert events[-1].partial.content == (TextBlock("first"),)
