@@ -18,6 +18,8 @@ const statusContext = vi.hoisted(() => ({
 
 vi.mock('../../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../../context/StatusContext', () => ({ useStatus: () => statusContext }));
+const authorization = vi.hoisted(() => ({ capabilities: { is_instance_owner: true } }));
+vi.mock('@/context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
 const apiFetch = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/apiFetch', () => ({ apiFetch }));
 vi.mock('./SettingsPageShell', () => ({
@@ -46,6 +48,7 @@ const renderPage = () => {
 afterEach(() => {
   cleanup();
   statusContext.status = { state: 'running', service_pid: 4321 };
+  authorization.capabilities = { is_instance_owner: true };
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
@@ -138,5 +141,22 @@ describe('saving the console server host', () => {
     expect(await screen.findByText(en.dashboard.uiRestartMessage)).toBeTruthy();
     expect(hostsWritten()).toEqual(['192.168.1.20']);
     expect(JSON.parse(apiFetch.mock.calls[0][1].body)).toEqual({ host: '192.168.1.20', port: 5123 });
+  });
+});
+
+describe('the console server address for someone who is not the owner', () => {
+  it('is shown, with nothing to edit and no save for it, and the rest of the page stays', async () => {
+    authorization.capabilities = { is_instance_owner: false };
+    api.getConfig.mockResolvedValue({ ui: { setup_host: 'fd00::4', setup_port: 6000 } });
+    renderPage();
+
+    expect(await screen.findByText('[fd00::4]:6000')).toBeTruthy();
+    expect(screen.getByText(en.settings.consoleServerOwnerOnly)).toBeTruthy();
+    expect(screen.queryByLabelText(en.dashboard.host)).toBeNull();
+    expect(screen.queryByLabelText(en.dashboard.port)).toBeNull();
+    expect(screen.queryByRole('button', { name: en.common.saveAndRestart })).toBeNull();
+    // Run control and the instance name are as before.
+    expect(screen.getByRole('button', { name: en.common.restart })).toBeTruthy();
+    expect(screen.getByRole('button', { name: en.common.save })).toBeTruthy();
   });
 });

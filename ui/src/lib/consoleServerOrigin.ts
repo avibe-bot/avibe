@@ -73,3 +73,9 @@ export function isListenableHost(value: string): boolean {
     return false;
   }
 }
+
+/** `host:port` as an address is written, an IPv6 host in brackets. */
+export function formatListenAddress(host: string, port: number): string {
+  const bare = stripBrackets(host.trim());
+  return `${bare.includes(':') ? `[${bare}]` : bare}:${port}`;
+}

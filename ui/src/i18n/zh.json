@@ -967,6 +967,7 @@
     "consoleServerHint": "保存这些值只会重启 Web UI 服务，不会重启主服务。",
     "consoleServerBound": "这个 Avibe 已绑定账号，改成网络地址也不会让其他设备免登录打开。",
     "consoleServerInvalidHost": "这不是一个可用的地址，没有保存。",
+    "consoleServerOwnerOnly": "只有所有者可以改这个地址和端口。",
     "instanceNameTitle": "实例名称",
     "instanceNameHint": "显示在浏览器标签标题中（“Avibe - 名称”）。留空则优先使用远程访问名称，否则使用系统 hostname。",
     "consoleServerRedirecting": "UI 服务地址已变更，正在跳转到 {{origin}}...",

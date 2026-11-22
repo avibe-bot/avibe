@@ -1,5 +1,6 @@
 // Settings · Service: run control, the console server, the instance name, and the log file.
 import { SettingsServicePage } from '@/components/settings/SettingsServicePage';
+import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { frames } from '../../frame';
 import { settingsConfig, settingsFixtures, settingsPage } from './fixtures';
@@ -46,6 +47,16 @@ const designFrames = frames([
     status: 'shipped',
     route,
     fixtures: settingsFixtures({ '/api/config': boundConfig }),
+    render: page,
+  },
+  {
+    name: 'member',
+    title: '设置 · 服务 · 不是所有者',
+    width: 1440,
+    height: 900,
+    status: 'shipped',
+    route,
+    fixtures: settingsFixtures({}, { capabilities: { ...OWNER_INSTANCE_CAPABILITIES, is_instance_owner: false } }),
     render: page,
   },
   {

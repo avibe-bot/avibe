@@ -967,6 +967,7 @@
     "consoleServerHint": "Saving these values restarts only the Web UI server.",
     "consoleServerBound": "This Avibe is bound to an account. A network address here does not let other devices in without signing in.",
     "consoleServerInvalidHost": "That is not a usable address. Nothing was saved.",
+    "consoleServerOwnerOnly": "Only the owner can change this address and port.",
     "instanceNameTitle": "Instance name",
     "instanceNameHint": "Shown in the browser tab title (\"Avibe - name\"). Leave blank to use the remote-access name when paired, otherwise the system hostname.",
     "consoleServerRedirecting": "UI server moved. Redirecting to {{origin}}...",

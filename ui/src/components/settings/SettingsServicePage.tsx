@@ -6,12 +6,13 @@ import clsx from 'clsx';
 
 import { useStatus } from '@/context/StatusContext';
 import { useApi } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { apiFetch } from '@/lib/apiFetch';
 import { SettingsPageShell } from './SettingsPageShell';
 import { CompactField, SettingsPanel, SettingsRow } from './SettingsPrimitives';
 import { Button } from '@/components/ui/button';
 import { setConfigField } from '@/lib/configMutations';
-import { consoleOriginAfterSave, isListenableHost } from '@/lib/consoleServerOrigin';
+import { consoleOriginAfterSave, formatListenAddress, isListenableHost } from '@/lib/consoleServerOrigin';
 import { applyAppTitle } from '@/lib/documentTitle';
 
 // ui/design: settings/service/default. Two cards:
@@ -51,6 +52,9 @@ export const SettingsServicePage: React.FC = () => {
   }, [api]);
 
   const isRunning = status.state === 'running';
+  // Where the server listens decides who can reach this computer: the Owner's to change.
+  const { capabilities } = useInstanceAuthorization();
+  const canChangeListener = capabilities.is_instance_owner;
   // Bound to an account: only this computer opens Avibe without signing in, whatever the host.
   const bound = Boolean(config?.remote_access?.vibe_cloud?.instance_id);
 
@@ -261,13 +265,20 @@ export const SettingsServicePage: React.FC = () => {
               {t('settings.consoleServerTitle')}
             </span>
           }
-          description={uiMessage || (
+          description={!canChangeListener ? t('settings.consoleServerOwnerOnly') : uiMessage || (
             <>
               {t('settings.consoleServerHint')}
               {bound && <span className="block">{t('settings.consoleServerBound')}</span>}
             </>
           )}
-          control={
+          control={!canChangeListener ? (
+            // Shown, not offered: no field to edit and no save that would be refused.
+            <div className="inline-flex items-center rounded-lg border border-edge bg-foreground/[0.04] px-3 py-2 shadow-elevation-0">
+              <span className="font-mono text-[11px] text-foreground">
+                {formatListenAddress(config?.ui?.setup_host || '127.0.0.1', config?.ui?.setup_port || 5123)}
+              </span>
+            </div>
+          ) : (
             <div className="grid grid-cols-[120px_96px_auto] items-center gap-2">
               <CompactField
                 aria-label={t('dashboard.host')}
@@ -308,7 +319,7 @@ export const SettingsServicePage: React.FC = () => {
                 {uiSaving ? t('common.saving') : t('common.saveAndRestart')}
               </Button>
             </div>
-          }
+          )}
         />
         <SettingsRow
           title={
