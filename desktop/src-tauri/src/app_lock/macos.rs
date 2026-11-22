@@ -17,7 +17,12 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview};
 
-type Entry = PendingEntry<Box<dyn FnOnce(&AppHandle) + Send>>;
+type PendingCallback = Box<dyn FnOnce(&AppHandle) + Send>;
+struct PendingAction {
+    execute: PendingCallback,
+    replaced: Option<PendingCallback>,
+}
+type Entry = PendingEntry<PendingAction>;
 type Observer = (
     Retained<NSNotificationCenter>,
     Retained<objc2::runtime::ProtocolObject<dyn NSObjectProtocol>>,
@@ -184,7 +189,33 @@ pub(crate) fn defer(app: &AppHandle, action: impl FnOnce(&AppHandle) + Send + 's
     defer_kind(app, EntryKind::Action, action)
 }
 pub(crate) fn defer_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) + Send + 'static) -> bool {
-    if !queue_kind(app, kind, action) {
+    defer_action(
+        app,
+        kind,
+        PendingAction {
+            execute: Box::new(action),
+            replaced: None,
+        },
+    )
+}
+/// Replacement is an explicit queue transition, not a Drop side effect:
+/// replay, rejected foreground requests and process exit never report failure.
+pub(crate) fn defer_with_replacement(
+    app: &AppHandle,
+    action: impl FnOnce(&AppHandle) + Send + 'static,
+    replaced: impl FnOnce(&AppHandle) + Send + 'static,
+) -> bool {
+    defer_action(
+        app,
+        EntryKind::Command,
+        PendingAction {
+            execute: Box::new(action),
+            replaced: Some(Box::new(replaced)),
+        },
+    )
+}
+fn defer_action(app: &AppHandle, kind: EntryKind, action: PendingAction) -> bool {
+    if !queue_action(app, kind, action) {
         return false;
     }
     let handle = app.clone();
@@ -203,6 +234,16 @@ pub(crate) fn queue_if_locked(app: &AppHandle, action: impl FnOnce(&AppHandle) +
     queue_kind(app, EntryKind::Navigation, action)
 }
 fn queue_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) + Send + 'static) -> bool {
+    queue_action(
+        app,
+        kind,
+        PendingAction {
+            execute: Box::new(action),
+            replaced: None,
+        },
+    )
+}
+fn queue_action(app: &AppHandle, kind: EntryKind, action: PendingAction) -> bool {
     let Some(owner) = app.try_state::<Owner>() else {
         return false;
     };
@@ -217,13 +258,10 @@ fn queue_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) 
     if !state.locked {
         return false;
     }
-    if !Entry::offer(
-        &mut owner.pending.lock().expect("app lock pending entry"),
-        kind,
-        Box::new(action),
-    ) {
-        return true; // Still gated; the caller may foreground and offer unlock.
-    }
+    let replaced = match Entry::offer(&mut owner.pending.lock().expect("app lock pending entry"), kind, action) {
+        Ok(replaced) => replaced,
+        Err(_) => return true, // Still gated; foreground and offer unlock.
+    };
     // A foreground-only Action must also preserve navigation that was already
     // waiting in the Workbench queue before locking.
     if kind == EntryKind::Action {
@@ -238,6 +276,11 @@ fn queue_kind(app: &AppHandle, kind: EntryKind, action: impl FnOnce(&AppHandle) 
         if let Some(id) = updates.current() {
             updates.finish_delivery(id, true);
         }
+    }
+    drop(state);
+    // Notify outside both owner locks; the callback may schedule native work.
+    if let Some(notify) = replaced.and_then(|entry| entry.action.replaced) {
+        notify(app);
     }
     true
 }
@@ -395,7 +438,7 @@ fn deliver_pending(app: &AppHandle) {
     if !is_locked(app) {
         let entry = machine(app).pending.lock().expect("pending entry").take();
         if let Some(entry) = entry {
-            (entry.action)(app);
+            (entry.action.execute)(app);
         }
         if app
             .try_state::<Mutex<avibe_runtime_host::deep_link::DeepLinks>>()

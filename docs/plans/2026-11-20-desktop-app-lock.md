@@ -132,7 +132,7 @@ AppKit sizes follow that kit; shared copy remains the embedded en/zh catalogs.
 
 The combined RC preparation passes 314 Desktop library tests (one existing ignored; 15 App Lock
 scenario groups, including the core event matrix across all three policies),
-273 runtime-host tests (three pre-existing ignored), 31 desktop-client e2e cases,
+273 runtime-host tests (three pre-existing ignored), 32 desktop-client e2e cases,
 54 shell-boundary tests and 56 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
 warnings denied. Rust formatting, desktop-client TypeScript, and UI build pass.
 Design typecheck passed for the native baseline; the integration does not change
@@ -270,7 +270,8 @@ integration commit. No dependency branches are edited or pushed by this lane.
 
 All four native Show actions enter the existing Command defer gate before any
 page eval or native callback. Replay rechecks the window's registered origin
-and route. The source-compiled rendering probe supplies an explicit lock-free
+and route. Deferred Annotate/Share restores and focuses that Show window before
+opening its page UI; Chat/Browser retain their own destinations. The source-compiled rendering probe supplies an explicit lock-free
 adapter; the App Lock peer consumes the production gate and actual buttons.
 Native notification answers also enter Command defer before `answer::submit`.
 The operation ID is allocated at the original action, retained with revision
@@ -278,10 +279,19 @@ and payload, and supplied unchanged after unlock. The transport deadline starts
 only then. Pure Action cannot replace any occupied slot, including Command;
 a later explicit Command/Content/Navigation replaces it. Cancellation retains
 memory-only intent, process exit discards it, and no answer text is rendered.
+Replacing a pending notification answer emits one existing-style follow-up
+with the original Session link: title `answer.notDelivered` and the approved
+new body `answer.answerAgain` ("Open Avibe to answer again." /
+"打开 Avibe 重新回复。"). It names no private content and does not falsely
+claim a connection failure. Quit-discard remains silent. Replacement callbacks
+run outside the owner locks and never run for replay or rejected Action entries.
 
-These additions implement main's 08:17 and 08:22 decisions. They do not change
+These additions implement main's 08:17, 08:22, 08:39 and 08:41 decisions. They do not change
 Machine's timing/verification model, D2a's Runtime idempotency/outcome rules,
-notification preview policy, or create new copy. Native tests consume actual
+or notification preview policy. Native tests consume actual
 NSButtons and the native notification admission path; the latter reaches the
 shipped WebView answer receiver with only its final Runtime POST substituted.
+Replacement tests consume the actual queue transition and native notification
+content builder, substituting only the final OS delivery sink; test-owned
+notification preferences are enabled without any production writes.
 Real notification-center UI and authentication remain local-package checks.

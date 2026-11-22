@@ -251,6 +251,10 @@ fn handle(app: &AppHandle, request: Value) {
                 });
                 *machine(app).machine.lock().unwrap() = Machine::new(policy, available);
                 *machine(app).pending.lock().unwrap() = None;
+                crate::notifications::macos::e2e_notices(true);
+                app.state::<crate::notifications::Notifications>()
+                    .set_enabled(false)
+                    .map_err(|e| e.to_string())?;
                 sync_windows(app);
                 Ok(snapshot(app))
             }
@@ -423,13 +427,28 @@ fn handle(app: &AppHandle, request: Value) {
                 Ok(Value::Null)
             }
             "notificationAnswer" => {
+                // Enable only this consumer, whose final UN sink is substituted.
+                // Other peer cases keep the unbundled plugin fallback disabled.
+                app.state::<crate::notifications::Notifications>()
+                    .set_enabled(true)
+                    .map_err(|e| e.to_string())?;
                 let id = crate::notifications::e2e_answer(
                     app,
                     request["question"].clone(),
                     request["action"].as_str().ok_or("action required")?,
                     request["text"].as_str().map(str::to_owned),
+                    request["opens"].as_str().map(str::to_owned),
                 )?;
                 Ok(json!({"operationId": id, "after": snapshot(app)}))
+            }
+            "notificationNotices" => Ok(crate::notifications::macos::e2e_notices(false)),
+            "showPresentation" => {
+                let window = app
+                    .get_webview_window("app-show-lock-fixture")
+                    .ok_or("Show fixture required")?;
+                Ok(json!({"focused":window.is_focused().map_err(|e| e.to_string())?,
+                    "visible":window.is_visible().map_err(|e| e.to_string())?,
+                    "minimized":window.is_minimized().map_err(|e| e.to_string())?}))
             }
             "composeQueue" => Ok(crate::compose::e2e_queue_state(app)),
             "appWindow" => {
@@ -835,6 +854,7 @@ pub(crate) fn run() {
     let app = tauri::Builder::default()
         .setup(move |app| {
             app.manage(crate::compose::Queue::default());
+            crate::notifications::macos::e2e_notices(true);
             let notifications = crate::notifications::Notifications::new(path.with_file_name("notifications.json"));
             notifications
                 .set_enabled(false)

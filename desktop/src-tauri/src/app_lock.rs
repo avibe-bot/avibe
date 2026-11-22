@@ -10,8 +10,8 @@ compile_error!("app-lock-e2e authentication substitutes must never ship in relea
 mod macos;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{
-    defer, defer_kind, init, is_locked, protects_view, queue_if_locked, ready, show_discard_question,
-    show_lifecycle_busy, show_quit_question, sync_windows,
+    defer, defer_kind, defer_with_replacement, init, is_locked, protects_view, queue_if_locked, ready,
+    show_discard_question, show_lifecycle_busy, show_quit_question, sync_windows,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,12 +32,11 @@ struct PendingEntry<T> {
 impl<T> PendingEntry<T> {
     /// Foreground-only requests add no work to an occupied slot. Content,
     /// navigation and explicit commands retain latest-wins semantics.
-    fn offer(slot: &mut Option<Self>, kind: EntryKind, action: T) -> bool {
+    fn offer(slot: &mut Option<Self>, kind: EntryKind, action: T) -> Result<Option<Self>, T> {
         if kind == EntryKind::Action && slot.is_some() {
-            return false;
+            return Err(action);
         }
-        *slot = Some(Self { kind, action });
-        true
+        Ok(slot.replace(Self { kind, action }))
     }
 }
 
@@ -408,8 +407,13 @@ mod tests {
         ] {
             for (incoming, expected_payload) in [Action, Content, Navigation, Command].into_iter().zip(expected) {
                 let mut slot = previous.map(|kind| PendingEntry { kind, action: "old" });
-                let accepted = PendingEntry::offer(&mut slot, incoming, "new");
+                let result = PendingEntry::offer(&mut slot, incoming, "new");
+                let accepted = result.is_ok();
                 assert_eq!(accepted, expected_payload == "new", "{previous:?} -> {incoming:?}");
+                match result {
+                    Ok(replaced) => assert_eq!(replaced.map(|entry| entry.action), previous.map(|_| "old")),
+                    Err(rejected) => assert_eq!(rejected, "new"),
+                }
                 let delivered = slot.take().unwrap();
                 assert_eq!(delivered.kind, if accepted { incoming } else { previous.unwrap() });
                 assert_eq!(delivered.action, expected_payload);

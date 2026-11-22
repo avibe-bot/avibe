@@ -144,6 +144,7 @@
         "placeholder": "Reply to this conversation",
         "notSent": "Not sent",
         "notDelivered": "Not delivered",
+        "answerAgain": "Open Avibe to answer again.",
         "alreadyChoice": "Already answered \"{{choice}}\" on another device.",
         "alreadyText": "Already answered on another device.",
         "stale": "The conversation has moved on. Open it to see the latest before replying.",

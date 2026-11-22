@@ -192,6 +192,9 @@ test('W1 physical App/Show windows inherit covers before and after locking, incl
 });
 
 test('all four native Show buttons wait for unlock before page events or owner actions', async () => {
+  // Workbench must be a real WebView so the lock gate can foreground it.
+  await peer.send('composePage');
+  await expect.poll(() => peer.send('composeRead')).not.toBeNull();
   await peer.send('appWindow', { label: 'app-show-lock-fixture' });
   await expect.poll(() => peer.send('appWindowLoads')).toEqual(['app-show-lock-fixture']);
   const events: string[] = [];
@@ -204,11 +207,17 @@ test('all four native Show buttons wait for unlock before page events or owner a
     expect(await peer.send('showRead')).toEqual(events);
     expect(await peer.send('appWindowTitles')).toEqual([null, 'Avibe is locked']);
     expect(pressed.pending).toBe(true);
+    // The lock entry foregrounds main; replay must restore the page that owns
+    // an in-window action rather than leave its popover behind Workbench.
+    await expect.poll(() => peer.send('showPresentation')).toMatchObject({ focused: false });
     await peer.send('outcome', { value: 'success' });
     const unlocked = await peer.send('unlock');
     if (action === 'Annotate' || action === 'Share') {
       events.push(action === 'Annotate' ? 'avibe:show-annotate-open' : 'avibe:show-share-open');
       expect(unlocked.executed).toEqual([]);
+      await expect.poll(() => peer.send('showPresentation')).toMatchObject({
+        focused: true, visible: true, minimized: false,
+      });
     } else {
       expect(unlocked.executed).toEqual([`show:${action}`]);
     }
@@ -681,6 +690,7 @@ test('native notification choice and Reply wait for unlock and preserve the orig
     expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);
     await peer.send('source', { value: 'dock' });
     await peer.send('tick', { time: 3600 });
+    expect(await peer.send('notificationNotices')).toEqual([]);
     expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);
     await peer.send('outcome', { value: 'success' });
     await peer.send('unlock');
@@ -689,6 +699,7 @@ test('native notification choice and Reply wait for unlock and preserve the orig
       ...(kind === 'choice' ? { metadata: { quick_reply_for: 'msg_fixture' } } : { in_reply_to: 'msg_fixture' }),
     } });
     await expect.poll(async () => (await peer.send<Answers>('composeRead')).answers).toEqual(expected);
+    expect(await peer.send('notificationNotices')).toEqual([]);
     await peer.send('source', { value: 'dock' });
     expect((await peer.send<Answers>('composeRead')).answers).toEqual(expected);
   }
@@ -702,4 +713,36 @@ test('native notification choice and Reply wait for unlock and preserve the orig
   } });
   await expect.poll(async () => (await peer.send<Answers>('composeRead')).answers).toEqual(expected);
   expect(off.after.authCalls).toBe(0);
+});
+
+test('E46 replacing a pending notification answer reports not delivered and retains its Session link', async () => {
+  await peer.send('composePage');
+  type Answers = { answers: { body: { operation_id: string } }[] };
+  await expect.poll(() => peer.send<Answers | null>('composeRead')).not.toBeNull();
+  const baseline = (await peer.send<Answers>('composeRead')).answers;
+  for (const [kind, action] of [
+    ['command', 'avibe.choice.0'], ['content', 'avibe.reply'], ['navigation', 'avibe.reply'],
+  ] as const) {
+    await peer.send('reset', { policy: 'immediately' });
+    await peer.send('outcome', { value: 'cancelled' });
+    const original = await peer.send<{ operationId: string }>('notificationAnswer', {
+      question: { sessionId: 'ses_main', messageId: 'msg_fixture', revision: 'a'.repeat(64), options: ['PRIVATE choice'], source: 'PRIVATE source' },
+      action, text: 'PRIVATE reply', opens: 'avibe://session/ses_main',
+    });
+    await peer.send('source', { value: 'dock' });
+    expect(await peer.send('notificationNotices')).toEqual([]);
+    await peer.send('entry', { kind, value: 'replacement' });
+    const notices = [{
+      title: 'Not delivered', body: 'Open Avibe to answer again.', opens: 'avibe://session/ses_main',
+    }];
+    await expect.poll(() => peer.send('notificationNotices')).toEqual(notices);
+    expect((await peer.send<Answers>('composeRead')).answers).toEqual(baseline);
+    await peer.send('source', { value: 'dock' });
+    await peer.send('outcome', { value: 'success' });
+    expect((await peer.send('unlock')).executed).toEqual(['replacement']);
+    expect(await peer.send('notificationNotices')).toEqual(notices);
+    expect((await peer.send<Answers>('composeRead')).answers.some(
+      (answer) => answer.body.operation_id === original.operationId,
+    )).toBe(false);
+  }
 });

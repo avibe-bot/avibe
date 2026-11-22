@@ -195,15 +195,36 @@ pub(super) fn submit(app: &AppHandle, id: String, question: Question, picked: Pi
             subtitle: Some(subtitle),
             body,
         };
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if handle
-                .try_state::<super::Notifications>()
-                .is_some_and(|notifications| notifications.enabled())
-            {
-                super::macos::notice(copy, opens);
-            }
-        });
+        follow_up(&app, copy, opens);
+    });
+}
+
+/// The answer never reached transport: a later user intent replaced it.
+/// Keep the next step, without claiming a connection failure or exposing text.
+pub(super) fn replaced(app: &AppHandle, opens: Option<String>) {
+    let labels = crate::native_catalog_for_locales(sys_locale::get_locales())
+        .notifications
+        .answer;
+    follow_up(
+        app,
+        NotificationCopy {
+            title: labels.not_delivered,
+            subtitle: None,
+            body: labels.answer_again,
+        },
+        opens,
+    );
+}
+
+fn follow_up(app: &AppHandle, copy: NotificationCopy, opens: Option<String>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if handle
+            .try_state::<super::Notifications>()
+            .is_some_and(|notifications| notifications.enabled())
+        {
+            super::macos::notice(copy, opens);
+        }
     });
 }
 
@@ -218,6 +239,7 @@ mod tests {
             placeholder: String::new(),
             not_sent: "Not sent".into(),
             not_delivered: "Not delivered".into(),
+            answer_again: "Open Avibe to answer again.".into(),
             already_choice: "Already answered \"{{choice}}\" on another device.".into(),
             already_text: "Already answered on another device.".into(),
             stale: "stale".into(),

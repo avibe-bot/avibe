@@ -144,6 +144,7 @@
         "placeholder": "回复这个会话",
         "notSent": "没有发送",
         "notDelivered": "没有送达",
+        "answerAgain": "打开 Avibe 重新回复。",
         "alreadyChoice": "已经在其他设备上回复了「{{choice}}」。",
         "alreadyText": "已在其他设备上回复。",
         "stale": "会话已经有了新进展。打开看看再回复。",

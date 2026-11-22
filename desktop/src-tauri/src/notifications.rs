@@ -50,6 +50,7 @@ pub(crate) struct AnswerCatalog {
     pub placeholder: String,
     pub not_sent: String,
     pub not_delivered: String,
+    pub answer_again: String,
     pub already_choice: String,
     pub already_text: String,
     pub stale: String,
@@ -576,8 +577,9 @@ pub(crate) fn e2e_answer(
     question: serde_json::Value,
     action: &str,
     typed: Option<String>,
+    opens: Option<String>,
 ) -> Result<Option<String>, String> {
-    macos::e2e_answer(app, question, action, typed)
+    macos::e2e_answer(app, question, action, typed, opens)
 }
 
 #[cfg(test)]

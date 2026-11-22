@@ -412,12 +412,17 @@ pub fn install(
         // Keep the document check inside the replayed operation: a window may
         // navigate while authentication is pending. One entry guards all four
         // actions before either page eval or the native owner callback runs.
-        let perform = Arc::new(move |pressed| {
+        let perform = Arc::new(move |pressed, replayed| {
             if !page
                 .url()
                 .is_ok_and(|url| url.origin() == origin && url.path() == route)
             {
                 return;
+            }
+            if replayed && matches!(pressed, Action::Annotate | Action::Share) {
+                let _ = page.unminimize();
+                let _ = page.show();
+                let _ = page.set_focus();
             }
             match pressed {
                 Action::Annotate => {
@@ -442,9 +447,9 @@ pub fn install(
                 }
                 let pending = perform.clone();
                 if !crate::app_lock::defer_kind(owned.app_handle(), crate::app_lock::EntryKind::Command, move |_| {
-                    pending(pressed)
+                    pending(pressed, true)
                 }) {
-                    perform(pressed);
+                    perform(pressed, false);
                 }
             }),
         );
