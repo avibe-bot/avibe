@@ -59,6 +59,8 @@ from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_sess
 from tests.test_desktop_local_instance import desktop_host as desktop_host
 from tests.test_personal_claims import claim_peer as claim_peer, owner_browser as owner_browser
 from tests.test_pairing_recovery import pairing_host as pairing_host
+from tests.test_claim_wire_rebind import issuer as issuer
+from tests.test_rebind_routes import machine as rebind_machine
 from tests.test_remote_rebind_cli import bound_terminal as bound_terminal, terminal as terminal
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
@@ -159,6 +161,75 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
     assert cloud.session_secret and cloud.tunnel_token and cloud.instance_secret
     assert remote_access._read_pending_pairing_record() == (None, None)
     assert all(s not in str(outcome) for s in (state, claim_peer.key, claim_peer.calls[-1][1]["code_verifier"], cloud.session_secret))
+
+
+def _constrained_browser_return(peer):
+    from tests.test_personal_claims import callback_proof
+    from tests.test_rebind_routes import ROOT as claims_path, ORIGIN
+
+    client = app.test_client()
+    headers = csrf_headers(client, base_url=ORIGIN)
+    start = client.post(claims_path, base_url=ORIGIN, headers=headers, json={})
+    assert start.status_code == 201
+    body = start.get_json()
+    assert peer.calls[0][1]['predecessor']['instance_id'] == 'inst_A'
+    returned = client.get('/remote/claim/callback', base_url=ORIGIN, params={
+        'claim_id': body['claim_id'], 'state': callback_proof(body), 'callback_token': 'A' * 43})
+    assert returned.status_code == 303 and returned.headers['Location'] == '/settings/remote-access'
+    path = claims_path + '/' + body['claim_id']
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(path, base_url=ORIGIN)
+        assert response.status_code == 200
+        view = response.get_json()
+        if view['state'] in ('error', 'bound'):
+            return client, headers, path, view
+        time.sleep(.02)
+    pytest.fail('constrained claim did not reach a terminal state')
+
+
+def test_constrained_browser_rebind_publishes_replacement(rebind_machine):
+    """AUTH-SETUP-213: the initiating local browser completes a predecessor-constrained rebind."""
+    peer, redeems = rebind_machine
+    before = V2Config.load().remote_access.vibe_cloud
+    client, _, _, outcome = _constrained_browser_return(peer)
+    assert outcome['state'] == 'bound' and outcome['binding_disposition'] == 'existing'
+    after = V2Config.load().remote_access.vibe_cloud
+    assert after.instance_id == before.instance_id and after.instance_secret != before.instance_secret
+    assert not before.enabled and not after.enabled
+    assert len(redeems) == 1 and redeems[0]['redeem_request_id']
+    assert client.get('/api/remote-access/rebind').get_json()['binding_state'] == 'bound'
+    assert remote_access._read_pending_pairing_record() == (None, None)
+
+
+def test_constrained_browser_refusal_then_confirmed_reset(rebind_machine, monkeypatch):
+    """AUTH-SETUP-214: a qualified refusal offers reset; preview alone never detaches the machine."""
+    from tests.test_rebind_routes import ORIGIN
+    from vibe import binding_admission, desktop_local_instance, direct_certificates
+
+    peer, redeems = rebind_machine
+    before = V2Config.load().remote_access.vibe_cloud
+    peer.outcomes.append((409, {'error': 'installation_unverified', 'recovery': 'reset_as_new',
+                                'reason': 'predecessor_unrecoverable'}, None))
+    monkeypatch.setattr(remote_access, 'stop', lambda _: {'ok': True})
+    monkeypatch.setattr(remote_access, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
+    monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
+    client, headers, path, outcome = _constrained_browser_return(peer)
+    assert outcome['state'] == 'error' and outcome['reason_code'] == 'predecessor_unrecoverable'
+    status = '/api/remote-access/rebind'
+    assert client.get(status, base_url=ORIGIN).get_json()['next_action'] == 'confirm_as_new'
+    reset = path + '/reset'
+    preview = client.post(reset + '/preview', base_url=ORIGIN, headers=headers, json={})
+    assert preview.status_code == 200
+    assert V2Config.load().remote_access.vibe_cloud == before and desktop_local_instance._installation_id()
+    assert not binding_admission.reset_in_progress()
+    proof = {'confirmation_id': preview.get_json()['confirmation_id']}
+    response = client.post(reset, base_url=ORIGIN, headers=headers, json=proof)
+    assert response.status_code == 200 and response.get_json() == {'state': 'unpaired'}
+    assert client.get(status, base_url=ORIGIN).get_json()['binding_state'] == 'unpaired'
+    assert not desktop_local_instance._installation_id() and not V2Config.load().remote_access.vibe_cloud.instance_secret
+    assert client.post(reset, base_url=ORIGIN, headers=headers, json=proof).status_code == 409
+    assert not redeems and not binding_admission.reset_in_progress()
 
 
 def test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account(bound_terminal, monkeypatch, capsys):
