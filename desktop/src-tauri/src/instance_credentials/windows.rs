@@ -87,10 +87,12 @@ impl Scope {
             return Err(unavailable());
         }
         let root = owner.entry(id)?;
-        let dir = dirs::data_local_dir()
-            .ok_or_else(unavailable)?
-            .join("Avibe")
-            .join("credential-locks");
+        // Unit-test binaries never fall back to the user's real Desktop lock.
+        #[cfg(test)]
+        let local = tests::fixture_local_data();
+        #[cfg(not(test))]
+        let local = dirs::data_local_dir();
+        let dir = local.ok_or_else(unavailable)?.join("Avibe").join("credential-locks");
         fs::create_dir_all(&dir).map_err(|_| unavailable())?;
         let lock = OpenOptions::new()
             .read(true)

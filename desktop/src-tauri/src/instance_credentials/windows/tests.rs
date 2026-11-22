@@ -12,6 +12,22 @@ const FIXTURE_PROFILE: &str = "AVIBE_TEST_CREDENTIAL_FIXTURE_PROFILE";
 const TEST_APP: &str = "org.avibe.test.accountjar";
 const ACCOUNT: &str = "synthetic-account";
 
+// Set only by the named fixture or its exact child cases, before any store operation.
+// No process-wide environment changes and no production known-folder fallback.
+static LOCAL_DATA: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub(super) fn fixture_local_data() -> Option<PathBuf> {
+    LOCAL_DATA.get().cloned()
+}
+fn use_fixture_dir(dir: &Path) {
+    assert!(dir.is_absolute() && dir.is_dir());
+    LOCAL_DATA.set(dir.to_owned()).expect("fixture already installed");
+}
+fn child_fixture_dir() -> PathBuf {
+    let dir = PathBuf::from(std::env::var_os(FIXTURE_SYNC).expect("fixture rendezvous"));
+    use_fixture_dir(&dir);
+    dir
+}
+
 struct NoNetwork;
 #[async_trait::async_trait]
 impl Transport for NoNetwork {
@@ -36,8 +52,8 @@ fn signal(dir: &Path, mark: &str) {
 #[ignore = "peer of the isolated live Windows credential contention test"]
 fn live_credential_peer() {
     let profile = uuid::Uuid::parse_str(&std::env::var(FIXTURE_PROFILE).expect("fixture profile")).unwrap();
+    let dir = child_fixture_dir();
     let owner = NativeCredentials::new(TEST_APP, &profile.to_string());
-    let dir = PathBuf::from(std::env::var_os(FIXTURE_SYNC).expect("fixture rendezvous"));
     // Parent holds a real Change (the same lock restore needs), but remains alive throughout.
     let start = Instant::now();
     assert!(owner.read(ACCOUNT).is_err_and(|e| e.code == "credentials_unavailable"));
@@ -52,25 +68,24 @@ fn live_credential_peer() {
     signal(&dir, "observed-absence");
 }
 
-fn exercise_live_contention(owner: &Arc<NativeCredentials>, profile: &str) {
-    let dir = tempfile::tempdir().unwrap();
+fn exercise_live_contention(owner: &Arc<NativeCredentials>, profile: &str, dir: &Path) {
     let mut held = owner.clone().begin_write(ACCOUNT).unwrap();
     let mut peer = Command::new(std::env::current_exe().unwrap())
         .stdout(std::process::Stdio::null())
         .args([LIVE_CASE, "--ignored", "--exact"])
         .env(FIXTURE_PROFILE, profile)
-        .env(FIXTURE_SYNC, dir.path())
+        .env(FIXTURE_SYNC, dir)
         .spawn()
         .unwrap();
-    wait_for(dir.path(), "timed-out");
+    wait_for(dir, "timed-out");
     held.publish(&vec![b'p'; CHUNK + 1]).unwrap();
     drop(held);
-    signal(dir.path(), "published");
-    wait_for(dir.path(), "overwritten");
+    signal(dir, "published");
+    wait_for(dir, "overwritten");
     assert!(owner.read(ACCOUNT).unwrap().as_deref() == Some(&vec![b'c'; CHUNK + 2][..]));
     owner.erase(ACCOUNT).unwrap();
-    signal(dir.path(), "erased");
-    wait_for(dir.path(), "observed-absence");
+    signal(dir, "erased");
+    wait_for(dir, "observed-absence");
     assert!(peer.wait().unwrap().success());
 }
 
@@ -79,7 +94,8 @@ fn exercise_live_contention(owner: &Arc<NativeCredentials>, profile: &str) {
 #[ignore = "worker for the isolated Windows Credential Manager test"]
 fn interrupted_staging_child() {
     let profile = uuid::Uuid::parse_str(&std::env::var(FIXTURE_PROFILE).expect("fixture profile")).unwrap();
-    let owner = NativeCredentials::new("org.avibe.test.accountjar", &profile.to_string());
+    child_fixture_dir();
+    let owner = NativeCredentials::new(TEST_APP, &profile.to_string());
     let change = Change::begin(&owner, "synthetic-account").unwrap();
     change.scope.stage(change.prior(), &vec![b'q'; MAX_JAR]).unwrap();
     // Model process loss: skip Drop (including the file lock) after staging, before publishing.
@@ -90,6 +106,8 @@ fn interrupted_staging_child() {
 #[test]
 #[ignore = "isolated Windows Credential Manager and DPAPI integration"]
 fn windows_native_account_jar_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    use_fixture_dir(dir.path());
     let profile = uuid::Uuid::new_v4().to_string();
     let app = "org.avibe.test.accountjar";
     let account = "synthetic-account";
@@ -122,6 +140,7 @@ fn windows_native_account_jar_lifecycle() {
     released.set_secret(&small).unwrap();
     assert!(legacy_restore().unwrap().cookie_value("ordinary").as_deref() == Some("fixture"));
     assert!(read().unwrap().as_deref() == Some(small.as_slice()));
+    assert!(dir.path().join("Avibe/credential-locks/instance-client.lock").is_file());
     owner.write(account, &first).unwrap();
     assert!(read().unwrap().as_deref() == Some(first.as_slice()));
     let manifest = released.get_secret().unwrap();
@@ -130,6 +149,7 @@ fn windows_native_account_jar_lifecycle() {
         .stdout(std::process::Stdio::null())
         .args([CHILD_CASE, "--ignored", "--exact"])
         .env(FIXTURE_PROFILE, &profile)
+        .env(FIXTURE_SYNC, dir.path())
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(73)); // a filtered/ignored child cannot satisfy the crash test
@@ -164,7 +184,7 @@ fn windows_native_account_jar_lifecycle() {
     assert!(read().unwrap().as_deref() == Some(small.as_slice()));
     released.delete_credential().unwrap();
     assert!(read().unwrap().is_none());
-    exercise_live_contention(&owner, &profile);
+    exercise_live_contention(&owner, &profile, dir.path());
     owner.write(account, &first).unwrap();
     {
         let scope = Scope::open(&owner, account).unwrap();
