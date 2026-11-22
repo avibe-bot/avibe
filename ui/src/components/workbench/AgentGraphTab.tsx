@@ -228,19 +228,29 @@ export const AgentGraphTab: React.FC = () => {
       const seq = ++seqRef.current;
       inFlightRef.current = true;
       if (!background) setLoading(true);
+      // Orphans come from the (filter-independent) running-agents snapshot,
+      // fetched in parallel with the filtered graph but applied on its own: the
+      // snapshot answers fast while the graph can take seconds, so the strip
+      // must not wait for the graph, and a graph failure must not blank it.
+      // A running-agents failure empties the strip and never fails the graph.
+      void api
+        .getRunningAgents()
+        .catch(() => null)
+        .then((running) => {
+          if (!mountedRef.current || seq !== seqRef.current) return;
+          // Every session-less live row (any state) goes to the strip — the graph
+          // is session-centric so these have no node, and the old flat list let
+          // users end them. The strip labels each by its actual state and offers a
+          // state-appropriate action (Stop/Disconnect/Kill).
+          setOrphans(running && running.ok ? running.agents.filter((a) => !a.session_id) : []);
+        });
       try {
-        // Orphans come from the (filter-independent) running-agents snapshot in
-        // parallel with the filtered graph; a running-agents failure must not
-        // fail the graph fetch.
-        const [result, running] = await Promise.all([
-          api.getAgentsGraph({
-            window: windowSel,
-            project: projectSel,
-            includeEnded: mode === 'history',
-            includeBackground: showBackground,
-          }),
-          api.getRunningAgents().catch(() => null),
-        ]);
+        const result = await api.getAgentsGraph({
+          window: windowSel,
+          project: projectSel,
+          includeEnded: mode === 'history',
+          includeBackground: showBackground,
+        });
         // Ignore a stale response: a slower earlier request must not clobber a
         // newer one issued after a filter change.
         if (!mountedRef.current || seq !== seqRef.current) return;
@@ -249,11 +259,6 @@ export const AgentGraphTab: React.FC = () => {
         // out of date. Mark it stale so the next search-box focus refetches —
         // the current copy stays usable so an open dropdown doesn't blank out.
         searchStaleRef.current = true;
-        // Every session-less live row (any state) goes to the strip — the graph
-        // is session-centric so these have no node, and the old flat list let
-        // users end them. The strip labels each by its actual state and offers a
-        // state-appropriate action (Stop/Disconnect/Kill).
-        setOrphans(running && running.ok ? running.agents.filter((a) => !a.session_id) : []);
         setErrored(false);
       } catch {
         if (mountedRef.current && seq === seqRef.current) setErrored(true);
