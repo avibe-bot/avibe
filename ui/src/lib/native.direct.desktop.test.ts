@@ -13,10 +13,29 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // `desktop/src-tauri/src/direct/bridge.rs` does.
 type NativeModule = typeof import('./native');
 
-const install = new Function(`return (${readFileSync(
+const script = new Function(`return (${readFileSync(
   resolve(dirname(fileURLToPath(import.meta.url)), '../../../desktop/src-tauri/src/direct/page_bridge.js'),
   'utf8',
 )})`)() as (token: string, version: string) => void;
+
+/**
+ * Runs the script as a new document would. Its two properties cannot be
+ * redefined, which a real document never needs; here every case is a new
+ * document in the same window, so for the length of this call alone they are
+ * made removable.
+ */
+const install = (token: string, version: string) => {
+  const page = window;
+  const defineProperty = Object.defineProperty;
+  Object.defineProperty = ((target: object, key: PropertyKey, descriptor: PropertyDescriptor) =>
+    defineProperty(target, key, target === page ? { ...descriptor, configurable: true } : descriptor)
+  ) as typeof Object.defineProperty;
+  try {
+    script(token, version);
+  } finally {
+    Object.defineProperty = defineProperty;
+  }
+};
 
 type Request = { token: string; id: string; method: string; params: Record<string, unknown> };
 
@@ -80,13 +99,6 @@ afterEach(() => {
   asksBeforeLeaving = true;
   vi.useRealTimers();
 });
-
-// `Object.defineProperty` without `configurable` cannot be undone between
-// cases, so the script's two properties are made removable for the tests.
-const defineProperty = Object.defineProperty;
-Object.defineProperty = ((target: object, key: PropertyKey, descriptor: PropertyDescriptor) =>
-  defineProperty(target, key, target === window ? { ...descriptor, configurable: true } : descriptor)
-) as typeof Object.defineProperty;
 
 describe('the desktop direct bridge', () => {
   it('answers direct, and nothing else of the phone App', async () => {
@@ -243,7 +255,7 @@ describe('the desktop direct bridge', () => {
 
   it('is not installed over a bridge that is already there', () => {
     const existing = { contract: 1, platform: 'ios' };
-    defineProperty(window, 'avibeNative', { configurable: true, value: existing });
+    Object.defineProperty(window, 'avibeNative', { configurable: true, value: existing });
     install('window-token', '3.2.7');
     expect(window.avibeNative).toBe(existing);
   });

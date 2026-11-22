@@ -13,7 +13,11 @@ use crate::direct::{
     Client, Handover, PathStatus,
 };
 use crate::instance_client;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tauri::{AppHandle, Manager, Webview};
 use tokio::sync::watch;
 
@@ -23,9 +27,13 @@ struct Page {
     account: String,
     origin: String,
     ledger: Ledger,
-    /// A document has loaded in it, so the window exists.
-    loaded: bool,
+    /// When its bridge script was made: just before the window was.
+    made: Instant,
 }
+
+/// How long a window may take to exist after its bridge script was made,
+/// before what is kept for it is dropped as a window that never was.
+const UNMADE: Duration = Duration::from_secs(60);
 
 /// What a session's client tells and does for its windows' pages.
 struct Live {
@@ -66,7 +74,7 @@ pub(crate) fn script(app: &AppHandle, label: &str, origin: &url::Url) -> Option<
             account,
             origin,
             ledger: Ledger::default(),
-            loaded: false,
+            made: Instant::now(),
         },
     );
     Some(script)
@@ -105,7 +113,7 @@ pub(super) fn refresh(app: &AppHandle, state: &Arc<Direct>, all: bool) {
         let mut pages = lock(&state.pages);
         pages
             .windows
-            .retain(|label, page| !page.loaded || app.get_webview(label).is_some());
+            .retain(|label, page| app.get_webview(label).is_some() || page.made.elapsed() < UNMADE);
         pages.windows.keys().cloned().collect()
     };
     for label in labels {
@@ -118,9 +126,8 @@ pub(super) fn refresh(app: &AppHandle, state: &Arc<Direct>, all: bool) {
 pub(crate) fn loaded(view: &Webview) {
     let app = view.app_handle();
     let Some(state) = direct(app) else { return };
-    match lock(&state.pages).windows.get_mut(view.label()) {
-        Some(page) => page.loaded = true,
-        None => return,
+    if !lock(&state.pages).windows.contains_key(view.label()) {
+        return;
     }
     push(app, &state, view.label(), true);
 }
