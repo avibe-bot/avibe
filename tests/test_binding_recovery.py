@@ -317,6 +317,43 @@ def test_tunnel_cutover_before_config_write_preserves_old_authority(cli_host, mo
     assert cs.value(V2Config.load(), 'ipFamily') == 'auto' and not cs.journal.path.exists()
 
 
+@pytest.mark.parametrize('action', ['pair', 'reset'])
+def test_busy_connector_defers_identity_cutover_without_losing_work(cli_host, monkeypatch, action):
+    from vibe import connection_settings as cs
+
+    _, redeems = cli_host
+    cfg = V2Config.load()
+    old = cs.value(cfg, 'ipFamily')
+    op = cs.journal.begin(cfg, 'ipFamily', '6')
+    cfg.remote_access.vibe_cloud.edge_ip_version = '6'
+    cfg.save()
+    cs.journal.verifying(cfg, op['id'], 'old-generation')
+    before = cs.journal.path.read_bytes()
+
+    def busy(*, timeout):
+        assert timeout == 0  # do not wait behind the running connector
+        raise remote._ConnectorLifecycleBusy()
+
+    with monkeypatch.context() as cut:
+        cut.setattr(remote, '_connector_lifecycle', busy)
+        if action == 'pair':
+            assert remote.pair('key_B', 'https://backend.test')['error'] == 'pairing_save_failed_after_redeem'
+            assert remote._read_pending_pairing_record()[0]['phase'] == 'redeemed'
+        else:
+            assert reset.reset_interactively(confirm=lambda: True) == {'state': 'resetting'}
+            assert reset._read()['phase'] == 'clear'
+    prior = V2Config.load()
+    assert prior.remote_access.vibe_cloud.instance_id == 'inst_A' and cs.value(prior, 'ipFamily') == '6'
+    assert cs.journal.path.read_bytes() == before
+    # A later worker tick resumes the sealed operation without new consent or redemption.
+    assert remote._drive_pending_pairing() == (True, 1)
+    live = V2Config.load()
+    assert live.remote_access.vibe_cloud.instance_id == ('inst_B' if action == 'pair' else '')
+    assert cs.value(live, 'ipFamily') == old and not cs.journal.path.exists()
+    assert [key for _, key in redeems] == (['key_A', 'key_B'] if action == 'pair' else ['key_A'])
+    assert not gate.reset_in_progress() and remote._read_pending_pairing_record() == (None, None)
+
+
 def _hold_admission(pipe):
     with gate.admitted('reset'):
         pipe.send('held')
