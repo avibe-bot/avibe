@@ -42,6 +42,13 @@ for (const lang of ['en', 'zh'] as const) {
     await page.getByRole('button', { name: copy.startTest, exact: true }).click();
     await expect(page.getByRole('button', { name: copy.stopTest, exact: true })).toBeVisible();
     await expect(page.getByTestId('microphone-level')).toBeVisible();
+    // The running action must remain below the complete status (including the meter),
+    // aligned with the input selector just like the idle action.
+    const inputBox = await page.getByRole('button', { name: copy.chooseInput }).boundingBox();
+    const stopBox = await page.getByRole('button', { name: copy.stopTest, exact: true }).boundingBox();
+    const statusBox = await page.getByRole('status').filter({ has: page.getByTestId('microphone-level') }).boundingBox();
+    expect(stopBox!.x).toBeCloseTo(inputBox!.x, 0);
+    expect(stopBox!.y).toBeGreaterThan(statusBox!.y + statusBox!.height);
     expect(await captures()).toEqual([{ constraints: { audio: { deviceId: { exact: 'fixture-usb' } } }, state: 'live' }]);
     await page.screenshot({ animations: 'disabled', path: `/tmp/w1-mic-composition-evidence/microphone-${lang}-testing.png` });
     await page.getByRole('button', { name: copy.stopTest, exact: true }).click();
@@ -88,7 +95,7 @@ for (const lang of ['en', 'zh'] as const) {
       const start = page.getByRole('button', { name: copy.startTest, exact: true });
       const startBox = await start.boundingBox();
       expect(startBox!.x).toBeCloseTo(initial.left, 0);
-      const statusBox = await page.getByText(copy.notTested, { exact: true }).boundingBox();
+      const statusBox = await page.getByRole('status').filter({ hasText: copy.notTested }).boundingBox();
       expect(startBox!.y).toBeGreaterThan(statusBox!.y + statusBox!.height);
       await trigger.hover();
       await page.mouse.down();

@@ -6,7 +6,7 @@ Scope: the shipped trigger, real-component design fixtures, and browser regressi
 
 Validation: compare before/after design frames at the same dimensions in light/dark and English/Chinese, plus selected short/long names and a narrow desktop container. Browser tests measure intrinsic width, containment, truncation, held-pointer geometry and test-action alignment; existing microphone unit and interaction tests retain behavioral coverage. Run the UI build and design typecheck.
 
-Owner review: send screenshots to main and wait for Max's confirmation before opening an English PR. No packaging or installation.
+Owner review: screenshots approved by Max; open an English PR and hand review coordination to main. No packaging or installation.
 
 ## Evidence
 
@@ -20,4 +20,4 @@ Owner review: send screenshots to main and wait for Max's confirmation before op
 
 The owner requested a left-aligned test action on November 22. Desktop/Web now stacks the status and action in their existing order; the action shares the input selector’s left edge. iOS retains its existing layout. Capture, permission and selection behavior are unchanged.
 
-Validation: 6 microphone unit tests and 6 browser tests passed, including the new action-position assertion in both languages and themes. The assertion fails on the preceding layout (action x=1069 versus selector x=347). UI build and design typecheck passed. Another 24 real-component captures cover both themes/languages, short and long names, narrow containment, expanded picker and active testing. Await owner screenshot approval; do not push or open a PR.
+Validation: 6 microphone unit tests and 6 browser tests passed, including the new action-position assertion in both languages and themes. The assertion fails on the preceding layout (action x=1069 versus selector x=347). UI build and design typecheck passed. Another 24 real-component captures cover both themes/languages, short and long names, narrow containment, expanded picker and active testing. Max approved the screenshots on November 22 at 13:29 and authorized opening a PR. Merge, release, packaging and installation remain unauthorized.
