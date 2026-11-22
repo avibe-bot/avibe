@@ -142,6 +142,8 @@ jobs:
         run: python src-tauri/tests/direct_sidecar_fixture.py
 
       - name: Test authenticated Desktop CONNECT against the verified sidecar
+        # #4149: this invocation explicitly runs ignored tests; the Rust ignore alone is not a quarantine.
+        if: runner.os != 'Windows'
         timeout-minutes: 5
         run: cargo test --locked -p avibe-desktop --all-features direct::interop::desktop_direct_real_sidecar -- --ignored --exact
 

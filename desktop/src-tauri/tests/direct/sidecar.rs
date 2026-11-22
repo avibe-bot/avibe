@@ -27,7 +27,14 @@ use tokio::{
 };
 
 #[tokio::test]
-#[ignore = "requires verified pinned release fixture; required in desktop-shell CI"]
+#[cfg_attr(
+    windows,
+    ignore = "#4149: Windows pending refresh returned Retired instead of Retained"
+)]
+#[cfg_attr(
+    not(windows),
+    ignore = "requires verified pinned release fixture; required in desktop-shell CI"
+)]
 async fn desktop_direct_real_sidecar() {
     for changed_selection in [false, true] {
         timeout(Duration::from_secs(30), run(changed_selection))
