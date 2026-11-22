@@ -14,7 +14,7 @@ import {
   type ComposerHoldView,
   type HoldPointer,
 } from '@/components/voice/ComposerHold';
-import { PendingVoiceItem, type PendingVoiceItemProps } from '@/components/voice/PendingVoiceItem';
+import { PendingVoiceItem, type PendingVoiceItemProps } from '@/components/voice/PendingVoiceTakes';
 import type { VoiceTarget } from '@/components/voice/VoiceCard';
 import { Composer } from '@/components/workbench/Composer';
 import { useBots } from '@/context/BotsContext';

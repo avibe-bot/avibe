@@ -114,22 +114,6 @@ Menu cases consume the production handler with actual AppKit checkmarks, cancel
 and replace deferred work, compare test-owned disk bytes, and verify successful
 notification replay toggles exactly once.
 
-## First-load CI follow-up
-
-The first-load gate rejected the frozen candidate at 600.1 KiB gzip for home.
-Keep its 600 KiB budget. Extract the unchanged `PendingVoiceItem` presentation
-into a chunk loaded through the existing `lazyPage` only when the list has
-something to draw. Storage ownership, automatic retry admission and every lock
-listener/guard remain eager in their existing owners; no capture cancellation
-or default-Off behavior waits for the chunk.
-
-A normal production build measured with CI's gzip level 6 gives home 613,958
-bytes (599.568359375 KiB) and chat 914,962 bytes (893.517578125 KiB), within the
-unchanged 600/900 KiB budgets. The real keeper/store/pending-list consumers,
-Composer, Hold and existing lazy-loader tests pass 147 cases. The design frames
-import the same extracted presentation directly; markup, props and copy are
-unchanged.
-
 ## Gates
 
 Record one old-red/new-green consuming test per family. Original reviewer checks
@@ -138,3 +122,26 @@ then required Rust/UI/build checks. Keep the unchanged Show focus assertion and
 public unlock Watch. New same-family omissions or product decisions return to
 main before another push. Main owns Codex triggering; fresh exact-head review,
 zero unresolved threads, green expected CI and CLEAN are mandatory for merge.
+
+## First-load budget follow-up (November 23)
+
+The clean `fccd8c8f96` production build measures 614,509 gzip bytes for home
+(109 above the unchanged 614,400-byte budget) and 915,200 for chat
+(within 921,600). The eager graph adds only `desktopVoiceLock.ts`; no new
+third-party eager dependency accounts for the increase.
+
+The local lazy-card experiment is withdrawn: a retained take can first appear
+offline, before any idle prefetch, and must remain visible and usable. The new
+production-browser regression fails against that experiment and passes with
+the eager card. It discovers the same persisted take offline, keeps the editor
+usable, then transcribes once on reconnect and consumes it by explicit Insert.
+No microphone or real service is used.
+
+The authorized bounded reduction round did not produce a passing candidate.
+Presentation deduplication reached 614,483 home bytes (83 over); shared bridge
+request parsing reached 614,501 (101 over); additionally sharing availability
+publication returned home to 614,509 (chat 915,176). All experiments are reverted.
+The final clean rebuild reproduces 614,509 / 915,200. Strict locked delivery
+semantics, eager offline retrieval and both budgets are unchanged. Further
+optimization scope requires the orchestrator's decision; no failing candidate
+is pushed or merged.
