@@ -76,6 +76,12 @@ class PermissionRequest:
 BinaryResolver = Callable[[V2Config], str | Path | None]
 
 
+def _effective_relay(config: V2Config) -> bool:
+    from vibe.connection_settings import relay_enrolled
+
+    return bool(config.remote_access.vibe_cloud.public_relay_trial and relay_enrolled(config))
+
+
 def resolve_direct_transport_binary(config: V2Config) -> Path | None:
     """Worker-only: inspect the exact packaged pin; never install or run it."""
     if not config.remote_access.vibe_cloud.direct or not _is_paired(config) or managed_direct_hostname(config) is None:
@@ -83,7 +89,7 @@ def resolve_direct_transport_binary(config: V2Config) -> Path | None:
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
     manager = DirectTransportRuntimeManager()
-    if config.remote_access.vibe_cloud.public_relay_trial:
+    if _effective_relay(config):
         return manager.resolve_binary(require_public_trial=True)
     return manager.resolve_binary()
 
@@ -107,7 +113,7 @@ def _config_signature(config: V2Config) -> tuple[Any, ...]:
     return (
         bool(cloud.direct), cloud.instance_id, cloud.public_url,
         remote_access._pairing_identity_fingerprint(remote_access._pairing_identity_from_cloud(cloud)),
-        cloud.public_relay_trial,
+        _effective_relay(config),
     )
 
 
@@ -222,6 +228,7 @@ class DirectAccessLifecycle:
         self._resource_generation: int | None = None
         self._failed_generation: int | None = None
         self._state_lock = threading.Lock()
+        self._settled_generation: int | None = None
         self._status = DirectAccessStatus(False, "disabled", "setting_off")
 
     async def start(self) -> None:
@@ -257,6 +264,7 @@ class DirectAccessLifecycle:
     def _invalidate(self) -> None:
         with self._state_lock:
             self._generation += 1
+            self._settled_generation = None
         self._failed_generation = None
         self._resource_generation = None
         # A worker from the retired generation can have replaced the on-disk
@@ -448,7 +456,7 @@ class DirectAccessLifecycle:
             binary = str(resolved) if resolved else None
             if not binary:
                 # An installed pin rejected only by trial policy isn't missing.
-                if config.remote_access.vibe_cloud.public_relay_trial:
+                if _effective_relay(config):
                     config.remote_access.vibe_cloud.public_relay_trial = False
                     missing = self._binary_resolver(config) is None
                 else:
@@ -653,7 +661,7 @@ class DirectAccessLifecycle:
 
         self._supervisor = self._supervisor_factory(
             binary, self._ingress, _OwnedRendezvous(self, generation, ingress),
-            **({"relay_policy": PUBLIC_TRIAL} if self._config.remote_access.vibe_cloud.public_relay_trial else {}),
+            **({"relay_policy": PUBLIC_TRIAL} if self._signature[-1] else {}),
         )
         await self._supervisor.start()
         if generation != self._generation or self._gate()[2] is None:
@@ -802,10 +810,17 @@ class DirectAccessLifecycle:
         with self._state_lock:
             return self._status
 
+    def applied_generation(self, config: V2Config) -> int | None:
+        signature = _config_signature(config)
+        with self._state_lock:
+            return self._settled_generation if not self._shutdown and self._signature == signature else None
+
     def _set_state(self, state: str, reason: str) -> None:
         assert state in DIRECT_STATES
         diagnostics = self._supervisor.status if self._supervisor is not None else None
         with self._state_lock:
+            if state not in {"starting", "stopping"} and (self._supervisor is None or self._resource_generation == self._generation):
+                self._settled_generation = self._generation
             self._status = DirectAccessStatus(
                 enabled=bool(self._signature and self._signature[0]), state=state, reason=reason,
                 certificate_not_after=getattr(self._certificate_result, "certificate_not_after", None),

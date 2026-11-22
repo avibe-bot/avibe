@@ -347,11 +347,38 @@ async def test_auto_install_once_only_when_enabled(reports, published, monkeypat
         assert attempts == [1] and len(published[2]) == 1 and rv.endpoint is not None
 
 
+def test_enrollment_only_changes_the_effective_policy_for_its_pairing(tmp_path, monkeypatch):
+    from vibe import connection_settings as cs
+
+    monkeypatch.setattr(cs, "_relay_enrollment_path", lambda: tmp_path / "enrollment.json")
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.public_relay_trial = True
+    not_enrolled = module._config_signature(config)
+    assert not not_enrolled[-1]
+    cs.enroll_from_host(config)
+    assert module._config_signature(config)[-1] is True
+    # No change to the config file or its enabled bit was needed to advance the policy.
+    assert module._config_signature(config) != not_enrolled
+    cloud.enabled = False
+    cloud.session_secret = "rotated-browser-cookie-key"
+    cloud.public_url = "https://renamed-app.avibe.bot"
+    assert cs.relay_enrolled(config)
+    cloud.enabled = True
+    assert module._config_signature(config)[-1] is True
+    cloud.instance_secret = "different-pairing-credential"
+    assert module._config_signature(config)[-1] is False
+    assert cloud.public_relay_trial is True
+
+
 async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_then_retires_on_off(reports, published, monkeypatch):
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
+    from vibe.connection_settings import enroll_from_host
+
     config = _config()
     config.remote_access.vibe_cloud.public_relay_trial = True
+    enroll_from_host(config)
     manager = DirectTransportRuntimeManager()
     assert manager.ensure()["ok"]
     monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)

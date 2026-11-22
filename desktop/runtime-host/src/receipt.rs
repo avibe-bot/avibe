@@ -393,87 +393,67 @@ mod tests {
         std::fs::remove_dir_all(scratch).ok();
     }
 
+    // Exercise the actual ChildStdout and reader thread. Python startup isn't
+    // part of the parser's budget: signal only after the one write is flushed,
+    // then keep stdout open until the parent has observed the verdict.
+    fn assert_invalid_on_open_stdout(bytes: &str) {
+        let scratch = tempfile::tempdir().unwrap();
+        let written = scratch.path().join("written");
+        let script = "import sys; sys.stdout.buffer.write(sys.argv[1].encode('ascii')); \
+                      sys.stdout.buffer.flush(); open(sys.argv[2], 'xb').close(); sys.stdin.buffer.read()";
+        let spawn = |python| {
+            Command::new(python)
+                .args(["-c", script, bytes])
+                .arg(&written)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+        };
+        let python = std::env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
+        let mut child = spawn(python)
+            .or_else(|_| spawn("python".into()))
+            .expect("a Python interpreter is available");
+        let stream = StartupReceiptStream::spawn(child.stdout.take().unwrap(), BootstrapLog::disabled());
+        let setup_deadline = Instant::now() + Duration::from_secs(15);
+        while !written.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("receipt writer exited before flushing stdout: {status}");
+            }
+            if Instant::now() >= setup_deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("receipt writer did not flush stdout");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut event = None;
+        while Instant::now() < deadline {
+            if let Some(next) = stream.try_next() {
+                event = Some(next);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let still_running = child.try_wait().unwrap().is_none();
+        // Child::wait closes stdin, releasing the writer even on a bad verdict.
+        let status = child.wait().unwrap();
+        assert_eq!(event, Some(ReceiptEvent::Invalid));
+        assert!(still_running, "invalid must precede writer exit");
+        assert!(status.success(), "receipt writer exited {status}");
+    }
+
     #[test]
     fn real_stdout_batch_rejects_a_second_receipt_before_acceptance() {
         let frame = format!(
             "{START_RECEIPT_PREFIX}{{\"schema_version\":1,\"outcome\":\"ready\",\"origin\":\"http://127.0.0.1:5123\"}}\n"
         );
-        let python = std::env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
-        let mut child = Command::new(&python)
-            .arg("-c")
-            .arg(format!(
-                "import sys; sys.stdout.write({frame:?} + {frame:?}); sys.stdout.flush()"
-            ))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .or_else(|_| {
-                Command::new("python")
-                    .arg("-c")
-                    .arg(format!(
-                        "import sys; sys.stdout.write({frame:?} + {frame:?}); sys.stdout.flush()"
-                    ))
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-            })
-            .expect("a Python interpreter is available");
-        let stdout = child.stdout.take().expect("receipt stdout pipe");
-        let stream = StartupReceiptStream::spawn(stdout, BootstrapLog::disabled());
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut event = None;
-        while Instant::now() < deadline {
-            if let Some(next) = stream.try_next() {
-                event = Some(next);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(event, Some(ReceiptEvent::Invalid));
-        assert!(child.wait().expect("Python producer exits").success());
+        assert_invalid_on_open_stdout(&frame.repeat(2));
     }
 
     #[test]
     fn real_stdout_reports_an_oversized_prefixed_frame_without_waiting_for_newline() {
-        let python = std::env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
-        let script = format!(
-            "import sys,time; sys.stdout.write({prefix:?} + 'x' * 4096); sys.stdout.flush(); time.sleep(1)",
-            prefix = START_RECEIPT_PREFIX,
-        );
-        let mut child = Command::new(&python)
-            .arg("-c")
-            .arg(&script)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .or_else(|_| {
-                Command::new("python")
-                    .arg("-c")
-                    .arg(&script)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-            })
-            .expect("a Python interpreter is available");
-        let stdout = child.stdout.take().expect("receipt stdout pipe");
-        let stream = StartupReceiptStream::spawn(stdout, BootstrapLog::disabled());
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut event = None;
-        while Instant::now() < deadline {
-            if let Some(next) = stream.try_next() {
-                event = Some(next);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(event, Some(ReceiptEvent::Invalid));
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "oversize is terminal before newline or child exit"
-        );
-        let _ = child.kill();
-        let _ = child.wait();
+        assert_invalid_on_open_stdout(&format!("{START_RECEIPT_PREFIX}{}", "x".repeat(4096)));
     }
 }

@@ -1,3 +1,4 @@
+import { nativeCaptureAllowed } from './nativeVoiceCapture';
 import {
   ShowPageVoiceDictation,
   type ShowPageVoiceDictationInput,
@@ -259,11 +260,15 @@ export class ShowPageVoiceHost {
         this.postError(request.requestId, 'unavailable', false);
         return;
       }
+      // In the iOS App the App records the take (lib/nativeVoiceCapture), not the page.
+      const nativeCapture = await nativeCaptureAllowed().catch(() => false);
+      if (this.disposed || pending.cancelled || this.starting !== pending) return;
       const keep = this.dependencies.keep?.() ?? null;
       const session = this.dependencies.createSession({
         before: request.before,
         after: request.after,
         captureClaim,
+        ...(nativeCapture ? { nativeCapture: true } : {}),
         maxFileBytes: availability.maxFileBytes,
         ...(keep ? { keep } : {}),
         onPreview: (text) => {

@@ -152,6 +152,9 @@ _QUALITY_MONITOR_LOCK = threading.Lock()
 _QUALITY_MONITOR_STARTED = False
 _QUALITY_EVALUATOR = tunnel_quality.QualityEvaluator()
 _QUALITY_SNAPSHOT_LOCK = threading.Lock()
+# Join preference-only writes and full monitor checkpoints without acquiring
+# the recovery lock from a connector promotion or inventing a quality sample.
+_QUALITY_HISTORY_LOCK = threading.Lock()
 _QUALITY_SNAPSHOT: dict[str, Any] | None = None
 _QUALITY_SNAPSHOT_PATH: Path | None = None
 _RECOVERY_LOCK = threading.Lock()
@@ -568,6 +571,14 @@ def _initial_connector_protocol(config: V2Config) -> str:
     if configured != "auto":
         return configured
     return _PREFERRED_PROTOCOL or _stored_preferred_protocol() or "auto"
+
+
+def _explicit_candidate_protocol(config: V2Config) -> str:
+    """Bounded trials cannot wait for cloudflared's literal auto to switch transports."""
+    first = _initial_connector_protocol(config)
+    if first not in ('quic', 'http2'):
+        first = _effective_protocol(None, None)
+    return first if first in ('quic', 'http2') else 'http2'
 
 
 def _connector_environment(config: V2Config, protocol: str) -> dict[str, str]:
@@ -1519,7 +1530,7 @@ def connectivity_diagnostics(config: V2Config | None = None) -> dict[str, Any]:
     }
 
 
-def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
+def apply_settings(payload: dict[str, Any], *, operation_id: str | None = None, expected_binding: str | None = None) -> dict[str, Any]:
     """Persist Tunnel controls, replacing a live Connector without an outage."""
 
     if not isinstance(payload, dict):
@@ -1549,9 +1560,64 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
             "error": binding_error,
         }
 
+    from vibe.connection_settings import AUTOMATIC, FIELDS, binding, journal
+    network_fields = {FIELDS[key] for key in AUTOMATIC} & set(payload)
+
+    def legacy_reserved(config):
+        return operation_id is None and network_fields and journal.legacy_busy(config, network_fields)
+
+    def persist(new_settings: dict[str, Any], *, promotion: tuple[int, str] | None = None):
+        with config_file_lock():
+            live = V2Config.load()
+            if legacy_reserved(live):
+                raise RuntimeError('remote_access_settings_unavailable')
+            if expected_binding is not None and binding(live) != expected_binding:
+                raise RuntimeError("connection_binding_changed")
+            if operation_id is not None:
+                journal.applying(live, operation_id)
+            if any(_remote_access_settings(live)[k] != previous_settings[k] for k in new_settings):
+                raise RuntimeError("remote_access_settings_changed")
+            if operation_id is not None:
+                state = journal.load(live)
+                op = journal.owned(state, operation_id, 'applying')
+                if promotion is not None:
+                    # Write ahead of both config persistence and promotion. The
+                    # candidate record (including started_at) becomes the active
+                    # record unchanged. No post-promotion write is needed to
+                    # prove which connector this operation could have installed.
+                    pid, url = promotion
+                    candidate = connector_generation('candidate', pid=pid, metrics_url=url)
+                    if not candidate:
+                        raise RuntimeError('candidate_state_changed')
+                    if op.get('candidateGeneration'):
+                        # An inherited repair may straddle an earlier promotion.
+                        # Keep its actually active fence before staging this one.
+                        active = connector_generation()
+                        if not active:
+                            raise RuntimeError('active_state_unavailable')
+                        op['generation'] = active if active in (op.get('generation'), op['candidateGeneration']) else None
+                    op['candidateGeneration'] = candidate
+                op['writeStarted'] = True
+                journal.save(state)
+            saved = api.save_config({"remote_access": {"vibe_cloud": new_settings}})
+            if promotion is None:
+                if operation_id is not None:
+                    state = journal.load(saved)
+                    journal.owned(state, operation_id, "applying")
+                    journal.finish(state, "applied", "saved_without_connector")
+                else:
+                    journal.legacy_supersede(saved, set(new_settings))
+            return saved
+
     previous_settings = _remote_access_settings(current_config)
     candidate_settings = _remote_access_settings(candidate_config)
     if previous_settings == candidate_settings:
+        # A no-op never cancels work. A value still awaiting rollback, however,
+        # is not safe to affirm as the current setting.
+        if operation_id is None and network_fields:
+            with config_file_lock():
+                if journal.legacy_busy(V2Config.load(), network_fields, noop=True):
+                    return {**status(current_config), 'ok': False, 'error': 'remote_access_settings_unavailable'}
         return {**status(current_config), "ok": True, "settings_applied": False}
     connector_fields = {
         "transport_protocol",
@@ -1564,9 +1630,12 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
     )
     current_status = status(current_config)
     if not connector_changed:
-        candidate_config = api.save_config(
-            {"remote_access": {"vibe_cloud": payload}}
-        )
+        try:
+            candidate_config = persist(payload)
+        except RuntimeError as exc:
+            if str(exc) != 'remote_access_settings_unavailable':
+                raise
+            return {**current_status, 'ok': False, 'error': 'remote_access_settings_unavailable'}
         return {
             **status(candidate_config),
             "ok": True,
@@ -1575,7 +1644,7 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
         }
 
     with _RECOVERY_LOCK:
-        if _connector_lane_reserved_locked():
+        if _connector_lane_reserved_locked() or legacy_reserved(V2Config.load()):
             return {
                 **current_status,
                 "ok": False,
@@ -1594,9 +1663,7 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
                     "error": "remote_access_settings_unavailable",
                 }
             if not live_status.get("running"):
-                candidate_config = api.save_config(
-                    {"remote_access": {"vibe_cloud": payload}}
-                )
+                candidate_config = persist(payload)
                 return {
                     **status(candidate_config),
                     "ok": True,
@@ -1613,7 +1680,7 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     def start_settings_candidate(protocol: str) -> tuple[int, str] | None:
         with _connector_lifecycle(), _RECOVERY_LOCK:
-            if _connector_lane_reserved_locked():
+            if _connector_lane_reserved_locked() or legacy_reserved(V2Config.load()):
                 return None
             with _CONNECTOR_LOCK:
                 return _start_candidate_connector(
@@ -1624,7 +1691,8 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     candidate_pid: int | None = None
     try:
-        requested_protocol = _initial_connector_protocol(candidate_config)
+        page_auto = operation_id is not None and _configured_protocol(candidate_config) == 'auto'
+        requested_protocol = _explicit_candidate_protocol(candidate_config) if page_auto else _initial_connector_protocol(candidate_config)
         started_candidate = start_settings_candidate(requested_protocol)
         if started_candidate is None:
             return {
@@ -1642,7 +1710,8 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
             candidate_pid = None
             if not fallback_to_auto:
                 raise RuntimeError("candidate_not_ready")
-            started_candidate = start_settings_candidate("auto")
+            fallback = _other_transport(requested_protocol) if page_auto else 'auto'
+            started_candidate = start_settings_candidate(fallback)
             if started_candidate is None:
                 return {
                     **current_status,
@@ -1664,21 +1733,23 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
                     or _remote_access_settings(live_config) != previous_settings
                 ):
                     raise RuntimeError("remote_access_settings_changed")
-                candidate_config = api.save_config(
-                    {"remote_access": {"vibe_cloud": payload}}
-                )
+                candidate_config = persist(payload, promotion=(candidate_pid, metrics_url))
             try:
-                replaced = _promote_candidate_connector(
-                    candidate_pid,
-                    runtime_signature=_runtime_signature(candidate_config, binary),
-                )
+                replaced = _promote_candidate_connector(candidate_pid, runtime_signature=_runtime_signature(candidate_config, binary))
             except Exception:
-                with CONFIG_LOCK:
-                    api.save_config(
-                        {"remote_access": {"vibe_cloud": previous_settings}},
-                        validate_remote_access_network=False,
-                    )
+                with config_file_lock():
+                    latest = V2Config.load()
+                    if binding(latest) == binding(candidate_config):
+                        restore = {k: previous_settings[k] for k in payload if _remote_access_settings(latest)[k] == candidate_settings[k]}
+                        if restore:
+                            api.save_config({"remote_access": {"vibe_cloud": restore}}, validate_remote_access_network=False)
                 raise
+            candidate_pid = None  # now active; a journal I/O failure must never discard it as a candidate
+            with config_file_lock():
+                if operation_id is not None:
+                    journal.verifying(candidate_config, operation_id, connector_generation())
+                else:
+                    journal.legacy_supersede(candidate_config, set(payload))
     except Exception as exc:
         if candidate_pid is not None:
             _discard_candidate_connector(candidate_pid)
@@ -1697,6 +1768,14 @@ def apply_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "connector_replaced": True,
         "previous_connector_drained": drained,
     }
+
+
+def connector_generation(slot: str = 'active', *, pid: int | None = None, metrics_url: str | None = None) -> str | None:
+    record = _state_connector(slot) or {}
+    if ((pid is not None and record.get('pid') != pid) or (metrics_url is not None and record.get('metrics_url') != metrics_url)
+            or not record.get('started_at') or not record.get('metrics_url') or not _is_cloudflared_pid(record.get('pid'))):
+        return None
+    return hashlib.sha256(json.dumps([record['pid'], record['started_at'], record['metrics_url']]).encode()).hexdigest()
 
 
 def live_direct_status(config: V2Config, *, wait_for_setting: bool = False) -> dict[str, Any] | None:
@@ -3129,9 +3208,10 @@ def _persist_quality_snapshot(
             "recovery": json.loads(json.dumps(_RECOVERY_STATE)),
             "retry_policy_version": RECOVERY_RETRY_POLICY_VERSION,
             "context": _QUALITY_CONTEXT,
-            "preferred_protocol": _PREFERRED_PROTOCOL,
         }
-    runtime.write_json(quality_path.with_name(_quality_history_path().name), monitor_state)
+    with _QUALITY_HISTORY_LOCK:
+        monitor_state["preferred_protocol"] = _PREFERRED_PROTOCOL
+        runtime.write_json(quality_path.with_name(_quality_history_path().name), monitor_state)
     if publish and _snapshot_change_key(previous) != _snapshot_change_key(snapshot):
         try:
             from vibe.sse_broker import broker
@@ -3186,6 +3266,9 @@ def _clear_availability_cooldown(*, source: str) -> None:
 
 
 def _recovery_refusal_locked(*, manual: bool, emergency: bool, now: float) -> str | None:
+    from vibe.connection_settings import journal
+    if journal.owns_connector_lane():
+        return "remote_access_busy"
     if _RECOVERY_THREAD is not None:
         return "route_optimization_evaluating"
     if _connector_lane_reserved_locked():
@@ -3359,10 +3442,14 @@ def _set_preferred_protocol(protocol: str | None) -> None:
     global _PREFERRED_PROTOCOL
     if protocol not in {"quic", "http2", None}:
         return
-    _PREFERRED_PROTOCOL = protocol
-    snapshot = tunnel_quality_snapshot()
-    if snapshot is not None:
-        _persist_quality_snapshot(snapshot, publish=False)
+    with _QUALITY_HISTORY_LOCK:
+        path = _quality_history_path()
+        history = runtime.read_json(path)
+        if not isinstance(history, dict):
+            history = {"schema_version": 2}
+        history["preferred_protocol"] = protocol
+        runtime.write_json(path, history)
+        _PREFERRED_PROTOCOL = protocol
 
 
 def _tail_snapshot_matches_active_protocol(
@@ -3548,6 +3635,8 @@ def _start_candidate_connector(
     config: V2Config,
     binary: str,
     requested_protocol: str,
+    *,
+    pin_attempt: str | None = None,
 ) -> tuple[int, str]:
     from vibe.binding_health import connector_start_denial
     if reason := connector_start_denial(config):
@@ -3567,22 +3656,32 @@ def _start_candidate_connector(
         stderr_path=_candidate_cloudflared_stderr_path(),
         requested_protocol=requested_protocol,
     )
+    if pin_attempt:
+        candidate['pin_attempt'] = pin_attempt  # replica ownership, not an authorization token
     _replace_state_connector("candidate", candidate)
     return candidate_pid, metrics_url
 
 
-def _discard_candidate_connector(pid: int) -> None:
+def _discard_candidate_connector(pid: int, *, grace_seconds: float = 8, expected_url: str | None = None) -> None:
+    if expected_url is not None:
+        # Never retire a promoted, superseded, or unidentifiable comparison.
+        record = _state_connector('candidate') or {}
+        if record.get('pid') != pid or record.get('metrics_url') != expected_url or (_state_connector('active') or {}).get('pid') == pid:
+            return
     state = _cloudflared_pid_state(pid)
     if state == "cloudflared":
-        runtime.stop_pid(pid, timeout=8)
+        runtime.stop_pid(pid, timeout=grace_seconds)
         state = _cloudflared_pid_state(pid)
     if state not in {"dead", "other"}:
         logger.warning("Preserving Tunnel candidate with unverified process identity pid=%s", pid)
         return
     try:
         with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS), _CONNECTOR_LOCK:
-            _candidate_pid_path().unlink(missing_ok=True)
             candidate = _state_connector("candidate") or {}
+            if expected_url is not None and (candidate.get('pid') != pid or candidate.get('metrics_url') != expected_url):
+                return
+            if _read_pid_file(_candidate_pid_path()) == pid:
+                _candidate_pid_path().unlink(missing_ok=True)
             if candidate.get("pid") == pid:
                 _replace_state_connector("candidate", None)
     except _ConnectorLifecycleBusy:
@@ -3594,6 +3693,7 @@ def _promote_candidate_connector(
     *,
     pending_tail_rollback: dict[str, Any] | None = None,
     runtime_signature: dict[str, str] | None = None,
+    registered_only: bool = False,
 ) -> dict[str, Any]:
     with _connector_lifecycle(), _CONNECTOR_LOCK:
         from vibe.binding_health import connector_start_denial
@@ -3605,7 +3705,13 @@ def _promote_candidate_connector(
         if not isinstance(candidate, dict) or candidate.get("pid") != pid:
             raise RuntimeError("candidate_state_changed")
         metrics_url = candidate.get("metrics_url")
-        if not isinstance(metrics_url, str) or not _connector_ready_now(pid, metrics_url):
+        if not isinstance(metrics_url, str):
+            raise RuntimeError("candidate_no_longer_ready")
+        if registered_only:
+            ready = _is_cloudflared_pid(pid) and (tunnel_quality.scrape_metrics(metrics_url).registered_connections or 0) > 0
+        else:
+            ready = _connector_ready_now(pid, metrics_url)
+        if not ready:
             raise RuntimeError("candidate_no_longer_ready")
         old_pid = active.get("pid") if isinstance(active, dict) else None
         state["active"] = candidate
@@ -3707,6 +3813,10 @@ def _tail_candidate_protocol(config: V2Config, previous_protocol: str) -> str:
     configured = _configured_protocol(config)
     if configured != "auto":
         return configured
+    return _other_transport(previous_protocol)
+
+
+def _other_transport(previous_protocol: str) -> str:
     if previous_protocol == "quic":
         return "http2"
     if previous_protocol == "http2":
@@ -4174,8 +4284,9 @@ def _restart_exited_connector(
     if not _exited_connector_requested(config):
         schedule.due_at = None
         return False
+    from vibe.connection_settings import journal
     with _RECOVERY_LOCK:
-        recovery_owns_lane = _connector_lane_reserved_locked()
+        recovery_owns_lane = _connector_lane_reserved_locked() or journal.owns_connector_lane()
     if recovery_owns_lane:
         schedule.due_at = None
         return False
@@ -4213,6 +4324,10 @@ def _quality_monitor_loop(
 ) -> None:
     global _QUALITY_MONITOR_STARTED
     last_report_at = 0.0
+    from vibe import connection_runtime, connection_settings
+
+    pin_window = connection_settings.PinFailureWindow()
+    previous_probe_tick = 0.0
     restart_schedule = _ConnectorRestartSchedule()
     request_probe = tunnel_quality.BackgroundRequestPathProbe(
         _public_probe_session, attempts=REQUEST_PATH_PROBE_ATTEMPTS, timeout=REQUEST_PATH_PROBE_TIMEOUT_SECONDS,
@@ -4247,6 +4362,15 @@ def _quality_monitor_loop(
                 loaded = V2Config.load()
             except Exception:
                 loaded = None
+            try:
+                connection_runtime.observe_pins(
+                    pin_window, loaded, active=active, pid_state=_cloudflared_pid_state(active_pid), sample=sample,
+                    interval_seconds=interval_seconds,
+                )
+            except _ConnectorLifecycleBusy:
+                pass
+            except Exception:
+                logger.warning("Could not evaluate tunnel pin recovery", exc_info=True)
             if sample is not None and sample.ready:
                 restart_schedule = _ConnectorRestartSchedule()
             if _restart_exited_connector(loaded, restart_schedule, started_at):
@@ -4271,6 +4395,10 @@ def _quality_monitor_loop(
                 (active.get("pid"), active.get("started_at"), metrics_url, effective_protocol, public_health_url),
                 public_health_url if probe_allowed else None,
             )
+            # poll() returns the preceding window. Bound freshness by its start,
+            # not collection time (a machine can sleep between the two ticks).
+            connection_runtime.observe_public_path(loaded, active, probe_allowed, request_path_sample, previous_probe_tick)
+            previous_probe_tick = connection_settings.journal.clock()
             previous_snapshot = tunnel_quality_snapshot()
             snapshot = None
             try:
@@ -4508,15 +4636,15 @@ def _finish_reconciled_recovery(
     )
 
 
-def _reconcile_orphan_candidate() -> None:
-    """Resolve a candidate left by a previous service process without risking the active route."""
+def _reconcile_orphan_candidate() -> bool:
+    """Return False to retry when optional settings cannot establish ownership."""
 
     with _connector_lifecycle(timeout=0):
         candidate = _state_connector("candidate")
         if not candidate or not isinstance(candidate.get("pid"), int):
             candidate_pid = _read_pid_file(_candidate_pid_path())
             if candidate_pid is None:
-                return
+                return True
             candidate = {"pid": candidate_pid}
         else:
             candidate_pid = int(candidate["pid"])
@@ -4524,6 +4652,19 @@ def _reconcile_orphan_candidate() -> None:
         active = _state_connector("active") or {}
         active_pid = active.get("pid") if isinstance(active.get("pid"), int) else _read_pid()
         active_state = _cloudflared_pid_state(active_pid)
+
+        if candidate.get('pin_attempt') and candidate_pid != active_pid:
+            # A comparison replica is never a general recovery candidate. A
+            # live pin worker owns its cleanup; on restart, retire (never adopt)
+            # the orphan, using the same platform stop policy as handovers.
+            from vibe.connection_settings import journal
+            with config_file_lock():
+                owned = journal.owns_pin_replica(V2Config.load(), candidate['pin_attempt'])
+            if owned is None:
+                return False  # preserve both slots; ordinary monitoring starts and retries next tick
+            if not owned:
+                _discard_candidate_connector(candidate_pid, grace_seconds=RECOVERY_DRAIN_SECONDS, expected_url=candidate['metrics_url'])
+            return True
 
         if candidate_pid == active_pid:
             with _CONNECTOR_LOCK:
@@ -4535,12 +4676,12 @@ def _reconcile_orphan_candidate() -> None:
                 _pid_path().write_text(str(candidate_pid), encoding="utf-8")
                 _candidate_pid_path().unlink(missing_ok=True)
             _finish_reconciled_recovery("improved")
-            return
+            return True
 
         if candidate_state == "cloudflared" and active_state != "cloudflared":
             if active_state == "unknown":
                 logger.warning("Preserving orphan Tunnel candidate because active process identity is unknown")
-                return
+                return True
             metrics_url = candidate.get("metrics_url")
             try:
                 ready = isinstance(metrics_url, str) and requests.get(
@@ -4559,27 +4700,28 @@ def _reconcile_orphan_candidate() -> None:
                     _pid_path().write_text(str(candidate_pid), encoding="utf-8")
                     _candidate_pid_path().unlink(missing_ok=True)
                 _finish_reconciled_recovery("improved")
-                return
+                return True
             if not runtime.stop_pid(candidate_pid, timeout=8):
                 logger.warning("Could not stop unready orphan Tunnel candidate pid=%s", candidate_pid)
-                return
+                return True
 
         if candidate_state == "cloudflared" and active_state == "cloudflared":
             if not runtime.stop_pid(candidate_pid, timeout=8):
                 logger.warning("Could not stop orphan Tunnel candidate pid=%s", candidate_pid)
-                return
+                return True
         elif candidate_state == "unknown":
             logger.warning("Preserving orphan Tunnel candidate with unknown process identity pid=%s", candidate_pid)
-            return
+            return True
 
         with _CONNECTOR_LOCK:
             if _state_path().exists():
                 _replace_state_connector("candidate", None)
             _candidate_pid_path().unlink(missing_ok=True)
         _finish_reconciled_recovery("failed")
+        return True
 
 
-def _reconcile_orphan_candidate_when_free() -> bool:
+def _reconcile_orphan_candidate_when_free(*, before_listen: bool = False) -> bool:
     """Run the startup orphan-candidate reconciliation; False to retry on a later tick.
 
     A candidate is spawned only under the lifecycle lock after recovery reserves
@@ -4593,10 +4735,14 @@ def _reconcile_orphan_candidate_when_free() -> bool:
                 recovery_running = _RECOVERY_THREAD is not None
             if recovery_running:
                 return False
-            _reconcile_orphan_candidate()
+            if before_listen and (_state_connector('candidate') or {}).get('pin_attempt'):
+                # A registered comparison may carry streams. Preserve the full
+                # stop grace, but run it on a quality-monitor tick, never inline
+                # on the UI startup thread.
+                return False
+            return _reconcile_orphan_candidate()
     except _ConnectorLifecycleBusy:
         return False
-    return True
 
 
 def _normalize_orphaned_recovery_state() -> None:
@@ -4623,7 +4769,11 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
             _RECOVERY_STATE.clear()
             _RECOVERY_STATE.update(tunnel_quality.empty_recovery())
             _QUALITY_CONTEXT = None
-        persisted = runtime.read_json(_quality_history_path())
+        with _QUALITY_HISTORY_LOCK:
+            persisted = runtime.read_json(_quality_history_path())
+            if isinstance(persisted, dict) and persisted.get("schema_version") in {1, 2}:
+                preferred = persisted.get("preferred_protocol")
+                _PREFERRED_PROTOCOL = preferred if preferred in {"quic", "http2"} else None
         if isinstance(persisted, dict) and persisted.get("schema_version") in {1, 2}:
             evaluator_state = persisted.get("evaluator")
             if isinstance(evaluator_state, dict):
@@ -4641,9 +4791,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                 legacy=persisted.get("retry_policy_version") != RECOVERY_RETRY_POLICY_VERSION,
                 now=time.time(),
             )
-            preferred_protocol = persisted.get("preferred_protocol")
-            _PREFERRED_PROTOCOL = str(preferred_protocol) if preferred_protocol in {"quic", "http2"} else None
-        orphan_candidate_pending = not _reconcile_orphan_candidate_when_free()
+        orphan_candidate_pending = not _reconcile_orphan_candidate_when_free(before_listen=True)
         _reconcile_connector_lifecycle()
         _normalize_orphaned_recovery_state()
         quality_path = _quality_state_path()
@@ -4880,7 +5028,10 @@ def _start(
         if record_request:
             try:
                 _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
-                _connector_requested_path().touch()
+                # Reaffirming an existing request is not a stop/start: keep the
+                # inode and mtime used to fence pending connector ownership.
+                if not _connector_requested_path().is_file():
+                    _connector_requested_path().touch()
             except OSError:
                 # The connector still starts; without the request the monitor
                 # just does not restart it if it exits.
@@ -4906,7 +5057,9 @@ def _start(
         if current.get("running"):
             running_sig = _running_signature(current.get("pid"))
             desired_sig = _runtime_signature(config, binary)
-            if running_sig == desired_sig and _running_connector_has_metrics(current.get("pid")):
+            from vibe.connection_runtime import keep_temporary_connector
+            if ((running_sig == desired_sig or keep_temporary_connector(config, binary, running_sig))
+                    and _running_connector_has_metrics(current.get("pid"))):
                 _retire_legacy_cloudflared(config, binary)
                 _report_runtime_status_async(config, event="start")
                 return {**current, "ok": True, "started": False}

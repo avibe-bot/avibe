@@ -1,14 +1,16 @@
 //! Parse only a private, native fetch completion. Unavailable and malformed
 //! answers both leave the normal tunnel in use. There is no public API to
 //! nominate an address, wall-clock comparison, or DNS for direct bootstrap.
-use super::connect::Authority;
-use iroh::EndpointId;
+use super::{
+    connect::Authority,
+    path::{global_v6, punched_family, AddressFamily, SelectedPath, TrialRelay},
+};
+use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use serde::Deserialize;
 use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
-use tokio::time::Instant;
 
 pub(super) const ALPN: &[u8] = b"avibe-direct/1";
 #[derive(Deserialize)]
@@ -28,6 +30,17 @@ struct Wire {
 struct Endpoint {
     id: String,
     addresses: Vec<serde_json::Value>,
+    #[serde(default)]
+    relay: Option<WireRelay>,
+}
+// Decode the object before converting anything to a JSON map. The struct
+// variant rejects duplicate fields; malformed relay metadata alone must not
+// discard otherwise valid IP candidates.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WireRelay {
+    Fields { policy: String, url: String },
+    Invalid(serde::de::IgnoredAny),
 }
 #[derive(Deserialize)]
 struct Client {
@@ -39,7 +52,8 @@ pub(super) struct Offer {
     pub generation: String,
     pub id: EndpointId,
     pub candidates: Vec<SocketAddr>,
-    pub until: Instant,
+    pub relay: Option<TrialRelay>,
+    pub until: Duration,
 }
 
 pub(super) fn lan(addr: SocketAddr) -> bool {
@@ -50,12 +64,55 @@ pub(super) fn lan(addr: SocketAddr) -> bool {
         }
 }
 impl Offer {
+    pub(super) fn bootstrap(&self) -> EndpointAddr {
+        let mut addr = EndpointAddr::new(self.id);
+        for candidate in &self.candidates {
+            addr = addr.with_ip_addr(*candidate);
+        }
+        if let Some(r) = &self.relay {
+            addr = addr.with_relay_url(r.home());
+        }
+        addr
+    }
+
+    /// Called only with a path snapshot of the authenticated connection, never
+    /// to authorize bootstrap. A LAN-only grant still requires exact membership.
+    pub(super) fn selected(&self, peer: EndpointId, remote: &TransportAddr) -> Option<SelectedPath> {
+        if peer != self.id {
+            return None;
+        }
+        match remote {
+            TransportAddr::Relay(url) => self
+                .relay
+                .as_ref()
+                .filter(|r| r.permits(url))
+                .map(|_| SelectedPath::Relay),
+            TransportAddr::Ip(a) => {
+                let listed = self.candidates.contains(a);
+                if !listed && self.relay.is_none() && !self.candidates.iter().copied().any(global_v6) {
+                    return None;
+                }
+                if lan(*a) || (listed && a.ip().is_loopback()) {
+                    // The private loopback address can be listed only by the confined interop fixture.
+                    Some(SelectedPath::Lan(if a.is_ipv4() {
+                        AddressFamily::Ipv4
+                    } else {
+                        AddressFamily::Ipv6
+                    }))
+                } else {
+                    punched_family(*a).map(SelectedPath::Punched)
+                }
+            }
+            _ => None,
+        }
+    }
     pub(super) fn parse(
         raw: &str,
         origin: &Authority,
         instance: &str,
         client: EndpointId,
-        sent: Instant,
+        sent: Duration,
+        now: Duration,
     ) -> Option<Self> {
         if raw.len() > 16384 || instance.is_empty() {
             return None;
@@ -82,20 +139,18 @@ impl Offer {
             .checked_sub(w.issued_at)?
             .min(300);
         let until = sent.checked_add(Duration::from_secs(span))?;
-        if Instant::now() >= until {
+        if now >= until {
             return None;
         }
         let mut candidates = Vec::new();
         for entry in w.endpoint.addresses.iter().take(32) {
-            if entry.get("kind").and_then(|s| s.as_str()) != Some("lan") {
-                continue;
-            }
+            let kind = entry.get("kind").and_then(|s| s.as_str());
             if let Some(a) = entry
                 .get("address")
                 .and_then(|s| s.as_str())
                 .filter(|s| s.len() <= 64 && !s.contains('%'))
                 .and_then(|s| s.parse().ok())
-                .filter(|a| lan(*a))
+                .filter(|a| matches!(kind, Some("lan") if lan(*a)) || matches!(kind, Some("ipv6") if global_v6(*a)))
             {
                 if !candidates.contains(&a) {
                     candidates.push(a);
@@ -105,7 +160,12 @@ impl Offer {
                 }
             }
         }
-        (!candidates.is_empty()).then_some(Self {
+        let relay = match w.endpoint.relay {
+            Some(WireRelay::Fields { policy, url }) => TrialRelay::offered(&policy, &url),
+            _ => None,
+        };
+        (!candidates.is_empty() || relay.is_some()).then_some(Self {
+            relay,
             id,
             generation: w.generation,
             candidates,

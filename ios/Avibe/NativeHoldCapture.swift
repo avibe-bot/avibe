@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import WebKit
 
 /// The in-App hold-to-talk's microphone (`voice.capturePrepare`,
@@ -47,6 +48,10 @@ final class NativeHoldCapture {
     struct Surface: Equatable {
         let id: String
         let rect: CGRect
+        /// The page asked that a touch here open no microphone: the input
+        /// is only prepared at touch-down and starts when the hold is
+        /// recognised (`start: "recognition"`), whatever the App's default.
+        var startsAtRecognition = false
     }
 
     /// What preparing a hold took (`NativeHoldCaptureAudio.arm`), in ms.
@@ -153,6 +158,14 @@ final class NativeHoldCapture {
         }
     }
 
+    /// What a touch says of itself when asked: when it lifted, by its own
+    /// time (nil while the finger is down), and where it is in its WebView
+    /// (nil when that is not known).
+    struct TouchState {
+        var liftedAt: TimeInterval?
+        var point: CGPoint?
+    }
+
     /// A press the App itself follows, from its touch-down until its take
     /// has ended (or it turned out not to be a hold).
     @MainActor
@@ -164,6 +177,10 @@ final class NativeHoldCapture {
         let downAt: Int
         /// The touch's own time at touch-down (`UITouch.timestamp`).
         var downStamp: TimeInterval?
+        /// Asks the touch itself where it is and whether it has lifted. On
+        /// a surface whose page took the press for itself, UIKit tells the
+        /// observer of neither.
+        var touch: (@MainActor () -> TouchState)?
         /// How long the touch lasted by its own times, when that made it a tap.
         var tapMs: Int?
         var recognised = false
@@ -171,8 +188,6 @@ final class NativeHoldCapture {
         var begun = false
         /// The input was prepared at touch-down (`quiet`).
         var prepared = false
-        /// A recognised hold's finger is in the cancel position.
-        var inCancel = false
         var timings = HoldTimings()
         var cancelTimer: (() -> Void)?
 
@@ -272,6 +287,7 @@ final class NativeHoldCapture {
     /// The press being followed, until its take is adopted or it ends.
     private var hold: Hold?
     private let after: @MainActor (TimeInterval, @escaping @MainActor () -> Void) -> (() -> Void)
+    private let onceTouchesAreHeard: @MainActor (@escaping @MainActor () -> Void) -> (() -> Void)
     private let uptimeMs: () -> Int
     private let haptic: NativeHoldHaptic
     private let startsAtTouchDown: () -> Bool
@@ -284,10 +300,6 @@ final class NativeHoldCapture {
     /// move first: the page's own numbers for a finger (`HOLD_GESTURE`).
     static let defaultHoldSeconds: TimeInterval = 0.2
     static let slop: CGFloat = 10
-    /// A recognised hold slides up this far to arm its cancel, and comes
-    /// back within this to disarm it: the page's own lines (`HOLD_GESTURE`).
-    static let cancelDistance: CGFloat = 80
-    static let uncancelDistance: CGFloat = 60
     /// How long a recognised hold's take waits for its page.
     /// The microphone is open meanwhile, so no longer than a page needs:
     /// its answer is two turns of its main thread (the event, then the
@@ -297,16 +309,21 @@ final class NativeHoldCapture {
     static let adoptionWait: TimeInterval = 1
     /// The most audio kept for a page that has not taken its take: 2 s,
     /// more than the longest threshold and the wait together can give.
-    static let unadoptedBytes = 2 * 16_000 * 2
+    /// The input itself keeps to it (`NativeHoldSink`), on the thread its
+    /// audio arrives on, so it holds while the main thread is stalled.
+    nonisolated static let unadoptedBytes = 2 * 16_000 * 2
 
     /// `afterQueued` runs its work once what the input already sent to the
     /// main queue has arrived (by default, the main queue's next turn);
-    /// `isInBackground` says whether the App is in the background.
+    /// `isInBackground` says whether the App is in the background;
+    /// `onceTouchesAreHeard` runs its work once every touch event that has
+    /// reached the App has been handled (`whenTouchesAreHeard`).
     init(
         audio: NativeHoldCaptureAudio,
         afterQueued: @escaping (@escaping () -> Void) -> Void = { DispatchQueue.main.async(execute: $0) },
         isInBackground: @escaping () -> Bool = { UIApplication.shared.applicationState == .background },
         after: (@MainActor (TimeInterval, @escaping @MainActor () -> Void) -> (() -> Void))? = nil,
+        onceTouchesAreHeard: (@MainActor (@escaping @MainActor () -> Void) -> (() -> Void))? = nil,
         uptimeMs: @escaping () -> Int = { Int(DispatchTime.now().uptimeNanoseconds / 1_000_000) },
         haptic: NativeHoldHaptic? = nil,
         startsAtTouchDown: @escaping () -> Bool = { !NativeHoldQuietSwitch.isOn },
@@ -319,6 +336,7 @@ final class NativeHoldCapture {
         self.afterQueued = afterQueued
         self.isInBackground = isInBackground
         self.after = after ?? { delay, work in NativeHoldCapture.mainTimer(delay, work) }
+        self.onceTouchesAreHeard = onceTouchesAreHeard ?? { work in NativeHoldCapture.whenTouchesAreHeard(work) }
         self.uptimeMs = uptimeMs
         self.haptic = haptic ?? .system()
         self.startsAtTouchDown = startsAtTouchDown
@@ -395,7 +413,9 @@ final class NativeHoldCapture {
     }
 
     /// The page's `surfaces` argument: at most eight, each an id and a
-    /// rectangle of finite, positive size. Nil when it is not that.
+    /// rectangle of finite, positive size, and optionally when its input
+    /// starts (`start`: `touch`, the default, or `recognition`). Nil when
+    /// it is not that.
     static func surfaces(from value: Any?) -> [Surface]? {
         guard let items = value as? [[String: Any]], items.count <= 8 else { return nil }
         var surfaces: [Surface] = []
@@ -406,12 +426,18 @@ final class NativeHoldCapture {
                 else { return nil }
                 return CGFloat(value.doubleValue)
             }
-            guard item.count == 5, let id = isValidTake(item["id"]),
+            let start = item["start"] as? String
+            guard item.count == (item["start"] == nil ? 5 : 6),
+                  item["start"] == nil || start == "touch" || start == "recognition",
+                  let id = isValidTake(item["id"]),
                   let x = number("x"), let y = number("y"),
                   let width = number("width"), let height = number("height"),
                   width > 0, height > 0
             else { return nil }
-            surfaces.append(Surface(id: id, rect: CGRect(x: x, y: y, width: width, height: height)))
+            surfaces.append(Surface(
+                id: id, rect: CGRect(x: x, y: y, width: width, height: height),
+                startsAtRecognition: start == "recognition"
+            ))
         }
         return surfaces
     }
@@ -479,6 +505,8 @@ final class NativeHoldCapture {
                     hold.timings.firstBufferBytes = data.count
                 }
                 take.receive(data)
+                // The input keeps this bound itself, where its audio arrives
+                // (`NativeHoldSink`); here it holds of any input.
                 if !take.adopted, take.pending.count > Self.unadoptedBytes {
                     self.discard(take, why: "unadopted")
                 }
@@ -545,7 +573,11 @@ final class NativeHoldCapture {
     /// A finger came down in `webView` at `point` (its own points). On one
     /// of the page's surfaces the App prepares the microphone, without
     /// starting it, and times the hold itself.
-    func touchDown(at point: CGPoint, in webView: WKWebView, timestamp: TimeInterval? = nil) {
+    /// `touch` asks the touch itself where it is and whether it has lifted.
+    func touchDown(
+        at point: CGPoint, in webView: WKWebView, timestamp: TimeInterval? = nil,
+        touch: (@MainActor () -> TouchState)? = nil
+    ) {
         guard hold == nil, running == nil, surfacesWebView === webView,
               let surface = surfaces.first(where: { $0.rect.contains(point) }),
               !VoiceCaptureAudioState.active, !isInBackground(), audio.permissionGranted
@@ -556,6 +588,7 @@ final class NativeHoldCapture {
         )
         self.hold = hold
         hold.downStamp = timestamp
+        hold.touch = touch
         hold.timings.route = audio.route
         hold.timings.holdMs = Int((holdSeconds * 1000).rounded())
         hold.timings.variant = "quiet"
@@ -568,7 +601,7 @@ final class NativeHoldCapture {
             // Activating can switch a headset to its call mode.
             hold.timings.variant = "late"
             hold.timings.why = "bluetooth"
-        } else if startsAtTouchDown() {
+        } else if startsAtTouchDown(), !surface.startsAtRecognition {
             hold.timings.variant = "early"
             begin(hold)
         } else {
@@ -589,29 +622,41 @@ final class NativeHoldCapture {
         }
         hold.cancelTimer = after(holdSeconds) { [weak self, weak hold] in
             guard let self, let hold, self.hold === hold, !hold.recognised else { return }
-            self.recognise(hold)
+            // The threshold has passed by the clock, which does not say the
+            // finger is still down: on a busy main thread this block can run
+            // while the touch's end waits to be handled, and a tap would get
+            // the cue and keep the microphone. The hold is recognised once
+            // every touch event that has reached the App has been handled;
+            // a lift among them ends the press first, as a tap.
+            hold.cancelTimer = self.onceTouchesAreHeard { [weak self, weak hold] in
+                guard let self, let hold, self.hold === hold, !hold.recognised else { return }
+                // And the touch itself is asked. On a surface whose page took
+                // the press for itself (it prevents the default on touchstart,
+                // as the composer does), UIKit stops telling the observer:
+                // no moves, and the lift only when it resets it, which a tap
+                // that raises the keyboard delays past this moment.
+                let touch = hold.touch?()
+                if let lifted = touch?.liftedAt {
+                    if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+                    self.cancelHold(hold, why: "tap")
+                    return
+                }
+                if let point = touch?.point, hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
+                    self.cancelHold(hold, why: "moved")
+                    return
+                }
+                self.recognise(hold)
+            }
         }
     }
 
     func touchMoved(to point: CGPoint, in webView: WKWebView) {
         guard let hold, hold.webView === webView else { return }
-        guard hold.recognised else {
-            if hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
-                cancelHold(hold, why: "moved")
-            }
-            return
-        }
-        // Sliding up arms the cancel and coming back disarms it, each felt
-        // once per crossing: the two lines are 20 pt apart, so a finger
-        // resting at either does not repeat it.
-        guard let take = running, take.hold === hold else { return }
-        let up = hold.origin.y - point.y
-        if !hold.inCancel, up > Self.cancelDistance {
-            hold.inCancel = true
-            haptic.intoCancel()
-        } else if hold.inCancel, up <= Self.uncancelDistance {
-            hold.inCancel = false
-            haptic.back()
+        // After the cue the finger's slides are the page's to answer: it
+        // sees them on every surface, and gives their haptics.
+        guard !hold.recognised else { return }
+        if hypot(point.x - hold.origin.x, point.y - hold.origin.y) > Self.slop {
+            cancelHold(hold, why: "moved")
         }
     }
 
@@ -622,12 +667,16 @@ final class NativeHoldCapture {
     func touchEnded(in webView: WKWebView, timestamp: TimeInterval? = nil) {
         guard let hold, hold.webView === webView else { return }
         guard hold.recognised else {
+            // Counted by the touch's own length: this block may run late.
+            if let down = hold.downStamp, let up = timestamp {
+                hold.tapMs = max(0, Int(((up - down) * 1000).rounded()))
+            }
             cancelHold(hold, why: "tap")
             return
         }
-        // A finger lifted just before the threshold on a busy main thread:
-        // the timer's block can run before this one. By the touch's own
-        // times it was a tap, and its audio is dropped as a tap's. The page
+        // A lift that reached the App only after the hold was recognised (the
+        // system delivered it late), from before the threshold by the touch's
+        // own times: a tap, and its audio is dropped as a tap's. The page
         // cannot have taken it yet: its answer comes after this block.
         if let down = hold.downStamp, let up = timestamp, (up - down) * 1000 < Double(hold.timings.holdMs),
            let take = running, take.hold === hold, !take.adopted {
@@ -649,7 +698,6 @@ final class NativeHoldCapture {
         hold.timings.recognisedAt = since(hold)
         haptic.fire()
         hold.timings.hapticAt = since(hold)
-        haptic.prepareSlide()
         if !hold.begun { begin(hold) }
         sendHoldEvent(hold.webView, ["phase": "recognised", "take": hold.take, "surface": hold.surface])
         hold.cancelTimer = after(Self.adoptionWait) { [weak self, weak hold] in
@@ -716,6 +764,7 @@ final class NativeHoldCapture {
         hold.cancelTimer = nil
         hold.timings.adoptedAt = since(hold)
         take.adopt()
+        audio.taken()
         return .success(hold.timings.fields)
     }
 
@@ -757,6 +806,24 @@ final class NativeHoldCapture {
         take.detached = true
         take.pending = Data()
         end(reason: why)
+    }
+
+    /// Runs `work` on the main thread once it has handled every touch event
+    /// that has reached the App; the returned closure cancels.
+    ///
+    /// UIKit hands touches to the App from a source of the main run loop.
+    /// The loop calls its `beforeWaiting` observers only in a pass in which
+    /// no such source had anything to do, so by then a lift that had arrived
+    /// has been delivered. With the main thread idle that is at once.
+    static func whenTouchesAreHeard(_ work: @escaping @MainActor () -> Void) -> (() -> Void) {
+        let observer = CFRunLoopObserverCreateWithHandler(
+            kCFAllocatorDefault, CFRunLoopActivity.beforeWaiting.rawValue, false, 0
+        ) { _, _ in
+            MainActor.assumeIsolated { work() }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+        return { CFRunLoopObserverInvalidate(observer) }
     }
 
     /// Timers on the main queue; the returned closure cancels.
@@ -866,34 +933,16 @@ let nativeHoldBatchBytes = 3_200
 struct NativeHoldHaptic {
     var prepare: @MainActor () -> Void
     var fire: @MainActor () -> Void
-    /// The two slide haptics, made ready at recognition: into the cancel
-    /// position, and back onto the composer.
-    var prepareSlide: @MainActor () -> Void
-    var intoCancel: @MainActor () -> Void
-    var back: @MainActor () -> Void
 
     @MainActor
     static func system() -> NativeHoldHaptic {
-        // The page's own cue for a hold (`impactFeedback('medium')`); rigid
-        // and soft differ from it and from the release's light.
+        // The page's own cue for a hold (`impactFeedback('medium')`). The
+        // slides into the cancel position and back are the page's to give:
+        // the App does not see them on every surface.
         let start = UIImpactFeedbackGenerator(style: .medium)
-        let cancel = UIImpactFeedbackGenerator(style: .rigid)
-        let back = UIImpactFeedbackGenerator(style: .soft)
         return NativeHoldHaptic(
             prepare: { start.prepare() },
-            fire: { start.impactOccurred() },
-            prepareSlide: {
-                cancel.prepare()
-                back.prepare()
-            },
-            intoCancel: {
-                cancel.impactOccurred()
-                back.prepare()
-            },
-            back: {
-                back.impactOccurred()
-                cancel.prepare()
-            }
+            fire: { start.impactOccurred() }
         )
     }
 }
@@ -1062,6 +1111,11 @@ protocol NativeHoldCaptureAudio: AnyObject {
     )
     /// Takes down what `arm` prepared; nothing was captured.
     func disarm()
+    /// The page took the take `begin` started. Until then the input passes
+    /// on no more than `NativeHoldCapture.unadoptedBytes`, and past that
+    /// stops itself and ends the take (`onEnd("unadopted")`), without
+    /// waiting for the main thread.
+    func taken()
     /// Returns once everything asked of the input so far (a preparing, a
     /// start, a taking down) has finished: the session is free for its next
     /// owner, and nothing will set or deactivate it afterwards.
@@ -1140,21 +1194,63 @@ final class NativeHoldPCMConverter {
 /// Where one engine's audio goes. Each engine has its own, emptied when it
 /// is taken down: a callback of an engine that is gone can never hand its
 /// buffer to the next press's take.
-private final class NativeHoldSink: @unchecked Sendable {
+///
+/// It also holds the bound on a take no page has taken. That audio waits for
+/// the page in the App's memory, and reaches it by way of the main thread:
+/// if the bound were kept only there, a main thread stalled for ten seconds
+/// would let ten seconds pile up before anything dropped them. Here, on the
+/// thread the audio arrives on, no more than `limit` bytes ever pass before
+/// the page has taken the take; past that nothing is passed on, and
+/// `overflow` is called once, to stop the input.
+final class NativeHoldSink: @unchecked Sendable {
     private let lock = NSLock()
     private var onPCM: ((Data) -> Void)?
+    private var overflow: (() -> Void)?
+    /// How much may still pass before the page takes the take; nil once it has.
+    private var left: Int?
 
-    func set(_ onPCM: ((Data) -> Void)?) {
+    /// Passes audio on from here, at most `limit` bytes of it until `unlimit()`.
+    func open(limit: Int, onPCM: @escaping (Data) -> Void, overflow: @escaping () -> Void) {
         lock.lock()
         self.onPCM = onPCM
+        self.overflow = overflow
+        left = limit
+        lock.unlock()
+    }
+
+    /// The page took the take: its audio is the page's, however long it is.
+    func unlimit() {
+        lock.lock()
+        left = nil
+        lock.unlock()
+    }
+
+    /// Nothing more passes.
+    func close() {
+        lock.lock()
+        onPCM = nil
+        overflow = nil
         lock.unlock()
     }
 
     func send(_ data: Data) {
         lock.lock()
-        let onPCM = self.onPCM
+        var pass = onPCM
+        var over: (() -> Void)?
+        if let left, pass != nil {
+            if data.count > left {
+                // Past the bound: this and all that follows is dropped here.
+                pass = nil
+                over = overflow
+                onPCM = nil
+                overflow = nil
+            } else {
+                self.left = left - data.count
+            }
+        }
         lock.unlock()
-        onPCM?(data)
+        pass?(data)
+        over?()
     }
 }
 
@@ -1162,6 +1258,13 @@ private final class NativeHoldSink: @unchecked Sendable {
 /// down on one serial queue, so activating the session never holds up the
 /// touch that asked for it.
 private final class NativeHoldHeldInput: @unchecked Sendable {
+    /// The queue all of this runs on, for what the input must do by itself.
+    private let queue: DispatchQueue
+
+    init(queue: DispatchQueue) {
+        self.queue = queue
+    }
+
     private var engine: AVAudioEngine?
     private var observers: [NSObjectProtocol] = []
     private var armed: NativeHoldCapture.ArmTimings?
@@ -1252,7 +1355,16 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
             }
         }
         guard let engine, let sink else { return .failure(.failed("engine:0")) }
-        sink.set(onPCM)
+        // Until the page takes the take, no more than the bound passes, and
+        // the input stops itself there, on this queue: neither waits for the
+        // main thread, which may be stalled.
+        sink.open(limit: NativeHoldCapture.unadoptedBytes, onPCM: onPCM) { [weak self, weak engine, queue] in
+            queue.async {
+                // An input already taken down ended its take another way.
+                guard let self, let engine, self.stopAtTheBound(engine) else { return }
+                onEnd("unadopted")
+            }
+        }
         let start = DispatchTime.now()
         do {
             try engine.start()
@@ -1280,6 +1392,22 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
         return .success(.init(armed: armedNow, startMs: startMs))
     }
 
+    /// The page took the take: its audio is no longer bounded.
+    func unlimit() {
+        sink?.unlimit()
+    }
+
+    /// The input reached the bound of a take no page has taken: it stops
+    /// here. The take's end, and the session's, follow from the main thread
+    /// when it can (`takeDown`). False when `stopping` is no longer the
+    /// input.
+    private func stopAtTheBound(_ stopping: AVAudioEngine) -> Bool {
+        guard engine === stopping else { return false }
+        stopping.inputNode.removeTap(onBus: 0)
+        stopping.stop()
+        return true
+    }
+
     /// `stopped` runs once the input can send no more audio, before the
     /// session is deactivated (which can take a while).
     func takeDown(deactivate: Bool, stopped: (() -> Void)? = nil) {
@@ -1292,7 +1420,7 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
         }
         // After the engine has stopped: what it sent until then is the
         // take's, and nothing reaches this sink again.
-        sink?.set(nil)
+        sink?.close()
         sink = nil
         stopped?()
         guard engine != nil else { return }
@@ -1306,10 +1434,16 @@ private final class NativeHoldHeldInput: @unchecked Sendable {
 final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
     private var engine: AVAudioEngine?
     private var observers: [NSObjectProtocol] = []
-    private let queue = DispatchQueue(label: "bot.avibe.ios.hold-capture", qos: .userInteractive)
-    private let held = NativeHoldHeldInput()
+    private let queue: DispatchQueue
+    private let held: NativeHoldHeldInput
     /// Whether `held` may hold an input (asked for on `queue`, not yet taken down).
     private var heldInUse = false
+
+    init() {
+        let queue = DispatchQueue(label: "bot.avibe.ios.hold-capture", qos: .userInteractive)
+        self.queue = queue
+        held = NativeHoldHeldInput(queue: queue)
+    }
 
     var permissionGranted: Bool {
         AVAudioApplication.shared.recordPermission == .granted
@@ -1356,6 +1490,10 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
 
     func disarm() {
         takeDownHeld(stopped: nil)
+    }
+
+    func taken() {
+        queue.async { [held] in held.unlimit() }
     }
 
     func settle() {
@@ -1503,5 +1641,94 @@ final class SystemNativeHoldCaptureAudio: NativeHoldCaptureAudio {
 
     nonisolated static func ms(since start: DispatchTime) -> Int {
         Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
+    }
+}
+
+/// Sees the first finger on the instance WebView for the App's own hold
+/// recognition (NativeHoldCapture). It never recognises, cancels or delays
+/// anything: the page gets every touch exactly as before.
+final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    private weak var tracked: UITouch?
+    /// A touch was handed to the capture and its end not yet.
+    private var following = false
+
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard tracked == nil, let touch = touches.first, let webView = view as? WKWebView else { return }
+        tracked = touch
+        following = true
+        NativeHoldCapture.shared.touchDown(
+            at: touch.location(in: webView), in: webView, timestamp: touch.timestamp,
+            // The touch itself knows where the finger is and when it lifts,
+            // whether or not UIKit goes on telling this recogniser.
+            touch: { [weak touch, weak webView] in Self.state(of: touch, in: webView) }
+        )
+    }
+
+    /// What `touch` says of itself: when it lifted, by its own time (nil
+    /// while the finger is down), and where it is. A touch that is gone has
+    /// lifted.
+    private static func state(of touch: UITouch?, in webView: WKWebView?) -> NativeHoldCapture.TouchState {
+        guard let touch else { return .init(liftedAt: ProcessInfo.processInfo.systemUptime, point: nil) }
+        let lifted = touch.phase == .ended || touch.phase == .cancelled
+        return .init(liftedAt: lifted ? touch.timestamp : nil, point: webView.map { touch.location(in: $0) })
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let tracked, touches.contains(tracked), let webView = view as? WKWebView else { return }
+        NativeHoldCapture.shared.touchMoved(to: tracked.location(in: webView), in: webView)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        finish(touches)
+    }
+
+    private func finish(_ touches: Set<UITouch>) {
+        guard let tracked, touches.contains(tracked) else { return }
+        self.tracked = nil
+        following = false
+        if let webView = view as? WKWebView {
+            NativeHoldCapture.shared.touchEnded(in: webView, timestamp: tracked.timestamp)
+        }
+        // Never a gesture of its own: the next touch starts it afresh.
+        state = .failed
+    }
+
+    override func reset() {
+        super.reset()
+        // UIKit took the gesture back without ending the touch for us: so it
+        // is on a surface whose page took the press for itself. The lift's
+        // time is still the touch's own.
+        // A reset is not always a lift: the capture is told of an end only
+        // when the touch is gone or says it lifted. A finger still down is
+        // asked again when its cue is due.
+        if following, let webView = view as? WKWebView,
+           let lifted = Self.state(of: tracked, in: webView).liftedAt {
+            NativeHoldCapture.shared.touchEnded(in: webView, timestamp: lifted)
+        }
+        following = false
+        tracked = nil
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
     }
 }

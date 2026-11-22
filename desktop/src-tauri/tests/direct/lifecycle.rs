@@ -6,14 +6,14 @@ use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
 
 #[tokio::test]
-async fn no_udp_endpoint_for_unavailable_missing_malformed_or_no_lan_offer() {
+async fn no_transport_for_unavailable_missing_malformed_or_ineligible_offer() {
     let mut client = Client::new("desk-app.avibe.bot", "one".into()).await.unwrap();
     let id = client.key.public().to_string();
     let peer = iroh::SecretKey::generate().public();
     let unavailable = json!({"status":"unavailable","reason":"not_running"});
     let no_lan = json!({"version":1,"status":"ready","hostname":"desk-app.avibe.bot","instance_id":"one","generation":"a","issued_at":10,"expires_at":300,"alpn":"avibe-direct/1","endpoint":{"id":peer.to_string(),"addresses":[{"kind":"ipv6","address":"[2001:db8::1]:443"}]},"client":{"endpoint_id":id,"admitted_until":300}});
     let port = client.route().unwrap().proxy;
-    assert!(client.endpoint.is_none());
+    assert!(client.monitor.is_none());
     for answer in [
         None,
         Some("{".into()),
@@ -28,7 +28,7 @@ async fn no_udp_endpoint_for_unavailable_missing_malformed_or_no_lan_offer() {
                 })
                 .await
         );
-        assert!(client.endpoint.is_none());
+        assert!(client.monitor.is_none());
         assert!(client.links.borrow().is_none());
         assert_eq!(client.route().unwrap().proxy, port);
     }

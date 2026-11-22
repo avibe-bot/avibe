@@ -2169,7 +2169,10 @@ def test_show_page_api_timeout_round_trips_through_config_routes(monkeypatch, tm
 def test_first_config_post_starts_remote_access_monitoring(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "_UI_RUNTIME_ACTIVE", True)
+    from vibe import connection_runtime
+
     monitoring = []
+    monkeypatch.setattr(connection_runtime, 'start', lambda: monitoring.append('connection-worker'))
     monkeypatch.setattr(remote_access, "start_runtime_monitoring", lambda config=None: monitoring.append(config))
     client = app.test_client()
 
@@ -2180,8 +2183,9 @@ def test_first_config_post_starts_remote_access_monitoring(monkeypatch, tmp_path
     )
 
     assert response.status_code == 200
-    assert len(monitoring) == 1
-    assert monitoring[0].version == "v2"
+    worker, monitored_config = monitoring
+    assert worker == 'connection-worker'
+    assert monitored_config.version == "v2"
 
 
 def test_config_post_policy_only_save_does_not_start_a_stopped_tunnel(

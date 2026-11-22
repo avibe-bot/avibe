@@ -516,17 +516,27 @@ jobs:
   unit-test-shards:
     needs: changes
     if: fromJSON(needs.changes.outputs.plan).jobs['unit-test-shards'] == 'run'
-    name: unit-tests (${{ matrix.shard }}/${{ matrix.shard-total }})
+    name: unit-tests (Python ${{ matrix.python }}, ${{ matrix.shard }}/${{ matrix.shard-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # Eight runners with two planned lanes each: the refreshed complete-run
-        # timings give each lane about five minutes of file work. Preserve
-        # discovery, watchdogs and one-process-per-file isolation.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
-        shard-total: [8]
+        # Two lanes per runner. Four additional runners cover the complete suite
+        # on 3.15 (~11 minutes of file work per runner) with half the startups.
+        include:
+          - {python: '3.12', shard: 0, shard-total: 8}
+          - {python: '3.12', shard: 1, shard-total: 8}
+          - {python: '3.12', shard: 2, shard-total: 8}
+          - {python: '3.12', shard: 3, shard-total: 8}
+          - {python: '3.12', shard: 4, shard-total: 8}
+          - {python: '3.12', shard: 5, shard-total: 8}
+          - {python: '3.12', shard: 6, shard-total: 8}
+          - {python: '3.12', shard: 7, shard-total: 8}
+          - {python: '3.15', shard: 0, shard-total: 4}
+          - {python: '3.15', shard: 1, shard-total: 4}
+          - {python: '3.15', shard: 2, shard-total: 4}
+          - {python: '3.15', shard: 3, shard-total: 4}
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
@@ -542,7 +552,7 @@ jobs:
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
       # Exact setup-uv versions still fetch a remote manifest on a cold runner.
       - name: Install pinned uv
@@ -552,7 +562,7 @@ jobs:
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
-          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.13.7-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.13.7-py${{ matrix.python }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       - name: Install package and test deps
         # Install the declared dev group instead of a hand-listed set so test

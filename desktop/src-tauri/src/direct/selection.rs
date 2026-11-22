@@ -1,5 +1,6 @@
 //! Candidates return an already-ready backend (direct CONNECT 200 or public
 //! TCP). No candidate receives the WebView's TLS bytes during this race.
+use super::public::OpenError;
 use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -19,7 +20,7 @@ impl Selection {
     pub(super) async fn choose<T>(
         &self,
         direct: impl Future<Output = Option<T>>,
-        public: impl Future<Output = Option<T>>,
+        public: impl Future<Output = Result<T, OpenError>>,
     ) -> Option<T> {
         let (sticky, serial) = {
             let s = self.0.lock().unwrap();
@@ -38,24 +39,32 @@ impl Selection {
         };
         // Deadlines include opening the stream and reading its CONNECT answer.
         let direct = timeout(Duration::from_millis(if sticky { 1500 } else { 5000 }), direct);
-        let public = async { timeout(Duration::from_secs(8), public).await.ok().flatten() };
+        let public = async {
+            timeout(Duration::from_secs(8), public)
+                .await
+                .unwrap_or(Err(OpenError::Unreachable))
+        };
         tokio::pin!(direct, public);
         if sticky {
             let result = direct.await.ok().flatten();
             mark(result.is_some());
-            return if result.is_some() { result } else { public.await };
+            return if result.is_some() { result } else { public.await.ok() };
         }
         tokio::select! {
             biased;
             d = &mut direct => {
                 let result = d.ok().flatten(); mark(result.is_some());
-                return if result.is_some() {result} else {public.await};
+                return if result.is_some() {result} else {public.await.ok()};
             }
             _ = sleep(Duration::from_millis(500)) => {}
         }
         tokio::select! {
-            d = &mut direct => {let result=d.ok().flatten(); mark(result.is_some()); if result.is_some() {result} else {public.await} }
-            p = &mut public => {if p.is_some() {p} else {let result=direct.await.ok().flatten(); mark(result.is_some()); result} }
+            d = &mut direct => {let result=d.ok().flatten(); mark(result.is_some()); if result.is_some() {result} else {public.await.ok()} }
+            p = &mut public => match p {
+                Ok(stream) => Some(stream),
+                Err(OpenError::Terminal) => None,
+                Err(OpenError::Unreachable) => { let result=direct.await.ok().flatten(); mark(result.is_some()); result }
+            }
         }
     }
 }
@@ -74,7 +83,7 @@ mod tests {
         );
         for ms in [1500, 500] {
             let start = Instant::now();
-            assert_eq!(s.choose(pending(), ready(Some(2))).await, Some(2));
+            assert_eq!(s.choose(pending(), ready(Ok(2))).await, Some(2));
             assert_eq!(start.elapsed(), Duration::from_millis(ms));
         }
     }
@@ -87,13 +96,13 @@ mod tests {
                     sleep(Duration::from_secs(1)).await;
                     Some(1)
                 },
-                ready(None)
+                ready(Err(OpenError::Unreachable))
             )
             .await,
             Some(1)
         );
         let start = Instant::now();
-        assert_eq!(s.choose(ready(None), ready(Some(2))).await, Some(2));
+        assert_eq!(s.choose(ready(None), ready(Ok(2))).await, Some(2));
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
