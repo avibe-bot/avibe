@@ -5015,8 +5015,9 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
 
     from modules.agents.vibey.models import registry_providers
 
+    source = "src_proxytool01"
     served = json.dumps(
-        {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": source},
         separators=(",", ":"),
     )
     call = '{"type":"tool_use","id":"toolu_1","name":"web_search","input":{"query":"avibe release"}}'
@@ -5049,6 +5050,7 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
             providers=registry_providers(media_loader=None, client=client),
             gateway_client=client,
         )
+        harness.controller.hub_source_id = source
         harness.controller.hub_hosted_tools = {"web_search": {"native": "unsupported", "replay": "unsupported"}}
         message = harness.request("search")
         await harness.agent.handle_message(message)
