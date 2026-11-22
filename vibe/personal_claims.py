@@ -21,7 +21,7 @@ from vibe.personal_claim_client import ClaimError, ClaimsClient, Grant, Pending,
 
 
 @contextmanager
-def _start_config_lock(home: ClaimHome | None):
+def _claim_config_lock(home: ClaimHome | None):
     # Acquiring the config lock can create its directory, and a wait on the
     # lock file doesn't prevent a home move. Check on both sides of acquire.
     if home is not None:
@@ -44,7 +44,7 @@ class _Source:
         # Only an explicit start reaches this reconciliation. Do not retire a still-usable
         # predecessor when a new start, browser grant or mode gate might subsequently fail.
         replaceable = _recover_before_start(on_bound, home)
-        with _start_config_lock(home):
+        with _claim_config_lock(home):
             config, pending = local._config(), local._pending()
             cloud = config.remote_access.vibe_cloud
             if pending != replaceable:
@@ -58,16 +58,18 @@ class _Source:
             installation = local.ensure_installation_id(recover_from=(pending or {}).get("personal_claim"))
             return cls(installation, local.claim_revision(config, installation, pending), socket.gethostname(), cloud.backend_url)
 
-    def validate(self):
-        with config_file_lock():
+    def validate(self, home):
+        with _claim_config_lock(home):
             config, identity, pending = local._config(), local._installation_id(), local._pending()
             if self.revision != local.claim_revision(config, identity, pending):
                 raise ClaimError("local_binding_changed")
+            if home is not None:
+                home.check()
 
 
 def _recover_before_start(on_bound, home):
     """Return the *exact* still-prepared record an explicit new claim may supersede."""
-    with _start_config_lock(home):
+    with _claim_config_lock(home):
         pending = local._pending()
         if not pending:
             return None
@@ -135,10 +137,12 @@ def _outcome():
     return saved
 
 
-def _record_attempt(ticket):
-    with config_file_lock():
+def _record_attempt(ticket, home):
+    with _claim_config_lock(home):
         saved = _outcome()
         saved.update(claim_id=ticket.id, expires_at=ticket.expiry)
+        if home is not None:
+            home.check()
         write_atomic(_marker(), json.dumps(saved))
 
 
@@ -154,6 +158,7 @@ def record_bound(claim_id, identity):
     if saved.get("claim_id") == claim_id:
         saved.pop("claim_id")
         saved.pop("expires_at", None)
+    remote_access._check_pairing_home()
     write_atomic(_marker(), json.dumps(saved))
 
 
@@ -171,7 +176,7 @@ def redirect_origin_allows_auto_accept(origin: str, *, admitted_owner: bool) -> 
 class _Flow:
     def __init__(self, mode, locale, *, origin="", admitted_owner=False, expected=None, confirm=None, show=None, on_bound=None):
         self.on_bound = on_bound
-        self._start_home: ClaimHome | None = None
+        self._home: ClaimHome | None = None
         self.previous_expiry = None
         self.admitted_owner = admitted_owner
         self._cleanup_client = None
@@ -236,10 +241,10 @@ class _Flow:
                 raise ClaimError("invalid_request")
             # Recovery itself may replay an earlier request. Check the local authority before
             # touching that journal, and check the actual issuer again before ClaimsClient.start.
-            with _start_config_lock(self._start_home):
+            with _claim_config_lock(self._home):
                 if local._config().remote_access.vibe_cloud.backend_url not in ("https://avibe.bot", "https://avibe.bot/"):
                     raise ClaimError("invalid_backend")
-        source = _Source.load(self.on_bound, self._start_home)
+        source = _Source.load(self.on_bound, self._home)
         if self.mode == "desktop" and source.backend not in ("https://avibe.bot", "https://avibe.bot/"):
             raise ClaimError("invalid_backend")
         self.previous_expiry = _outcome().get("expires_at")
@@ -250,8 +255,7 @@ class _Flow:
         if self.mode == "desktop" and self.cancelled:
             self.update("declined")
             return
-        if self._start_home is not None:
-            self._start_home.check()
+        self._check_home()
         ticket = self.ticket = client.start(source.installation, source.device, self.mode, self.locale, origin=self.origin, state=state)
         self._cleanup_client = client
         self._check_time()
@@ -294,6 +298,7 @@ class _Flow:
                     self.update("declined", code="subject_mismatch" if mismatch else "declined")
                     return
                 if grant is None:
+                    self._check_home()
                     try:
                         result = client.observe(ticket)
                     except ClaimError as error:
@@ -328,23 +333,26 @@ class _Flow:
                         if not approved:
                             self.cancelled = True
                             continue
-                        source.validate()
+                        source.validate(self._home)
                         if remote_access._pairing_local_write_preflight():
                             raise ClaimError("local_binding_unavailable")
+                        self._check_home()
                         remote_access._run_pending_deferred_context_migration()
+                        self._check_home()
                         ensure_sqlite_state()
                         with self.lock:
                             if self.cancelled:
                                 continue
                             self._check_time()
                             # Write before sending: a crash from here until durable pairing handoff is ambiguous.
-                            _record_attempt(ticket)
+                            _record_attempt(ticket, self._home)
                             self.accepting, grant = True, result
                             self.update("accepting", account={"email": grant.email}, hostname=grant.hostname)
                         continue
                 else:
-                    source.validate()
+                    source.validate(self._home)
                     result = client.accept(ticket, grant)
+                    self._check_home()  # the network wait does not pin the pairing destination
                     if not isinstance(result, Pending):
                         if self.mode == "desktop" and self._target.existing_id not in (None, result.instance_id):
                             # Accept was dispatched, so this is ambiguous. Never persist a key for another instance.
@@ -355,10 +363,11 @@ class _Flow:
                             installation=source.installation, subject=grant.subject, claim_id=ticket.id,
                             instance_id=result.instance_id, hostname=grant.hostname,
                         )
+                        self._check_home()
                         if not paired.get("ok"):
                             if paired.get("error") in ("local_binding_changed", "pairing_superseded_after_redeem"):
                                 raise ClaimError("local_binding_changed")
-                            raise ClaimError("pairing_recovery_required" if _journal_for(ticket.id) else "fresh_claim_required")
+                            raise ClaimError("pairing_recovery_required" if _journal_for(ticket.id, self._home) else "fresh_claim_required")
                         if self.mode == "desktop":
                             # Private only: retain the actual redeemed target, not just the
                             # hostname in the public flow view or a later catalog row.
@@ -388,10 +397,13 @@ class _Flow:
                 pass  # A lost decline is not proof a hosted reservation was released.
         self._cleanup_client = None
 
+    def _check_home(self):
+        if self._home is not None:
+            self._home.check()
+
     def run(self):
         try:
-            if self._start_home is not None:
-                self._start_home.check()
+            self._check_home()
             with MigrationFileLock(paths.get_state_dir() / "personal-claim.lock", timeout_seconds=0):
                 try:
                     self._execute()
@@ -418,8 +430,8 @@ def _matches(expected, actual):
     return isinstance(actual, str) and actual.isascii() and hmac.compare_digest(expected, actual)
 
 
-def _journal_for(claim_id):
-    with config_file_lock():
+def _journal_for(claim_id, home=None):
+    with _claim_config_lock(home):
         record = local._pending()
         return record if record and record.get("personal_claim", {}).get("claim_id") == claim_id else None
 
@@ -473,7 +485,7 @@ class DesktopClaim(_Flow):
         if not isinstance(home, ClaimHome) or not text(signed_in_subject, 200) or not callable(publish_ticket):
             raise ClaimError("invalid_request")
         super().__init__("desktop", locale, expected=signed_in_subject)
-        self._start_home = home
+        self._home = home
         self._publish_ticket = publish_ticket
         self._target: _ReviewedTarget | None = None
         self._publication: DesktopPublication | None = None
@@ -494,7 +506,9 @@ class DesktopClaim(_Flow):
             self._used = True
             if self.cancelled:
                 return {"state": "declined"}
-        return super().run()
+        # Only this synchronous worker's journal operations inherit the admission.
+        with remote_access._with_pairing_home(self._check_home):
+            return super().run()
 
     def _await_native_arm(self, ticket, device):
         # Emit only this projection over the private pipe. Never send the verifier, local

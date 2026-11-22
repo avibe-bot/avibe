@@ -200,6 +200,78 @@ def test_desktop_machine_checks_its_own_ack_reviewed_host_and_receipt(claim_peer
     assert bool(V2Config.load().remote_access.vibe_cloud.instance_id) == (state == "bound")
 
 
+@pytest.mark.parametrize("boundary,accepts,redeems,phase", [
+    ("ticket", 0, 0, None), ("accepting", 0, 0, None),
+    ("accept_reply", 1, 0, None), ("redeem_reply", 1, 1, "prepared"),
+    ("redeem_denied", 1, 1, "prepared"), ("redeemed", 1, 1, "redeemed"),
+    ("applied", 1, 1, "applied"),
+])
+def test_desktop_home_admission_is_required_through_publication(
+    claim_peer, pairing_host, monkeypatch, boundary, accepts, redeems, phase,
+):
+    # Physical-home recognition is exercised by the pipe suite. Withdraw only
+    # its verdict here: the config, installation ID and journal still match.
+    live = True
+    def reach(stage):
+        nonlocal live
+        if stage == boundary:
+            live = False
+
+    def review(ticket):
+        flow.arm(claim_id=ticket["claim_id"], kind="new", hostname=claim_peer.hostname, existing_instance_id=None)
+        reach("ticket")
+
+    flow = _desktop_claim(signed_in_subject="owner-id", publish_ticket=review)
+    original_check = ClaimHome.check
+    def check(home):
+        if not live:
+            raise claims.ClaimError("local_binding_changed")
+        original_check(home)
+    monkeypatch.setattr(ClaimHome, "check", check)
+
+    update, accept = flow.update, claims.ClaimsClient.accept
+    redeem, write = remote_access._json_request, remote_access._write_pending_pairing_record
+    def updated(state, **fields):
+        update(state, **fields)
+        reach(state)
+    def accepted(*args, **kwargs):
+        result = accept(*args, **kwargs)
+        reach("accept_reply")
+        return result
+    def redeemed(*args, **kwargs):
+        result = redeem(*args, **kwargs)
+        if live and boundary == "redeem_denied":
+            reach("redeem_denied")
+            raise remote_access.BackendRequestError(400, {"error": "pairing_key_expired"})
+        reach("redeem_reply")
+        return result
+    def written(record):
+        result = write(record)
+        reach(record["phase"])
+        return result
+    monkeypatch.setattr(flow, "update", updated)
+    monkeypatch.setattr(claims.ClaimsClient, "accept", accepted)
+    monkeypatch.setattr(remote_access, "_json_request", redeemed)
+    monkeypatch.setattr(remote_access, "_write_pending_pairing_record", written)
+
+    result = flow.run()
+    assert not live and (result["state"], result["code"]) == ("error", "local_binding_changed")
+    assert claim_peer.decisions.count("owner-id") == accepts
+    assert len(pairing_host[1]) == redeems
+    assert "bound" not in claims._outcome()
+    with pytest.raises(claims.ClaimError, match="local_binding_changed"):
+        flow.take_publication()
+    record, error = remote_access._read_pending_pairing_record()
+    assert error is None and (record and record["phase"]) == phase
+    assert bool(V2Config.load().remote_access.vibe_cloud.instance_id) == (phase == "applied")
+    if phase:
+        # Ordinary recovery has its own authority. It can finish the retained
+        # operation without accepting again or redeeming a sealed reply again.
+        assert claims.recover_pairing(claim_peer.id)["state"] == "bound"
+        assert claim_peer.decisions.count("owner-id") == accepts
+        assert len(pairing_host[1]) == redeems + (phase == "prepared")
+
+
 def test_desktop_close_before_arm_never_observes_or_accepts(claim_peer):
     shown = threading.Event()
     messages, outcomes = [], []

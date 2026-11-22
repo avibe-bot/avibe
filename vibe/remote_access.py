@@ -5450,16 +5450,39 @@ class _PairingRevocationUnavailable(RuntimeError):
     """The pending pairing revocation fence could not be persisted."""
 
 
+# Only the admitted Desktop worker installs a guard. An ordinary CLI or service
+# replay owns its own admission; nothing from the caller or journal can set this.
+_pairing_worker = threading.local()
+
+
+@contextmanager
+def _with_pairing_home(check: Callable[[], None]):
+    previous = getattr(_pairing_worker, "check_home", None)
+    _pairing_worker.check_home = check
+    try:
+        yield
+    finally:
+        _pairing_worker.check_home = previous
+
+
+def _check_pairing_home() -> None:
+    check = getattr(_pairing_worker, "check_home", None)
+    if check is not None:
+        check()
+
+
 @contextmanager
 def _pairing_persist_lock():
     """Enter the existing config lock while preserving body exceptions."""
 
+    _check_pairing_home()
     lock = config_file_lock()
     try:
         lock.__enter__()
     except Exception as exc:
         raise _PairingLockUnavailable(str(exc)) from exc
     try:
+        _check_pairing_home()
         yield
     except BaseException as exc:
         if not lock.__exit__(type(exc), exc, exc.__traceback__):
@@ -5659,6 +5682,7 @@ def _validate_pending_pairing_record(payload: Any) -> tuple[dict[str, Any] | Non
 
 
 def _write_pending_pairing_record(record: Mapping[str, Any]) -> Path:
+    _check_pairing_home()
     path = _pending_pairing_path()
     _pending_pairing_dir(create=True)
     write_atomic(path, json.dumps(dict(record), ensure_ascii=False, indent=2, sort_keys=True))
@@ -5672,6 +5696,7 @@ def _retire_pending_pairing(*, operation_id: str) -> bool:
         return False
     if record is None or record.get("operation_id") != operation_id:
         return True
+    _check_pairing_home()
     path = _pending_pairing_path()
     try:
         path.unlink()
@@ -5827,15 +5852,18 @@ def _pairing_local_write_preflight() -> str | None:
         pass  # fresh install: save_config seeds defaults
     except Exception as exc:
         return f"config load failed: {exc}"
+    _check_pairing_home()
     config_path = paths.get_config_path()
     try:
         _probe_atomic_parent(config_path.parent)
+        _check_pairing_home()
         _probe_atomic_parent(_pending_pairing_dir())
         pending_path = _pending_pairing_path()
         if pending_path.exists() and not pending_path.is_file():
             return f"pending pairing record is not a regular file: {pending_path}"
     except Exception as exc:
         return f"local pairing state is not writable: {exc}"
+    _check_pairing_home()
     try:
         with config_file_lock():
             pass  # the save itself takes this lock; prove it is acquirable now
@@ -6224,7 +6252,9 @@ def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: st
     from vibe import desktop_local_instance as local
     from storage.importer import ensure_sqlite_state
 
+    _check_pairing_home()
     _run_pending_deferred_context_migration()
+    _check_pairing_home()
     ensure_sqlite_state()
     with _pairing_persist_lock():
         config, identity, pending = local._config(), local._installation_id(), local._pending()
@@ -6318,6 +6348,7 @@ def _redeem_pairing_claim(
 ) -> dict[str, Any]:
     """Send only the exact request whose recovery inputs are already durable."""
     origin_service = request_payload["origin_service"]
+    _check_pairing_home()
     try:
         result = _json_request(
             f"{backend.base_url}/api/v1/pairing/redeem",
@@ -6325,6 +6356,7 @@ def _redeem_pairing_claim(
             connection_target=backend,
         )
     except BackendRequestError as exc:
+        _check_pairing_home()
         if claim.get("personal_claim"):
             # Recovery is also reachable from the existing pair route and CLI.
             # The raw upstream body/detail may contain the one-use key or credentials.
@@ -6378,6 +6410,7 @@ def _redeem_pairing_claim(
             # distinct from a lost reply only in this protected record.
             return _record_desktop_reply(claim, outcome, "ended_unknown")
         return outcome
+    _check_pairing_home()
     normalized_result, response_error = _validate_pairing_response(result)
     if response_error:
         failure = {"ok": False, "error": "invalid_pairing_response", "detail": response_error}
@@ -6426,6 +6459,7 @@ def _persist_pairing_impl(
     """Claim, apply, and retire one pending pairing under the config lock."""
     from storage.importer import ensure_sqlite_state
 
+    _check_pairing_home()
     try:
         ensure_sqlite_state()
     except Exception as exc:
@@ -6438,6 +6472,7 @@ def _persist_pairing_impl(
             }
         return {"ok": False, "error": "pairing_recovery_unavailable", "detail": str(exc)}
 
+    _check_pairing_home()
     try:
         with config_file_lock():
             pass
@@ -6597,6 +6632,7 @@ def _persist_pairing_impl(
                     "detail": "a different local identity now owns the pending operation",
                     "pairing": {"ok": False, "recoverable": False},
                 }
+            _check_pairing_home()
             try:
                 config = api.save_config(_config_for_pairing_record(record))
             except Exception as exc:
@@ -6628,6 +6664,7 @@ def _persist_pairing_impl(
                 "pairing": {"ok": False, "reconciling": True},
             }
         instance_kind = _normalized_instance_kind(record["pairing"].get("instance_kind"))
+        _check_pairing_home()
         try:
             transition = _transition_instance_binding(
                 instance_id=str(record["pairing"]["instance_id"]),
@@ -6674,6 +6711,7 @@ def _persist_pairing_impl(
             # this claim to this exact credential generation. A failed write is resumable.
             from vibe.personal_claim_client import ClaimError
             from vibe.personal_claims import record_bound
+            _check_pairing_home()
             try:
                 record_bound(personal["claim_id"], persisted_identity)
             except (OSError, ClaimError):
@@ -6688,6 +6726,7 @@ def _persist_pairing_impl(
             }
 
     assert config is not None
+    _check_pairing_home()
     start_result = start(config)
     _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     return _pairing_result_status(config, start_result=start_result)
