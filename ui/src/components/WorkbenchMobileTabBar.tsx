@@ -6,6 +6,7 @@ import { Plus } from 'lucide-react';
 import { useApi } from '../context/ApiContext';
 import { useBots } from '../context/BotsContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
+import { mainBotStartsAtRecognition } from '../lib/appVoice';
 import { MAIN_BOT_SESSION_ID, botSessionPath, type BotAvatar as BotAvatarSpec } from '../lib/bots';
 import { loadVoiceContext } from '../lib/voiceContext';
 import { MobileTabBar, type BotCenterPhase, type ShellNavItem } from './MobileChrome';
@@ -64,6 +65,8 @@ const MainBotTabBar: React.FC<{ items: ShellNavItem[] }> = ({ items }) => {
     context: () => loadVoiceContext(api.listSessionMessages, MAIN_BOT_SESSION_ID),
     // Kept on the device until sent; if it cannot be, it waits in the main Bot's composer.
     keep: () => ({ target: MAIN_BOT_SESSION_ID }),
+    // A tap here is navigation: the instance may say that it opens no microphone (lib/appVoice).
+    startsAtRecognition: mainBotStartsAtRecognition,
   });
   return (
     <>
@@ -78,7 +81,8 @@ const MainBotTabBar: React.FC<{ items: ShellNavItem[] }> = ({ items }) => {
           onClick: open,
           // Pressed from the gesture's ring delay (100 ms), as every hold surface is: a tap does not flash.
           phase: hold.phase === 'pressing' && hold.progress <= 0 ? 'idle' : CENTER_PHASE[hold.phase],
-          hold: hold.bind,
+          // The whole button is the hold's: the iOS App may recognise a hold on it itself.
+          hold: { ...hold.bind, ref: hold.attachSurface },
         }}
       />
       <MainBotHoldOverlay hold={hold} bot={{ name, avatar }} />

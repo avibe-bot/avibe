@@ -494,6 +494,29 @@ def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path, sqlite_sch
     assert payload["audio_asr"]["enabled_configured"] is True
     assert payload["audio_asr"]["echo_transcript"] is False
 
+    # The off switch for the iOS App's hold recognition: on unless turned off, set
+    # and unset by a one-key save that leaves the rest of the section as it was.
+    assert updated.audio_asr.app_hold is True
+    off = api.save_config({"audio_asr": {"app_hold": False}})
+    assert off.audio_asr.app_hold is False
+    assert off.audio_asr.echo_transcript is False
+    assert api.config_to_payload(off)["audio_asr"]["app_hold"] is False
+    assert api.save_config({"audio_asr": {"app_hold": True}}).audio_asr.app_hold is True
+    with pytest.raises(ValueError):
+        api.save_config({"audio_asr": {"app_hold": []}})
+
+    # Where the main Bot's button opens the microphone in the iOS App: at touch-down
+    # unless turned off, by a one-key save that leaves the rest as it was.
+    assert updated.audio_asr.app_hold_main_at_touch is True
+    late = api.save_config({"audio_asr": {"app_hold_main_at_touch": False}})
+    assert late.audio_asr.app_hold_main_at_touch is False
+    assert late.audio_asr.app_hold is True
+    assert late.audio_asr.echo_transcript is False
+    assert api.config_to_payload(late)["audio_asr"]["app_hold_main_at_touch"] is False
+    assert api.save_config({"audio_asr": {"app_hold_main_at_touch": True}}).audio_asr.app_hold_main_at_touch is True
+    with pytest.raises(ValueError):
+        api.save_config({"audio_asr": {"app_hold_main_at_touch": "recognition"}})
+
 
 def test_save_config_marks_explicit_audio_asr_disable_patch(monkeypatch, tmp_path, sqlite_schema_db_factory):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1699,14 +1722,6 @@ def test_wrong_typed_settings_writes_are_refused_instead_of_silently_defaulted(
     assert api.load_config().show_duration is True
 
 
-# Remove both marks with the config.v2_config._named_value fix for Optional[int].
-_known_optional_int_recovery = pytest.mark.xfail(
-    sys.version_info >= (3, 14), reason="_named_value misses Optional[int] on Python 3.14+",
-    raises=AssertionError, strict=True,
-)
-
-
-@_known_optional_int_recovery
 def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_path, monkeypatch):
     """Refusing over HTTP must not turn a hand-edited config into a dead start.
 
@@ -1793,7 +1808,7 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
         (section, info.name)
         for section in _FIELD_SCOPED_RECOVERY_SECTIONS
         for info in fields(V2Config.__dataclass_fields__[section].default_factory)
-        if any(kind in str(info.type) for kind in ("int", "float"))
+        if info.type in (int, float, int | None, float | None)
     ]
     assert len(numeric_paths) >= 3, numeric_paths
     for path in numeric_paths:
@@ -1820,7 +1835,6 @@ def test_wrong_typed_settings_on_disk_degrade_instead_of_failing_the_load(tmp_pa
             }, (label, number)
 
 
-@_known_optional_int_recovery
 def test_unreadable_optional_feature_fields_never_load_the_feature_back_on(tmp_path, monkeypatch):
     """Recovery keeps the siblings it can read, and never leaves a feature on.
 

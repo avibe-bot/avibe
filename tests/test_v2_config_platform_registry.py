@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import copy
 import re
-import sys
 from dataclasses import fields
+from typing import Optional, Union
 
 import pytest
 
 from config.v2_config import (
     _BOOL_SPELLINGS,
     _named_value,
+    _unwrap_optional,
     AgentsConfig,
     AudioAsrConfig,
     DiscordConfig,
@@ -389,33 +390,32 @@ _NAMING_NO_NUMBER = (True, False, "garbage", [], {}, None, float("inf"), float("
 # one row the two numeric kinds cannot share: ``int(14.9)`` is ``14``, and a
 # font size posted as 14.9 was answered 200 and stored as 14.
 _VALUES_NAMING_NO = {
-    "bool": ("garbage", 5, -1, 2.0, [], {}, None),
-    "int": _NAMING_NO_NUMBER + (14.9, -0.5, 0.1),
-    "float": _NAMING_NO_NUMBER,
-    "str": (5, True, 2.0, [], {}, None),
+    bool: ("garbage", 5, -1, 2.0, [], {}, None),
+    int: _NAMING_NO_NUMBER + (14.9, -0.5, 0.1),
+    float: _NAMING_NO_NUMBER,
+    str: (5, True, 2.0, [], {}, None),
 }
+_OPTIONAL_SCALARS = {kind | None: kind for kind in _VALUES_NAMING_NO}
 
 
-def _declared_kind(info) -> tuple[str, bool]:
-    """The kind a field declares, and whether it also names ``None``.
-
-    ``Optional[int]`` reports its ``__name__`` as the bare ``"Optional"``, which
-    dropped the kind being wrapped and quietly excused every optional field from
-    the rule below — ``audio_asr.max_file_bytes`` was skipped while this test's
-    docstring claimed every declared field was covered.
-    """
-
-    text = info.type if isinstance(info.type, str) else getattr(info.type, "__name__", "")
-    if text.startswith("Optional"):
-        text = str(info.type)
-    optional = re.fullmatch(r"(?:typing\.)?Optional\[(?:typing\.)?(.+)\]", text)
-    return (optional.group(1), True) if optional else (text, False)
-
-
-@pytest.mark.xfail(
-    sys.version_info >= (3, 14), strict=True, raises=AssertionError,
-    reason="#4134 config fix: recognize optional scalar annotations in _named_value and its contract test",
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        (Optional[int], (int, True)),
+        (int | None, (int, True)),
+        (Union[int, None], (int, True)),
+        (None | int, (int, True)),
+        (list[int] | None, (list[int], True)),
+        (list[int | None], (list[int | None], False)),
+        (int, (int, False)),
+        (int | str, (int | str, False)),
+        (int | str | None, (int | str | None, False)),
+    ],
 )
+def test_unwrap_optional(declared, expected) -> None:
+    assert _unwrap_optional(declared) == expected
+
+
 def test_config_fields_are_held_to_the_kind_they_declare() -> None:
     """Every field of a writable section refuses a value naming another kind.
 
@@ -463,7 +463,7 @@ def test_config_fields_are_held_to_the_kind_they_declare() -> None:
     for section, dataclass_type, section_path in _KIND_HELD_SECTIONS:
         assert V2Config.from_payload(copy.deepcopy(healthy)), section
         for info in fields(dataclass_type):
-            kind, optional = _declared_kind(info)
+            kind = _OPTIONAL_SCALARS.get(info.type, info.type)
             if kind not in _VALUES_NAMING_NO:
                 # Containers and nested sections are held by the code that
                 # already understands them, not by the declared-kind rule.
@@ -472,7 +472,7 @@ def test_config_fields_are_held_to_the_kind_they_declare() -> None:
                 continue
             declared_kinds.add((section, info.name))
             for value in _VALUES_NAMING_NO[kind]:
-                if value is None and optional:
+                if value is None and info.type in _OPTIONAL_SCALARS:
                     # A field that declares ``Optional`` names ``None`` as one of
                     # its own values, so refusing it would be the mirror defect.
                     assert V2Config.from_payload(_seed(section_path, info.name, None))
@@ -492,7 +492,7 @@ def test_config_fields_are_held_to_the_kind_they_declare() -> None:
         (section, info.name)
         for section, dataclass_type, _ in _KIND_HELD_SECTIONS
         for info in fields(dataclass_type)
-        if _declared_kind(info)[1] and _declared_kind(info)[0] in _VALUES_NAMING_NO
+        if info.type in _OPTIONAL_SCALARS
     }
     assert optional_scalars, "no optional scalar field left to hold to its declared kind"
     assert optional_scalars <= held, optional_scalars - held
@@ -551,11 +551,11 @@ def test_a_number_this_parser_accepts_is_the_number_it_was_given() -> None:
     conversion anyway: ``int("14.9")`` raises.
     """
 
-    read: dict[str, list[object]] = {"int": [], "float": []}
+    read: dict[type, list[object]] = {int: [], float: []}
     for kind in read:
         for value in _NUMBERS_GIVEN:
             try:
-                number = _named_value(f"probe.{kind}", kind, value)
+                number = _named_value(f"probe.{kind.__name__}", kind, value)
             except ValueError:
                 continue
             assert number == value, (kind, value, number)
@@ -567,13 +567,13 @@ def test_a_number_this_parser_accepts_is_the_number_it_was_given() -> None:
     # them in what was accepted, because ``14.0 in [14]`` is true in Python —
     # membership would report the float as read on the strength of the int it
     # equals, and a rule that refused every float would pass.
-    assert _named_value("probe.int", "int", 14.0) == 14
-    assert _named_value("probe.float", "float", 14.9) == 14.9
-    assert _named_value("probe.int", "int", 2**53 + 1) == 2**53 + 1
-    assert len(read["int"]) >= 6 and len(read["float"]) >= 6, read
+    assert _named_value("probe.int", int, 14.0) == 14
+    assert _named_value("probe.float", float, 14.9) == 14.9
+    assert _named_value("probe.int", int, 2**53 + 1) == 2**53 + 1
+    assert len(read[int]) >= 6 and len(read[float]) >= 6, read
 
-    assert _named_value("probe.int", "int", "14") == 14
-    assert _named_value("probe.float", "float", "2.5") == 2.5
+    assert _named_value("probe.int", int, "14") == 14
+    assert _named_value("probe.float", float, "2.5") == 2.5
 
 
 def test_config_payload_includes_vibe_cloud_remote_access() -> None:

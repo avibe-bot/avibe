@@ -12,6 +12,7 @@
 import { useSyncExternalStore } from 'react';
 
 import { apiFetch } from './apiFetch';
+import { noteAppVoice } from './appVoice';
 import { subscribeLocalSnapshotPrincipal } from './localSnapshots';
 
 export type VoiceConsent = 'granted' | 'declined' | null;
@@ -29,6 +30,9 @@ const emit = () => listeners.forEach((listener) => listener());
 // was, so a slow read cannot bring back an answer the reader has since changed.
 let sequence = 0;
 let applied = 0;
+// The same order for what a read says of the iOS App's voice (lib/appVoice), kept apart: a
+// saved answer says nothing of that, so only a newer read supersedes a read there.
+let appliedAppVoice = 0;
 
 /** Number a `/api/asr/status` read as it starts; hand it to `noteVoiceStatus` with the body. */
 export function beginVoiceConsentRead(): number {
@@ -62,6 +66,12 @@ if (typeof window !== 'undefined') {
  *  instance that asks no question and refuses nothing, so voice goes on as before. */
 export function noteVoiceStatus(data: unknown, read: number = beginVoiceConsentRead()): void {
   if (typeof data !== 'object' || data === null) return;
+  // The same body says what the instance set for the iOS App's voice (lib/appVoice): taken
+  // unless a newer read has said it, so a slow read cannot turn the off switch back on.
+  if (read > appliedAppVoice) {
+    appliedAppVoice = read;
+    noteAppVoice(data);
+  }
   // Superseded by a newer read or a saved answer.
   if (read <= applied) return;
   applied = read;
