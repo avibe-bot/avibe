@@ -16464,6 +16464,24 @@ _REMOTE_START_BINDING_REFUSALS = {
 }
 
 
+_REMOTE_DISABLED_AFTER_PAIRING = (
+    "Pairing saved. Remote access is disabled in this computer's settings and stays disabled."
+)
+
+
+#: The same refusals keyed by the local binding state, for a start that the
+#: settings refused before it reached the binding.
+_REMOTE_START_BINDING_STATES = {
+    "binding_rejected": _REMOTE_START_BINDING_REFUSALS["binding_rejected"],
+    "resetting": _REMOTE_START_BINDING_REFUSALS["reset_in_progress"],
+    "reset_repair_required": _REMOTE_START_BINDING_REFUSALS["reset_in_progress"],
+    "pairing_recovery_required": (
+        "Remote access was not started: an earlier attempt to bind this computer has not finished.",
+        "Continue it: vibe remote rebind",
+    ),
+}
+
+
 def _remote_disabled_lines() -> tuple[str, ...]:
     """The way out when a bound computer has remote access disabled in settings.
 
@@ -16620,7 +16638,8 @@ def _print_remote_pair_failure(result: dict) -> None:
 
 def _print_remote_start_failure(start_result: dict) -> None:
     error_code = str(start_result.get("error") or "unknown_error")
-    print("Remote access is paired, but the tunnel did not start.", file=sys.stderr)
+    if error_code != "remote_access_disabled":
+        print("Remote access is paired, but the tunnel did not start.", file=sys.stderr)
     if error_code == "cloudflared_install_failed":
         print("Avibe could not install cloudflared automatically.", file=sys.stderr)
     elif error_code == "cloudflared_spawn_failed":
@@ -16628,7 +16647,11 @@ def _print_remote_start_failure(start_result: dict) -> None:
     elif error_code == "cloudflared_exited":
         print("cloudflared exited immediately after launch.", file=sys.stderr)
     elif error_code == "remote_access_disabled":
-        print("Remote access is disabled in the saved config.", file=sys.stderr)
+        # The same state as a pairing that starts nothing: the same words.
+        print(_REMOTE_DISABLED_AFTER_PAIRING, file=sys.stderr)
+        for line in _remote_disabled_lines():
+            print(line, file=sys.stderr)
+        return
     else:
         print(f"Reason: {error_code}", file=sys.stderr)
     if start_result.get("detail"):
@@ -16742,7 +16765,11 @@ def _run_remote_pair(args, *, guided: bool) -> int:
     # Pairing over a computer whose remote access was off keeps it off and starts
     # no tunnel. That is the result asked for, not a failed start.
     kept_off = bool(result.get("ok")) and "start" not in result
-    command_ok = bool(result.get("ok") and (kept_off or start_result.get("ok")))
+    # Disabled in settings is one state however the pairing reported it: with no start
+    # at all, or with a start that the setting refused.
+    settings_disabled = bool(result.get("ok")) and result.get("enabled") is False and (
+        kept_off or start_result.get("error") == "remote_access_disabled")
+    command_ok = bool(result.get("ok") and (kept_off or settings_disabled or start_result.get("ok")))
     if getattr(args, "json", False):
         payload = {**result, "ok": command_ok}
         if result.get("ok") and not command_ok:
@@ -16755,14 +16782,15 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         _print_remote_pair_failure(result)
         return 1
 
+    if settings_disabled:
+        # Disabled in settings, not switched off: `vibe remote start` refuses it.
+        print("")
+        print(_REMOTE_DISABLED_AFTER_PAIRING)
+        for line in _remote_disabled_lines():
+            print(line)
+        return 0
     if kept_off:
         print("")
-        if result.get("enabled") is False:
-            # Disabled in settings, not switched off: `vibe remote start` refuses it.
-            print("Pairing saved. Remote access is disabled in this computer's settings and stays disabled.")
-            for line in _remote_disabled_lines():
-                print(line)
-            return 0
         print("Pairing saved. Remote access was off on this computer and stays off.")
         print("Turn it on with:")
         print("  vibe remote start")
@@ -16822,8 +16850,22 @@ def cmd_remote_start(args):
             for line in _REMOTE_START_BINDING_REFUSALS[result["error"]]:
                 print(line, file=sys.stderr)
         elif result.get("error") == "remote_access_disabled" and remote_access.status().get("paired"):
-            print("Remote access was not started: it is disabled in this computer's settings.", file=sys.stderr)
-            for line in _remote_disabled_lines():
+            from vibe import remote_rebind
+
+            try:
+                binding_state = remote_rebind.read_state()[0]
+            except Exception:
+                binding_state = None
+            if binding_state == "bound":
+                print("Remote access was not started: it is disabled in this computer's settings.", file=sys.stderr)
+                lines = _remote_disabled_lines()
+            else:
+                # Start reports the setting before it looks at the binding. The setting is
+                # part of what unfinished binding work compares, so a person is never sent
+                # to edit it while that work, or a refused binding, is what stands in the way.
+                lines = _REMOTE_START_BINDING_STATES.get(binding_state, (
+                    "Remote access was not started.", "See what can be done: vibe remote rebind"))
+            for line in lines:
                 print(line, file=sys.stderr)
         else:
             print(f"Remote access failed to start: {result.get('error') or 'unknown_error'}", file=sys.stderr)

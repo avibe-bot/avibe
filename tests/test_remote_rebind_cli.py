@@ -574,6 +574,14 @@ def test_status_start_and_pair_say_what_the_binding_needs(bound_terminal, monkey
     assert "vibe remote start does not turn it on." in out and "remote_access.vibe_cloud.enabled to true" in out
     assert str(cli.paths.get_config_path()) in out and out.rstrip().endswith("vibe remote start")
 
+    # The same state when the pairing did try a start and the setting refused it: the same words.
+    monkeypatch.setattr(remote_access, "pair", lambda *_: {
+        "ok": True, "paired": True, "enabled": False, "pairing": {"ok": True},
+        "start": {"ok": False, "error": "remote_access_disabled"}})
+    assert cli.cmd_remote_pair(args) == 0
+    captured = capsys.readouterr()
+    assert captured.out == out and not captured.err
+
 
 def test_a_completed_binding_on_a_computer_disabled_in_settings_does_not_point_at_start_alone(bound_terminal, monkeypatch, capsys):
     config = V2Config.load()
@@ -589,28 +597,85 @@ def test_a_completed_binding_on_a_computer_disabled_in_settings_does_not_point_a
     assert "vibe remote start does not turn it on." in out and out.rstrip().endswith("vibe remote start")
 
 
-@pytest.mark.parametrize("bound", [True, False])
-def test_start_on_a_computer_disabled_in_settings_names_the_setting_only_when_bound(monkeypatch, tmp_path, capsys, bound):
+@pytest.mark.parametrize("case", ["bound", "unbound", "reset_record_damaged", "pairing_record_damaged"])
+def test_start_on_a_computer_disabled_in_settings_names_the_setting_only_on_a_plain_bound_computer(
+        monkeypatch, tmp_path, capsys, case):
     from tests.test_remote_access_vibe_cloud import _config
 
     # The real start against a real settings file, with no connector to launch.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *_a, **_k: None)
     config = _config()
     cloud = config.remote_access.vibe_cloud
     cloud.enabled = False
-    cloud.tunnel_token = "fixture-tunnel" if bound else ""
-    if not bound:
-        cloud.instance_id = ""
+    cloud.instance_secret = "fixture-secret"
+    cloud.tunnel_token = "" if case == "unbound" else "fixture-tunnel"
+    if case == "unbound":
+        cloud.instance_id = cloud.instance_secret = ""
     config.save()
+    if case == "reset_record_damaged":
+        gate.reset_intent_path().parent.mkdir(parents=True, exist_ok=True)
+        gate.reset_intent_path().write_text("{")
+    elif case == "pairing_record_damaged":
+        remote_access._pending_pairing_path().parent.mkdir(parents=True, exist_ok=True)
+        remote_access._pending_pairing_path().write_text("not a pairing record")
 
     assert cli.cmd_remote_start(SimpleNamespace(json=False)) == 1
 
     err = capsys.readouterr().err
-    if bound:
+    if case == "bound":
         assert "Remote access was not started: it is disabled in this computer's settings." in err
         assert "remote_access.vibe_cloud.enabled to true" in err and str(cli.paths.get_config_path()) in err
         assert "remote_access_disabled" not in err
-    else:
+    elif case == "unbound":
         # Nothing to enable on a computer that is not bound; that output is unchanged here.
         assert "settings file" not in err and "remote_access_disabled" in err
-    assert cli._CLI_COMMAND_FLOORS[("remote", "rebind")] == "owner"
+    else:
+        assert "settings file" not in err and "enabled" not in err and "remote_access_disabled" not in err
+        assert err.startswith("Remote access was not started") and err.rstrip().endswith("vibe remote rebind")
+        assert ("a reset of this computer's binding has not finished" in err) is (case == "reset_record_damaged")
+
+
+_REAL_START, _REAL_STATUS = remote_access.start, remote_access.status
+
+
+@pytest.mark.parametrize("unfinished,sentence", [
+    ("reset", "a reset of this computer's binding has not finished.\nContinue it: vibe remote rebind"),
+    ("pairing", "an earlier attempt to bind this computer has not finished.\nContinue it: vibe remote rebind"),
+    ("refused", "avibe.bot is refusing this computer's binding.\nSee what can be done: vibe remote rebind"),
+])
+def test_start_never_sends_a_person_to_edit_the_setting_while_binding_work_stands_in_the_way(
+        bound_terminal, monkeypatch, capsys, unfinished, sentence):
+    """The setting is part of what a reset and a saved pairing compare: editing it would break them."""
+    import time
+
+    from config.v2_config import config_file_lock
+    from tests.test_pairing_recovery import _fail_config_publication_once, _response
+    from vibe import binding_health
+    from vibe.account_session_revoke import pairing_epoch
+
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    if unfinished == "reset":
+        with gate.admitted("reset"), config_file_lock():
+            binding_reset._seal(V2Config.load())
+    elif unfinished == "pairing":
+        # Accepted and redeemed on avibe.bot, not yet published on this computer.
+        _fail_config_publication_once(monkeypatch)
+        _unfinished_attempt(monkeypatch, lambda _n: {**_response(), "binding_disposition": "existing"})
+        assert remote_access._read_pending_pairing_record()[0]["phase"] == "redeemed"
+    else:
+        binding_health._path().write_text(json.dumps({"epoch": pairing_epoch(V2Config.load()), "since": time.time()}))
+    before = remote_rebind.read_state()[0]
+    assert before == {"reset": "resetting", "pairing": "pairing_recovery_required", "refused": "binding_rejected"}[unfinished]
+    monkeypatch.setattr(remote_access, "start", _REAL_START)
+    monkeypatch.setattr(remote_access, "status", _REAL_STATUS)
+    settings = cli.paths.get_config_path().read_bytes()
+
+    assert cli.cmd_remote_start(SimpleNamespace(json=False)) == 1
+
+    err = capsys.readouterr().err
+    assert err == "Remote access was not started: " + sentence + "\n"
+    # Nothing was changed, and the unfinished work is still where it was.
+    assert cli.paths.get_config_path().read_bytes() == settings and remote_rebind.read_state()[0] == before
