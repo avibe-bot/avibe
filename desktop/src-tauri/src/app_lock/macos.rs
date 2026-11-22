@@ -1258,13 +1258,10 @@ fn install_observers(
     );
 }
 
-pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
-    let path = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("app-lock.json");
-    let policy = match std::fs::read(&path) {
+/// Installing/upgrading Desktop never opts the user in. Only a previously
+/// verified, readable policy enables protection; invalid optional state is Off.
+fn load_policy(path: &std::path::Path) -> Policy {
+    match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
             eprintln!("Invalid App Lock preference; disabled: {error}");
             Policy::Off
@@ -1274,7 +1271,16 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
             eprintln!("Cannot read App Lock preference; disabled: {e}");
             Policy::Off
         }
-    };
+    }
+}
+
+pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("app-lock.json");
+    let policy = load_policy(&path);
     app.manage(Owner {
         machine: Mutex::new(Machine::new(policy, availability())),
         pending: Mutex::new(None),
@@ -1326,6 +1332,66 @@ pub(crate) fn init(app: &AppHandle) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+
+    #[test]
+    fn launch_is_off_without_a_saved_choice_and_preserves_an_explicit_choice_on_upgrade() {
+        // Exercise the actual startup reader with test-owned disk state: a
+        // default flip or eager preference write would opt users in on upgrade.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("app-lock.json");
+        let available = Availability {
+            available: true,
+            biometry: Biometry::TouchId,
+            biometry_state: BiometryState::Usable,
+        };
+        assert_eq!(Policy::default(), Policy::Off);
+        let assert_off = || {
+            let mut state = Machine::new(load_policy(&path), available);
+            assert_eq!(state.policy, Policy::Off);
+            assert!(!state.effective());
+            state.leave(1.0);
+            state.tick(3600.0);
+            state.arrive(3601.0);
+            assert!(!state.locked);
+            assert!(!state.should_prompt());
+        };
+        assert_off(); // First installation.
+        assert!(!path.exists());
+        let older_settings = directory.path().join("notifications.json");
+        std::fs::write(&older_settings, b"{\"enabled\":true}").unwrap();
+        assert_off(); // Upgrade from Desktop without an App Lock preference.
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&older_settings).unwrap(), b"{\"enabled\":true}");
+        for bytes in [
+            b"".as_slice(),
+            b"{",
+            b"null",
+            b"{}",
+            b"true",
+            br#""unknown""#,
+            br#""off""#,
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_off();
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap(); // A read error also disables optional state.
+        assert_off();
+        std::fs::remove_dir(&path).unwrap();
+        assert_off(); // A deleted preference never recreates an enabled policy.
+        for policy in [Policy::Immediately, Policy::OneMinute, Policy::FiveMinutes] {
+            persist(&path, policy).unwrap();
+            let state = Machine::new(load_policy(&path), available);
+            assert_eq!(state.policy, policy);
+            assert!(state.locked); // An upgrade preserves explicit opt-in.
+        }
+    }
 }
 
 // AppKit notifications are a catch-up path, not a presentation boundary: an

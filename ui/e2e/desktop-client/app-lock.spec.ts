@@ -85,6 +85,25 @@ test('the Rust owner decodes every payload from the frozen shared contract', asy
   await expect(peer.send('setPolicy', { policy: 'unsupported' })).rejects.toThrow();
 });
 
+test('E36 default Off leaves native windows and entry actions unlocked until opt-in', async () => {
+  for (const [event, time] of [['leave', 1], ['tick', 3600], ['arrive', 3601]] as const) {
+    const state = await peer.send(event, { time });
+    expect(state.status.policy).toBe('off');
+    expect(state.locked).toBe(false);
+    expect(state.authCalls).toBe(0);
+    expect(state.windows).toEqual([]);
+  }
+  expect((await peer.send('newWindow')).windows).toEqual([]);
+  const expected: string[] = [];
+  for (const kind of ['action', 'command', 'content', 'navigation']) {
+    expected.push(kind);
+    const state = await peer.send('entry', { kind, value: kind });
+    expect(state.executed).toEqual(expected);
+    expect(state.pending).toBe(false);
+    expect(state.authCalls).toBe(0);
+  }
+});
+
 test('the real settings adapter waits for verification and preserves the old choice on cancel', async ({ page }) => {
   const select = await settings(page);
   await expect(select).toHaveValue('off');

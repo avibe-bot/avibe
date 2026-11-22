@@ -225,7 +225,7 @@ fn handle(app: &AppHandle, request: Value) {
                     machine(app).machine.lock().unwrap().policy = Policy::Off;
                 }
                 sync_windows(app);
-                let policy = serde_json::from_value(request.get("policy").cloned().unwrap_or(json!("off")))
+                let policy = serde_json::from_value(request.get("policy").cloned().unwrap_or(json!(Policy::default())))
                     .map_err(|e| e.to_string())?;
                 let available = request
                     .get("availability")
@@ -866,7 +866,7 @@ pub(crate) fn run() {
                 avibe_runtime_host::BootstrapLog::disabled(),
             ));
             app.manage(Owner {
-                machine: Mutex::new(Machine::new(Policy::Off, available)),
+                machine: Mutex::new(Machine::new(load_policy(&path), available)),
                 pending: Mutex::new(None),
                 path: path.clone(),
                 dirty: std::sync::atomic::AtomicBool::new(false),

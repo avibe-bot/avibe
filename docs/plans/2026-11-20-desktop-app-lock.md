@@ -2,9 +2,9 @@
 
 ## Contract
 
-Based on origin/master `ca534deea6004823c9985347ecdd7cedfcfd91e3`
-(2026-11-21 snapshot, including W1 #4036, Show share #4037, sign-in #4034,
-Mini #4104, lazy Ask Vibey receiver #4077, and shared/iOS App Lock #4040). The approved product
+Based on origin/master `8d801522c46fbe8e07fb968dd79e06d97cc26d0b`
+(2026-11-23 snapshot, including notification answers #4105, the compact 40pt
+Show title bar and four controls #4108, Workbench chrome #4162, and #4181/#4182). The approved product
 specification is the orchestrator's `app-lock-plan.md` and `app-lock-design/`.
 All seven recommendations were accepted on 2026-11-20.
 
@@ -47,8 +47,10 @@ validation peer is compiled only for test/e2e, with a release-build prohibition.
 Real Touch ID/password/Watch, lid/sleep, Mission Control and signed-package
 behavior require the two Mac acceptance groups in the product specification.
 
-Freeze a local commit for main to package. No packaging, installation or PR in
-this lane before Max's local acceptance. GitHub review/CI gates follow acceptance.
+Max authorized the Desktop PR and merge on 2026-11-23 at 04:16 CST, with
+Default Off explicitly required. Publish against master after local checks;
+merge only with exact-head Codex approval, no unresolved threads, green CI,
+and CLEAN merge status. RC publication and installation are outside this task.
 
 ## Native boundaries and review corrections
 
@@ -130,11 +132,10 @@ AppKit sizes follow that kit; shared copy remains the embedded en/zh catalogs.
 
 ## Current local evidence
 
-The combined RC preparation passes 314 Desktop library tests (one existing ignored; 15 App Lock
-scenario groups, including the core event matrix across all three policies),
-273 runtime-host tests (three pre-existing ignored), 32 desktop-client e2e cases,
-54 shell-boundary tests and 56 focused Vitest cases. Normal and e2e-feature all-target clippy pass with
-warnings denied. Rust formatting, desktop-client TypeScript, and UI build pass.
+The 2026-11-23 merge candidate passes 357 Desktop library tests (one existing
+ignored), 273 runtime-host tests (three pre-existing ignored), 33 native
+desktop-client e2e cases, 54 shell-boundary tests and 56 focused Vitest cases.
+All-feature all-target clippy passes with warnings denied. Rust formatting, desktop-client TypeScript, and UI build pass.
 Design typecheck passed for the native baseline; the integration does not change
 design files. The release guard compiles the normal release and proves that a
 release containing authentication substitutes is rejected. Updated native
@@ -255,7 +256,7 @@ Cancel with main hidden. This does not change the effective-policy boundary,
 generic copy, exact sheet exemption, or Machine timing rules.
 
 
-## RC preparation on 2026-11-22
+## Historical RC preparation on 2026-11-22
 
 The master-only lane rebases onto `ba2a136e975d15b8a6f5397e775519540cd0b28f`.
 It includes integration fix `bde21e8e` for the capability inventory and fixes
@@ -295,3 +296,27 @@ Replacement tests consume the actual queue transition and native notification
 content builder, substituting only the final OS delivery sink; test-owned
 notification preferences are enabled without any production writes.
 Real notification-center UI and authentication remain local-package checks.
+
+## Merge preparation on 2026-11-23
+
+The previously separate candidates are now integrated on master, after #4105
+and #4108 merged. Their prepared semantic integrations are applied without
+changing the compact Show title-bar layout. The rebase preserves master’s
+Direct menu dispatcher behind the common menu entry gate: Off behaves as
+before; a locked shell defers the command. No other PR is changed.
+
+The actual startup preference reader is shared with the native peer. A disk
+consumer test checks a fresh directory, an upgrade with unrelated existing
+preferences, missing/deleted files, invalid JSON/types/policies, and read
+errors. All load Off and remain unlocked across departure/return; startup does
+not write or modify preferences. A saved authenticated enabled policy survives
+an upgrade and starts locked. Native E36 separately checks that default Off
+leaves existing/new windows and Action/Command/Content/Navigation entries
+unrestricted, with no LA invocation.
+
+The UI build, lint baseline, focused Vitest, desktop-client typecheck, native
+i18n verifier, Rust formatting, library/boundary suites, all-feature clippy and
+33 native e2e cases pass. The normal release compiles and the authentication
+substitute feature is rejected in release. Hardware behavior is not inferred
+from substituted authentication or system facts; the existing smoke checklist
+remains the hardware record. This task does not build an RC or install a package.
