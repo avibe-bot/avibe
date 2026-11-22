@@ -128,6 +128,8 @@ const designFrames = frames([
   frame('direct-refused', '远程关直连被拒：确认不了隧道是通的，一句话', WIDE, { ...remote, refused: { row: 'direct', reason: 'tunnel_unhealthy' } }),
   frame('direct-refused-busy', '关直连被拒：另一项更改还在进行', WIDE, { refused: { row: 'direct', reason: 'connection_change_busy' } }),
   frame('relay', '加入了中继试用的实例：多一行中继，开着并已连上', WIDE, { connection: connection({ relay: { enabled: true, connected: true } }) }),
+  frame('app-relay', '连接方式 · Avibe App 正走中继：「使用中」标在中继那一行，直连那一行不标（中继绝不叫直连）', { ...IPHONE_17_PRO, height: 2500 },
+    { ...remote, via: 'direct', path: { kind: 'relay', rttMs: 85 }, preference: { mode: 'automatic', reverted: null }, connection: connection({ relay: { enabled: true, connected: true } }) }, { app: true }),
   frame('relay-off', '中继 · 关着', WIDE, { connection: connection({ relay: { enabled: false, connected: false } }) }),
   frame('relay-no-permission', '中继 · 暂时开不了：还没有直连的许可', WIDE,
     { connection: connection({ direct: 'denied', relay: { enabled: false, connected: false, unavailable: 'direct_permission_required' } }) }),

@@ -450,7 +450,10 @@ export function rebindFromWire(raw: unknown): RebindState {
  *  record is the terminal command's to handle, and anywhere but this computer it is said as such. */
 export function rebindUnavailable(code: string): RebindState | null {
   if (code === 'direct_loopback_required' || code === 'local_operator_required') return { state: 'remote' };
-  if (code === 'local_binding_unavailable' || code === 'local_identity_unavailable') return { state: 'needsTerminal' };
+  // The three ways this computer's own record of its binding cannot be read: the terminal's.
+  if (code === 'local_binding_unavailable' || code === 'local_identity_unavailable' || code === 'local_enrollment_unavailable') {
+    return { state: 'needsTerminal' };
+  }
   // Any other refusal is not the overview's own word: the role gate in front of every route
   // (`instance_access_forbidden`), the tunnel's own 502, a build that has no such route. None of
   // them says that this instance has binding again.

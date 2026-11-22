@@ -246,8 +246,9 @@ function PreferenceGroup({ path, preference, onChange }: {
   );
 }
 
-function RelayRow({ relay, direct, refused, busy, onChange }: {
-  relay: RelayState; direct: DirectState; refused?: SwitchRefusal; busy?: boolean; onChange?: (on: boolean) => void;
+function RelayRow({ relay, direct, inUse, refused, busy, onChange }: {
+  relay: RelayState; direct: DirectState; /** This device's own path is the relay. */ inUse?: boolean;
+  refused?: SwitchRefusal; busy?: boolean; onChange?: (on: boolean) => void;
 }) {
   const { t } = useTranslation();
   const status = refused ? <Refused refusal={refused} /> : relay.unavailable ? (
@@ -264,15 +265,19 @@ function RelayRow({ relay, direct, refused, busy, onChange }: {
   return (
     <Row
       title={t('remoteAccess.direct.usingRelay')}
+      tone={inUse ? 'info' : undefined}
       hint={t('devices.connection.relayDetail')}
       status={status}
       control={(
-        <ToggleSwitch
-          enabled={relay.enabled}
-          disabled={busy || Boolean(relay.unavailable)}
-          onClick={() => onChange?.(!relay.enabled)}
-          label={t('remoteAccess.direct.usingRelay')}
-        />
+        <div className="flex items-center gap-2.5">
+          {inUse && <Badge variant="info">{t('devices.connection.inUse')}</Badge>}
+          <ToggleSwitch
+            enabled={relay.enabled}
+            disabled={busy || Boolean(relay.unavailable)}
+            onClick={() => onChange?.(!relay.enabled)}
+            label={t('remoteAccess.direct.usingRelay')}
+          />
+        </div>
       )}
     />
   );
@@ -372,6 +377,12 @@ export function ConnectionPageView({
   const set = actions.onSettingChange;
   const connected = tunnel.state === 'up' || tunnel.state === 'slow' || tunnel.state === 'unsteady' || tunnel.state === 'optimizing';
   const tunnelInUse = remote && via === 'tunnel' && connected;
+  // Which path is in use. A stream that came in by the direct ingress may be relayed, and a
+  // relayed path is never called direct: inside a shell that names its path (`path` is given),
+  // the path decides, and while it names none nothing is marked. A browser has only the stream.
+  const inShell = path !== undefined;
+  const directInUse = inShell ? path?.kind === 'lan' || path?.kind === 'punched' || path?.kind === 'direct' : via === 'direct';
+  const relayInUse = inShell && path?.kind === 'relay';
   const directBadge: { label: string; variant: BadgeVariant } = {
     label: t(directStateKeys[direct]),
     variant: direct === 'ready' ? 'success' : direct === 'off' || direct === 'unknown' ? 'secondary' : 'warning',
@@ -436,7 +447,7 @@ export function ConnectionPageView({
         />
         <Row
           title={t('remoteAccess.direct.label')}
-          tone={via === 'direct' ? 'info' : undefined}
+          tone={directInUse ? 'info' : undefined}
           hint={(
             <>
               <KeptTail text={t('devices.connection.directDetail')} />
@@ -447,7 +458,7 @@ export function ConnectionPageView({
           status={refused?.row === 'direct' ? <Refused refusal={refused} /> : null}
           control={(
             <div className="flex items-center gap-2.5">
-              {via === 'direct' && <Badge variant="info">{t('devices.connection.inUse')}</Badge>}
+              {directInUse && <Badge variant="info">{t('devices.connection.inUse')}</Badge>}
               <ToggleSwitch
                 enabled={direct !== 'off'}
                 disabled={sending === 'direct' || direct === 'unknown'}
@@ -475,6 +486,7 @@ export function ConnectionPageView({
           <RelayRow
             relay={relay}
             direct={direct}
+            inUse={relayInUse}
             refused={refused?.row === 'relay' ? refused : undefined}
             busy={sending === 'relay'}
             onChange={(on) => set?.('relay', on)}

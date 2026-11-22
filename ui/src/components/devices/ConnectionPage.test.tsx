@@ -655,6 +655,35 @@ describe('ConnectionPageView', () => {
     }
   });
 
+  it('marks the path this device really uses, and never calls a relayed one direct', () => {
+    const inUse = () => Array.from(document.querySelectorAll('[role="switch"]'))
+      .filter((each) => each.parentElement?.textContent?.includes('使用中'))
+      .map((each) => each.getAttribute('aria-label'));
+    const app = { remote: true, via: 'direct' as const, preference: { mode: 'automatic' as const, reverted: null } };
+    const relay = { enabled: true, connected: true };
+
+    // The phone App on the relay: the stream came in by the direct ingress, the path is the relay.
+    const relayed = view({ ...app, path: { kind: 'relay', rttMs: 85 }, connection: connection({ relay }) });
+    expect(inUse()).toEqual(['中继']);
+    relayed.unmount();
+    // The same where this instance shows no relay row: nothing is marked.
+    const noRow = view({ ...app, path: { kind: 'relay', rttMs: 85 } });
+    expect(document.body.textContent).not.toContain('使用中');
+    noRow.unmount();
+    // A direct path, of either kind, marks 「直连」.
+    const punched = view({ ...app, path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, connection: connection({ relay }) });
+    expect(inUse()).toEqual(['直连']);
+    punched.unmount();
+    // The App names no path yet (or never does): it may be the relay, so nothing is marked.
+    const unnamed = view({ ...app, path: null, connection: connection({ relay }) });
+    expect(document.body.textContent).not.toContain('使用中');
+    unnamed.unmount();
+    // A browser has only its stream, which is the tunnel.
+    view({ remote: true, via: 'tunnel' });
+    expect(screen.getByText('使用中')).toBeTruthy();
+    expect(inUse()).toEqual([]);
+  });
+
   it('says how the last connection\'s two paths raced where the App recorded it, and an expired certificate has no date', () => {
     view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), direct: { certificate: null, lastConnection: { direct: 'timeout', public: 212 } } } });
     const rows = screen.getByTestId('direct-details');

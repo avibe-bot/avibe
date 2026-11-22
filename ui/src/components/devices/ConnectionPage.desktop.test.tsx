@@ -89,6 +89,17 @@ describe('ConnectionPage · in an Avibe Desktop window of another computer\'s in
     expect(document.body.textContent).not.toContain('浏览器只走 Cloudflare 隧道');
   });
 
+  it('never calls a relayed path direct: on the relay the 「直连」 row is not marked in use', async () => {
+    install(said('relay'));
+    // The stream came in by the direct ingress, as a relayed one does.
+    await mount('direct');
+    await waitFor(() => expect(screen.getByText('本设备正在使用：中继')).toBeTruthy());
+    const direct = screen.getByRole('switch', { name: '直连' }).closest('div')!.parentElement!;
+    expect(direct.textContent).not.toContain('使用中');
+    // This instance reports no relay row, so nothing carries the mark.
+    expect(document.body.textContent).not.toContain('使用中');
+  });
+
   it('says the tunnel where the window has no route of its own', async () => {
     install(said(null));
     await mount('other');

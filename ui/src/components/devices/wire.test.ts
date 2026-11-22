@@ -318,6 +318,8 @@ describe('rebindFromWire', () => {
     // the terminal command's to handle, not "try again later".
     expect(rebindUnavailable('local_binding_unavailable')).toEqual({ state: 'needsTerminal' });
     expect(rebindUnavailable('local_identity_unavailable')).toEqual({ state: 'needsTerminal' });
+    // An unfinished pairing record that cannot be read (the overview's own 503): the same.
+    expect(rebindUnavailable('local_enrollment_unavailable')).toEqual({ state: 'needsTerminal' });
     expect(rebindUnavailable('direct_loopback_required')).toEqual({ state: 'remote' });
     expect(rebindUnavailable('local_operator_required')).toEqual({ state: 'remote' });
     // Not the overview's own word: nothing is said on its strength.
