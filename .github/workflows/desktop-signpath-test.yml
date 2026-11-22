@@ -50,7 +50,7 @@ jobs:
             ui/package-lock.json
             desktop/package-lock.json
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
@@ -161,7 +161,7 @@ jobs:
     steps:
       - name: Submit installer to SignPath test signing
         id: sign
-        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092  # v3.0
+        uses: signpath/github-action-submit-signing-request@4a84eb4ad763290f059275786f2deed97c2c672b  # v3.1
         with:
           api-token: ${{ secrets.SIGNPATH_TEST_API_TOKEN }}
           organization-id: cd712383-10e4-47d1-8267-d395bd8104b1
