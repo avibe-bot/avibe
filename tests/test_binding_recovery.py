@@ -357,6 +357,52 @@ def test_busy_connector_defers_identity_cutover_without_losing_work(cli_host, mo
     assert not gate.reset_in_progress() and remote._read_pending_pairing_record() == (None, None)
 
 
+@pytest.mark.parametrize(('target', 'as_new', 'inherits'), [
+    ('inst_A', False, True), ('inst_B', False, False), ('inst_A', True, False),
+])
+def test_address_state_read_follows_instance_unless_reset_as_new(cli_host, monkeypatch, target, as_new, inherits):
+    from tests.test_instance_address import ControlPlane, OLD
+    from vibe import instance_address as address
+
+    cfg = V2Config.load()
+    cloud = cfg.remote_access.vibe_cloud
+    cloud.public_url = f'https://{OLD}'
+    cloud.redirect_uri = cloud.public_url + '/auth/callback'
+    cfg.save()
+    plane = ControlPlane('inst_A', OLD)
+    monkeypatch.setattr(remote, '_device_json_request', plane)
+    assert address.refresh_state(force=True)
+    first = address._load_state('inst_A')['state_read_at']
+    assert isinstance(first, int) and address.describe()['eligible']
+    plane.fail = remote.BackendRequestError(409, {'error': 'rebind_required'})
+    assert not address.refresh_state(force=True)
+    assert address.describe()['state_error'] == 'rebind_required'
+
+    disposition = 'existing' if target == 'inst_A' else 'new'
+    answer = {**_response(target), 'public_url': cloud.public_url, 'redirect_uri': cloud.redirect_uri,
+              'instance_secret': 'fixture-rotated', 'binding_disposition': disposition}
+    monkeypatch.setattr(remote, '_json_request', lambda *_a, **_kw: answer)
+    if as_new:
+        assert reset.reset_interactively(confirm=lambda: True) == {'state': 'unpaired'}
+        assert not address._state_path().exists()
+        assert remote.pair('key_A', 'https://backend.test')['ok']
+    else:
+        ident = local.ensure_installation_id()
+        assert remote.pair_personal_claim(key='vrp2_' + 'A' * 43, backend_url='https://backend.test', device='test',
+            revision=local.claim_revision(cfg, ident, None), installation=ident, subject='owner',
+            claim_id=str(uuid4()), instance_id=target, hostname=OLD, binding_disposition=disposition)['ok']
+    plane.instance_id = target
+    plane.fail = remote.BackendRequestError(503, {})
+    view = address.describe()
+    assert view['state_error'] is None  # refusals belong to a pairing, not an instance ID
+    assert address._load_state(target)['state_read_at'] == (first if inherits else None)
+    assert view['eligible'] is inherits
+    assert view['ineligible_reason'] == (None if inherits else 'address_state_unknown')
+    plane.fail = None
+    assert address.refresh_state(force=True)
+    assert address.describe()['eligible']
+
+
 def _receipt_in_ui_process(pipe):
     from vibe import instance_address
     with pipe:

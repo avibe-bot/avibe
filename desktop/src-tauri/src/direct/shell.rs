@@ -1,8 +1,10 @@
 //! Desktop direct in the running app: does what `wiring.rs` decides, against
 //! real windows, and keeps each session's client asking its rendezvous.
 //!
-//! Nothing here is reachable from a page: there is no command, no message
-//! handler and no bridge. The choice of path is made in the app's own menus.
+//! A page of another computer's instance reaches this only through its
+//! window's `direct` bridge (`bridge.rs`, `pages.rs`): it is told its
+//! window's path, and may ask for a hand-over or change the choice of path.
+//! There is no command and no message handler for it.
 //! Logs name what happened and nothing else: no host, address, ID or count
 //! that could identify an instance.
 use super::{
@@ -30,6 +32,7 @@ use tokio::{
 
 pub(crate) const MENU_AUTOMATIC: &str = "direct-connection-automatic";
 pub(crate) const MENU_TUNNEL: &str = "direct-connection-tunnel";
+const MENU_CONNECTION: &str = "direct-connection";
 
 /// How often a session looks at the clock, to notice that the computer slept.
 const GLANCE: Duration = Duration::from_secs(30);
@@ -49,17 +52,66 @@ pub(crate) struct ConnectionMenu<R: Runtime> {
     pub tunnel: CheckMenuItem<R>,
 }
 
-impl<R: Runtime> ConnectionMenu<R> {
-    /// Greyed, with "automatic" ticked, until `show` says otherwise.
-    pub(crate) fn build(app: &AppHandle<R>) -> tauri::Result<Option<Self>> {
+/// The submenu as words: what every system builds it from. `None` when the
+/// product catalog lacks one of its three strings.
+struct ConnectionRows {
+    title: String,
+    /// The choices in the frame's order, each with its item's ID.
+    choices: [(&'static str, Mode, String); 2],
+}
+
+impl ConnectionRows {
+    fn read() -> Option<Self> {
         let text = |key: &str| crate::product_text(&format!("devices.connection.{key}"));
-        let (Some(title), Some(automatic), Some(tunnel)) = (text("title"), text("automatic"), text("tunnelOnly"))
-        else {
+        Some(Self {
+            title: text("title")?,
+            choices: [
+                (MENU_AUTOMATIC, Mode::Automatic, text("automatic")?),
+                (MENU_TUNNEL, Mode::Tunnel, text("tunnelOnly")?),
+            ],
+        })
+    }
+}
+
+/// What the submenu shows for a choice: whether it can be used, and which
+/// of its items is ticked.
+#[derive(Debug, PartialEq, Eq)]
+struct ConnectionState {
+    enabled: bool,
+    ticked: Mode,
+}
+
+impl ConnectionState {
+    /// The choice for the instance on show; `None`, and greyed with
+    /// "automatic" ticked, while this computer's own instance is.
+    fn of(chosen: Option<Mode>) -> Self {
+        Self {
+            enabled: chosen.is_some(),
+            ticked: chosen.unwrap_or_default(),
+        }
+    }
+}
+
+/// This computer's choice of path for the instance on show: each account's
+/// instance has its own, and this computer's own instance has none.
+fn chosen(shown: Option<&Published>, wiring: &Wiring) -> Option<Mode> {
+    shown.map(|shown| wiring.mode(&shown.target.account, &shown.target.origin))
+}
+
+impl<R: Runtime> ConnectionMenu<R> {
+    /// As for this computer's own instance until `show` says otherwise.
+    pub(crate) fn build(app: &AppHandle<R>) -> tauri::Result<Option<Self>> {
+        let Some(rows) = ConnectionRows::read() else {
             return Ok(None);
         };
-        let automatic = CheckMenuItem::with_id(app, MENU_AUTOMATIC, automatic, true, true, None::<&str>)?;
-        let tunnel = CheckMenuItem::with_id(app, MENU_TUNNEL, tunnel, true, false, None::<&str>)?;
-        let submenu = Submenu::with_id_and_items(app, "direct-connection", title, false, &[&automatic, &tunnel])?;
+        let state = ConnectionState::of(None);
+        let [automatic, tunnel] = rows.choices;
+        let item = |(id, mode, text): (&str, Mode, String)| {
+            CheckMenuItem::with_id(app, id, text, true, state.ticked == mode, None::<&str>)
+        };
+        let (automatic, tunnel) = (item(automatic)?, item(tunnel)?);
+        let submenu =
+            Submenu::with_id_and_items(app, MENU_CONNECTION, rows.title, state.enabled, &[&automatic, &tunnel])?;
         Ok(Some(Self {
             submenu,
             automatic,
@@ -67,13 +119,13 @@ impl<R: Runtime> ConnectionMenu<R> {
         }))
     }
 
-    /// The choice for the instance on show; `None`, and greyed, while this
-    /// computer's own instance is. The system ticks whatever was clicked, so
-    /// both ticks are always set from the choice.
+    /// The system ticks whatever was clicked, so both ticks are always set
+    /// from the choice.
     pub(crate) fn show(&self, chosen: Option<Mode>) {
-        let _ = self.submenu.set_enabled(chosen.is_some());
-        let _ = self.automatic.set_checked(chosen != Some(Mode::Tunnel));
-        let _ = self.tunnel.set_checked(chosen == Some(Mode::Tunnel));
+        let state = ConnectionState::of(chosen);
+        let _ = self.submenu.set_enabled(state.enabled);
+        let _ = self.automatic.set_checked(state.ticked == Mode::Automatic);
+        let _ = self.tunnel.set_checked(state.ticked == Mode::Tunnel);
     }
 }
 
@@ -85,6 +137,9 @@ pub(crate) struct Direct {
     shown: Mutex<Option<Published>>,
     wake: Notify,
     menu: Mutex<Option<ConnectionMenu<tauri::Wry>>>,
+    /// The windows whose pages are told their path, and what tells them.
+    /// Taken before `wiring` where both are held, never after it.
+    pages: Mutex<pages::Pages>,
     /// Whether this system and configuration can route at all.
     available: bool,
 }
@@ -139,6 +194,7 @@ pub(crate) fn init(app: &AppHandle) {
         shown: Mutex::new(None),
         wake: Notify::new(),
         menu: Mutex::new(None),
+        pages: Mutex::default(),
         available: routing != Routing::Unsupported && !proxy_configured,
     });
     app.manage(state.clone());
@@ -240,6 +296,7 @@ async fn look(app: &AppHandle, state: &Arc<Direct>) {
     }
     // What was kept for a window that has closed went with it.
     native::forget_closed(|window| app.get_webview(window).is_some());
+    pages::refresh(app, state, false);
     refresh_menu(app, state);
 }
 
@@ -339,6 +396,7 @@ async fn open(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
 fn start(app: &AppHandle, state: &Arc<Direct>, session: u64, client: Client) {
     let (stop, stopped) = oneshot::channel();
     lock(&state.stops).insert(session, stop);
+    pages::session_started(app, state, session, &client);
     eprintln!("desktop direct: a session started");
     tauri::async_runtime::spawn(run(app.clone(), state.clone(), session, client, stopped));
 }
@@ -396,6 +454,7 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
         for effect in effects {
             perform(&app, &state, effect).await;
         }
+        pages::refresh(&app, &state, false);
         due = pace.next(&outcome, Instant::now());
     };
     if ended {
@@ -408,6 +467,7 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
     }
     lock(&state.stops).remove(&session);
     drop(client);
+    pages::session_ended(&app, &state, session);
 }
 
 /// Asks the rendezvous through `window`, and says how it ended in the
@@ -486,8 +546,8 @@ pub(crate) fn window_arguments(route_argument: &str) -> String {
     format!("{WRY_DEFAULT_ARGUMENTS} {route_argument}")
 }
 
-/// A route for a window that is about to be created, where a route can only
-/// be given then.
+/// The session a window that is about to be created is routed to, so that
+/// its route is in place before its first load.
 pub(crate) struct AtCreation {
     session: u64,
     /// The whole of the window's browser arguments, where its route is given
@@ -496,20 +556,17 @@ pub(crate) struct AtCreation {
 }
 
 /// The main window's instance view for `destination` is about to be created,
-/// on the main thread. Where a route can only be given at creation, and this
-/// account's instance has answered a rendezvous before, this starts its
-/// client and returns the route; otherwise `None`, and the view is created
-/// as it always was.
+/// on the main thread. When this account's instance has answered a
+/// rendezvous before, this starts its client and returns the route, which
+/// `window_created` puts in place before the view's first load; otherwise
+/// `None`, and the view is created as it always was.
 pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Option<AtCreation> {
-    let state = direct(app)?;
-    if !lock(&state.wiring).routes_at_creation() {
-        return None;
-    }
+    let state = direct(app).filter(|state| state.available)?;
     let target = target_at(app, destination)?;
     let host = target.host()?.to_owned();
     // The system's settings are read, and the listener is bound, here and
-    // now, so its port is in the arguments. Never from a thread that is
-    // running the async runtime.
+    // now, so the route is there before the view asks for anything. Never
+    // from a thread that is running the async runtime.
     if tokio::runtime::Handle::try_current().is_ok() {
         return None;
     }
@@ -523,14 +580,15 @@ pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Op
     }
     let client = tauri::async_runtime::block_on(Client::new(&host, target.instance.clone()))?;
     let material = material(&client)?;
-    let arguments = native::arguments(&host, &material)?;
+    // Where the route is the window's arguments, there is none without them.
+    let arguments = native::arguments(&host, &material);
+    if arguments.is_none() && lock(&state.wiring).routes_at_creation() {
+        return None;
+    }
     let session = lock(&state.wiring).open(target, material, None, Instant::now());
     start(app, &state, session, client);
     state.wake.notify_one();
-    Some(AtCreation {
-        session,
-        arguments: Some(arguments),
-    })
+    Some(AtCreation { session, arguments })
 }
 
 /// The signed-in instance whose document `destination` is, by its origin.
@@ -626,6 +684,7 @@ fn route_windows(app: &AppHandle, state: &Arc<Direct>, effects: Vec<Effect>) {
     for effect in effects {
         let _ = route_window(app, state, effect);
     }
+    pages::refresh(app, state, false);
 }
 
 /// The app's 「连接方式」 submenu, for its tray and application menus. `None`
@@ -644,9 +703,7 @@ pub(crate) fn menu(app: &AppHandle) -> tauri::Result<Option<Submenu<tauri::Wry>>
 }
 
 fn refresh_menu(app: &AppHandle, state: &Arc<Direct>) {
-    let chosen = lock(&state.shown)
-        .as_ref()
-        .map(|shown| lock(&state.wiring).mode(&shown.target.account, &shown.target.origin));
+    let chosen = chosen(lock(&state.shown).as_ref(), &lock(&state.wiring));
     let state = state.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(menu) = lock(&state.menu).as_ref() {
@@ -663,22 +720,36 @@ pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
         _ => return false,
     };
     let Some(state) = direct(app) else { return true };
-    let effects = match lock(&state.shown).as_ref() {
-        Some(shown) => lock(&state.wiring).choose(&shown.target.account, &shown.target.origin, mode),
-        None => Vec::new(),
-    };
-    refresh_menu(app, &state);
-    let app = app.clone();
+    let shown = lock(&state.shown).as_ref().map(|shown| shown.target.clone());
+    match shown {
+        Some(target) => choose(app, &state, &target.account, &target.origin, mode),
+        // Nothing to choose for; the ticks go back to what they were.
+        None => refresh_menu(app, &state),
+    }
+    true
+}
+
+/// The choice of path for the instance of `account` at `origin` is now
+/// `mode`: from the menu, or from a page of that instance. Nothing reloads.
+fn choose(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, mode: Mode) {
+    let effects = lock(&state.wiring).choose(account, origin, mode);
+    refresh_menu(app, state);
+    let (app, state) = (app.clone(), state.clone());
     tauri::async_runtime::spawn(async move {
         for effect in effects {
             perform(&app, &state, effect).await;
         }
+        // Every page of the instance hears the choice, and its menu shows it.
+        pages::refresh(&app, &state, true);
         // "Automatic" starts a session for the instance on show, where a
         // route can be put on an open window.
         state.wake.notify_one();
     });
-    true
 }
+
+#[path = "pages.rs"]
+mod pages;
+pub(crate) use pages::{loaded as page_loaded, request as page_request, script as page_script};
 
 #[cfg(target_os = "macos")]
 #[path = "shell_macos.rs"]
@@ -689,3 +760,7 @@ mod native;
 #[cfg(not(any(target_os = "macos", windows)))]
 #[path = "shell_unsupported.rs"]
 mod native;
+
+#[cfg(test)]
+#[path = "../../tests/direct/menu_model.rs"]
+mod menu_model_tests;

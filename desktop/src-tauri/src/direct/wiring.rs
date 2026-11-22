@@ -20,7 +20,18 @@
 //!   window gets one only for an instance that answered a rendezvous in an
 //!   earlier session, and a window already open is never rebuilt. Until an
 //!   instance has answered once, its session only asks (a "scout"): it
-//!   routes nothing and ends with the first answer.
+//!   routes nothing and ends with the first answer;
+//! - where a route can be put on an open window (macOS 14 and later), an
+//!   instance that answered before still gets its client before its view is
+//!   created and its route before that view's first load. WebKit does not
+//!   use a route written while it has a connection to that host: not for
+//!   the next request, a reload or a new navigation, until every such
+//!   connection has closed (`examples/direct_webview_probe.rs` measures
+//!   it). So only a route that is there first carries the view, and only
+//!   then are its tunnel connections the listener's to hand over. An
+//!   instance that has not answered before is asked from its open view and
+//!   routed there; that view keeps the tunnel while its connections live,
+//!   and the windows opened from it later are routed as they are made.
 use super::{
     choices::{Choices, Mode},
     connect::Authority,
@@ -113,6 +124,10 @@ struct Session {
     ready: bool,
     /// It only learns whether the instance answers; it routes no window.
     scout: bool,
+    /// Started before its instance view was created, where a route can be
+    /// put on an open window: every window of it is routed as it is made,
+    /// before its first load, without waiting for an answer.
+    early: bool,
     opened: Instant,
 }
 
@@ -270,10 +285,12 @@ impl Wiring {
         self.routing == Routing::AtCreation
     }
 
-    /// Routing at creation: whether the instance view about to be created
-    /// for `target` gets a route, so that a client must exist before it does.
+    /// Whether the instance view about to be created for `target` gets a
+    /// route before its first load, so that a client must exist before it
+    /// does: wherever a window can be routed, for an instance that answered
+    /// before.
     pub fn starts_at_creation(&self, target: &Target) -> bool {
-        self.routing == Routing::AtCreation && self.permitted(target) && self.reached(target)
+        self.permitted(target) && self.reached(target)
     }
 
     /// A client exists for `target`. `runtime` is the published instance view
@@ -285,6 +302,7 @@ impl Wiring {
         // Where a route is given only at creation, a session started for a
         // view that is already open can route nothing.
         let scout = self.routing == Routing::AtCreation && runtime.is_some();
+        let early = self.routing == Routing::Live && runtime.is_none();
         let mut windows: Vec<String> = runtime.map(str::to_owned).into_iter().collect();
         // Where a route can be put on an open window, the app windows that
         // are already open for this instance belong to the session too: one
@@ -309,19 +327,23 @@ impl Wiring {
             away: None,
             ready: false,
             scout,
+            early,
             opened: now,
         });
         self.next
     }
 
     /// The session of the published instance view of `account` at `origin`:
-    /// the one an app window opened from that view shares.
+    /// the one an app window opened from that view shares. A session that
+    /// was started before its view was created counts from the start: its
+    /// view can be on show for a moment before a look has seen it there,
+    /// and an app window opened in that moment is routed like any other.
     pub fn shared(&self, account: &str, origin: &str) -> Option<u64> {
         self.sessions
             .iter()
             .find(|session| {
                 !session.scout
-                    && session.runtime.is_some()
+                    && (session.runtime.is_some() || session.early)
                     && session.target.account == account
                     && session.target.origin == origin
             })
@@ -393,7 +415,9 @@ impl Wiring {
                     window: window.to_owned(),
                 }]
             }
-            Routing::Live if found.ready => {
+            // After the first answer, or at once for a session that was
+            // started so that its windows are routed before they load.
+            Routing::Live if found.ready || found.early => {
                 found.routed.push(window.to_owned());
                 vec![Effect::Install {
                     session,
@@ -608,6 +632,39 @@ impl Wiring {
             .iter()
             .find(|candidate| candidate.id == session)
             .map(|found| found.target.origin.as_str())
+    }
+
+    /// Whether a window of the instance at `origin` could ever be routed:
+    /// this system and configuration can route, and the address is one the
+    /// direct path serves. Whatever the choice of path is now.
+    pub fn routable(&self, origin: &str) -> bool {
+        self.routing != Routing::Unsupported
+            && !self.proxy_configured
+            && origin
+                .strip_prefix("https://")
+                .is_some_and(|host| Authority::managed(host).is_some())
+    }
+
+    /// The session whose route is on `window`, if one is.
+    pub fn routed_by(&self, window: &str) -> Option<u64> {
+        self.sessions
+            .iter()
+            .find(|session| session.routed.iter().any(|label| label == window))
+            .map(|session| session.id)
+    }
+
+    /// Whether `window` is the only `open` window that has the session's
+    /// route: its instance view and the app windows opened from it share one
+    /// listener, so what is closed in it for one page is closed for all. A
+    /// window that is only between two documents still counts.
+    pub fn sole(&self, session: u64, window: &str, open: impl Fn(&str) -> bool) -> bool {
+        self.sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .is_some_and(|found| {
+                found.routed.iter().any(|label| label == window)
+                    && found.routed.iter().all(|label| label == window || !open(label))
+            })
     }
 
     /// Whether any session exists, so the shell knows to keep looking for
