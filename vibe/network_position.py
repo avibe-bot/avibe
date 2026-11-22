@@ -60,5 +60,7 @@ def position_snapshot() -> tuple[V2Config | None, BindingState]:
         stat = path.stat()
         config = _config_revision(path, (stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size))
         return config, binding_state(config)
-    except (OSError, ValueError):
+    except Exception:
+        # An unreadable snapshot is an admission result, also for an idle
+        # stream: do not let a reader failure terminate just its watchdog.
         return None, BindingState.UNAVAILABLE
