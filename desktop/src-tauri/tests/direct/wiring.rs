@@ -944,3 +944,53 @@ fn a_window_does_not_join_a_session_that_is_about_to_end() {
     );
     assert_eq!(wiring.app_window_created("show-2", ACCOUNT, ONE, None), []);
 }
+
+#[test]
+fn a_page_closes_shared_connections_only_from_the_sole_routed_window() {
+    let now = Instant::now();
+    let mut wiring = live();
+    let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+    wiring.app_window_created("show-1", ACCOUNT, ONE, None);
+    // Before the first answer no window has the route: none is on it.
+    assert_eq!(wiring.routed_by("main-runtime-1"), None);
+    assert!(!wiring.sole(session, "main-runtime-1", |_| true));
+
+    wiring.probed(session, true);
+    assert_eq!(wiring.routed_by("main-runtime-1"), Some(session));
+    assert_eq!(wiring.routed_by("show-1"), Some(session));
+    assert_eq!(wiring.routed_by("editor-9"), None);
+    // The instance view and an app window share the listener: neither is alone.
+    assert!(!wiring.sole(session, "main-runtime-1", |_| true));
+    assert!(!wiring.sole(session, "show-1", |_| true));
+    // The app window has closed, whether or not the wiring has heard: the view is.
+    assert!(wiring.sole(session, "main-runtime-1", |window| window != "show-1"));
+    // An app window whose instance view is gone is alone too.
+    assert!(wiring.sole(session, "show-1", |window| window == "show-1"));
+    // Never a window without the route, or another session's.
+    assert!(!wiring.sole(session, "editor-9", |_| false));
+    assert!(!wiring.sole(session + 1, "main-runtime-1", |_| false));
+
+    // The choice of the tunnel ends the session: no window is on a route.
+    wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert_eq!(wiring.routed_by("main-runtime-1"), None);
+    assert!(!wiring.sole(session, "main-runtime-1", |_| false));
+}
+
+#[test]
+fn only_an_instance_that_could_be_routed_is_one_whose_page_gets_a_bridge() {
+    let custom = "https://avibe.example.com";
+    let mut wiring = live();
+    assert!(wiring.routable(ONE));
+    // Whatever the choice of path: its page can still read and change it.
+    wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert!(wiring.routable(ONE));
+    // An address the direct path does not serve, and anything that is not
+    // an instance's own origin.
+    for origin in [custom, "http://one-app.avibe.bot", "one-app.avibe.bot", ""] {
+        assert!(!wiring.routable(origin), "{origin}");
+    }
+    // A configured proxy, or a system that cannot route.
+    assert!(!Wiring::new(Routing::Live, true, Choices::unsaved()).routable(ONE));
+    assert!(!Wiring::new(Routing::Unsupported, false, Choices::unsaved()).routable(ONE));
+    assert!(Wiring::new(Routing::AtCreation, false, Choices::unsaved()).routable(ONE));
+}

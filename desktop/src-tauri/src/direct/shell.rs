@@ -1,8 +1,10 @@
 //! Desktop direct in the running app: does what `wiring.rs` decides, against
 //! real windows, and keeps each session's client asking its rendezvous.
 //!
-//! Nothing here is reachable from a page: there is no command, no message
-//! handler and no bridge. The choice of path is made in the app's own menus.
+//! A page of another computer's instance reaches this only through its
+//! window's `direct` bridge (`bridge.rs`, `pages.rs`): it is told its
+//! window's path, and may ask for a hand-over or change the choice of path.
+//! There is no command and no message handler for it.
 //! Logs name what happened and nothing else: no host, address, ID or count
 //! that could identify an instance.
 use super::{
@@ -135,6 +137,9 @@ pub(crate) struct Direct {
     shown: Mutex<Option<Published>>,
     wake: Notify,
     menu: Mutex<Option<ConnectionMenu<tauri::Wry>>>,
+    /// The windows whose pages are told their path, and what tells them.
+    /// Taken before `wiring` where both are held, never after it.
+    pages: Mutex<pages::Pages>,
     /// Whether this system and configuration can route at all.
     available: bool,
 }
@@ -189,6 +194,7 @@ pub(crate) fn init(app: &AppHandle) {
         shown: Mutex::new(None),
         wake: Notify::new(),
         menu: Mutex::new(None),
+        pages: Mutex::default(),
         available: routing != Routing::Unsupported && !proxy_configured,
     });
     app.manage(state.clone());
@@ -290,6 +296,7 @@ async fn look(app: &AppHandle, state: &Arc<Direct>) {
     }
     // What was kept for a window that has closed went with it.
     native::forget_closed(|window| app.get_webview(window).is_some());
+    pages::refresh(app, state, false);
     refresh_menu(app, state);
 }
 
@@ -389,6 +396,7 @@ async fn open(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
 fn start(app: &AppHandle, state: &Arc<Direct>, session: u64, client: Client) {
     let (stop, stopped) = oneshot::channel();
     lock(&state.stops).insert(session, stop);
+    pages::session_started(app, state, session, &client);
     eprintln!("desktop direct: a session started");
     tauri::async_runtime::spawn(run(app.clone(), state.clone(), session, client, stopped));
 }
@@ -446,6 +454,7 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
         for effect in effects {
             perform(&app, &state, effect).await;
         }
+        pages::refresh(&app, &state, false);
         due = pace.next(&outcome, Instant::now());
     };
     if ended {
@@ -458,6 +467,7 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
     }
     lock(&state.stops).remove(&session);
     drop(client);
+    pages::session_ended(&app, &state, session);
 }
 
 /// Asks the rendezvous through `window`, and says how it ended in the
@@ -676,6 +686,7 @@ fn route_windows(app: &AppHandle, state: &Arc<Direct>, effects: Vec<Effect>) {
     for effect in effects {
         let _ = route_window(app, state, effect);
     }
+    pages::refresh(app, state, false);
 }
 
 /// The app's 「连接方式」 submenu, for its tray and application menus. `None`
@@ -711,22 +722,36 @@ pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
         _ => return false,
     };
     let Some(state) = direct(app) else { return true };
-    let effects = match lock(&state.shown).as_ref() {
-        Some(shown) => lock(&state.wiring).choose(&shown.target.account, &shown.target.origin, mode),
-        None => Vec::new(),
-    };
-    refresh_menu(app, &state);
-    let app = app.clone();
+    let shown = lock(&state.shown).as_ref().map(|shown| shown.target.clone());
+    match shown {
+        Some(target) => choose(app, &state, &target.account, &target.origin, mode),
+        // Nothing to choose for; the ticks go back to what they were.
+        None => refresh_menu(app, &state),
+    }
+    true
+}
+
+/// The choice of path for the instance of `account` at `origin` is now
+/// `mode`: from the menu, or from a page of that instance. Nothing reloads.
+fn choose(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, mode: Mode) {
+    let effects = lock(&state.wiring).choose(account, origin, mode);
+    refresh_menu(app, state);
+    let (app, state) = (app.clone(), state.clone());
     tauri::async_runtime::spawn(async move {
         for effect in effects {
             perform(&app, &state, effect).await;
         }
+        // Every page of the instance hears the choice, and its menu shows it.
+        pages::refresh(&app, &state, true);
         // "Automatic" starts a session for the instance on show, where a
         // route can be put on an open window.
         state.wake.notify_one();
     });
-    true
 }
+
+#[path = "pages.rs"]
+mod pages;
+pub(crate) use pages::{loaded as page_loaded, request as page_request, script as page_script};
 
 #[cfg(target_os = "macos")]
 #[path = "shell_macos.rs"]
