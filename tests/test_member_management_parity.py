@@ -115,6 +115,7 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
     ("GET", "/api/desktop/local-instance"),
     ("POST", "/api/desktop/local-instance/prepare"),
+    ("POST", "/api/desktop/claim/v1/admit"),
     ("GET", "/api/devices/connection"),
     ("PATCH", "/api/devices/connection"),
     ("POST", "/api/remote-access/direct/suspend"),
@@ -201,7 +202,8 @@ def test_complete_registered_api_management_inventory():
     # + 8 device function, activity and Health ticket methods.
     # + 2 Owner-only connection settings methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
-    assert len(endpoints) == 374
+    # + 1 private Desktop claim acknowledgement (Owner and direct-loopback-only).
+    assert len(endpoints) == 375
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),
@@ -219,6 +221,7 @@ def test_complete_registered_api_management_inventory():
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
+        ("POST", "/api/desktop/claim/v1/admit"),
     ):
         assert (method, path) in endpoints
         policy = http_authorization_policy(method, path)
@@ -318,6 +321,7 @@ def test_desktop_local_enrollment_refuses_every_remote_role(management_http, rol
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
+        ("POST", "/api/desktop/claim/v1/admit"),
     ):
         response = request_http(method, path, payload={} if method == "POST" else None)
         assert response.status_code == 403
