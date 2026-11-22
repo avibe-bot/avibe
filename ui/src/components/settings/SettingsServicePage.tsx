@@ -11,7 +11,7 @@ import { SettingsPageShell } from './SettingsPageShell';
 import { CompactField, SettingsPanel, SettingsRow } from './SettingsPrimitives';
 import { Button } from '@/components/ui/button';
 import { setConfigField } from '@/lib/configMutations';
-import { consoleOriginAfterSave } from '@/lib/consoleServerOrigin';
+import { consoleOriginAfterSave, isListenableHost } from '@/lib/consoleServerOrigin';
 import { applyAppTitle } from '@/lib/documentTitle';
 
 // ui/design: settings/service/default. Two cards:
@@ -37,8 +37,17 @@ export const SettingsServicePage: React.FC = () => {
   const [nameMessage, setNameMessage] = useState<string | null>(null);
   const [controlMessage, setControlMessage] = useState<string | null>(null);
 
+  // The console server's host and port as the configuration has them, apart from what is typed.
+  const [savedUi, setSavedUi] = useState({ setup_host: '127.0.0.1', setup_port: 5123 });
+
   useEffect(() => {
-    api.getConfig().then(setConfig).catch(() => {});
+    api.getConfig().then((loaded) => {
+      setConfig(loaded);
+      setSavedUi({
+        setup_host: loaded?.ui?.setup_host || '127.0.0.1',
+        setup_port: loaded?.ui?.setup_port || 5123,
+      });
+    }).catch(() => {});
   }, [api]);
 
   const isRunning = status.state === 'running';
@@ -71,9 +80,15 @@ export const SettingsServicePage: React.FC = () => {
     setUiMessage(null);
     try {
       const uiPayload = {
-        setup_host: config.ui?.setup_host || '127.0.0.1',
+        setup_host: (config.ui?.setup_host || '127.0.0.1').trim(),
         setup_port: config.ui?.setup_port || 5123,
       };
+      // Checked before anything is written: a host the server cannot listen on must not reach the
+      // configuration, where the next start would fail on it.
+      if (!isListenableHost(uiPayload.setup_host)) {
+        setUiMessage(t('settings.consoleServerInvalidHost'));
+        return;
+      }
       // Send ONLY host/port — not the whole config.ui. Spreading config.ui
       // would persist any unsaved instance_name draft the user typed but
       // didn't Save on that row. The backend deep-merges config saves, so
@@ -82,11 +97,22 @@ export const SettingsServicePage: React.FC = () => {
         setConfigField(['ui', 'setup_host'], uiPayload.setup_host),
         setConfigField(['ui', 'setup_port'], uiPayload.setup_port),
       ]);
-      await apiFetch('/api/ui/reload', {
+      const reloaded = await apiFetch('/api/ui/reload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host: uiPayload.setup_host, port: uiPayload.setup_port }),
       });
+      if (!reloaded.ok) {
+        // The server refused to listen there and keeps its address: take the values back out of
+        // the configuration, so that what is saved is what is running.
+        await api.mutateConfig([
+          setConfigField(['ui', 'setup_host'], savedUi.setup_host),
+          setConfigField(['ui', 'setup_port'], savedUi.setup_port),
+        ]);
+        setUiMessage(t('common.saveFailed'));
+        return;
+      }
+      setSavedUi(uiPayload);
       // The page may now be at an address the server no longer answers: move it, or say where
       // the console is. A page on the computer that runs Avibe stays on a loopback address.
       const { origin, action } = consoleOriginAfterSave(

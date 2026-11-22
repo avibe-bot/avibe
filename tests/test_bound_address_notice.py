@@ -94,3 +94,24 @@ def test_a_visitor_learns_nothing_from_it(bound):
     bound.remote_access.vibe_cloud.enabled = True
     bound.save()
     assert open_old_address("/", "zh").content == answer.content
+
+
+def test_a_declared_custom_domain_shows_the_same_page_and_not_its_own_name(bound):
+    """An operator's reverse-proxy domain no longer opens a bound Avibe: its visitors read this page too."""
+    bound.ui.trusted_public_origins = ["https://home.example.test"]
+    bound.save()
+    navigation = {"Accept": "text/html", "Accept-Language": "zh-CN", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
+    answer = ui_server.app.test_client().get(
+        "/sessions/abc?claim=secret-claim", base_url="https://home.example.test", environ_base=LAN_PEER, headers=navigation
+    )
+    assert answer.status_code == 200
+    assert answer.content == open_old_address("/", "zh-CN").content
+    title, body, action, local = SAID["zh"]
+    for sentence in (title, body, action, local):
+        assert sentence in html.unescape(answer.text)
+    for private in ("home.example.test", "secret-claim", "fixture"):
+        assert private not in answer.text, private
+    assert "Set-Cookie" not in answer.headers and "Location" not in answer.headers
+    # Its scripts get the refusal a script can read, not a page.
+    api = ui_server.app.test_client().get("/api/session", base_url="https://home.example.test", environ_base=LAN_PEER)
+    assert api.status_code == 503 and api.get_json() == {"ok": False, "error": "remote_access_host_mismatch"}

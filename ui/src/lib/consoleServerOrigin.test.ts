@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { consoleOriginAfterSave } from './consoleServerOrigin';
+import { consoleOriginAfterSave, isListenableHost } from './consoleServerOrigin';
 
 const at = (hostname: string, port = '5123') => ({ hostname, port });
 
@@ -31,5 +31,17 @@ describe('where the page is after the console server host or port is saved', () 
     ['127.0.0.1', 6000],
   ])('a page opened by name (signed in at the Avibe\'s own address) is not sent to %s', (host, port) => {
     expect(consoleOriginAfterSave(at('alex.avibe.bot', '443'), { host, port }).action).toBe('stay');
+  });
+});
+
+describe('a host the console server can listen on', () => {
+  it.each(['127.0.0.1', '0.0.0.0', '192.168.1.20', '::', '::1', '[::1]', 'fd00::4', '*', 'localhost', 'LOCALHOST',
+    'avibe.local', 'my-mac', ' 192.168.1.20 '])('accepts %s', (host) => {
+    expect(isListenableHost(host)).toBe(true);
+  });
+
+  it.each(['', '192.168.1', '192.168.1.256', '1.2.3.4.5', 'fe80::1%en0', ':::', 'bad host', 'a_b.local', '-a.local',
+    "x'); import os #", 'http://192.168.1.20', '192.168.1.20:5123', 'name.123'])('refuses %s', (host) => {
+    expect(isListenableHost(host)).toBe(false);
   });
 });
