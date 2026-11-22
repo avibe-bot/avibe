@@ -530,11 +530,7 @@ async def test_runtime_work_stack_does_not_drain_after_task_service_failure() ->
     assert stopped == ["quiesce", "supervisor"]
 
 
-@pytest.mark.xfail(
-    sys.version_info >= (3, 14), strict=False, raises=AssertionError,
-    reason="racy ordering in the test; synchronization fix in the follow-up",
-)
-def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
+def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace(monkeypatch) -> None:
     """HFR-178: loop-owned shutdown retains supervisor join past outer grace."""
 
     controller = Controller.__new__(Controller)
@@ -544,21 +540,25 @@ def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -
     controller._shutdown_task = None
     controller._shutdown_tainted = False
     controller._runtime_work_shutdown_grace_seconds = 0.0
-    started = threading.Event()
+    grace_exceeded = threading.Event()
+    monkeypatch.setattr("core.controller.logger.critical", lambda *_: grace_exceeded.set())
     release = threading.Event()
 
     class _Supervisor:
         async def stop(self) -> None:
-            started.set()
             await asyncio.to_thread(release.wait)
 
     controller.runtime_work_supervisor = _Supervisor()
 
     thread = threading.Thread(target=loop.run_forever, name="controller-loop")
+    loop_running = threading.Event()
+    loop.call_soon(loop_running.set)
     thread.start()
     try:
+        assert loop_running.wait(timeout=2)
         controller.request_shutdown("test")
-        assert started.wait(timeout=1)
+        assert grace_exceeded.wait(timeout=2)
+        assert controller._shutdown_tainted is True
         assert thread.is_alive()
         assert controller.service_lock_safe_to_release is False
         release.set()

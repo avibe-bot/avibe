@@ -8,9 +8,9 @@ without deleting, and the post-install hook prunes stale archives.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -860,51 +860,35 @@ def test_symlinked_install_lock_is_refused(tmp_path: Path) -> None:
     assert victim.read_text(encoding="utf-8") == "precious"  # link never followed
 
 
-# Follow-up to #4134: inject the directory error at the manager's lstat call.
-_known_archive_inspection = pytest.mark.xfail(
-    sys.version_info >= (3, 14), strict=True, raises=AssertionError,
-    reason="The stat fault no longer reaches the archive inspector's lstat call",
-)
+def _deny_lstat(monkeypatch, denied: Path) -> None:
+    real_lstat = Path.lstat
 
+    def lstat(path):
+        if path == denied:
+            raise PermissionError(errno.EACCES, "permission denied", path)
+        return real_lstat(path)
 
-@_known_archive_inspection
+    monkeypatch.setattr(Path, "lstat", lstat)
+
 def test_downloads_dir_stat_failure_is_an_inspection_failure(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))
-    _write_archive(manager, _sha(2), b"stale")
+    stale_archive = _write_archive(manager, _sha(2), b"stale")
 
-    import errno
-
-    real_stat = Path.stat
-
-    def _stat_guard(self, **kwargs):
-        if self.name == "downloads" and self.parent == manager.runtime_dir:
-            raise OSError(errno.EACCES, "permission denied")
-        return real_stat(self, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", _stat_guard)
+    _deny_lstat(monkeypatch, manager.runtime_dir / "downloads")
     result = manager.clean()
 
     assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
+    assert stale_archive.exists()
 
 
-@_known_archive_inspection
 def test_versions_dir_stat_failure_fails_closed(tmp_path: Path, monkeypatch) -> None:
     manager = _make_manager(tmp_path)
     _write_current_pointer(manager, _sha(1))
     _write_install_metadata(manager, version="v1", sha256=_sha(8), mtime=-3600)
     rollback_archive = _write_archive(manager, _sha(8), b"rollback")
 
-    import errno
-
-    real_stat = Path.stat
-
-    def _stat_guard(self, **kwargs):
-        if self.name == "versions" and self.parent == manager.runtime_dir:
-            raise OSError(errno.EACCES, "permission denied")
-        return real_stat(self, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", _stat_guard)
+    _deny_lstat(monkeypatch, manager.runtime_dir / "versions")
     result = manager.clean()
 
     assert result["archives"].get("skipped_reason") == "archive_inspection_failed"
