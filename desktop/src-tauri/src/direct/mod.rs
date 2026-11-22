@@ -1,6 +1,7 @@
 //! One controller per native-selected remote origin and signed-in session.
 //! Dropping it on a selection change retires the proxy and the peer. Never
 //! identify an instance or session by its installation ID.
+pub(crate) mod choices;
 mod clock;
 mod connect;
 #[cfg(test)]
@@ -28,11 +29,20 @@ pub mod rendezvous;
 #[path = "../../tests/direct/rendezvous.rs"]
 mod rendezvous_tests;
 mod selection;
+pub(crate) mod shell;
+// muda builds macOS menus only on the main thread, which a test never runs on.
+#[cfg(all(test, windows))]
+#[path = "../../tests/direct/menu.rs"]
+mod menu_tests;
 mod transport;
 #[cfg(target_os = "macos")]
 pub mod webview_macos;
 #[cfg(windows)]
 pub mod webview_windows;
+pub(crate) mod wiring;
+#[cfg(test)]
+#[path = "../../tests/direct/wiring.rs"]
+mod wiring_tests;
 
 use clock::Clock;
 use connect::Authority;
