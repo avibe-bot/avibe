@@ -568,3 +568,29 @@ def test_a_sign_out_receipt_says_whose_device_it_was_for_each_viewer(install):
     with get_cached_sqlite_engine().connect() as conn:
         seen = recent(conn, pairing_epoch(install), "owner", True, int(time.time()))
     assert {row["device_id"]: row["group"] for row in seen} == {partner: "others", member_desk: "others", unproven: None}
+
+
+def test_a_receipt_takes_the_role_the_list_showed_when_no_cookie_is_live(install, monkeypatch):
+    from tests.test_remote_access_vibe_cloud import _pin_clock
+
+    clock = _pin_clock(monkeypatch, int(time.time()))
+    loop = "http://127.0.0.1:5123"
+    first = login(install, "person", "member", installation="phone")
+    c = client(first)
+    payload = {"endpoint": "https://example.invalid/kept", "keys": {"auth": "fixture", "p256dh": "fixture"}}
+    assert c.post("/api/web-push/subscriptions", base_url=ORIGIN, headers=csrf_headers(c, ORIGIN),
+                  json={"subscription": payload, "device_id": "same-id"}).status_code == 200
+    # The same device signs in again as Owner and does not register notifications again.
+    second = login(install, "person", "owner", installation="phone")
+    assert len(listing(client(second))["mine"]) == 2  # this computer and the one device
+    clock["now"] = max(remote_access.parse_session_identity(install, cookie)["exp"] for cookie in (first, second))
+    # Both cookies have idled out, neither has reached its absolute end: the list shows the notification registration.
+    install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
+    local = ui_server.app.test_client()
+    view = listing(local, loop)
+    (row,) = [r for r in view["mine"] + view["others"] if r["push_only"]]
+    assert row["group"] == "others" and row["account"]["login_role"] == "member"
+    stopped = sign_out(local, row["id"] + "/sign-out", loop)
+    assert stopped.status_code == 200
+    assert [r["group"] for r in stopped.get_json()["sign_out_results"]] == ["others"]
+    assert [r["group"] for r in listing(local, loop)["recent_sign_outs"]] == ["others"]

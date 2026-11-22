@@ -231,6 +231,8 @@ def test_age_limit_is_unconfirmed_and_erases_ref(paired, monkeypatch):
 
 
 def test_a_recorded_role_leaves_with_its_receipt(paired, monkeypatch):
+    from sqlalchemy import event
+
     from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
 
     cfg, clock, enroll, stop, read = paired
@@ -238,18 +240,44 @@ def test_a_recorded_role_leaves_with_its_receipt(paired, monkeypatch):
     enroll('B', B)
     _, _, [result], _ = stop(target, delegate=False)
     assert result['group'] == 'mine' and read() == [result]
+    monkeypatch.setattr(worker, '_ROLE_PAGE', 2)
+    monkeypatch.setattr(worker, '_roles_checked_to', '')  # as after a start
     with get_cached_sqlite_engine().begin() as conn:
         assert conn.execute(select(roles.c.receipt, roles.c.login_role)).all() == [(result['operation_id'], 'owner')]
-        # A role whose receipt an earlier version already removed.
-        conn.execute(roles.insert().values(receipt='left-behind', login_role='member'))
+        # Roles whose receipts an earlier version already removed.
+        conn.execute(roles.insert(), [dict(receipt=f'left-{n}', login_role='member') for n in range(5)])
     fake_issuer(monkeypatch, 204)
-    worker.run_once(lambda: cfg)
-    with get_cached_sqlite_engine().connect() as conn:
-        assert conn.execute(select(roles.c.receipt)).scalars().all() == [result['operation_id']]
-    clock[0] += 7 * 86400 + 1
-    worker.run_once(lambda: cfg)
-    with get_cached_sqlite_engine().connect() as conn:
+    engine, statements = get_cached_sqlite_engine(), []
+
+    def record(_conn, _cursor, statement, parameters, *_):
+        if 'remote_signout_receipt_roles' in statement:
+            statements.append((statement, parameters))
+
+    event.listen(engine, 'before_cursor_execute', record)
+    try:
+        passes = 0
+        while worker._roles_checked_to is not None:
+            worker.run_once(lambda: cfg)
+            passes += 1
+        ran = len(statements)
+        with engine.connect() as conn:
+            assert conn.execute(select(roles.c.receipt)).scalars().all() == [result['operation_id']]
+        del statements[ran:]  # the check above is the test's own
+        # Six roles, two keys at a step, and a last step that finds the end; then the table is not read for this again.
+        assert passes == 4
+        clock[0] += 7 * 86400 + 1
+        worker.run_once(lambda: cfg)
+    finally:
+        event.remove(engine, 'before_cursor_execute', record)
+    with engine.connect() as conn:
         assert conn.execute(select(receipts.c.id)).all() == [] and conn.execute(select(roles.c.receipt)).all() == []
+        # Every statement a tick runs on the table reaches it by key.
+        kinds = {statement.split()[0].upper() for statement, _ in statements}
+        assert kinds == {'SELECT', 'DELETE'}
+        for statement, parameters in statements:
+            plan = [row[-1] for row in conn.exec_driver_sql('EXPLAIN QUERY PLAN ' + statement, parameters)]
+            assert plan and not any(step.startswith('SCAN remote_signout_receipt') for step in plan), (statement, plan)
+            assert not any('TEMP B-TREE' in step for step in plan), (statement, plan)
     assert read() == []
 
 

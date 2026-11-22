@@ -67,11 +67,8 @@ def _claim(config, now):
         _expire_page(conn, refs, refs.c.sid, refs.c.expires_at, now)
         expired_receipts = select(receipts.c.id).where(receipts.c.expires_at <= now).order_by(receipts.c.expires_at).limit(32)
         conn.execute(items.delete().where(items.c.receipt.in_(expired_receipts)))
+        conn.execute(receipt_roles.delete().where(receipt_roles.c.receipt.in_(expired_receipts)))
         conn.execute(receipts.delete().where(receipts.c.id.in_(expired_receipts)))
-        # A role goes with its receipt, also one whose receipt an earlier version removed.
-        left = select(receipt_roles.c.receipt).where(~select(receipts.c.id).where(
-            receipts.c.id == receipt_roles.c.receipt).exists()).limit(32)
-        conn.execute(receipt_roles.delete().where(receipt_roles.c.receipt.in_(left)))
         _expire_page(conn, jobs, jobs.c.digest, jobs.c.forget_at, now)
         if config is not None:
             _retire_old_pairings(conn, epoch or '', now)
@@ -131,8 +128,35 @@ def _settle(digest, attempt, code, now):
                 conn.execute(items.update().where(items.c.job == digest).values(reason='retrying'))
 
 
+_ROLE_PAGE = 32
+_roles_checked_to = ''  # None once every role present at start has been looked at
+
+
+def _drop_roles_left_behind():
+    """Remove roles whose receipt an earlier version deleted, a page of keys at a time.
+
+    Only a binary that does not know the table can leave one, and it cannot run
+    while this process does: one pass after start is enough, and then no tick
+    reads the table for this again. Each step reads at most one page by key.
+    """
+    global _roles_checked_to
+    if _roles_checked_to is None:
+        return
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.exec_driver_sql('BEGIN IMMEDIATE')
+        page = conn.execute(select(receipt_roles.c.receipt).where(receipt_roles.c.receipt > _roles_checked_to)
+                            .order_by(receipt_roles.c.receipt).limit(_ROLE_PAGE)).scalars().all()
+        if page:
+            kept = set(conn.execute(select(receipts.c.id).where(receipts.c.id.in_(page))).scalars())
+            left = [key for key in page if key not in kept]
+            if left:
+                conn.execute(receipt_roles.delete().where(receipt_roles.c.receipt.in_(left)))
+    _roles_checked_to = page[-1] if len(page) == _ROLE_PAGE else None
+
+
 def run_once(load_config):
     config = load_config()
+    _drop_roles_left_behind()
     job = _claim(config, int(time.time()))
     if job is None:
         return False
