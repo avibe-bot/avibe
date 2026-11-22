@@ -1543,6 +1543,7 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
             json={"action": "refresh"},
         )
         assert api_response.status_code == 200
+        assert set(api_response.headers["Content-Security-Policy"].split("; ")) == {"sandbox", "frame-ancestors 'none'"}
         assert api_response.headers["Cache-Control"] == "private, no-store"
         assert "Cookie" in api_response.headers["Vary"]
 
@@ -5353,9 +5354,51 @@ def test_private_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
     assert "cookie" not in manager.calls[0][2]
     assert manager.calls[0][3] == b'{"ping":true}'
     assert manager.calls[0][4] == 90.0
+    assert response.headers["content-security-policy"] == "sandbox"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert "x-runtime-private-header" not in response.headers
     assert "__Host-vibe_remote_session=attacker" not in response.headers.get("set-cookie", "")
+
+
+@pytest.mark.parametrize("surface", ["private", "public"])
+@pytest.mark.parametrize("content_type,chunks", [
+    ("text/html", (b"<script>", b"/* fixture */</script>")),
+    ("image/svg+xml", (b'<svg xmlns="http://www.w3.org/2000/svg"/>',)),
+    ("application/xml", (b"<document/>",)),
+    ("application/json", (b'{"ok":true}',)),
+    ("image/png", (b"\x89PNG\r\n\x1a\n",)),
+    ("text/event-stream", (b"data: first\n\n", b"data: last\n\n")),
+])
+def test_show_handler_document_policy_preserves_representation(monkeypatch, tmp_path, surface, content_type, chunks):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    share_id = _create_show_page("ses123", surface)
+    base = "/show/ses123" if surface == "private" else f"/p/{share_id}"
+    manager = ShowRuntimeManager(runtime_dir=tmp_path / "runtime")
+    manager._base_url = "http://show-runtime.test"
+    monkeypatch.setattr(manager, "_negotiate_context_key_capability", AsyncMock())
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    async def upstream(_transport, request):
+        assert request.url.path == "/sessions/ses123/app/api/data"
+
+        async def stream():
+            for chunk in chunks:
+                yield chunk
+
+        return httpx.Response(200, content=stream(), headers={
+            "Content-Type": content_type,
+            "Content-Security-Policy": "sandbox allow-scripts allow-same-origin",
+        })
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", upstream)
+    response = app.test_client().get(f"{base}/api/data", headers={"Accept": "text/html"})
+    assert response.status_code == 200
+    assert response.content == b"".join(chunks)
+    assert response.headers["Content-Type"] == content_type
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert "Content-Disposition" not in response.headers
+    assert set(response.headers["Content-Security-Policy"].split("; ")) == {"sandbox", "frame-ancestors 'self'"}
 
 
 def test_private_show_page_api_uses_live_v2_config_timeout(monkeypatch, tmp_path):
@@ -13638,6 +13681,7 @@ def test_public_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
     assert "cookie" not in manager.calls[0][2]
     assert manager.calls[0][3] == b'{"ping":true}'
     assert manager.calls[0][4] == 90.0
+    assert response.headers["content-security-policy"] == "sandbox"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert "x-runtime-private-header" not in response.headers
     assert "__Host-vibe_remote_session=attacker" not in response.headers.get("set-cookie", "")

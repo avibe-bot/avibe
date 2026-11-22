@@ -63,11 +63,14 @@ tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Networking_WindowsWebServices", "Win32_Foundation", "Data_Xml_Dom", "UI_Notifications"] }
 keyring = { version = "3.6", features = ["windows-native"] }
+zeroize = "1"
 # Match Tauri's Known Folder lookup without initializing the GUI.
 dirs = "7"
 # The pet's drag: the primary button's state and a one-step window frame.
 uuid = { version = "1", features = ["v4"] }
 windows-sys = { version = "0.61", features = [
+  "Win32_Security_Credentials",
+  "Win32_Security_Cryptography",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   # Computer Use's inactive Windows x64 process-ownership foundation.

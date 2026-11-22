@@ -1607,6 +1607,13 @@ remote_signout_receipts = Table(
     Index("ix_rsr_subject", "binding", "subject", "created_at", "id"),
     Index("ix_rsr_expiry", "expires_at"),
 )
+# The role a receipt's device signed in with, as the registry knew it at sign-out.
+# No row for a receipt written before this table or for a device with no proven account.
+remote_signout_receipt_roles = Table(
+    "remote_signout_receipt_roles", metadata,
+    Column("receipt", String, primary_key=True),
+    Column("login_role", String, nullable=False),
+)
 remote_signout_items = Table(
     "remote_signout_items", metadata,
     Column("id", Integer, primary_key=True),
