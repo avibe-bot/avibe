@@ -1,6 +1,7 @@
 """Explicit, short-lived delivery of this device's existing credential."""
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,19 @@ import time
 from urllib.parse import urlparse
 
 from .pairing import Pairing
+
+
+def websocket_address(value: str) -> tuple[str, int]:
+    """The local listener is plaintext, on one concrete private IP address."""
+    url = urlparse(value)
+    if (url.scheme != "ws" or not url.hostname or url.path != "/device/ws"
+            or url.username is not None or url.password is not None or url.query or url.fragment):
+        raise ValueError("invalid_device_url")
+    address = ipaddress.ip_address(url.hostname)
+    port = url.port if url.port is not None else 80
+    if not (address.is_private or address.is_loopback) or address.is_unspecified or not 1 <= port <= 65535:
+        raise ValueError("invalid_device_url")
+    return str(address), port
 
 
 class ProvisionWindow:
@@ -31,10 +45,8 @@ class ProvisionWindow:
             raise ValueError("invalid_provision_file")
         if not isinstance(websocket["url"], str) or not isinstance(websocket["token"], str):
             raise ValueError("invalid_provision_file")
-        url = urlparse(websocket["url"])
-        if (url.scheme != "ws" or url.hostname != bind or (url.port or 80) != port
-                or url.path != "/device/ws" or url.username is not None or url.password is not None
-                or url.query or url.fragment or type(websocket["version"]) is not int or websocket["version"] != 2):
+        if (websocket_address(websocket["url"]) != (str(ipaddress.ip_address(bind)), port)
+                or type(websocket["version"]) is not int or websocket["version"] != 2):
             raise ValueError("provision_url_must_match_listener")
         self.pairing = pairing
         self.device_id = pairing.read().get("device_id")

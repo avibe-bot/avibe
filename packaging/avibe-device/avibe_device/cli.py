@@ -8,7 +8,6 @@ import json
 import os
 import signal
 from pathlib import Path
-from urllib.parse import urlparse
 
 from .pairing import Pairing
 
@@ -88,9 +87,9 @@ def main(argv=None) -> int:
     pairing = Pairing(args.state_dir)
     try:
         if args.command == "pair":
-            url = urlparse(args.websocket_url)
-            if url.scheme not in {"ws", "wss"} or not url.hostname or url.path != "/device/ws" or url.username:
-                raise ValueError("invalid_device_url")
+            from .provision import websocket_address
+
+            websocket_address(args.websocket_url)
             # Refuse overwriting a provisioning artifact; tokens are never stdout/log output.
             fd = os.open(args.provision_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:

@@ -579,6 +579,24 @@ def test_pair_cli_emits_only_private_device_provisioning(plugin, tmp_path, capsy
     assert Pairing(root).status()["name"] == "My Vibey"
 
 
+@pytest.mark.parametrize("url", [
+    "wss://127.0.0.1:8765/device/ws", "ws://127.0.0.1:0/device/ws",
+    "ws://127.0.0.1:8765/device/ws?token=x", "ws://127.0.0.1:8765/device/ws#fragment",
+    "ws://user@127.0.0.1:8765/device/ws", "ws://127.0.0.1:8765/other",
+    "ws://0.0.0.0:8765/device/ws", "ws://8.8.8.8:8765/device/ws", "ws://localhost:8765/device/ws",
+])
+def test_pair_rejects_unservable_url_before_persisting(plugin, tmp_path, url, capsys):
+    from avibe_device.cli import main
+    from avibe_device.pairing import Pairing
+
+    root = tmp_path / "plugin"
+    artifact = tmp_path / "provision.json"
+    assert main(["--state-dir", str(root), "pair", "--device-id", "board",
+                 "--websocket-url", url, "--provision-file", str(artifact)]) == 1
+    assert not artifact.exists() and not Pairing(root).path.exists()
+    assert url not in capsys.readouterr().out
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.name == "nt", reason="The optional provisioning file is Unix owner-private")
 @pytest.mark.parametrize("end", ["expiry", "disable", "revoke", "shutdown"])
