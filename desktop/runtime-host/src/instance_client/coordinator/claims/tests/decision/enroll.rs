@@ -64,7 +64,22 @@ pub(super) async fn finish(
         caller.retire();
     }
     hosted.factor_release.notify_one();
-    let reply = wait.await.unwrap();
+    let mut reply = wait.await.unwrap();
+    if matches!(cut, "factor_enroll_retry" | "factor_enroll_expired") {
+        assert!(submit("000003").await.is_err(), "refusal has not been delivered");
+        let err = reply.deliver().unwrap_err();
+        if cut == "factor_enroll_expired" {
+            assert_ne!(err.code, "invalid_code");
+            assert!(submit("000003").await.is_err());
+            assert_eq!(hosted.setups.load(Ordering::SeqCst), 1);
+            return Err(());
+        }
+        assert_eq!(err.code, "invalid_code");
+        assert_eq!(hosted.factors.load(Ordering::SeqCst), 1);
+        hosted.factor_release.notify_one();
+        reply = submit("000003").await.unwrap();
+        assert_eq!(hosted.setups.load(Ordering::SeqCst), 1);
+    }
     if matches!(
         cut,
         "factor_enroll_unknown" | "factor_enroll_unknown_late" | "factor_enroll_replaced"
@@ -97,7 +112,7 @@ pub(super) async fn finish(
         let expected = match cut {
             "factor_enroll_absent" => json!({"state":"not_issued"}),
             "factor_enroll_bad_codes" => json!({"state":"unavailable"}),
-            "factor_enroll_ok" => json!({"state":"issued","codes":codes()}),
+            "factor_enroll_ok" | "factor_enroll_retry" => json!({"state":"issued","codes":codes()}),
             _ => panic!("unexpected enrollment result"),
         };
         assert_eq!(

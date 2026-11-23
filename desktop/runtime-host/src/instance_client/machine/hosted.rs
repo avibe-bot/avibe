@@ -83,6 +83,7 @@ pub(crate) struct ProofNeeded {
     epochs: [Epoch; 2],
     account: Account,
     refused_revision: Uuid,
+    confirmed_content: serde_json::Value,
     target: Target,
 }
 impl ProofNeeded {
@@ -98,7 +99,7 @@ impl ProofNeeded {
     /// Rebuild a review on the original live pipe, never from a page's target
     /// or ticket. The old confirmation is spent. Even the same hostname must
     /// not silently change from new to existing, or to a different existing ID.
-    pub(crate) async fn reread(self, flow: &mut AccountFlow, state: &AccountState) -> Result<HostedClaim> {
+    pub(crate) async fn reread(self, flow: &mut AccountFlow, state: &AccountState) -> Result<(HostedClaim, bool)> {
         let a = state.identity.as_ref().ok_or_else(changed)?;
         self.check(a)?;
         let [account_epoch, document_epoch] = self.epochs;
@@ -134,9 +135,12 @@ impl ProofNeeded {
         {
             return Err(changed());
         }
+        let same_target = read.target.as_ref() == Some(&self.target);
         flow.session = jar;
         claim.review = Some(read);
-        Ok(claim)
+        let view = claim.screen(flow, state)?;
+        let unchanged = same_target && view.can_confirm && view.content() == self.confirmed_content;
+        Ok((claim, unchanged))
     }
     pub(crate) fn refused_revision(&self) -> Uuid {
         self.refused_revision
@@ -178,6 +182,13 @@ impl ReviewView<'_> {
     /// Only the private direct command reply. No subject, ticket, immutable instance ID
     /// or masked former owner here (the latter belongs to a separate D1u preview).
     pub(crate) fn private_reply(&self) -> serde_json::Value {
+        let mut body = self.content();
+        body["revision"] = json!(self.revision.to_string());
+        body
+    }
+    // This is both the displayed decision and the value compared after proof;
+    // only the per-read revision is deliberately outside the comparison.
+    fn content(&self) -> serde_json::Value {
         let screen = match self.screen {
             Screen::New {
                 prefilled,
@@ -194,7 +205,7 @@ impl ReviewView<'_> {
                 json!({"state":"name_holding_limit_reached","prefilled_prefix":prefilled,"names":names})
             }
         };
-        json!({"revision":self.revision.to_string(),"account_email":self.account_email,"device_name":self.device_name,"screen":screen})
+        json!({"account_email":self.account_email,"device_name":self.device_name,"screen":screen})
     }
 }
 
@@ -406,6 +417,7 @@ impl HostedClaim {
         expected: Uuid,
     ) -> Result<GrantResponse> {
         self.consume_revision(expected)?;
+        let confirmed_content = self.screen(flow, state)?.content();
         let target = self.review.take().and_then(|r| r.target).ok_or_else(changed)?;
         let (m, a) = self.current(flow, state)?;
         if target.existing_id.is_some() && !m.ticket.existing_readback {
@@ -445,6 +457,7 @@ impl HostedClaim {
                     epochs: [self.account_epoch.clone(), self.document_epoch.clone()],
                     account: self.identity.clone(),
                     refused_revision: expected,
+                    confirmed_content,
                     target,
                 }));
             }

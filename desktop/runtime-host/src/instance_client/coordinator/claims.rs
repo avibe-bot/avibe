@@ -158,6 +158,7 @@ enum Delivery {
 enum UseReview {
     Edit,
     Confirm { receipt: Uuid },
+    ContinueConsent { receipt: Uuid },
 }
 impl Claims {
     pub(super) fn retire(&mut self) {
@@ -260,6 +261,11 @@ impl Claims {
                     && (*delivery == Delivery::Released(expected) || *delivery == Delivery::EditOnly) =>
             {
                 Delivery::Unreleased
+            }
+            UseReview::ContinueConsent { receipt }
+                if receipt == active.receipt && *delivery == Delivery::Unreleased && claim.can_confirm() =>
+            {
+                Delivery::Confirming(expected, claim.deadline()?)
             }
             UseReview::Confirm { receipt }
                 if receipt == active.receipt && *delivery == Delivery::Released(expected) && claim.can_confirm() =>
@@ -376,9 +382,11 @@ enum ReplyBody<'a> {
     Decision(&'a Coordinator, Box<decision::DecisionOutcome<'a>>),
     Mail(Box<proof::PendingMail<'a>>),
     Submission(Box<proof::SubmittedReply>),
+    PasskeyRefusal(Box<proof::PasskeyRefusal<'a>>),
     Setup(Box<proof::TotpSetupReply<'a>>),
     Enrolled(Box<proof::EnrolledReply>),
     RereadFailed(Box<proof::RereadFailed<'a>>),
+    ProofStatus(&'a Coordinator, Uuid, Uuid, super::claim_binding::BindingId),
     // Even a sanitized rejection can disclose account or ticket state. Keep the
     // original read receipt (not the machine) revocable through shell delivery.
     ReadFailed(ClientError, Borrow<'a>),
@@ -412,6 +420,7 @@ impl ClaimReply<'_> {
                     json!({"state":"mail_accepted", "delivery":mail.deliver()?.to_string()}),
                 ))
             }
+            ReplyBody::PasskeyRefusal(refusal) => return refusal.deliver(),
             ReplyBody::Submission(s) => {
                 return Ok(Some(
                     json!({"state":"verification_accepted", "submission":s.deliver()?.to_string()}),
@@ -434,6 +443,9 @@ impl ClaimReply<'_> {
                 return Ok(Some(
                     json!({"state":"enrollment_accepted", "submission":id.to_string(), "recovery":recovery}),
                 ));
+            }
+            ReplyBody::ProofStatus(c, receipt, submitted, id) => {
+                return c.deliver_proof_status(&self.caller, &self.account, receipt, submitted, id);
             }
             ReplyBody::RereadFailed(f) => return f.deliver(&self.account, &self.caller),
             body => body,
@@ -653,11 +665,11 @@ impl Coordinator {
             ClaimAction::SubmitFactorPasskey { receipt, submission } => {
                 let receipt = opaque(receipt)?;
                 let id = self.factor_predecessor(caller, receipt, opaque(submission)?, false)?;
-                let reply = self
+                let body = self
                     .submit_claim_factor_passkey(caller, r.expected_generation, receipt, id)
                     .await?;
                 return Ok(ClaimReply {
-                    body: ReplyBody::Submission(Box::new(reply)),
+                    body,
                     account: epoch,
                     caller: caller.clone(),
                 });

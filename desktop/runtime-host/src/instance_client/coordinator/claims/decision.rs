@@ -124,6 +124,17 @@ impl Coordinator {
         receipt: Uuid,
         revision: Uuid,
     ) -> Result<DecisionOutcome<'_>> {
+        self.confirm_review(caller, expected_generation, receipt, revision, None)
+            .await
+    }
+    pub(super) async fn confirm_review(
+        &self,
+        caller: &ClaimCaller,
+        expected_generation: u64,
+        receipt: Uuid,
+        revision: Uuid,
+        continuation: Option<&proof::RereadOrigin>,
+    ) -> Result<DecisionOutcome<'_>> {
         if !Arc::ptr_eq(&self.claims, &caller.owner) {
             return Err(stale());
         }
@@ -145,7 +156,13 @@ impl Coordinator {
                 return Err(auth());
             }
             let previous = inner.account.session.factor_cookies().ok_or_else(auth)?;
-            let (_, claim) = owner.borrow_review(revision, a, UseReview::Confirm { receipt }, wake)?;
+            let usage = if let Some(origin) = continuation {
+                origin.check(self, &inner, a)?;
+                UseReview::ContinueConsent { receipt }
+            } else {
+                UseReview::Confirm { receipt }
+            };
+            let (_, claim) = owner.borrow_review(revision, a, usage, wake)?;
             (
                 claim,
                 inner.account.for_claim(epoch.clone()),

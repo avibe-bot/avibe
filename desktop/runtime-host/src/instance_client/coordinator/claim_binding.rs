@@ -24,6 +24,8 @@ struct Pending {
     id: BindingId,
     account: Account,
     base: BindingBase,
+    original: FactorCookies,
+    automatic: bool,
     clock: Arc<AtomicU64>,
     phase: Phase,
     // The first read/save belongs to the ordinary worker. An explicit retry
@@ -78,6 +80,16 @@ impl BindingSlot {
                 .as_ref()
                 .is_some_and(|p| p.id == id && !matches!(p.phase, Phase::Forwarding))
     }
+    pub(super) fn publishing_for(&self, id: BindingId, inner: &Inner, account: &Account) -> bool {
+        self.pending.as_ref().is_some_and(|p| {
+            p.id == id
+                && &p.account == account
+                && p.automatic
+                && !matches!(p.phase, Phase::Forwarding)
+                && selected(inner, account, p.base)
+                && inner.account.session.factor_cookies().as_ref() == Some(&p.original)
+        })
+    }
     pub(super) fn committed(&self) -> Option<BindingId> {
         self.committed.as_ref().map(|(id, _)| *id)
     }
@@ -103,6 +115,19 @@ impl BindingSlot {
         code.fence(epoch);
         Ok(id)
     }
+    pub(in crate::instance_client) fn restore_factor_predecessor(
+        &mut self,
+        rejected: BindingId,
+        predecessor: BindingId,
+        cookies: FactorCookies,
+    ) -> bool {
+        if !self.rejected(rejected) || self.occupied() || self.committed.is_some() {
+            return false;
+        }
+        self.rejected = None;
+        self.committed = Some((predecessor, cookies));
+        true
+    }
     pub(super) fn reserve_factor(
         &mut self,
         inner: &Inner,
@@ -126,6 +151,7 @@ impl BindingSlot {
         if self.occupied() {
             return Err(busy());
         }
+        let original = inner.account.session.factor_cookies().ok_or_else(stale)?;
         let clock = Arc::new(AtomicU64::new(1));
         let epoch = Epoch::new(clock.clone(), 1);
         let id = BindingId(Uuid::new_v4());
@@ -135,6 +161,8 @@ impl BindingSlot {
             id,
             account: account.clone(),
             base,
+            original,
+            automatic: true,
             clock,
             phase: Phase::Forwarding,
             retry: None,
@@ -223,6 +251,7 @@ impl Coordinator {
             return None;
         }
         let token = Uuid::new_v4();
+        p.automatic = false;
         p.retry = Some(token);
         Some(token)
     }

@@ -9,7 +9,7 @@ use crate::instance_client::{
     machine::hosted::ProofNeeded,
     transport::FactorCookies,
 };
-pub(super) use factor::{EnrolledReply, TotpSetupReply};
+pub(super) use factor::{EnrolledReply, PasskeyRefusal, TotpSetupReply};
 pub(super) use submission::SubmittedReply;
 
 pub(super) struct StepUp {
@@ -19,6 +19,10 @@ pub(super) struct StepUp {
     // Opaque document handle issued at delivery, never the ordinary BindingId.
     released: Option<(Uuid, BindingId)>,
     phase: Phase,
+    // Inert during dispatch. Only original-document delivery of a definite
+    // refusal may restore this exact input step, never the rejected operation.
+    retry_phase: Option<Phase>,
+    retry_until: Option<Instant>,
     // Only the original final POST's native reply can take this; retirement
     // of the document drops any still-undelivered recovery codes.
     enrolled: Option<crate::instance_client::account::EnrolledCodes>,
@@ -157,6 +161,16 @@ pub(super) struct ClaimStart<'a> {
     delivery: Uuid,
 }
 impl StepUp {
+    fn check_wait(&self) -> Result<()> {
+        if let Some(until) = self.retry_until.filter(|until| *until > Instant::now()) {
+            let mut e = ClientError::new("rate_limited");
+            let left = until.saturating_duration_since(Instant::now());
+            e.retry_after_seconds = Some((left.as_secs() + u64::from(left.subsec_nanos() != 0)).clamp(1, 255) as u8);
+            e.retry_until = Some(until);
+            return Err(e);
+        }
+        Ok(())
+    }
     fn release(&mut self, id: BindingId) -> Uuid {
         let handle = Uuid::new_v4();
         self.released = Some((handle, id));
@@ -212,6 +226,8 @@ impl Claims {
             proof,
             initial_credential: cookies,
             correlation: revision,
+            retry_phase: None,
+            retry_until: None,
             released: None,
             phase: Phase::Offer {
                 state: OfferState::Unreleased,
@@ -362,14 +378,16 @@ impl Coordinator {
             if !matches!(step.phase, Phase::Delivered(_)) {
                 return Err(changed());
             }
+            step.check_wait()?;
             validate_code(code)?;
             let Phase::Delivered(flow) = std::mem::replace(&mut step.phase, Phase::Preparing { _interrupt: wake })
             else {
                 unreachable!()
             };
+            step.retry_phase = Some(Phase::Delivered(flow.clone()));
             Ok((flow, account.clone(), step.proof.deadline()))
         })?;
-        let borrow = Borrow {
+        let mut borrow = Borrow {
             owner: &self.claims,
             receipt,
             returned: false,
@@ -377,7 +395,22 @@ impl Coordinator {
         let prepared = tokio::select! { biased;
             _ = &mut interrupted => return Err(stale()),
             _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
-            r = flow.prepare_claim_code(&account, code) => r?,
+            r = flow.prepare_claim_code(&account, code) => r,
+        };
+        let prepared = match prepared {
+            Err(e) if e.retry_until.is_some() => {
+                self.with_proof(caller, &epoch, receipt, delivery, |_, _, step| {
+                    if !matches!(step.phase, Phase::Preparing { .. }) {
+                        return Err(stale());
+                    }
+                    step.phase = step.retry_phase.take().ok_or_else(stale)?;
+                    step.retry_until = e.retry_until;
+                    Ok(())
+                })?;
+                borrow.returned = true;
+                return Err(e);
+            }
+            r => r?,
         };
         self.with_proof(caller, &epoch, receipt, delivery, |_, _, step| {
             if !matches!(step.phase, Phase::Preparing { .. }) {
@@ -438,6 +471,43 @@ impl Coordinator {
     }
     /// No machine open, grant or OTP. Only an exact ordinary commit receipt from
     /// this delivery can release the original unarmed ticket for another review.
+    pub(super) fn deliver_proof_status(
+        &self,
+        caller: &ClaimCaller,
+        epoch: &Epoch,
+        receipt: Uuid,
+        submitted: Uuid,
+        id: BindingId,
+    ) -> Result<Option<Value>> {
+        let inner = self.inner.try_lock().map_err(|_| busy())?;
+        let mut claims = caller.owner.lock().expect("claim owner");
+        epoch.check()?;
+        claims.expire();
+        caller.check()?;
+        let active = claims
+            .active
+            .as_ref()
+            .filter(|a| a.receipt == receipt)
+            .ok_or_else(stale)?;
+        let Stage::Proof(step) = &active.stage else {
+            return Err(stale());
+        };
+        if step.predecessor(submitted, false)? != id || self.signing_out.load(Ordering::SeqCst) {
+            return Err(stale());
+        }
+        step.proof.check(&active.account)?;
+        let slot = self.binding.try_lock().map_err(|_| busy())?;
+        if slot.published_for(id, &inner, &active.account) {
+            if inner.state.account.status == AccountStatus::SecondFactorRequired {
+                return Err(auth());
+            }
+            // Publication won between admission and delivery. This receipt arose
+            // before read admission: the next call may perform the single reread.
+        } else if !slot.publishing_for(id, &inner, &active.account) {
+            return Err(changed());
+        }
+        Ok(Some(json!({"state":"publishing"})))
+    }
     pub(super) async fn reread_after_proof(
         &self,
         caller: &ClaimCaller,
@@ -452,7 +522,9 @@ impl Coordinator {
         let (wake, mut interrupted) = oneshot::channel();
         let (proof, origin, mut flow, state) = {
             let _operation = self.operation.try_lock().map_err(|_| busy())?;
-            self.check_claim_admission()?;
+            if self.signing_out.load(Ordering::SeqCst) {
+                return Err(stale());
+            }
             let inner = self.inner.lock().expect("client state");
             let mut owner = self.claims.lock().expect("claim owner");
             epoch.check()?;
@@ -464,27 +536,36 @@ impl Coordinator {
                 .filter(|a| a.receipt == receipt)
                 .ok_or_else(stale)?;
             let account = &active.account;
+            let Stage::Proof(step) = &active.stage else {
+                return Err(changed());
+            };
+            let id = step.predecessor(submitted, false)?;
+            step.proof.check(account)?;
+            {
+                let slot = self.binding.lock().expect("ordinary binding");
+                if slot.publishing_for(id, &inner, account)
+                    || (slot.published_for(id, &inner, account)
+                        && inner.state.account.status == AccountStatus::SecondFactorRequired)
+                {
+                    return Ok(ClaimReply {
+                        body: ReplyBody::ProofStatus(self, receipt, submitted, id),
+                        account: epoch,
+                        caller: caller.clone(),
+                    });
+                }
+                if !slot.published_for(id, &inner, account) {
+                    return Err(changed());
+                }
+            }
+            self.check_claim_admission()?;
             if inner.state.account.status != AccountStatus::SignedIn
                 || inner.state.account.identity.as_ref() != Some(account)
                 || inner.record.account_id.as_ref() != Some(&account.id)
                 || inner.account.resumes.as_ref() != Some(&account.id)
                 || !inner.account.session.is_account()
             {
-                return Err(auth());
-            }
-            let Stage::Proof(step) = &active.stage else {
-                return Err(changed());
-            };
-            let id = step.predecessor(submitted, false)?;
-            if !self
-                .binding
-                .lock()
-                .expect("ordinary binding")
-                .published_for(id, &inner, account)
-            {
                 return Err(changed());
             }
-            step.proof.check(account)?;
             let Stage::Proof(step) = std::mem::replace(
                 &mut active.stage,
                 Stage::Reading {
@@ -518,10 +599,26 @@ impl Coordinator {
             _ = tokio::time::sleep_until(deadline) => return Err(stale()),
             result = proof.reread(&mut flow, &state) => result,
         };
-        match claim
-            .and_then(|claim| self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, Some(&origin)))
-        {
-            Ok(review) => Ok(review),
+        match claim.and_then(|(claim, unchanged)| {
+            let revision = claim.revision();
+            let review = self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, Some(&origin))?;
+            Ok((review, unchanged.then_some(revision)))
+        }) {
+            Ok((_review, Some(revision))) => {
+                // This revision was never released to the page. If confirmation
+                // loses admission, do not strand an undisplayable review.
+                borrow.returned = false;
+                let decision = self
+                    .confirm_review(caller, generation, receipt, revision, Some(&origin))
+                    .await?;
+                borrow.returned = true;
+                Ok(ClaimReply {
+                    body: ReplyBody::Decision(self, Box::new(decision)),
+                    account: epoch,
+                    caller: caller.clone(),
+                })
+            }
+            Ok((review, None)) => Ok(review),
             Err(error) => Ok(ClaimReply {
                 body: ReplyBody::RereadFailed(Box::new(RereadFailed {
                     c: self,

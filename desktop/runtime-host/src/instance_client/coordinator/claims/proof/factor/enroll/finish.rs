@@ -79,70 +79,65 @@ impl Coordinator {
         let c = self.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
-            let result =
-                async {
-                    let (id, epoch, setup, flow, account, previous) =
-                        owner.with(&c, At::DeliveredTotp, |inner, a, step, slot| {
-                            let Phase::TotpSetup { setup, until, .. } = &step.phase else {
-                                return Err(changed());
-                            };
-                            let previous = credentials(inner, a)?;
-                            if setup.material.is_some()
-                                || previous != setup.cookies
-                                || Instant::now() >= *until
-                                || tx.is_closed()
-                            {
-                                return Err(stale());
-                            }
-                            let (id, epoch) = slot.reserve_factor(inner, a, predecessor)?;
-                            let Phase::TotpSetup { setup, .. } =
-                                std::mem::replace(&mut step.phase, Phase::Submitted(id))
-                            else {
-                                unreachable!()
-                            };
-                            Ok((id, epoch, setup, Box::new(inner.account.clone()), a.clone(), previous))
-                        })?;
-                    let mut naming = Borrow {
-                        owner: &c.claims,
-                        receipt,
-                        returned: false,
-                    };
-                    let (bound, codes) =
-                        match BoundClaimSession::enroll_totp(flow, account, setup.cookies, setup.token, code, epoch)
-                            .await
-                        {
-                            Ok((bound, codes)) => (Ok(bound), Some(codes)),
-                            Err(e) => (Err(e), None),
+            let result = async {
+                let (id, epoch, token, flow, account, previous) =
+                    owner.with(&c, At::DeliveredTotp, |inner, a, step, slot| {
+                        let Phase::TotpSetup { setup, until, .. } = &step.phase else {
+                            return Err(changed());
                         };
-                    let refusal = c.finish_forward(id, bound).err().map(|error| {
-                        Box::new(SubmittedReply::new(
-                            c.clone(),
-                            owner.caller.clone(),
-                            Epoch::new(c.generation.clone(), generation),
-                            receipt,
-                            id,
-                            previous,
-                            Err(error),
-                        ))
-                    });
-                    naming.returned = true;
-                    let direct = EnrolledReply {
-                        c: c.clone(),
-                        owner,
-                        id,
-                        refusal,
+                        let previous = credentials(inner, a)?;
+                        if setup.material.is_some()
+                            || previous != setup.cookies
+                            || Instant::now() >= *until
+                            || tx.is_closed()
+                        {
+                            return Err(stale());
+                        }
+                        let token = setup.token.clone();
+                        let (id, epoch) = slot.reserve_factor(inner, a, predecessor)?;
+                        step.retry_phase = Some(std::mem::replace(&mut step.phase, Phase::Submitted(id)));
+                        Ok((id, epoch, token, Box::new(inner.account.clone()), a.clone(), previous))
+                    })?;
+                let mut naming = Borrow {
+                    owner: &c.claims,
+                    receipt,
+                    returned: false,
+                };
+                let (bound, codes) =
+                    match BoundClaimSession::enroll_totp(flow, account, &previous, token, code, epoch).await {
+                        Ok((bound, codes)) => (Ok(bound), Some(codes)),
+                        Err(e) => (Err(e), None),
                     };
-                    // Loss of the waiter, its document, or its separate display
-                    // material never undoes acceptance or dispatches enrollment again.
-                    if direct.refusal.is_none() && !tx.is_closed() {
-                        let _ = direct.with_document(|step| {
-                            step.enrolled = codes;
-                            Ok(())
-                        });
-                    }
-                    Ok(direct)
+                let refusal = c.finish_forward(id, bound).err().map(|error| {
+                    Box::new(SubmittedReply::new(
+                        c.clone(),
+                        owner.caller.clone(),
+                        Epoch::new(c.generation.clone(), generation),
+                        receipt,
+                        id,
+                        previous,
+                        Err(error),
+                    ))
+                });
+                naming.returned = true;
+                let direct = EnrolledReply {
+                    c: c.clone(),
+                    owner,
+                    id,
+                    refusal,
+                };
+                // Loss of the waiter, its document, or its separate display
+                // material never undoes acceptance or dispatches enrollment again.
+                if direct.refusal.is_none() && !tx.is_closed() {
+                    let _ = direct.with_document(|step| {
+                        step.retry_phase = None;
+                        step.enrolled = codes;
+                        Ok(())
+                    });
                 }
-                .await;
+                Ok(direct)
+            }
+            .await;
             let _ = tx.send(result);
         });
         rx.await.map_err(|_| ClientError::new("factor_delivery_unknown"))?

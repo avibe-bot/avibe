@@ -57,6 +57,34 @@ pub(super) async fn exercise(
     assert!(again(Uuid::new_v4(), current).await.is_err());
     assert!(confirm(refused).await.is_err());
     peer.assert_unarmed();
+    if matches!(cut, "ok" | "refused") {
+        let reread = again(receipt, current);
+        tokio::pin!(reread);
+        if cut == "refused" {
+            assert_eq!(
+                reread.await.unwrap().deliver().unwrap_err().code,
+                "reauthentication_failed"
+            );
+            assert!(peer.arm().await.is_err());
+        } else {
+            let arm = tokio::select! { _ = &mut reread => panic!("publication held"), r = peer.arm() => r.unwrap() };
+            assert_eq!(arm["hostname"], "desk-app.avibe.bot");
+            assert!(
+                again(receipt, current).await.is_err(),
+                "only one review may admit a grant"
+            );
+            let (_adoption, nonce, ack) = peer.published();
+            let challenge = tokio::select! { _ = &mut reread => panic!("recheck held"), n = nonce => n.unwrap() };
+            assert_eq!(challenge.len(), 32);
+            ack.send(Ok(())).unwrap();
+            assert_eq!(reread.await.unwrap().deliver().unwrap(), Some(json!({"state":"bound"})));
+        }
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 2);
+        assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
+        assert_eq!(memory.read("fixture-a").unwrap().unwrap(), stored);
+        return;
+    }
     let read = again(receipt, current).await;
     assert_eq!(hosted.reads.load(Ordering::SeqCst), if factor { 5 } else { 3 });
     assert_eq!(
@@ -134,6 +162,7 @@ pub(super) async fn exercise(
         } else {
             let projection = reply.deliver().unwrap().unwrap();
             assert_eq!(projection["screen"]["prefix"], "desk");
+            assert_eq!(projection["screen"]["prefilled_prefix"], "changed-suggestion");
             peer.assert_unarmed();
             assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
             if cut == "refused" {

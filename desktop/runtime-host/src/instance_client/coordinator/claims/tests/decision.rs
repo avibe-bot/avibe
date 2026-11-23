@@ -66,6 +66,8 @@ struct Hosted {
     starting: Notify,
     forward: Mutex<Option<oneshot::Receiver<()>>>,
     forwarding: Notify,
+    starts_sent: AtomicU64,
+    codes_sent: AtomicU64,
     reads: AtomicU64,
     unknown: bool,
     review: Option<&'static str>,
@@ -76,8 +78,11 @@ struct Hosted {
     resume_observation: Notify,
     ticket_reads: AtomicU64,
     factors: AtomicU64,
+    factor_accepted: std::sync::atomic::AtomicBool,
     factor_entered: Notify,
     factor_release: Notify,
+    factor_publication_read: Notify,
+    release_publication_read: Notify,
     setups: AtomicU64,
     setup_entered: Notify,
     setup_release: Notify,
@@ -90,7 +95,7 @@ impl Transport for Hosted {
         let mut headers = reqwest::header::HeaderMap::new();
         let raced_name = self.publication_case.starts_with("name_race_");
         let owed = self.review.is_some_and(|s| s.starts_with("factor_"));
-        let verified = owed && self.factors.load(Ordering::SeqCst) != 0;
+        let verified = owed && self.factor_accepted.load(Ordering::SeqCst);
         let ordinary = if verified {
             "ordinary=after-factor"
         } else {
@@ -188,7 +193,11 @@ impl Transport for Hosted {
         } else if req.url.path() == "/api/auth/first-party/email-code" {
             assert_eq!(
                 req.headers[reqwest::header::COOKIE],
-                "__Host-avibe-sign-in-start=fixture"
+                if self.codes_sent.load(Ordering::SeqCst) == 0 {
+                    "__Host-avibe-sign-in-start=fixture"
+                } else {
+                    "__Host-avibe-sign-in-start=retry"
+                }
             );
         } else if req.url.path() == "/api/mobile/session" {
             assert_eq!(req.method, reqwest::Method::GET);
@@ -232,6 +241,10 @@ impl Transport for Hosted {
                     assert!(raced_name || self.review.is_some());
                 }
                 let mut projection = json!({"mode":"desktop","locale":"en","expires_at":self.expiry,"device_name":"fixture computer","account_subject":"fixture-a","account_email":"fixture@example.test","state":"new","prefilled_prefix":"desk","prefix":"desk","taken":false});
+                if again && self.review.is_some_and(|r| !matches!(r, "ok" | "refused" | "target")) {
+                    // Same selected hostname and target, different displayed suggestion.
+                    projection["prefilled_prefix"] = json!("changed-suggestion");
+                }
                 if again && raced_name {
                     projection["prefix"] = json!("spare");
                 }
@@ -283,7 +296,17 @@ impl Transport for Hosted {
                         raced_name
                             || matches!(
                                 self.review,
-                                Some("ok" | "refused" | "factor_ok" | "factor_recovery" | "factor_pk_ok")
+                                Some(
+                                    "ok" | "refused"
+                                        | "factor_ok"
+                                        | "email_retry"
+                                        | "factor_recovery"
+                                        | "factor_totp_retry"
+                                        | "factor_recovery_retry"
+                                        | "factor_pk_ok"
+                                        | "factor_pk_os_retry"
+                                        | "factor_pk_denied_retry"
+                                )
                             )
                             || self.review.is_some_and(|r| r.starts_with("factor_enroll_"))
                     );
@@ -338,25 +361,47 @@ impl Transport for Hosted {
                     req.body,
                     Some(json!({"kind":"email_code", "email":"fixture@example.test", "expected_subject":"fixture-a"}))
                 );
-                let wait = self.start.lock().unwrap().take().expect("start replayed");
-                self.starting.notify_one();
-                wait.await.map_err(|_| stale())?;
+                let n = self.starts_sent.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    let wait = self.start.lock().unwrap().take().expect("start replayed");
+                    self.starting.notify_one();
+                    wait.await.map_err(|_| stale())?;
+                } else {
+                    assert!(n == 1 && self.review == Some("email_retry"), "unexpected start");
+                }
+                let cookie = if n == 0 { "fixture" } else { "retry" };
                 headers.insert(
                     reqwest::header::SET_COOKIE,
-                    "__Host-avibe-sign-in-start=fixture; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=600"
+                    format!("__Host-avibe-sign-in-start={cookie}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=600")
                         .parse()
                         .unwrap(),
                 );
-                json!({"transaction":"t".repeat(43)})
+                json!({"transaction":if n == 0 { "t" } else { "u" }.repeat(43)})
             }
             "https://avibe.bot/api/auth/first-party/email-code" => {
+                let n = self.codes_sent.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    n == 0 || (self.review == Some("email_retry") && n == 1),
+                    "email code replayed"
+                );
                 assert_eq!(
                     req.body,
-                    Some(json!({"email":"fixture@example.test","transaction":"t".repeat(43),"code":"000001"}))
+                    Some(
+                        json!({"email":"fixture@example.test", "transaction":if n == 0 { "t" } else { "u" }.repeat(43), "code":if n == 0 { "000001" } else { "000003" }})
+                    )
                 );
-                let wait = self.forward.lock().unwrap().take().expect("code replayed");
-                self.forwarding.notify_one();
-                wait.await.map_err(|_| stale())?;
+                if n == 0 {
+                    let wait = self.forward.lock().unwrap().take().expect("code replayed");
+                    self.forwarding.notify_one();
+                    wait.await.map_err(|_| stale())?;
+                    if self.review == Some("email_retry") {
+                        return Ok(Response {
+                            status: 403,
+                            headers,
+                            body: br#"{"error":"verification_invalid"}"#.to_vec(),
+                        });
+                    }
+                }
                 if self.unknown {
                     return Err(ClientError::new("network_unavailable"));
                 }
@@ -374,16 +419,34 @@ impl Transport for Hosted {
             }
             "https://avibe.bot/api/two-factor/totp" => {
                 assert_eq!(req.method, reqwest::Method::POST);
-                assert_eq!(req.body, Some(json!({"token":"fixture-setup-token", "code":"000002"})));
-                assert_eq!(self.factors.fetch_add(1, Ordering::SeqCst), 0, "enrollment replay");
+                let n = self.factors.fetch_add(1, Ordering::SeqCst);
+                let retry = self.review == Some("factor_enroll_retry") && n == 1;
+                assert!(n == 0 || retry, "enrollment replay");
+                assert_eq!(
+                    req.body,
+                    Some(json!({"token":"fixture-setup-token", "code": if retry { "000003" } else { "000002" }}))
+                );
                 self.factor_entered.notify_one();
                 self.factor_release.notified().await;
+                if n == 0 && matches!(self.review, Some("factor_enroll_retry" | "factor_enroll_expired")) {
+                    let reason = if self.review == Some("factor_enroll_retry") {
+                        "invalid"
+                    } else {
+                        "expired"
+                    };
+                    return Ok(Response {
+                        status: 400,
+                        headers,
+                        body: serde_json::to_vec(&json!({"error":reason})).unwrap(),
+                    });
+                }
                 if matches!(
                     self.review,
                     Some("factor_enroll_unknown" | "factor_enroll_unknown_late")
                 ) {
                     return Err(ClientError::new("network_unavailable"));
                 }
+                self.factor_accepted.store(true, Ordering::SeqCst);
                 status = 201;
                 headers.insert(
                     reqwest::header::SET_COOKIE,
@@ -432,10 +495,22 @@ impl Transport for Hosted {
             "https://avibe.bot/api/two-factor/verify" => {
                 assert!(owed);
                 assert_eq!(req.method, reqwest::Method::POST);
-                assert_eq!(self.factors.fetch_add(1, Ordering::SeqCst), 0, "MFA replay");
+                let n = self.factors.fetch_add(1, Ordering::SeqCst);
+                let retry_case = matches!(
+                    self.review,
+                    Some("factor_pk_denied_retry" | "factor_totp_retry" | "factor_recovery_retry")
+                );
+                let after_refusal = retry_case && n == 1;
+                assert!(n == 0 || after_refusal, "MFA replay");
                 assert_eq!(
                     req.body,
-                    Some(if self.review.is_some_and(|r| r.starts_with("factor_pk_")) {
+                    Some(if self.review == Some("factor_totp_retry") && after_refusal {
+                        json!({"method":"totp","code":"000003"})
+                    } else if self.review == Some("factor_recovery_retry") && !after_refusal {
+                        json!({"method":"recovery","code":"fixture-wrong"})
+                    } else if after_refusal || self.review == Some("factor_pk_os_retry") {
+                        json!({"method":"recovery","code":"fixture-backup"})
+                    } else if self.review.is_some_and(|r| r.starts_with("factor_pk_")) {
                         json!({"method":"passkey","token":"fixture-factor-token","response":passkey::assertion()})
                     } else if self.review == Some("factor_recovery") {
                         json!({"method":"recovery","code":"fixture-backup"})
@@ -445,7 +520,17 @@ impl Transport for Hosted {
                 );
                 self.factor_entered.notify_one();
                 self.factor_release.notified().await;
-                if matches!(self.review, Some("factor_unknown" | "factor_unknown_late")) {
+                if n == 0 && retry_case {
+                    return Ok(Response {
+                        status: 400,
+                        headers,
+                        body: br#"{"error":"invalid"}"#.to_vec(),
+                    });
+                }
+                if matches!(
+                    self.review,
+                    Some("factor_unknown" | "factor_unknown_late" | "factor_pk_unknown")
+                ) {
                     return Err(ClientError::new("network_unavailable"));
                 }
                 if self.review == Some("factor_malformed") {
@@ -459,6 +544,7 @@ impl Transport for Hosted {
                     reqwest::header::SET_COOKIE,
                     "ordinary=after-factor; Path=/; Secure; HttpOnly".parse().unwrap(),
                 );
+                self.factor_accepted.store(true, Ordering::SeqCst);
                 json!({"ok":true})
             }
             "https://avibe.bot/api/mobile/session" => {
@@ -497,9 +583,13 @@ impl Transport for Hosted {
                                 .unwrap(),
                         );
                     }
-                    return Ok(Response { status, headers, body: serde_json::to_vec(&json!({"error":"two_factor_required","email":"fixture@example.test","gate":"challenge","methods": if self.review.is_some_and(|r| r == "factor_recovery" || r.starts_with("factor_pk_")) {json!(["passkey"])} else {json!(["totp"])}})).unwrap() });
+                    return Ok(Response { status, headers, body: serde_json::to_vec(&json!({"error":"two_factor_required","email":"fixture@example.test","gate":"challenge","methods": if self.review.is_some_and(|r| r.starts_with("factor_recovery") || r.starts_with("factor_pk_")) {json!(["passkey"])} else {json!(["totp"])}})).unwrap() });
                 }
                 if owed && n == 2 {
+                    if self.review == Some("factor_pk_denied_retry") {
+                        self.factor_publication_read.notify_one();
+                        self.release_publication_read.notified().await;
+                    }
                     return Err(ClientError::new("network_unavailable"));
                 }
                 if n == 2 && matches!(self.review, Some("mfa" | "mfa_late_credential" | "mfa_late_successor")) {
@@ -583,6 +673,7 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_auto_save_direct_changed",
         "proof_start_review_unsaved",
         "proof_start_review_ok",
+        "proof_start_review_email_retry",
         "proof_start_review_refused",
         "proof_start_review_subject",
         "proof_start_review_mfa",
@@ -593,6 +684,8 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_review_replaced",
         "proof_start_review_factor_ok",
         "proof_start_review_factor_recovery",
+        "proof_start_review_factor_recovery_retry",
+        "proof_start_review_factor_totp_retry",
         "proof_start_review_factor_close",
         "proof_start_review_factor_subject",
         "proof_start_review_factor_unknown",
@@ -609,6 +702,8 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_review_factor_pk_wrong_id",
         "proof_start_review_factor_pk_close",
         "proof_start_review_factor_setup_ok",
+        "proof_start_review_factor_enroll_retry",
+        "proof_start_review_factor_enroll_expired",
         "proof_start_review_factor_setup_cancel",
         "proof_start_review_factor_setup_replaced",
         "proof_start_review_factor_setup_drop",
@@ -748,6 +843,8 @@ async fn check_cut(cut: &'static str) {
         starting: Notify::new(),
         forward: Mutex::new(Some(forward_wait)),
         forwarding: Notify::new(),
+        starts_sent: AtomicU64::new(0),
+        codes_sent: AtomicU64::new(0),
         reads: AtomicU64::new(0),
         unknown: cut.starts_with("proof_start_unknown"),
         review,
@@ -758,8 +855,11 @@ async fn check_cut(cut: &'static str) {
         resume_observation: Notify::new(),
         ticket_reads: AtomicU64::new(0),
         factors: AtomicU64::new(0),
+        factor_accepted: std::sync::atomic::AtomicBool::new(false),
         factor_entered: Notify::new(),
         factor_release: Notify::new(),
+        factor_publication_read: Notify::new(),
+        release_publication_read: Notify::new(),
         setups: AtomicU64::new(0),
         setup_entered: Notify::new(),
         setup_release: Notify::new(),
@@ -1355,7 +1455,17 @@ async fn check_cut(cut: &'static str) {
                             memory.allow_one_save();
                         }
                         forward_reply.send(()).unwrap();
-                        let direct = start.await.unwrap();
+                        let mut direct = start.await.unwrap();
+                        if review == Some("email_retry") {
+                            assert!(submit("000003").await.is_err(), "wrong-code result still undelivered");
+                            assert_eq!(direct.deliver().unwrap_err().code, "invalid_or_expired");
+                            assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 1);
+                            assert_eq!(hosted.codes_sent.load(Ordering::SeqCst), 1);
+                            direct = submit("000003").await.unwrap();
+                            assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
+                            assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 2);
+                            assert_eq!(hosted.codes_sent.load(Ordering::SeqCst), 2);
+                        }
                         assert!(dispatch(ClaimAction::ReviewAfterProof {
                             receipt: receipt.to_string(),
                             submission: delivery.to_string()

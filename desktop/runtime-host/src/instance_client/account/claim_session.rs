@@ -54,6 +54,21 @@ pub(in crate::instance_client) struct PreparedFactor {
     body: Value,
     recovery: bool,
 }
+pub(super) fn factor_refusal(r: &super::Response) -> ClientError {
+    if r.status == 429 {
+        return super::email_code::limited(super::email_code::retry_after(r));
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Denied {
+        error: String,
+    }
+    if r.status == 400 && serde_json::from_slice::<Denied>(&r.body).is_ok_and(|d| d.error == "invalid") {
+        ClientError::new("invalid_or_expired")
+    } else {
+        ClientError::new("factor_delivery_unknown")
+    }
+}
 impl PreparedFactor {
     pub(in crate::instance_client) fn code(
         flow: &AccountFlow,
@@ -95,6 +110,7 @@ impl PreparedFactor {
     }
     pub(in crate::instance_client) async fn forward(mut self, epoch: Epoch) -> Result<BoundClaimSession, ClientError> {
         self.flow.fence(epoch);
+        let passkey = self.body["method"] == "passkey";
         let response = self
             .flow
             .session
@@ -113,11 +129,12 @@ impl PreparedFactor {
             && serde_json::from_slice::<Accepted>(&response.body)
                 .is_ok_and(|a| a.ok && (a.remaining.is_none() || self.recovery));
         if !accepted {
-            return Err(ClientError::new(match response.status {
-                400 => "invalid_or_expired",
-                429 => "rate_limited",
-                _ => "factor_delivery_unknown",
-            }));
+            let error = factor_refusal(&response);
+            return Err(if passkey && error.code == "invalid_or_expired" {
+                ClientError::new("invalid_passkey_assertion")
+            } else {
+                error
+            });
         }
         Ok(BoundClaimSession {
             flow: self.flow,
@@ -164,6 +181,9 @@ impl FactorChallenge {
         let r = jar
             .factor_post("/api/two-factor/passkey-challenge", json!({}), cookies)
             .await?;
+        if r.status == 429 {
+            return Err(factor_refusal(&r));
+        }
         if r.status != 200 {
             return Err(invalid());
         }

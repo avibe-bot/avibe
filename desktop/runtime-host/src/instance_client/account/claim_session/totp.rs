@@ -32,7 +32,7 @@ impl BoundClaimSession {
     pub(in crate::instance_client) async fn enroll_totp(
         mut flow: Box<AccountFlow>,
         account: Account,
-        cookies: FactorCookies,
+        cookies: &FactorCookies,
         token: String,
         code: String,
         epoch: Epoch,
@@ -41,14 +41,15 @@ impl BoundClaimSession {
         flow.fence(epoch);
         let r = flow
             .session
-            .factor_post("/api/two-factor/totp", json!({"token":token,"code":code}), &cookies)
+            .factor_post("/api/two-factor/totp", json!({"token":token,"code":code}), cookies)
             .await
             .map_err(|_| unknown())?;
         if r.status != 201 {
-            return Err(match r.status {
-                400 => ClientError::new("invalid_or_expired"),
-                429 => ClientError::new("rate_limited"),
-                _ => unknown(),
+            let refusal = factor_refusal(&r);
+            return Err(if refusal.code == "invalid_or_expired" {
+                ClientError::new("invalid_code")
+            } else {
+                refusal
             });
         }
         // Only a coherent method receipt establishes acceptance. The method ID

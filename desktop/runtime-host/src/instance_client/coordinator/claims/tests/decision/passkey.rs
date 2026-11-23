@@ -28,6 +28,9 @@ impl Passkeys for Hosted {
         self.platform.opening.notify_one();
         self.platform.answer.notified().await;
         // Deliberately return a late result even if the platform did not cancel.
+        if self.review == Some("factor_pk_os_retry") {
+            return Err(ClientError::new("passkey_cancelled"));
+        }
         let mut result = assertion();
         if self.review == Some("factor_pk_wrong_id") {
             result["id"] = json!("b3RoZXI");
@@ -99,10 +102,26 @@ pub(super) async fn prepare<'a>(
     assert!(c.operation.try_lock().is_ok() && c.credential_io.try_lock().is_ok());
     assert!(submit().await.is_err());
     match cut {
+        "factor_pk_os_retry" => {
+            platform.answer.notify_one();
+            let refused = run.await.unwrap();
+            assert!(submit().await.is_err(), "not returned before original delivery");
+            assert_eq!(refused.deliver().unwrap_err().code, "passkey_cancelled");
+            assert_eq!(hosted.factors.load(Ordering::SeqCst), 0, "no assertion was sent");
+            Some(Box::pin(output::dispatch(
+                c,
+                caller,
+                generation,
+                json!({
+                    "type":"submit_factor_code", "receipt":receipt.to_string(),
+                    "submission":submission.to_string(), "method":"recovery", "code":"fixture-backup"
+                }),
+            )))
+        }
         "factor_pk_wrong_id" => {
             platform.answer.notify_one();
             assert_eq!(
-                run.await.err().expect("preparation did not refuse").code,
+                run.await.unwrap().deliver().unwrap_err().code,
                 "invalid_passkey_assertion"
             );
             None
@@ -135,6 +154,18 @@ pub(super) async fn prepare<'a>(
             Some(run)
         }
     }
+}
+#[tokio::test]
+async fn os_cancel_returns_the_submission_without_sending_an_assertion() {
+    check_cut("proof_start_review_factor_pk_os_retry").await;
+}
+#[tokio::test]
+async fn issuer_refusal_allows_a_manual_recovery_code_on_the_original_submission() {
+    check_cut("proof_start_review_factor_pk_denied_retry").await;
+}
+#[tokio::test]
+async fn unknown_assertion_delivery_retires_the_original_submission() {
+    check_cut("proof_start_review_factor_pk_unknown").await;
 }
 #[tokio::test]
 async fn ticket_expiry_during_the_native_assertion_never_dispatches_verify() {

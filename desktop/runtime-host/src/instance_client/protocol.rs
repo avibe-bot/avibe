@@ -424,12 +424,16 @@ pub struct ClientError {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_seconds: Option<u8>,
+    // Full issuer deadline; the public countdown is only a bounded display hint.
+    #[serde(skip)]
+    pub(super) retry_until: Option<tokio::time::Instant>,
 }
 impl ClientError {
     pub fn new(code: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             retry_after_seconds: None,
+            retry_until: None,
         }
     }
     pub fn pending(code: &str, delay: &serde_json::Value) -> Self {
@@ -438,6 +442,7 @@ impl ClientError {
             Self {
                 code: code.to_owned(),
                 retry_after_seconds: delay,
+                retry_until: None,
             }
         } else {
             Self::new("invalid_response")

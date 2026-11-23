@@ -104,7 +104,7 @@ enum Phase {
     Spent(Option<Instant>),
     Bound(Box<NativeSession>),
 }
-fn retry_after(r: &Response) -> u64 {
+pub(super) fn retry_after(r: &Response) -> u64 {
     // Both pinned producers emit integral seconds, issuer forwarding accepts
     // up to seven digits. Keep the native deadline even past the u8 wire hint.
     r.headers
@@ -116,8 +116,9 @@ fn retry_after(r: &Response) -> u64 {
         .unwrap_or(60)
         .max(1)
 }
-fn limited(seconds: u64) -> ClientError {
+pub(super) fn limited(seconds: u64) -> ClientError {
     let mut e = ClientError::new("rate_limited");
+    e.retry_until = Some(tokio::time::Instant::now() + Duration::from_secs(seconds));
     e.retry_after_seconds = Some(seconds.clamp(1, 255) as u8);
     e
 }

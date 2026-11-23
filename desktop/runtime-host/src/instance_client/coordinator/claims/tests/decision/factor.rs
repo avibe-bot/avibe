@@ -34,7 +34,10 @@ pub(super) async fn challenge(
         )
     };
     assert!(submit(CodeMethod::Totp, "bad").await.is_err());
-    assert!(again(first_token).await.is_err());
+    assert_eq!(
+        again(first_token).await.unwrap().deliver().unwrap_err().code,
+        "authentication_required"
+    );
     if cut.starts_with("factor_setup_") {
         assert!(submit(CodeMethod::Totp, "000002").await.is_err());
         enroll::setup(c, caller, hosted, receipt, first_token, cut).await;
@@ -57,7 +60,7 @@ pub(super) async fn challenge(
         };
         token
     } else {
-        let recovery = cut == "factor_recovery";
+        let recovery = cut.starts_with("factor_recovery");
         if recovery {
             assert!(submit(CodeMethod::Totp, "000002").await.is_err());
         }
@@ -70,7 +73,14 @@ pub(super) async fn challenge(
             };
             verify
         } else if recovery {
-            Box::pin(submit(CodeMethod::Recovery, "fixture-backup"))
+            Box::pin(submit(
+                CodeMethod::Recovery,
+                if cut == "factor_recovery_retry" {
+                    "fixture-wrong"
+                } else {
+                    "fixture-backup"
+                },
+            ))
         } else {
             Box::pin(submit(CodeMethod::Totp, "000002"))
         };
@@ -86,8 +96,35 @@ pub(super) async fn challenge(
         if cut == "factor_unknown_late" {
             caller.retire();
         }
-        let outcome = direct.deliver();
-        if matches!(cut, "factor_unknown" | "factor_unknown_late" | "factor_malformed") {
+        let mut outcome = direct.deliver();
+        if matches!(
+            cut,
+            "factor_pk_denied_retry" | "factor_totp_retry" | "factor_recovery_retry"
+        ) {
+            assert_eq!(
+                outcome.unwrap_err().code,
+                if cut == "factor_pk_denied_retry" {
+                    "invalid_passkey_assertion"
+                } else {
+                    "invalid_or_expired"
+                }
+            );
+            assert_eq!(hosted.factors.load(Ordering::SeqCst), 1);
+            assert!(!hosted.factor_accepted.load(Ordering::SeqCst));
+            assert!(c.binding.lock().unwrap().committed() == Some(predecessor));
+            assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
+            hosted.factor_release.notify_one();
+            let retry = if cut == "factor_totp_retry" {
+                submit(CodeMethod::Totp, "000003")
+            } else {
+                submit(CodeMethod::Recovery, "fixture-backup")
+            };
+            outcome = retry.await.unwrap().deliver();
+        }
+        if matches!(
+            cut,
+            "factor_unknown" | "factor_unknown_late" | "factor_malformed" | "factor_pk_unknown"
+        ) {
             assert_eq!(
                 outcome.unwrap_err().code,
                 if cut == "factor_unknown_late" {
@@ -98,7 +135,7 @@ pub(super) async fn challenge(
             );
             assert_eq!(recovery::inspect(c).await, json!({"state":"unavailable"}));
             assert!(!caller.monitoring());
-            assert!(submit(CodeMethod::Totp, "000002").await.is_err());
+            assert!(submit(CodeMethod::Recovery, "fixture-backup").await.is_err());
             assert_eq!(hosted.factors.load(Ordering::SeqCst), 1);
             assert_eq!(hosted.reads.load(Ordering::SeqCst), 2);
             assert_eq!(memory.read("fixture-a").unwrap().unwrap(), first);
@@ -111,6 +148,20 @@ pub(super) async fn challenge(
             Some(output::submission(outcome.unwrap()))
         }
     };
+    if cut == "factor_pk_denied_retry" {
+        let token = next.expect("accepted recovery submission");
+        hosted.factor_publication_read.notified().await;
+        assert_eq!(c.state().account.status, AccountStatus::SecondFactorRequired);
+        assert!(again(first_token).await.is_err());
+        let reads = hosted.reads.load(Ordering::SeqCst);
+        let (one, two) = tokio::join!(again(token), again(token));
+        for observation in [one.unwrap(), two.unwrap()] {
+            assert_eq!(observation.deliver().unwrap(), Some(json!({"state":"publishing"})));
+        }
+        assert_eq!(hosted.reads.load(Ordering::SeqCst), reads);
+        assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 1);
+        hosted.release_publication_read.notify_one();
+    }
     let found = recovery::read_once(c).await;
     if cut == "factor_subject" {
         assert_eq!(found, json!({"state":"unavailable"}));
@@ -144,7 +195,17 @@ pub(super) async fn challenge(
     let disk = NativeSession::restore_account(c.transport.clone(), &bytes).unwrap();
     assert_eq!(disk.cookie_value("ordinary").as_deref(), Some("after-factor"));
     assert_eq!(c.state().account.identity.unwrap().id, "fixture-a");
-    assert_eq!(hosted.factors.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        hosted.factors.load(Ordering::SeqCst),
+        if matches!(
+            cut,
+            "factor_pk_denied_retry" | "factor_enroll_retry" | "factor_totp_retry" | "factor_recovery_retry"
+        ) {
+            2
+        } else {
+            1
+        }
+    );
     assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
     assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
     if matches!(cut, "factor_close" | "factor_pk_close" | "factor_enroll_close") {

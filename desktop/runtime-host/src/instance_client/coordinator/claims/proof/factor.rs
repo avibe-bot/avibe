@@ -25,6 +25,27 @@ struct FactorOwner {
     receipt: Uuid,
     predecessor: BindingId,
 }
+pub(in crate::instance_client::coordinator::claims) struct PasskeyRefusal<'a> {
+    c: &'a Coordinator,
+    owner: FactorOwner,
+    borrow: Borrow<'a>,
+    cookies: FactorCookies,
+    error: ClientError,
+}
+impl PasskeyRefusal<'_> {
+    pub(in crate::instance_client::coordinator::claims) fn deliver(mut self) -> Result<Option<Value>> {
+        self.owner.with(self.c, At::Passkey, |inner, a, step, _| {
+            if FactorChallenge::credentials(&inner.account, &inner.state.account, a)? != self.cookies {
+                return Err(changed());
+            }
+            step.retry_until = self.error.retry_until;
+            step.phase = Phase::Submitted(self.owner.predecessor);
+            Ok(())
+        })?;
+        self.borrow.returned = true;
+        Err(self.error)
+    }
+}
 impl FactorOwner {
     fn with<T>(
         &self,
@@ -37,7 +58,7 @@ impl FactorOwner {
         }
         let _operation = c.operation.try_lock().map_err(|_| busy())?;
         c.check_claim_admission()?;
-        let inner = c.inner.lock().expect("client state");
+        let inner = c.inner.try_lock().map_err(|_| busy())?;
         let mut owner = c.claims.lock().expect("claim owner");
         Epoch::new(c.generation.clone(), self.generation).check()?;
         owner.expire();
@@ -57,7 +78,7 @@ impl FactorOwner {
             (At::DeliveredTotp, Phase::TotpSetup { predecessor, .. }) => predecessor,
             _ => return Err(changed()),
         };
-        let mut slot = c.binding.lock().expect("ordinary binding");
+        let mut slot = c.binding.try_lock().map_err(|_| busy())?;
         if *p != self.predecessor
             || !slot.published_for(*p, &inner, &active.account)
             || slot.occupied()
@@ -66,6 +87,7 @@ impl FactorOwner {
             return Err(changed());
         }
         step.proof.check(&active.account)?;
+        step.check_wait()?;
         f(&inner, &active.account, step, &mut slot)
     }
     async fn forward(
@@ -85,6 +107,9 @@ impl FactorOwner {
                     }
                     let (id, epoch) = slot.reserve_factor(inner, a, self.predecessor)?;
                     step.phase = Phase::Submitted(id);
+                    // The committed predecessor, not an OS challenge or a signed assertion,
+                    // is what a definite refusal can return to the same document.
+                    step.retry_phase = Some(Phase::Submitted(self.predecessor));
                     Ok((id, epoch, factor, previous))
                 })?;
                 let result = c.finish_forward(id, factor.forward(epoch).await);
@@ -133,10 +158,7 @@ impl Coordinator {
         generation: u64,
         receipt: Uuid,
         predecessor: BindingId,
-    ) -> Result<SubmittedReply> {
-        if !self.passkeys.supported() {
-            return Err(ClientError::new("passkey_unavailable"));
-        }
+    ) -> Result<ReplyBody<'_>> {
         let owner = FactorOwner {
             caller: caller.clone(),
             generation,
@@ -157,11 +179,27 @@ impl Coordinator {
             receipt,
             returned: false,
         };
+        let refusal = |owner, borrow, cookies, error| {
+            ReplyBody::PasskeyRefusal(Box::new(PasskeyRefusal {
+                c: self,
+                owner,
+                borrow,
+                cookies,
+                error,
+            }))
+        };
+        if !self.passkeys.supported() {
+            return Ok(refusal(owner, borrow, cookies, ClientError::new("passkey_unavailable")));
+        }
         jar.fence(caller.epoch.clone());
         let challenge = tokio::select! {biased;
             _ = &mut interrupted => return Err(stale()),
             _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
-            r = FactorChallenge::fetch(jar, &cookies) => r?,
+            r = FactorChallenge::fetch(jar, &cookies) => r,
+        };
+        let challenge = match challenge {
+            Err(e) if e.retry_until.is_some() => return Ok(refusal(owner, borrow, cookies, e)),
+            other => other?,
         };
         owner.with(self, At::Passkey, |inner, a, _, _| {
             (FactorChallenge::credentials(&inner.account, &inner.state.account, a)? == cookies)
@@ -171,7 +209,18 @@ impl Coordinator {
         let response = tokio::select! {biased;
             _ = &mut interrupted => return Err(stale()),
             _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
-            r = challenge.assertion(self.passkeys.as_ref(), caller.epoch.clone()) => r?,
+            r = challenge.assertion(self.passkeys.as_ref(), caller.epoch.clone()) => r,
+        };
+        let response = match response {
+            Err(e)
+                if matches!(
+                    e.code.as_str(),
+                    "passkey_cancelled" | "passkey_unavailable" | "invalid_passkey_assertion"
+                ) =>
+            {
+                return Ok(refusal(owner, borrow, cookies, e));
+            }
+            other => other?,
         };
         // No detached preparation. Only the ordinary worker may cross verify;
         // recheck in that worker, not merely when the OS returned an assertion.
@@ -184,6 +233,6 @@ impl Coordinator {
             })
             .await;
         borrow.returned = result.is_ok();
-        result
+        result.map(|r| ReplyBody::Submission(Box::new(r)))
     }
 }

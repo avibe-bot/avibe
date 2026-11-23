@@ -60,10 +60,11 @@ impl SubmittedReply {
         if !matches!(step.phase, Phase::Submitted(id) if id == self.id) {
             return Err(stale());
         }
-        let slot = c.binding.try_lock().map_err(|_| stale())?;
+        let mut slot = c.binding.try_lock().map_err(|_| stale())?;
         // Publication changes the ordinary jar by design. Only the positive
         // receipt of this very transaction may witness that replacement.
         if self.result.is_ok() && slot.published_for(self.id, &inner, &active.account) {
+            step.retry_phase = None;
             return release(step);
         }
         let original = inner.record.account_id.as_ref() == Some(&active.account.id)
@@ -79,7 +80,35 @@ impl SubmittedReply {
         if !original || !matching {
             return Err(stale());
         }
-        self.result.clone()?;
+        if let Err(error) = &self.result {
+            if matches!(
+                error.code.as_str(),
+                "invalid_or_expired" | "invalid_code" | "invalid_passkey_assertion"
+            ) || error.retry_until.is_some()
+            {
+                if let Some(prior) = step.retry_phase.take() {
+                    let predecessor = match &prior {
+                        Phase::Delivered(_) => None,
+                        Phase::Submitted(id) => Some(*id),
+                        Phase::TotpSetup { predecessor, until, .. } if Instant::now() < *until => Some(*predecessor),
+                        _ => return Err(stale()),
+                    };
+                    if let Some(id) = predecessor {
+                        let cookies = inner.account.session.factor_cookies().ok_or_else(stale)?;
+                        if step.released.map(|(_, previous)| previous) != Some(id)
+                            || !BindingBase::OwedFactor.matches(&active.account, &inner.account, &inner.state.account)
+                            || !slot.restore_factor_predecessor(self.id, id, cookies)
+                        {
+                            return Err(stale());
+                        }
+                    }
+                    step.retry_until = error.retry_until;
+                    step.phase = prior;
+                }
+            }
+            return Err(error.clone());
+        }
+        step.retry_phase = None;
         release(step)
     }
 }
