@@ -98,7 +98,7 @@ export type BindStep =
   /** `error`: what the last try said, in place. `rateLimited` waits `retryMinutes` here. */
   | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | 'rateLimited' | null; retryMinutes?: number; waitUntil?: number }
   /** The account must add an authenticator first. `material` once native issued it. */
-  | { kind: 'factorSetup'; material: { uri: string; secret: string } | null; code: string; invalid?: boolean }
+  | { kind: 'factorSetup'; material: { uri: string; secret: string } | null; code: string; invalid?: boolean; limited?: boolean; retryMinutes?: number; waitUntil?: number }
   /** Recovery codes that setup returned, shown once. */
   | { kind: 'codes'; codes: string[] }
   | { kind: 'bound'; host: string }
@@ -174,9 +174,9 @@ function BindDialogBody({ step, account, busy = false, onNameChange, onPick, onC
     </SignInChrome></Close.Provider>;
   }
   if (step.kind === 'factorSetup') {
-    return <><DialogTitle className="sr-only">{t('desktopAccount.enrollFactor')}</DialogTitle><AccountSecondFactorView code={step.code} busy={busy}
+    return <><DialogTitle className="sr-only">{t('desktopAccount.enrollFactor')}</DialogTitle><AccountSecondFactorView code={step.code} busy={busy || Boolean(step.waitUntil)}
       material={step.material ? { type: 'totp_enrollment', uri: step.material.uri, secret: step.material.secret, qrSvg: '' } : null}
-      errorMessage={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : null}
+      errorMessage={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : step.limited ? t('mobileApp.twoFactor.rateLimited', { count: step.retryMinutes ?? 1 }) : null}
       onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} onEnroll={onBeginSetup} onLocal={onClose} exitLabel={t('common.cancel')} /></>;
   }
   if (step.kind === 'codes') return <><DialogTitle className="sr-only">{t('desktopAccount.recoveryTitle')}</DialogTitle><RecoveryCodesView codes={step.codes} busy={busy} onSaved={onSavedCodes} /></>;

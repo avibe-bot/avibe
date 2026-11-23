@@ -480,3 +480,22 @@ it('an older record that ended without a result is a dead end on the card: suppo
   expect(screen.queryByRole('button', { name: copy.action })).toBeNull();
   expect(page.types().filter((type) => type === 'open')).toEqual([]);
 });
+
+it('a 429 while adding an authenticator keeps its key and QR, locked until the wait ends', async () => {
+  let finishes = 0;
+  mount({ ...proofAnswers,
+    review_after_proof: refuse('authentication_required'),
+    prepare_totp_setup: { state: 'totp_setup', setup: 'setup-1', manual_key: 'KEY-FIXTURE', qr_payload: 'otpauth://totp/fixture' },
+    finish_totp_setup: () => { finishes += 1; throw { code: 'rate_limited', retry_after_seconds: 1 }; } });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'enroll', methods: [] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.desktopAccount.addAuthenticator }, { timeout: 5000 }));
+  fireEvent.change(await screen.findByLabelText(en.desktopAccount.authenticatorCode), { target: { value: '123456' } });
+  fireEvent.click(screen.getByRole('button', { name: en.desktopAccount.finishFactor }));
+  await screen.findByText(/Try again in 1 minute/);
+  expect(screen.getByText('KEY-FIXTURE')).toBeTruthy();
+  expect((screen.getByLabelText(en.desktopAccount.authenticatorCode) as HTMLInputElement).disabled).toBe(true);
+  await waitFor(() => expect((screen.getByLabelText(en.desktopAccount.authenticatorCode) as HTMLInputElement).disabled).toBe(false), { timeout: 3000 });
+  expect(finishes).toBe(1);
+});

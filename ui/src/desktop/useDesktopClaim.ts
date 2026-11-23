@@ -65,6 +65,22 @@ const PROBLEMS: Record<string, BindProblem> = {
   claim_unavailable: 'expired',
   reauthentication_failed: 'reauth',
 };
+/** The longest delay one timer takes; a longer wait is re-armed until its deadline. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/**
+ * Calls `due` once the absolute `deadline` (epoch ms) has passed, never earlier: a timer that wakes
+ * early, or a wait longer than one timer can hold, is re-armed against the clock. Returns a cancel.
+ */
+export function afterDeadline(deadline: number, due: () => void, now: () => number = Date.now): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const check = () => {
+    const left = deadline - now();
+    if (left <= 0) { timer = null; due(); return; }
+    timer = setTimeout(check, Math.min(left, MAX_TIMER_MS));
+  };
+  check();
+  return () => { if (timer !== null) clearTimeout(timer); };
+}
 /** When a 429's wait ends: native refuses an earlier try, so the step stays locked until then. */
 const until = (reply: Reply) => Date.now() + 1000 * (!reply.ok && reply.retryAfter ? reply.retryAfter : 60);
 const problemFor = (code: string): BindStep => code === 'local_runtime_upgrade_required'
@@ -550,7 +566,13 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     } else if (step?.kind === 'factorSetup' && h.setup) {
       const reply = await call('desktop_claim_review', { type: 'finish_totp_setup', receipt: h.receipt, setup: h.setup, code });
       if (!reply) return;
-      if (!reply.ok) { setStep(WRONG_SETUP_CODE.has(reply.code) ? { ...step, code: '', invalid: true } : problemFor(reply.code)); return; }
+      if (!reply.ok) {
+        // A wrong code or a 429 keeps the issued setup (its QR and key); only an expired one ends it.
+        setStep(WRONG_SETUP_CODE.has(reply.code) ? { ...step, code: '', invalid: true }
+          : reply.code === 'rate_limited' ? { ...step, code: '', invalid: false, limited: true, retryMinutes: Math.max(1, Math.ceil((reply.retryAfter ?? 60) / 60)), waitUntil: until(reply) }
+            : problemFor(reply.code));
+        return;
+      }
       const submission = submissionFrom(reply);
       if (!submission) { setStep(problemFor('invalid_response')); return; }
       h.setup = null;
@@ -598,13 +620,15 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   }), [run, afterVerification]);
 
   // A step waiting out a 429 unlocks itself when the wait ends, with its message cleared.
-  const waitUntil = step && (step.kind === 'code' || step.kind === 'factor') ? step.waitUntil : undefined;
+  const waitUntil = step && (step.kind === 'code' || step.kind === 'factor' || step.kind === 'factorSetup') ? step.waitUntil : undefined;
   useEffect(() => {
     if (!waitUntil) return;
-    const unlock = window.setTimeout(() => setStep((current) => current && (current.kind === 'code' || current.kind === 'factor') && current.waitUntil === waitUntil
-      ? (current.kind === 'code' ? { ...current, limited: false, waitUntil: undefined } : { ...current, error: null, waitUntil: undefined })
-      : current), Math.max(0, waitUntil - Date.now()));
-    return () => window.clearTimeout(unlock);
+    return afterDeadline(waitUntil, () => setStep((current) => {
+      if (!current || !(current.kind === 'code' || current.kind === 'factor' || current.kind === 'factorSetup') || current.waitUntil !== waitUntil) return current;
+      return current.kind === 'code' ? { ...current, limited: false, waitUntil: undefined }
+        : current.kind === 'factor' ? { ...current, error: null, waitUntil: undefined }
+          : { ...current, limited: false, waitUntil: undefined };
+    }));
   }, [waitUntil, setStep]);
   const setCode = useCallback((code: string) => {
     setStep((current) => current && (current.kind === 'code' || current.kind === 'factor' || current.kind === 'factorSetup') ? { ...current, code } : current);
