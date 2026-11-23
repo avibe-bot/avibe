@@ -8663,7 +8663,9 @@ class ModelHubService:
                         raise ModelHubError(refusal)
                     if old in agent.routes:
                         agent.routes[new] = agent.routes.pop(old)
-                    if current[old].origin in {"provider", "builtin"} and old not in agent.removed_model_ids:
+                    if old not in agent.removed_model_ids:
+                        # Suppression belongs to the vacated identity, not the row's origin.
+                        # A built-in can have been removed and then manually re-added.
                         agent.removed_model_ids.append(old)
                 agent.removed_model_ids = [mid for mid in agent.removed_model_ids if mid not in moves.values()]
                 agent.models = [replace(row, id=moves[row.id]) if row.id in moves else row for row in agent.models]
@@ -8866,15 +8868,30 @@ class ModelHubService:
             if moves:
                 # Validate the entire prospective document and recovery gate before the SQLite commit.
                 # A failed file replacement leaves the old catalog retryable: the same SQL is a no-op.
-                from storage.model_selection_rename import rename_selections
+                from storage.model_selection_rename import SelectionChanged, rename_selections
+
+                prior_menu_ids = (
+                    frozenset(row.id for row in previous.agents[backend].models)
+                    if backend == "opencode" and previous.agents[backend].mode == "hub" else None
+                )
+                # An old provider-qualified spelling can name a different moved row.
+                # Such a destination is ambiguous on a retry after SQLite commits.
+                if prior_menu_ids is not None and any(
+                    (resolved := opencode_menu_model_id(new, prior_menu_ids)) in prior_menu_ids and resolved != old
+                    for old, new in moves.items()
+                ):
+                    raise ModelHubError("backend_model_conflict", status=409)
 
                 def move_selections() -> None:
                     canonical = ModelHubConfig.from_payload(config.to_payload())
                     self._ensure_config_writable()
                     self._permitted_takeover(canonical)
-                    rename_selections(backend, moves)
+                    rename_selections(backend, moves, opencode_menu_ids=prior_menu_ids)
 
-                await run_owned_in_thread(move_selections)
+                try:
+                    await run_owned_in_thread(move_selections)
+                except SelectionChanged:
+                    raise ModelHubError("backend_model_conflict", status=409) from None
             # SQLite selections now refer to the new catalog. Engine sync failure
             # must not roll the file back over them; reconcile on next demand.
             await self._commit_synced(previous, config, rollback_on_sync_failure=not moves)

@@ -2684,8 +2684,9 @@ async def test_a_running_turn_takes_its_sessions_model_effort_and_speed_at_its_n
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
 
 
+@pytest.mark.parametrize("inherited", [False, True], ids=["session-pin", "agent-default"])
 async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_request(
-    engine, session, tmp_path, published
+    engine, session, tmp_path, published, inherited
 ):
     from config.v2_config import ModelHubBackendModelConfig
     from tests.test_model_hub_api import _service
@@ -2698,7 +2699,13 @@ async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_req
     old_turn = {"turn_id": "last-completed", "agent": "vibey", "requested_model_id": "test-model"}
     service.provenance.put(old_turn)
     with engine.begin() as conn:
-        conn.exec_driver_sql("UPDATE agent_sessions SET model=? WHERE id=?", ("test-model", SESSION))
+        if inherited:
+            from tests.test_model_selection_addresses import _add_agent
+
+            _add_agent(conn, "inherit-agent", "test-model")
+            conn.exec_driver_sql("UPDATE agents SET backend='vibey' WHERE id='inherit-agent'")
+        else:
+            conn.exec_driver_sql("UPDATE agent_sessions SET model=? WHERE id=?", ("test-model", SESSION))
     started, release = asyncio.Event(), asyncio.Event()
     first, second = _tool_turn()
 
@@ -2710,6 +2717,9 @@ async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_req
 
     harness = _Harness(engine, tmp_path, "avibe", [in_flight, second])
     request = harness.request("list files")
+    if inherited:
+        request.vibe_agent_id = "inherit-agent"
+        request.vibe_agent_inherited_model = "test-model"
     running = asyncio.create_task(harness.agent.handle_message(request))
     try:
         await asyncio.wait_for(started.wait(), 5)
