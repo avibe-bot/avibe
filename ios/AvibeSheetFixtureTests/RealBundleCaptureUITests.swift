@@ -138,9 +138,13 @@ final class RealBundleCaptureUITests: XCTestCase {
                         }
                         // Synthetic data only; no credential UI is reachable. Neither
                         // native nor fallback clipboard paths are called by this flow.
-                        let marker: String? = state == "first-run"
-                            ? (chinese ? "想从哪里开始？" : "Where shall we begin?")
-                            : isBRoute ? nil : (chinese ? "正在使用" : "You’re in")
+                        // A text this state's page shows, as the checks above found it.
+                        let marker: String? = switch state {
+                        case "first-run": chinese ? "想从哪里开始？" : "Where shall we begin?"
+                        case "account": "alex@example.invalid"
+                        case "instances-named", "account-root": nil
+                        default: chinese ? "正在使用" : "You’re in"
+                        }
                         let attachment = XCTAttachment(screenshot: settledScreenshot(of: app, showing: marker))
                         attachment.name = name
                         attachment.lifetime = .keepAlways
@@ -231,9 +235,12 @@ final class RealBundleCaptureUITests: XCTestCase {
             let next = app.screenshot()
             let settled = next.pngRepresentation == shot.pngRepresentation
             shot = next
-            if settled, element.map({ isDrawn($0.frame, in: next) }) ?? true { break }
+            if settled, element.map({ $0.exists && isDrawn($0.frame, in: next) }) ?? true { break }
         }
-        if let text, let element { XCTAssertTrue(isDrawn(element.frame, in: shot), "Not drawn: \(text)") }
+        if let text, let element {
+            XCTAssertTrue(element.exists, "Not on the page: \(text)")
+            XCTAssertTrue(element.exists && isDrawn(element.frame, in: shot), "Not drawn: \(text)")
+        }
         return shot
     }
 

@@ -7200,8 +7200,9 @@ final class DirectPathAppTests: XCTestCase {
 
     private var storeIdentifiers: Set<UUID> = []
     private var releaseFixtureApps: [@MainActor () -> Void] = []
-    /// Whether an App this test made is still alive: an App keeps its store.
-    private var fixtureAppIsAlive: [@MainActor () -> Bool] = []
+    /// Whether an App or a runtime controller this test made is still
+    /// alive: either keeps its store (a controller through its WebViews).
+    private var fixtureOwnerIsAlive: [@MainActor () -> Bool] = []
     /// Stores WebKit alone still held when their test ended, and since
     /// when. Later teardowns try them again; see `removeTrackedStores`.
     @MainActor private static var storesWebKitStillHolds: [UUID: Date] = [:]
@@ -7826,7 +7827,7 @@ final class DirectPathAppTests: XCTestCase {
         onScheduleDelivery: ((SystemScheduleAdmission) -> Void)? = nil
     ) throws -> WebViewController {
         let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
-        return WebViewController(
+        let controller = WebViewController(
             instanceOrigin: origin,
             websiteDataStore: app.runtimeWebsiteDataStore,
             deviceID: { [weak app] in app?.systemScheduleDeviceID },
@@ -7851,13 +7852,15 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        fixtureOwnerIsAlive.append { [weak controller] in controller != nil }
+        return controller
     }
 
     /// The App made real named stores; remove exactly those.
     @MainActor
     private func trackStore(of app: AppModel) {
         storeIdentifiers.insert(app.websiteDataStore.identifier)
-        fixtureAppIsAlive.append { [weak app] in app != nil }
+        fixtureOwnerIsAlive.append { [weak app] in app != nil }
     }
 
     @MainActor
@@ -7894,8 +7897,9 @@ final class DirectPathAppTests: XCTestCase {
 
     /// Removes the stores this test's Apps used.
     ///
-    /// What the test owns is asserted here: its Apps are released and no
-    /// page of theirs uses a store, within the same 5 s as before.
+    /// What the test owns is asserted here: its Apps and runtime controllers
+    /// are released and no page of theirs uses a store, within the same 5 s
+    /// as before.
     ///
     /// On iOS 27 WebKit keeps a store while a web process of its own for it
     /// has not shut down, and answers every removal "in use (by network
@@ -7903,8 +7907,8 @@ final class DirectPathAppTests: XCTestCase {
     /// answer what WebKit last asked it: 11 ms at the median on CI, but over
     /// 30 s for 3 of 683 processes in one run of this class, and five
     /// minutes for one that never answered. No wait covers that, so such a
-    /// store, once no App of the test is alive, is left to later teardowns
-    /// (one try each) and to the class's own.
+    /// store, once nothing of the test that holds it is alive, is left to
+    /// later teardowns (one try each) and to the class's own.
     @MainActor
     private func removeTrackedStores() async {
         // Release every App's runtime/account views before removing any
@@ -7926,8 +7930,8 @@ final class DirectPathAppTests: XCTestCase {
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            let appAlive = fixtureAppIsAlive.contains { $0() }
-            if !removed, !appAlive, Self.isHeldByWebKitAlone(lastError) {
+            let ownerAlive = fixtureOwnerIsAlive.contains { $0() }
+            if !removed, !ownerAlive, Self.isHeldByWebKitAlone(lastError) {
                 Self.storesWebKitStillHolds[identifier] = Date()
                 print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false, "
                     + "WebKit still holds it: left to a later teardown")
@@ -7935,7 +7939,7 @@ final class DirectPathAppTests: XCTestCase {
             }
             XCTAssertTrue(
                 removed,
-                "Fixture store still registered: \(identifier); an App of this test is still alive: \(appAlive); "
+                "Fixture store still registered: \(identifier); an App or controller of this test is still alive: \(ownerAlive); "
                     + "error=\(String(describing: lastError))"
             )
             print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
