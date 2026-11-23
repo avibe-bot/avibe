@@ -6513,7 +6513,7 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
     first = desktop_host.post("/api/remote-access/vibe-cloud/pair",
                               json=_pair_body(prepared), headers=csrf_headers(desktop_host))
     assert first.get_json()["pairing"]["recoverable"] is True
-    assert first.status_code == 400
+    assert first.status_code == (409 if first_outcome == 'pending' else 400)
     if first_outcome == "pending":
         assert first.get_json() == {
             "ok": False, "error": "pairing_redeem_pending", "status": 409,
@@ -6526,6 +6526,9 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
     assert calls[0]["pairing_key"] not in json.dumps(snapshot)
     # No UI-provided key, no memory cache, and no recomputed device/origin inputs.
     client = ui_server.app.test_client()
+    if first_outcome == 'pending':
+        from vibe import pairing_replay
+        monkeypatch.setattr(pairing_replay, '_now', lambda: time.time() + 2)
     resumed = client.post("/api/remote-access/vibe-cloud/pair", json={"pairing_key": ""},
                           headers=csrf_headers(client))
     assert resumed.status_code == 200, resumed.get_json()

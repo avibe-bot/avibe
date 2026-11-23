@@ -5149,7 +5149,22 @@ def _json_request_to_validated_backend(
             if 300 <= response.status < 400:
                 raise BackendRequestError(response.status, {"error": "backend_http_redirect_blocked"})
             if response.status >= 400:
-                raise BackendRequestError(response.status, _backend_error_payload(response_body))
+                error_payload = _backend_error_payload(response_body)
+                if response.status == 429:
+                    from email.utils import parsedate_to_datetime
+                    import math
+
+                    advice = response.getheader('Retry-After')
+                    if advice:
+                        try:
+                            seconds = int(advice) if advice.isascii() and advice.isdigit() else math.ceil(
+                                parsedate_to_datetime(advice).timestamp() - time.time()
+                            )
+                            if 0 < seconds <= 2**53:
+                                error_payload['retry_after_seconds'] = seconds
+                        except (TypeError, ValueError, OverflowError, OSError):
+                            pass
+                raise BackendRequestError(response.status, error_payload)
             try:
                 parsed_response = json.loads(response_body.decode("utf-8"))
             except (UnicodeDecodeError, ValueError) as exc:
@@ -5896,10 +5911,15 @@ def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
         return None
     phase = record["phase"]
     can_resume = phase == "retirement_pending"
-    if config is not None and phase == "prepared" and record.get("redeem_request"):
-        can_resume = record["source_fingerprint"] == _pairing_identity_fingerprint(
-            _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
-        )
+    replay = {}
+    if phase == "prepared" and record.get("redeem_request"):
+        from vibe import desktop_local_instance as local, pairing_replay
+        try:
+            can_resume = pairing_replay.eligible(record, config)
+        except local.LocalInstanceError:
+            can_resume = False
+        replay = pairing_replay.projection(record, can_resume)
+        can_resume = replay['replay_state'] != 'terminated'
     if config is not None and phase in {"redeemed", "applied"}:
         current_identity = _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
         current_fingerprint = _pairing_identity_fingerprint(current_identity)
@@ -5909,6 +5929,7 @@ def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
     return {
         "phase": phase,
         "can_resume": can_resume,
+        **replay,
     }
 
 
@@ -6242,6 +6263,7 @@ def _with_redeem_request(claim, backend_url: str, device_name: str, key: str) ->
     return {
         **claim, "backend_url": backend_url, "device_name": device_name,
         "request_fingerprint": _pairing_request_fingerprint(backend_url, key, claim["session_secret"]),
+        "redeem_prepared_at": time.time(),
         "redeem_request": {
             "pairing_key": key, "redeem_request_id": secrets.token_urlsafe(32), "device_name": device_name,
             "local_version": "dev", "origin_service": origin_service_for_pairing(),
@@ -6312,23 +6334,8 @@ def _pair_desktop(
 
 
 def _retry_installation_pairing(claim: Mapping[str, Any]) -> dict[str, Any]:
-    from vibe import desktop_local_instance
-
-    with _pairing_persist_lock():
-        current, error = _read_pending_pairing_record()
-        config = desktop_local_instance._config()
-        if (
-            error or current != claim or claim["phase"] != "prepared"
-            or desktop_local_instance._installation_id() != (claim.get("personal_claim") or claim["desktop_enrollment"])["installation_id"]
-            or _pairing_identity_fingerprint(_pairing_identity_from_cloud(
-                config.remote_access.vibe_cloud
-            )) != claim["source_fingerprint"]
-        ):
-            return {"ok": False, "error": "local_binding_changed", "status": 409}
-    backend, error = _normalize_pairing_backend_url(claim["backend_url"])
-    if error or backend is None:
-        return {"ok": False, "error": error or "invalid_pairing_backend_url"}
-    return _redeem_pairing_claim(claim, backend, claim["redeem_request"])
+    from vibe import pairing_replay
+    return pairing_replay.run(claim)
 
 
 def _redeem_pairing_claim(
@@ -6353,6 +6360,10 @@ def _redeem_pairing_claim(
         else:
             failure = {"ok": False, **exc.payload, "status": exc.status}
         retry_after = exc.payload.get("retry_after_seconds")
+        if exc.status == 429 and type(retry_after) is int and 0 < retry_after <= 2**53:
+            failure['retry_after_seconds'] = retry_after
+        elif exc.status == 429:
+            failure.pop('retry_after_seconds', None)
         if (
             claim.get("redeem_request") and exc.status == 409
             and exc.payload.get("error") == "pairing_redeem_pending"

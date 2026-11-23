@@ -296,7 +296,17 @@ def test_late_old_grant_outcome_cannot_change_replacement_request(desktop_host, 
         return remote_access.pair(key, body["backend_url"], body["device_name"],
                                   desktop_enrollment=body["desktop_enrollment"])
 
-    worker = threading.Thread(daemon=True, target=lambda: results.append(pair(body["pairing_key"])))
+    # Simulate an old-version sender already in flight during upgrade. New
+    # senders are single-flight; old replies still need the publication fence.
+    def legacy_sender():
+        with remote_access._pairing_persist_lock():
+            claim = remote_access._with_redeem_request(remote_access._read_pending_pairing_record()[0],
+                                                      body['backend_url'], body['device_name'], body['pairing_key'])
+            remote_access._write_pending_pairing_record(claim)
+        backend, _ = remote_access._normalize_pairing_backend_url(body['backend_url'])
+        results.append(remote_access._redeem_pairing_claim(claim, backend, claim['redeem_request']))
+
+    worker = threading.Thread(daemon=True, target=legacy_sender)
     worker.start()
     try:
         assert entered.wait(10)

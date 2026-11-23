@@ -50,11 +50,19 @@ This retains the Runtime's existing wire spelling and policy.
 
 An exact in-flight redemption can return backend HTTP 409 with
 `{"error":"pairing_redeem_pending","retry_after_seconds":1}`. The local pair
-route retains HTTP 400 and exposes that specific error, backend `status:409`,
+route returns HTTP 409 and exposes that specific error, backend `status:409`,
 the bounded integer delay (1–60 seconds), and
 `pairing:{ok:false,recoverable:true,cause:"pairing_redeem_pending"}`.
 Other status/error combinations are not pending advice. Retry retains the
-same operation, recovery identifier, and entire request.
+same operation, recovery identifier, and entire request. The running UI service
+(not an open browser) retries a saved installation redemption on network errors
+or 5xx after 2/4/8/16/32/60 seconds, capped at 60 seconds per subsequent retry.
+Pending is a minimum wait even for `POST /api/remote-access/vibe-cloud/pair {}`.
+Automatic replay ends after 15 minutes or 20 automatic sends; neither service
+restart nor manual Continue restarts the budget. The owner-facing
+`pending_pairing.replay_state` for a saved prepared request is `scheduled` (with
+`next_retry_at` in Unix seconds), `manual`, or `terminated`. An absent journal
+has no pending operation. Unkeyed legacy requests cannot be replayed.
 
 Only backend HTTP 400 `pairing_key_expired` on the request-bound path proves
 safe grant renewal: the producer must establish expired, unconsumed and no

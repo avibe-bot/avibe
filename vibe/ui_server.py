@@ -9140,7 +9140,7 @@ def remote_access_vibe_cloud_pair():
         _ensure_remote_access_monitoring()
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
-    conflict = result.get("error") in {"local_binding_changed", "local_instance_conflict"}
+    conflict = result.get("error") in {"local_binding_changed", "local_instance_conflict", "pairing_redeem_pending"}
     return response, 200 if result.get("ok") else (409 if conflict else 400)
 
 
@@ -20976,10 +20976,13 @@ def run_ui_server(host: str, port: int) -> None:
                     daemon=True,
                     name="remote-access-reconcile-on-start",
                 ).start()
+                from vibe import pairing_replay
                 _UI_RUNTIME_ACTIVE = True
+                replay_stop = pairing_replay.start_worker(_ensure_remote_access_monitoring)
                 try:
                     _server.run(sockets=bound_sockets)
                 finally:
+                    replay_stop.set()
                     _UI_RUNTIME_ACTIVE = False
                 break
             except OSError as e:
