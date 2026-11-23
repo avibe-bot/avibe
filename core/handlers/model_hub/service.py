@@ -142,7 +142,7 @@ from .errors import ModelDiscoveryError
 from .evidence_rules import LearnedEvidence
 from .evidence_rules import learn as learn_from_rejection
 from .evidence_rules import wire_effort
-from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content
+from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content, thread_mode
 from .hosted_executor import (
     EXECUTOR_RESPONSE_MAX_BYTES,
     ExecutorCall,
@@ -1153,6 +1153,8 @@ class ResolvedInvocation:
     # This hop's request asked for the vendor's fast tier, so its served response
     # confirms or not that it ran fast (``docs/plans/fast-mode.md``).
     fast_requested: bool = False
+    # A failed speculative Anthropic request says nothing about ordinary full-request Source health.
+    thread_attempt: bool = False
     # Frozen at final transport admission, including inventory/alias revalidation.
     inventory_member: bool = True
 
@@ -11201,6 +11203,7 @@ class ModelHubService:
         source_transition_persisted: bool | None = None
         if decision.reason is not None:
             source_transition_persisted = False
+        if decision.reason is not None and not resolved.thread_attempt:
             config = self.store.load()
             source = next(
                 (item for item in config.sources if item.id == resolved.source_id),
@@ -11628,6 +11631,7 @@ class ModelHubService:
         decision: ResolutionDecision,
         settlement_generation: int,
         attempt_observer: Optional[AttemptObserver],
+        thread_attempt: bool = False,
     ) -> None:
         """Persist facts from an upstream call that beat downstream cancellation."""
 
@@ -11642,12 +11646,12 @@ class ModelHubService:
                 (),
                 (),
                 HopOrigin(source.vendor, source.protocol, source_model_id, source.id, identity_digest(source))
-                if backend == "vibey" else None,
+                if backend == "vibey"
+                else None,
             )
-        if decision.action == "fallback" or (
-            decision.action == "surface"
-            and outcome.stream_started
-            and decision.reason is not None
+        if not thread_attempt and (
+            decision.action == "fallback"
+            or (decision.action == "surface" and outcome.stream_started and decision.reason is not None)
         ):
             await self._settle_fallback_source(
                 source,
@@ -11782,6 +11786,11 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         pinned_hop = _pinned_hop(request, backend)
+        thread_attempt = (
+            pinned_hop is not None
+            and getattr(request, "protocol", None) == "anthropic"
+            and thread_mode(request) in ("continue", "create")
+        )
         hosted = (
             # A walk of the whole history, so off the controller loop.
             await asyncio.to_thread(
@@ -12008,6 +12017,7 @@ class ModelHubService:
                     verification_pending=verification_pending,
                     origin=origin,
                     source_identity=identity,
+                    thread_attempt=thread_attempt,
                     hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                     fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                     inventory_member=inventory_member,
@@ -12023,6 +12033,7 @@ class ModelHubService:
                     outcome=outcome,
                     decision=decision,
                     settlement_generation=settlement_generation,
+                    thread_attempt=thread_attempt,
                     attempt_observer=attempt_observer,
                 )
                 raise cancelled
@@ -12078,6 +12089,7 @@ class ModelHubService:
                         verification_pending=verification_pending,
                         origin=origin,
                         source_identity=identity,
+                        thread_attempt=thread_attempt,
                         hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                         fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                         inventory_member=inventory_member,
@@ -12093,6 +12105,7 @@ class ModelHubService:
                         outcome=outcome,
                         decision=decision,
                         settlement_generation=settlement_generation,
+                        thread_attempt=thread_attempt,
                         attempt_observer=attempt_observer,
                     )
                     raise cancelled
@@ -12157,6 +12170,7 @@ class ModelHubService:
                 source_transition_persisted: bool | None = None
                 if outcome.stream_started and decision.reason is not None:
                     source_transition_persisted = False
+                if outcome.stream_started and decision.reason is not None and not thread_attempt:
                     _reason, source_transition_persisted = await self._settle_fallback_source(
                         source,
                         decision,
@@ -12190,6 +12204,9 @@ class ModelHubService:
                     ),
                 )
             if decision.action == "fallback" and pinned_hop is not None:
+                if thread_attempt:
+                    self.recovery.release(source.id, settlement_generation)
+                    raise _pin_unavailable()
                 # A failure normal routing would fail over from. The Source's
                 # health is settled as usual; the request goes back to Vibey,
                 # which re-renders it in portable form and sends it unpinned.

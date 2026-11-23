@@ -7,7 +7,9 @@ httpx directly so Model Hub remains the only gateway boundary.
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import time
 import json
 import logging
 import re
@@ -17,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from core.agent_core.ai import message_threads as threads
 from core.agent_core.ai.claude_thinking import is_claude_model, uses_adaptive_thinking
 from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
 from core.agent_core.ai.image_limits import LoadedImage
@@ -69,6 +72,7 @@ from core.agent_core.messages import (
     ToolCallBlock,
     ToolResultMessage,
     Usage,
+    usage_to_dict,
     UserMessage,
 )
 
@@ -87,7 +91,7 @@ _MAX_CACHE_BREAKPOINTS = 4
 # longer lifetime precedes every shorter one because Anthropic evaluates breakpoints as tools, system, messages.
 _PREFIX_TTL = "1h"
 # Routes whose endpoint rejected the field. They keep the default lifetime for the rest of the process.
-_TTL_REJECTED_ROUTES: set[tuple[str, str | None, str, str]] = set()
+_TTL_REJECTED_ROUTES: set[tuple[str, str | None, str | None, str, str]] = set()
 _TTL_REJECTION = re.compile(r"cache_control|\bttl\b", re.IGNORECASE)
 _LEGACY_THINKING_BUDGETS = {
     "minimal": 1024,
@@ -229,6 +233,16 @@ class AnthropicAdapter(ProviderAdapter):
         return self._stream(request, cancel)
 
     async def _stream(self, request: ModelRequest, cancel: CancelToken) -> AsyncIterator[Any]:
+        observation = request.thread_observation
+        session = observation.session_id if observation else None
+        # Claim before the first await: two requests can never continue the same response.
+        parent = threads.parents.pop(session, None) if session else None
+        route = threads.route_key(request.endpoint, self._gateway)
+        replay: str | None = None
+        replacement = False
+        attempt: threads.Attempt | None = None
+        response_id: str | None = None
+        lossless = True
         origin = endpoint_origin(request.endpoint)
 
         def new_assembler() -> StreamAssembler:
@@ -301,9 +315,18 @@ class AnthropicAdapter(ProviderAdapter):
             return None if index is None else index + offset
 
         try:
+
+            def served_as_pinned() -> bool:
+                return (
+                    assembler.verified_origin
+                    and assembler.origin == origin
+                    and assembler.source_id == sending.endpoint.source_id
+                    and assembler.source_identity == sending.endpoint.source_identity
+                )
+
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
-                nonlocal response_counts, refusal_detail
+                nonlocal response_counts, refusal_detail, response_id, lossless
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -322,6 +345,7 @@ class AnthropicAdapter(ProviderAdapter):
                             yield terminal
                         return
                     if event.event is not None and event.event not in _KNOWN_STREAM_EVENTS:
+                        lossless = False
                         # Pi filters by the SSE event name before parsing its
                         # JSON payload, so unknown event names are ignored
                         # even when their data is malformed.
@@ -335,6 +359,7 @@ class AnthropicAdapter(ProviderAdapter):
                         # still ignored rather than misclassified as provider
                         # payload errors.
                         if event.event is None:
+                            lossless = False
                             continue
                         terminal = assembler.terminal(
                             assembler.error("Provider returned invalid Anthropic JSON", kind="invalid_request")
@@ -356,6 +381,7 @@ class AnthropicAdapter(ProviderAdapter):
                             yield terminal
                         return
                     if event_type is None:
+                        lossless = False
                         continue
                     shape_error = validate_wire_shape(
                         chunk,
@@ -369,7 +395,25 @@ class AnthropicAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
+                    if speculative and self._gateway and not served_as_pinned() and event_type != "message_start":
+                        yield assembler.error("thread_origin_mismatch", kind="invalid_request")
+                        return
+                    if speculative and lossless:
+                        lossless = shape.accepts(event_type, chunk)
+                    if (
+                        attempt
+                        and attempt.mode == "continue"
+                        and not message_started
+                        and event_type not in ("message_start", "ping")
+                    ):
+                        yield assembler.error("thread_missing_start", kind="invalid_request")
+                        return
                     if event_type == "message_start":
+                        if message_started or message_stopped:
+                            lossless = False
+                        if message_started and attempt and attempt.mode == "continue":
+                            yield assembler.error("thread_duplicate_start", kind="invalid_request")
+                            return
                         message_started = True
                         message = chunk.get("message")
                         if not isinstance(message, Mapping):
@@ -408,7 +452,25 @@ class AnthropicAdapter(ProviderAdapter):
                         # Each response's own usage: the last request's input already holds every paused part, so
                         # it is the context the merged response stands for (plan §4.3 as implemented).
                         response_usage = _anthropic_usage(message.get("usage"))
+                        mid = message.get("id")
+                        response_id = mid if isinstance(mid, str) and 0 < len(mid) <= 256 and mid.isascii() else None
                         assembler.set_usage(response_usage)
+                        if speculative and self._gateway and not served_as_pinned():
+                            yield assembler.error("thread_origin_mismatch", kind="invalid_request")
+                            return
+                        if attempt and attempt.mode == "continue":
+                            total = (
+                                (
+                                    response_usage.input_tokens
+                                    + response_usage.cache_read_tokens
+                                    + response_usage.cache_write_tokens
+                                )
+                                if response_usage
+                                else 0
+                            )
+                            if attempt.prior is None or total * 100 < attempt.prior.tokens * threads.MIN_USAGE_PERCENT:
+                                yield assembler.error("thread_usage_mismatch", kind="invalid_request")
+                                return
                         start_usage = message.get("usage")
                         if isinstance(start_usage, Mapping) and "server_tool_use" in start_usage:
                             response_counts = reported_counts(start_usage.get("server_tool_use"), bound=None)
@@ -442,13 +504,18 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        if (
+                            not message_started
+                            or kind not in ("text", "tool_use", "thinking", "redacted_thinking")
+                            or block.get("citations")
+                            or (kind == "tool_use" and not block.get("id"))
+                        ):
+                            lossless = False
                         if kind == "fallback":
                             if assembler.has_content():
                                 terminal = assembler.terminal(
                                     assembler.exception(
-                                        RuntimeError(
-                                            "Anthropic performed an unsupported mid-output model fallback"
-                                        )
+                                        RuntimeError("Anthropic performed an unsupported mid-output model fallback")
                                     )
                                 )
                                 if terminal is not None:
@@ -614,6 +681,8 @@ class AnthropicAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         delta_type = delta.get("type")
+                        if delta_type not in ("text_delta", "thinking_delta", "signature_delta", "input_json_delta"):
+                            lossless = False
                         if not isinstance(delta_type, str):
                             terminal = assembler.terminal(
                                 assembler.error(
@@ -854,15 +923,14 @@ class AnthropicAdapter(ProviderAdapter):
                         yield PAUSE_TURN
                         return
                     final = assembler.finalize(stop_reason, error_message=refusal_detail)
-                    terminal = assembler.terminal(
-                        final if isinstance(final, ProviderError) else Done(final)
-                    )
+                    terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
                     if terminal is not None:
                         yield terminal
                     return
                 terminal = assembler.terminal(assembler.incomplete())
                 if terminal is not None:
                     yield terminal
+
             sending = request
             continuations = 0
             # The first send's prepared messages and images: every continuation must send exactly them plus the
@@ -870,8 +938,36 @@ class AnthropicAdapter(ProviderAdapter):
             first_sent: tuple[tuple[Any, ...], Mapping[str, LoadedImage]] | None = None
             while True:
                 # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
-                prefix_ttl = _prefix_ttl(sending)
+                prefix_ttl = _prefix_ttl(sending, gateway=self._gateway)
                 wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
+                full_wire = wire
+                if observation is not None:
+                    attempt = await threads.plan_send(
+                        wire,
+                        sending.endpoint,
+                        gateway=self._gateway,
+                        session=None if continuations else session,
+                        parent=parent,
+                        repair=observation.ordinary_retry or bool(prepared.hosted_render_omitted),
+                        ordinary=replay,
+                    )
+                    wire = attempt.wire
+
+                def record_send(size: int) -> None:
+                    attempt.record["body_bytes"] = size
+                    attempt.record["ordinary_baseline_bytes"] = (
+                        0 if replacement else (attempt.record["full_bytes"] or size)
+                    )
+                    if attempt.mode == "full":
+                        attempt.record["full_bytes"] = size
+                    observation.attempts.append(attempt.record)
+
+                speculative = bool(attempt and attempt.mode != "full")
+                response_id = None
+                lossless = True
+                shape = threads.ReplayShape()
+                visible = False
+                failed = None
                 driver = drive_sse_stream(
                     self._client,
                     method="POST",
@@ -885,7 +981,9 @@ class AnthropicAdapter(ProviderAdapter):
                     gateway=self._gateway,
                     translate=translate,
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
-                    refused=_rejects_ttl if prefix_ttl is not None else None,
+                    bound_pin_handback=speculative,
+                    on_send=record_send if attempt else None,
+                    refused=_rejects_ttl if prefix_ttl is not None and not speculative else None,
                 )
                 rejected = continued = paused = message_started = message_stopped = False
                 unavailable: PinUnavailable | None = None
@@ -893,6 +991,9 @@ class AnthropicAdapter(ProviderAdapter):
                 try:
                     async for event in driver:
                         if isinstance(event, PinUnavailable):
+                            if speculative:
+                                failed = "pin_unavailable"
+                                break
                             unavailable = event
                             break
                         if event is PAUSE_TURN:
@@ -902,6 +1003,29 @@ class AnthropicAdapter(ProviderAdapter):
                             rejected = True
                             break
                         if isinstance(event, ProviderError):
+                            if (
+                                speculative
+                                and not event.silence_exhausted
+                                and not cancel.cancelled
+                                and not (visible or assembler.streamed)
+                            ):
+                                if response_usage:
+                                    attempt.record["discarded_usage"] = usage_to_dict(response_usage)
+                                failed = (
+                                    event.message
+                                    if event.message.startswith("thread_")
+                                    and event.message
+                                    in (
+                                        "thread_usage_mismatch",
+                                        "thread_duplicate_start",
+                                        "thread_missing_start",
+                                        "thread_origin_mismatch",
+                                    )
+                                    else f"http_{event.status}"
+                                    if event.status
+                                    else event.kind
+                                )
+                                break
                             if event.status == 400:
                                 _log_refused_request_shape(sending, wire.body, continuations)
                             repair = search_replay_refusal(event, sending, wire.body)
@@ -911,9 +1035,72 @@ class AnthropicAdapter(ProviderAdapter):
                                 # The Agent owns bounds and retries of uncommitted output. The adapter only
                                 # identifies a changed request, equally for HTTP refusals and streamed errors.
                                 event = replace(event, retryable=False, continuable=False, after_thinking=False)
+                        elif isinstance(event, Done):
+                            message = event.message
+                            if (
+                                speculative
+                                and session
+                                and response_id
+                                and message.usage
+                                and message_stopped
+                                and lossless
+                                and message.stop_reason in ("stop", "tool_use")
+                                and (not self._gateway or served_as_pinned())
+                            ):
+                                assistant_hash = await asyncio.to_thread(_replayable_digest, message)
+                                if assistant_hash is None:
+                                    yield event
+                                    continue
+                                u = message.usage
+                                threads.remember(
+                                    threads.parents,
+                                    session,
+                                    threads.Parent(
+                                        route,
+                                        attempt.fixed,
+                                        len(full_wire.body["messages"]),
+                                        attempt.history,
+                                        assistant_hash,
+                                        response_id,
+                                        u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens,
+                                        time.monotonic() + threads.PARENT_SECONDS,
+                                    ),
+                                )
+                        else:
+                            visible = True
                         yield event
                 finally:
                     await driver.aclose()
+                if failed is not None:
+                    threads.remember(threads.failed_routes, route, time.monotonic() + threads.COOLDOWN_SECONDS)
+                    attempt.record["failure"] = replay = failed
+                    replacement = True
+                    if (
+                        observation.settle_discard
+                        and observation.attempts
+                        and observation.attempts[-1] is attempt.record
+                    ):
+                        if response_usage:
+                            attempt.record["writes_by_ttl"] = dict(response_usage.cache_writes_by_ttl or {})
+                            attempt.record["cache_write_basis"] = (
+                                "incomplete_total"
+                                if not response_usage.cache_write_total_reported
+                                else "none"
+                                if not response_usage.cache_write_tokens
+                                else "reported"
+                                if response_usage.cache_writes_by_ttl is not None
+                                else "unknown"
+                            )
+                        # Settle before handing the replay to HTTPX: Stop during the replacement cannot erase this send.
+                        await observation.settle_discard(attempt.record)
+                        observation.attempts.pop()
+                    assembler = new_assembler()
+                    assembler.hosted_render_omitted = prepared.hosted_render_omitted
+                    response_usage = None
+                    uses.clear()
+                    next_index = 0
+                    response_counts.clear()
+                    continue
                 if unavailable is not None and continuations == 0:
                     # The pinned Source cannot serve this content; nothing reached a model. The loop renders the
                     # request again for a fresh hop (§3.5).
@@ -924,8 +1111,9 @@ class AnthropicAdapter(ProviderAdapter):
                 elif unavailable is not None or (
                     continued
                     and self._gateway
-                    and (PIN_SOURCE_HEADER not in wire.headers or not assembler.verified_origin)
+                    and (PIN_SOURCE_HEADER not in full_wire.headers or not assembler.verified_origin)
                 ):
+                    # A pin added only to try threads must never authorize an ordinary pause follow-up.
                     # A paused response continues only on the Source that served it, pinned, so it stays one origin's
                     # message: a continuation that Source cannot serve, a send no pin held there, or a response whose
                     # Source is unknown (no served-hop report, so its hosted calls could not be kept and sent back) ends
@@ -952,6 +1140,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if first_sent is None:
                         first_sent = (transformed_messages, loaded_images)
                     continuations += 1
+                    replacement = False
                     response_usage = None
                     carried_counts, response_counts = _summed(carried_counts, response_counts), {}
                     offset = next_index
@@ -959,7 +1148,9 @@ class AnthropicAdapter(ProviderAdapter):
                 elif rejected:
                     # The endpoint refused the lifetime before answering, so nothing reached the consumer: the same
                     # send once more with the default lifetime, which this route keeps from now on.
-                    _remember_ttl_rejection(sending.endpoint)
+                    # Later ordinary TTL/paused sends have their own ordinary baseline.
+                    replacement = False
+                    _remember_ttl_rejection(sending.endpoint, gateway=self._gateway)
                     continue
                 else:
                     return
@@ -995,6 +1186,17 @@ class AnthropicAdapter(ProviderAdapter):
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
                 yield terminal
+
+
+def _replayable_digest(message: AssistantMessage) -> bytes | None:
+    for b in message.content:
+        if (
+            (isinstance(b, ThinkingBlock) and not b.signature)
+            or (isinstance(b, TextBlock) and (not b.text.strip() or b.citations))
+            or (isinstance(b, ToolCallBlock) and b.id != b.native_id)
+        ):
+            return None
+    return threads.message_digest([_message_to_anthropic(message, False)])
 
 
 def _binding_prefix(
@@ -1155,7 +1357,9 @@ def wire_request(
 ) -> WireRequest:
     """The Messages request for already prepared ``messages``, as the adapter sends it."""
 
-    payload = build_messages_payload(request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request))
+    payload = build_messages_payload(
+        request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request, gateway=gateway)
+    )
     headers = auth_headers(request.endpoint, provider="anthropic", gateway=gateway)
     headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
     headers.update(hosted_pin(request, messages))
@@ -1267,10 +1471,10 @@ def cache_ttl_s(request: ModelRequest) -> float:
     default.
     """
 
-    return 3_600.0 if _prefix_ttl(request) == _PREFIX_TTL else 300.0
+    return 3_600.0 if _prefix_ttl(request, gateway=request.endpoint.via_hub) == _PREFIX_TTL else 300.0
 
 
-def _prefix_ttl(request: ModelRequest) -> str | None:
+def _prefix_ttl(request: ModelRequest, *, gateway: bool) -> str | None:
     """The static prefix's lifetime: an hour where the field is known to work, else the default (``None``).
 
     Known means a Claude model on the Anthropic vendor, read from the hop: the vendor id exactly, and a model id that
@@ -1283,16 +1487,18 @@ def _prefix_ttl(request: ModelRequest) -> str | None:
         or not (request.tools or request.system)
         or endpoint.provider != "anthropic"
         or not endpoint.model_id.startswith("claude-")
-        or _ttl_route(endpoint) in _TTL_REJECTED_ROUTES
+        or _ttl_route(endpoint, gateway=gateway) in _TTL_REJECTED_ROUTES
     ):
         return None
     return _PREFIX_TTL
 
 
-def _ttl_route(endpoint: ModelEndpoint) -> tuple[str, str | None, str, str]:
-    """The route a TTL rejection is remembered for. Every Vibey hop shares the one gateway URL, so the Source behind
-    it is part of the route: one relay's rejection never changes what another Source is sent."""
-    return (endpoint.base_url, endpoint.source_id, endpoint.provider, endpoint.model_id)
+def _ttl_route(endpoint: ModelEndpoint, *, gateway: bool) -> tuple[str, str | None, str | None, str, str]:
+    # Hub previews intentionally have no bound URL or token; both launches name the same Source/account.
+    # An unbound hop has no such identity. Keep the transport address there, as for a direct endpoint.
+    if gateway and endpoint.source_id and endpoint.source_identity:
+        return ("hub", endpoint.source_identity, endpoint.source_id, endpoint.provider, endpoint.model_id)
+    return ("url", endpoint.base_url, endpoint.source_id, endpoint.provider, endpoint.model_id)
 
 
 def _rejects_ttl(event: Any) -> bool:
@@ -1310,8 +1516,8 @@ def _rejects_ttl(event: Any) -> bool:
     )
 
 
-def _remember_ttl_rejection(endpoint: ModelEndpoint) -> None:
-    route = _ttl_route(endpoint)
+def _remember_ttl_rejection(endpoint: ModelEndpoint, *, gateway: bool) -> None:
+    route = _ttl_route(endpoint, gateway=gateway)
     if route in _TTL_REJECTED_ROUTES:
         return
     _TTL_REJECTED_ROUTES.add(route)

@@ -1882,6 +1882,8 @@ async def drive_sse_stream(
     gateway: bool,
     translate: WireTranslator,
     refused: Callable[[ProviderError], bool] | None = None,
+    on_send: Callable[[int], None] | None = None,
+    bound_pin_handback: bool = False,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
 
@@ -1900,6 +1902,12 @@ async def drive_sse_stream(
     sent_at: float | None = None
     # The request's bytes, kept until it succeeds (``request_artifacts``), when a capture scope is active.
     attempt: RequestAttempt | None = None
+
+    def silence_exhausted() -> bool:
+        return (
+            sent_at is not None and not assembler.streamed and time.monotonic() - sent_at >= PROVIDER_SILENCE_TIMEOUT_S
+        )
+
     assembler.begin_driver()
     try:
         try:
@@ -1947,6 +1955,8 @@ async def drive_sse_stream(
                 # Retain the opening task even if cancellation wins the await:
                 # its successful result still belongs to this driver's finally.
                 sent_at = time.monotonic()
+                if on_send is not None:
+                    on_send(len(request.content))
                 opening = asyncio.create_task(client.send(request, stream=True))
                 response = await _await_network(
                     opening,
@@ -1980,6 +1990,9 @@ async def drive_sse_stream(
                             and response.status_code == 409
                             and PIN_SOURCE_HEADER in headers
                             and (handed_back := _pin_unavailable(body)) is not None
+                            # A speculative handback after the full silence budget is a terminal HTTP
+                            # error, not permission to start a second request. Ordinary pins are unchanged.
+                            and not (bound_pin_handback and silence_exhausted())
                         ):
                             # The pinned Source cannot serve this content; nothing reached a model. The adapter
                             # decides what follows (§3.5, §4.3), so no terminal is committed here.
@@ -2060,17 +2073,12 @@ async def drive_sse_stream(
             candidate = assembler.exception(exc)
 
         if candidate is not None:
-            if (
-                isinstance(candidate, ProviderError)
-                and sent_at is not None
-                and not assembler.streamed
-                and time.monotonic() - sent_at >= PROVIDER_SILENCE_TIMEOUT_S
-            ):
+            if isinstance(candidate, ProviderError) and silence_exhausted():
                 # Whatever ended it, the request went at least the whole silence
                 # bound without output. Sent again it would most likely wait as
                 # long again, so the failure ends the turn: neither replayed nor
                 # continued.
-                candidate = replace(candidate, retryable=False, continuable=False)
+                candidate = replace(candidate, retryable=False, continuable=False, silence_exhausted=True)
             # Decided before the artifact's write is awaited: diagnostic storage never counts as provider silence.
             if attempt is not None:
                 await _await_artifact(
