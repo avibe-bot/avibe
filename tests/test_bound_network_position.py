@@ -670,6 +670,32 @@ def test_missing_partial_reset_block_position(monkeypatch, tmp_path):
     denied()
 
 
+def test_the_reset_record_has_one_path_shared_with_the_reset_itself(monkeypatch, tmp_path):
+    """The reset (AV-13) writes this record and this gate reads it: one name, taken from one place.
+
+    The name is a shipped artifact: a reset that an older version started must
+    still close network-position trust after an upgrade, so it is pinned here.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    record = paths.get_remote_binding_reset_path()
+    assert record == paths.get_state_dir() / "remote-binding-reset.json"
+
+    config = _unbound()
+    assert binding_state(config) is BindingState.UNBOUND
+    # A record under any other name is not the reset's and changes nothing.
+    (paths.get_state_dir() / "remote-binding-reset.json.tmp").write_text("{}")
+    (paths.get_state_dir() / "binding-reset.json").write_text("{}")
+    assert binding_state(config) is BindingState.UNBOUND
+    # The record itself closes trust, whatever it holds, and a dangling link does too.
+    record.write_text("{}")
+    assert binding_state(config) is BindingState.UNAVAILABLE
+    record.unlink()
+    record.symlink_to(tmp_path / "nowhere")
+    assert binding_state(config) is BindingState.UNAVAILABLE
+    record.unlink()
+    assert binding_state(config) is BindingState.UNBOUND
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('publication', ['binding', 'settings-save', 'proxy-withdrawal'])
 async def test_second_process_retires_live_setup_channels(monkeypatch, tmp_path, publication):

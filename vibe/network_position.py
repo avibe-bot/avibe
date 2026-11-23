@@ -20,7 +20,7 @@ def _reset_absent() -> bool:
     # AV-13's durable gate outlives its config clear. Only ENOENT means absent,
     # including on recovery from an interrupted reset; never follow a link.
     try:
-        (paths.get_state_dir() / "remote-binding-reset.json").lstat()
+        paths.get_remote_binding_reset_path().lstat()
     except FileNotFoundError:
         return True
     except OSError:
