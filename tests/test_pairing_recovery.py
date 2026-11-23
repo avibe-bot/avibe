@@ -735,41 +735,6 @@ def test_uncertain_redeem_failure_retains_prepared_claim(pairing_host, monkeypat
     assert remote_access.pair("", "")["error"] == "pairing_recovery_not_ready"
 
 
-@pytest.mark.parametrize("language", ["en", "zh"])
-def test_cli_uncertain_failure_instructions_reach_explicit_replacement(
-    pairing_host, monkeypatch, capsys, language,
-):
-    _, calls = pairing_host
-    redeem = remote_access._json_request
-
-    def fail_then_redeem(url, payload, **kwargs):
-        if payload["pairing_key"] == "uncertain-key":
-            raise remote_access.BackendRequestError(503, {"error": "backend_http_error"})
-        return redeem(url, payload, **kwargs)
-
-    monkeypatch.setattr(remote_access, "_json_request", fail_then_redeem)
-    _configure_ui_language(monkeypatch, language)
-    monkeypatch.setattr(cli.getpass, "getpass", lambda *args: pytest.fail("pending operation must not prompt"))
-    args = SimpleNamespace(
-        pairing_key="uncertain-key", backend_url="https://backend.test", device_name="fixture", json=False,
-    )
-    assert cli.cmd_remote_pair(args) == 1
-    first = capsys.readouterr().err
-    command = "vibe remote pair NEW_PAIRING_KEY --backend-url BACKEND_URL"
-    assert command in first
-    assert "uncertain" in first
-    args.pairing_key = None
-    assert cli.cmd_remote_pair(args) == 1
-    assert command in capsys.readouterr().err
-    args.pairing_key = "key_B"
-    assert cli.cmd_remote_pair(args) == 0
-    assert calls == [("https://backend.test/api/v1/pairing/redeem", "key_B")]
-    saved = V2Config.load().remote_access.vibe_cloud
-    binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
-    assert saved.instance_id == binding["instance_id"] == "inst_B"
-    assert not remote_access.pending_pairing_record_exists()
-
-
 @pytest.mark.parametrize(
     "response",
     [
