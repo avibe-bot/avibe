@@ -83,12 +83,16 @@ Push and PR creation wait for the coordinated simulator consumer checks.
 Do not start a simulator until the lead allocates it; stop heavy builds below
 20 GiB free space and retain existing devices and other owners' data.
 
-## Preparation status
+## Simulator evidence
 
-The two production edits and their tests are prepared. Swift syntax parsing
-passes for both changed Swift files; the test-only EventKit overrides type
-check against the installed Simulator SDK. These are lightweight compiler
-checks, not an App build or XCTest execution. Baseline red, fixed green,
-confirmation/bridge consumers and unsigned builds remain pending the
-coordinated simulator window. Physical acceptance remains pending the
-separately authorized merge and TestFlight route.
+On 2026-11-23, both owning regressions failed against the unchanged baseline
+adapter for the intended capability and dispatch reasons. The fixed adapter
+passed 57 isolated tests on iOS 26.4: all 50 SystemSchedule tests, five
+WK/AppModel consumers (including both kinds through confirmation and
+cancellation), and two bridge/identity consumers. The OS stand-ins did not
+create real alarms or reminders. This is Native consumer evidence, not
+physical-device acceptance.
+
+Commands, source hashes, exits and xcresults remain in the task's matter
+handoff. Physical acceptance remains pending the separately authorized merge
+and TestFlight route.
