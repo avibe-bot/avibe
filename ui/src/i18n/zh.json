@@ -8225,5 +8225,12 @@
       "browserHint": "只有这一次：去 avibe.bot 起个名字、领取域名，然后自动回来，直接进入工作台。",
       "skip": "以后再说，进入工作台"
     }
+  },
+  "domainField": {
+    "free": "可用",
+    "taken": "已被占用",
+    "reclaim": "你用过的",
+    "checking": "正在查…",
+    "invalid": "只能用小写字母、数字和连字符"
   }
 }

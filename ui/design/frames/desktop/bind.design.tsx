@@ -7,7 +7,7 @@
 import type { ReactNode } from 'react';
 import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { AccountDetailsView } from '@/desktop/AccountDetailsView';
-import { BindComputerView, ComputerBindingCard, type AccountRecovery, type BindStep, type ComputerBinding } from '@/desktop/BindComputerView';
+import { BindDialog, ComputerBindingCard, type BindStep, type ComputerBinding } from '@/desktop/BindComputerView';
 import { SetupCompleteView } from '@/desktop/SetupCompleteView';
 import { DESIGN_NOW } from '../../shell/clock';
 import { frames, type FrameSpec } from '../../frame';
@@ -17,6 +17,7 @@ import { copyFor } from './instances-fixtures';
 const ACCOUNT = 'max@example.test';
 const COMPUTER = 'Max 的 MacBook Pro';
 const HOST = 'max-app.avibe.bot';
+
 const noop = () => {};
 const inDays = (days: number) => new Date(DESIGN_NOW + days * 86_400_000).toISOString().replace(/\.\d{3}Z$/, '.000Z');
 
@@ -25,72 +26,62 @@ const column = (children: ReactNode, centered = false) => () => <div className={
   ? 'flex h-full flex-col overflow-y-auto bg-background px-10 py-5 text-foreground'
   : 'h-full overflow-y-auto bg-background px-10 py-5 text-foreground'}>{children}</div>;
 
-const account = (binding: ComputerBinding, recovery: AccountRecovery | null = null) => column(
+const card = (binding: ComputerBinding) => <ComputerBindingCard binding={binding} computer={COMPUTER}
+  onBind={noop} onRefresh={noop} onUpdates={noop} onSignInOther={noop} />;
+const account = (binding: ComputerBinding) => column(
+  <AccountDetailsView email={ACCOUNT} busy={false} onBack={noop} onSignOut={noop}>{card(binding)}</AccountDetailsView>,
+);
+
+/** The dialog over the Account page, as the person sees it after pressing Bind this computer. */
+const bind = (step: BindStep, { busy = false } = {}) => column(
   <AccountDetailsView email={ACCOUNT} busy={false} onBack={noop} onSignOut={noop}>
-    <ComputerBindingCard binding={binding} account={ACCOUNT} computer={COMPUTER} recovery={recovery}
-      onBind={noop} onRefresh={noop} onUpdates={noop} onRecover={noop} />
+    {card({ state: 'unbound' })}
+    <BindDialog step={step} account={ACCOUNT} busy={busy}
+      onNameChange={noop} onPick={noop} onConfirm={noop} onSendCode={noop} onCodeChange={noop} onSubmitCode={noop} onBeginSetup={noop} onSavedCodes={noop}
+      onFactorStep={noop} onPasskey={noop} onRestart={noop} onRecover={noop} onUpdates={noop} onClose={noop} />
   </AccountDetailsView>,
 );
 
-const bind = (step: BindStep, { busy = false, computer = COMPUTER } = {}) => column(
-  <BindComputerView step={step} account={ACCOUNT} computer={computer} busy={busy}
-    onNameChange={noop} onPick={noop} onConfirm={noop} onSendCode={noop} onCodeChange={noop} onSubmitCode={noop} onBeginSetup={noop} onSavedCodes={noop}
-    onFactorStep={noop} onPasskey={noop} onRestart={noop} onRecover={noop} onUpdates={noop} onClose={noop} />,
-  step.kind === 'code' || step.kind === 'factor' || step.kind === 'factorSetup',
-);
-
+const HELD = [{ prefix: 'maxlab', host: 'maxlab-app.avibe.bot' }];
 type State = { name: string; title: string; render: () => ReactNode; height?: number; both?: boolean };
 
 const states: State[] = [
-  // The Account page: what this computer's binding is now.
-  { name: 'account-reading', title: '账号页 · 正在读这台电脑的绑定（只读，不开始绑定）', render: account({ state: 'reading' }) },
-  { name: 'account-unbound', title: '账号页 · 未绑定：入口，一个按钮', render: account({ state: 'unbound' }), both: true },
-  { name: 'account-unbound-previous', title: '账号页 · 未绑定，上一次旧版绑定没有在本机完成', render: account({ state: 'unbound', previous: true }) },
-  { name: 'account-bound', title: '账号页 · 已绑定在这个账号名下：域名、账号（远程访问开着，域名可点）', render: account({ state: 'bound', host: HOST, url: `https://${HOST}` }), both: true },
-  { name: 'account-bound-off', title: '账号页 · 已绑定，远程访问关着：仍是「已绑定」，域名不可点', render: account({ state: 'bound', host: HOST, url: null }) },
-  { name: 'account-unconfirmed', title: '账号页 · 已绑定，但没能确认在这个账号名下', render: account({ state: 'unconfirmed', host: 'studio-app.avibe.bot' }) },
-  { name: 'account-pending', title: '账号页 · 上一次（旧版）绑定还在进行', render: account({ state: 'pending' }) },
-  { name: 'account-repair', title: '账号页 · 旧版绑定记录需要在终端修复', render: account({ state: 'repair' }) },
-  { name: 'account-upgrade', title: '账号页 · 需要先更新本机的 Avibe', render: account({ state: 'upgrade' }) },
-  { name: 'account-unknown', title: '账号页 · 读不到绑定（不是「未绑定」）', render: account({ state: 'unknown' }) },
-  { name: 'account-recovery', title: '账号页 · 普通账号恢复：上一次验证已通过、还没保存完（按「继续」才恢复）', render: account({ state: 'unbound' }, 'available') },
-  { name: 'account-recovery-blocked', title: '账号页 · 普通账号恢复：系统凭据存储写不进去', render: account({ state: 'unbound' }, 'blocked') },
+  // The card answers only: can I use it, and what do I do.
+  { name: 'account-reading', title: '卡 · 正在读（只读）', render: account({ state: 'reading' }) },
+  { name: 'account-unbound', title: '卡 · 未绑定：一个按钮（旧版没完成或还在进行的尝试也是这样）', render: account({ state: 'unbound' }), both: true },
+  { name: 'account-bound', title: '卡 · 已绑定：域名（远程访问开着时可点）；读不到账号列表时也这样显示，后台再查', render: account({ state: 'bound', host: HOST, url: `https://${HOST}` }), both: true },
+  { name: 'account-bound-off', title: '卡 · 已绑定，远程访问关着', render: account({ state: 'bound', host: HOST, url: null }) },
+  { name: 'account-other-account', title: '卡 · 绑定在另一个账号下：用那个账号登录（保留：要人做不同的事）', render: account({ state: 'otherAccount' }) },
+  { name: 'account-unknown', title: '卡 · 现在确认不了：再看一次', render: account({ state: 'unknown' }) },
+  { name: 'account-upgrade', title: '卡 · 要先更新（保留：要人做不同的事）', render: account({ state: 'upgrade' }) },
+  { name: 'account-repair', title: '卡 · 要在终端修复（保留，等 #4133）', render: account({ state: 'repair' }) },
 
-  // Naming and confirming, one screen: the account, this computer and the exact domain, then 绑定.
-  { name: 'opening', title: '起名 · 正在打开（读 avibe.bot 的建议）', render: bind({ kind: 'opening' }) },
-  { name: 'name', title: '起名并确认 · 预填邮箱前缀，可改，域名写全', render: bind({ kind: 'name', name: 'max', check: 'free' }), both: true },
-  { name: 'name-second', title: '起名 · 同一账号的第二台电脑：avibe.bot 预填「前缀-电脑名」', render: bind({ kind: 'name', name: 'max-macmini', check: 'free' }, { computer: 'Mac mini（办公室）' }) },
-  { name: 'name-empty', title: '起名 · avibe.bot 没有建议：空着，按钮不可用', render: bind({ kind: 'name', name: '', check: 'invalid' }) },
-  { name: 'name-checking', title: '起名 · 改了名称，正在查', render: bind({ kind: 'name', name: 'maxwell', check: 'checking' }) },
-  { name: 'name-taken', title: '起名 · 已被占用：只提示，不加数字', render: bind({ kind: 'name', name: 'max', check: 'taken' }) },
-  { name: 'name-reclaim', title: '起名 · 这是自己放弃过的名字，可以用回来', render: bind({ kind: 'name', name: 'maxlab', check: 'reclaim' }) },
-  { name: 'limit', title: '起名 · 名字到了上限，有可取回的自己的名字和最早释放日期', render: bind({ kind: 'limit', name: 'max', held: 5, earliest: inDays(11), eligible: [{ prefix: 'maxlab', host: 'maxlab-app.avibe.bot' }] }) },
-  { name: 'limit-plain', title: '起名 · 名字到了上限，avibe.bot 没给明细', render: bind({ kind: 'limit', name: 'max', held: null, earliest: null, eligible: [] }) },
-  { name: 'existing', title: '确认 · 这台电脑在这个账号下已有域名：只能确认，不能改', render: bind({ kind: 'existing', host: 'mac-7f3k-app.avibe.bot' }) },
-  { name: 'binding', title: '确认之后 · 正在绑定', render: bind({ kind: 'name', name: 'max', check: 'free' }, { busy: true }) },
+  // The dialog: claim your own domain.
+  { name: 'opening', title: '弹窗 · 正在打开', render: bind({ kind: 'opening' }) },
+  { name: 'name', title: '弹窗 · 预填邮箱前缀：可用', render: bind({ kind: 'name', name: 'max', check: 'free' }), both: true },
+  { name: 'name-held', title: '弹窗 · 自己保留着的名字放在输入框下面', render: bind({ kind: 'name', name: 'max-macmini', check: 'free', held: HELD }) },
+  { name: 'name-checking', title: '弹窗 · 正在查', render: bind({ kind: 'name', name: 'maxwell', check: 'checking' }) },
+  { name: 'name-taken', title: '弹窗 · 已被占用：不加数字', render: bind({ kind: 'name', name: 'max', check: 'taken' }) },
+  { name: 'name-reclaim', title: '弹窗 · 你用过的', render: bind({ kind: 'name', name: 'maxlab', check: 'reclaim', held: HELD }) },
+  { name: 'name-invalid', title: '弹窗 · 不合规则：留在输入框里，不去查', render: bind({ kind: 'name', name: 'a', check: 'invalid' }) },
+  { name: 'limit', title: '弹窗 · 名字到上限（数字来自服务器）', render: bind({ kind: 'limit', name: 'max', held: 10, earliest: inDays(11), eligible: HELD }) },
+  { name: 'existing', title: '弹窗 · 这台电脑在账号里已有域名：只能确认', render: bind({ kind: 'existing', host: 'mac-7f3k-app.avibe.bot' }) },
+  { name: 'binding', title: '弹窗 · 正在绑定', render: bind({ kind: 'name', name: 'max', check: 'free' }, { busy: true }) },
+  { name: 'proof', title: '弹窗 · 要先确认是你本人：发送是单独一按', render: bind({ kind: 'proof' }) },
+  { name: 'code', title: '弹窗 · 邮件验证码（登录同款）', render: bind({ kind: 'code', code: '' }), height: 1000 },
+  { name: 'code-invalid', title: '弹窗 · 验证码不对：留在原地', render: bind({ kind: 'code', code: '', invalid: true }), height: 1000 },
+  { name: 'factor-totp', title: '弹窗 · 两步验证', render: bind({ kind: 'factor', method: 'totp', methods: ['passkey', 'totp'], code: '' }), height: 1000 },
+  { name: 'factor-setup', title: '弹窗 · 先添加验证器', render: bind({ kind: 'factorSetup', material: null, code: '' }), height: 900 },
+  { name: 'saving', title: '弹窗 · 验证之后，正在完成', render: bind({ kind: 'saving' }) },
+  { name: 'saving-recover', title: '弹窗 · 上一次验证没保存完：按「继续」接着做（不显示在卡上）', render: bind({ kind: 'saving', recover: true }) },
+  { name: 'changed', title: '弹窗 · 验证之后内容变了：说哪几项，再按一次', render: bind({ kind: 'name', name: 'max', check: 'taken', changed: ['availability'] }) },
+  { name: 'bound', title: '弹窗 · 已绑定', render: bind({ kind: 'bound', host: HOST }), both: true },
+  { name: 'problem-unreachable', title: '弹窗 · 出错：连不上 avibe.bot，重新开始', render: bind({ kind: 'problem', problem: 'unreachable' }) },
+  { name: 'problem-busy', title: '弹窗 · 旧版绑定还在进行：关闭，稍后再开', render: bind({ kind: 'problem', problem: 'busy' }) },
+  { name: 'problem-unavailable', title: '弹窗 · 这台电脑不能绑定（墓碑）：死路，请联系我们', render: bind({ kind: 'problem', problem: 'unavailable' }) },
+  { name: 'problem-storage', title: '弹窗 · 钥匙串写不进去（保留：要人做不同的事）', render: bind({ kind: 'problem', problem: 'storage' }) },
+  { name: 'conflict', title: '弹窗 · 这台电脑属于另一个账号（owner_conflict）', render: bind({ kind: 'conflict' }) },
 
-  // avibe.bot wants recent proof: a separate choice to send, the sign-in's code step, a second factor.
-  { name: 'proof', title: '需要邮件验证码 · 发送是单独的一步', render: bind({ kind: 'proof' }) },
-  { name: 'code', title: '邮件验证码 · 登录同款，没有「修改邮箱」和「重新发送」', render: bind({ kind: 'code', code: '' }), height: 900 },
-  { name: 'factor-totp', title: '两步验证 · 身份验证器', render: bind({ kind: 'factor', method: 'totp', methods: ['passkey', 'totp'], code: '' }), height: 900 },
-  { name: 'factor-passkey', title: '两步验证 · 通行密钥', render: bind({ kind: 'factor', method: 'passkey', methods: ['passkey', 'totp'], code: '' }), height: 900 },
-  { name: 'code-invalid', title: '邮件验证码不对或已过期 · 留在原地再输', render: bind({ kind: 'code', code: '', invalid: true }), height: 900 },
-  { name: 'factor-totp-invalid', title: '两步验证码不对 · 留在原地再输', render: bind({ kind: 'factor', method: 'totp', methods: ['passkey', 'totp'], code: '', error: 'code' }), height: 900 },
-  { name: 'factor-setup', title: '账号要求先开两步验证 · 在这里添加验证器', render: bind({ kind: 'factorSetup', material: null, code: '' }), height: 900 },
-  { name: 'codes', title: '添加验证器后的恢复码 · 只显示这一次（帧里是假码）', render: bind({ kind: 'codes', codes: ['•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••'] }) },
-  { name: 'saving', title: '验证之后 · 正在保存登录（原生读回并保存好之前不重读）', render: bind({ kind: 'saving' }) },
-  { name: 'saving-recover', title: '验证之后 · 保存没完成：按「继续」接着做，不重发验证码', render: bind({ kind: 'saving', recover: true }) },
-  { name: 'changed', title: '验证之后内容变了 · 说明变了什么，再按一次「绑定」（没变就直接绑定，不出这一屏）', render: bind({ kind: 'name', name: 'max', check: 'taken', changed: ['availability'] }) },
-
-  // Ends.
-  { name: 'bound', title: '已绑定 · 域名、账号、电脑（不说「已连通」）', render: bind({ kind: 'bound', host: HOST }), both: true },
-  { name: 'conflict', title: '这台电脑属于另一个账号（owner_conflict）：什么都没改，退出后用那个账号登录', render: bind({ kind: 'conflict' }) },
-  { name: 'upgrade', title: '需要先更新本机的 Avibe', render: bind({ kind: 'upgrade' }) },
-  { name: 'problem-unreachable', title: '出错 · 连不上 avibe.bot：重新开始', render: bind({ kind: 'problem', problem: 'unreachable' }) },
-  { name: 'problem-busy', title: '出错 · 另一项更改在进行：返回', render: bind({ kind: 'problem', problem: 'busy' }) },
-  { name: 'problem-lost', title: '出错 · 确认后回复丢了，无法再取：重新开始', render: bind({ kind: 'problem', problem: 'lost' }) },
-
-  // Setup's last screen: signing in no longer registers this computer.
   { name: 'setup-complete', title: '设置完成 · 登录不再自动登记本机', render: column(<SetupCompleteView onLocal={noop} onSignIn={noop} />) },
 ];
 

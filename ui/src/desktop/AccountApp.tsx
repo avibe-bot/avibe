@@ -11,7 +11,7 @@ import { InstanceSwitcherView } from './InstanceSwitcherView';
 import { AccountSignOutView } from './AccountSignOutView';
 import { AccountDetailsView } from './AccountDetailsView';
 import { SetupCompleteView } from './SetupCompleteView';
-import { BindComputerView, ComputerBindingCard } from './BindComputerView';
+import { BindDialog, ComputerBindingCard } from './BindComputerView';
 import { useDesktopClaim } from './useDesktopClaim';
 import { AddInstanceView } from './AddInstanceView';
 import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
@@ -363,16 +363,8 @@ export function AccountApp() {
       if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
       else setView('account');
     }}>{failure}</RecoveryCodesView>;
-  } else if (claim.step) {
-    // A binding in progress keeps its own verification, also while the new session owes a second factor.
-    centerLogin = claim.step.kind === 'code' || claim.step.kind === 'factor' || claim.step.kind === 'factorSetup';
-    content = <BindComputerView step={claim.step} account={claim.account} computer={claim.computer} busy={claim.busy}
-      onNameChange={claim.changeName} onPick={(prefix) => void claim.pick(prefix)} onConfirm={() => void claim.confirm()}
-      onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
-      onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
-      onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
-      onRestart={claim.restart} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')} onClose={claim.close} />;
-  } else if (state.account.status !== 'signed_in') {
+  // A binding in progress keeps its dialog, also while its new sign-in owes a second factor.
+  } else if (state.account.status !== 'signed_in' && !claim.step) {
     // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
     // "continue on this computer", Back to Workbench and the in-app authenticator setup below.
     centerLogin = true;
@@ -394,9 +386,16 @@ export function AccountApp() {
     content = <AccountDetailsView email={state.account.identity?.email ?? state.account.email ?? ''}
       busy={busy} errorMessage={errorMessage} onBack={instances}
       onSignOut={() => { setView('sign-out'); leave('sign_out'); }}>
-      <ComputerBindingCard binding={claim.binding} account={state.account.identity?.email ?? ''} computer={state.local.name}
-        recovery={claim.recovery} busy={claim.busy} onBind={() => void claim.start()} onRefresh={() => void claim.observe()}
-        onUpdates={() => setView('updates')} onRecover={() => void claim.resume()} />
+      <ComputerBindingCard binding={claim.binding} computer={state.local.name} busy={claim.busy}
+        onBind={() => void claim.start()} onRefresh={() => void claim.observe()} onUpdates={() => setView('updates')}
+        onSignInOther={() => { setView('sign-out'); leave('sign_out'); }} />
+      {/* ui/design: desktop/bind/*. Binding happens in a dialog over the Account page. */}
+      {claim.step && <BindDialog step={claim.step} account={claim.account || (state.account.identity?.email ?? '')} busy={claim.busy}
+        onNameChange={claim.changeName} onPick={(prefix) => void claim.pick(prefix)} onConfirm={() => void claim.confirm()}
+        onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
+        onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
+        onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
+        onRestart={claim.restart} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')} onClose={claim.close} />}
     </AccountDetailsView>;
   } else if (view === 'add') {
     content = <AddInstanceView onBack={() => setView('instances')} onRefresh={instances} busy={busy} />;

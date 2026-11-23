@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { hasDesktopClient, type DesktopClientState } from './bridge';
-import type { AccountRecovery, BindField, BindProblem, BindStep, ComputerBinding, EligibleName } from './BindComputerView';
+import type { BindField, BindProblem, BindStep, ComputerBinding, EligibleName } from './BindComputerView';
 
 /**
  * Binding this computer from the Account page (AV-8). Native owns every decision; this hook only
@@ -71,11 +71,18 @@ const SAVE_WAIT_MS = 1500;
  *  unverifiable challenge or reply is final and starts again. */
 const PASSKEY_FAILED = new Set(['passkey_cancelled', 'passkey_unavailable', 'invalid_passkey_assertion']);
 
+/** The Account page shows only whether it can be used and what to do (owner, 2026-11-23). An older
+ *  attempt still running or ended is "not bound": native refuses or replaces it on Bind, and the
+ *  dialog says the one sentence. Only a repair no button here can do keeps its own line. */
 const OBSERVED: Record<string, ComputerBinding['state']> = {
-  no_published_binding: 'unbound', legacy_review_required: 'unbound', owner_observed: 'bound',
-  bound_owner_unconfirmed: 'unconfirmed', legacy_wait: 'pending', legacy_publication_pending: 'pending',
+  no_published_binding: 'unbound', legacy_review_required: 'unbound', legacy_wait: 'unbound',
+  legacy_publication_pending: 'unbound', owner_observed: 'bound', bound_owner_unconfirmed: 'otherAccount',
   legacy_recovery_required: 'repair',
 };
+/** Native read this computer's binding here, then could not read the account's list: bound, so
+ *  shown bound while it is read again quietly. Every other failure may come before that. */
+const BOUND_UNREAD = 'account_observation_unavailable';
+const QUIET_RETRY_MS = 30_000;
 
 /** What a review showed the person, to say what changed when native shows another one. */
 type Shown = { account: string; computer: string; host: string | null; available: boolean };
@@ -102,9 +109,16 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   const handles = useRef<Handles>({ ...NO_HANDLES });
   // `published`: native said this submission's sign-in is published and owes a second factor, so
   // the account's gate, once it shows that, is this sign-in's and not an earlier snapshot's.
-  const saving = useRef<{ tries: number; running: boolean; recover: string | null; timer: number | null; published: boolean } | null>(null);
+  // `thenOpen`: this recovery was continued from Bind, so the name opens once it is saved.
+  const saving = useRef<{ tries: number; running: boolean; recover: string | null; timer: number | null; published: boolean; thenOpen?: boolean } | null>(null);
+  const stopSaving = useCallback(() => {
+    if (saving.current?.timer) window.clearTimeout(saving.current.timer);
+    saving.current = null;
+  }, []);
   const [binding, setBinding] = useState<ComputerBinding>({ state: 'reading' });
-  const [recovery, setRecovery] = useState<{ state: AccountRecovery; receipt: string | null } | null>(null);
+  // An accepted sign-in waiting to be saved: not shown on the page; Bind continues it first.
+  const recovery = useRef<string | null>(null);
+  const quiet = useRef<number | null>(null);
   // The flow belongs to the generation it started in: a changed account or document generation
   // ends it (native has fenced it already), without a state update from an effect.
   const [flow, setFlow] = useState<{ generation: number; step: BindStep | null }>({ generation, step: null });
@@ -141,29 +155,34 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     setBusyAt(null);
   }, [setStep]);
 
-  const observe = useCallback(async () => {
-    setBinding({ state: 'reading' });
+  const observe = useCallback(async (quietly = false) => {
+    if (quiet.current !== null) { window.clearTimeout(quiet.current); quiet.current = null; }
+    if (!quietly) setBinding({ state: 'reading' });
     const reply = await call('desktop_claim_review', { type: 'observe_current_binding' });
     if (!reply) return;
-    if (!reply.ok) { setBinding(reply.code === 'local_runtime_upgrade_required' ? { state: 'upgrade' } : { state: 'unknown' }); return; }
-    const answer = str(reply.value?.state) ?? '';
-    const kind = OBSERVED[answer];
     const local = latest.current?.local;
     const listed = latest.current?.catalog.instances.find((each) => each.id === local?.instance_id);
     const url = local?.remote_access_url ?? null;
-    const host = listed?.host ?? (url ? new URL(url).host : null);
-    if (kind === 'bound') setBinding({ state: 'bound', host, url: local?.remote_access === 'on' ? url : null });
-    else if (kind === 'unconfirmed') setBinding({ state: 'unconfirmed', host });
-    else if (kind === 'unbound') setBinding({ state: 'unbound', previous: answer === 'legacy_review_required' });
-    else if (kind) setBinding({ state: kind } as ComputerBinding);
-    else setBinding({ state: 'unknown' });
+    const bound = (): ComputerBinding => ({ state: 'bound', host: listed?.host ?? (url ? new URL(url).host : null), url: local?.remote_access === 'on' ? url : null });
+    if (!reply.ok) {
+      if (reply.code === BOUND_UNREAD) {
+        setBinding(bound());
+        quiet.current = window.setTimeout(() => { quiet.current = null; void observe(true); }, QUIET_RETRY_MS);
+        return;
+      }
+      setBinding(reply.code === 'local_runtime_upgrade_required' ? { state: 'upgrade' } : { state: 'unknown' });
+      return;
+    }
+    const kind = OBSERVED[str(reply.value?.state) ?? ''];
+    setBinding(kind === 'bound' ? bound() : kind ? { state: kind } as ComputerBinding : { state: 'unknown' });
   }, [call]);
+  useEffect(() => () => { if (quiet.current !== null) window.clearTimeout(quiet.current); }, []);
 
   const inspect = useCallback(async () => {
     const reply = await call('desktop_account_recovery', { type: 'inspect' });
     if (!reply) return;
     const receipt = reply.ok ? str(reply.value?.receipt) : null;
-    setRecovery(reply.ok && reply.value?.state === 'available' && receipt ? { state: 'available', receipt } : null);
+    recovery.current = reply.ok && reply.value?.state === 'available' && receipt ? receipt : null;
   }, [call]);
 
   // The two reads, once per showing of the Account page and per account generation.
@@ -238,7 +257,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
         if (selected !== null && selected !== name) { setStep({ kind: 'name', name, check: 'invalid' }); return; }
         const check = screen.taken === true ? 'taken' : !selected ? 'invalid' : eligible.some((each) => each.prefix === selected) ? 'reclaim' : 'free';
         shown = { account, computer, host: selected ? hostFor(selected) : null, available: check === 'free' || check === 'reclaim' };
-        next = { kind: 'name', name, check };
+        next = { kind: 'name', name, check, held: eligible };
       } else if (kind === 'existing') {
         const host = str(screen.hostname) ?? '';
         shown = { account, computer, host, available: true };
@@ -298,9 +317,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     try { await work(); } finally { if (mine === epoch.current) setBusyAt(null); }
   }, [busy]);
 
-  const start = useCallback(() => run(async () => {
-    handles.current = { ...NO_HANDLES };
-    nameRef.current = '';
+  /** Opens a review (one ticket) and shows what native read for it. */
+  const openReview = useCallback(async () => {
     setStep({ kind: 'opening' });
     const opened = await call('desktop_claim_review', { type: 'open' });
     if (!opened) return;
@@ -311,7 +329,22 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!read) return;
     if (!read.ok) { setStep(problemFor(read.code)); return; }
     await showReview(read.value ?? {}, 'read');
-  }), [run, call, showReview, setStep]);
+  }, [call, showReview, setStep]);
+
+  const start = useCallback(() => run(async () => {
+    handles.current = { ...NO_HANDLES };
+    nameRef.current = '';
+    // An accepted sign-in still waiting to be saved comes first: the dialog continues it on a
+    // press (no new code), then opens the name.
+    if (recovery.current) {
+      stopSaving();
+      saving.current = { tries: 0, running: false, recover: recovery.current, timer: null, published: false, thenOpen: true };
+      recovery.current = null;
+      setStep({ kind: 'saving', recover: true });
+      return;
+    }
+    await openReview();
+  }), [run, openReview, setStep, stopSaving]);
 
   const timer = useRef<number | null>(null);
   const changeName = useCallback((typed: string) => {
@@ -395,10 +428,6 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   // continues it on a press, with no new code. This runs only after the person's own verification
   // in this document; a new document starts with no flow.
   const [saveTick, setSaveTick] = useState(0);
-  const stopSaving = useCallback(() => {
-    if (saving.current?.timer) window.clearTimeout(saving.current.timer);
-    saving.current = null;
-  }, []);
   const afterVerification = useCallback((submission: string) => {
     handles.current.submission = submission;
     stopSaving();
@@ -461,7 +490,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply || saving.current !== current) return;
     const answer = reply.ok ? str(reply.value?.state) : null;
     const renewed = reply.ok && answer === 'available' ? str(reply.value?.receipt) : null;
-    if (answer === 'saved') {
+    if (answer === 'saved' && current.thenOpen) {
+      stopSaving();
+      await openReview();
+    } else if (answer === 'saved') {
       current.recover = null;
       current.tries = 0;
       setStep({ kind: 'saving' });
@@ -473,7 +505,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       stopSaving();
       setStep({ kind: 'problem', problem: answer === 'storage_blocked' ? 'storage' : 'expired' });
     }
-  }), [run, call, setStep, stopSaving]);
+  }), [run, call, openReview, setStep, stopSaving]);
 
   const submissionFrom = (reply: Reply | null): string | null => reply?.ok ? str(reply.value?.submission) : null;
 
@@ -584,23 +616,11 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     void start();
   }, [reset, start]);
 
-  const resume = useCallback(() => run(async () => {
-    const receipt = recovery?.receipt;
-    if (!receipt) return;
-    const reply = await call('desktop_account_recovery', { type: 'resume', receipt });
-    if (!reply) return;
-    const answer = reply.ok ? str(reply.value?.state) : null;
-    if (answer === 'saved') { setRecovery(null); void observe(); return; }
-    // Read back but not saved yet, or a retryable save: a new receipt for the next press.
-    const renewed = reply.ok && answer === 'available' ? str(reply.value?.receipt) : null;
-    if (renewed) { setRecovery({ state: 'available', receipt: renewed }); return; }
-    setRecovery({ state: answer === 'storage_blocked' ? 'blocked' : 'gone', receipt: null });
-  }), [run, call, recovery, observe]);
 
   return {
-    binding, recovery: recovery?.state ?? null, step, busy,
+    binding, step, busy,
     account: review.account, computer: review.computer,
     start, changeName, pick, confirm, sendCode, submitCode, passkey, beginSetup, savedCodes, setCode, factorStep,
-    close, restart, resume, recoverSaving, observe,
+    close, restart, recoverSaving, observe,
   };
 }

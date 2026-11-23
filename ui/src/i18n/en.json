@@ -8225,5 +8225,12 @@
       "browserHint": "Only this once: name it and get its domain on avibe.bot, then come back by itself, straight into the workbench.",
       "skip": "Later, go to the workbench"
     }
+  },
+  "domainField": {
+    "free": "Available",
+    "taken": "Taken",
+    "reclaim": "Yours from before",
+    "checking": "Checking…",
+    "invalid": "Lowercase letters, digits and hyphens only"
   }
 }
