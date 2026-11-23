@@ -207,13 +207,16 @@ it('waits for the accepted sign-in to be published before reading the ticket aga
 });
 
 it('a published sign-in that still owes a second factor asks for it, with the same submission', async () => {
-  const page = mount({ ...proofAnswers, review_after_proof: (action: Action) => (action.submission === 's' ? { state: 'publishing' } : { state: 'bound' }),
+  let published = false;
+  const page = mount({ ...proofAnswers,
+    review_after_proof: () => (published ? refuse('authentication_required')() : { state: 'publishing' }),
     submit_factor_code: { state: 'verification_accepted', submission: 's2' } });
   await verify();
   await screen.findByText(copy.saving);
+  published = true;
   await broadcast({ ...signedIn, revision: signedIn.revision + 5,
     account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['totp'] } });
-  const field = await screen.findByLabelText(en.mobileApp.twoFactor.totpLabel);
+  const field = await screen.findByLabelText(en.mobileApp.twoFactor.totpLabel, undefined, { timeout: 5000 });
   fireEvent.change(field, { target: { value: '654321' } });
   fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.verify }));
   await waitFor(() => expect(page.actions.find((each) => each.type === 'submit_factor_code'))
@@ -283,4 +286,33 @@ it('asks again only while native says publishing, one request at a time', async 
   await screen.findByRole('heading', { name: copy.boundTitle }, { timeout: 5000 });
   expect(most).toBe(1);
   expect(page.types().filter((type) => type === 'submit_proof_code')).toHaveLength(1);
+});
+
+it('a factor accepted while an earlier snapshot still owes one waits for this sign-in, then reads the ticket once', async () => {
+  const owing = { ...signedIn, account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['totp'] } } as DesktopClientState;
+  let saved = false;
+  let afterSave = 0;
+  const page = mount({ ...proofAnswers,
+    review_after_proof: (action: Action) => {
+      if (action.submission === 's') return refuse('authentication_required')();
+      if (!saved) return { state: 'publishing' };
+      afterSave += 1;
+      return { state: 'bound' };
+    },
+    submit_factor_code: { state: 'verification_accepted', submission: 's2' } });
+  await verify();
+  // The email code's sign-in is published and owes a factor.
+  await broadcast({ ...owing, revision: signedIn.revision + 3 });
+  fireEvent.change(await screen.findByLabelText(en.mobileApp.twoFactor.totpLabel), { target: { value: '654321' } });
+  fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.verify }));
+  await screen.findByText(copy.saving);
+  // The ordinary save lags: broadcasts still carry the snapshot that owes a factor.
+  await broadcast({ ...owing, revision: signedIn.revision + 4 });
+  await broadcast({ ...owing, revision: signedIn.revision + 5 });
+  expect(screen.queryByLabelText(en.mobileApp.twoFactor.totpLabel)).toBeNull();
+  saved = true;
+  await broadcast({ ...signedIn, revision: signedIn.revision + 6 });
+  await screen.findByRole('heading', { name: copy.boundTitle }, { timeout: 5000 });
+  expect(page.types().filter((type) => type === 'submit_factor_code')).toHaveLength(1);
+  expect(afterSave).toBe(1);
 });

@@ -92,7 +92,9 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   const latest = useRef(state);
   useLayoutEffect(() => { latest.current = state; });
   const handles = useRef<Handles>({ ...NO_HANDLES });
-  const saving = useRef<{ tries: number; running: boolean; recover: string | null; timer: number | null } | null>(null);
+  // `published`: native said this submission's sign-in is published and owes a second factor, so
+  // the account's gate, once it shows that, is this sign-in's and not an earlier snapshot's.
+  const saving = useRef<{ tries: number; running: boolean; recover: string | null; timer: number | null; published: boolean } | null>(null);
   const [binding, setBinding] = useState<ComputerBinding>({ state: 'reading' });
   const [recovery, setRecovery] = useState<{ state: AccountRecovery; receipt: string | null } | null>(null);
   // The flow belongs to the generation it started in: a changed account or document generation
@@ -377,7 +379,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   const afterVerification = useCallback((submission: string) => {
     handles.current.submission = submission;
     stopSaving();
-    saving.current = { tries: 0, running: false, recover: null, timer: null };
+    saving.current = { tries: 0, running: false, recover: null, timer: null, published: false };
     setStep({ kind: 'saving' });
     setSaveTick((tick) => tick + 1);
   }, [setStep, stopSaving]);
@@ -385,8 +387,21 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     const h = handles.current;
     const current = saving.current;
     if (!current || current.running || current.recover || !h.receipt || !h.submission) return;
-    // Published, and the new sign-in still owes a second factor.
-    if (owedFactor()) { stopSaving(); return; }
+    const retry = () => {
+      if (++current.tries < SAVE_TRIES) {
+        current.timer = window.setTimeout(() => setSaveTick((tick) => tick + 1), SAVE_WAIT_MS);
+        return true;
+      }
+      return false;
+    };
+    // The account state never decides on its own: an earlier snapshot can still owe a factor this
+    // submission has just answered. Only after native said this one is published and owes a factor
+    // does the account's gate choose the step, once its broadcast shows it.
+    if (current.published) {
+      if (owedFactor()) { stopSaving(); return; }
+      if (!retry()) { stopSaving(); setStep(problemFor('authentication_required')); }
+      return;
+    }
     current.running = true;
     const reply = await call('desktop_claim_review', { type: 'review_after_proof', receipt: h.receipt, submission: h.submission });
     current.running = false;
@@ -395,15 +410,16 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (reply.ok && !publishing) { stopSaving(); await decided(reply.value); return; }
     if (!reply.ok) {
       // Published, and the new sign-in owes a second factor: the account's gate says which.
-      if (reply.code === 'authentication_required' && owedFactor()) { stopSaving(); return; }
+      if (reply.code === 'authentication_required') {
+        current.published = true;
+        if (owedFactor()) { stopSaving(); return; }
+        if (retry()) return;
+      }
       stopSaving();
       setStep(problemFor(reply.code));
       return;
     }
-    if (++current.tries < SAVE_TRIES) {
-      current.timer = window.setTimeout(() => setSaveTick((tick) => tick + 1), SAVE_WAIT_MS);
-      return;
-    }
+    if (retry()) return;
     const inspected = await call('desktop_account_recovery', { type: 'inspect' });
     if (saving.current !== current) return;
     const receipt = inspected?.ok && inspected.value?.state === 'available' ? str(inspected.value.receipt) : null;
