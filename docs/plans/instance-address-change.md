@@ -385,14 +385,6 @@ carries; the current generation is no proof of it. Any other change is
 adopted as one made elsewhere, which deletes nothing. Until such a state, the
 Owner cannot start another change (`operation_in_progress`).
 
-What each route does, with and without a held change:
-
-| | No held change | A held change |
-|---|---|---|
-| `GET /api/instance-address` | Reads the state when it is older than 60 seconds (never past a standing refusal); `operation` is the last failure, or `null` | Only the held check: one read-only read, at most once a minute, also past a standing refusal; `operation: {state:"pending", hostname, error, unconfirmed:true}` |
-| `preview` | One read, then the confirmation or the refusal | One read-only read; if the change is still held, `409 operation_in_progress` |
-| `change` | Writes the intent and waits briefly: `200` applied, `202` pending, or the refusal of a first sending | `409 operation_in_progress` (no confirmation can be issued while a change is held); a `change` that was waiting when its repeat was refused answers `202 pending` |
-
 - A held change is not sent again and nothing unlocks it by time: avibe.bot's
   state does not report a cancelled operation, so waiting, an unchanged
   address or a restart prove nothing. The way out without evidence is
