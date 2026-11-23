@@ -40,6 +40,7 @@ impl ResolvedRuntimeLauncher for Fixture {
         panic!("observation must not start a Runtime")
     }
     fn claim_helper(&self) -> Option<ClaimHelperCommand> {
+        eprintln!("observation fixture: resolving inspect peer");
         let exe = if cfg!(windows) { "python.exe" } else { "python3" };
         let interpreter = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .filter(|p| p.is_absolute())
@@ -68,7 +69,9 @@ impl Transport for Wire {
     async fn send(&self, r: Request) -> Result<Response> {
         let mut headers = HeaderMap::new();
         assert!(!r.headers.contains_key(AUTHORIZATION));
-        let (status, body) = match self.calls.fetch_add(1, Ordering::SeqCst) {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        eprintln!("observation fixture: transport call {call}");
+        let (status, body) = match call {
             0 => {
                 assert_eq!(
                     (r.method, r.url.as_str()),
@@ -116,8 +119,7 @@ impl Transport for Wire {
 fn request(generation: u64, action: Value) -> ClaimRequest {
     serde_json::from_value(json!({"expected_generation":generation,"action":action})).unwrap()
 }
-async fn exercise(case: &'static str) {
-    let root = tempfile::tempdir().unwrap();
+async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     std::fs::write(root.path().join("peer.py"), include_bytes!("observation_peer.py")).unwrap();
     let fixture = Arc::new(Fixture {
         root: root.path().to_owned(),
@@ -130,6 +132,7 @@ async fn exercise(case: &'static str) {
             BootstrapPhase::Ready
         );
     }
+    eprintln!("observation fixture: bootstrap complete");
     let wire = Arc::new(Wire {
         case,
         calls: AtomicU64::new(0),
@@ -191,6 +194,7 @@ async fn exercise(case: &'static str) {
         assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
         return;
     }
+    eprintln!("observation fixture: dispatch");
     let work = c.claim_review(&host, &caller, "en", observe());
     tokio::pin!(work);
     if case == "during" {
@@ -202,6 +206,7 @@ async fn exercise(case: &'static str) {
         return;
     }
     let pending = work.await;
+    eprintln!("observation fixture: dispatch returned");
     if case == "no_source" {
         assert!(pending.is_err());
         assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
@@ -293,8 +298,25 @@ async fn current_binding_is_read_only_and_only_the_original_document_receives_it
         "naming",
         "no_source",
     ] {
-        tokio::time::timeout(Duration::from_secs(15), exercise(case))
+        let root = tempfile::tempdir().unwrap();
+        if tokio::time::timeout(Duration::from_secs(15), exercise(case, &root))
             .await
-            .expect(case);
+            .is_err()
+        {
+            // Peer-side progress only: no frame, URL, credential, nonce or child stderr.
+            let phase = [
+                "inspect-finished",
+                "unchanged",
+                "recheck",
+                "binding",
+                "begin",
+                "challenge",
+                "peer-started",
+            ]
+            .into_iter()
+            .find(|phase| root.path().join(phase).is_file())
+            .unwrap_or("before-peer-start");
+            panic!("binding observation timed out: {case}, peer stage: {phase}");
+        }
     }
 }
