@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Mapping
@@ -19866,11 +19867,49 @@ def _inject_show_system_entry(
         f'<meta name="{_SHOW_SYSTEM_ENTRY_META}" content="{escaped_payload}">'
         f'<script defer src="{html.escape(base + _SHOW_SYSTEM_ENTRY_SCRIPT, quote=True)}"></script>'
     )
-    head_match = re.search(r"<head\b[^>]*>", document, flags=re.IGNORECASE)
-    if head_match:
-        document = f"{document[:head_match.end()]}{tags}{document[head_match.end():]}"
-    else:
-        document = f"{tags}{document}"
+    # Locate a real token, not a head-shaped string inside a comment or a
+    # quoted attribute. Keep the prologue/doctype and all authored bytes intact.
+    # Without an explicit head, metadata opens the browser's implicit head.
+    line_starts = [0] + [match.end() for match in re.finditer("\n", document)]
+
+    class InsertionPointFound(Exception):
+        pass
+
+    class HeadInsertionPoint(HTMLParser):
+        def document_offset(self) -> int:
+            line, column = self.getpos()
+            return line_starts[line - 1] + column
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            if tag != "html":
+                position = self.document_offset()
+                if tag == "head":
+                    position += len(self.get_starttag_text())
+                raise InsertionPointFound(position)
+
+        def handle_endtag(self, tag: str) -> None:
+            raise InsertionPointFound(self.document_offset())
+
+        def handle_data(self, data: str) -> None:
+            prefix = "\ufeff" if self.document_offset() == 0 and data.startswith("\ufeff") else ""
+            remaining = data[len(prefix):].lstrip(" \t\r\n\f")
+            if remaining:
+                raise InsertionPointFound(self.document_offset() + len(data) - len(remaining))
+
+        def handle_entityref(self, name: str) -> None:
+            raise InsertionPointFound(self.document_offset())
+
+        handle_charref = handle_entityref
+
+    parser = HeadInsertionPoint(convert_charrefs=False)
+    position = len(document)
+    try:
+        parser.feed(document)
+        parser.close()
+    except InsertionPointFound as found:
+        # Stop at the head boundary; authored scripts/body need no parsing.
+        position = found.args[0]
+    document = f"{document[:position]}{tags}{document[position:]}"
     return document.encode("utf-8")
 
 
