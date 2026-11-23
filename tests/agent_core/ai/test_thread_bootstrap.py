@@ -200,7 +200,7 @@ def test_shared_reservation_survives_restart_and_clock_boundaries(monkeypatch, t
 
     now = [time.time() - 100]
     monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
-    routes = [f"route-{i}".encode() for i in range(6)]
+    routes = [bytes([i]) * 32 for i in range(6)]
     assert ledger.reserve(routes[0], 10, preview=True)[0] is not None and list(tmp_path.iterdir()) == []
 
     # No shared connection or Python lock: each reservation opens the same on-disk instance.
@@ -235,7 +235,7 @@ def test_late_loss_at_capacity_preserves_both_routes_and_reclaims_expired_receip
     monkeypatch.setattr(ledger, "MAX_ROUTES", 1)
     now = [time.time() - ledger.DAY - 10]
     monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
-    a, b, c = b"A", b"B", b"C"
+    a, b, c = (v * 32 for v in (b"A", b"B", b"C"))
     owner, _ = ledger.reserve(a, 100, False)
     now[0] += ledger.DAY + 1
     second, _ = ledger.reserve(b, 100, False)
@@ -253,7 +253,7 @@ def test_late_loss_at_capacity_preserves_both_routes_and_reclaims_expired_receip
         [
             sys.executable,
             "-c",
-            "from core.agent_core.ai import thread_bootstrap as b; assert all(b.reserve(r, 100, True)[1] == 'bootstrap_read_loss' for r in (b'A', b'B'))",
+            "from core.agent_core.ai import thread_bootstrap as b; assert all(b.reserve(r, 100, True)[1] == 'bootstrap_read_loss' for r in (b'A'*32, b'B'*32))",
         ],
         check=True,
         timeout=10,
@@ -269,6 +269,52 @@ def test_late_loss_at_capacity_preserves_both_routes_and_reclaims_expired_receip
     assert marker.exists()  # preview is inert even on expired state
     assert ledger.reserve(a, 100, False)[1] == "bootstrap_capacity"
     assert not marker.exists()
+
+
+def test_sweep_is_bounded_and_only_reclaims_owned_regular_files(monkeypatch, tmp_path):
+    import os
+    import subprocess
+    import sys
+    import time
+    from core.agent_core.ai import thread_bootstrap as ledger
+    from storage.lock import MigrationFileLock
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    trial, _ = ledger.reserve(b"A" * 32, 10, False)
+    marker = ledger._loss_marker(b"D" * 32)
+    directory = marker.parent
+    directory.mkdir()
+    marker.touch()
+    junk = directory / ".DS_Store"
+    junk.write_text("foreign")
+    sub = directory / ("ab" * 32)
+    sub.mkdir()
+    link = directory / ("cd" * 32)
+    link.symlink_to(junk)
+    old = time.time() - 2 * ledger.DAY
+    for p in (junk, link, sub, marker):
+        os.utime(p, (old, old), follow_symlinks=False)
+    # The child cannot take this lock until after it returns; the timeout kills an unbounded regression.
+    with MigrationFileLock(directory.with_suffix(".lock")):
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                f"""from core.agent_core.ai import thread_bootstrap as b
+r = b'B' * 32
+assert b.reserve(r, 10, True)[1] == 'bootstrap_trial'
+assert b.reserve(r, 10, False)[0] is None
+owner = b.Trial({trial.ticket!r}, 10, False)
+assert b.settle(b'A' * 32, owner, 'bootstrap_proven') != 'bootstrap_proven'
+assert b.settle(b'A' * 32, owner, 'bootstrap_read_loss') == 'bootstrap_read_loss'
+assert b.reserve(b'A' * 32, 10, True)[1] == 'bootstrap_read_loss'
+""",
+            ],
+            check=True,
+            timeout=3,
+        )
+    assert ledger.reserve(b"B" * 32, 10, False)[0] is not None
+    assert not marker.exists() and junk.read_text() == "foreign" and link.is_symlink() and sub.is_dir()
 
 
 @pytest.mark.parametrize("change", ["session", "model", "edit", "disabled", "cold"])

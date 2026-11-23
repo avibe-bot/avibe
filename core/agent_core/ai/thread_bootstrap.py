@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
+import stat
 import time
 import uuid
 from contextlib import closing
@@ -27,34 +29,76 @@ def _loss_marker(route: bytes):
     return get_state_dir() / "message-thread-loss" / route.hex()
 
 
-def _lost_at(route: bytes) -> float:
+def _regular_stamp(path) -> float:
     try:
-        return _loss_marker(route).stat().st_mtime
+        info = path.lstat()
     except FileNotFoundError:
         return 0
+    return info.st_mtime if stat.S_ISREG(info.st_mode) else 0
 
 
-def _receipt_lock(directory):
-    # Never wait for a receipt lock with a SQLite write transaction open.
-    return MigrationFileLock(directory.with_suffix(".lock"), timeout_seconds=None)
+def _directory(path) -> bool:
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _lost_at(route: bytes) -> float:
+    marker = _loss_marker(route)
+    if not _directory(marker.parent):
+        return 0
+    # Order matters: GC can move active -> retiring, never the reverse. Read both even after restart.
+    active = _regular_stamp(marker)
+    retiring = marker.parent / "retiring"
+    return max(active, _regular_stamp(retiring / marker.name) if _directory(retiring) else 0)
 
 
 def _write_loss(route: bytes) -> str:
+    # Never wait for the sweeper, SQLite, or a suspended writer to preserve measured loss.
     marker = _loss_marker(route)
-    with _receipt_lock(marker.parent):
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    if not _directory(marker.parent):
+        raise OSError("Invalid receipt directory")
+    try:
+        marker.touch(exist_ok=False)
+    except FileExistsError:
+        if not _regular_stamp(marker):
+            # A concurrent sweep may just have renamed it, leaving the renewal its own fresh name.
+            marker.touch(exist_ok=False)
+        else:
+            try:
+                os.utime(marker, follow_symlinks=False)
+            except FileNotFoundError:
+                marker.touch(exist_ok=True)
     return "bootstrap_read_loss"
 
 
+def _expired(directory, cutoff):
+    if _directory(directory):
+        for p in directory.iterdir():
+            if re.fullmatch("[0-9a-f]{64}", p.name) and (stamp := _regular_stamp(p)) and stamp <= cutoff:
+                yield p, stamp
+
+
 def _prune_losses(db, directory) -> None:
-    if not directory.is_dir():
+    if not _directory(directory):
         return
-    # Renew and delete share the same cross-process lock. Commit any revocation before unlinking:
-    # a crash between the two operations must not resurrect an older proof.
-    with _receipt_lock(directory):
+    # Only maintenance ever takes this try-lock, and only before starting a SQLite transaction.
+    # Busy => fail closed for admission/proof; the loss path can still write its active receipt.
+    with MigrationFileLock(directory.with_suffix(".lock"), timeout_seconds=0):
         cutoff = time.time() - DAY
-        expired = [(p, stamp) for p in directory.iterdir() if (stamp := p.stat().st_mtime) <= cutoff]
+        retiring = directory / "retiring"
+        for marker, _ in _expired(directory, cutoff):
+            retiring.mkdir(exist_ok=True)
+            if not _directory(retiring):
+                raise OSError("Invalid receipt retirement directory")
+            target = retiring / marker.name
+            if not os.path.lexists(target):
+                marker.rename(target)
+        # Recheck *after* the atomic handoff: a concurrent renewal before rename moves with it;
+        # after rename it writes the active name and GC cannot unlink it. Persist revocations first.
+        expired = list(_expired(retiring, cutoff))
         if expired:
             with db:
                 db.executemany(
