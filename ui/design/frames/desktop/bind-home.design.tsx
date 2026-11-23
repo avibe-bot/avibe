@@ -4,10 +4,7 @@
 // the shell brings its bundled document to the front with the dialog, binds there, and returns to the
 // same Workbench page. A signed-out App opens the dialog on its own sign-in, then the name.
 import type { ReactNode } from 'react';
-import { useTranslation } from 'react-i18next';
-import { ArrowLeft } from 'lucide-react';
 import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
-import { Button } from '@/components/ui/button';
 import { DevicesPageView } from '@/components/devices/DevicesPageView';
 import type { Device } from '@/components/devices/types';
 import { SetupRemoteAccessView } from '@/components/onboarding/SetupRemoteAccessView';
@@ -17,6 +14,7 @@ import { DesktopSignIn } from '@/desktop/DesktopSignIn';
 import type { DesktopClientState } from '@/desktop/bridge';
 import { SIGN_IN_PROVIDERS } from '@/sign-in/types';
 import { frames, type FrameSpec } from '../../frame';
+import { DesktopBackHeader } from '../../kit/desktop-back-header';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
 import { setupFixtures } from '../setup/fixtures';
 import { copyFor } from './instances-fixtures';
@@ -55,15 +53,11 @@ const dialog = (step: BindStep) => <BindDialog step={step} account={EMAIL}
 
 /** The Devices page, remote access off, as the Desktop's Workbench shows it. */
 const devicesOff = () => <DevicesPageView ownerEmail={EMAIL} reach={{ state: 'off', surface: 'browser' }} devices={[macbook]} />;
-function BackHeader() {
-  const { t } = useTranslation();
-  return <header className="flex shrink-0 items-center px-8 py-3"><Button variant="ghost" size="sm"><ArrowLeft className="size-4" />{t('desktopAccount.backWorkbench')}</Button></header>;
-}
 /** The shell's trusted sheet as it can be today: its bundled document brought to the front (the
  *  Workbench hidden behind it, kept as it was), with the dialog. */
 const sheet = (step: BindStep) => () => <div className="flex h-full flex-col bg-background text-foreground">
   <div aria-hidden="true" className="h-7 shrink-0 bg-surface" />
-  <BackHeader />
+  <DesktopBackHeader />
   <main className="min-h-0 flex-1" />
   {dialog(step)}
 </div>;
