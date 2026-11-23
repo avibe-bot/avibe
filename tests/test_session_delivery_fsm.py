@@ -789,9 +789,9 @@ def test_fifo_segment_never_mixes_dictated_and_typed_inputs(managers) -> None:
         "spoken one\nspoken two", "typed three\ntyped four", "spoken five",
     ]
     assert rendered_inputs == [
-        f"[Alice<remote:alice>]\n{VOICE_INPUT_LINE}\nspoken one\nspoken two",
-        "[Alice<remote:alice>]\ntyped three\ntyped four",
-        f"[Alice<remote:alice>]\n{VOICE_INPUT_LINE}\nspoken five",
+        f"[Alice<remote:alice>]\n{VOICE_INPUT_LINE}\n[Source: unknown]\nspoken one\nspoken two",
+        "[Alice<remote:alice>]\n[Source: unknown]\ntyped three\ntyped four",
+        f"[Alice<remote:alice>]\n{VOICE_INPUT_LINE}\n[Source: unknown]\nspoken five",
     ]
 
     with engine.connect() as conn:
@@ -9046,6 +9046,33 @@ async def test_unlinked_turn_end_never_enters_successor_write_transaction(manage
     assert await manager._resume_linked_control_successor("ses_fsm", turn_id) is None
 
 
+def test_turn_end_probes_seek_only_live_rows_in_fifo_order(managers):
+    """A negative head/owner check must not read a Session's terminal history."""
+    from sqlalchemy import event
+
+    _, _, engine, *_ = managers
+    plans = []
+
+    def explain(_conn, cursor, statement, parameters, *_):
+        plans.append([r[3] for r in cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+
+    with engine.connect() as conn:
+        event.listen(conn, "before_cursor_execute", explain)
+        for probe in (
+            delivery_store.ordering_head,
+            lambda c, s: delivery_store.ordering_head(c, s, include_claimable=False),
+            delivery_store.claimable_fifo_head,
+            delivery_store.claimable_fifo_prefix,
+            delivery_store.active_turn,
+        ):
+            assert not probe(conn, "ses_fsm")
+
+    assert len(plans) == 5
+    for details, index in zip(plans, ["ix_message_deliveries_session_order"] * 4 + ["uq_session_turns_live_session"]):
+        assert any("SEARCH" in d and f"{index} (session_id=?)" in d for d in details), details
+        assert not any("TEMP B-TREE" in d for d in details), details
+
+
 def test_control_predecessor_lookup_seeks_both_link_ids(managers):
     _, _, engine, *_ = managers
     with engine.connect() as conn:
@@ -9540,3 +9567,40 @@ def test_runtime_recovery_reads_a_starting_turns_owner_off_the_controller_loop(m
     assert asyncio.run(asyncio.wait_for(scenario(), 10))
     assert answered_during_read == [True]
     assert [started for started, _text in starts] == [turn_id, turn_id]
+
+
+def test_queue_preserves_each_inputs_terminal_at_the_consumer(managers):
+    """MESSAGE-DELIVERY-341: queued messages retain their own source at consumption."""
+    from core.handlers.message_handler import MessageHandler
+
+    manager, _other, engine, _engine_b, starts = managers
+    active, _ = asyncio.run(_activate(manager, text="active"))
+    queued = [asyncio.run(manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content=text, author_id="alice",
+                        message_kind="original", metadata={"terminal_source": {"type": terminal, "surface": surface}}),
+        context=_context(),
+    )) for text, terminal, surface in (
+        ("from main", "mac_app", "main"), ("from mini", "mac_app", "mini"),
+        ("from phone", "iphone_app", "main"),
+    )]
+    handler = SimpleNamespace(_input_user_name=AsyncMock(return_value="Alice"))
+    seen = []
+    previous = active
+    for item in queued:
+        assert asyncio.run(manager.terminalize_turn(previous))
+        row = _row(engine, str(item.delivery_id))
+        previous = row["turn_id"]
+        context = _context()
+        manager._hydrate_delivery_batch_context(context, [row])
+        facts = asyncio.run(MessageHandler.prepare_input_metadata(handler, context, human=True))
+        text = next(text for turn, text in starts if turn == previous)
+        seen.append(facts.render(text, SimpleNamespace(include_user_info=False, include_time_info=False)))
+        context.platform_specific["turn_token"] = previous
+        context.platform_specific["agent_runtime_turn_token"] = f"runtime-{previous}"
+        manager.on_native_start(context, backend="codex", runtime_key=f"runtime-key-{previous}",
+                                runtime_turn_id=f"runtime-{previous}")
+    assert seen == [
+        "[Source: mac_app; surface=main]\nfrom main",
+        "[Source: mac_app; surface=mini]\nfrom mini",
+        "[Source: iphone_app; surface=main]\nfrom phone",
+    ]

@@ -157,4 +157,49 @@ describe('Settings › Notifications', () => {
     await waitFor(() => expect(screen.getByText('settings.notifications.desktopSaveFailed')).toBeTruthy());
     expect(desktopSwitch.getAttribute('aria-checked')).toBe('true');
   });
+
+  function desktopShell(authorization: () => string) {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_NOTIFICATIONS__', { configurable: true, value: true });
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'desktop_notifications_state') return true;
+      if (command === 'desktop_notifications_authorization') return authorization();
+      return undefined;
+    });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
+    return invoke;
+  }
+
+  it('says notifications can be answered where macOS reports a permission', async () => {
+    desktopShell(() => 'authorized');
+    mount({ enabled: true, bots: true, sessions: true }, false);
+    await waitFor(() => expect(screen.getByText('settings.notifications.desktopHintAnswers')).toBeTruthy());
+    expect(screen.getByRole('switch', { name: 'settings.notifications.desktopTitle' })).toBeTruthy();
+  });
+
+  it('replaces the switch with the way to System Settings while macOS refuses, and reads again on return', async () => {
+    let authorization = 'denied';
+    const invoke = desktopShell(() => authorization);
+    mount({ enabled: true, bots: true, sessions: true }, false);
+
+    const open = await waitFor(() => screen.getByRole('button', { name: 'settings.notifications.openSystemSettings' }));
+    expect(screen.getByText('settings.notifications.desktopDenied')).toBeTruthy();
+    expect(screen.queryByRole('switch', { name: 'settings.notifications.desktopTitle' })).toBeNull();
+    fireEvent.click(open);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('desktop_notifications_open_settings'));
+
+    authorization = 'authorized';
+    fireEvent.focus(window);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'settings.notifications.desktopTitle' })).toBeTruthy());
+    expect(screen.queryByText('settings.notifications.desktopDenied')).toBeNull();
+  });
+
+  it('keeps the shipped copy on a shell without the permission command or without a system permission', async () => {
+    for (const authorization of ['unavailable', 'something-else']) {
+      desktopShell(() => authorization);
+      mount({ enabled: true, bots: true, sessions: true }, false);
+      await waitFor(() => expect(screen.getByText('settings.notifications.desktopHint')).toBeTruthy());
+      cleanup();
+    }
+  });
 });

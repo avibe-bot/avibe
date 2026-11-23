@@ -19,6 +19,7 @@ change (the turn's pin identity claim, made atomically at final admission).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Final, Mapping, Optional
@@ -89,11 +90,35 @@ def _declaration_tools() -> Mapping[str, Mapping[str, str]]:
     return tools
 
 
+THREAD_CALLS_HEADER: Final = "x-avibe-thread-declarations"
+
+
+def thread_mode(payload: Mapping[str, Any]) -> str | None:
+    thread = payload.get("thread")
+    return thread.get("type") if isinstance(thread, Mapping) else None
+
+
+def read_thread_calls(value: str) -> frozenset[tuple[str, str]]:
+    """Only compact catalog declarations travel between Vibey and its local pinned Hub."""
+    if len(value) > 2048:
+        raise ValueError("oversized declarations")
+    entries = json.loads(value)
+    catalog = _declaration_tools().get("anthropic", {})
+    if not isinstance(entries, list) or not all(
+        isinstance(e, list) and len(e) == 2 and all(isinstance(s, str) for s in e) and catalog.get(e[1]) == e[0]
+        for e in entries
+    ):
+        raise ValueError("invalid declarations")
+    return frozenset((name, kind) for name, kind in entries)
+
+
 def hosted_content(request: Mapping[str, Any], protocol: str, *, pinned: bool) -> HostedContent:
     """The hosted declarations and replayed native items in a request body, by tool."""
 
     declared = _declaration_tools().get(protocol, {})
     calls = frozenset((declared[kind], kind) for kind in declared_tool_types(request) if kind in declared)
+    if pinned and protocol == "anthropic":
+        calls |= getattr(request, "thread_calls", frozenset())
     if protocol == "openai_responses":
         replays, in_flight = _responses_replays(request.get("input"), pinned=pinned)
     elif protocol == "anthropic":

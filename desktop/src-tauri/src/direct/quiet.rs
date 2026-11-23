@@ -58,7 +58,27 @@ pub(super) struct PublicCopy {
     leg: Arc<Leg>,
     stopped: oneshot::Receiver<()>,
 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PublicCensus {
+    pub quiet: usize,
+    pub busy: usize,
+}
 impl PublicLegs {
+    pub(super) fn census(&self) -> PublicCensus {
+        let mut c = PublicCensus::default();
+        let now = Instant::now();
+        for leg in self.0.lock().unwrap().iter().filter_map(Weak::upgrade) {
+            let s = leg.0.lock().unwrap();
+            if s.stop.is_some() {
+                if s.quiet(now) {
+                    c.quiet += 1;
+                } else {
+                    c.busy += 1;
+                }
+            }
+        }
+        c
+    }
     pub(super) fn commit(&self, browser: &tokio::net::TcpStream, peer: &tokio::net::TcpStream) -> PublicCopy {
         let (stop, stopped) = oneshot::channel();
         let leg = Arc::new(Leg(Mutex::new(Activity {

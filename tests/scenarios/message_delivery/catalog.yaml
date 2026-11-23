@@ -565,5 +565,21 @@ scenarios:
       - tests/test_message_answers.py::test_dispatch_failure_releases_only_proven_unaccepted_answers
       - tests/test_message_answers.py::test_stale_and_missing_answers_do_not_dispatch
       - tests/test_message_answers.py::test_revoked_chat_permission_precedes_operation_replay
+  - id: MESSAGE-DELIVERY-341
+    name: Every human input carries its bounded terminal provenance at the native consumer, independent of display switches; authenticated registry facts precede client hints, absent facts remain unknown, and distinct terminal labels survive queue batching without changing canonical text
+    status: covered
+    kind: contract
+    layer: contract
+    test:
+      - tests/test_input_terminal_source.py::test_http_delivery_reaches_native_consumer
+      - tests/test_input_terminal_source.py::test_authenticated_session_wins_over_hint
+      - tests/test_input_terminal_source.py::test_im_native_consumer_uses_transport
+      - tests/test_session_delivery_fsm.py::test_queue_preserves_each_inputs_terminal_at_the_consumer
+    supporting_tests:
+      - ui/src/lib/apiFetch.test.ts
+      - ui/src/components/workbench/Composer.appendLine.test.tsx
+      - ui/src/desktop/desktopAnswerReceiver.test.ts
+      - ui/src/desktop/desktopComposeReceiver.test.ts
+      - ui/src/pet/PetPage.test.tsx
 next_priority:
-  - MESSAGE-DELIVERY-341
+  - MESSAGE-DELIVERY-342

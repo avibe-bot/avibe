@@ -131,12 +131,16 @@ fn shows(webview: &WKWebView, origin: &str) -> bool {
 ///
 /// `true` means the store took the configuration, not that any connection
 /// uses it. What WebKit was measured to do (`docs/plans/remote-direct-ios.md`
-/// section 2, on iOS; not measured on macOS either way):
-/// - a route written while the store has a live or pooled connection to the
-///   host is not used by that connection, nor by requests pooled on it, a
-///   reload included; only a connection opened later takes it;
-/// - so a window is routed from its first request only when the route is
-///   installed before the instance's first load.
+/// section 2 on iOS; on macOS by `examples/direct_webview_probe.rs`, its
+/// last three cases):
+/// - a route written before the store's first load of the host carries the
+///   page from its first request;
+/// - a route written while the store has a live connection to the host is
+///   not used: not by the next requests, a new navigation or a reload;
+/// - once every connection to the host has closed, the next one takes it.
+///
+/// So the shell installs it before an instance view's first load whenever
+/// it can (`wiring.rs`).
 pub fn install_route(
     webview: &WKWebView,
     _mtm: MainThreadMarker,

@@ -166,6 +166,7 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-computer-use-windows",
             "main-desktop-update",
             "main-app-windows",
+            "main-app-lock",
             "main-desktop-notifications",
             "main-instance-client",
             "main-window-focus",
@@ -707,11 +708,14 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_reset_voice_shortcut",
         "desktop_notifications_state",
         "desktop_notifications_set_enabled",
+        "desktop_notifications_authorization",
+        "desktop_notifications_open_settings",
         "desktop_update_remote_decline",
         "pet_ready",
         "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
+        "pet_frame_drawn",
         "pet_pointer",
         "pet_settle",
         "pet_hit_regions",
@@ -1107,7 +1111,7 @@ fn the_macos_overlay_title_bar_keeps_its_layout_and_defaults_to_no_inset() {
     assert_eq!(window["titleBarStyle"], "Overlay");
     assert_eq!(window["hiddenTitle"], true);
     assert_eq!(window["trafficLightPosition"]["x"], 12);
-    assert_eq!(window["trafficLightPosition"]["y"], 16);
+    assert_eq!(window["trafficLightPosition"]["y"], 22);
     // Bootstrap management and window gestures have separate capability grants.
     assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
     let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
@@ -1458,11 +1462,41 @@ fn start_at_login_is_restored_through_the_toggle_write_policy() {
         );
     }
     // The policy takes its write as `FnOnce` and the adapter runs it once, so a
-    // failure is reported, never retried. Nothing else enables the registration
-    // or draws its checkbox, so no caller can discard a write's result again.
+    // failure is reported, never retried. Deferred menu clicks may redraw the
+    // effective value, but must not become another registration write adapter.
     assert_eq!(source.matches("settle_start_at_login(").count(), 2);
     assert_eq!(source.matches(".enable()").count(), 1);
-    assert_eq!(source.matches("login.set_checked(").count(), 1);
+    let redraw = body("render_saved_checkmarks");
+    let check_redraw = |redraw: &str| {
+        assert!(redraw.contains("app.autolaunch().is_enabled().unwrap_or(false)"));
+        assert!(redraw.contains("menus.login.set_checked(login)"));
+        for forbidden in [
+            ".enable(",
+            ".disable(",
+            "set_start_at_login(",
+            "toggle_start_at_login(",
+            "settle_start_at_login(",
+            ".save(",
+            ".persist(",
+        ] {
+            assert!(!redraw.contains(forbidden), "redraw must not call {forbidden}");
+        }
+    };
+    check_redraw(&redraw);
+    assert_eq!(redraw.matches("login.set_checked(").count(), 1);
+    assert_eq!(adapter.matches("login.set_checked(").count(), 1);
+    assert_eq!(source.replace(&redraw, "").matches("login.set_checked(").count(), 1);
+    // Prove this boundary rejects accidental writes, rather than merely
+    // accepting the increased number of checkbox calls.
+    for mutation in [
+        "app.autolaunch().enable();",
+        "app.autolaunch().disable();",
+        "set_start_at_login(app, Ok(true));",
+        "preferences.save();",
+    ] {
+        let mutated = format!("{redraw}\n{mutation}");
+        assert!(std::panic::catch_unwind(|| check_redraw(&mutated)).is_err());
+    }
 }
 
 #[test]
@@ -1707,6 +1741,7 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
             "allow-pet-context-menu",
             "allow-pet-set-expanded",
             "allow-pet-drag",
+            "allow-pet-frame-drawn",
             "allow-pet-pointer",
             "allow-pet-settle",
             "allow-pet-hit-regions",
@@ -1780,7 +1815,9 @@ fn desktop_notifications_are_main_only_and_loopback_scoped() {
         grant["permissions"],
         serde_json::json!([
             "allow-desktop-notifications-state",
-            "allow-desktop-notifications-set-enabled"
+            "allow-desktop-notifications-set-enabled",
+            "allow-desktop-notifications-authorization",
+            "allow-desktop-notifications-open-settings"
         ])
     );
     let patterns = loopback_patterns(&grant);

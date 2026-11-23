@@ -12,6 +12,7 @@ visibility emission + background filtering.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -748,6 +749,202 @@ def test_active_view_captures_nonterminal_past_window_and_aliases(isolated_state
         "ses_oldq": "queued",
         "ses_run": "queued",
     }
+
+
+def test_active_graph_reads_metadata_only_for_a_callback_that_needs_it(isolated_state):
+    # Ordinary old terminal runs still count, but reading their metadata can
+    # traverse megabytes of result overflow pages. A sent callback needs no
+    # mode check; only the unsent one needs SQLite's JSON extractor.
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for sid in ("a", "b"):
+            _insert_session(conn, sid, scope_id=None)
+        for j in range(15):
+            _insert_run(conn, f"r{j:02}", session_id="a", created=NOW - timedelta(days=2, seconds=j),
+                        status="processing" if j == 14 else "completed")
+        _insert_run(conn, "sent", session_id="a", source_kind="agent", source_actor="b",
+                    callback_session_id="b", callback_status="sent", callback_run_id="delivery")
+        _insert_run(conn, "unsent", session_id="a", callback_session_id="b", callback_status="pending",
+                    metadata={"callback_mode": "failure"}, created=NOW)
+        calls = []
+
+        def extract(raw, path):
+            calls.append(path)
+            return json.loads(raw).get("callback_mode")
+
+        conn.connection.driver_connection.create_function("json_extract", 2, extract, deterministic=True)
+    try:
+        graph = agent_graph.build_graph(live_agents=[{"session_id": "b", "state": "idle"}],
+                                        include_ended=False, engine=engine, now=NOW)
+        assert calls == ["$.callback_mode"]
+        a = _nodes_by_id(graph)["a"]
+        assert (a["status"], a["run_counts"]) == ("queued", {"total": 17, "running": 1})
+        assert [r["id"] for r in a["runs"]] == ["unsent", "sent", *(f"r{j:02}" for j in range(8))]
+        assert _edge(graph, "callback", "a", "b")["last_run_id"] == "delivery"
+        assert _edge(graph, "spawn", "b", "a")["last_run_id"] == "sent"
+    finally:
+        engine.dispose()
+
+
+def test_history_proves_lineage_and_newest_callback_without_opening_older_modes(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for sid in ("root", "known", "sent", "mode", "hidden"):
+            _insert_session(conn, sid, scope_id=None)
+        # All callback rows are older than the window. An independently
+        # reached caller and a sent callback establish two endpoints without
+        # consulting metadata. Two others need a mode check to decide closure.
+        _insert_run(conn, "spawn", session_id="root", source_kind="agent", source_actor="known")
+        for j in range(24):
+            _insert_run(conn, f"old-{j}", session_id="root", created=NOW - timedelta(days=6, seconds=j),
+                        callback_session_id="known", callback_status="skipped",
+                        metadata={"callback_mode": "failure", "probe": "irrelevant"})
+        for idx, (target, status, mode) in enumerate([
+            ("known", "sent", "failure"), ("sent", "sent", "failure"),
+            ("mode", "pending", "normal"), ("hidden", "skipped", "failure"),
+        ]):
+            _insert_run(conn, f"winner-{idx}", session_id="root", created=NOW - timedelta(days=4),
+                        callback_session_id=target, callback_status=status, callback_run_id=f"delivery-{idx}",
+                        metadata={"callback_mode": mode, "probe": target})
+        opened = []
+
+        def read_mode(raw, path):
+            meta = json.loads(raw)
+            opened.append(meta["probe"])
+            assert path == "$.callback_mode"
+            return meta["callback_mode"]
+
+        conn.connection.driver_connection.create_function("json_extract", 2, read_mode, deterministic=True)
+    try:
+        graph = agent_graph.build_graph(now=NOW, engine=engine)
+        assert set(_nodes_by_id(graph)) == {"root", "known", "sent", "mode"}
+        for idx, target in enumerate(("known", "sent", "mode")):
+            assert _edge(graph, "callback", "root", target)["last_run_id"] == f"delivery-{idx}"
+        assert set(opened) == {"mode", "hidden"}
+    finally:
+        engine.dispose()
+
+
+def test_active_graph_follows_noncanonical_pending_ancestor_through_missing_row(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for sid in ("live", "old", "unrelated"):
+            _insert_session(conn, sid, scope_id=None)
+        mids = [f"missing-{i}" for i in range(16)]
+        chain = ["live", *mids, "old", "live"]
+        for sid, caller in zip(chain, chain[1:]):
+            _insert_run(conn, f"run-{sid}", session_id=sid, source_kind="agent", source_actor=caller,
+                        status=" pending " if sid == "old" else "completed", created=NOW - timedelta(days=3))
+        _insert_run(conn, "other", session_id="unrelated", status=" pending ")
+        raw = conn.connection.driver_connection
+        if hasattr(raw, "setlimit"):
+            raw.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 12)
+    try:
+        graph = agent_graph.build_graph(live_agents=[{"session_id": "live", "state": "idle"}],
+                                        include_ended=False, engine=engine, now=NOW)
+        assert [n["session_id"] for n in graph["nodes"]] == ["live", "old"]
+        assert graph["counts"]["queued"] == 1
+        assert _edge(graph, "spawn", "live", "old")["last_run_id"] == "run-old"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("frontier,expected", [({"kid"}, {"parent"}), ({"absent", "missing"}, set())])
+def test_graph_lineage_and_status_lookups_seek_the_matching_keys(isolated_state, frontier, expected):
+    from sqlalchemy import event
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _insert_run(conn, "child", session_id="kid", source_kind="agent", source_actor="parent")
+    plans = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def record(_conn, cursor, statement, parameters, *_args):
+        cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)
+        plans.extend(str(row[-1]) for row in cursor.fetchall())
+
+    try:
+        with engine.connect() as conn:
+            reader = agent_graph._GraphReader(conn, {"execute": 0., "fetch": 0.})
+            assert agent_graph._lineage_refs(reader, frontier) == expected
+            assert any("(source_kind=? AND session_id=?" in p and "COVERING INDEX" in p for p in plans), plans
+            assert any("ix_agent_runs_pair_callback (session_id=?" in p for p in plans), plans
+            assert not any("TEMP B-TREE" in p or "SCAN agent_runs" in p for p in plans), plans
+            plans.clear()
+            assert not agent_graph._has_noncanonical_pending_status(reader)
+            probes = [p for p in plans if "agent_runs" in p]
+            assert len(probes) == 2 and all("SEARCH" in p and "status>" in p for p in probes), probes
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("recent_target", [None, "visible"])
+def test_history_candidate_discovery_reads_only_recent_runs_of_filtered_source(isolated_state, recent_target):
+    from sqlalchemy import event
+
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            _insert_session(conn, "hidden", scope_id=None, status="archived")
+            _insert_session(conn, "visible", scope_id=None)
+            for i in range(19):
+                _insert_run(conn, f"old-{i}", session_id="hidden", callback_session_id="visible",
+                            callback_status="sent", created=NOW - timedelta(days=3))
+            _insert_run(conn, "recent", session_id="hidden", callback_session_id=recent_target,
+                        callback_status="sent" if recent_target else None)
+        with engine.connect() as conn:
+            plans, fetched = [], []
+
+            @event.listens_for(conn, "before_cursor_execute")
+            def plan(_conn, cursor, statement, parameters, *_args):
+                cursor.execute("EXPLAIN QUERY PLAN " + statement, parameters)
+                plans.extend(r[-1] for r in cursor.fetchall())
+
+            class Reader(agent_graph._GraphReader):
+                def _fetch(self, result, span=None):
+                    rows = super()._fetch(result, span)
+                    fetched.append(len(rows))
+                    return rows
+
+            reader = Reader(conn, {"execute": 0., "fetch": 0.})
+            expected = {"visible"} if recent_target else set()
+            assert agent_graph._resolve_candidates(reader, set(), _run_iso(NOW - timedelta(days=1))) == expected | {"hidden"}
+            assert sum(fetched) == 1
+            assert len(plans) == 1 and "ix_agent_runs_updated (updated_at>" in plans[0], plans
+        graph = agent_graph.build_graph(now=NOW, engine=engine)
+        assert {n["session_id"] for n in graph["nodes"]} == expected
+    finally:
+        engine.dispose()
+
+
+def test_history_statement_counts_consumed_rows_and_excludes_consumer_time(monkeypatch):
+    from itertools import count
+    from sqlalchemy import create_engine, event, text
+
+    # A real cursor with a partially consumed fetch batch, then another SQL
+    # parameter batch under the same label. Advance the clock in the consumer:
+    # its work must never be attributed to either execute or fetch.
+    engine = create_engine("sqlite://")
+    clock = count()
+    monkeypatch.setattr(agent_graph, "perf_counter", lambda: next(clock))
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda _, __, sql, *args: statements.append(sql))
+    try:
+        with engine.connect() as conn:
+            spans = agent_graph.HistoryStatementSpans()
+            reader = agent_graph._GraphReader(conn, {"execute": 0., "fetch": 0.}, spans)
+            stmt = text("select :value as sample union all select :value")
+            rows = reader.rows(stmt.params(value="private"), name="callback_modes", mappings=True)
+            assert next(rows) == {"sample": "private"}
+            for _ in range(100):
+                next(clock)
+            rows.close()
+            assert len(list(reader.rows(stmt.params(value="other"), name="callback_modes"))) == 2
+            assert spans.log_fields() == {"callback_modes": {"statements": 2, "batches": 2, "rows": 3,
+                                                            "execute_ms": 2000., "fetch_ms": 3000.}}
+            assert len(statements) == 2 and all(sql.startswith("select ? as sample") for sql in statements)
+    finally:
+        engine.dispose()
 
 
 def test_null_status_callback_target_not_promoted(isolated_state):

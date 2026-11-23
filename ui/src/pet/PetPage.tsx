@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '@/lib/desktopVoiceLock';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useLayoutEffect, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -343,10 +344,11 @@ const PetSurface: React.FC = () => {
   }, [setComposing]);
   // An open history stays open: the input takes its place below it (§5.2).
   const openComposer = useCallback((text?: string, selected?: SessionReference[]) => {
-    if (!epoch.isCurrent()) return;
+    if (!epoch.isCurrent() || !desktopVoiceLock.allowed()) return;
     if (text !== undefined) setDraft(text, selected);
     setComposing(true);
-    window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
+    const lockToken = desktopVoiceLock.token();
+    window.setTimeout(() => { if (epoch.isCurrent() && desktopVoiceLock.current(lockToken)) inputRef.current?.focus(); }, 0);
   }, [epoch, setComposing, setDraft]);
   const hotkeyHeld = useRef(false);
   const resetVoiceShortcut = useCallback(() => {
@@ -584,7 +586,7 @@ const PetSurface: React.FC = () => {
       : derivePetPose(state, { othersWorking: liveCards.some((card) => card.running), asleep });
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
-    if (!epoch.isCurrent() || !text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
+    if (!desktopVoiceLock.allowed() || !epoch.isCurrent() || !text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
     if (petComposer.isSending() || petComposer.isUncertain(binding)) return false;
     petComposer.setSending(true);
     try {
@@ -592,7 +594,7 @@ const PetSurface: React.FC = () => {
       const row = await api.sendSessionMessage(binding, {
         text: text.trim(),
         ...(references.length ? { content: { references } } : {}),
-        ...(metadata ? { metadata } : {}),
+        metadata: { ...metadata, input_surface: 'mini' },
       });
       if (epoch.isCurrent()) {
         data.noteSent(row && typeof row === 'object' && 'id' in row ? row : null);
@@ -707,9 +709,19 @@ const PetSurface: React.FC = () => {
     return () => document.removeEventListener('click', onClick, true);
   }, [composing, voice.busy, closeComposer]);
 
+  useEffect(() => desktopVoiceLock.onInvalidate(() => {
+    hotkeyHeld.current = false;
+    const press = pressRef.current;
+    pressRef.current = null;
+    if (press) window.clearTimeout(press.timer);
+    lastClickAtRef.current = 0;
+    doubleOpenedRef.current = false;
+    allowDoubleEventRef.current = false;
+  }), []);
+
   const onSummon = useCallback(() => {
     const intent = petShell.takeSummon();
-    if (!intent) return;
+    if (!desktopVoiceLock.allowed() || !intent) return;
     if (intent === 'release') {
       hotkeyHeld.current = false;
       voice.stop(true);
@@ -730,7 +742,7 @@ const PetSurface: React.FC = () => {
   }, [setPanel, openCards, voice.stop, voice.busy, voice.finishing, composing, binding, canChat, uncertain, resetVoiceShortcut]);
   useOnSummon(onSummon);
   useEffect(() => {
-    if (!listenPending || !binding || !canChat || !expanded) return;
+    if (!desktopVoiceLock.allowed() || !listenPending || !binding || !canChat || !expanded) return;
     petComposer.takeListen();
     if (uncertain) { resetVoiceShortcut(); setDetailOpen(true); return; }
     if (hotkeyHeld.current && voice.available) voice.start();
@@ -1018,6 +1030,7 @@ const PetSurface: React.FC = () => {
           if (allowDoubleEventRef.current) openDoubleClick();
         }}
         onPointerDown={(event) => {
+          if (!desktopVoiceLock.allowed()) return;
           if (event.button !== 0) return;
           const target = event.currentTarget;
           const pointerId = event.pointerId;
@@ -1459,7 +1472,8 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
     setPreview('');
   }, [onCaptureEnd]);
   const start = useCallback(() => {
-    if (!epoch.isCurrent() || !available || captureRef.current) return;
+    if (!desktopVoiceLock.allowed() || !epoch.isCurrent() || !available || captureRef.current) return;
+    const lockToken = desktopVoiceLock.token();
     // Voice goes to a third-party AI service: the mini window records nothing before this
     // account said yes, and says where to turn it on (the question is asked in Avibe's window).
     // A "no" given since in Avibe's window or on another device reaches this window's store
@@ -1478,18 +1492,28 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
         before,
         after: '',
         maxFileBytes: asrForEpoch.maxFileBytes,
-        onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); },
+        onPreview: (text) => { if (epoch.isCurrent() && desktopVoiceLock.current(lockToken) && captureRef.current === capture) setPreview(text); },
         ...(keepTarget ? { keep: { target: keepTarget, intent: 'insert' as const } } : {}),
       }),
       ending: false,
       cancelled: false,
     };
     captureRef.current = capture;
+    const stopWatchingLock = desktopVoiceLock.onInvalidate(() => {
+      capture.cancelled = true;
+      capture.ending = true;
+      if (captureRef.current === capture) {
+        captureRef.current = null;
+        onCaptureEnd();
+        setListening(false); setFinishing(false); setPreview('');
+      }
+      capture.dictation.abort();
+    });
     setListening(true);
     setFinishing(false);
     setError(null);
     const settle = () => {
-      if (captureRef.current !== capture || !epoch.isCurrent()) return false;
+      if (captureRef.current !== capture || !epoch.isCurrent() || !desktopVoiceLock.current(lockToken)) return false;
       if (!capture.ending) onCaptureEnd();
       captureRef.current = null;
       setListening(false);
@@ -1516,10 +1540,10 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
       fail(reason);
       // A take that could not be transcribed stays on the device: the pet lets go of it, so the
       // bound conversation's pending voice items offer it (lib/voiceTakeStore).
-      capture.dictation.detach();
-    });
+      if (!capture.cancelled) capture.dictation.detach();
+    }).finally(stopWatchingLock);
     void capture.dictation.start().then(() => {
-      if (!epoch.isCurrent()) { capture.dictation.abort(); return; }
+      if (!epoch.isCurrent() || !desktopVoiceLock.current(lockToken) || capture.cancelled) { capture.dictation.abort(); return; }
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
     }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });

@@ -204,6 +204,7 @@ def selection_from_hop(hop: Mapping[str, Any]) -> ModelSelection:
         cache_ttl_wire=cache_ttl_wire,
         source_id=hop["source_id"],
         source_identity=hop["source_identity"],
+        via_hub=True,
         hosted_tools=hosted_tools,
         image_models=image_models,
     )

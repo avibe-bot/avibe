@@ -323,7 +323,7 @@ export const ShowPageShareControl: React.FC<{
           size="icon"
           className={cn(compact
             ? 'size-6 shrink-0 rounded-md text-muted hover:bg-wash hover:text-foreground'
-            : 'size-7 shrink-0', anchorOnly && 'pointer-events-none opacity-0')}
+            : 'size-7 shrink-0', anchorOnly && 'size-7 pointer-events-none opacity-0')}
           aria-label={t('chat.showPage.share')}
           {...(anchorOnly ? { tabIndex: -1, 'aria-hidden': true } : {})}
         >

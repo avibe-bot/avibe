@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '@/lib/desktopVoiceLock';
 import { useEffect, useSyncExternalStore } from 'react';
 
 import { referenceToMarker, type SessionReference } from '@/lib/mentions';
@@ -25,6 +26,10 @@ const notify = () => {
   version += 1;
   listeners.forEach((listener) => listener());
 };
+
+desktopVoiceLock.onInvalidate(() => {
+  if (pendingListen) { pendingListen = false; notify(); }
+});
 
 const subscribe = (listener: () => void) => {
   listeners.add(listener);
@@ -92,7 +97,7 @@ export const petComposer = {
     return true;
   },
   requestListen() {
-    if (pendingListen) return;
+    if (!desktopVoiceLock.allowed() || pendingListen) return;
     pendingListen = true;
     notify();
   },

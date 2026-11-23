@@ -369,6 +369,7 @@ const candidateModelsDev = (row: Record<string, unknown>): ModelCandidateModelsD
   typeof row.models_dev_id === 'string' && row.models_dev_id
     ? {
         models_dev_id: row.models_dev_id,
+        ...(row.match_kind === 'exact' || row.match_kind === 'closest' ? { match_kind: row.match_kind } : {}),
         context_window: positiveInt(row.context_window),
         max_output_tokens: positiveInt(row.max_output_tokens),
         input_modalities: members(row.input_modalities, BACKEND_MODEL_INPUT_MODALITIES),

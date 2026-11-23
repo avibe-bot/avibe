@@ -2,6 +2,9 @@
 self-hosted-runner:
   labels:
     - avibe
+    # GitHub's hosted Xcode 27 image (public preview), newer than actionlint
+    # 1.7.12's list of hosted labels.
+    - xcode-27
 paths:
   .github/workflows/publish.yml:
     ignore:

@@ -14,6 +14,7 @@ export interface WorkbenchFixtures {
   microphone?: {
     platform: 'desktop' | 'ios';
     state: import('@/components/settings/MicrophoneSettingsPage').MicrophoneSettingsState;
+    devices?: import('@/lib/voiceInput').VoiceInputDevice[];
   };
   capabilities?: InstanceCapabilities;
   /** What every ask-before-signing switch shows for turning it off; frames never reach the sandbox,

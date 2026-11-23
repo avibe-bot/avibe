@@ -49,6 +49,17 @@ pub fn set_frame(window: &WebviewWindow, origin: (f64, f64), size: (f64, f64)) {
     let _ = window.set_position(tauri::LogicalPosition::new(origin.0, origin.1));
 }
 
+/// Hides (0) or shows (1) the whole window without ordering it out, so its
+/// page keeps drawing. macOS only; elsewhere the window stays as it is.
+pub fn set_alpha(window: &WebviewWindow, alpha: f64) {
+    #[cfg(target_os = "macos")]
+    if let Some(native) = native_window(window) {
+        native.setAlphaValue(alpha);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, alpha);
+}
+
 /// How the shell drags the window once it has shrunk to the drag strip.
 pub enum Drag {
     /// The platform's own window drag runs until the button is released.

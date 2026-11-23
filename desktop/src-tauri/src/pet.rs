@@ -18,7 +18,7 @@ use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
     area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, upward_frame, valid_session_id,
     FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding, PetFrame, PetIntent,
-    PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
+    PetLayout, PetReady, PetStore, Reveal, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
     DEFAULT_TOGGLE_SHORTCUT,
 };
 use avibe_runtime_host::LoopbackOrigin;
@@ -31,7 +31,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use url::Url;
 
-use crate::pet_native::{follow_pointer, primary_button_down, set_frame, start_drag, Drag, PointerOffset};
+use crate::pet_native::{follow_pointer, primary_button_down, set_alpha, set_frame, start_drag, Drag, PointerOffset};
 use crate::{native_catalog_for_locales, Shell, DESKTOP_SHELL_MARKER, MAIN_WINDOW};
 
 pub const PET_WINDOW: &str = "pet";
@@ -43,6 +43,12 @@ const SUMMON_EVENT: &str = "avibe:pet-summon";
 const BOUND_EVENT: &str = "avibe:pet-bound";
 const HOVER_EVENT: &str = "avibe:pet-hover";
 const LAYOUT_EVENT: &str = "avibe:pet-layout";
+/// A resize the page answers with `pet_frame_drawn` once it has drawn at the
+/// new height (`{token, height}`).
+const FRAME_EVENT: &str = "avibe:pet-frame";
+/// How long a resized window stays hidden when its page does not answer (an
+/// older page, or one that cannot draw now).
+const REVEAL_TIMEOUT: Duration = Duration::from_millis(300);
 pub const SETTINGS_EVENT: &str = "avibe:desktop-pet-settings";
 /// A drag settles before its anchor is saved, as the main window's frame does.
 const MOVE_SETTLE: Duration = Duration::from_millis(400);
@@ -103,6 +109,7 @@ pub struct Pet {
     registered_shortcuts: Mutex<Vec<String>>,
     voice_shortcut_state: Mutex<VoiceShortcutState>,
     toggle_shortcut_down: Mutex<bool>,
+    voice_suppressed_until_release: Mutex<bool>,
     move_generation: Arc<AtomicU64>,
     /// Advances with every drag and every new window, so a stale drag's steps
     /// change nothing.
@@ -111,6 +118,7 @@ pub struct Pet {
     /// While the shell itself moves the window for a drag (macOS), the
     /// pointer's offset in it; `None` otherwise.
     drag_follow: Mutex<Option<PointerOffset>>,
+    reveal: Mutex<Reveal>,
     poll_generation: AtomicU64,
     poll_wake: Arc<tokio::sync::Notify>,
 }
@@ -128,10 +136,12 @@ impl Pet {
             registered_shortcuts: Mutex::new(Vec::new()),
             voice_shortcut_state: Mutex::new(VoiceShortcutState::default()),
             toggle_shortcut_down: Mutex::new(false),
+            voice_suppressed_until_release: Mutex::new(false),
             move_generation: Arc::new(AtomicU64::new(0)),
             drag_generation: AtomicU64::new(0),
             hit_regions: Mutex::new(Vec::new()),
             drag_follow: Mutex::new(None),
+            reveal: Mutex::new(Reveal::default()),
             poll_generation: AtomicU64::new(0),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
         }
@@ -236,7 +246,7 @@ pub(crate) fn set_native_available(app: &AppHandle, available: bool) {
     }
 }
 
-fn refresh_menu(app: &AppHandle) {
+pub(crate) fn refresh_menu(app: &AppHandle) {
     let Some(menus) = app.try_state::<PetMenus>() else {
         return;
     };
@@ -516,13 +526,75 @@ fn shortcut_action(pet: &Pet, shortcut: &Shortcut, event: ShortcutState) -> Opti
         .map(ShortcutAction::Voice)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_voice_for_app_lock(app: &AppHandle) {
+    if let Some(pet) = app.try_state::<Pet>() {
+        pet.reset_voice_shortcut_state();
+    }
+}
+
+fn shortcut_lifetime_current(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState, epoch: u64) -> bool {
+    if !crate::app_lock::is_locked(app) && crate::app_lock::voice_epoch(app) == epoch {
+        return true;
+    }
+    // A press queued before lock may not yet have reached shortcut_action.
+    // Still remember its physical hold so an OS repeat after unlock is not new input.
+    if let Some(pet) = app.try_state::<Pet>() {
+        if parse_shortcut(pet.store().shortcut()).is_ok_and(|key| key == *shortcut) {
+            *lock(&pet.voice_suppressed_until_release) = event == ShortcutState::Pressed;
+        }
+        if event == ShortcutState::Released {
+            let _ = shortcut_action(&pet, shortcut, event);
+        }
+    }
+    false
+}
+
 pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
+    if let Some(pet) = app.try_state::<Pet>() {
+        let voice_key = parse_shortcut(pet.store().shortcut()).is_ok_and(|key| key == *shortcut);
+        if voice_key {
+            let mut suppressed = lock(&pet.voice_suppressed_until_release);
+            if *suppressed {
+                if event == ShortcutState::Released {
+                    *suppressed = false;
+                    let _ = shortcut_action(&pet, shortcut, event);
+                }
+                return;
+            }
+            if crate::app_lock::is_locked(app) && event == ShortcutState::Pressed {
+                *suppressed = true;
+                pet.reset_voice_shortcut_state();
+                drop(suppressed);
+                crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Action, |_| {});
+                return;
+            }
+        }
+    }
+    if crate::app_lock::is_locked(app) {
+        if event == ShortcutState::Pressed {
+            let shortcut = *shortcut;
+            crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Command, move |app| {
+                handle_shortcut(app, &shortcut, ShortcutState::Pressed);
+                handle_shortcut(app, &shortcut, ShortcutState::Released);
+            });
+        } else if let Some(pet) = app.try_state::<Pet>() {
+            // Key-up still ends an admitted physical press. Drain only the
+            // latch; do not reconcile/show a window or dispatch page actions.
+            let _ = shortcut_action(&pet, shortcut, ShortcutState::Released);
+        }
+        return;
+    }
     if !crate::instance_client::local_selected(app) {
         return;
     }
     let handle = app.clone();
     let shortcut = *shortcut;
+    let epoch = crate::app_lock::voice_epoch(app);
     let _ = app.run_on_main_thread(move || {
+        if !shortcut_lifetime_current(&handle, &shortcut, event, epoch) {
+            return;
+        }
         // Build/replace the window before starting its conversation state.
         // Otherwise page_loading would erase the press that created it.
         let window = reconcile_now(&handle);
@@ -532,6 +604,63 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutStat
             None => {}
         }
     });
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_shortcut_cycle(app: &AppHandle, kind: &str, step: &str) -> Result<serde_json::Value, String> {
+    let pet = app.state::<Pet>();
+    if step == "prepare" {
+        pet.set_enabled(true)?;
+        pet.store()
+            .try_set_voice_mode(if kind == "voiceToggle" {
+                VoiceMode::Toggle
+            } else {
+                VoiceMode::Hold
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    let key = {
+        let store = pet.store();
+        parse_shortcut(if kind == "mini" {
+            store.toggle_shortcut()
+        } else {
+            store.shortcut()
+        })?
+    };
+    if step == "suppressed" {
+        return Ok(serde_json::json!(*lock(&pet.voice_suppressed_until_release)));
+    }
+    let action = match step {
+        "stalePress" => {
+            assert!(!shortcut_lifetime_current(
+                app,
+                &key,
+                ShortcutState::Pressed,
+                crate::app_lock::voice_epoch(app).saturating_sub(1)
+            ));
+            None
+        }
+        "nativePress" => {
+            handle_shortcut(app, &key, ShortcutState::Pressed);
+            None
+        }
+        "prepare" => {
+            *lock(&pet.voice_shortcut_state) = VoiceShortcutState::default();
+            *lock(&pet.toggle_shortcut_down) = false;
+            shortcut_action(&pet, &key, ShortcutState::Pressed)
+        }
+        "cancelVoice" => {
+            pet.reset_voice_shortcut_state();
+            None
+        }
+        "release" => {
+            handle_shortcut(app, &key, ShortcutState::Released);
+            None
+        }
+        "next" => shortcut_action(&pet, &key, ShortcutState::Pressed),
+        _ => return Err("unknown shortcut fixture step".into()),
+    };
+    Ok(serde_json::json!(action.map(|action| format!("{action:?}"))))
 }
 
 /// Brings the window in line with the switch and the Runtime the Workbench
@@ -631,6 +760,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let builder = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::External(url))
         .initialization_script(DESKTOP_SHELL_MARKER)
         .initialization_script(PET_DRAG_MARKER)
+        .initialization_script(crate::app_lock::VOICE_MARKER)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Avibe")
         .inner_size(width, height)
@@ -682,8 +812,12 @@ fn initial_anchor(saved: Option<&PetAnchor>, areas: &[WorkArea]) -> PetAnchor {
 
 /// Every way to summon the pet. The hotkey listens; everything else shows.
 pub fn wake(app: &AppHandle, intent: PetIntent) {
+    let epoch = crate::app_lock::voice_epoch(app);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        if crate::app_lock::is_locked(&handle) || crate::app_lock::voice_epoch(&handle) != epoch {
+            return;
+        }
         let window = reconcile_now(&handle);
         deliver_summon(&handle, window, intent);
     });
@@ -848,7 +982,7 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
 fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
     match step {
         FrameStep::Keep => {}
-        FrameStep::Apply { frame, anchor } => set_frame(window, frame.origin(anchor, 1.0), frame.size()),
+        FrameStep::Apply { frame, anchor } => resize(app, window, frame.origin(anchor, 1.0), frame.size()),
         FrameStep::Publish { snapshot, publication } => {
             // An older page ignores the event; one still loading may already listen.
             dispatch(window, LAYOUT_EVENT, &serde_json::json!(snapshot));
@@ -868,6 +1002,53 @@ fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
             });
         }
     }
+}
+
+/// Puts the window at `origin` with `size`. A change of height is made while
+/// the window is hidden (`Reveal`): it shows again once the page has drawn at
+/// the new height, or after `REVEAL_TIMEOUT`, so the last picture, pinned to
+/// the top of the new frame, never shows a second Vibey.
+fn resize(app: &AppHandle, window: &WebviewWindow, origin: (f64, f64), size: (f64, f64)) {
+    let current = window
+        .inner_size()
+        .ok()
+        .zip(window.scale_factor().ok())
+        .map(|(inner, scale)| inner.to_logical::<f64>(scale).height);
+    if current.is_none_or(|height| (height - size.1).abs() < 0.5) {
+        set_frame(window, origin, size);
+        return;
+    }
+    let token = lock(&app.state::<Pet>().reveal).hide();
+    set_alpha(window, 0.0);
+    set_frame(window, origin, size);
+    dispatch(
+        window,
+        FRAME_EVENT,
+        &serde_json::json!({ "token": token, "height": size.1 }),
+    );
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REVEAL_TIMEOUT).await;
+        let _ = on_main_thread(&app, move |app| show_drawn(app, token)).await;
+    });
+}
+
+/// Shows the window hidden for `token`'s resize, if that is still the one.
+fn show_drawn(app: &AppHandle, token: u64) {
+    if !lock(&app.state::<Pet>().reveal).drawn(token) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window(PET_WINDOW) {
+        set_alpha(&window, 1.0);
+    }
+}
+
+/// The page drew at the height of `token`'s resize (`FRAME_EVENT`).
+#[tauri::command]
+pub fn pet_frame_drawn(window: WebviewWindow, token: u64) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    show_drawn(window.app_handle(), token);
+    Ok(())
 }
 
 /// The display `pet.json` last placed the pet on.
@@ -1357,7 +1538,7 @@ fn begin_drag(app: &AppHandle, window: &WebviewWindow, press: Option<(f64, f64)>
         // layout (it drags the window natively then).
         return Err("The desktop pet cannot be dragged by the shell now.".to_owned());
     };
-    set_frame(window, strip.origin(anchor, 1.0), strip.size());
+    resize(app, window, strip.origin(anchor, 1.0), strip.size());
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
     drop(frame);
     // The press, moved with Vibey from the frame it was in to the strip.

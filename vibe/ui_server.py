@@ -2090,6 +2090,7 @@ def _restart_vibe_cloud_login_from_state(config: V2Config, state: str | None):
 # other code falls back to the generic "default_*" strings so an unexpected failure
 # still renders a usable page.
 _OAUTH_ERROR_PAGE_CODES = {
+    "account_session_signed_out",
     "invalid_oauth_state",
     "oauth_exchange_failed",
     "remote_pairing_mismatch",
@@ -3239,13 +3240,26 @@ def add_api_timing_headers(response: Response) -> Response:
     response.headers["X-Vibe-Request-Ms"] = elapsed_text
     if elapsed_ms >= SLOW_API_REQUEST_MS:
         payload_size = response.headers.get("Content-Length")
+        graph_stages = getattr(g, "graph_stage_seconds", None)
+        # Server-side only: pre-authorization stages reflect work on the
+        # instance's entire graph. Never put them in a member's response.
+        stages_text = "" if graph_stages is None else " stages_ms=" + ",".join(
+            f"{stage}:{graph_stages[stage] * 1000:.1f}"
+            for stage in ("ipc", "queue", "open", "execute", "fetch", "assemble", "acl", "json", "resume",
+                          # Inclusive graph phase times; overlap execute/fetch/assemble above.
+                          "candidates", "lineage", "histories", "edges")
+        )
+        history_spans = getattr(g, "graph_history_spans", None)
+        if history_spans is not None:
+            stages_text += " history_statements=" + json.dumps(history_spans.log_fields(), separators=(",", ":"))
         logger.warning(
-            "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s",
+            "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s%s",
             request.path,
             request.method,
             response.status_code,
             elapsed_ms,
             payload_size or "unknown",
+            stages_text,
         )
     return response
 
@@ -5614,6 +5628,7 @@ async def model_hub_agent_models_put(backend):
             "baseline",
             "models",
             "expected_suppliers",
+            "renames",
             "force",
             "would_remove_hops",
             "would_interrupt",
@@ -5623,6 +5638,7 @@ async def model_hub_agent_models_put(backend):
             backend,
             payload.get("baseline"),
             payload.get("models"),
+            **({"renames": payload["renames"]} if "renames" in payload else {}),
             expected_suppliers=payload.get("expected_suppliers"),
             force=payload.get("force") is True,
             confirmed_remove_hops=payload.get("would_remove_hops"),
@@ -6301,6 +6317,7 @@ async def agents_graph_get():
 
     live_agents: list = []
     live_unreachable = False
+    started = time.perf_counter()
     try:
         result = await internal_client.list_running_agents()
         live_agents = (result.get("body") or {}).get("agents") or []
@@ -6308,17 +6325,35 @@ async def agents_graph_get():
         # Controller down: fall back to a DB-only graph (history stays visible).
         live_unreachable = True
 
-    payload = await asyncio.to_thread(
-        agent_graph.build_graph,
-        live_agents=live_agents,
-        window=window,
-        project=project,
-        include_ended=include_ended,
-        include_background=include_background,
-        live_unreachable=live_unreachable,
-    )
     context = _request_authorization_context()
-    return jsonify(_authorized_graph_payload(context, payload))
+    submitted = time.perf_counter()
+    stages = {"ipc": submitted - started}
+    history_spans = agent_graph.HistoryStatementSpans()
+
+    def render_graph():
+        entered = time.perf_counter()
+        stages["queue"] = entered - submitted
+        payload = agent_graph.build_graph(
+            live_agents=live_agents, window=window, project=project,
+            include_ended=include_ended, include_background=include_background,
+            live_unreachable=live_unreachable, timings=stages, history_spans=history_spans,
+        )
+        built = time.perf_counter()
+        # Includes Python/ORM overhead, not time blocked opening or reading SQLite.
+        stages["assemble"] = max(0.0, built - entered - stages["open"] - stages["execute"] - stages["fetch"])
+        authorized = _authorized_graph_payload(context, payload)
+        filtered = time.perf_counter()
+        stages["acl"] = filtered - built
+        response = jsonify(authorized)
+        finished = time.perf_counter()
+        stages["json"] = finished - filtered
+        return response, finished
+
+    response, finished = await asyncio.to_thread(render_graph)
+    stages["resume"] = time.perf_counter() - finished
+    g.graph_stage_seconds = stages
+    g.graph_history_spans = history_spans
+    return response
 
 
 @app.route("/api/agents/<name>", methods=["GET"])
@@ -14521,11 +14556,40 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     # starting the microphone.
     "holdActMs",
     "holdStartMs",
+    # When a hold's microphone may start, and how it went: the earliest time in ms after
+    # touch-down, how long the touch took to reach the App, when the input was prepared and
+    # when it was asked to start (ms from the App's handling of the touch), and the session's
+    # category and the engine's set-up durations.
+    "holdT",
+    "holdDlyMs",
+    "holdArmMs",
+    "holdBeginMs",
+    "holdCatMs",
+    "holdPrepMs",
+    # The App's counts of the touches on its surfaces that were not holds, since it was
+    # installed: those that lifted, those that moved away, those it opened the microphone
+    # for, and those it would have with each judged time.
+    "holdTaps",
+    "holdTapsMoved",
+    "holdTapsOpen",
+    "holdTapsW50",
+    "holdTapsW80",
+    "holdTapsW100",
+    "holdTapsW120",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8
 _VOICE_CAPTURE_MAX_STALLED_RATES = 4
 _VOICE_CAPTURE_MAX_TRACK_EVENTS = 24
+
+
+def _app_hold_start_ms(audio_asr_config: Any) -> int | None:
+    """``audio_asr.app_hold_start_ms`` as the page may send it to the App: a whole number of ms
+    from 0 to 500, else null (the App's own default)."""
+    value = getattr(audio_asr_config, "app_hold_start_ms", None)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 500:
+        return value
+    return None
 
 
 def _voice_count(value: Any) -> bool:
@@ -14655,6 +14719,12 @@ def asr_telemetry():
         "audioSession": {"auto", "playback", "transient", "transient-solo", "ambient", "play-and-record"},
         "audioSessionState": _VOICE_AUDIO_SESSION_STATES,
         "audioSessionStateEnd": _VOICE_AUDIO_SESSION_STATES,
+        # In the iOS App, why a hold's press was not followed by the App
+        # (ui/src/lib/nativeVoiceHold.ts, `holdMissReason`).
+        "holdMiss": {
+            "off", "viewport", "unlisted", "closed", "hidden", "covered", "limit",
+            "pending", "refused", "outside", "failed", "gone", "unanswered",
+        },
     }
     outcome = payload.get("outcome")
     if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
@@ -14811,6 +14881,13 @@ def asr_status():
                 # there at once (``audio_asr.app_hold_main_at_touch``); false
                 # makes that button open it when the hold is recognised.
                 "app_hold_main_at_touch": getattr(audio_asr_config, "app_hold_main_at_touch", True) is not False,
+                # The earliest a hold's microphone may start in the App, in ms
+                # after touch-down (``audio_asr.app_hold_start_ms``); null: the
+                # App's own default. A value out of 0..500 is said as null.
+                "app_hold_start_ms": _app_hold_start_ms(audio_asr_config),
+                # Whether the App may activate its audio session before the
+                # microphone starts (``audio_asr.app_hold_prepare_at_touch``).
+                "app_hold_prepare_at_touch": getattr(audio_asr_config, "app_hold_prepare_at_touch", True) is not False,
             }
         )
     except Exception:
@@ -15071,6 +15148,15 @@ async def sessions_messages_create(session_id: str):
                     "_web_push_user_key": web_push_user_key,
                 },
                 getattr(g, "authorization_context", None),
+            )
+            from vibe.input_source import resolve_source
+
+            # Overwrite caller-supplied resolved facts, including retries from old clients.
+            message_metadata["terminal_source"] = resolve_source(
+                conn, identity=getattr(g, "remote_session_identity", None),
+                authorization=getattr(g, "authorization_context", None),
+                client_hint=request.headers.get("X-Avibe-Input-Source"),
+                surface_hint=message_metadata.pop("input_surface", None),
             )
             message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
             if web_push_authorization_context is not None:
@@ -20569,7 +20655,7 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
     try:
         from vibe import remote_access
 
-        result = remote_access.reconcile(config)
+        result = remote_access.restore_connector()
         if isinstance(result, dict) and result.get("ok") is False:
             logger.warning("Remote access reconcile after UI start failed: %s", result.get("error"))
     except Exception:

@@ -84,6 +84,7 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
         "reusable_static_tokens": 20,
         "previous_input_tokens": 100,
         "writes_by_ttl": {"5m": 10},
+        "thread_attempts": [{"mode": "continue", "body_bytes": 450, "full_bytes": 8000}],
         "cache_write_basis": "reported",
         "causes": [],
     }
@@ -114,11 +115,13 @@ def test_cache_view_reads_observed_rows_and_ignores_scalar_optional_json(state_d
         conn.commit()
 
     result = run_read_only_query(
-        "select request_id, purpose, idle_s, classification, data_basis, input_tokens, cache_write_basis, writes_by_ttl "
+        "select request_id, purpose, idle_s, classification, data_basis, input_tokens, cache_write_basis, writes_by_ttl, thread_attempts "
         "from cache_requests order by request_id",
         db_path=state_db, page_request=PageRequest(), user_context=instance_owner_context(),
     )
     by_id = {row["request_id"]: row for row in result.rows}
+    assert json.loads(by_id['m-observed']['thread_attempts']) == cache['thread_attempts']
+    assert by_id['m-scalar']['thread_attempts'] is None
     assert by_id["m-observed"]["idle_s"] == 10
     assert by_id["m-observed"]["classification"] == "hit"
     assert by_id["m-observed"]["data_basis"] == "observed"

@@ -17,7 +17,7 @@ from core.agent_core.harness.context import ContextConfig, cache_cold
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import Usage, usage_from_dict, usage_to_dict
 from core.agent_core.tools.base import ToolSpec
-from tests.agent_core.agent.test_compaction import Model, make_agent, run
+from tests.agent_core.agent.test_compaction import Model, SELECTION, make_agent, run
 from tests.agent_core.fakes import ENDPOINT, InMemoryTranscriptStore, assistant, user
 
 
@@ -192,3 +192,44 @@ async def test_usage_less_retry_preserves_expiry_and_prompt_cause_until_a_billed
     assert cache["expected_read_basis"] == "expired"
     assert {item["reason"] for item in cache["causes"] if item["kind"] == "prompt_applied"} == {"tier1"}
     assert restarted.cache_causes == ()
+
+
+async def test_discarded_thread_usage_is_durable_before_stop_during_full_replay():
+    import asyncio
+    import json
+    import httpx
+    from core.agent_core.ai.anthropic import AnthropicAdapter
+
+    replay_started = asyncio.Event()
+
+    async def reply(wire):
+        if "thread" in json.loads(wire.content):
+            return httpx.Response(
+                200,
+                text=(
+                    'data: {"type":"message_start","message":{"usage":{"input_tokens":7,"cache_creation_input_tokens":21,"cache_creation":{"ephemeral_1h_input_tokens":21}}}}\n\n'
+                    "event: error\ndata: interrupted\n\n"
+                ),
+            )
+        replay_started.set()
+        await asyncio.Event().wait()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reply)) as client:
+        store = InMemoryTranscriptStore()
+        agent = make_agent(
+            AnthropicAdapter(client),
+            store=store,
+            selection=replace(SELECTION, endpoint=replace(ENDPOINT, source_id="cancel-test")),
+        )
+        task = asyncio.create_task(run(agent))
+        try:
+            await asyncio.wait_for(replay_started.wait(), 3)
+        finally:
+            agent.abort()
+            await asyncio.wait_for(task, 3)
+    assert len(store.attempts) == 1
+    audit = store.attempts[0][2]
+    assert audit["usage"]["input_tokens"] == 7 and audit["usage"]["cache_write_tokens"] == 21
+    assert audit["cache"]["writes_by_ttl"] == {"1h": 21}
+    assert audit["cache"]["thread_attempts"][0]["mode"] == "create"
+    assert not any(row.kind == "response" for row in store.rows["session"])

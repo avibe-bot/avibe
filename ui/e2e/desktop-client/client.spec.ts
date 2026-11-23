@@ -60,29 +60,38 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 880, height: 600 
         const rect = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
         const tools = node.firstElementChild!.getBoundingClientRect();
         const row = rect('[data-sidebar-status-row]');
-        const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
-        const label = node.querySelector('[data-account-label]')!;
-        const probe = document.createElement('span'); probe.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:middle';
-        label.prepend(probe); const xMiddle = probe.getBoundingClientRect().top; probe.remove();
+        const box = rect('[data-account-trigger]');
         const dot = rect('[data-status-indicator]');
-        return { dot: dot.x, centring: dot.top + dot.height / 2 - xMiddle, tools: tools.x, trigger: rect('[data-account-trigger]').x,
-          inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
-          insetRight: parseFloat(style.borderRightWidth) + parseFloat(style.paddingRight),
-          groupLeft: rect('[data-line-glyph]').x - rect('[data-account-trigger]').x,
-          groupRight: rect('[data-account-trigger]').right - rect('[data-account-label]').right,
+        const line = rect('[data-sidebar-footer-divider]');
+        const aside = node.closest('aside')!;
+        const sidebar = aside.getBoundingClientRect();
+        return { tools: tools.x, trigger: box.x, box,
+          dot: { left: dot.left - box.left, top: dot.top - box.top, bottom: box.bottom - dot.bottom, width: dot.width },
+          line: { left: line.left, right: line.right, height: line.height, top: line.top, bottom: line.bottom },
+          sidebar: { left: sidebar.left, inner: sidebar.left + aside.clientLeft + aside.clientWidth },
+          toolsBottom: tools.bottom, rowTop: row.top, pageWidth: document.documentElement.scrollWidth,
+          version: rect('[data-version-chip]'), toolsGap: parseFloat(getComputedStyle(node.firstElementChild!).columnGap),
           labelGap: rect('[data-account-label]').x - rect('[data-status-indicator]').right,
           versionRight: rect('[data-version-trigger]').right, footerRight: node.getBoundingClientRect().right,
           above: row.top - tools.bottom, below: window.innerHeight - row.bottom };
       });
-      // The trigger's edge is flush with the tools above. Its dot and name are one group centred in the
-      // hover wash, with the same inset on both sides (Max, 2026-11-20).
+      // The trigger's edge is flush with the tools above. Both buttons are 28 px, the instance's reading from
+      // the left: the dot, centred in the button and as far from its left edge as from its top and bottom,
+      // then the name (Max, 2026-11-22 12:51, 13:15). The version follows at the top row's gap.
       expect(measurements.tools).toBe(16);
       expect(measurements.trigger).toBe(measurements.tools);
-      expect(measurements.insetRight).toBe(measurements.inset);
-      expect(measurements.groupLeft).toBeGreaterThanOrEqual(measurements.inset);
-      expect(Math.abs(measurements.groupLeft - measurements.groupRight)).toBeLessThanOrEqual(1);
-      // Centred on the label's lowercase letters, not on its line box.
-      expect(Math.abs(measurements.centring)).toBeLessThanOrEqual(0.5);
+      expect(measurements.box.height).toBe(28);
+      expect(measurements.version.height).toBe(28);
+      expect(measurements.dot).toEqual({ left: 10, top: 10, bottom: 10, width: 8 });
+      expect(measurements.version.left - measurements.box.right).toBe(measurements.toolsGap);
+      // A 1 px line between the tools and the row, across the whole sidebar and no further (Max, 2026-11-22
+      // 13:00): from its left edge to its right one, and the page gains no width.
+      expect(measurements.line.left).toBe(measurements.sidebar.left);
+      expect(measurements.line.right).toBe(measurements.sidebar.inner);
+      expect(measurements.line.height).toBe(1);
+      expect(measurements.line.top).toBeGreaterThan(measurements.toolsBottom);
+      expect(measurements.line.bottom).toBeLessThanOrEqual(measurements.rowTop);
+      expect(measurements.pageWidth).toBe(viewport.width);
       expect(measurements.labelGap).toBeGreaterThanOrEqual(0);
       expect(measurements.labelGap).toBeLessThanOrEqual(8);
       await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
@@ -170,18 +179,17 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await expect(chip).toHaveText('v2.4.0');
     const geometry = await row.evaluate((node) => {
       const box = (selector: string) => node.querySelector(selector)!.getBoundingClientRect();
-      const style = getComputedStyle(node.querySelector('[data-account-trigger]')!);
-      return { left: box('[data-account-trigger]').left, dot: box('[data-status-indicator]').left - box('[data-account-trigger]').left,
-        inset: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
-        insetRight: parseFloat(style.borderRightWidth) + parseFloat(style.paddingRight),
-        groupLeft: box('[data-line-glyph]').left - box('[data-account-trigger]').left,
-        groupRight: box('[data-account-trigger]').right - box('[data-account-label]').right,
+      const trigger = box('[data-account-trigger]'), dot = box('[data-status-indicator]');
+      return { left: trigger.left, dot: { left: dot.left - trigger.left, top: dot.top - trigger.top, bottom: trigger.bottom - dot.bottom },
+        trigger,
+        version: box('[data-version-chip]'),
         gap: box('[data-account-label]').left - box('[data-status-indicator]').right,
         right: box('[data-version-chip]').right - node.getBoundingClientRect().right,
         bottom: innerHeight - node.getBoundingClientRect().bottom };
     });
-    expect(geometry.left).toBe(16); expect(geometry.insetRight).toBe(geometry.inset);
-    expect(geometry.dot).toBeGreaterThanOrEqual(geometry.inset); expect(Math.abs(geometry.groupLeft - geometry.groupRight)).toBeLessThanOrEqual(1);
+    // 28 px buttons; the dot 10 px from the button's left, top and bottom edges (Max, 2026-11-22 13:15).
+    expect(geometry.left).toBe(16); expect(geometry.trigger.height).toBe(28); expect(geometry.version.height).toBe(28);
+    expect(geometry.dot).toEqual({ left: 10, top: 10, bottom: 10 });
     expect(geometry.gap).toBeGreaterThanOrEqual(0);
     expect(geometry.gap).toBeLessThanOrEqual(8); expect(geometry.right).toBe(0); expect(geometry.bottom).toBe(8);
     await page.screenshot({ animations: 'disabled', path: info.outputPath('remote-bottom-row.png') });

@@ -291,7 +291,7 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
 | `voiceCapture: 1` | `voice.capturePrepare()`, `voice.captureStart({take})`, `voice.captureStop({take})` | The in-App hold's microphone, instance document only (`NativeHoldCapture.swift`). Prepare sets the audio session's category and starts nothing; start activates it and answers `{sampleRate: 16000, activateMs, engineMs}` once the input runs, or fails `permission`, `busy` or with the step; `take` is 1–64 letters, digits, `-` or `_`. Audio arrives as `avibe:native:voice.capture` events `{take, pcm}` (base64 Int16 little-endian mono, the first at once, then about 100 ms each), and the take's end as `{take, ended: true, reason?}` after its last audio. The App ends a take itself when it goes to the background, its page goes, or the system interrupts or changes the input |
-| `voiceHold: 2` | `voice.holdSurfaces({surfaces, holdMs?})`, `voice.holdAdopt({take})`, `voice.holdReject({take})` | The App recognises a hold itself, so the cue never waits for the page or the microphone. The page names up to eight surfaces `{id, x, y, width, height, start?}` (the WebView's own points) where a hold may record now, and its hold threshold `holdMs` (100–500, default 200; any other is `invalid_argument`); an empty list ends it. Only a consent-marked document (as for `voice.captureStart`) names a surface: another gets `failed` `consent`. Only the instance's own WebView is watched: a popup gets `failed` `unwatched`, and the page goes on recognising its holds itself. One WebView's list at a time, and its calls count in the order the page made them: a list overtaken by a later call, or by its document going, gets `failed` `superseded`. A passive recogniser sees each touch (it cancels and delays nothing). On a surface, at touch-down the App starts the input off the main thread, into its own memory; when other audio plays or the route is Bluetooth it opens nothing until the hold is recognised. A surface named with `start: "recognition"` opens no microphone on a touch either: its input is only prepared at touch-down and starts when the hold is recognised (`start: "touch"`, or none, is the default; any other value is `invalid_argument`). At the threshold (10 pt slop), once it has handled every touch event that reached it (a lift it had not yet heard of ends the press as a tap, with no cue; the touch itself is asked, since UIKit does not report the lift of a press the page took for itself), it fires the haptic and dispatches `avibe:native:voice.hold` `{phase: "recognised", take, surface}`. When the input cannot start for a take no page has taken, the page gets `{phase: "failed", take, surface, step}` instead of audio: the App is not following that press, and the page goes on recognising it itself. The take's audio waits in memory until the page calls `voice.holdAdopt` (answer `{sampleRate, timings}`; the same consent-marked document), then arrives as `voice.capture` events, what was recorded since touch-down first; the page ends it with `voice.captureStop`, and gets `{phase: "timings", take, timings}`. The audio of a touch that ends as a tap or a scroll is dropped when the touch ends and never leaves the App's memory (a touch shorter than the threshold by its own timestamps is a tap, even if its end was handled late); so is a take the page rejects or does not adopt within 1 s of recognition (`end=unadopted` in its timings), or whose input has passed on 2 s of audio before the page adopted it (the input counts this itself, on the thread its audio arrives on, and stops there: the bound holds while the main thread is stalled), and one cut off by App Lock, the background, an Action Button take or a withdrawn surface. After recognition the finger's slides are the page's: it gives the cancel haptics and decides what a release does (the App is not told of moves on a surface whose page took the press for itself, so at the cue it also asks the touch where it is, and gives none to a finger past the slop). Each hold's timings (numbers only), and counts of the touches that were not holds by duration (25 ms steps), are kept for the next Action Button message's `capture_earlier`. `avibe-diagnostics://voice/hold-quiet?on=1` (TestFlight and development builds) only prepares the input at touch-down and starts it at recognition. Version 1 (TestFlight 50.1 only) could give a tap the cue when the lift reached the App late; the page names surfaces from version 2 |
+| `voiceHold: 3` | `voice.holdSurfaces({surfaces, holdMs?})`, `voice.holdAdopt({take})`, `voice.holdReject({take})` | The App recognises a hold itself, so the cue never waits for the page or the microphone. The page names up to eight surfaces `{id, x, y, width, height, start?, startAfterMs?, prepare?}` (the WebView's own points) where a hold may record now, and its hold threshold `holdMs` (100–500, default 200; any other is `invalid_argument`); an empty list ends it. Only a consent-marked document (as for `voice.captureStart`) names a surface: another gets `failed` `consent`. Only the instance's own WebView is watched: a popup gets `failed` `unwatched`, and the page goes on recognising its holds itself. One WebView's list at a time, and its calls count in the order the page made them: a list overtaken by a later call, or by its document going, gets `failed` `superseded`. A passive recogniser sees each touch (it cancels and delays nothing). On a surface, at touch-down the App prepares the input off the main thread (session and engine, nothing started) and starts it at the later of "prepared" and `startAfterMs` (0 to 500 ms; 50 when the page names none), and only if the touch, asked on the main thread once every touch event that reached the App has been handled, is still down and within the slop: **a lift before the input starts never opens the microphone**, and a stalled main thread starts nothing (a hold made then records from when it is free). `start: "recognition"` (or `avibe-diagnostics://voice/hold-quiet?on=1`) starts it with the cue instead; `prepare: "start"` prepares nothing before the start; when other audio plays or the route is Bluetooth nothing is prepared before the hold is recognised. A list with any other key or value is `invalid_argument`, so a page sends the new keys only from version 3. At the threshold (10 pt slop), once it has handled every touch event that reached it (a lift it had not yet heard of ends the press as a tap, with no cue; the touch itself is asked, since UIKit does not report the lift of a press the page took for itself), it fires the haptic and dispatches `avibe:native:voice.hold` `{phase: "recognised", take, surface}`. When the input cannot start for a take no page has taken, the page gets `{phase: "failed", take, surface, step}` instead of audio: the App is not following that press, and the page goes on recognising it itself. The take's audio waits in memory until the page calls `voice.holdAdopt` (answer `{sampleRate, timings}`; the same consent-marked document), then arrives as `voice.capture` events, what was recorded since touch-down first; the page ends it with `voice.captureStop`, and gets `{phase: "timings", take, timings}`. The audio of a touch that ends as a tap or a scroll is dropped when the touch ends and never leaves the App's memory (a touch shorter than the threshold by its own timestamps is a tap, even if its end was handled late); so is a take the page rejects or does not adopt within 1 s of recognition (`end=unadopted` in its timings), or whose input has passed on 2 s of audio before the page adopted it (the input counts this itself, on the thread its audio arrives on, and stops there: the bound holds while the main thread is stalled), and one cut off by App Lock, the background, an Action Button take or a withdrawn surface. After recognition the finger's slides are the page's: it gives the cancel haptics and decides what a release does (the App is not told of moves on a surface whose page took the press for itself, so at the cue it also asks the touch where it is, and gives none to a finger past the slop). Each hold's timings (numbers only, with how long the touch took to reach the App and when the input was asked to start), and counts of the touches that were not holds by duration (25 ms steps), with how many had the microphone started (`open`) and how many would have with a `startAfterMs` of 50, 80, 100 and 120 ms (`w50`…), are kept for the next Action Button message's `capture_earlier`; the counts since installation also ride in each hold's `timings` event (`taps`). `avibe-diagnostics://voice/hold-quiet?on=1` (TestFlight and development builds) only prepares the input at touch-down and starts it at recognition. Version 1 (TestFlight 50.1 only) could give a tap the cue when the lift reached the App late; the page names surfaces from version 2. Version 2 (51.1) started the input at touch-down with no look at the finger, so a tap opened the microphone for a moment |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 | `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
 
@@ -1197,8 +1197,8 @@ cleanup.
 
 This inventory is organized by the finite WebKit API surface instead of by
 individual Web UI call sites. It includes the iOS methods present through the
-local iOS 27 SDK; iOS 27-only methods are documentation-only while CI remains
-pinned to Xcode 26.6.
+local iOS 27 SDK; iOS 27-only methods are still documentation-only (CI now
+builds with Xcode 27.2; adopting them is separate work).
 
 ### `WKNavigationDelegate`
 
@@ -1219,7 +1219,7 @@ pinned to Xcode 26.6.
 | `navigationAction:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `navigationResponse:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `shouldGoTo backForwardListItem` | Uses WebKit default continuation. The ordinary action-policy delegate still rejects a primary `.backForward` target outside the selected instance origin. | Hermetic SPA/auth-history XCTest on iOS 26.4.1 and 27.2; gesture feel remains a device check. |
-| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when the shell needs to see or stop a form submission. |
 
 ### `WKUIDelegate`
 
@@ -1237,7 +1237,7 @@ pinned to Xcode 26.6.
 | `showLockdownModeFirstUseMessage` | Uses WebKit's default Lockdown Mode message. | System-owned behavior; no shell test. |
 | `willPresentEditMenuWithAnimator`, `willDismissEditMenuWithAnimator` | Use WebKit's default edit menu. This preserves selection, copy, paste, and the Web UI clipboard fallback. | Existing Web UI clipboard tests plus manual copy/paste check. |
 | `runOpenPanelWith` | Uses WebKit's Safari-matching iOS file picker. The shell declares localized camera and photo-library-add usage descriptions. | Simulator build validates resources; Files, Camera, and Save Image remain device checks. |
-| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when a page of an instance needs location and the shell should decide. |
 | `insertInputSuggestion` | Uses WebKit's default keyboard insertion behavior. | Manual keyboard suggestion check. |
 
 ### `WKDownloadDelegate`
@@ -1345,7 +1345,7 @@ bridge and do not run these Web UI branches.
 
 | Environment | Coverage |
 | --- | --- |
-| CI: Xcode 26.6, pinned iOS 26.5 / iPhone 17 Pro simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
+| CI: Xcode 27.2 (GitHub's `xcode-27` image), pinned iOS 27.2 / iPhone 18 Pro simulator (the image has no iPhone 17 Pro on 27.2) | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
 | Local: Xcode 27.2, iOS 26.4.1 simulator | Focused Debug XCTest for notification-driven viewport geometry and bundled onboarding, plus real-WebKit Home quick-task, conversation composer, background/foreground, and bundled OTP explicit-dismissal checks. Each path returned to its safe-area baseline. Interactive pull-down dismissal remains an owner device retest. |
 | Local: Xcode 27.2, iOS 27.2 simulator | Focused Home quick-task check with the software keyboard; explicit dismissal returned the tab bar to its safe-area baseline. |
 
@@ -1483,13 +1483,29 @@ A structural test derives both pull-request and push path lists from that
 single source, so new shared or out-of-tree UI inputs cannot silently skip the
 mobile build. The job installs the repository-pinned Node version and lockfile,
 runs `build:mobile`, generates the license notices, verifies the generated
-entry, assets and notices, then pins the same
-Xcode 26.6 toolchain used by the desktop native workflow. It builds against the
-iOS Simulator SDK without signing and runs the XCTest navigation, new-window,
-download, bundled-page, and WebKit capability contracts on an available iPhone
-simulator. Debug and Release use the same generated folder resource; the
-bundled-page XCTest resolves `MobileApp` from the built application bundle and
-executes its React entry through `avibe-app://bundle`.
+entry, assets and notices, then pins Xcode 27.2 and the iOS 27.2 SDK on
+GitHub's hosted `xcode-27` image (the desktop native workflow stays on Xcode
+26.6). It builds against the iOS Simulator SDK without signing and runs the
+XCTest navigation, new-window, download, bundled-page, and WebKit capability
+contracts on the pinned iPhone 18 Pro / iOS 27.2 simulator. Debug and Release
+use the same generated folder resource; the bundled-page XCTest resolves
+`MobileApp` from the built application bundle and executes its React entry
+through `avibe-app://bundle`.
+
+**Going back to Xcode 26.6.** GitHub lists the `xcode-27` image as a public
+preview. If it breaks or is withdrawn, revert the squash commit of
+avibe-bot/avibe#4128 (one commit; it restores both workflows, their lint
+expectations and the tests as they were on Xcode 26.6). To keep its test
+changes instead, change only these lines: in `ios-shell.yml` and
+`ios-testflight.yml`, `runs-on: macos-26`,
+`DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer`, the
+`Xcode 26.6` version check (dropping the 27.2 SDK check); in `ios-shell.yml`,
+the simulator `SimRuntime.iOS-26-5` / `iPhone 17 Pro`; and the matching
+expectations in `tests/test_ci_pipeline.py`. Everything else from that PR works on
+Xcode 26.6 as it is: the sheet fixture's scene life cycle (the comparison's 26.6
+build uses it), the deferred removal of fixture stores (it acts only on WebKit's
+"in use (by network process)" refusal), the cold-first-tap expected failure
+(only on an iOS 27 simulator) and the dispatch-only `ios-sdk-comparison`.
 
 ## TestFlight
 

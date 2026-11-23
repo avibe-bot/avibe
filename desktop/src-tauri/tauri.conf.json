@@ -26,7 +26,7 @@
         "titleBarStyle": "Overlay",
         "trafficLightPosition": {
           "x": 12,
-          "y": 16
+          "y": 22
         },
         "hiddenTitle": true
       }
@@ -43,6 +43,7 @@
         "main-computer-use-windows",
         "main-desktop-update",
         "main-app-windows",
+        "main-app-lock",
         "main-desktop-notifications",
         "main-instance-client",
         "main-window-focus",
@@ -83,7 +84,9 @@
       "hardenedRuntime": true,
       "entitlements": "Entitlements.plist",
       "files": {
+        "Resources/en.lproj/InfoPlist.strings": "macos/en.lproj/InfoPlist.strings",
         "Resources/en.lproj/ServicesMenu.strings": "macos/en.lproj/ServicesMenu.strings",
+        "Resources/zh-Hans.lproj/InfoPlist.strings": "macos/zh-Hans.lproj/InfoPlist.strings",
         "Resources/zh-Hans.lproj/ServicesMenu.strings": "macos/zh-Hans.lproj/ServicesMenu.strings"
       }
     },

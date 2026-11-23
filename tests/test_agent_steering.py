@@ -56,9 +56,10 @@ def native_input(request, monkeypatch):
     if request.param == "human":
         return AgentInputMetadata(user_id="incoming", user_name="Sender"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<incoming>]\n"
     if request.param == "dictated":
-        return AgentInputMetadata(user_id="incoming", user_name="Sender", voice=True), (
+        return AgentInputMetadata(user_id="incoming", user_name="Sender", voice=True, source="iphone_app; surface=main"), (
             "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<incoming>]\n"
             "[Input: voice dictation; may contain speech-recognition errors]\n"
+            "[Source: iphone_app; surface=main]\n"
         )
     return AgentInputMetadata(harness_source="agent run run-1 from #source-session"), (
         "[Harness: agent run run-1 from #source-session]\n[Now: 2026-09-06 11:10:00 UTC+00:00]\n"

@@ -3,12 +3,19 @@
 //! any error after the 200. Drop/abort owns and cancels all accepted sockets.
 use super::{
     connect::{parse_connect, Authority, Head},
+    credentials::Windows,
     public,
-    quiet::PublicLegs,
     transport::{Link, Stream},
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
-use std::{future::Future, net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::Ipv4Addr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -17,49 +24,53 @@ use tokio::{
     time::timeout,
 };
 
-pub(super) struct Credential {
-    password: String,
-    header: String,
-}
-impl Credential {
-    pub fn generate() -> Option<Self> {
-        let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).ok()?;
-        let password = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-        let header = format!("Basic {}", STANDARD.encode(format!("avibe:{password}")));
-        Some(Self { password, header })
-    }
-    // Native proxy configuration only. No Debug, telemetry or serde impl.
-    pub fn native_login(&self) -> (&str, &str) {
-        ("avibe", &self.password)
-    }
-}
 pub(super) struct Listener {
     #[cfg(test)]
     pub(super) accept_fault: Arc<tokio::sync::Notify>,
-    pub public_legs: PublicLegs,
+    pub access: Arc<ListenerAccess>,
     pub port: u16,
-    pub credential: Arc<Credential>,
     // Retain the bound port until the native owner detaches, even if the
     // accept worker dies. Another process must not inherit a published port.
     _reservation: Arc<TcpListener>,
+}
+// A handle operation can retain these references, never the port reservation or
+// the owner's decision to retire. Only Listener owns shutdown.
+pub(super) struct ListenerAccess {
+    pub windows: Arc<Windows>,
+    retired: AtomicBool,
     health: watch::Receiver<()>,
     task: JoinHandle<()>,
 }
+impl ListenerAccess {
+    pub(super) fn owned(&self) -> bool {
+        !self.retired.load(Ordering::Acquire)
+    }
+    pub(super) fn is_alive(&self) -> bool {
+        self.owned() && self.health.has_changed().is_ok() && !self.task.is_finished()
+    }
+    pub(super) fn window_credential(&self, window: &str) -> Option<super::WindowRegistration> {
+        self.is_alive().then(|| self.windows.credential(window)).flatten()
+    }
+}
 impl Drop for Listener {
     fn drop(&mut self) {
-        self.task.abort()
+        self.retire();
     }
 }
 impl Listener {
+    pub(super) fn retire(&self) {
+        if !self.access.retired.swap(true, Ordering::AcqRel) {
+            self.access.task.abort();
+        }
+    }
     pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Self> {
         Self::bind_with_port(host, links, |h, port| async move { public::open(&h, port).await }).await
     }
     pub(super) fn is_alive(&self) -> bool {
-        self.health.has_changed().is_ok() && !self.task.is_finished()
+        self.access.is_alive()
     }
     pub(super) fn health(&self) -> watch::Receiver<()> {
-        self.health.clone()
+        self.access.health.clone()
     }
     #[cfg(test)]
     pub(super) async fn bind_via<F, Fut>(
@@ -86,14 +97,12 @@ impl Listener {
         F: Fn(Authority, u16) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Result<TcpStream, public::OpenError>> + Send + 'static,
     {
-        let credential = Arc::new(Credential::generate()?);
+        let windows = Arc::new(Windows::new()?);
         let socket = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.ok()?);
         let reservation = socket.clone();
         let (live, health) = watch::channel(());
         let port = socket.local_addr().ok()?.port();
-        let key = credential.clone();
-        let public_legs = PublicLegs::default();
-        let legs = public_legs.clone();
+        let keys = windows.clone();
         #[cfg(test)]
         let accept_fault = Arc::new(tokio::sync::Notify::new());
         #[cfg(test)]
@@ -112,12 +121,11 @@ impl Listener {
                     continue;
                 }
                 let h = host.clone();
-                let key = key.clone();
+                let keys=keys.clone();
                 let links = links.clone();
                 let dial = open_public.clone();
-                let legs = legs.clone();
                 clients.spawn(async move {
-                    serve(socket, &h, &key.header, &legs, || async {
+                    serve(socket, &h, &keys, || async {
                         let link = links.borrow().clone();
                         let fallback = async { dial(h.clone(), port).await.map(Backend::Public) };
                         match link {
@@ -142,11 +150,13 @@ impl Listener {
         Some(Self {
             #[cfg(test)]
             accept_fault,
-            public_legs,
+            access: Arc::new(ListenerAccess {
+                windows,
+                task,
+                health,
+                retired: AtomicBool::new(false),
+            }),
             port,
-            credential,
-            task,
-            health,
             _reservation: reservation,
         })
     }
@@ -181,8 +191,7 @@ enum Backend {
 async fn serve<F: Future<Output = Option<Backend>>>(
     mut browser: TcpStream,
     host: &Authority,
-    key: &str,
-    public: &PublicLegs,
+    keys: &Windows,
     open: impl FnOnce() -> F,
 ) {
     let mut data = Vec::with_capacity(1024);
@@ -194,7 +203,7 @@ async fn serve<F: Future<Output = Option<Backend>>>(
                 return None;
             }
             data.extend_from_slice(&buf[..n]);
-            match parse_connect(&data, host, Some(key)) {
+            match parse_connect(&data, host, |v| keys.authenticate(v?)) {
                 Head::More => {}
                 other => return Some(other),
             }
@@ -202,8 +211,8 @@ async fn serve<F: Future<Output = Option<Backend>>>(
     })
     .await;
     let Ok(Some(parsed)) = parsed else { return };
-    let end = match parsed {
-        Head::Accept(n) => n,
+    let (end, grant) = match parsed {
+        Head::Accept(n, grant) => (n, grant),
         other => {
             let answer:&[u8]=match other {
         Head::Refuse(407)=>b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Avibe Direct\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -214,40 +223,44 @@ async fn serve<F: Future<Output = Option<Backend>>>(
             return;
         }
     };
-    let Some(backend) = open().await else {
-        let _ = browser
-            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-            .await;
-        return;
-    };
-    let (mut stream, _direct, public_copy) = match backend {
-        Backend::Direct(s, link) => {
-            let Some(guard) = link.commit_stream() else {
+    grant
+        .until_revoked(async {
+            let Some(backend) = open().await else {
                 let _ = browser
                     .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                     .await;
                 return;
             };
-            (s, Some(guard), None)
-        }
-        Backend::Public(s) => {
-            let copy = public.commit(&browser, &s);
-            (Box::new(s) as Stream, None, Some(copy))
-        }
-    };
-    if browser
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-        .is_err()
-        || stream.write_all(&data[end..]).await.is_err()
-    {
-        return;
-    }
-    if let Some(copy) = public_copy {
-        copy.copy(browser, stream).await;
-    } else {
-        let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
-    }
+            let (mut stream, _direct, public_copy) = match backend {
+                Backend::Direct(s, link) => {
+                    let Some(guard) = link.commit_stream() else {
+                        let _ = browser
+                            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    };
+                    (s, Some(guard), None)
+                }
+                Backend::Public(s) => {
+                    let copy = grant.legs.commit(&browser, &s);
+                    (Box::new(s) as Stream, None, Some(copy))
+                }
+            };
+            if browser
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .is_err()
+                || stream.write_all(&data[end..]).await.is_err()
+            {
+                return;
+            }
+            if let Some(copy) = public_copy {
+                copy.copy(browser, stream).await;
+            } else {
+                let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
+            }
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -257,6 +270,11 @@ mod tests {
         future::ready,
         io::{Error, ErrorKind},
     };
+    fn basic(credential: &super::super::Credential) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let (u, p) = credential.native_login();
+        format!("Basic {}", STANDARD.encode(format!("{u}:{p}")))
+    }
     #[tokio::test]
     async fn authenticated_connect_without_a_backend_returns_502_then_closes() {
         let host = Authority::managed("desk-app.avibe.bot").unwrap();
@@ -266,7 +284,7 @@ mod tests {
         let request = format!(
             "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
             host.host(),
-            l.credential.header
+            basic(l.access.windows.legacy())
         );
         browser.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
@@ -284,8 +302,10 @@ mod tests {
         let mut browser = TcpStream::connect(socket.local_addr().unwrap()).await.unwrap();
         let (accepted, _) = socket.accept().await.unwrap();
         let (release, waiting) = tokio::sync::oneshot::channel();
+        let keys = Windows::new().unwrap();
+        let authorization = basic(keys.legacy());
         let worker = tokio::spawn(async move {
-            serve(accepted, &host, "Basic fixture", &PublicLegs::default(), || async {
+            serve(accepted, &host, &keys, || async {
                 Selection::default()
                     .choose(
                         async {
@@ -303,7 +323,10 @@ mod tests {
             .await;
         });
         browser
-            .write_all(b"CONNECT desk-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: Basic fixture\r\n\r\n")
+            .write_all(
+                format!("CONNECT desk-app.avibe.bot:443 HTTP/1.1\r\nProxy-Authorization: {authorization}\r\n\r\n")
+                    .as_bytes(),
+            )
             .await
             .unwrap();
         let mut reply = Vec::new();
@@ -343,7 +366,7 @@ mod tests {
             .unwrap();
         let addr = c.route().unwrap().proxy;
         let mut life = c.listener_lifetime();
-        c.listener.task.abort();
+        c.listener.access.task.abort();
         assert!(life.changed().await.is_err());
         assert!(c.route().is_none());
         assert!(TcpListener::bind(addr).await.is_err());

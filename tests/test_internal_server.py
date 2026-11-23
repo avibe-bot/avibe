@@ -9404,3 +9404,50 @@ def test_resubmitting_a_carried_agent_run_answers_with_its_carry(monkeypatch, tm
     assert result.delivery_status == "queued"
     with engine.connect() as conn:
         assert message_deliveries.get_delivery(conn, carry["id"])["state"] == "queued"
+
+
+def test_default_warm_freeze_is_armed_only_while_the_control_listener_serves(monkeypatch):
+    """The freeze is on by default, but only reachable-to-undo: it is armed once
+    the private listener is published and retired when serving ends or fails."""
+    import uvicorn
+
+    states: list[str] = []
+    watchdog = SimpleNamespace(
+        arm_warm_freeze=lambda: states.append("armed"),
+        rollback_warm_freeze=lambda: states.append("retired"),
+    )
+    controller = SimpleNamespace(
+        session_turns=object(),
+        _loop_watchdog=watchdog,
+        skill_observability=SimpleNamespace(close=AsyncMock()),
+    )
+
+    def _host(bind):
+        return SimpleNamespace(instance_id=None, bearer_token=None, bind=bind,
+                               publish=lambda _b: states.append("published"), cleanup=lambda _b: None)
+
+    class _Server:
+        def __init__(self, _config):
+            pass
+
+        async def serve(self, *, sockets):
+            states.append("serving")
+            raise RuntimeError("listener failed")
+
+    monkeypatch.setattr(internal_server, "create_app", lambda _c, **_k: object())
+    monkeypatch.setattr(uvicorn, "Config", lambda *_a, **_k: object())
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+
+    def _fail_bind():
+        raise OSError("bind failed")
+
+    monkeypatch.setattr(internal_server.control_ipc, "select_control_ipc_host", lambda **_k: _host(_fail_bind))
+    with pytest.raises(OSError):
+        asyncio.run(internal_server.serve(controller))
+    assert states == []  # no listener, never armed
+
+    bound = SimpleNamespace(listener=object())
+    monkeypatch.setattr(internal_server.control_ipc, "select_control_ipc_host", lambda **_k: _host(lambda: bound))
+    with pytest.raises(RuntimeError):
+        asyncio.run(internal_server.serve(controller))
+    assert states == ["published", "armed", "serving", "retired"]

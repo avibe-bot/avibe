@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub mod app_lock;
 mod app_windows;
 pub mod direct;
 pub mod instance_client;
@@ -711,26 +712,59 @@ fn append_account_items<R: Runtime>(
     application: Option<&Submenu<R>>,
     connection: Option<&Submenu<R>>,
 ) -> tauri::Result<()> {
-    for (id, key) in [
-        ("desktop-client-account", "accountService"),
-        ("desktop-client-instances", "switchInstance"),
-        ("desktop-client-sign-out", "signOut"),
-    ] {
-        if let Some(label) = instance_client::native_copy(key) {
-            let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
-            tray.append(&item)?;
-            if let Some(submenu) = application {
-                submenu.append(&item)?;
+    for item in account_items(connection.is_some()) {
+        match (item, connection) {
+            (AccountItem::Copy { id, key }, _) => {
+                if let Some(label) = instance_client::native_copy(key) {
+                    let item = MenuItem::with_id(app, id, label, true, None::<&str>)?;
+                    tray.append(&item)?;
+                    if let Some(submenu) = application {
+                        submenu.append(&item)?;
+                    }
+                }
             }
-        }
-        if let Some(connection) = connection.filter(|_| id == "desktop-client-instances") {
-            tray.append(connection)?;
-            if let Some(submenu) = application {
-                submenu.append(connection)?;
+            (AccountItem::Connection, Some(connection)) => {
+                tray.append(connection)?;
+                if let Some(submenu) = application {
+                    submenu.append(connection)?;
+                }
             }
+            (AccountItem::Connection, None) => {}
         }
     }
     Ok(())
+}
+
+/// One of the account's items, before it is built.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountItem {
+    /// An item of the account's own, with the key of its text.
+    Copy { id: &'static str, key: &'static str },
+    /// The 「连接方式」 submenu.
+    Connection,
+}
+
+/// The account's items in order, on every system. With a `connection`
+/// submenu, it comes right after "Switch instance".
+fn account_items(connection: bool) -> Vec<AccountItem> {
+    let mut items = vec![
+        AccountItem::Copy {
+            id: "desktop-client-account",
+            key: "accountService",
+        },
+        AccountItem::Copy {
+            id: "desktop-client-instances",
+            key: "switchInstance",
+        },
+    ];
+    if connection {
+        items.push(AccountItem::Connection);
+    }
+    items.push(AccountItem::Copy {
+        id: "desktop-client-sign-out",
+        key: "signOut",
+    });
+    items
 }
 
 fn stop_is_available(owned: bool, activity: u8) -> bool {
@@ -1006,6 +1040,9 @@ fn refresh_latest_tray(app: &AppHandle) {
 
 fn show_lifecycle_busy(app: &AppHandle) {
     let catalog = native_tray_catalog();
+    if app_lock::show_lifecycle_busy(app, &catalog) {
+        return;
+    }
     app.dialog()
         .message(catalog.busy_message)
         .title(catalog.busy_title)
@@ -1250,6 +1287,17 @@ fn continue_runtime_lifecycle(app: AppHandle, quit: bool) {
     }
     let catalog = native_tray_catalog();
     if quit {
+        let callback_app = app.clone();
+        let callback_catalog = catalog.clone();
+        if app_lock::show_quit_question(&app, &catalog, move |result| {
+            carry_out_quit(&callback_app, quit_choice(result, &callback_catalog));
+            callback_app
+                .state::<Shell>()
+                .dialog_pending
+                .store(false, Ordering::SeqCst);
+        }) {
+            return;
+        }
         let callback_app = app.clone();
         app.dialog()
             .message(catalog.quit_message.clone())
@@ -2019,6 +2067,8 @@ fn build_main_window(
         .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
         .initialization_script(show_share::marker())
+        .initialization_script(app_lock::MARKER)
+        .initialization_script(app_lock::VOICE_MARKER)
         .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
@@ -2109,6 +2159,8 @@ fn build_main_child(
             .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
             .initialization_script(DESKTOP_NOTIFICATIONS_MARKER)
             .initialization_script(show_share::marker())
+            .initialization_script(app_lock::MARKER)
+            .initialization_script(app_lock::VOICE_MARKER)
             .initialization_script(window_return::DESKTOP_FOCUS_MARKER)
             .initialization_script(format!(
         "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
@@ -2144,8 +2196,9 @@ fn build_main_child(
     if disposable && cfg!(windows) {
         builder = builder.on_permission_request(|_, kind| direct::shell::remote_instance_permission(kind));
     }
-    // Another computer's instance, where a route to its direct listener can
-    // only be given now (Windows). Never beside a configured proxy.
+    // Another computer's instance that has answered on the direct path
+    // before: its client starts now, so that the view's route is in place
+    // before its first load. Never beside a configured proxy.
     let direct_route = if disposable {
         direct::shell::instance_view_route(app, destination)
     } else {
@@ -2153,6 +2206,12 @@ fn build_main_child(
     };
     if let Some(arguments) = direct_route.as_ref().and_then(|route| route.arguments.as_deref()) {
         builder = builder.additional_browser_args(arguments);
+    }
+    // Its page is told this window's path, and may ask for a hand-over.
+    if disposable {
+        if let Some(script) = direct::shell::page_script(app, label, destination) {
+            builder = builder.initialization_script(script);
+        }
     }
     if let Some(script) = instance_client::initial_script(app) {
         builder = builder.initialization_script(script);
@@ -2304,6 +2363,13 @@ fn claim_recreated_window_bootstrap(activity: &AtomicU8) -> bool {
 
 /// Brings the existing window forward, or recreates it and re-enters bootstrap.
 pub(crate) fn focus_or_restore_main_window(app: &AppHandle) {
+    if app_lock::defer(app, focus_or_restore_main_window) {
+        return;
+    }
+    focus_or_restore_main_window_unlocked(app);
+}
+
+fn focus_or_restore_main_window_unlocked(app: &AppHandle) {
     let created = app.get_window(MAIN_WINDOW).is_none();
     let Some(window) = ensure_main_window(app) else {
         return;
@@ -2391,11 +2457,47 @@ fn main_document_finished(webview: &tauri::Webview) {
     refresh_native_controls(webview.app_handle(), None);
 }
 
+#[cfg(target_os = "macos")]
+fn startup_arguments(mut arguments: Vec<String>, resume: bool) -> Vec<String> {
+    // The parser consumes the first valid explicit link; setup resume is only a fallback.
+    if resume {
+        arguments.push(COMPUTER_USE_SETUP_DEEP_LINK.to_owned());
+    }
+    arguments
+}
+
+fn receive_startup_arguments(app: &AppHandle, arguments: Vec<String>) {
+    let pending = arguments.clone();
+    let has_link = arguments
+        .iter()
+        .any(|a| a == updater::OPEN_URL || avibe_runtime_host::deep_link::parse_deep_link(a).is_some());
+    if !has_link || !app_lock::queue_if_locked(app, move |app| receive_native_deep_link(app, pending)) {
+        if arguments.iter().any(|a| a == updater::OPEN_URL) {
+            request_desktop_updates(app);
+        }
+        if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+            links.receive(arguments.into_iter().filter(|a| a != updater::OPEN_URL));
+        }
+    }
+}
+
 fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
+    let arguments: Vec<String> = arguments.into_iter().map(|a| a.as_ref().to_owned()).collect();
+    let deferred = arguments.clone();
+    let kind = if arguments.iter().any(|argument| {
+        argument == updater::OPEN_URL || avibe_runtime_host::deep_link::parse_deep_link(argument).is_some()
+    }) {
+        app_lock::EntryKind::Navigation
+    } else {
+        app_lock::EntryKind::Action
+    };
+    if app_lock::defer_kind(app, kind, move |app| receive_native_deep_link(app, deferred)) {
+        return;
+    }
     let mut updates_requested = false;
     let mut workbench_arguments = Vec::new();
     for argument in arguments {
-        let argument = argument.as_ref();
+        let argument: &str = argument.as_ref();
         if argument == updater::OPEN_URL {
             updates_requested = true;
         } else {
@@ -2426,6 +2528,9 @@ fn apply_pending_deep_link(app: &AppHandle) {
 }
 
 fn apply_pending_deep_link_on_main(app: &AppHandle) {
+    if app_lock::is_locked(app) {
+        return;
+    }
     if !app.try_state::<Mutex<DeepLinks>>().is_some_and(|links| {
         links
             .lock()
@@ -2830,6 +2935,84 @@ fn request_private_runtime_removal(app: AppHandle) {
         });
 }
 
+// Reconcile system-toggled checkmarks from effective state without executing a command.
+fn render_saved_checkmarks(app: &AppHandle) {
+    direct::shell::restore_deferred_menu(app);
+    if let Some(menus) = app.try_state::<NativeMenus>() {
+        #[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+        let login = app
+            .try_state::<checkmark_peer::Login>()
+            .map(|state| state.0)
+            .unwrap_or_else(|| app.autolaunch().is_enabled().unwrap_or(false));
+        #[cfg(not(all(target_os = "macos", feature = "app-lock-e2e")))]
+        let login = app.autolaunch().is_enabled().unwrap_or(false);
+        let _ = menus.login.set_checked(login);
+        if let Some(notifications) = app.try_state::<notifications::Notifications>() {
+            notifications::sync_native_menu(app, notifications.enabled());
+        }
+    }
+    #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
+    refresh_computer_use_control(app);
+    pet::refresh_menu(app);
+    updater::refresh_channel_menu(app);
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+#[path = "../tests/app_lock/checkmarks.rs"]
+mod checkmark_peer;
+
+fn handle_menu(app: &AppHandle, id: &str) {
+    if id != QUIT_MENU_ID {
+        let pending = id.to_owned();
+        let kind = if id == OPEN_MENU_ID {
+            app_lock::EntryKind::Action
+        } else {
+            app_lock::EntryKind::Command
+        };
+        if app_lock::defer_kind(app, kind, move |app| handle_menu(app, &pending)) {
+            render_saved_checkmarks(app);
+            return;
+        }
+    }
+    if let Some(quit) = runtime_lifecycle_request(id) {
+        request_runtime_lifecycle(app.clone(), quit);
+    }
+    if direct::shell::menu_event(app, id) {
+        return;
+    }
+    match id {
+        OPEN_MENU_ID => focus_or_restore_main_window(app),
+        SETTINGS_MENU_ID => open_workbench_settings(app),
+        updater::MENU_ID => {
+            let _ = open_desktop_updates(app);
+        }
+        updater::CHANNEL_ID => updater::toggle_channel(app),
+        LOGIN_MENU_ID => toggle_start_at_login(app),
+        "desktop-client-account" => instance_client::menu_present(app, "account"),
+        "desktop-client-instances" => instance_client::menu_present(app, "instances"),
+        "desktop-client-sign-out" => instance_client::menu_present(app, "sign-out"),
+        notifications::MENU_ID => {
+            notifications::toggle(app);
+        }
+        pet::MENU_ID => pet::toggle(app),
+        pet::SHORTCUT_SETTINGS_MENU_ID => open_workbench_shortcut_settings(app),
+        pet::HIDE_MENU_ID => pet::toggle(app),
+        #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
+        COMPUTER_USE_MENU_ID => {
+            app.state::<computer_use::Controller>().toggle();
+        }
+        _ => {}
+    }
+    #[cfg(feature = "bundled-runtime")]
+    if id == UNINSTALL_MENU_ID {
+        request_private_runtime_removal(app.clone());
+    }
+}
+
+fn desktop_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 pub fn run() {
     let builder = tauri::Builder::default()
         .manage(Mutex::new(DeepLinks::default()))
@@ -2842,6 +3025,8 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(macos_deep_link::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(notifications::macos::init());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(computer_use::activation_plugin());
     builder
@@ -2863,44 +3048,12 @@ pub fn run() {
                 .with_handler(|app, shortcut, event| pet::handle_shortcut(app, shortcut, event.state()))
                 .build(),
         )
-        .on_menu_event(|app, event| {
-            if let Some(quit) = runtime_lifecycle_request(event.id().as_ref()) {
-                request_runtime_lifecycle(app.clone(), quit);
-            }
-            if direct::shell::menu_event(app, event.id().as_ref()) {
-                return;
-            }
-            match event.id().as_ref() {
-                OPEN_MENU_ID => focus_or_restore_main_window(app),
-                SETTINGS_MENU_ID => open_workbench_settings(app),
-                updater::MENU_ID => {
-                    let _ = open_desktop_updates(app);
-                }
-                updater::CHANNEL_ID => updater::toggle_channel(app),
-                LOGIN_MENU_ID => toggle_start_at_login(app),
-                "desktop-client-account" => instance_client::menu_present(app, "account"),
-                "desktop-client-instances" => instance_client::menu_present(app, "instances"),
-                "desktop-client-sign-out" => instance_client::menu_present(app, "sign-out"),
-                notifications::MENU_ID => {
-                    notifications::toggle(app);
-                }
-                pet::MENU_ID => pet::toggle(app),
-                pet::SHORTCUT_SETTINGS_MENU_ID => open_workbench_shortcut_settings(app),
-                pet::HIDE_MENU_ID => pet::toggle(app),
-                #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
-                COMPUTER_USE_MENU_ID => {
-                    app.state::<computer_use::Controller>().toggle();
-                }
-                _ => {}
-            }
-            #[cfg(feature = "bundled-runtime")]
-            if event.id() == UNINSTALL_MENU_ID {
-                request_private_runtime_removal(app.clone());
-            }
-        })
+        .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
+                    direct::shell::page_loaded(webview);
+                    if payload.event() == tauri::webview::PageLoadEvent::Finished { app_lock::voice_document_ready(webview); }
                     if webview.label() == pet::PET_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Started {
                         pet::page_loading(webview.app_handle());
                     }
@@ -2955,6 +3108,8 @@ pub fn run() {
                     false
                 })
                 .on_event(|app, event| {
+                    if matches!(event, RunEvent::WindowEvent { .. }) { app_lock::sync_windows(app); }
+                    if matches!(event, RunEvent::Ready) { app_lock::ready(app); }
                     #[cfg(target_os = "macos")]
                     if matches!(event, RunEvent::Exit) { macos_services::remove(); }
                     #[cfg(target_os = "macos")]
@@ -3020,6 +3175,8 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            app_lock::app_lock_status,
+            app_lock::app_lock_set_policy,
             instance_client::desktop_client_request,
             instance_client::desktop_claim_review,
             instance_client::desktop_account_recovery,
@@ -3043,6 +3200,8 @@ pub fn run() {
             pet::pet_set_voice_mode,
             notifications::desktop_notifications_state,
             notifications::desktop_notifications_set_enabled,
+            notifications::desktop_notifications_authorization,
+            notifications::desktop_notifications_open_settings,
             updater::desktop_update_prereleases_set,
             updater::desktop_update_auto_update_set,
             updater::desktop_update_remote_decline,
@@ -3050,6 +3209,7 @@ pub fn run() {
             pet::pet_context_menu,
             pet::pet_set_expanded,
             pet::pet_drag,
+            pet::pet_frame_drawn,
             pet::pet_pointer,
             pet::pet_settle,
             pet::pet_hit_regions,
@@ -3082,6 +3242,8 @@ pub fn run() {
             #[cfg(not(feature = "bundled-runtime"))]
             let bootstrap_log = BootstrapLog::disabled();
             app.manage(Shell::new(host, bootstrap_log.clone()));
+            #[cfg(target_os = "macos")]
+            app_lock::init(app.handle())?;
             #[cfg(any(target_os = "macos", all(target_os = "windows", target_arch = "x86_64")))]
             app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(
@@ -3097,21 +3259,10 @@ pub fn run() {
             }
             #[cfg(target_os = "macos")]
             macos_terminate::install(app.handle());
-            if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
-                // A link the launch carries still wins: it is received last.
-                #[cfg(target_os = "macos")]
-                if computer_use::take_setup_resume(app.handle()) {
-                    links.receive([COMPUTER_USE_SETUP_DEEP_LINK]);
-                }
-                let arguments: Vec<String> = std::env::args_os()
-                    .skip(1)
-                    .filter_map(|argument| argument.into_string().ok())
-                    .collect();
-                if arguments.iter().any(|argument| argument == updater::OPEN_URL) {
-                    request_desktop_updates(app.handle());
-                }
-                links.receive(arguments.into_iter().filter(|argument| argument != updater::OPEN_URL));
-            }
+            let arguments: Vec<String> = std::env::args_os().skip(1).filter_map(|a| a.into_string().ok()).collect();
+            #[cfg(target_os = "macos")]
+            let arguments = startup_arguments(arguments, computer_use::take_setup_resume(app.handle()));
+            receive_startup_arguments(app.handle(), arguments);
             updater::init(app.handle())?;
             let bundled_origin = if cfg!(windows) {
                 "http://tauri.localhost/"
@@ -3137,7 +3288,7 @@ pub fn run() {
             start_bootstrap_when_shell_url_ready(app.handle().clone(), window);
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(desktop_context())
         .expect("failed to start the Avibe desktop shell");
 }
 

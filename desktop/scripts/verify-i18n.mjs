@@ -58,6 +58,19 @@ assert.deepEqual(
 assert.deepEqual(Object.keys(zh.notices).sort(), expectedNoticeCodes)
 
 const notificationKeys = [
+  'answer.alreadyChoice',
+  'answer.alreadyText',
+  'answer.answerAgain',
+  'answer.gone',
+  'answer.notDelivered',
+  'answer.notSent',
+  'answer.placeholder',
+  'answer.reply',
+  'answer.send',
+  'answer.stale',
+  'answer.unavailable',
+  'answerRequested.body',
+  'answerRequested.title',
   'approvalRequested.body',
   'approvalRequested.title',
   'runCanceled.body',

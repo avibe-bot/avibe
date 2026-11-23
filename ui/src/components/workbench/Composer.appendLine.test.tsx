@@ -2,7 +2,7 @@
 
 import { createInstance } from 'i18next';
 import { createRef, type RefObject } from 'react';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -66,7 +66,7 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); sessionStorage.clear(); });
 
 describe.each([
   { path: 'mention editor', mentions: true },
@@ -110,6 +110,37 @@ describe.each([
     await screen.findByRole('textbox');
     act(() => { handle.current!.appendLine('「引用」'); });
     await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith('「引用」'));
+  });
+
+  it('keeps Ask Vibey on its draft through remount and refusal, then consumes it exactly once', async () => {
+    const handle = createRef<ComposerHandle>();
+    const onSend = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const view = (draft: string | null) => (
+      <I18nextProvider i18n={i18n}><ToastProvider>
+        <Composer ref={handle} sessionId="ses_source" onSend={onSend} initialDraft={draft}
+          onSearchAgents={mentions ? async () => [] : undefined}
+          onSearchSessions={mentions ? async () => [] : undefined} />
+      </ToastProvider></I18nextProvider>
+    );
+    const first = render(view(null));
+    await screen.findByRole('textbox');
+    act(() => { handle.current!.appendLine('quoted selection', 'ask_vibey'); });
+    await waitFor(() => expect(textOf(screen.getByRole('textbox'))).toBe('quoted selection'));
+    first.unmount();
+    render(view('quoted selection'));
+    await waitFor(() => expect(textOf(screen.getByRole('textbox'))).toBe('quoted selection'));
+    fireEvent.click(screen.getByRole('button', { name: en.chat.compose.send }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(textOf(screen.getByRole('textbox'))).toBe('quoted selection'));
+    fireEvent.click(screen.getByRole('button', { name: en.chat.compose.send }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+    expect(onSend.mock.calls[0][3]).toEqual({ input_surface: 'ask_vibey' });
+    expect(onSend.mock.calls[1][3]).toEqual({ input_surface: 'ask_vibey' });
+    act(() => { handle.current!.setDraft('ordinary next message'); });
+    await waitFor(() => expect(textOf(screen.getByRole('textbox'))).toBe('ordinary next message'));
+    fireEvent.click(screen.getByRole('button', { name: en.chat.compose.send }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(3));
+    expect(onSend.mock.calls[2][3]).toBeUndefined();
   });
 
   it('stages files only when the composer can take them, and says so', async () => {
