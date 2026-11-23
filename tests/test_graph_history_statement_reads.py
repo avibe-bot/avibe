@@ -7,11 +7,13 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import event
 
 from core.services import agent_graph
+from storage import migrations
 from storage.db import create_sqlite_engine
 from tests.test_agent_graph_service import (
     NOW, _edge, _insert_definition, _insert_run, _insert_session, _nodes_by_id,
@@ -114,6 +116,23 @@ GOLDENS = {
     (40, False): '1eb19deaaa88019734163408ac8d65d4550457412873f1eac94f51e32713645d',
     (40, True): '32424edfd8aa90d06c898c5567733d650573c18a2de5ac0507b743e11d9de1bc',
 }
+
+
+@pytest.mark.parametrize('history', [False, True])
+def test_missing_session_created_index_preserves_long_history(isolated_state, history):  # noqa: F811
+    # Compatible snapshots need not retain this performance index. Empty or
+    # short histories never exercise either of the two long-session queries.
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            seed(conn, 8)
+            conn.exec_driver_sql('DROP INDEX ix_agent_runs_session_created')
+            conn.exec_driver_sql("UPDATE alembic_version SET version_num='20990101_9999'")
+        assert migrations.preflight_database(Path(engine.url.database)).compatible_open
+        graph = agent_graph.build_graph(now=NOW, live_agents=LIVE, engine=engine, include_ended=history)
+        assert hashlib.sha256(json.dumps(graph, separators=(',', ':')).encode()).hexdigest() == GOLDENS[8, history]
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.parametrize('hit', [False, True])

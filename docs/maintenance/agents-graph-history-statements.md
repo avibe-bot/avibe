@@ -24,6 +24,8 @@ Let **V** be the number of visible sessions (normally ≤300), **T** the number 
 | `timeline_timestamps_fallback` | Identical columns/semantics, only when probe misses | Same counts as covered; mutually exclusive for the snapshot | Unique ID index + table lookup; trailing timestamps can require overflow reads |
 | `callback_delivery_ids` | rowid, callback_run_id: callback edge links to delivery run, falling back to source run ID if absent | `b(winners)` per wave, exactly one row per drawable pair, ≤min(R,V²), at most 90,000 at V=300 | Integer PK lookups; trailing field can require overflow even if NULL |
 
+The table describes plans on the normal migrated schema. Neither long-session query requires the session/created index to exist: SQLite can choose a slower plan on a compatible snapshot without it, with the same ordered result. The timestamp query only forces its own covering index after checking presence in the same snapshot.
+
 Endpoint source batches reserve one bind and at most half the remaining slots for source IDs; each target batch uses the remaining slots. There is no one-statement-per-node loop. The ten-row cap is **not** a cap on counts, historical pairs, distinct trigger definitions, retained equal instants, imported time spellings, failure-only callback evidence, or visited keys. Lineage discovery (including its own conditional callback predicate), candidate selection, trigger *definition* hydration and post-query assembly have separate stage accounting; they are not additional history SQL shapes.
 
 ## Why the time predicate is safe

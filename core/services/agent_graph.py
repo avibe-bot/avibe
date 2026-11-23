@@ -651,7 +651,7 @@ def _creation_candidates(conn, session_ids, long_ids, endpoints):
     # transfer/parse every historical time or fetch old table records.
     stmt = text(f"""
         SELECT r.rowid, r.session_id, r.created_at FROM json_each(:floors) AS s
-        CROSS JOIN agent_runs AS r INDEXED BY ix_agent_runs_session_created
+        CROSS JOIN agent_runs AS r
         WHERE r.session_id = s.key AND (
             r.created_at >= s.value OR ({_NONSTANDARD})
             OR r.rowid IN (SELECT value FROM json_each(:edges))
@@ -771,7 +771,7 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime,
         # record. Non-standard times below the raw floor can be inside the
         # window too; the time index pass retained those.
         stmt = text("""
-            SELECT rowid, session_id, created_at, definition_id FROM agent_runs INDEXED BY ix_agent_runs_session_created
+            SELECT rowid, session_id, created_at, definition_id FROM agent_runs
             WHERE session_id IN :ids AND created_at >= :floor AND run_type IN ('scheduled','watch')
               AND definition_id IS NOT NULL AND definition_id != ''
         """).bindparams(bindparam("ids", expanding=True), floor=floor)
