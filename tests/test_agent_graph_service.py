@@ -786,6 +786,45 @@ def test_active_graph_reads_metadata_only_for_a_callback_that_needs_it(isolated_
         engine.dispose()
 
 
+def test_history_proves_lineage_and_newest_callback_without_opening_older_modes(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for sid in ("root", "known", "sent", "mode", "hidden"):
+            _insert_session(conn, sid, scope_id=None)
+        # All callback rows are older than the window. An independently
+        # reached caller and a sent callback establish two endpoints without
+        # consulting metadata. Two others need a mode check to decide closure.
+        _insert_run(conn, "spawn", session_id="root", source_kind="agent", source_actor="known")
+        for j in range(24):
+            _insert_run(conn, f"old-{j}", session_id="root", created=NOW - timedelta(days=6, seconds=j),
+                        callback_session_id="known", callback_status="skipped",
+                        metadata={"callback_mode": "failure", "probe": "irrelevant"})
+        for idx, (target, status, mode) in enumerate([
+            ("known", "sent", "failure"), ("sent", "sent", "failure"),
+            ("mode", "pending", "normal"), ("hidden", "skipped", "failure"),
+        ]):
+            _insert_run(conn, f"winner-{idx}", session_id="root", created=NOW - timedelta(days=4),
+                        callback_session_id=target, callback_status=status, callback_run_id=f"delivery-{idx}",
+                        metadata={"callback_mode": mode, "probe": target})
+        opened = []
+
+        def read_mode(raw, path):
+            meta = json.loads(raw)
+            opened.append(meta["probe"])
+            assert path == "$.callback_mode"
+            return meta["callback_mode"]
+
+        conn.connection.driver_connection.create_function("json_extract", 2, read_mode, deterministic=True)
+    try:
+        graph = agent_graph.build_graph(now=NOW, engine=engine)
+        assert set(_nodes_by_id(graph)) == {"root", "known", "sent", "mode"}
+        for idx, target in enumerate(("known", "sent", "mode")):
+            assert _edge(graph, "callback", "root", target)["last_run_id"] == f"delivery-{idx}"
+        assert set(opened) == {"mode", "hidden"}
+    finally:
+        engine.dispose()
+
+
 def test_active_graph_follows_noncanonical_pending_ancestor_through_missing_row(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:
