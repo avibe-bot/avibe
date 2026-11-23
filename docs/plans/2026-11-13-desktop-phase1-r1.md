@@ -58,6 +58,15 @@ same operation, recovery identifier, and entire request. The running UI service
 (not an open browser) retries a saved installation redemption on network errors
 or 5xx after 2/4/8/16/32/60 seconds, capped at 60 seconds per subsequent retry.
 Pending is a minimum wait even for `POST /api/remote-access/vibe-cloud/pair {}`.
+HTTP 429 also backs off; valid server retry advice is a floor. A bound redeem
+may try another validated address only after a preconnect failure, before the
+POST. A lost reply after dispatch is one spent attempt. A received success
+that cannot be archived locally does not schedule another automatic POST.
+Explicit replacements share the send lock before changing the journal.
+If the process loses the outcome before recording it, the next lock holder
+waits the maximum 60-second pending interval from discovering the abandoned
+reservation and leaves further replay manual. Missing or mismatched schedule
+state after budget enrollment cannot create a second automatic budget.
 Automatic replay ends after 15 minutes or 20 automatic sends; neither service
 restart nor manual Continue restarts the budget. The owner-facing
 `pending_pairing.replay_state` for a saved prepared request is `scheduled` (with

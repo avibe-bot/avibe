@@ -5141,8 +5141,14 @@ def _json_request_to_validated_backend(
     if connection_target.requires_proxy and not proxy_url:
         raise RuntimeError("pairing_backend_proxy_required")
     last_network_error: Exception | None = None
+    single_delivery = 'redeem_request_id' in payload and request_path.endswith('/api/v1/pairing/redeem')
     for connection in _validated_backend_connections(connection_target, timeout, proxy_url):
+        may_have_sent = False
         try:
+            if single_delivery:
+                # Only preconnect failures prove no redeem bytes were sent.
+                connection.connect()
+                may_have_sent = True
             connection.request("POST", request_path, body=body, headers=request_headers)
             response = connection.getresponse()
             response_body = response.read()
@@ -5176,6 +5182,8 @@ def _json_request_to_validated_backend(
             raise
         except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
             last_network_error = exc
+            if may_have_sent:
+                break
         finally:
             connection.close()
     if last_network_error is not None:
@@ -6167,6 +6175,14 @@ def pair(
     pairing_key: str, backend_url: str, device_name: str = "avibe", *,
     desktop_enrollment: Any = None,
 ) -> dict[str, Any]:
+    from vibe import pairing_replay
+    if desktop_enrollment is not None or (pairing_key or '').strip():
+        return pairing_replay.with_send_right(_pair, pairing_key, backend_url, device_name,
+                                             desktop_enrollment=desktop_enrollment)
+    return _pair(pairing_key, backend_url, device_name)
+
+
+def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None):
     from vibe import desktop_local_instance
 
     pairing_key = (pairing_key or "").strip()
@@ -6263,7 +6279,7 @@ def _with_redeem_request(claim, backend_url: str, device_name: str, key: str) ->
     return {
         **claim, "backend_url": backend_url, "device_name": device_name,
         "request_fingerprint": _pairing_request_fingerprint(backend_url, key, claim["session_secret"]),
-        "redeem_prepared_at": time.time(),
+        "redeem_prepared_at": time.time(), "replay_budget_claimed": False,
         "redeem_request": {
             "pairing_key": key, "redeem_request_id": secrets.token_urlsafe(32), "device_name": device_name,
             "local_version": "dev", "origin_service": origin_service_for_pairing(),
@@ -6273,7 +6289,13 @@ def _with_redeem_request(claim, backend_url: str, device_name: str, key: str) ->
 
 def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: str, installation: str,
                         subject: str, claim_id: str, instance_id: str, hostname: str) -> dict[str, Any]:
-    """Atomic handoff into the same request-bound pairing journal used by Desktop."""
+    from vibe import pairing_replay
+    return pairing_replay.with_send_right(_pair_personal_claim, key=key, backend_url=backend_url, device=device,
+        revision=revision, installation=installation, subject=subject, claim_id=claim_id, instance_id=instance_id,
+        hostname=hostname)
+
+
+def _pair_personal_claim(*, key, backend_url, device, revision, installation, subject, claim_id, instance_id, hostname):
     from vibe import desktop_local_instance as local
     from storage.importer import ensure_sqlite_state
 

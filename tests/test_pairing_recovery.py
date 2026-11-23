@@ -109,10 +109,11 @@ class _ThreadRedeemGate:
         self._events.put("entered")
         self._release.wait()
 
-    def start(self, *args):
+    def start(self, *args, legacy=False):
         def run():
             try:
-                self.result = remote_access.pair(*args)
+                # Pre-upgrade senders can still return after the new process starts.
+                self.result = remote_access._pair(*args, 'avibe') if legacy else remote_access.pair(*args)
             finally:
                 self._events.put("finished")
 
@@ -166,9 +167,11 @@ def _write_child_result(path, result):
     path.write_text(json.dumps(result), encoding="utf-8")
 
 
-def _child_pair(pairing_key, backend_url, result_path):
+def _child_pair(pairing_key, backend_url, result_path, legacy=False):
     try:
-        _write_child_result(result_path, remote_access.pair(pairing_key, backend_url))
+        result = (remote_access._pair(pairing_key, backend_url, 'avibe') if legacy
+                  else remote_access.pair(pairing_key, backend_url))
+        _write_child_result(result_path, result)
     except BaseException as exc:
         _write_child_result(result_path, {
             "child_exception": type(exc).__name__,
@@ -908,7 +911,7 @@ def test_duplicate_key_preserves_the_inflight_owner_across_processes(pairing_hos
         journal = root / "state/pending-pairing.json"
         claimed = journal.read_bytes()
         duplicate = remote_access.pair(" key_A ", "https://backend.test", device_name="another tab")
-        assert duplicate["error"] == "pairing_recovery_not_ready"
+        assert duplicate["error"] == "pairing_redeem_pending"
         assert journal.read_bytes() == claimed
         assert "key_A" not in claimed.decode()
     finally:
@@ -1468,7 +1471,7 @@ def test_late_response_cannot_override_new_claim(pairing_host, monkeypatch):
         return _response("inst_B")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    gate.start("key_A", "https://backend.test")
+    gate.start("key_A", "https://backend.test", legacy=True)
     try:
         gate.wait_entered()
         result_b = remote_access.pair("key_B", "https://other-backend.test")
@@ -1496,7 +1499,7 @@ def test_definitive_failure_cannot_retire_superseding_claim(pairing_host, monkey
         return _response("inst_B")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    gate.start("key_A", "https://backend.test")
+    gate.start("key_A", "https://backend.test", legacy=True)
     try:
         gate.wait_entered()
         result_b = remote_access.pair("key_B", "https://other-backend.test")
@@ -1585,7 +1588,7 @@ def test_old_response_in_process_cannot_override_new_claim(pairing_host, monkeyp
         return _response("inst_B")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    gate.start(_child_pair, "key_A", "https://backend.test", result_path)
+    gate.start(_child_pair, "key_A", "https://backend.test", result_path, True)
     try:
         gate.wait_entered()
         result_b = remote_access.pair("key_B", "https://other-backend.test")
