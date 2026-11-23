@@ -37,6 +37,7 @@ import {
   sameCatalog,
   type BackendCatalogBaseline,
   type ChosenCandidate,
+  settleBackendCatalogRenames,
 } from './backendCatalog';
 import { BackendModelEditorDialog } from './BackendModelEditorDialog';
 import { BackendModelPickerDialog } from './BackendModelPickerDialog';
@@ -201,6 +202,14 @@ export const BackendModelCatalogDialog: React.FC<{
     setRenamedRows(next);
   }, []);
 
+  /** The draft as it can still be replayed onto a newer list: a rename that
+   *  list no longer allows is taken back first, and forgotten. */
+  const settleRenames = React.useCallback((current: readonly BackendModel[], requested: readonly BackendModel[]): BackendModel[] => {
+    const settled = settleBackendCatalogRenames(current, requested, renamedFrom.current);
+    if (settled.renames.size !== renamedFrom.current.size) setRenames(settled.renames);
+    return settled.draft;
+  }, [setRenames]);
+
   const loadBaseline = React.useCallback((preserveDraft: boolean) => {
     const attempt = ++readAttempt.current;
     setReadState('loading');
@@ -211,14 +220,14 @@ export const BackendModelCatalogDialog: React.FC<{
         const server = observed.models ?? [];
         const previous = baselineRef.current?.models;
         const next = preserveDraft && previous
-          ? applyBackendCatalogIntent(server, backendCatalogIntent(previous, draftRef.current))
+          ? applyBackendCatalogIntent(server, backendCatalogIntent(previous, settleRenames(server, draftRef.current)))
           : server;
         applyBaseline(observed, next);
       } catch {
         if (attempt === readAttempt.current) setReadState('error');
       }
     })();
-  }, [applyBaseline, backend]);
+  }, [applyBaseline, backend, settleRenames]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -297,13 +306,16 @@ export const BackendModelCatalogDialog: React.FC<{
     }
     return reserved;
   })();
-  const draftedIds = new Set(draft.map((model) => model.id));
   /** The ID the server knows the open row by; null for a row this draft added. */
   const editingSavedId = (() => {
     const row = editing?.model ?? savingEdit?.model;
     if (!row) return null;
     return renamedRows.get(row.id) ?? ((baseline?.models ?? []).some((model) => model.id === row.id) ? row.id : null);
   })();
+  /** IDs other rows hold. The open row's own place in the draft is not one of
+   *  them, under whichever ID it stands there: a focused editor stays on screen
+   *  as it was opened while its save runs, after the draft took its new ID. */
+  const editingTaken = new Set(draft.map((model) => model.id).filter((id) => editingSavedId === null || renamedRows.get(id) !== editingSavedId));
   const effortSuggestions = [...new Set(draft.flatMap((model) => model.reasoning_efforts))];
   /** Reordering permutes which movable row sits in which movable slot; a locked
    *  row keeps its absolute index, so the order sent never moves one. */
@@ -780,7 +792,10 @@ export const BackendModelCatalogDialog: React.FC<{
             closeSaved();
             return null;
           }
-          applyBaseline(observed, current ? applyBackendCatalogIntent(current, intent) : []);
+          // What is replayed is what can still be said: a rename the newer list
+          // rules out (its new ID taken, or its model gone) is not turned into a
+          // removal and an overwrite.
+          applyBaseline(observed, current ? applyBackendCatalogIntent(current, backendCatalogIntent(baselineModels, settleRenames(current, requested))) : []);
           await Promise.resolve(onObserved(observed.agent)).catch(() => {});
           // Stored and out of use at the same time, and only for the code that
           // can leave a list that way: a validation or conflict refusal keeps
@@ -1059,7 +1074,7 @@ export const BackendModelCatalogDialog: React.FC<{
               backend={backend}
               model={editing.model}
               seedId={editing.seedId}
-              takenIds={draftedIds}
+              takenIds={editingTaken}
               reservedIds={editingReserved}
               savedId={editingSavedId}
               effortSuggestions={effortSuggestions}
@@ -1096,7 +1111,7 @@ export const BackendModelCatalogDialog: React.FC<{
           backend={backend}
           model={(editing ?? savingEdit)!.model}
           seedId={(editing ?? savingEdit)!.seedId}
-          takenIds={draftedIds}
+          takenIds={editingTaken}
           reservedIds={editingReserved}
           savedId={editingSavedId}
           effortSuggestions={effortSuggestions}

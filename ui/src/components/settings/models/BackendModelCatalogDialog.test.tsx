@@ -288,6 +288,61 @@ describe('BackendModelCatalogDialog', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
   });
 
+  it('takes a rename back when another editor took the new ID meanwhile, instead of writing over their model', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 }), model('beta')];
+    const theirs = model('gamma', { display_name: 'Theirs' });
+    const newer = [...catalog, theirs];
+    vi.spyOn(modelsApi, 'getAgentSources')
+      .mockResolvedValueOnce(agent(catalog))
+      .mockResolvedValue(agent(newer));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError('invalid_request', 'modelHub.errors.backend_model_conflict', true))
+      .mockResolvedValue(agent(newer));
+    renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
+    await user.clear(screen.getByLabelText('Model ID'));
+    await user.type(screen.getByLabelText('Model ID'), 'gamma');
+    await user.clear(screen.getByLabelText('Context window'));
+    await user.type(screen.getByLabelText('Context window'), '2000');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/This list changed elsewhere while you were editing/)).toBeTruthy();
+    // alpha is back under its own ID beside their gamma; only its other edit is still pending.
+    expect(screen.getByRole('button', { name: 'Edit alpha' })).toBeTruthy();
+    expect(screen.getByText('Theirs')).toBeTruthy();
+    expect(screen.getByText('3 models')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /^(Save|Retry|Try again)$/ }));
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledTimes(2));
+    expect(putAgentModels.mock.calls[1][1]).toEqual({
+      baseline: newer,
+      models: [model('alpha', { context_window: 2000 }), model('beta'), theirs],
+    });
+  });
+
+  it('shows no error on a focused editor while the rename it just made is being saved', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    let settle: (value: ReturnType<typeof agent>) => void = () => {};
+    vi.spyOn(modelsApi, 'putAgentModels').mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const { onClose } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    await screen.findByRole('button', { name: 'Save model' });
+    await user.clear(screen.getByLabelText('Model ID'));
+    await user.type(screen.getByLabelText('Model ID'), 'alpha-2');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+
+    // The draft already holds the row under its new ID; that is this row, not another one.
+    expect(screen.getByRole('button', { name: 'Save model' })).toHaveProperty('disabled', true);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('status').textContent).toContain('switch to the new ID');
+    await act(async () => { settle(agent([model('alpha-2')])); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: false, renamedTo: 'alpha-2' }));
+  });
+
   it('cancels a focused removal without writing', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));

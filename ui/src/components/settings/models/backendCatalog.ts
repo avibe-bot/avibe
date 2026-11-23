@@ -599,6 +599,43 @@ export const applyBackendCatalogIntent = (
   return ordered;
 };
 
+/**
+ * Renames still pending in a draft, held against a newer list from the server.
+ *
+ * A rename can be said only while the server still has the old ID and nothing
+ * under the new one. A newer list can end that: another editor took the new ID,
+ * or removed the model. Replaying the draft as it stands would then remove one
+ * model and write over another, with nothing moved. So such a row stops being a
+ * rename here, before the replay:
+ *
+ * - the server has the new ID and not the old one: the row is the server's row
+ *   (this rename, or the same one made elsewhere, is already there);
+ * - otherwise the row goes back to the ID it was saved under, keeping its other
+ *   edits, and whatever the server holds under the new ID is left alone.
+ *
+ * `renames` maps a row's new ID to the ID it was saved under.
+ */
+export const settleBackendCatalogRenames = (
+  current: readonly BackendModel[],
+  draft: readonly BackendModel[],
+  renames: ReadonlyMap<string, string>,
+): { draft: BackendModel[]; renames: ReadonlyMap<string, string> } => {
+  if (renames.size === 0) return { draft: [...draft], renames };
+  const held = new Map(current.map((model) => [model.id, model]));
+  const pending = new Map<string, string>();
+  const settled = draft.map((row) => {
+    const from = renames.get(row.id);
+    if (from === undefined) return row;
+    const taken = held.get(row.id);
+    if (held.has(from) && !taken) {
+      pending.set(row.id, from);
+      return row;
+    }
+    return taken && !held.has(from) ? taken : { ...row, id: from };
+  });
+  return { draft: settled, renames: pending };
+};
+
 /** Whether a catalog the server now holds already carries this intent — the
  *  only honest answer to an inconclusive PUT, which may have committed. */
 export const backendCatalogIntentApplied = (
