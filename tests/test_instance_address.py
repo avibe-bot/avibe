@@ -150,7 +150,7 @@ def address(monkeypatch):
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
         ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
         ("_last_read_failed", None), ("_known_cleanup", None), ("_binding_failure_logged", None),
-        ("_read_refused", False), ("_standing_refusal", None), ("_read_refusal", None), ("_endpoint_absent", None),
+        ("_read_refused", False), ("_standing_refusal", None), ("_read_refusal", None), ("_endpoint_absent", None), ("_held_checked_at", None),
     ):
         monkeypatch.setattr(instance_address, name, value)
     instance_address._worker_read_requested.clear()
@@ -1394,6 +1394,33 @@ def test_the_owner_can_check_a_held_change_past_a_standing_refusal_without_sendi
         instance_address.preview("third", ("loopback",))
     run()
     assert binding().active_host == NEW and len(renames_sent(plane)) == renames
+
+
+@pytest.mark.parametrize("read", ["old address", "fails"])
+def test_opening_the_page_reads_the_state_once_for_a_held_change(address, read):
+    plane, clocks = address
+    plane.pending_answers = 1
+    plane.refuse = (409, {"error": "binding_changed"})  # no standing refusal
+    rename_to("new")
+    run()
+    held_journal()
+    assert instance_address._standing_refusal is None
+    plane.refuse = None
+    if read == "fails":
+        plane.state = lambda: (_ for _ in ()).throw(TimeoutError("no answer"))
+    renames = len(renames_sent(plane))
+    clocks.advance(120)  # what was read is past the display interval
+    reads = asked(plane, "hostname-state")
+    instance_address.describe()
+    assert asked(plane, "hostname-state") == reads + 1
+    for _ in range(3):
+        clocks.advance(10)
+        instance_address.describe()
+    assert asked(plane, "hostname-state") == reads + 1  # within the minute, no more
+    clocks.advance(61)
+    instance_address.describe()
+    assert asked(plane, "hostname-state") == reads + 2
+    assert len(renames_sent(plane)) == renames and held_journal()
 
 
 def test_a_held_change_that_the_state_shows_went_another_way_is_adopted_as_made_elsewhere(address):

@@ -1227,7 +1227,12 @@ def describe() -> dict[str, Any]:
                 "unrecognized_change": None, "cleanup": [], "health": {"connected": False, "cleanup": "none"}}
     state = _load_state(binding.instance_id)
     read_at = state.get("state_read_at")
-    if reason is None and (not isinstance(read_at, int) or _wall() - read_at > DISPLAY_REFRESH_SECONDS):
+    # One way to read per opening of the page, never two.
+    if isinstance(state.get("journal"), dict) and isinstance(state["journal"].get("held"), dict):
+        # The Owner looking at a held change checks it, at most once a minute.
+        if _check_held(binding):
+            state = _load_state(binding.instance_id)
+    elif reason is None and (not isinstance(read_at, int) or _wall() - read_at > DISPLAY_REFRESH_SECONDS):
         # Also while the state was never read: opening the page asks again (no
         # more often than the read interval), so the page follows avibe.bot
         # without a restart once it answers.
@@ -1235,10 +1240,6 @@ def describe() -> dict[str, Any]:
         state = _load_state(binding.instance_id)
     if reason is None and not _state_ever_read(binding):
         reason = STATE_UNKNOWN_REASON
-    if isinstance(state.get("journal"), dict) and isinstance(state["journal"].get("held"), dict):
-        # The Owner looking at a held change checks it, at most once a minute.
-        if _check_held(binding):
-            state = _load_state(binding.instance_id)
     journal = state.get("journal")
     operation = None
     if isinstance(journal, dict):
