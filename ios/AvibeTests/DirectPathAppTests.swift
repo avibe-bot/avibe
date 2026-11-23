@@ -591,6 +591,63 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testBothScheduleKindsKeepTheirIntentThroughConfirmationReceiptAndCancellation() async throws {
+        for kind in SystemScheduleKind.allCases {
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let platform = RuntimeSystemSchedulePlatform()
+            platform.supportsReminders = true
+            let app = try await makeApp(
+                directTransport: nil,
+                systemSchedulePlatform: platform,
+                systemScheduleNow: { now }
+            )
+            let runtime = try await select("instance-1", in: app)
+            let page = try await showRuntimePage(app, runtime)
+            defer { page.close() }
+            var params = scheduleParams(
+                requestID: "create-\(kind.rawValue)",
+                operationID: "operation-1",
+                now: now
+            )
+            params["kind"] = kind.rawValue
+            params["title"] = kind == .alarm ? "Wake up" : "取快递"
+            let requestParams = params
+            let creation = Task { @MainActor in
+                try await page.systemScheduleRequest(requestParams)
+            }
+            try await eventually { app.systemScheduleConfirmation != nil }
+            let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+            XCTAssertEqual(confirmation.request.kind, kind)
+            XCTAssertEqual(confirmation.request.title, params["title"] as? String)
+            XCTAssertEqual(platform.systemCreationCalls, 0)
+
+            app.confirmSystemSchedule(id: confirmation.id)
+            let receipt = try jsonObject(try await creation.value)
+            XCTAssertEqual(receipt["kind"] as? String, kind.rawValue)
+            XCTAssertEqual(receipt["state"] as? String, "scheduled")
+            XCTAssertEqual(receipt["systemIdentifier"] as? String, "system-1")
+            XCTAssertEqual(platform.systemCreationCalls, 1)
+            XCTAssertNil(app.systemScheduleConfirmation)
+
+            let cancellation = try jsonObject(try await page.systemScheduleCancel(
+                requestID: "cancel-\(kind.rawValue)",
+                operationID: "operation-1",
+                kind: kind.rawValue
+            ))
+            XCTAssertEqual(cancellation["kind"] as? String, kind.rawValue)
+            XCTAssertEqual(cancellation["state"] as? String, "cancelled")
+            XCTAssertEqual(platform.cancelIdentifiers, ["system-1"])
+            let repeated = try jsonObject(try await page.systemScheduleCancel(
+                requestID: "repeat-cancel-\(kind.rawValue)",
+                operationID: "operation-1",
+                kind: kind.rawValue
+            ))
+            XCTAssertEqual(repeated["state"] as? String, "cancelled")
+            XCTAssertEqual(platform.cancelCalls, 1)
+        }
+    }
+
+    @MainActor
     func testDeferredColdLogoutRemainsUnmanagedThroughAppRecoveryAndAccountReopen() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let directory = FileManager.default.temporaryDirectory
@@ -8228,6 +8285,7 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
     private(set) var scheduleCalls = 0
     private(set) var systemCreationCalls = 0
     private(set) var cancelCalls = 0
+    var supportsReminders = false
     var holdBeforeSystemCreation = false
     var holdAfterSystemCreation = false
     var onCreationSuspended: (() -> Void)?
@@ -8250,9 +8308,9 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
             iosVersion: "26.6.2",
             alarmKitAvailable: true,
             alarmAuthorization: .authorized,
-            remindersAvailable: false,
-            remindersAuthorization: .unsupported,
-            supportedKinds: [.alarm]
+            remindersAvailable: supportsReminders,
+            remindersAuthorization: supportsReminders ? .authorized : .unsupported,
+            supportedKinds: supportsReminders ? [.alarm, .reminder] : [.alarm]
         )
     }
 
