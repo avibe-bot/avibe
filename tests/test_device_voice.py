@@ -127,6 +127,11 @@ def test_projection_does_not_send_full_long_answer():
     assert speech_projection("苹果是红色的。你想吃一个吗？" + "详情" * 200) == "苹果是红色的。你想吃一个吗？"
     assert speech_projection("```secret code```<silent>hidden</silent>你好。") == "你好。"
     assert speech_projection("长" * 500) == ""
+    assert speech_projection("Done. unfinished") == "Done."
+    assert speech_projection("unfinished") == ""
+    assert speech_projection("Run `rm -rf /` now.") == "Run now."
+    assert speech_projection("Hello. `unterminated code") == "Hello."
+    assert speech_projection("Use ``secret`value`` carefully.") == "Use carefully."
 
 
 async def site(app):
@@ -571,3 +576,52 @@ async def test_abort_cancels_pending_voice_capability(plugin, tmp_path):
                 await asyncio.wait_for(cancelled.wait(), 2)
     finally:
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["transcribe", "speech"])
+async def test_real_host_disconnect_cancels_cloud_audio(monkeypatch, action):
+    from core.internal_server import create_app
+
+    started, cancelled, disconnected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def pending_cloud(_config, actual_action, _value):
+        assert actual_action == action
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr("core.handlers.device_voice.cloud_audio", pending_cloud)
+    app = create_app(SimpleNamespace(config=SimpleNamespace()))
+    payload = new_request("device.voice", {
+        "action": action, "audio" if action == "transcribe" else "text": "synthetic",
+    }).to_payload()
+    first = True
+
+    async def receive():
+        nonlocal first
+        if first:
+            first = False
+            return {"type": "http.request", "body": json.dumps(payload).encode(), "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(_message):
+        pass
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/internal/control", "raw_path": b"/internal/control", "query_string": b"",
+             "headers": [(b"content-type", b"application/json")], "server": ("localhost", 80), "client": ("localhost", 123)}
+    task = asyncio.create_task(app(scope, receive, send))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        disconnected.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert cancelled.is_set()
+    finally:
+        disconnected.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

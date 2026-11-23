@@ -30,12 +30,14 @@ def speech_projection(text: str) -> str:
     """Speak up to two complete plain sentences; never synthesize code/URLs."""
     text = re.sub(r"<silent>.*?</silent>", "", text, flags=re.S)
     text = re.sub(r"```.*?```", "", text, flags=re.S)
+    text = re.sub(r"(`+).*?\1", "", text, flags=re.S)
+    text = text.split("`")[0]  # An unterminated code span cannot become speech.
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[#*`>_]", "", text)
     text = " ".join(text.split()).split("---")[0].strip()
-    sentences = re.findall(r"[^。！？.!?]+[。！？.!?]?", text)
+    sentences = re.findall(r"[^。！？.!?]+[。！？.!?]", text)
     chosen: list[str] = []
     for sentence in sentences[:2]:
         if len("".join(chosen) + sentence) > MAX_SPEECH_CHARS:

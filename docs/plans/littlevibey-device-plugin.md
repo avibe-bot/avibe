@@ -58,3 +58,20 @@ when the optional dependencies are absent; this local run installed those
 dependencies into a disposable directory and used the existing native libopus.
 The cloud lane's `f0082aed` candidate was inspected read-only for its exact
 JSON, paired headers, MIME and 24 kHz PCM16 contract; no shared endpoint was used.
+
+## Review inventory
+
+Head `0a6f4a8449` received four findings in its first Codex review: device-origin
+execution inherited local Owner authority; production IPC did not cancel audio
+on disconnect; sentence projection accepted unfinished fragments; inline code
+was retained. Root-cause classes are authority propagation, live-request lifetime,
+and speech projection (two comments, one class). No class has yet recurred on a
+second reviewed head.
+
+The lifetime fix uses the existing FastAPI disconnect monitor only for ASR/TTS;
+admitted Bot submissions remain independent mutations. Real ASGI tests cover
+both audio actions. Projection now requires sentence terminators and removes
+inline code including unterminated tails. The focused device/IPC/Vault run passed
+61 tests with seven existing platform skips. The authority finding remains open
+pending the coordinator's scope decision: prompt text is not an enforcement
+boundary, and a fabricated cloud principal is not a valid substitute.
