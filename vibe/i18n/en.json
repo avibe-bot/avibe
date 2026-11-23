@@ -58,7 +58,7 @@
       "iosTitle": "Add to Home Screen",
       "macTitle": "Add to Dock",
       "iosBody": "In Safari, tap Share, then Add to Home Screen.",
-      "macBody": "In Safari, choose File, then Add to Dock.",
+      "macBody": "In Safari, click the Share button or open the File menu, then choose Add to Dock.",
       "otherBody": "Open this page in Safari, then use Share or File to add it.",
       "copyLink": "Copy link",
       "copied": "Link copied",

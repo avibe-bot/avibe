@@ -58,7 +58,7 @@
       "iosTitle": "添加到主屏幕",
       "macTitle": "添加到程序坞",
       "iosBody": "在 Safari 中点击分享，然后选择“添加到主屏幕”。",
-      "macBody": "在 Safari 中选择“文件”，然后选择“添加到程序坞”。",
+      "macBody": "在 Safari 中点分享按钮或菜单「文件」，选择「添加到程序坞」。",
       "otherBody": "在 Safari 中打开此页面，再通过分享或文件菜单添加。",
       "copyLink": "复制链接",
       "copied": "已复制链接",

@@ -213,7 +213,7 @@ describe('ShowPageShareControl installation guidance', () => {
     await renderOpenControl();
 
     expect(screen.getByText('Add to Dock')).toBeTruthy();
-    expect(screen.getByText(/Open this Show Page.*File.*Add to Dock/)).toBeTruthy();
+    expect(screen.getByText(/Open this Show Page.*Share.*File.*Add to Dock/)).toBeTruthy();
     expect(screen.queryByRole('switch', { name: 'Pin to Dock' })).toBeNull();
   });
 });

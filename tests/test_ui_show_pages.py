@@ -1619,6 +1619,24 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         )
         assert events.status_code == 404
 
+        # A non-member recipient can install this exact limited route; metadata
+        # has the same admission boundary as its content, never a management gate.
+        manifest = client.get(
+            f"/p/{share_id}/__show/manifest.webmanifest",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert manifest.status_code == 200
+        identity = json.loads(manifest.content)
+        assert identity["id"] == identity["start_url"] == identity["scope"] == f"/p/{share_id}/"
+        assert manifest.headers["Cache-Control"] == "private, no-store"
+        guidance = client.get(
+            f"/p/{share_id}/__show/system-entry.js",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert guidance.status_code == 200
+
         store = ShowPageStore()
         try:
             access = store.get_access("ses123")
@@ -1633,6 +1651,15 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
             assert removed.status == "applied"
         finally:
             store.close()
+
+        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js"):
+            denied = client.get(
+                f"/p/{share_id}/{installed_resource}",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+            )
+            assert denied.status_code == 404
+            assert denied.headers["Cache-Control"] == "private, no-store"
 
         existing_asset = client.get(
             f"/p/{share_id}/app.js",

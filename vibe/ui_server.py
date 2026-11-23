@@ -290,10 +290,10 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   const shadow = root.attachShadow({ mode: 'open' });
   const style = document.createElement('style');
   style.textContent = `
-    :host { all: initial; }
+    :host { all: initial; display: block; flex: 0 0 auto; min-width: 0; }
     .wrap { position: fixed; left: max(12px, env(safe-area-inset-left)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 2147483000; max-width: calc(100vw - 24px); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
     .wrap[hidden] { display: none; }
-    .wrap[data-expanded="true"] { bottom: calc(96px + env(safe-area-inset-bottom)); }
+    .wrap[data-expanded="true"] { position: relative; left: auto; bottom: auto; margin: 12px; padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
     .button, .copy, .close { border: 1px solid rgba(23,32,42,.18); border-radius: 999px; background: rgba(255,255,255,.94); color: #17202a; box-shadow: 0 8px 26px rgba(23,32,42,.16); cursor: pointer; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .button { max-width: 100%; padding: 9px 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .button:hover, .copy:hover, .close:hover { background: #f4f7f8; }
@@ -399,9 +399,9 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   safeArea.style.cssText = 'width:1px;height:0;pointer-events:none;';
   document.body.append(safeArea);
   const updateSafeArea = () => {
-    safeArea.style.height = panel.hidden || wrap.hidden
-      ? '0px'
-      : `${Math.ceil(panel.getBoundingClientRect().height + parseFloat(getComputedStyle(wrap).bottom) + 12)}px`;
+    // Expanded guidance participates in document flow, so it cannot cover the last line.
+    // The collapsed entry and annotation button still need clearance at the page end.
+    safeArea.style.height = panel.hidden && !wrap.hidden ? '80px' : '0px';
   };
   const setPanelOpen = (open) => {
     panel.hidden = !open;
@@ -431,10 +431,21 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   annotationReady.observe(document.body, { childList: true });
   bindAnnotation();
   button.addEventListener('click', () => {
-    setPanelOpen(panel.hidden);
+    setPanelOpen(true);
+    window.requestAnimationFrame(() => {
+      root.scrollIntoView({ block: 'end', behavior: 'instant' });
+      collapseButton.focus({ preventScroll: true });
+    });
   });
   collapseButton.addEventListener('click', () => {
     setPanelOpen(false);
+    button.focus({ preventScroll: true });
+  });
+  panel.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      setPanelOpen(false);
+      button.focus({ preventScroll: true });
+    }
   });
   closeButton.addEventListener('click', () => {
     savePreference('dismissed');

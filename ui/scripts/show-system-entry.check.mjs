@@ -67,7 +67,7 @@ for (const [name, width, height, agent] of [
       const { context } = browser;
       await context.route('http://show.test/**', (route) => route.fulfill({
         contentType: 'text/html',
-        body: '<!doctype html><body><main><h1>Authored Show</h1></main></body>',
+        body: '<!doctype html><body style="margin:0"><main style="min-height:calc(100vh - 140px);display:flex;flex-direction:column"><h1>Authored Show</h1><p id="last-line" style="margin-top:auto">END OF TEST CONTENT — this line must remain reachable.</p></main></body>',
       }));
       await context.addInitScript((userAgent) => {
         Object.defineProperty(navigator, 'userAgent', { value: userAgent });
@@ -86,8 +86,14 @@ for (const [name, width, height, agent] of [
       const fab = page.getByRole('button', { name: 'Annotate', exact: true });
       assert.equal(intersects(await entry.boundingBox(), await fab.boundingBox()), false);
       await entry.click({ timeout: 2000 });
+      // Opening scrolls and focuses on the next animation frame; measure the settled UI.
+      await page.waitForFunction(() => document.querySelector('[data-avibe-show-system-entry]')?.shadowRoot.activeElement?.classList.contains('collapse'));
       const guide = page.getByRole('dialog', { name: name === 'Mac' ? 'Add to Dock' : 'Add to Home Screen' });
       assert.equal(intersects(await guide.boundingBox(), await fab.boundingBox()), false);
+      const lastLine = await page.locator('#last-line').boundingBox();
+      const guideBox = await guide.boundingBox();
+      assert.ok(lastLine.y >= 0 && lastLine.y + lastLine.height <= height, 'last authored line stays in the viewport when guidance opens');
+      assert.equal(intersects(lastLine, guideBox), false, 'expanded guidance must not cover authored content');
       await page.getByRole('button', { name: 'Collapse guidance' }).click();
       await entry.click();
       await fab.click(); // The expanded guide must not prevent annotation.
@@ -103,8 +109,39 @@ for (const [name, width, height, agent] of [
       await fab.click();
       await page.getByRole('button', { name: 'Exit annotation' }).click();
       assert.equal(await page.locator('[data-avibe-show-system-entry]').count(), 0);
+      await page.addScriptTag({ content: script });
+      assert.equal(await page.locator('[data-avibe-show-system-entry]').count(), 0, 'dismissal survives another injection');
     } finally {
       await browser.close();
     }
+  });
+}
+
+for (const mode of ['ios', 'display-mode']) {
+  test(`${mode}: standalone launch suppresses installation guidance`, async () => {
+    const browser = await launchSafeBrowser();
+    try {
+      const { context } = browser;
+      await context.route('http://show.test/**', (route) => route.fulfill({
+        contentType: 'text/html', body: '<!doctype html><body><h1>Original Show</h1></body>',
+      }));
+      const page = await context.newPage();
+      await page.goto('http://show.test/p/limited/');
+      await page.evaluate(({ copy, mode }) => {
+        const meta = document.createElement('meta');
+        meta.name = 'avibe-show-system-entry';
+        meta.content = JSON.stringify({ copy });
+        document.head.append(meta);
+        if (mode === 'ios') Object.defineProperty(navigator, 'standalone', { value: true });
+        else {
+          const original = window.matchMedia.bind(window);
+          window.matchMedia = (query) => query === '(display-mode: standalone)'
+            ? { matches: true } : original(query);
+        }
+      }, { copy, mode });
+      await page.addScriptTag({ content: script });
+      assert.equal(await page.locator('[data-avibe-show-system-entry]').count(), 0);
+      assert.equal(await page.getByRole('heading', { name: 'Original Show' }).count(), 1);
+    } finally { await browser.close(); }
   });
 }

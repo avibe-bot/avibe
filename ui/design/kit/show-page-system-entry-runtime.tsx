@@ -1,21 +1,9 @@
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { MessageCirclePlus } from 'lucide-react';
 
 type RuntimeEntryMode = 'ios' | 'mac';
 type RuntimeEntryState = 'expanded' | 'collapsed' | 'annotating';
-
-const content = {
-  ios: {
-    title: 'Add to Home Screen',
-    body: 'In Safari, tap Share, then Add to Home Screen.',
-    cta: 'Add to Home Screen',
-  },
-  mac: {
-    title: 'Add to Dock',
-    body: 'In Safari, choose File, then Add to Dock.',
-    cta: 'Add to Dock',
-  },
-} as const;
 
 const RuntimeEntryButton = ({
   children,
@@ -40,11 +28,14 @@ export const ShowPageSystemEntryRuntimePreview = ({
   mode: RuntimeEntryMode;
   state: RuntimeEntryState;
 }) => {
-  const copy = content[mode];
+  const { t, i18n } = useTranslation();
+  const collapse = i18n.language.startsWith('zh') ? '收起提示' : 'Collapse guidance';
+  const title = t(mode === 'ios' ? 'chat.showPage.addToHomeTitle' : 'chat.showPage.addToDockTitle');
+  const body = t(mode === 'ios' ? 'chat.showPage.addToHomeBodySafari' : 'chat.showPage.addToDockBodySafari');
 
   return (
-    <div className="relative h-full overflow-hidden bg-background text-foreground">
-      <main className={`mx-auto flex h-full max-w-4xl flex-col px-6 pt-8 sm:px-10 ${state === 'expanded' ? 'pb-72' : 'pb-24'}`}>
+    <div className="relative flex h-full flex-col overflow-auto bg-background text-foreground">
+      <main className={`mx-auto flex w-full flex-1 max-w-4xl flex-col px-6 pt-8 sm:px-10 pb-24`}>
         <div className="flex items-center justify-between border-b border-border pb-4">
           <div>
             <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted">Show Page</div>
@@ -71,7 +62,7 @@ export const ShowPageSystemEntryRuntimePreview = ({
         <div className="mt-auto pt-8 text-xs text-muted">Next milestone: November launch review.</div>
       </main>
 
-      <div className={`absolute left-3 z-10 max-w-[calc(100%-1.5rem)] ${state === 'expanded' ? 'bottom-24' : 'bottom-3'}`}>
+      <div className={`z-10 max-w-[calc(100%-1.5rem)] ${state === 'expanded' ? 'relative mx-3 mb-24' : 'absolute left-3 bottom-3'}`}>
         {state === 'expanded' ? (
           <section
             role="dialog"
@@ -80,18 +71,18 @@ export const ShowPageSystemEntryRuntimePreview = ({
           >
             <div className="flex items-start gap-2.5">
               <div className="min-w-0 flex-1">
-                <h2 id="runtime-entry-title" className="text-sm font-semibold">{copy.title}</h2>
-                <p className="mt-1 text-xs leading-relaxed text-muted">{copy.body}</p>
+                <h2 id="runtime-entry-title" className="text-sm font-semibold">{title}</h2>
+                <p className="mt-1 text-xs leading-relaxed text-muted">{body}</p>
               </div>
-              <RuntimeEntryButton ariaLabel="Close guidance">×</RuntimeEntryButton>
+              <RuntimeEntryButton ariaLabel={t('common.close')}>×</RuntimeEntryButton>
             </div>
             <div className="mt-3">
-              <RuntimeEntryButton ariaLabel="Collapse guidance">Collapse guidance</RuntimeEntryButton>
+              <RuntimeEntryButton ariaLabel={collapse}>{collapse}</RuntimeEntryButton>
             </div>
           </section>
         ) : null}
         {state === 'collapsed' ? (
-          <RuntimeEntryButton ariaLabel={copy.title}>{copy.cta}</RuntimeEntryButton>
+          <RuntimeEntryButton ariaLabel={title}>{title}</RuntimeEntryButton>
         ) : null}
       </div>
       {state === 'annotating' ? (
