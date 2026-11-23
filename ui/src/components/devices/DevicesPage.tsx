@@ -112,7 +112,7 @@ export function DevicesPage() {
   const [add, setAdd] = useState<AddKind | undefined>();
   const [busy, setBusy] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | undefined>();
+  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar' | undefined>();
   // The callback's own refusal arrives as one allowlisted word in the address, read once here.
   const [returned] = useState(() => returnRefusal(location.search));
   // A bind-again started from the connection page comes back here (the claim's return is one
@@ -125,14 +125,20 @@ export function DevicesPage() {
   const [notice, setNotice] = useState<SignOutNotice | undefined>();
   const alive = useRef(true);
   const readCount = useRef(0);
+  /** A turn-off from this remote device is waiting for its answer: a read that fails meanwhile is
+   *  the tunnel going, not a state that cannot be read, and is not said as such. */
+  const closingFromAfar = useRef(false);
 
   const go = useCallback((to: string, replace = false) => navigate(to, { state: location.state, replace }), [location.state, navigate]);
 
-  const load = useCallback(async () => {
+  /** Reads the page again. Says whether remote access's state could be read, and what it was. */
+  const load = useCallback(async (): Promise<{ readable: boolean; status: RemoteAccessStatus | null }> => {
     const mine = ++readCount.current;
     const current = () => alive.current && mine === readCount.current;
     const [devices, remote] = await Promise.allSettled([api.devices(), reads ? api.status() : Promise.resolve(null)]);
-    if (!current()) return;
+    const read = remote.status === 'fulfilled' && remote.value && typeof remote.value.paired === 'boolean' ? remote.value : null;
+    const result = { readable: read !== null, status: read };
+    if (!current()) return result;
     if (devices.status === 'fulfilled') {
       setSnapshot(devices.value);
       setListRead('known');
@@ -146,12 +152,12 @@ export function DevicesPage() {
         setStatusRead('known');
         // Read again through a tunnel that was supposed to be gone: it was not turned off after
         // all. What is known is only that the answer was lost.
-        if (remote.value.running) setProblem((current) => (current === 'offFromAfar' ? 'lost' : current));
-      } else {
+        if (remote.value.running) setProblem((current) => (current === 'offFromAfar' || current === 'closedFromAfar' ? 'lost' : current));
+      } else if (!closingFromAfar.current) {
         setStatusRead('unknown');
       }
     }
-    if (!owner || devices.status !== 'fulfilled') return;
+    if (!owner || devices.status !== 'fulfilled') return result;
     // A device signed out lately is no longer listed: its sign-out receipt still has its name, so the
     // activity says the same name as 「最近退出的设备」 on the same page.
     const byId = new Map<string, string>(devices.value.signedOut.flatMap((each) => (each.deviceId && each.device ? [[each.deviceId, each.device] as const] : [])));
@@ -159,7 +165,7 @@ export function DevicesPage() {
     const nameOf = (id: string | undefined) => (id ? byId.get(id) ?? null : null);
     names.current = nameOf;
     const [events, address] = await Promise.allSettled([api.activity(nameOf), api.address()]);
-    if (!current()) return;
+    if (!current()) return result;
     if (events.status === 'fulfilled') {
       const page = events.value;
       setFeed((current) => joinNewest(current, page));
@@ -168,6 +174,7 @@ export function DevicesPage() {
     if (address.status === 'fulfilled') {
       setUnrecognizedChange(address.value?.unrecognizedChange ? { hostname: address.value.unrecognizedChange.hostname } : undefined);
     }
+    return result;
   }, [owner, reads, t]);
 
   const onEnd = useCallback((end: ClaimEnd) => {
@@ -209,12 +216,20 @@ export function DevicesPage() {
     };
   }, [load, rebindReturn]);
 
+  // The full activity list is the owner's, as 「连接方式」 is: anyone else opening its address is
+  // shown the page itself.
+  const activityView = location.pathname.replace(/\/+$/, '') === DEVICES_ACTIVITY_PATH;
+  useEffect(() => {
+    if (activityView && !owner) navigate(DEVICES_PATH, { replace: true, state: location.state });
+  }, [activityView, location.state, navigate, owner]);
+
   const onStatus = useCallback((next: RemoteAccessStatus) => {
     setStatus(next);
   }, []);
   const { optimize, recovering, run: optimizeRoute } = useOptimizeRoute({ status, now, onStatus, refresh: load });
-  // An evaluation that is running, and a connector still connecting, are followed until they end.
-  const connecting = Boolean(status?.running) && tunnelFromStatus(status, now, justStarted).state === 'connecting';
+  // An evaluation that is running, and a connector still starting or connecting, are followed until they end.
+  const startingStill = justStarted && Boolean(status) && (!status?.paired || !hostOf(status) || !(status.running || status.pid_state === 'unknown'));
+  const connecting = startingStill || (Boolean(status?.running) && tunnelFromStatus(status, now, justStarted).state === 'connecting');
   useEffect(() => {
     if (!recovering && !connecting) return undefined;
     const timer = window.setInterval(() => { void load(); }, FOLLOW_MS);
@@ -244,7 +259,7 @@ export function DevicesPage() {
 
   // Once remote access was turned off from afar, the list on the page is the last one read: the
   // connections it names are the ones that were just closed, so no path is said for them.
-  const closed = problem === 'offFromAfar';
+  const closed = problem === 'offFromAfar' || problem === 'closedFromAfar';
   const devices = useMemo<Device[]>(() => snapshot.devices.map((each) => ({
     ...each,
     online: closed && each.kind !== 'host' ? undefined : each.online,
@@ -260,6 +275,9 @@ export function DevicesPage() {
   else if (flow.phase === 'retrying') reach = { state: 'starting', retrying: true };
   else if (flow.phase === 'binding') reach = { state: 'starting' };
   else if (statusRead !== 'known' || !status) reach = { state: statusRead === 'loading' ? 'loading' : 'unknown' };
+  // Just after this page turned it on or bound it, a state read before that (not bound, not
+  // running) is not a close: nothing closed it, so it is still starting.
+  else if (startingStill) reach = { state: 'starting' };
   // Inside Avibe Desktop this computer is bound by the App's own account sign-in, not by a claim
   // from this page.
   // Binding is the owner's: anyone else is offered nothing on an instance that is not bound.
@@ -310,22 +328,47 @@ export function DevicesPage() {
   const switchRemoteAccess = useCallback(async (on: boolean) => {
     setSwitching(true);
     setProblem(undefined);
+    // Turning it off is the one explicit close: whatever this page started is over.
+    if (!on) setStartedAt(null);
+    if (!on && remote) closingFromAfar.current = true;
+    let outcome: 'done' | 'refused' | 'none' = 'none';
+    let refusal: unknown;
     try {
       const answer = on ? await api.start() : await api.stop();
-      if (answer.ok === false) setProblem('failed');
-      else if (on) setStartedAt(Date.now());
+      outcome = answer.ok === false ? 'refused' : 'done';
+      if (on && outcome === 'done') setStartedAt(Date.now());
     } catch (error) {
-      // Turning it off stops the tunnel before the answer leaves: from a remote device, hearing
-      // nothing back is what success looks like.
-      if (!on && remote && error instanceof LostAnswer) setProblem('offFromAfar');
-      else failed(error);
-    } finally {
-      if (alive.current) {
-        setSwitching(false);
-        setConfirm(undefined);
+      if (!(error instanceof LostAnswer)) {
+        outcome = 'refused';
+        refusal = error;
       }
-      await load();
     }
+    const refused = () => (refusal ? failed(refusal) : setProblem('failed'));
+    if (!on && remote) {
+      closingFromAfar.current = false;
+      // From a remote device, turning it off stops the tunnel this page speaks through, so what the
+      // stop request got back (an answer, an error the network made up, nothing) says nothing by
+      // itself (Product, 2026-11-23). The state, read once more, decides: not readable is the
+      // tunnel gone; read and off is off; read and still on is the only case the answer is taken
+      // at its word. Whether the answer said done only picks the sentence.
+      const read = await load();
+      if (!alive.current) return;
+      setSwitching(false);
+      setConfirm(undefined);
+      if (!read.readable) setProblem(outcome === 'done' ? 'closedFromAfar' : 'offFromAfar');
+      else if (!read.status?.running) setProblem('closedFromAfar');
+      else if (outcome === 'done') setProblem('closedFromAfar');
+      else if (outcome === 'refused') refused();
+      else setProblem('lost');
+      return;
+    }
+    if (outcome === 'refused') refused();
+    else if (outcome === 'none') failed(new LostAnswer());
+    if (alive.current) {
+      setSwitching(false);
+      setConfirm(undefined);
+    }
+    await load();
   }, [failed, load, remote]);
 
   const signOut = useCallback((device: Device) => act(async () => {

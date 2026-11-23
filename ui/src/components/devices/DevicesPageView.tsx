@@ -113,7 +113,7 @@ export type DevicesPageViewProps = DevicesPageActions & {
   /** Something this page asked for did not happen, or its answer never arrived. `offFromAfar`:
    *  remote access was turned off from this remote device and no answer came back, which is what
    *  turning it off does. */
-  problem?: 'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar';
+  problem?: 'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar';
   /** The device whose detail is open. */
   detail?: string;
   /** A way out was pressed and something would be lost: the confirmation. */
@@ -134,6 +134,7 @@ const problemKeys = {
   gone: 'devices.problem.gone',
   lost: 'devices.problem.lost',
   offFromAfar: 'devices.problem.offFromAfar',
+  closedFromAfar: 'devices.problem.closedFromAfar',
 } as const satisfies Record<NonNullable<DevicesPageViewProps['problem']>, TranslationKey>;
 
 const healthSyncedKeys = {
@@ -731,7 +732,7 @@ export function DevicesPageView({
       )}
       {/* After turning remote access off from afar, not reading its state is the expected result:
           the notice below says so, and the card does not add "cannot be read" to it. */}
-      {owner && !(problem === 'offFromAfar' && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
+      {owner && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
       {signOutNotice && <SignOutNoticeCard notice={signOutNotice} rebindOffered={rebindOffered} onDismiss={actions.onDismissNotice} />}
       {problem && (

@@ -8468,7 +8468,8 @@
       "failed": "That did not go through. Try again.",
       "gone": "That device is no longer in the list.",
       "lost": "No answer came back, so it is not known whether it went through. What is shown below was read again.",
-      "offFromAfar": "No answer came back, which is what turning it off looks like from here: once remote access is off, this device cannot be answered. To use it again, turn it back on at the computer running Avibe."
+      "offFromAfar": "No answer came back, which is what turning it off looks like from here: once remote access is off, this device cannot be answered. To use it again, turn it back on at the computer running Avibe.",
+      "closedFromAfar": "Remote access is off. This device can no longer reach this Avibe; to use it again, turn it back on at the computer running Avibe."
     },
     "outsideChange": {
       "title": "This Avibe's address was changed somewhere else",

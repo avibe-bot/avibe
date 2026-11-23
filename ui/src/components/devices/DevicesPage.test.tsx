@@ -414,6 +414,29 @@ describe('DevicesPage · devices', () => {
     expect(await screen.findByText(said('连接良好'))).toBeTruthy();
   });
 
+  it('shows starting, not off, between binding and the first read that sees it bound', async () => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'bound', hostname: host } as never);
+    // The read that follows still sees the state from before: not bound, not running.
+    const status = vi.spyOn(devicesApi, 'status').mockResolvedValue(unpaired as never);
+    mount();
+    await waitFor(() => expect(status).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('正在开启…')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '开启远程访问' })).toBeNull();
+    expect(document.body.textContent).not.toContain('只有第一次');
+  });
+
+  it('shows starting, not turned off, between switching it on and the first read that sees it running', async () => {
+    const stopped = { ...paired, running: false };
+    const status = vi.spyOn(devicesApi, 'status').mockResolvedValue(stopped as never);
+    vi.spyOn(devicesApi, 'start').mockResolvedValue({ ...stopped, ok: true } as never);
+    mount();
+    fireEvent.click(await screen.findByRole('switch', { name: '远程访问' }));
+    await waitFor(() => expect(status).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('正在开启…')).toBeTruthy();
+    expect(screen.queryByText('已关闭，域名为你保留')).toBeNull();
+  });
+
   it('stops saying connecting a minute after binding when the metrics still cannot be read, and stops following', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
@@ -636,6 +659,15 @@ describe('DevicesPage · devices', () => {
     expect(screen.getByText(said('如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。'))).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '去重新绑定' }));
     expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
+  });
+});
+
+describe('DevicesPage · the full activity list', () => {
+  it('is the owner\'s: a member opening its address is shown the page', async () => {
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    mount('/settings/remote-access/activity', 'member');
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access'));
+    expect(api.activity).not.toHaveBeenCalled();
   });
 });
 
