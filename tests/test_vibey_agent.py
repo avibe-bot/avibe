@@ -317,6 +317,7 @@ class _Controller:
                 runtime_key="runtime",
                 runtime_turn_id=turn_id,
                 native_turn_id=native,
+                execution=(context.platform_specific or {}).get("vibey_execution"),
             )
             assert message_deliveries.materialize_start_acceptance(conn, turn_id=turn_id, evidence={"kind": "test"})
 
@@ -2680,6 +2681,58 @@ async def test_a_running_turn_takes_its_sessions_model_effort_and_speed_at_its_n
     assert list(zip(harness.controller.hub_calls, harness.controller.hub_speeds)) == [(started[0], None), (model, speed)]
     # The Turn keeps its prefix: the same system prompt and tool list go out on the new route.
     assert (second.system, second.tools) == (first.system, first.tools)
+    assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
+
+
+async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_request(
+    engine, session, tmp_path, published
+):
+    from config.v2_config import ModelHubBackendModelConfig
+    from tests.test_model_hub_api import _service
+
+    service, store, _ = _service(tmp_path)
+    agent = store.config.agents["vibey"]
+    agent.models = [ModelHubBackendModelConfig(id="test-model")]
+    baseline = [row.to_payload() for row in agent.models]
+    desired = [{**baseline[0], "id": "new-model"}]
+    old_turn = {"turn_id": "last-completed", "agent": "vibey", "requested_model_id": "test-model"}
+    service.provenance.put(old_turn)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE agent_sessions SET model=? WHERE id=?", ("test-model", SESSION))
+    started, release = asyncio.Event(), asyncio.Event()
+    first, second = _tool_turn()
+
+    async def in_flight(request, cancel):
+        started.set()
+        await release.wait()
+        for event in first:
+            yield event
+
+    harness = _Harness(engine, tmp_path, "avibe", [in_flight, second])
+    request = harness.request("list files")
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        with engine.connect() as conn:
+            receipt = conn.exec_driver_sql(
+                "SELECT start_receipt_json FROM session_turns WHERE session_id=?", (SESSION,)
+            ).scalar_one()
+        assert json.loads(receipt)["vibey_execution"]["model"] == "test-model"
+        await service.set_agent_models("vibey", baseline, desired, renames={"test-model": "new-model"})
+        assert service.provenance.get("last-completed")["requested_model_id"] == "test-model"
+        with engine.connect() as conn:
+            assert (
+                conn.exec_driver_sql(
+                    "SELECT start_receipt_json FROM session_turns WHERE session_id=?", (SESSION,)
+                ).scalar_one()
+                == receipt
+            )
+        assert not running.done()
+        assert harness.provider.closed_streams == 0
+    finally:
+        release.set()
+        await running
+    assert [call.endpoint.model_id for call in harness.provider.requests] == ["test-model", "new-model"]
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
 
 

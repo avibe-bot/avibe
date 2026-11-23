@@ -58,6 +58,7 @@ agents = Table(
     Column("updated_at", String, nullable=False),
     UniqueConstraint("normalized_name", name="uq_agents_normalized_name"),
     Index("ix_agents_backend", "backend"),
+    Index("ix_agents_backend_model", "backend", "model"),
     Index("ix_agents_updated", "updated_at"),
 )
 
@@ -227,6 +228,7 @@ agent_sessions = Table(
     Index("uq_agent_sessions_scope_anchor", "scope_id", "session_anchor", unique=True),
     Index("ix_agent_sessions_scope_anchor_workdir", "scope_id", "session_anchor", "workdir"),
     Index("ix_agent_sessions_backend_variant", "agent_backend", "agent_variant"),
+    Index("ix_sessions_backend_model", "agent_backend", "model"),
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
     # The Sessions projected running, for the startup projection repair (migration 0068).
     Index("ix_agent_sessions_agent_status", "agent_status", "status"),
