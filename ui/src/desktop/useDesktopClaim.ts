@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { hasDesktopClient, type DesktopClientState } from './bridge';
 import type { AccountRecovery, BindField, BindProblem, BindStep, ComputerBinding, EligibleName } from './BindComputerView';
@@ -83,11 +83,21 @@ const NO_HANDLES: Handles = { receipt: null, revision: null, offer: null, delive
 export function useDesktopClaim(state: DesktopClientState | null, enabled: boolean) {
   const generation = state?.generation ?? 0;
   const latest = useRef(state);
-  latest.current = state;
+  useLayoutEffect(() => { latest.current = state; });
   const handles = useRef<Handles>({ ...NO_HANDLES });
   const [binding, setBinding] = useState<ComputerBinding>({ state: 'reading' });
   const [recovery, setRecovery] = useState<{ state: AccountRecovery; receipt: string | null } | null>(null);
-  const [step, setStep] = useState<BindStep | null>(null);
+  // The flow belongs to the generation it started in: a changed account or document generation
+  // ends it (native has fenced it already), without a state update from an effect.
+  const [flow, setFlow] = useState<{ generation: number; step: BindStep | null }>({ generation, step: null });
+  const step = flow.generation === generation ? flow.step : null;
+  const setStep = useCallback((next: BindStep | null | ((current: BindStep | null) => BindStep | null)) => {
+    setFlow((current) => {
+      const at = latest.current?.generation ?? 0;
+      const previous = current.generation === at ? current.step : null;
+      return { generation: at, step: typeof next === 'function' ? next(previous) : next };
+    });
+  }, []);
   const [review, setReview] = useState<{ account: string; computer: string }>({ account: '', computer: '' });
   const [busy, setBusy] = useState(false);
   const nameRef = useRef('');
@@ -106,7 +116,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     nameRef.current = '';
     setStep(null);
     setBusy(false);
-  }, []);
+  }, [setStep]);
 
   const observe = useCallback(async () => {
     setBinding({ state: 'reading' });
@@ -137,20 +147,21 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   const showing = enabled && state?.account.status === 'signed_in';
   // Closing the flow reads again itself (close()); a flow opening or ending is not a new showing.
   const flowOpen = useRef(false);
-  flowOpen.current = step !== null;
+  useEffect(() => { flowOpen.current = step !== null; }, [step]);
   useEffect(() => {
     if (!showing || flowOpen.current) return;
     void observe();
     void inspect();
   }, [showing, generation, observe, inspect]);
 
-  // A changed account or document generation ends the flow: native has fenced it already.
+  // A changed generation also drops the old flow's handles and any reply still on its way.
   const seen = useRef(generation);
   useEffect(() => {
     if (seen.current === generation) return;
     seen.current = generation;
-    if (step) reset();
-  }, [generation, step, reset]);
+    epoch.current += 1;
+    handles.current = { ...NO_HANDLES };
+  }, [generation]);
 
   // Leaving the page ends the review it held. Cancelling only attenuates this receipt.
   useEffect(() => () => {
@@ -159,82 +170,84 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (receipt) void invoke('desktop_claim_review', latest.current?.generation ?? 0, { type: 'cancel', receipt });
   }, []);
 
-  /** Draws one review native delivered; `changed` names what differs from the confirmed one. */
-  const showReview = useCallback(async (value: Record<string, unknown>, after: 'read' | 'check' | 'proof'): Promise<void> => {
+  /** Draws one review native delivered; `changed` names what differs from the confirmed one. A
+   *  review for a name other than the field's now is checked again for what the field says. */
+  const showReview = useCallback(async (delivered: Record<string, unknown>, first: 'read' | 'check' | 'proof'): Promise<void> => {
     const h = handles.current;
-    const revision = str(value.revision);
-    const screen = obj(value.screen);
-    if (!revision || !screen) { setStep({ kind: 'problem', problem: 'unknown' }); return; }
-    h.revision = revision;
-    const account = str(value.account_email) ?? '';
-    const computer = str(value.device_name) ?? '';
-    setReview({ account, computer });
-    const kind = str(screen.state);
-    const names = obj(screen.names);
-    const eligible: EligibleName[] = Array.isArray(names?.eligible)
-      ? names.eligible.flatMap((each) => { const e = obj(each); const prefix = str(e?.prefix); const host = str(e?.hostname); return prefix && host ? [{ prefix, host }] : []; })
-      : [];
-    let next: BindStep;
-    let shown: Shown = { account, computer, host: null, available: false };
-    if (kind === 'new') {
-      const selected = str(screen.prefix);
-      const prefilled = str(screen.prefilled_prefix);
-      // The first read carries avibe.bot's suggestion; check it once so the review names it exactly.
-      if (after === 'read' && !selected && prefilled && validPrefix(prefilled)) {
-        nameRef.current = prefilled;
-        setStep({ kind: 'name', name: prefilled, check: 'checking' });
-        const reply = await call('desktop_claim_review', { type: 'check', revision, prefix: prefilled });
-        if (!reply) return;
-        if (!reply.ok) { setStep(problemFor(reply.code)); return; }
-        return showReview(reply.value ?? {}, 'check');
-      }
-      const name = after === 'read' ? (selected ?? prefilled ?? '') : nameRef.current;
-      nameRef.current = name;
-      // The person kept typing while this check was on its way: check what the field says now.
-      if (selected !== null && selected !== name) {
-        if (validPrefix(name)) {
-          const reply = await call('desktop_claim_review', { type: 'check', revision, prefix: name });
+    let value = delivered;
+    let after = first;
+    for (;;) {
+      const revision = str(value.revision);
+      const screen = obj(value.screen);
+      if (!revision || !screen) { setStep({ kind: 'problem', problem: 'unknown' }); return; }
+      h.revision = revision;
+      const account = str(value.account_email) ?? '';
+      const computer = str(value.device_name) ?? '';
+      setReview({ account, computer });
+      const kind = str(screen.state);
+      const names = obj(screen.names);
+      const eligible: EligibleName[] = Array.isArray(names?.eligible)
+        ? names.eligible.flatMap((each) => { const e = obj(each); const prefix = str(e?.prefix); const host = str(e?.hostname); return prefix && host ? [{ prefix, host }] : []; })
+        : [];
+      let next: BindStep;
+      let shown: Shown = { account, computer, host: null, available: false };
+      if (kind === 'new') {
+        const selected = str(screen.prefix);
+        const prefilled = str(screen.prefilled_prefix);
+        // The first read carries avibe.bot's suggestion; check it once so the review names it exactly.
+        const ask = after === 'read' && !selected && prefilled && validPrefix(prefilled) ? prefilled
+          // The person kept typing while this check was on its way: check what the field says now.
+          : after !== 'read' && selected !== null && selected !== nameRef.current && validPrefix(nameRef.current) ? nameRef.current
+            : null;
+        if (ask) {
+          nameRef.current = ask;
+          setStep({ kind: 'name', name: ask, check: 'checking' });
+          const reply = await call('desktop_claim_review', { type: 'check', revision, prefix: ask });
           if (!reply) return;
           if (!reply.ok) { setStep(problemFor(reply.code)); return; }
-          return showReview(reply.value ?? {}, 'check');
+          value = reply.value ?? {};
+          after = 'check';
+          continue;
         }
-        setStep({ kind: 'name', name, check: 'invalid' });
-        return;
+        const name = after === 'read' ? (selected ?? prefilled ?? '') : nameRef.current;
+        nameRef.current = name;
+        if (selected !== null && selected !== name) { setStep({ kind: 'name', name, check: 'invalid' }); return; }
+        const check = screen.taken === true ? 'taken' : !selected ? 'invalid' : eligible.some((each) => each.prefix === selected) ? 'reclaim' : 'free';
+        shown = { account, computer, host: selected ? hostFor(selected) : null, available: check === 'free' || check === 'reclaim' };
+        next = { kind: 'name', name, check };
+      } else if (kind === 'existing') {
+        const host = str(screen.hostname) ?? '';
+        shown = { account, computer, host, available: true };
+        next = { kind: 'existing', host };
+      } else if (kind === 'name_holding_limit_reached') {
+        const holding = obj(names?.holding);
+        next = {
+          kind: 'limit', name: nameRef.current,
+          held: typeof holding?.limit === 'number' ? holding.limit : null,
+          earliest: str(holding?.earliest_release_at), eligible,
+        };
+      } else if (kind === 'owner_conflict') {
+        next = { kind: 'conflict' };
+      } else if (kind === 'local_runtime_upgrade_required') {
+        next = { kind: 'upgrade' };
+      } else {
+        next = { kind: 'problem', problem: 'unknown' };
       }
-      const check = screen.taken === true ? 'taken' : !selected ? 'invalid' : eligible.some((each) => each.prefix === selected) ? 'reclaim' : 'free';
-      shown = { account, computer, host: selected ? hostFor(selected) : null, available: check === 'free' || check === 'reclaim' };
-      next = { kind: 'name', name, check };
-    } else if (kind === 'existing') {
-      const host = str(screen.hostname) ?? '';
-      shown = { account, computer, host, available: true };
-      next = { kind: 'existing', host };
-    } else if (kind === 'name_holding_limit_reached') {
-      const holding = obj(names?.holding);
-      next = {
-        kind: 'limit', name: nameRef.current,
-        held: typeof holding?.limit === 'number' ? holding.limit : null,
-        earliest: str(holding?.earliest_release_at), eligible,
-      };
-    } else if (kind === 'owner_conflict') {
-      next = { kind: 'conflict' };
-    } else if (kind === 'local_runtime_upgrade_required') {
-      next = { kind: 'upgrade' };
-    } else {
-      next = { kind: 'problem', problem: 'unknown' };
+      h.shown = shown;
+      if (after === 'proof' && h.confirmed && (next.kind === 'name' || next.kind === 'existing')) {
+        const before = h.confirmed;
+        const changed: BindField[] = [
+          ...(before.account !== shown.account ? ['account' as const] : []),
+          ...(before.computer !== shown.computer ? ['computer' as const] : []),
+          ...(before.host !== shown.host ? ['name' as const] : []),
+          ...(before.available !== shown.available ? ['availability' as const] : []),
+        ];
+        next = { ...next, changed: changed.length ? changed : ['availability'] };
+      }
+      setStep(next);
+      return;
     }
-    h.shown = shown;
-    if (after === 'proof' && h.confirmed && (next.kind === 'name' || next.kind === 'existing')) {
-      const before = h.confirmed;
-      const changed: BindField[] = [
-        ...(before.account !== shown.account ? ['account' as const] : []),
-        ...(before.computer !== shown.computer ? ['computer' as const] : []),
-        ...(before.host !== shown.host ? ['name' as const] : []),
-        ...(before.available !== shown.available ? ['availability' as const] : []),
-      ];
-      next = { ...next, changed: changed.length ? changed : ['availability'] };
-    }
-    setStep(next);
-  }, [call]);
+  }, [call, setStep]);
 
   /** What native decided for a confirmed review, or for one re-read after verification. */
   const decided = useCallback(async (value: Record<string, unknown> | null): Promise<void> => {
@@ -250,7 +263,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       return;
     }
     setStep({ kind: 'problem', problem: 'unknown' });
-  }, [showReview]);
+  }, [showReview, setStep]);
 
   /** Runs one pressed action; nothing else runs while it is on its way. */
   const run = useCallback(async (work: () => Promise<void>) => {
@@ -273,7 +286,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!read) return;
     if (!read.ok) { setStep(problemFor(read.code)); return; }
     await showReview(read.value ?? {}, 'read');
-  }), [run, call, showReview]);
+  }), [run, call, showReview, setStep]);
 
   const timer = useRef<number | null>(null);
   const changeName = useCallback((typed: string) => {
@@ -295,7 +308,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
         await showReview(reply.value ?? {}, 'check');
       });
     }, 400);
-  }, [call, showReview]);
+  }, [call, showReview, setStep]);
   useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
 
   const pick = useCallback((prefix: string) => run(async () => {
@@ -306,7 +319,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply) return;
     if (!reply.ok) { setStep(problemFor(reply.code)); return; }
     await showReview(reply.value ?? {}, 'check');
-  }), [run, call, showReview]);
+  }), [run, call, showReview, setStep]);
 
   const confirm = useCallback(() => run(async () => {
     const h = handles.current;
@@ -316,7 +329,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply) return;
     if (!reply.ok) { setStep(problemFor(reply.code)); return; }
     await decided(reply.value);
-  }), [run, call, decided]);
+  }), [run, call, decided, setStep]);
 
   const sendCode = useCallback(() => run(async () => {
     const h = handles.current;
@@ -328,30 +341,32 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply.ok || !delivery) { setStep(problemFor(reply.ok ? 'invalid_response' : reply.code)); return; }
     h.delivery = delivery;
     setStep({ kind: 'code', code: '' });
-  }), [run, call]);
+  }), [run, call, setStep]);
 
   /** After an accepted verification: a second factor the account still owes, or the same ticket again. */
+  const owedFactor = useCallback((): boolean => {
+    const account = latest.current?.account;
+    if (account?.status !== 'second_factor_required') return false;
+    if (account.gate === 'enroll') { setStep({ kind: 'factorSetup', material: null, code: '' }); return true; }
+    const methods = account.methods.length ? account.methods : ['totp' as const];
+    setStep({ kind: 'factor', method: methods[0], methods, code: '' });
+    return true;
+  }, [setStep]);
   const afterVerification = useCallback(async (submission: string): Promise<void> => {
     const h = handles.current;
     h.submission = submission;
-    const account = latest.current?.account;
-    if (account?.status === 'second_factor_required') {
-      if (account.gate === 'enroll') { setStep({ kind: 'factorSetup', material: null, code: '' }); return; }
-      const methods = account.methods.length ? account.methods : ['totp' as const];
-      setStep({ kind: 'factor', method: methods[0], methods, code: '' });
-      return;
-    }
+    if (owedFactor()) return;
     if (!h.receipt) return;
     const reply = await call('desktop_claim_review', { type: 'review_after_proof', receipt: h.receipt, submission });
     if (!reply) return;
     if (!reply.ok) {
       // The new session may still owe its second factor; the account state says so.
-      if (reply.code === 'authentication_required' && latest.current?.account.status === 'second_factor_required') return afterVerification(submission);
+      if (reply.code === 'authentication_required' && owedFactor()) return;
       setStep(problemFor(reply.code));
       return;
     }
     await decided(reply.value);
-  }, [call, decided]);
+  }, [call, decided, owedFactor, setStep]);
 
   const submissionFrom = (reply: Reply | null): string | null => reply?.ok ? str(reply.value?.submission) : null;
 
@@ -386,7 +401,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       if (recovered?.state === 'issued' && codes.length) { h.submission = submission; setStep({ kind: 'codes', codes }); return; }
       await afterVerification(submission);
     }
-  }), [run, call, step, afterVerification]);
+  }), [run, call, step, afterVerification, setStep]);
 
   const passkey = useCallback(() => run(async () => {
     const h = handles.current;
@@ -398,7 +413,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     const submission = submissionFrom(reply);
     if (!submission) { setStep(problemFor('invalid_response')); return; }
     await afterVerification(submission);
-  }), [run, call, step, afterVerification]);
+  }), [run, call, step, afterVerification, setStep]);
 
   const beginSetup = useCallback(() => run(async () => {
     const h = handles.current;
@@ -411,7 +426,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply.ok || !setup || !uri || !secret) { setStep(problemFor(reply.ok ? 'invalid_response' : reply.code)); return; }
     h.setup = setup;
     setStep({ kind: 'factorSetup', material: { uri, secret }, code: '' });
-  }), [run, call]);
+  }), [run, call, setStep]);
 
   const savedCodes = useCallback(() => run(async () => {
     const submission = handles.current.submission;
@@ -420,10 +435,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   const setCode = useCallback((code: string) => {
     setStep((current) => current && (current.kind === 'code' || current.kind === 'factor' || current.kind === 'factorSetup') ? { ...current, code } : current);
-  }, []);
+  }, [setStep]);
   const factorStep = useCallback((method: 'passkey' | 'totp' | 'recovery') => {
     setStep((current) => current?.kind === 'factor' ? { ...current, method, code: '', error: null } : current);
-  }, []);
+  }, [setStep]);
 
   const close = useCallback(() => {
     const receipt = handles.current.receipt;
