@@ -433,6 +433,41 @@ export const applyModelsDevMatch = (
   backend,
 );
 
+/** The registered model a catalog key names: its last path segment. The same
+ *  cut reads a provider-prefixed model ID as the registry would know it. */
+export const modelsDevBaseId = (id: string): string => id.slice(id.lastIndexOf('/') + 1);
+
+/**
+ * A models.dev answer's parameters, poured into a draft that keeps its own ID
+ * and display name.
+ *
+ * This is describing a model, not choosing one: the row stays the model the
+ * user named — a relay's name for it, a variant the catalog files under its
+ * base — and takes what the catalog knows about the model it answers to.
+ *
+ * `origin` is passed in for the reason `applyModelsDevMatch` takes it. `backend`
+ * is passed only for a row being added: the API an OpenCode model is answered
+ * on comes with the description then, and a saved row keeps the one it has.
+ */
+export const applyModelsDevParameters = (
+  draft: BackendModel,
+  match: ModelsDevMatch,
+  origin: BackendModelOrigin,
+  backend: AgentBackend | null,
+): BackendModel => ({
+  ...draft,
+  origin,
+  models_dev_id: match.models_dev_id,
+  context_window: match.context_window,
+  max_output_tokens: match.max_output_tokens,
+  input_modalities: [...match.input_modalities],
+  output_modalities: [...match.output_modalities],
+  supports_tools: match.supports_tools,
+  supports_reasoning: match.supports_reasoning,
+  reasoning_efforts: [...match.reasoning_efforts],
+  ...(backend === 'opencode' ? { native_protocol: match.native_protocol } : {}),
+});
+
 const sameList = (left: readonly unknown[], right: readonly unknown[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 

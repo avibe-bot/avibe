@@ -1579,8 +1579,8 @@
             "capabilities": "Capabilities"
           },
           "id": {
-            "label": "Model",
-            "placeholder": "Search models.dev or enter a model ID",
+            "label": "Model ID",
+            "placeholder": "Enter a model ID",
             "required": "Enter a backend model ID.",
             "duplicate": "This list already has a model with this ID."
           },
@@ -1588,14 +1588,10 @@
             "label": "Display name",
             "placeholder": "Optional — the list shows the model ID when this is empty"
           },
-          "lookupLoading": "Searching models.dev…",
-          "useAsId": "Use \"<id>{{query}}</id>\" as the model ID",
-          "useAsIdKeep": "Use \"<id>{{query}}</id>\", keep current parameters",
-          "parametersFrom": "Parameters from {{name}}",
-          "clearParameters": "Clear parameters",
-          "fillFailed": "models.dev could not be reached",
-          "fillUnavailable": "models.dev unavailable",
-          "matches": "models.dev matches",
+          "lookupLoading": "Searching the model catalog…",
+          "fillFailed": "The model catalog could not be reached",
+          "fillUnavailable": "The model catalog is unavailable",
+          "matches": "Model catalog results",
           "contextWindow": "Context window",
           "maxOutput": "Maximum output",
           "tokens": "tokens",
@@ -1626,7 +1622,20 @@
           },
           "cancel": "Cancel",
           "add": "Add model",
-          "apply": "Save model"
+          "apply": "Save model",
+          "source": {
+            "from": "Parameters from <id>{{model}}</id>",
+            "fromClosest": "Parameters from the closest match, <id>{{model}}</id>",
+            "none": "The model catalog has no match for this model",
+            "updateTo": "Update parameters to <id>{{model}}</id>",
+            "change": "Change",
+            "pick": "Pick one from the catalog",
+            "search": "Search the model catalog",
+            "applyNote": "Copies parameters only. The model ID stays.",
+            "clear": "Fill in myself",
+            "empty": "Nothing found. Try another keyword."
+          },
+          "presets": "Common values"
         },
         "off": {
           "status": "Turned off",

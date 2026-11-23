@@ -1579,8 +1579,8 @@
             "capabilities": "能力"
           },
           "id": {
-            "label": "模型",
-            "placeholder": "搜索 models.dev 或输入模型 ID",
+            "label": "模型 ID",
+            "placeholder": "输入模型 ID",
             "required": "请填写 Backend 模型 ID。",
             "duplicate": "列表中已存在相同 ID 的模型。"
           },
@@ -1588,14 +1588,10 @@
             "label": "显示名称",
             "placeholder": "可选，留空时列表显示模型 ID"
           },
-          "lookupLoading": "正在搜索 models.dev…",
-          "useAsId": "把「<id>{{query}}</id>」作为模型 ID",
-          "useAsIdKeep": "使用「<id>{{query}}</id>」，保留当前参数",
-          "parametersFrom": "参数来自 {{name}}",
-          "clearParameters": "清空参数",
-          "fillFailed": "没能访问 models.dev",
-          "fillUnavailable": "models.dev 不可用",
-          "matches": "models.dev 匹配结果",
+          "lookupLoading": "正在搜索模型目录…",
+          "fillFailed": "没能访问模型目录",
+          "fillUnavailable": "模型目录不可用",
+          "matches": "模型目录搜索结果",
           "contextWindow": "上下文窗口",
           "maxOutput": "最大输出",
           "tokens": "tokens",
@@ -1626,7 +1622,20 @@
           },
           "cancel": "取消",
           "add": "添加模型",
-          "apply": "保存模型"
+          "apply": "保存模型",
+          "source": {
+            "from": "参数来自 <id>{{model}}</id>",
+            "fromClosest": "参数来自最接近的 <id>{{model}}</id>",
+            "none": "模型目录里没有找到这个模型",
+            "updateTo": "按 <id>{{model}}</id> 更新参数",
+            "change": "更换",
+            "pick": "从目录选一个套用参数",
+            "search": "搜索模型目录",
+            "applyNote": "只套用参数，模型 ID 不变。",
+            "clear": "不套用，自己填",
+            "empty": "没有找到，换个关键词试试。"
+          },
+          "presets": "常见值"
         },
         "off": {
           "status": "已停用",
