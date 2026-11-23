@@ -41,6 +41,46 @@ fn configured_controls(config: &tauri::Config) -> Option<(f64, f64)> {
         .map(|position| (position.x, position.y))
 }
 
+/// The commands a page's drag strip sends: a press starts a window drag, a
+/// double click zooms the window. The same pair `capabilities/window-drag.json`
+/// grants the loopback Workbench.
+const DRAG_PERMISSIONS: [&str; 2] = [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+];
+
+/// Another computer's instance draws the same drag strip as this Mac's, from
+/// its own origin, which no static capability names: without a grant its press
+/// was refused and the window could not be moved by its top. This grants that
+/// one web view, for that one origin, the window-drag pair only; every other
+/// native command stays refused to it.
+pub fn remote_drag_capability(label: &str, destination: &url::Url) -> Option<tauri::ipc::CapabilityBuilder> {
+    if destination.scheme() != "https" && destination.scheme() != "http" {
+        return None;
+    }
+    let host = destination.host_str()?;
+    let origin = match destination.port() {
+        Some(port) => format!("{}://{host}:{port}/*", destination.scheme()),
+        None => format!("{}://{host}/*", destination.scheme()),
+    };
+    let mut capability = tauri::ipc::CapabilityBuilder::new(format!("remote-window-drag-{label}"))
+        .webview(label)
+        .remote(origin)
+        .local(false)
+        .platform(tauri::utils::platform::Target::MacOS);
+    for permission in DRAG_PERMISSIONS {
+        capability = capability.permission(permission);
+    }
+    Some(capability)
+}
+
+/// Grants `remote_drag_capability` to a web view showing another computer's instance.
+pub fn grant_remote_drag(app: &tauri::AppHandle, label: &str, destination: &url::Url) {
+    if let Some(capability) = remote_drag_capability(label, destination) {
+        let _ = app.add_capability(capability);
+    }
+}
+
 /// Applies the transparent native frame to every loaded page. The frame is a
 /// shell property, so it must not depend on a metadata marker served by the
 /// Runtime's UI version.
@@ -116,6 +156,91 @@ fn set_overlay(window: &NSWindow, _mtm: MainThreadMarker) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mock_context() -> tauri::Context<tauri::test::MockRuntime> {
+        tauri::generate_context!()
+    }
+
+    fn invoke(view: &tauri::Webview<tauri::test::MockRuntime>, url: &str, cmd: &str) -> Result<(), String> {
+        tauri::test::get_ipc_response(
+            view,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: url.parse().unwrap(),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
+    /// Another computer's instance in main, through the real capability files:
+    /// its drag strip is refused before the grant, may drag and zoom after it,
+    /// and nothing else; another view, or another origin in this one, gains nothing.
+    #[test]
+    fn a_remote_instance_view_may_drag_the_window_and_nothing_more() {
+        use tauri::{WebviewBuilder, WebviewUrl, WindowBuilder};
+        let app = tauri::test::mock_builder().build(mock_context()).unwrap();
+        let remote = "https://studio-app.avibe.bot/";
+        let physical = WindowBuilder::new(&app, crate::MAIN_WINDOW).build().unwrap();
+        let child = |label: &str| {
+            physical
+                .add_child(
+                    WebviewBuilder::new(label, WebviewUrl::External(remote.parse().unwrap())),
+                    tauri::LogicalPosition::new(0.0, 0.0),
+                    tauri::LogicalSize::new(880.0, 600.0),
+                )
+                .unwrap()
+        };
+        let view = child("main-runtime-7");
+        let other = child("main-runtime-8");
+        let drag = "plugin:window|start_dragging";
+        assert!(invoke(&view, remote, drag).is_err(), "refused before the grant");
+
+        grant_remote_drag(app.handle(), "main-runtime-7", &remote.parse().unwrap());
+        assert_eq!(invoke(&view, remote, drag), Ok(()));
+        assert_eq!(invoke(&view, remote, "plugin:window|internal_toggle_maximize"), Ok(()));
+        for cmd in [
+            "plugin:window|close",
+            "plugin:window|set_position",
+            "plugin:event|emit",
+            "pet_bind",
+            "open_app_window",
+        ] {
+            assert!(invoke(&view, remote, cmd).is_err(), "{cmd} stays refused");
+        }
+        assert!(invoke(&other, remote, drag).is_err(), "another view gains nothing");
+        assert!(
+            invoke(&view, "https://elsewhere.example/", drag).is_err(),
+            "another origin gains nothing"
+        );
+    }
+
+    #[test]
+    fn the_remote_grant_names_one_origin_and_ignores_other_schemes() {
+        let built = |raw: &str| {
+            remote_drag_capability("main-runtime-3", &raw.parse().unwrap())
+                .map(|c| serde_json::to_value(tauri::ipc::RuntimeCapability::build(c)).unwrap())
+        };
+        let file = built("https://studio-app.avibe.bot/chat/1?x=2").unwrap();
+        assert_eq!(
+            file["remote"]["urls"],
+            serde_json::json!(["https://studio-app.avibe.bot/*"])
+        );
+        assert_eq!(file["webviews"], serde_json::json!(["main-runtime-3"]));
+        assert_eq!(file["local"], false);
+        assert_eq!(file["permissions"], serde_json::json!(DRAG_PERMISSIONS));
+        assert_eq!(
+            built("https://host.example:8443/").unwrap()["remote"]["urls"],
+            serde_json::json!(["https://host.example:8443/*"])
+        );
+        assert!(built("tauri://localhost/").is_none());
+        assert!(built("about:blank").is_none());
+    }
 
     #[test]
     fn shipping_pages_declare_native_drag_support() {
