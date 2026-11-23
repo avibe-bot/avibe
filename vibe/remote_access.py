@@ -6276,6 +6276,11 @@ def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None, man
                 return {'ok': False, 'error': 'pairing_local_archive_required', 'replay_state': 'local_archive'}
             elif pairing_replay.replacement_blocked(pending) or (pending and pending.get('desktop_enrollment')):
                 return pairing_replay.reconciliation_required()
+            elif pending and pending.get('personal_claim'):
+                # A pasted key cannot take ownership of a personal claim's saved
+                # request, schedule or acceptance marker. Leave all three intact.
+                return {'ok': False, 'status': 409, 'error': 'local_instance_conflict',
+                        'operation_owner': 'personal_claim'}
             else:
                 claim = _new_pairing_claim(
                     current_config, backend.base_url, device_name, pairing_key=pairing_key,

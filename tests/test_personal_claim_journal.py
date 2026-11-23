@@ -27,6 +27,28 @@ def test_expired_unconsumed_grant_retires_only_its_claim_attempt(claim_peer, mon
     assert _claim()['state'] == 'bound'
 
 
+def test_explicit_key_leaves_settled_personal_request_with_its_owner(claim_peer, monkeypatch):
+    from vibe import pairing_replay
+
+    sends = []
+    def rejected(url, request, **kwargs):
+        sends.append(request['redeem_request_id'])
+        raise remote_access.BackendRequestError(422, {'error': 'pairing_request_failed'})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(remote_access, '_json_request', rejected)
+        assert _claim()['code'] == 'pairing_recovery_required'
+        evidence = [remote_access._pending_pairing_path(), pairing_replay._path(), claims._marker()]
+        before = [path.read_bytes() for path in evidence]
+        decisions = list(claim_peer.decisions)
+        result = remote_access.pair('fixture-unrelated-key', 'https://avibe.bot')
+        assert result['error'] == 'local_instance_conflict' and result['operation_owner'] == 'personal_claim'
+        assert [path.read_bytes() for path in evidence] == before
+        assert len(sends) == 1 and claim_peer.decisions == decisions
+    assert claims.recover_pairing(claim_peer.id)['state'] == 'bound'
+    assert claim_peer.decisions == decisions and not pairing_replay.orphaned_delivery()
+
+
 def test_off_binding_is_not_repaired_or_replaced(claim_peer):
     assert _claim()["state"] == "bound"
     cfg = V2Config.load()
