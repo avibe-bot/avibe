@@ -165,6 +165,8 @@ export type BindDialogProps = {
   onClose: () => void;
   /** The App's sign-in (DesktopSignIn) for the `signIn` step. */
   signIn?: ReactNode;
+  /** The document must not leave (an authenticator setup finishing): no close, no Escape. */
+  holding?: boolean;
   /** False in a claim view whose one review was sent: a problem's way on is closing. */
   restartable?: boolean;
   /** `notHere`: observe again (「再看一次」), and sign in with the account the binding is under. */
@@ -192,7 +194,7 @@ const BIND_CHROME: SignInChromeValue = { Frame: BindSignInFrame, platform: 'desk
 export function BindDialog(props: BindDialogProps) {
   const { t } = useTranslation();
   // Recovery codes are shown once: the dialog does not close until the person says they saved them.
-  const held = props.step.kind === 'codes';
+  const held = props.step.kind === 'codes' || Boolean(props.holding);
   return <Dialog open onOpenChange={(open) => { if (!open && !held) props.onClose(); }}>
     <DialogContent data-bind-dialog className={held ? 'max-w-lg [&>button:last-child]:hidden' : 'max-w-lg'} closeLabel={t('common.close')}
       keepOnOutsideClick={held} onEscapeKeyDown={(event) => { if (held) event.preventDefault(); }}>

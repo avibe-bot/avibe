@@ -466,6 +466,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   }, [call, showReview, setStep]);
   useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
 
+  // An authenticator setup's last step on its way (generation it started in).
+  const [finalizing, setFinalizing] = useState<number | null>(null);
   const pick = useCallback((prefix: string) => run(async () => {
     const h = handles.current;
     if (!h.revision || h.checking) return;
@@ -644,7 +646,15 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       const digits = code.replace(/\s/g, '');
       if (!/^\d{6}$/.test(digits)) { setStep({ ...step, invalid: true }); return; }
       code = digits;
-      const reply = await call('desktop_claim_review', { type: 'finish_totp_setup', receipt: h.receipt, setup: h.setup, code });
+      // Native finishes the setup even if this document leaves, and drops its one-time recovery
+      // codes then: hold the document from the press until the reply is drawn.
+      setFinalizing(latest.current?.generation ?? 0);
+      let reply;
+      try {
+        reply = await call('desktop_claim_review', { type: 'finish_totp_setup', receipt: h.receipt, setup: h.setup, code });
+      } finally {
+        setFinalizing(null);
+      }
       if (!reply) return;
       if (!reply.ok) {
         // A wrong code or a 429 keeps the issued setup (its QR and key); only an expired one ends it.
@@ -741,6 +751,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     : step ?? (state && state.account.status !== 'signed_in' ? { kind: 'signIn' } : observedStep(binding, settled));
   return {
     binding, step: shown, busy, recheck: begin,
+    /** Nothing may leave: recovery codes shown, or the setup that returns them on its way. */
+    held: step?.kind === 'codes' || finalizing === generation,
     /** Whether 「重新开始」 can do anything: the claim view's one review not yet sent. */
     restartable: !claimView || !opened,
     account: review.account, computer: review.computer,

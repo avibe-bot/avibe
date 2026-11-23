@@ -382,6 +382,33 @@ it('recovery codes from a binding hold the document until they are saved', async
   await screen.findByRole('heading', { name: copy.boundTitle }, { timeout: 5000 });
 });
 
+it('an authenticator setup finishing holds the document until its recovery codes are drawn', async () => {
+  let answer: (value: unknown) => void = () => {};
+  const page = mount({ ...proofAnswers,
+    review_after_proof: (action: Action) => (action.submission === 's' ? refuse('authentication_required')() : { state: 'bound' }),
+    prepare_totp_setup: { state: 'totp_setup', setup: 'setup-1', manual_key: 'KEY-FIXTURE', qr_payload: 'otpauth://totp/fixture' },
+    finish_totp_setup: () => new Promise((resolve) => { answer = resolve; }) });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'enroll', methods: [] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.desktopAccount.addAuthenticator }, { timeout: 5000 }));
+  fireEvent.change(await screen.findByLabelText(en.desktopAccount.authenticatorCode), { target: { value: '123456' } });
+  fireEvent.click(screen.getByRole('button', { name: en.desktopAccount.finishFactor }));
+  await waitFor(() => expect(page.types()).toContain('finish_totp_setup'));
+  // On its way: no way out, by key, by the dialog or by the header.
+  await waitFor(() => expect(screen.queryByRole('button', { name: en.desktopAccount.backWorkbench })).toBeNull());
+  fireEvent.keyDown(window, { key: 'Escape' });
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+  // The corner close is hidden by style; even pressed, it closes nothing.
+  for (const close of screen.queryAllByRole('button', { name: en.common.close })) fireEvent.click(close);
+  expect(screen.getByLabelText(en.desktopAccount.authenticatorCode)).toBeTruthy();
+  expect(page.actions.some((each) => each.type === 'cancel')).toBe(false);
+  expect(page.leaves()).toEqual([]);
+  await act(async () => { answer({ state: 'enrollment_accepted', submission: 's2', recovery: { state: 'issued', codes: ['•••••-••003'] } }); });
+  await screen.findByText('•••••-••003');
+  expect(page.leaves()).toEqual([]);
+});
+
 it('an authenticator code that is not six digits stays in place and is never sent', async () => {
   const page = mount({ ...proofAnswers,
     review_after_proof: refuse('authentication_required'),
