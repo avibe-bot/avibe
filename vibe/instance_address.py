@@ -104,7 +104,14 @@ def hostname_for_prefix(prefix: str) -> str:
 
 
 def _valid_prefix(prefix: Any) -> bool:
-    return isinstance(prefix, str) and _PREFIX.fullmatch(prefix) is not None and is_managed_name(hostname_for_prefix(prefix))
+    # avibe.bot's rule for a new prefix (avibe-bot-backend lib/claims/prefix.ts):
+    # also, ``<prefix>-app`` must not read as an IDNA label (``xx--``).
+    return (
+        isinstance(prefix, str)
+        and _PREFIX.fullmatch(prefix) is not None
+        and f"{prefix}-app"[2:4] != "--"
+        and is_managed_name(hostname_for_prefix(prefix))
+    )
 
 
 # --- the local binding --------------------------------------------------------
@@ -908,9 +915,31 @@ def _note_other_active_name(
 
     journal = stored.get("journal")
     if isinstance(journal, dict) and journal.get("origin") == "local" and journal.get("phase") == "intent":
-        # Our own request is still unanswered here; its replay settles it.
-        _wake_worker()
-        return
+        if not isinstance(journal.get("held"), dict):
+            # Our own request is still unanswered here; its replay settles it.
+            _wake_worker()
+            return
+        target = journal.get("target_hostname")
+        if state["active_hostname"] == target and state["last_rename_operation_id"] == journal.get("operation_id"):
+            # avibe.bot names this operation as the one that made the change: it
+            # is our own, committed, as a receipt would have said.
+            release = next((entry.get("release_at") for entry in state["cleanup"]
+                            if entry.get("hostname") == journal.get("previous_hostname")), None)
+            _set_journal(binding, {
+                **{key: value for key, value in journal.items() if key != "held"},
+                "phase": "committed",
+                "receipt": {
+                    "committed_generation": state["generation"],
+                    "previous_hostname": journal.get("previous_hostname"),
+                    "hostname": target,
+                    "previous_release_at": release if _parse_instant(release) is not None else None,
+                    "oidc_client_id": state.get("oidc_client_id"),
+                },
+            })
+        else:
+            # Another change: adopted as one made elsewhere, which deletes nothing.
+            _set_journal(binding, None)
+            journal = None
     if not isinstance(journal, dict):
         _update_state(
             binding.instance_id,
@@ -1185,6 +1214,11 @@ def describe() -> dict[str, Any]:
             "hostname": journal.get("target_hostname"),
             "error": None,
         }
+        held = journal.get("held")
+        if journal.get("phase") == "intent" and isinstance(held, dict):
+            # Refused after avibe.bot may already have taken the request: not
+            # failed, not sent again, waiting for the state to say what became of it.
+            operation.update({"error": held.get("error"), "unconfirmed": True})
     elif isinstance(state.get("last_operation"), dict) and state["last_operation"].get("state") == "failed":
         last = state["last_operation"]
         operation = {key: value for key, value in last.items() if key not in {"operation_id", "status"}}
@@ -1350,6 +1384,8 @@ def _advance_operation() -> float:
     if journal is None:
         return 0.0
     if journal.get("origin") == "local" and journal.get("phase") == "intent":
+        if isinstance(journal.get("held"), dict):
+            return 0.0  # not sent again; a state read that shows the outcome resolves it
         return _request_change(binding, journal)
     return _apply_committed(binding, journal)
 
@@ -1393,11 +1429,23 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
         "expected_hostname": journal["expected_hostname"],
         "new_prefix": journal["new_prefix"],
     }
+    # Whether an earlier sending of this request may have been taken by avibe.bot:
+    # it was answered "pending", or not answered for sure (no answer, a server
+    # fault, an answer this contract does not know, a crash while it was out).
+    # Recorded before the request leaves, so a crash counts as not knowing.
+    landed_before = bool(journal.get("may_have_landed"))
+    if not landed_before:
+        journal = {**journal, "may_have_landed": True}
+        _set_journal(binding, journal)
     try:
         reply = remote_access._device_json_request(_load_config(), "POST", "hostname-renames", body, timeout=20.0)
     except remote_access.BackendRequestError as exc:
         status, payload = exc.status, exc.payload if isinstance(exc.payload, dict) else {}
         if status == 429 or status >= 500:
+            if status == 429 and not landed_before:
+                # Turned away before it was looked at: this sending did not land.
+                journal = {**journal, "may_have_landed": False}
+                _set_journal(binding, journal)
             retry = payload.get("retry_after_seconds")
             return float(min(max(retry, 1), 600)) if isinstance(retry, (int, float)) else 30.0
         code = payload.get("error") if isinstance(payload.get("error"), str) else ""
@@ -1428,6 +1476,16 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
                    "error": page_code, "status": page_status}
         if page_code == "name_holding_limit_reached":
             failure.update({field: payload.get(field) for field in _LIMIT_FIELDS})
+        if landed_before:
+            # This sending was refused, but an earlier one may have been taken and
+            # still be in avibe.bot's hands (a refusal of a repeat does not cancel
+            # it). Not a failure of the change: stop sending, keep the journal with
+            # its request and its local origin, and let a state read that shows the
+            # outcome settle it (``_note_other_active_name``).
+            held = {key: value for key, value in failure.items() if key not in {"operation_id", "state", "hostname"}}
+            _set_journal(binding, {**journal, "held": held})
+            refresh_state(force=True)
+            return 0.0
         _refuse_operation(binding, journal, failure)
         return 0.0
     except Exception:

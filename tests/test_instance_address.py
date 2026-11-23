@@ -743,8 +743,8 @@ def test_refusals_reach_the_page_as_stable_codes(address, monkeypatch, reply, co
 def test_a_tunnel_configuration_mismatch_settles_the_operation_and_is_never_sent_again(address):
     plane, _ = address
     _cookie, sid = sign_in()
-    # The refusal may also be the answer to a repeat of a request first answered "pending".
-    plane.pending_answers = 1
+    # The answer to the first sending. (To a repeat after "pending" it holds the
+    # journal instead: test_a_refused_repeat_after_pending_holds_the_change.)
     plane.refuse = (409, {"error": "remote_access_configuration_mismatch"})
     rename_to("new")
     run()
@@ -752,14 +752,14 @@ def test_a_tunnel_configuration_mismatch_settles_the_operation_and_is_never_sent
     def sent():
         return [call[2] for call in plane.calls if call[1] == "hostname-renames"]
 
-    assert len(sent()) == 2 and len({body["operation_id"] for body in sent()}) == 1
+    assert len(sent()) == 1
     # Settled: no journal, so nothing is left to send; the page reads the code.
     assert instance_address._journal(binding()) is None
     assert instance_address.describe()["operation"] == {
         "state": "failed", "hostname": NEW, "error": "remote_access_configuration_mismatch"}
     assert instance_address._advance_operation() <= 0
     run()
-    assert len(sent()) == 2
+    assert len(sent()) == 1
     # Nothing of the change happened: the address, its sessions, and no cleaning anywhere.
     assert binding().active_host == OLD and not is_cleaning(get(OLD)) and get(NEW).status_code == 503
     with get_cached_sqlite_engine().connect() as conn:
@@ -770,7 +770,7 @@ def test_a_tunnel_configuration_mismatch_settles_the_operation_and_is_never_sent
     rename_to("new")
     run()
     assert binding().active_host == NEW
-    assert len(sent()) == 3 and sent()[2]["operation_id"] != sent()[0]["operation_id"]
+    assert len(sent()) == 2 and sent()[1]["operation_id"] != sent()[0]["operation_id"]
 
 
 @pytest.mark.parametrize("no_answer", [
@@ -820,13 +820,12 @@ def test_a_rename_refused_for_more_than_one_pairing_is_settled_and_nothing_asks_
     run()
     assert is_cleaning(get(OLD))
     # A second pairing of this instance appears at avibe.bot; this computer's credential is still valid.
-    plane.pending_answers = 1
     plane.refuse = (409, {"error": "rebind_required"})
     rename_to("third")
     plane.fail = None
     reads = asked(plane, "hostname-state")
     run()
-    assert asked(plane, "hostname-renames") == 3  # the first change, then this one: pending, refused
+    assert asked(plane, "hostname-renames") == 2  # the first change, then this one, refused at once
     assert instance_address._journal(binding()) is None and binding().active_host == NEW
     told = instance_address.describe()
     assert told["operation"] == {"state": "failed", "hostname": THIRD, "error": "rebind_required"}
@@ -837,7 +836,7 @@ def test_a_rename_refused_for_more_than_one_pairing_is_settled_and_nothing_asks_
     run()
     clocks.advance(120)
     assert not is_cleaning(get(OLD)) and get(OLD).status_code == 503  # no permission is given, none is held
-    assert asked(plane, "hostname-renames") == 3 and asked(plane, "hostname-state") == reads
+    assert asked(plane, "hostname-renames") == 2 and asked(plane, "hostname-state") == reads
     with get_cached_sqlite_engine().connect() as conn:
         assert sid not in conn.execute(select(remote_device_sessions.c.session_id)).scalars().all()  # ended by the first change only
     # The way out: remote access bound again is another pairing, which is asked and answered.
@@ -1222,6 +1221,156 @@ def test_the_rename_request_passes_avibe_bots_rule_and_a_repeat_sends_the_same_i
     later = renames_sent(plane)[3:]
     assert len(later) == 2 and later[0]["operation_id"] == later[1]["operation_id"] != sent[0]["operation_id"]
     assert BACKEND_UUID.match(later[0]["operation_id"]) and binding().active_host == THIRD
+
+
+def held_journal():
+    journal = instance_address._journal(binding())
+    assert journal is not None and journal["phase"] == "intent" and isinstance(journal.get("held"), dict)
+    return journal
+
+
+@pytest.mark.parametrize(("refusal", "said"), [
+    ((409, {"error": "binding_changed"}), "address_changed"),
+    ((409, {"error": "remote_access_configuration_mismatch"}), "remote_access_configuration_mismatch"),
+    ((409, {"error": "rebind_required"}), "rebind_required"),
+    ((403, {"error": "forbidden"}), "rename_ineligible"),
+])
+def test_a_refused_repeat_after_pending_holds_the_change_until_the_state_says_what_became_of_it(address, refusal, said):
+    """avibe.bot may answer a repeat of a request it took (202) with a 409 that does not cancel it."""
+
+    plane, clocks = address
+    _cookie, sid = sign_in()
+    plane.pending_answers = 1
+    plane.refuse = refusal
+    rename_to("new")
+    run()
+    sent = renames_sent(plane)
+    assert len(sent) == 2 and sent[0] == sent[1]
+    journal = held_journal()
+    assert journal["operation_id"] == sent[0]["operation_id"] and journal["origin"] == "local"
+    told = instance_address.describe()["operation"]
+    assert told == {"state": "pending", "hostname": NEW, "error": said, "unconfirmed": True}
+    # Not sent again, by the worker or anything else; nothing of the change has happened.
+    for _ in range(3):
+        assert instance_address._advance_operation() == 0.0
+        clocks.advance(60)
+    run()
+    assert len(renames_sent(plane)) == 2 and instance_address.describe()["operation"]["state"] == "pending"
+    assert binding().active_host == OLD
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.execute(select(remote_device_sessions.c.session_id)).scalars().all() == [sid]
+    with pytest.raises(instance_address.AddressError) as busy:
+        instance_address.preview("third", ("loopback",))
+    assert busy.value.code in {"operation_in_progress", said}
+    # avibe.bot finishes the operation it took; the state names it, and it is ours.
+    plane.refuse = None
+    instance_address._standing_refusal = None
+    plane.move(NEW, journal["operation_id"])
+    instance_address.note_generation_hint(plane.generation)
+    clocks.advance(6)
+    run()
+    assert binding().active_host == NEW and instance_address._journal(binding()) is None
+    assert len(renames_sent(plane)) == 2
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.execute(select(remote_device_sessions.c.session_id)).scalars().all() == []
+
+
+def test_a_lost_receipt_then_a_refused_credential_stops_sending_and_the_state_settles_it(address, monkeypatch):
+    plane, clocks = address
+    answer = plane.rename
+
+    def committed_but_lost(body):
+        answer(body)  # avibe.bot commits it
+        raise TimeoutError("the answer was lost")
+
+    plane.rename = committed_but_lost
+    rename_to("new")
+    assert instance_address._advance_operation() > 0  # no answer: owed again
+    journal = instance_address._journal(binding())
+    assert journal["may_have_landed"] is True and binding().active_host == OLD
+
+    def credential_refused(_body):
+        raise remote_access.BackendRequestError(401, {"error": "invalid_device_secret"})
+
+    plane.rename = credential_refused
+    state = plane.state
+    plane.state = lambda: credential_refused(None)  # the state read is refused the same way
+    epoch = instance_address._authority_epoch
+    instance_address._advance_operation()
+    held = held_journal()
+    assert held["held"]["error"] == "pairing_invalid" and instance_address._authority_epoch > epoch
+    assert instance_address.describe()["operation"]["unconfirmed"] is True
+    for _ in range(3):
+        assert instance_address._advance_operation() == 0.0
+    assert sum(1 for call in plane.calls if call[1] == "hostname-renames") == 2
+    # The state, once read (here: the credential is accepted again), says the change was
+    # made by this very operation: it is applied as our own.
+    plane.state = state
+    clocks.advance(6)
+    assert instance_address.refresh_state(force=True)
+    run()
+    assert binding().active_host == NEW and instance_address._journal(binding()) is None
+
+
+def test_a_held_change_that_the_state_shows_went_another_way_is_adopted_as_made_elsewhere(address):
+    plane, clocks = address
+    plane.pending_answers = 1
+    plane.refuse = (409, {"error": "binding_changed"})
+    rename_to("new")
+    run()
+    held_journal()
+    plane.refuse = None
+    plane.move(THIRD, "an-operation-from-elsewhere")
+    clocks.advance(6)
+    instance_address.refresh_state(force=True)
+    run()
+    assert binding().active_host == THIRD and instance_address._journal(binding()) is None
+    assert len(renames_sent(plane)) == 2
+
+
+@pytest.mark.parametrize("before", ["nothing", "throttled"])
+def test_a_refusal_of_a_request_that_never_landed_still_settles(address, before):
+    plane, _ = address
+    if before == "throttled":
+        # Turned away before it was looked at: that sending did not land either.
+        plane.refuse = (429, {"error": "rate_limited", "retry_after_seconds": 1})
+        rename_to("new")
+        assert instance_address._advance_operation() > 0
+        assert instance_address._journal(binding())["may_have_landed"] is False
+        plane.refuse = (409, {"error": "taken"})
+    else:
+        plane.refuse = (409, {"error": "taken"})
+        rename_to("new")
+    run()
+    assert instance_address._journal(binding()) is None
+    assert instance_address.describe()["operation"] == {"state": "failed", "hostname": NEW, "error": "taken"}
+
+
+def test_a_crash_while_the_request_was_out_counts_as_not_knowing(address, monkeypatch):
+    plane, _ = address
+    rename_to("new")
+    answer = plane.rename
+
+    def crash(_body):
+        raise KeyboardInterrupt("process killed while the request was out")
+
+    plane.rename = crash
+    with pytest.raises(KeyboardInterrupt):
+        instance_address._advance_operation()
+    assert instance_address._journal(binding())["may_have_landed"] is True  # written before it left
+    plane.rename = answer
+    plane.refuse = (409, {"error": "binding_changed"})
+    instance_address._advance_operation()
+    assert held_journal()["held"]["error"] == "address_changed"
+
+
+@pytest.mark.parametrize("prefix", ["ab--cd", "xn--abc", "a1--"])
+def test_a_prefix_avibe_bot_refuses_is_refused_here_first(address, prefix):
+    # avibe-bot-backend lib/claims/prefix.ts: ``<prefix>-app`` must not have "--" at its third and fourth character.
+    with pytest.raises(instance_address.AddressError) as refused:
+        instance_address.preview(prefix, ("loopback",))
+    assert (refused.value.status, refused.value.code) == (400, "invalid_prefix")
+    assert not any(call[1] == "hostname-renames" for call in address[0].calls)
 
 
 def test_c4_a_phone_paired_on_the_new_address_before_the_health_step_is_kept(address):

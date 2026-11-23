@@ -349,6 +349,25 @@ at the next one, when a read failed in the last 5 seconds), and an instance
 nobody looks at learns it at its next owed read, within the hour,
 or at the first reply that carries a `hostname_generation`.
 
+**A refusal is a failure of the change only when the request never landed.**
+Before a rename request leaves, the journal records that it may land
+(`may_have_landed`), so a crash while it is out counts as not knowing; a
+`429` takes that back, since it is turned away before it is looked at. A
+definitive refusal of the first sending settles the operation as above. A
+definitive refusal after an earlier sending was answered `202`/`pending`, or
+not answered for sure (no answer, `5xx`, an unknown answer, a crash), says only
+that this repeat was refused: avibe.bot may still hold the operation it took
+(a `409` to a repeat does not cancel it). Then the journal is kept, with its
+request, its UUID and its local origin, marked `held` with the refusal; the
+request is not sent again; `401` still drops every permission, and
+`rebind_required` still stands. `GET` shows `operation: {state: "pending",
+hostname, error, unconfirmed: true}`. A state read that shows the outcome
+settles it: the target active with `last_rename_operation_id` equal to the
+journal's is our own change, applied as if its receipt had arrived (Health
+data included); any other change is adopted as one made elsewhere, which
+deletes nothing. Until such a state, the Owner cannot start another change
+(`operation_in_progress`).
+
 What the instance does with every answer of the two endpoints (the codes are
 the backend's, `docs/plans/personal-hostname-release.md`). At a state read the
 page is told by `preview`, in the words a rename refused the same way gets:
