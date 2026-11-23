@@ -75,7 +75,7 @@ pub fn remote_drag_capability(label: &str, destination: &url::Url) -> Option<tau
 }
 
 /// Grants `remote_drag_capability` to a web view showing another computer's instance.
-pub fn grant_remote_drag(app: &tauri::AppHandle, label: &str, destination: &url::Url) {
+pub fn grant_remote_drag<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str, destination: &url::Url) {
     if let Some(capability) = remote_drag_capability(label, destination) {
         let _ = app.add_capability(capability);
     }
@@ -157,13 +157,22 @@ fn set_overlay(window: &NSWindow, _mtm: MainThreadMarker) {
 mod tests {
     use super::*;
 
+    // `test = true`: the crate's own context already embeds the Info.plist.
     fn mock_context() -> tauri::Context<tauri::test::MockRuntime> {
-        tauri::generate_context!()
+        tauri::generate_context!(test = true)
+    }
+
+    /// A child web view, as `get_ipc_response` takes one.
+    struct Child(tauri::Webview<tauri::test::MockRuntime>);
+    impl AsRef<tauri::Webview<tauri::test::MockRuntime>> for Child {
+        fn as_ref(&self) -> &tauri::Webview<tauri::test::MockRuntime> {
+            &self.0
+        }
     }
 
     fn invoke(view: &tauri::Webview<tauri::test::MockRuntime>, url: &str, cmd: &str) -> Result<(), String> {
         tauri::test::get_ipc_response(
-            view,
+            &Child(view.clone()),
             tauri::webview::InvokeRequest {
                 cmd: cmd.into(),
                 callback: tauri::ipc::CallbackFn(0),
