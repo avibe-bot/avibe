@@ -1253,7 +1253,7 @@ async def test_mh_limits_001_rows_written_before_a_models_dev_copy_take_its_limi
     ]
     payload["agents"]["opencode"]["models"] = [
         # The user set the context window when adding it.
-        {"id": "claude-sonnet-5-5", "origin": "provider", "native_protocol": "anthropic", "context_window": 200_000},
+        {"id": "claude-sonnet-5-5-high", "origin": "provider", "native_protocol": "anthropic", "context_window": 200_000},
         # models.dev described it, and the user cleared both limits since.
         {
             "id": "claude-opus-5-5", "origin": "provider", "native_protocol": "anthropic",
@@ -1289,7 +1289,7 @@ async def test_mh_limits_001_rows_written_before_a_models_dev_copy_take_its_limi
 
     assert limits("vibey") == [("claude-opus-5-5", "anthropic/claude-opus-5-5", 1_000_000, 128_000)]
     assert limits("opencode") == [
-        ("claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", 200_000, 64_000),
+        ("claude-sonnet-5-5-high", "anthropic/claude-sonnet-5-5", 200_000, 64_000),
         ("claude-opus-5-5", "anthropic/claude-opus-5-5", None, None),
     ]
     for backend in ("claude", "codex"):

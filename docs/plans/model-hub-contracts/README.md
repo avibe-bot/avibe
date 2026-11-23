@@ -408,6 +408,10 @@ Controller cache. Production cannot acquire the migration guard without its
 Controller owner. This is a memory-consumer correction inside the existing
 lifecycle, not another journal, marker, lock, phase or public API field.
 
+## Catalog metadata match provenance
+
+Within v23, `match_kind` is an additive, read-only projection on models.dev search results and described provider candidates. Current servers emit `exact` or `closest`; on older servers absence has the legacy `exact` presentation. This does not change a stored backend row, an upstream model identity, a supplier projection, or the envelope version. See `api.md` and `api-response.schema.json`.
+
 ## Authority and mirror guard
 
 `mirror-registry.json` is the executable index for closed vocabularies and decision

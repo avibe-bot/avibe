@@ -35,7 +35,7 @@ does, being a person's own choice for a native Agent. With none qualifying, the
 seed starts Vibey on one model, so a new install's default Agent can run once
 setup places a Source. That model is the
 first one, in Vibey's Source order and then each Source's own non-retired
-inventory order, that models.dev describes, by the picker's exact match, as
+inventory order, that models.dev describes, by the picker's exact or guarded suffix match, as
 taking text and tool calls and producing text. A model models.dev does not know is never
 guessed at: with none described that way, the catalog stays empty and the setup
 card offers the pick. A Vibey left with nothing to run on is healed by the
@@ -94,7 +94,7 @@ The consumer resolves once per run and again after a retryable failure. Failover
 recovery, Source health, and credentials remain owned by Model Hub.
 
 Candidate admission also preserves this capability authority: Source metadata
-first, then exact catalog metadata. Vibey never receives the native-backend
+first, then catalog metadata from an exact or guarded suffix match. Vibey never receives the native-backend
 protocol/model-family default reasoning ladder. An undeclared ladder is empty;
 undeclared boolean/numeric capabilities remain null.
 

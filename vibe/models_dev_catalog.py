@@ -620,7 +620,18 @@ def search_models_dev(
             )
         )
     matches.sort(key=lambda item: item[:-1])
-    return [row for *_, row in matches[:MODELS_DEV_MAX_MATCHES]]
+    rows = [row for *_, row in matches]
+    identity = query.strip()
+    leaf = identity.rsplit("/", 1)[-1]
+    for row in rows:
+        row["match_kind"] = (
+            "exact" if identity == row["models_dev_id"] or row["model_id"] in (identity, leaf) else "closest"
+        )
+    if _variant_bases(identity, vendor_map) and not any(row["match_kind"] == "exact" for row in rows):
+        inferred = models_dev_metadata_matches([identity], catalog).get(identity)
+        if inferred is not None:
+            rows = [inferred, *(row for row in rows if row["model_id"] != inferred["model_id"])]
+    return rows[:MODELS_DEV_MAX_MATCHES]
 
 
 def exact_models_dev_matches(
@@ -667,6 +678,59 @@ def exact_models_dev_matches(
             vendor_map,
         )
     return matches
+
+
+# A date token is one suffix even when its year/month/day contain hyphens.
+_MONTH = r"(?:0[1-9]|1[0-2])"
+_DAY = r"(?:0[1-9]|[12][0-9]|3[01])"
+_VARIANT = re.compile(
+    rf"-(?:high|medium|low|xhigh|minimal|thinking|tiered|latest|[0-9]{{4}}-{_MONTH}-{_DAY}|(?:[0-9]{{4}})?{_MONTH}{_DAY})\Z"
+)
+_PARAMETER_FIELDS = (
+    "context_window", "max_output_tokens", "input_modalities", "output_modalities",
+    "supports_tools", "supports_reasoning", "reasoning_efforts",
+)
+
+
+def _variant_bases(identity: str, vendor_map: dict[str, Any]) -> list[str]:
+    """Only literal prefixes are possible, so distinct equal-length bases cannot tie."""
+    stem = identity.rsplit("/", 1)[-1]
+    vendor = _first_party_vendor(stem, vendor_map)
+    if vendor is None or any(c in stem for c in "*?[]"):
+        return []
+    bases = []
+    while match := _VARIANT.search(stem):
+        stem = stem[:match.start()]
+        if re.search(r"[0-9]", stem) and _first_party_vendor(stem, vendor_map) == vendor:
+            bases.append(stem)
+    return bases
+
+
+def models_dev_metadata_matches(model_ids: Iterable[str], catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Describe a requested ID without changing it or attributing another deployment's limits to it."""
+    ids = tuple(dict.fromkeys(model_ids))
+    exact = exact_models_dev_matches(ids, catalog)
+    result = {key: {**row, "match_kind": "exact"} for key, row in exact.items()}
+    if not catalog or len(result) == len(ids):
+        return result
+    vendor_map = load_model_vendor_map()
+    bases = {key: _variant_bases(key, vendor_map) for key in ids if key not in result}
+    wanted = {base for options in bases.values() for base in options}
+    if not wanted:
+        return result
+    copies_by_id = _catalog_rows(catalog, vendor_map, lambda _p, mid, _n: 0 if mid in wanted else None)
+    for key, options in bases.items():
+        base = next((base for base in options if base in copies_by_id), None)
+        if base is None:
+            continue
+        copies = copies_by_id[base]
+        row = _preferred_copy(base, copies, vendor_map)
+        if not row["first_party"] and any(
+            other[field] != row[field] for _, _, other in copies for field in _PARAMETER_FIELDS
+        ):
+            continue
+        result[key] = {**row, "match_kind": "closest"}
+    return result
 
 
 def text_only_model_ids(

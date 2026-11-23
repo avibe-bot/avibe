@@ -424,6 +424,12 @@
   ],
   "decision_tables": [
     {
+      "id": "D32",
+      "domain": "models.dev metadata match provenance",
+      "authority": {"kind": "schema_vocabulary", "schema": "api-response.schema.json", "paths": ["/definitions/ModelsDevMatchKind"]},
+      "consumers": [{"kind": "typescript_string_union", "file": "ui/src/components/settings/models/types.ts", "name": "ModelsDevMatchKind"}]
+    },
+    {
       "id": "D31",
       "domain": "readable hosted result tools including fetch",
       "authority": {"kind": "schema_vocabulary", "schema": "capability-evidence.schema.json", "paths": ["/properties/feature/oneOf/1/properties/name"]},
