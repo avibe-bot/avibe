@@ -3249,6 +3249,9 @@ def add_api_timing_headers(response: Response) -> Response:
                           # Inclusive graph phase times; overlap execute/fetch/assemble above.
                           "candidates", "lineage", "histories", "edges")
         )
+        history_spans = getattr(g, "graph_history_spans", None)
+        if history_spans is not None:
+            stages_text += " history_statements=" + json.dumps(history_spans.log_fields(), separators=(",", ":"))
         logger.warning(
             "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s%s",
             request.path,
@@ -6319,6 +6322,7 @@ async def agents_graph_get():
     context = _request_authorization_context()
     submitted = time.perf_counter()
     stages = {"ipc": submitted - started}
+    history_spans = agent_graph.HistoryStatementSpans()
 
     def render_graph():
         entered = time.perf_counter()
@@ -6326,7 +6330,7 @@ async def agents_graph_get():
         payload = agent_graph.build_graph(
             live_agents=live_agents, window=window, project=project,
             include_ended=include_ended, include_background=include_background,
-            live_unreachable=live_unreachable, timings=stages,
+            live_unreachable=live_unreachable, timings=stages, history_spans=history_spans,
         )
         built = time.perf_counter()
         # Includes Python/ORM overhead, not time blocked opening or reading SQLite.
@@ -6342,6 +6346,7 @@ async def agents_graph_get():
     response, finished = await asyncio.to_thread(render_graph)
     stages["resume"] = time.perf_counter() - finished
     g.graph_stage_seconds = stages
+    g.graph_history_spans = history_spans
     return response
 
 

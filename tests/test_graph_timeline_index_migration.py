@@ -34,7 +34,10 @@ def test_graph_timeline_index_upgrade_rollback_and_old_writes(tmp_path, caplog):
         c.exec_driver_sql("UPDATE agent_runs SET started_at='2026-07-22T20:40:03.100-04:00', "
                           "completed_at='2026-07-23T01:02:03Z' WHERE id='r1'")
     try:
-        before = agent_graph.build_graph(engine=engine, now=NOW)
+        old_spans = agent_graph.HistoryStatementSpans()
+        before = agent_graph.build_graph(engine=engine, now=NOW, history_spans=old_spans)
+        assert old_spans.log_fields()['timeline_index_probe']['rows'] == 0
+        assert old_spans.log_fields()['timeline_timestamps_fallback']['rows'] == 3
         caplog.set_level(logging.INFO, logger="storage.migrations")
         notice = f"Building SQLite index {INDEX}"
         build_count = 0
@@ -49,8 +52,12 @@ def test_graph_timeline_index_upgrade_rollback_and_old_writes(tmp_path, caplog):
                 cursor.execute("EXPLAIN QUERY PLAN " + sql, params)
                 plans.extend(row[-1] for row in cursor.fetchall())
 
+        # The optional-index fallback is a real ID seek, not a table scan.
         event.listen(Engine, "before_cursor_execute", observe)
         try:
+            assert agent_graph.build_graph(engine=engine, now=NOW) == before
+            assert any('INDEX sqlite_autoindex_agent_runs_' in p and '(id=?)' in p for p in plans)
+            plans.clear()
             migrations.run_migrations(path, revision=REVISION)
             migrations.run_migrations(path, revision=REVISION)
             assert build_count == caplog.messages.count(notice) == 1

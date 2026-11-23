@@ -121,12 +121,27 @@ def test_slow_graph_log_reports_only_fixed_server_side_stage_times(monkeypatch, 
     assert resp.status_code == 200
     entry = next(r.getMessage() for r in caplog.records if "slow api request path=/api/agents-graph" in r.getMessage())
     assert "private-filter" not in entry
-    stages = dict(item.split(":") for item in entry.split(" stages_ms=")[1].split(","))
+    stages_text, stmt_text = entry.split(" stages_ms=")[1].split(" history_statements=")
+    stages = dict(item.split(":") for item in stages_text.split(","))
     assert set(stages) == {"ipc", "queue", "open", "execute", "fetch", "assemble", "acl", "json", "resume",
                            "candidates", "lineage", "histories", "edges"}
     assert all(float(value) >= 0 for value in stages.values())
     assert "lineage" not in resp.headers["Server-Timing"]
     assert "stages_ms" not in json.loads(resp.content)
+    assert json.loads(stmt_text) == {}  # No history statements were executed.
+
+    caplog.clear()
+    history = app.test_client().get("/api/agents-graph?window=24h")
+    entry = next(r.getMessage() for r in caplog.records if "slow api request path=/api/agents-graph" in r.getMessage())
+    fields = json.loads(entry.split(" history_statements=")[1])
+    assert set(fields) == {"run_totals", "all_timeline_times", "spawn_endpoints", "callback_endpoints",
+                           "run_headers", "timeline_index_probe", "timeline_timestamps_covered"}
+    for name, span in fields.items():
+        assert set(span) == {"statements", "batches", "rows", "execute_ms", "fetch_ms"}
+        assert span["statements"] == 1 and span["rows"] == span["batches"] == int(not name.endswith("endpoints"))
+        assert span["execute_ms"] >= 0 and span["fetch_ms"] >= 0
+    assert "ses_ended" not in entry and "run_e1" not in entry and "SELECT" not in entry
+    assert "history_statements" not in history.headers["Server-Timing"] and "history_statements" not in history.json()
 
 
 def test_graph_endpoint_outside_agent_namespace(monkeypatch, tmp_path):
