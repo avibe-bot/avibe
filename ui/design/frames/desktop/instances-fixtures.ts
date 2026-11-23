@@ -1,5 +1,4 @@
-import en from '@/i18n/en.json';
-import zh from '@/i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import type { DesktopAccountRowViewProps } from '@/desktop/DesktopAccountRowView';
 import type { InstanceSwitcherViewProps } from '@/desktop/InstanceSwitcherView';
 import type { AccountSecondFactorViewProps } from '@/desktop/AccountSecondFactorView';
@@ -79,7 +78,7 @@ export function accountRowViewProps(fixture: DesktopInstanceFixture): Omit<Deskt
 
 export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwitcherViewProps | null {
   if (!['instances', 'empty', 'loading', 'list-error', 'offline', 'switching', 'consent', 'switch-error', 'upgrade-error', 'offline-help', 'long-content', 'current-shared', 'offline-shared'].includes(fixture.state)) return null;
-  const strings = (fixture.lang === 'en' ? en : zh).desktopClient;
+  const strings = (fixture.lang === 'en' ? en : zh).desktopAccount;
   const noop = () => {};
   const email = fixture.state === 'long-content' ? 'international-design-and-engineering-account@cross-region-research-and-development-workstations.example.test' : 'max@example.test';
   const state: InstanceSwitcherViewProps['state'] = {
@@ -126,6 +125,6 @@ export function factorViewProps(fixture: DesktopInstanceFixture): AccountSecondF
 
 export function profileViewProps(fixture: DesktopInstanceFixture): AccountDetailsViewProps | null {
   if (!['profile', 'profile-error'].includes(fixture.state)) return null;
-  return { errorMessage: fixture.state === 'profile-error' ? (fixture.lang === 'en' ? en : zh).desktopClient.errors.request : null, email: 'long-research-account-name@example.test', busy: false,
+  return { errorMessage: fixture.state === 'profile-error' ? (fixture.lang === 'en' ? en : zh).desktopAccount.errors.request : null, email: 'long-research-account-name@example.test', busy: false,
     onBack: () => {}, onSignOut: () => {} };
 }

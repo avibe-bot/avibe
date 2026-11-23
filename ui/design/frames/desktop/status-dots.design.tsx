@@ -21,8 +21,7 @@
 // `desktop/instances/instances-*`, gold in `switching-*`, an unreachable current remote in `offline-*`,
 // a shared current or offline instance in `current-shared-*` / `offline-shared-*`. These frames hold
 // the rows whose dot no other frame decides.
-import en from '@/i18n/en.json';
-import zh from '@/i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { InstanceSwitcherView, type InstanceSwitcherViewProps } from '@/desktop/InstanceSwitcherView';
 import { frames, type FrameSpec } from '../../frame';
 import { copyFor, switcherViewProps } from './instances-fixtures';

@@ -13,14 +13,14 @@ export function SetupCompleteView({ onLocal, onSignIn, failure }: { onLocal: () 
   return <div className="mx-auto max-w-xl pt-12">
     <ShieldCheck className="mb-6 size-10 text-mint-ink" />
     <div className="mb-7">
-      <h1 ref={heading} tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none">{t('desktopClient.setupReady')}</h1>
-      <p className="mt-3 max-w-xl text-sm leading-6 text-muted">{t('desktopClient.setupBody')}</p>
+      <h1 ref={heading} tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none">{t('desktopAccount.setupReady')}</h1>
+      <p className="mt-3 max-w-xl text-sm leading-6 text-muted">{t('desktopAccount.setupBody')}</p>
     </div>
     <div className="flex flex-wrap gap-3">
-      <Button variant="brand" onClick={onLocal}>{t('desktopClient.startLocal')}</Button>
-      <Button variant="outline" onClick={onSignIn}>{t('desktopClient.signInAndAdd')}<ArrowRight className="size-4" /></Button>
+      <Button variant="brand" onClick={onLocal}>{t('desktopAccount.startLocal')}</Button>
+      <Button variant="outline" onClick={onSignIn}>{t('desktopAccount.signInAndAdd')}<ArrowRight className="size-4" /></Button>
     </div>
-    <p className="mt-5 text-sm text-muted">{t('desktopClient.signInLater')}</p>
+    <p className="mt-5 text-sm text-muted">{t('desktopAccount.signInLater')}</p>
     {failure}
   </div>;
 }

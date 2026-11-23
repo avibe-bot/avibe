@@ -304,7 +304,7 @@ export function AccountApp() {
     if (recoveryProtection.current) return;
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
   };
-  const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
+  const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopAccount.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopAccount.errors.upgrade' : error === 'invalid_credentials' ? 'desktopAccount.errors.credentials' : error === 'rate_limited' ? 'desktopAccount.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopAccount.errors.code' : 'desktopAccount.errors.request');
   // An install the instance refused or failed is told by its section (the shell's receipt says `failed`). Any
   // other failed action there, a check or a switch, has no such place, and keeps this page's notice.
   // A refusal that leaves no receipt (the shell busy, a selection under way, the offer changed) keeps it too.
@@ -337,7 +337,7 @@ export function AccountApp() {
   let content: ReactNode;
   let centerLogin = false;
   if (!state) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
+    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopAccount.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
   } else if (view === 'updates') {
     // ui/design: update/panel/trusted-view
     // With the instance's section beside the app's, the panel says whose each is; the heading only names the page.
@@ -396,7 +396,7 @@ export function AccountApp() {
   }
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
-    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3" style={controlsLeft ? { paddingLeft: 'var(--shell-window-controls-left)' } : undefined}><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>}
+    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3" style={controlsLeft ? { paddingLeft: 'var(--shell-window-controls-left)' } : undefined}><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopAccount.backWorkbench')}</Button></header>}
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
   </div>;
 }

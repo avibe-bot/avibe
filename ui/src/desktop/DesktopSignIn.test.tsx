@@ -4,8 +4,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
 
-import en from '../i18n/en.json';
-import zh from '../i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '../i18n/desktop';
 import type { DesktopClientState } from './bridge';
 import { DesktopSignIn } from './DesktopSignIn';
 
@@ -52,11 +51,11 @@ it.each([['en', en], ['zh', zh]] as const)(
     expect(screen.getByRole('heading').textContent).toBe(`${welcome.titleLine1}${welcome.titleLine2}`);
     expect(page.textContent).toContain(`${welcome.footerLine1}${welcome.footerLine2}`);
     // The Desktop's own subtitle, not the App's.
-    expect(page.textContent).toContain(`${copy.desktopClient.welcomeLine1}${copy.desktopClient.welcomeLine2}`);
+    expect(page.textContent).toContain(`${copy.desktopAccount.welcomeLine1}${copy.desktopAccount.welcomeLine2}`);
     expect(page.textContent).not.toContain(welcome.bodyLine1);
     // No brand row; "continue on this computer" stays.
     expect(page.textContent).not.toContain(copy.mobileApp.brand.agentOs);
-    expect(screen.getByRole('button', { name: copy.desktopClient.continueLocal })).toBeTruthy();
+    expect(screen.getByRole('button', { name: copy.desktopAccount.continueLocal })).toBeTruthy();
     expect(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail })).toBeTruthy();
   },
 );
@@ -80,7 +79,7 @@ it.each([['en', en], ['zh', zh]] as const)('AUTH-SETUP-182 a later step goes bac
   );
   fireEvent.click(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail }));
   expect(screen.getByLabelText(copy.mobileApp.email.label)).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: copy.desktopClient.previousStep }));
+  fireEvent.click(screen.getByRole('button', { name: copy.desktopAccount.previousStep }));
   expect(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail })).toBeTruthy();
   expect(screen.queryByRole('button', { name: copy.common.back })).toBeNull();
 });

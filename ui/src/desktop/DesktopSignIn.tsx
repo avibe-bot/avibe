@@ -32,12 +32,12 @@ function DesktopSignInFrame({ children, back }: SignInFrameProps) {
         >
           <ArrowLeft className="size-4" />
           {/* Back one step within sign-in (Max, 2026-11-20); the header's "Back to Workbench" leaves it. */}
-          {t('desktopClient.previousStep')}
+          {t('desktopAccount.previousStep')}
         </Button>
       ) : null}
       {children}
       <div className="mt-6 text-center">
-        <Button variant="ghost" onClick={onLocal}>{t('desktopClient.continueLocal')}</Button>
+        <Button variant="ghost" onClick={onLocal}>{t('desktopAccount.continueLocal')}</Button>
       </div>
     </div>
   );
@@ -139,12 +139,12 @@ export function DesktopSignIn({
         // The iPhone's first page, smaller and without its brand row, with the Desktop's own
         // subtitle (Max, 2026-11-20); "continue on this computer" stays, quieter, below it.
         <div data-account-login className="mx-auto my-auto flex w-full max-w-sm shrink-0 flex-col py-4">
-          <SignInWelcome compact subtitle={[t('desktopClient.welcomeLine1'), t('desktopClient.welcomeLine2')]}>
+          <SignInWelcome compact subtitle={[t('desktopAccount.welcomeLine1'), t('desktopAccount.welcomeLine2')]}>
             {actions}
           </SignInWelcome>
           <div className="mt-2 text-center">
             <Button variant="ghost" size="sm" className="text-muted" onClick={onLocal}>
-              {t('desktopClient.continueLocal')}
+              {t('desktopAccount.continueLocal')}
             </Button>
           </div>
         </div>

@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import en from '../i18n/en.json';
+import { desktopEn as en } from '../i18n/desktop';
 import { AccountApp } from './AccountApp';
 
 const send = vi.hoisted(() => vi.fn(async () => null));
@@ -41,7 +41,7 @@ it('AUTH-SETUP-178 the trusted update view acts on this computer\'s desktop app 
   render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
   expect(screen.getByText(en.update.trustedView.title)).toBeTruthy();
   expect(screen.getByText(en.update.status.available)).toBeTruthy();
-  expect(screen.queryByText(en.desktopClient.errors.request)).toBeNull();
+  expect(screen.queryByText(en.desktopAccount.errors.request)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: en.update.action.update }));
   expect(send).toHaveBeenCalledWith({ type: 'update_install', target_version: '3.2.7' });
 });
@@ -100,7 +100,7 @@ it('AUTH-SETUP-178 the update popup still shows why it cannot reach the desktop 
   bridge.failed = true;
   render(<AccountApp />);
   expect(screen.getByRole('dialog', { name: 'dashboard.versionAndUpdate' })).toBeTruthy();
-  expect(screen.getByText('desktopClient.errors.bridge')).toBeTruthy();
+  expect(screen.getByText('desktopAccount.errors.bridge')).toBeTruthy();
 });
 
 // The remote note lives in the instance menu only, where switching happens; full pages do not repeat it.
@@ -108,7 +108,7 @@ it('AUTH-SETUP-179 full pages do not repeat the remote-instance note', async () 
   window.history.replaceState(null, '', '/account/index.html?view=instances');
   const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
   render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
-  expect(screen.queryByText(en.desktopClient.auxiliaryIncomplete)).toBeNull();
+  expect(screen.queryByText(en.desktopAccount.auxiliaryIncomplete)).toBeNull();
 });
 
 // ui/design: update/instance-and-app. The owner clicked Update here meaning the instance he was looking at,
@@ -167,7 +167,7 @@ it("a failed install of the instance is told by its section, not also by this pa
   expect(instance!.textContent).toContain(en.update.failure.install.title);
   fireEvent.click(screen.getByRole('button', { name: en.update.action.retry }));
   await waitFor(() => expect(send).toHaveBeenCalledWith({ type: 'instance_update_install', target_version: '3.2.7' }));
-  expect(screen.queryByText(en.desktopClient.errors.request)).toBeNull();
+  expect(screen.queryByText(en.desktopAccount.errors.request)).toBeNull();
 });
 
 const accepted = (following: boolean) => ({ action: 'install', phase: 'accepted', target: '3.2.7', error_code: null, updated_at: '2026-11-20T07:03:17Z', following, installed_from: '3.2.5' });
@@ -196,7 +196,7 @@ it("a refusal that leaves no receipt keeps this page's notice: the section has n
   await openPopup();
   fireEvent.click(screen.getByRole('button', { name: en.update.action.retry }));
   await waitFor(() => expect(send).toHaveBeenCalledWith({ type: 'instance_update_install', target_version: '3.2.7' }));
-  expect(screen.getByText(en.desktopClient.errors.request)).toBeTruthy();
+  expect(screen.getByText(en.desktopAccount.errors.request)).toBeTruthy();
 });
 
 it("a failed check or switch on the instance, which no section tells, keeps this page's notice", async () => {
@@ -206,7 +206,7 @@ it("a failed check or switch on the instance, which no section tells, keeps this
   fireEvent.click(screen.getByRole('button', { name: 'Studio' }));
   fireEvent.click(screen.getByRole('switch', { name: en.update.setting.prereleases }));
   await waitFor(() => expect(send).toHaveBeenCalledWith({ type: 'instance_update_set_prereleases', enabled: true }));
-  expect(screen.getByText(en.desktopClient.errors.request)).toBeTruthy();
+  expect(screen.getByText(en.desktopAccount.errors.request)).toBeTruthy();
 });
 
 it('the update popup does not tell an enrollment failure', async () => {
@@ -243,7 +243,7 @@ it.each(['12px', '19.5px', ''])('uses the configured back-header inset %s withou
   document.documentElement.style.setProperty('--shell-window-controls-left', value);
   const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
   const { container } = render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
-  const button = screen.getByRole('button', { name: en.desktopClient.backWorkbench });
+  const button = screen.getByRole('button', { name: en.desktopAccount.backWorkbench });
   expect(button.closest('header')!.style.paddingLeft).toBe(value ? 'var(--shell-window-controls-left)' : '');
   expect(button.classList.contains('pl-0')).toBe(false);
   expect(container.querySelector('main')!.classList.contains('px-10')).toBe(true);

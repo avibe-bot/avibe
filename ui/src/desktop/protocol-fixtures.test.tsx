@@ -3,8 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, expectTypeOf, it, vi } from 'vitest';
-import en from '../i18n/en.json';
-import zh from '../i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '../i18n/desktop';
 import { AccountApp } from './AccountApp';
 import { DESKTOP_CLIENT_STATE_EVENT, DESKTOP_PRESENT_EVENT, DESKTOP_CLIENT_VIEWS, withLocalIdentity, type DesktopClientAction, type DesktopClientProjection, type DesktopClientRequest, type DesktopClientState } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
@@ -188,7 +187,7 @@ it('keeps opening, failure and retry on the selected instance without replacing 
   expect(document.querySelector('[data-instance-mask]')).toBeTruthy();
   for (const button of document.querySelectorAll('[data-instance-list] button')) expect((button as HTMLButtonElement).disabled).toBe(true);
   await act(async () => finish({ ...replies.success, request_id: pendingRequest.request_id, ok: false, error: { code: 'instance_upgrade_required' } }));
-  expect(within(row as HTMLElement).getByRole('alert').textContent).toContain(en.desktopClient.errors.upgrade);
+  expect(within(row as HTMLElement).getByRole('alert').textContent).toContain(en.desktopAccount.errors.upgrade);
   expect(document.querySelector('[data-instance-mask]')).toBeNull();
   fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Retry' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
@@ -206,7 +205,7 @@ it('disables offline instances without expansion or a retry bypass and keeps pag
   expect(button.hasAttribute('aria-expanded')).toBe(false);
   fireEvent.click(button); fireEvent.keyDown(button, { key: 'Enter' });
   expect(invoke).toHaveBeenCalledOnce();
-  expect(within(row).queryByText(en.desktopClient.offlineInstructions)).toBeNull();
+  expect(within(row).queryByText(en.desktopAccount.offlineInstructions)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Refresh instances' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   expect(invoke.mock.calls[1][1].request.action).toEqual({ type: 'refresh_instances' });
@@ -283,10 +282,10 @@ it.each([false, true])('selection generation advancement retains only a current 
   } }));
   await act(async () => finish({ version: 1, request_id: request.request_id, ok: false,
     state: { ...advanced, connection: initial.connection }, error: { code: 'instance_upgrade_required' } }));
-  if (superseded) expect(screen.queryByText(en.desktopClient.errors.upgrade)).toBeNull();
+  if (superseded) expect(screen.queryByText(en.desktopAccount.errors.upgrade)).toBeNull();
   else {
     const row = screen.getByText(target.name).closest('[data-instance-id]') as HTMLElement;
-    expect(within(row).getByRole('alert').textContent).toContain(en.desktopClient.errors.upgrade);
+    expect(within(row).getByRole('alert').textContent).toContain(en.desktopAccount.errors.upgrade);
     expect(within(row).getByRole('button', { name: 'Retry' })).toBeTruthy();
   }
 });
@@ -360,7 +359,7 @@ it.each(['reject', 'malformed'] as const)('correlates selected-row %s with its a
     } }));
     await act(async () => finish());
     const row = screen.getByText(target.name).closest('[data-instance-id]') as HTMLElement;
-    expect(within(row).getByRole('alert').textContent).toContain(en.desktopClient.errors.bridge);
+    expect(within(row).getByRole('alert').textContent).toContain(en.desktopAccount.errors.bridge);
     expect((within(row).getByRole('button', { name: 'Retry' }) as HTMLButtonElement).disabled).toBe(false);
     expect(document.querySelector('[data-instance-list]')).toBeTruthy();
     expect(document.querySelector('[data-instance-mask]')).toBeNull();
@@ -860,7 +859,7 @@ it('AUTH-SETUP-183 says when a different account could not forget the stored one
   });
   fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.differentAccount }));
   await waitFor(() => expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toContain('abort_sign_in'));
-  expect(await screen.findByText(en.desktopClient.errors.request)).toBeTruthy();
+  expect(await screen.findByText(en.desktopAccount.errors.request)).toBeTruthy();
   expect(screen.getByRole('button', { name: en.mobileApp.welcome.continueWithEmail })).toBeTruthy();
 });
 

@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
-import en from '../i18n/en.json';
+import { desktopEn as en } from '../i18n/desktop';
 import { AccountApp } from './AccountApp';
 import { DESKTOP_CLIENT_STATE_EVENT, type DesktopClientRequest, type DesktopClientState } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
@@ -16,7 +16,7 @@ const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
 afterEach(() => { cleanup(); window.history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
-const copy = en.desktopClient.bind;
+const copy = en.desktopAccount.bind;
 const signedIn = states.signed_in as unknown as DesktopClientState;
 type Action = { type: string } & Record<string, unknown>;
 type Answer = unknown | ((action: Action) => unknown);

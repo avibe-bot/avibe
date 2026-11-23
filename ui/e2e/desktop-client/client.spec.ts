@@ -4,6 +4,8 @@ import { clientState, installBridge, signIn } from './bridge-fixture';
 import type { Page } from '@playwright/test';
 import en from '../../src/i18n/en.json' with { type: 'json' };
 import zh from '../../src/i18n/zh.json' with { type: 'json' };
+import accountEn from '../../src/i18n/desktop/en.json' with { type: 'json' };
+import accountZh from '../../src/i18n/desktop/zh.json' with { type: 'json' };
 
 const ACCOUNT = 'http://127.0.0.1:5214/account/index.html';
 async function isolateAccount(page: Page) {
@@ -161,7 +163,7 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await expect(page.locator('[data-account-label]')).toHaveText('Studio');
     await expect(row.locator('[data-account-avatar],[data-account-chevron]')).toHaveCount(0);
     await expect(row).not.toContainText('max@example.test');
-    await expect(row).not.toContainText((lang === 'en' ? en : zh).desktopClient.auxiliaryIncomplete);
+    await expect(row).not.toContainText((lang === 'en' ? accountEn : accountZh).desktopAccount.auxiliaryIncomplete);
     const chip = row.locator('[data-version-chip]');
     // Beside another computer's name is that instance's own version, as its page reads /api/version
     // (serveProduct answers 2.4.0), not this computer's desktop app's (#4071).
@@ -197,7 +199,7 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
 for (const lang of ['en', 'zh'] as const) for (const persistenceError of [false, true]) test(`AUTH-SETUP-171 direct TOTP enrollment and recovery material stays transient (${lang}, persistenceError=${persistenceError})`, async ({ page }, info) => {
   await page.setViewportSize({ width: 880, height: 600 });
   await isolateAccount(page); await language(page, lang);
-  const copy = (lang === 'en' ? en : zh).desktopClient;
+  const copy = (lang === 'en' ? accountEn : accountZh).desktopAccount;
   const state = clientState();
   state.account = { ...state.account, status: 'second_factor_required', gate: 'enroll' };
   state.connection = { status: 'remote_connected', pending: null, committed: { kind: 'remote', name: 'Retained remote', instance_id: 'remote-retained', canonical_origin: 'https://retained.example.test' } };

@@ -5,8 +5,7 @@
 // Verification reuses the sign-in's own steps (CodeEntry, SecondFactor) without "change email",
 // "resend" or "another account", since this flow's account and code are fixed.
 import type { ReactNode } from 'react';
-import en from '@/i18n/en.json';
-import zh from '@/i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { AccountDetailsView } from '@/desktop/AccountDetailsView';
 import { BindComputerView, ComputerBindingCard, type AccountRecovery, type BindStep, type ComputerBinding } from '@/desktop/BindComputerView';
 import { SetupCompleteView } from '@/desktop/SetupCompleteView';

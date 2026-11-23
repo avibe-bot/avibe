@@ -41,8 +41,8 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   const currentDot = (opening = false): Dot => state.connection.status === 'switching' || opening ? { tone: 'connecting', label: t('desktopClient.connecting') }
     : unreachable ? { tone: 'stopped', label: t('desktopClient.disconnected') } : { tone: 'running', label: t('desktopClient.connected') };
   const catalogDot = (opening: boolean, available: boolean | undefined): Dot | null => opening ? { tone: 'connecting' }
-    : available === false ? { tone: 'stopped' } : available ? { tone: 'running', label: t('desktopClient.online') } : null;
-  const detail = (item: Instance) => [!item.available && t('desktopClient.offline'), item.relationship === 'shared' && (item.owner_email ? t('desktopClient.sharedBy', { owner: item.owner_email }) : t('desktopClient.shared')), item.host].filter(Boolean).join(' · ');
+    : available === false ? { tone: 'stopped' } : available ? { tone: 'running', label: t('desktopAccount.online') } : null;
+  const detail = (item: Instance) => [!item.available && t('desktopAccount.offline'), item.relationship === 'shared' && (item.owner_email ? t('desktopAccount.sharedBy', { owner: item.owner_email }) : t('desktopAccount.shared')), item.host].filter(Boolean).join(' · ');
   // This computer always opens, so its row is never offline: listed among the others, a catalog
   // entry that reports it reachable draws the green dot, and anything else leaves the column empty.
   const local = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')} detail={localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected}
@@ -56,39 +56,39 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
       error={failure?.instanceId === item.id ? failure.message : null} onClick={() => selected && failure?.instanceId !== item.id ? onCancel() : onSelect(item.id)} />;
   };
   return <div data-instance-switcher className="mx-auto w-full max-w-2xl pt-6">
-    <div className="mb-6 flex items-center justify-between gap-4"><h1 className="text-2xl font-semibold tracking-tight">{t('desktopClient.instancesTitle')}</h1>
-      <Button variant="ghost" size="icon" aria-label={t('desktopClient.refreshInstances')} disabled={blocked} onClick={onRefresh}><RefreshCw className={cn('size-4', state.catalog.status === 'loading' && 'animate-spin')} /></Button>
+    <div className="mb-6 flex items-center justify-between gap-4"><h1 className="text-2xl font-semibold tracking-tight">{t('desktopAccount.instancesTitle')}</h1>
+      <Button variant="ghost" size="icon" aria-label={t('desktopAccount.refreshInstances')} disabled={blocked} onClick={onRefresh}><RefreshCw className={cn('size-4', state.catalog.status === 'loading' && 'animate-spin')} /></Button>
     </div>
-    {unreachable && <div role="alert" className="mb-5 text-sm text-destructive-ink"><p className="break-words font-medium [overflow-wrap:anywhere]">{t('desktopClient.unreachable', { name: current.name })}</p><p className="mt-2 text-muted">{t('desktopClient.offlineInstructions')}</p><Button variant="outline" className="mt-3" onClick={onLocal}>{t('desktopClient.backLocal')}</Button></div>}
+    {unreachable && <div role="alert" className="mb-5 text-sm text-destructive-ink"><p className="break-words font-medium [overflow-wrap:anywhere]">{t('desktopAccount.unreachable', { name: current.name })}</p><p className="mt-2 text-muted">{t('desktopAccount.offlineInstructions')}</p><Button variant="outline" className="mt-3" onClick={onLocal}>{t('desktopAccount.backLocal')}</Button></div>}
     <div data-instance-list aria-busy={!!pendingId} className="relative space-y-6">
-      <section aria-label={t('desktopClient.currentlyUsing')}><h2 className="mb-2 text-sm font-medium text-muted">{t('desktopClient.currentlyUsing')}</h2>
+      <section aria-label={t('desktopAccount.currentlyUsing')}><h2 className="mb-2 text-sm font-medium text-muted">{t('desktopAccount.currentlyUsing')}</h2>
         <div className="overflow-hidden rounded-xl border border-mint/40 bg-surface">
           {!currentRemote ? local(true) : currentItem ? remoteRow(currentItem, true) : <InstanceRow id={current.instance_id} name={current.name} detail={current.canonical_origin} selected offline={unreachable} dot={currentDot()} disabled={blocked} onClick={onCancel} />}
         </div>
       </section>
-      <section aria-label={t('desktopClient.otherInstances')}><h2 className="mb-2 text-sm font-medium text-muted">{t('desktopClient.otherInstances')}</h2>
-        {state.catalog.status === 'loading' && !others.length && <div className="mb-3 space-y-3" aria-label={t('desktopClient.loading')}><Skeleton className="h-20 w-full rounded-xl" /><Skeleton className="h-20 w-full rounded-xl" /></div>}
-        {state.catalog.status === 'error' && <p role="alert" className="mb-3 text-sm text-destructive-ink">{t('desktopClient.catalogError')}</p>}
+      <section aria-label={t('desktopAccount.otherInstances')}><h2 className="mb-2 text-sm font-medium text-muted">{t('desktopAccount.otherInstances')}</h2>
+        {state.catalog.status === 'loading' && !others.length && <div className="mb-3 space-y-3" aria-label={t('desktopAccount.loading')}><Skeleton className="h-20 w-full rounded-xl" /><Skeleton className="h-20 w-full rounded-xl" /></div>}
+        {state.catalog.status === 'error' && <p role="alert" className="mb-3 text-sm text-destructive-ink">{t('desktopAccount.catalogError')}</p>}
         {(others.length > 0 || currentRemote) ? <div data-other-instances className="divide-y divide-border overflow-hidden rounded-xl border border-edge bg-surface">
           {others.map((item) => item.id === localInstanceId ? local(false) : remoteRow(item))}
           {currentRemote && !others.some((item) => item.id === localInstanceId) && local(false)}
-        </div> : state.catalog.status !== 'loading' && state.catalog.status !== 'error' && <p className="rounded-xl border border-edge bg-surface p-4 text-sm text-muted">{t('desktopClient.emptyBody')}</p>}
+        </div> : state.catalog.status !== 'loading' && state.catalog.status !== 'error' && <p className="rounded-xl border border-edge bg-surface p-4 text-sm text-muted">{t('desktopAccount.emptyBody')}</p>}
       </section>
       {pendingId && <div data-instance-mask aria-hidden="true" className="absolute inset-0 rounded-xl bg-background/40" />}
     </div>
     <div className="mt-6 space-y-3">
-      <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAdd}><Plus className="size-5 text-muted" /><span className="flex-1 text-left">{t('desktopClient.addInstance')}</span><ChevronRight className="size-4 text-muted" /></Button>
+      <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAdd}><Plus className="size-5 text-muted" /><span className="flex-1 text-left">{t('desktopAccount.addInstance')}</span><ChevronRight className="size-4 text-muted" /></Button>
     </div>
-    <section aria-label={t('desktopClient.accountTitle')} className="mt-6" data-instance-account>
-      <h2 className="mb-2 text-sm font-medium text-muted">{t('desktopClient.accountTitle')}</h2>
-      <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAccount}><UserRound className="size-5 shrink-0 text-muted" /><span className="min-w-0 flex-1 whitespace-normal break-words text-left [overflow-wrap:anywhere]">{state.account.identity?.email ?? state.account.email ?? t('desktopClient.accountTitle')}</span><ChevronRight className="size-4 shrink-0 text-muted" /></Button>
+    <section aria-label={t('desktopAccount.accountTitle')} className="mt-6" data-instance-account>
+      <h2 className="mb-2 text-sm font-medium text-muted">{t('desktopAccount.accountTitle')}</h2>
+      <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAccount}><UserRound className="size-5 shrink-0 text-muted" /><span className="min-w-0 flex-1 whitespace-normal break-words text-left [overflow-wrap:anywhere]">{state.account.identity?.email ?? state.account.email ?? t('desktopAccount.accountTitle')}</span><ChevronRight className="size-4 shrink-0 text-muted" /></Button>
     </section>
     <Dialog open={!!state.consent} onOpenChange={(open) => { if (!open) { if (busy) onCancel(); else onConsent(false); } }}>
       {state.consent && <DialogContent closeLabel={t('common.close')} onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (busy) onCancel(); else onConsent(false); }}>
-        <DialogHeader><DialogTitle>{t('desktopClient.consentTitle', { name: state.consent.instance_name })}</DialogTitle><DialogDescription>{t('desktopClient.consentBody', { name: state.consent.instance_name })}</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>{t('desktopAccount.consentTitle', { name: state.consent.instance_name })}</DialogTitle><DialogDescription>{t('desktopAccount.consentBody', { name: state.consent.instance_name })}</DialogDescription></DialogHeader>
         <div className="break-words text-sm leading-6 text-muted [overflow-wrap:anywhere]"><p>{state.consent.host}</p><ConsentExtras scope={state.consent.scope} /></div>
         {consentError && <p role="alert" className="text-sm text-destructive-ink">{consentError}</p>}
-        <DialogFooter><Button variant="outline" disabled={busy} onClick={() => onConsent(false)}>{t('desktopClient.deny')}</Button><Button variant="brand" disabled={busy} onClick={() => onConsent(true)}>{t('desktopClient.allow')}</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" disabled={busy} onClick={() => onConsent(false)}>{t('desktopAccount.deny')}</Button><Button variant="brand" disabled={busy} onClick={() => onConsent(true)}>{t('desktopAccount.allow')}</Button></DialogFooter>
       </DialogContent>}
     </Dialog>
   </div>;
@@ -112,11 +112,11 @@ function InstanceRow({ id, name, detail, relationship, selected = false, offline
       {/* A fixed column centred on the name's first line, kept when empty so names align. */}
       <LineGlyph text={name} className={cn('w-2', NAME_TYPE)}>{dot && <StatusDot tone={dot.tone} label={dot.label} />}</LineGlyph>
       <span className="min-w-0 flex-1"><span className={cn('block break-words [overflow-wrap:anywhere]', NAME_TYPE, offline && 'text-muted')}>{name}</span><span className="mt-1 block break-words text-xs font-normal leading-5 text-muted [overflow-wrap:anywhere]">{detail}</span>
-        {opening && <span role="status" className="mt-1 block text-xs text-gold-ink">{t('desktopClient.opening')}</span>}
+        {opening && <span role="status" className="mt-1 block text-xs text-gold-ink">{t('desktopAccount.opening')}</span>}
         {error && <span role="alert" className="mt-2 block break-words text-sm font-normal leading-6 text-destructive-ink [overflow-wrap:anywhere]">{error}</span>}
       </span>
     </span></>;
-  const slot = opening ? <RefreshCw className="size-4 animate-spin text-gold-ink" /> : selected ? <span aria-label={t('desktopClient.current')} className="flex items-center gap-1 text-xs text-mint-ink"><Check className="size-4" />{t('desktopClient.current')}</span> : offline ? null : <ChevronRight className="size-4 text-muted" />;
+  const slot = opening ? <RefreshCw className="size-4 animate-spin text-gold-ink" /> : selected ? <span aria-label={t('desktopAccount.current')} className="flex items-center gap-1 text-xs text-mint-ink"><Check className="size-4" />{t('desktopAccount.current')}</span> : offline ? null : <ChevronRight className="size-4 text-muted" />;
   const retry = !!error && !offline && !opening;
   return <div data-instance-id={id} data-instance-row className={cn('relative flex items-center gap-3', offline && 'text-muted', opening && 'z-10 bg-surface')}>
     {retry ? <><div className="flex min-w-0 flex-1 items-center gap-3 py-4 pl-4">{content}</div><div data-instance-action className="shrink-0 pr-4"><Button variant="outline" size="sm" disabled={disabled} onClick={onClick}>{t('common.retry')}</Button></div></>
@@ -130,8 +130,8 @@ function InstanceRow({ id, name, detail, relationship, selected = false, offline
 function ConsentExtras({ scope }: { scope: string }) {
   const { t, i18n } = useTranslation();
   const extras = [...new Set(scope.split(/\s+/).filter((token) => token && token !== 'openid' && token !== 'email'))];
-  const known = extras.includes('profile') ? [t('desktopClient.consentScopes.profile')] : [];
+  const known = extras.includes('profile') ? [t('desktopAccount.consentScopes.profile')] : [];
   const unknown = extras.filter((token) => token !== 'profile');
   const list = (items: string[]) => new Intl.ListFormat(i18n.language, { type: 'conjunction' }).format(items);
-  return <>{known.length > 0 && <p className="mt-2">{t('desktopClient.consentAlsoReceives', { items: list(known) })}</p>}{unknown.length > 0 && <p className="mt-2">{t('desktopClient.consentAlsoOther', { items: list(unknown) })}</p>}</>;
+  return <>{known.length > 0 && <p className="mt-2">{t('desktopAccount.consentAlsoReceives', { items: list(known) })}</p>}{unknown.length > 0 && <p className="mt-2">{t('desktopAccount.consentAlsoOther', { items: list(unknown) })}</p>}</>;
 }

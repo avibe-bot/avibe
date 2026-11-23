@@ -970,7 +970,7 @@ describe('mobile onboarding', () => {
     expect(screen.getByText('mobileApp.brand.agentOs')).toBeTruthy();
     expect(screen.getByRole('heading').textContent).toBe('mobileApp.welcome.titleLine1mobileApp.welcome.titleLine2');
     expect(document.body.textContent).toContain('mobileApp.welcome.bodyLine1mobileApp.welcome.bodyLine2');
-    expect(document.body.textContent).not.toContain('desktopClient.welcomeLine1');
+    expect(document.body.textContent).not.toContain('desktopAccount.welcomeLine1');
   });
 
   describe('AUTH-SETUP-185 the ways in on Welcome follow the signed-out answer', () => {

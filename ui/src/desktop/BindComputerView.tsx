@@ -75,23 +75,23 @@ export function ComputerBindingCard({ binding, account, computer, recovery, busy
   const action = (label: string, run: () => void, brand = false) => <Button variant={brand ? 'brand' : 'outline'} className="mt-4" disabled={busy} onClick={run}>{label}</Button>;
   return <div data-computer-binding={binding.state} className="mt-4 rounded-xl border border-edge bg-surface p-5">
     <div className="flex items-center justify-between gap-3">
-      <p className="text-xs font-medium text-muted">{t('desktopClient.bind.computer')}</p>
-      {bound && <Badge variant="success">{t('desktopClient.bind.bound')}</Badge>}
+      <p className="text-xs font-medium text-muted">{t('desktopAccount.bind.computer')}</p>
+      {bound && <Badge variant="success">{t('desktopAccount.bind.bound')}</Badge>}
     </div>
     <div className="mt-3 flex items-start gap-3"><Laptop className="mt-0.5 size-5 shrink-0 text-muted" /><p className="min-w-0 break-words text-sm font-semibold [overflow-wrap:anywhere]">{computer}</p></div>
     {binding.state === 'reading' && <Skeleton className="mt-4 h-5 w-2/3" />}
     {(bound || binding.state === 'unconfirmed') && host && <div className="mt-4 grid grid-cols-[72px_minmax(0,1fr)] items-center gap-x-4 gap-y-2 border-t border-edge pt-4">
-      <Row label={t('desktopClient.bind.domain')}>{bound && binding.url ? <a className="font-mono underline underline-offset-4" href={binding.url} target="_blank" rel="noreferrer">{host}</a> : <span className="font-mono">{host}</span>}</Row>
+      <Row label={t('desktopAccount.bind.domain')}>{bound && binding.url ? <a className="font-mono underline underline-offset-4" href={binding.url} target="_blank" rel="noreferrer">{host}</a> : <span className="font-mono">{host}</span>}</Row>
       {bound && <Row label={t('devices.claim.account')}><AccountLine email={account} /></Row>}
     </div>}
-    {binding.state === 'unbound' && <>{binding.previous && line(t('desktopClient.bind.previous'))}{line(t('desktopClient.bind.notBound'))}{!recovering && action(t('desktopClient.bind.action'), onBind, true)}</>}
-    {binding.state === 'unconfirmed' && <>{line(t('desktopClient.bind.unconfirmed'))}{action(t('desktopClient.bind.checkAgain'), onRefresh)}</>}
-    {binding.state === 'pending' && <>{line(t('desktopClient.bind.pending'))}{action(t('desktopClient.bind.checkAgain'), onRefresh)}</>}
-    {binding.state === 'repair' && line(t('desktopClient.bind.repair'))}
-    {binding.state === 'upgrade' && <>{line(t('desktopClient.bind.upgrade'))}{action(t('update.action.check'), onUpdates)}</>}
-    {binding.state === 'unknown' && <>{line(t('desktopClient.bind.unknown'))}{action(t('desktopClient.bind.checkAgain'), onRefresh)}</>}
+    {binding.state === 'unbound' && <>{binding.previous && line(t('desktopAccount.bind.previous'))}{line(t('desktopAccount.bind.notBound'))}{!recovering && action(t('desktopAccount.bind.action'), onBind, true)}</>}
+    {binding.state === 'unconfirmed' && <>{line(t('desktopAccount.bind.unconfirmed'))}{action(t('desktopAccount.bind.checkAgain'), onRefresh)}</>}
+    {binding.state === 'pending' && <>{line(t('desktopAccount.bind.pending'))}{action(t('desktopAccount.bind.checkAgain'), onRefresh)}</>}
+    {binding.state === 'repair' && line(t('desktopAccount.bind.repair'))}
+    {binding.state === 'upgrade' && <>{line(t('desktopAccount.bind.upgrade'))}{action(t('update.action.check'), onUpdates)}</>}
+    {binding.state === 'unknown' && <>{line(t('desktopAccount.bind.unknown'))}{action(t('desktopAccount.bind.checkAgain'), onRefresh)}</>}
     {recovery && <div role="status" className="mt-4 rounded-xl border border-gold/40 bg-gold/10 p-4 text-sm leading-6">
-      <p>{t(recovery === 'available' ? 'desktopClient.bind.recovery' : recovery === 'blocked' ? 'desktopClient.bind.recoveryBlocked' : 'desktopClient.bind.recoveryGone')}</p>
+      <p>{t(recovery === 'available' ? 'desktopAccount.bind.recovery' : recovery === 'blocked' ? 'desktopAccount.bind.recoveryBlocked' : 'desktopAccount.bind.recoveryGone')}</p>
       {recovery === 'available' && <Button variant="brand" size="sm" className="mt-3" disabled={busy} onClick={onRecover}>{t('common.continue')}</Button>}
     </div>}
   </div>;
@@ -181,7 +181,7 @@ export function BindComputerView({ step, account, computer, busy = false, onName
     return <Close.Provider value={onClose}><SignInChrome value={BIND_CHROME}>
       {step.kind === 'code'
         ? <CodeEntry email={account} code={step.code} verifyLabel={t('mobileApp.twoFactor.verify')} busy={busy ? 'verify' : null} locked={busy} errorKey={null}
-          invalidText={step.invalid ? t('desktopClient.bind.problem.codeInvalid') : undefined} cooldown={0} providerCooldownActive={false} resent={false}
+          invalidText={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : undefined} cooldown={0} providerCooldownActive={false} resent={false}
           onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} />
         : <SecondFactor session={{ status: 'secondFactor', email: account, gate: 'challenge', methods: step.methods }} step={step.method} code={step.code}
           busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy} retryMinutes={0}
@@ -193,7 +193,7 @@ export function BindComputerView({ step, account, computer, busy = false, onName
   if (step.kind === 'factorSetup') {
     return <div className="flex min-h-full flex-col"><AccountSecondFactorView code={step.code} busy={busy}
       material={step.material ? { type: 'totp_enrollment', uri: step.material.uri, secret: step.material.secret, qrSvg: '' } : null}
-      errorMessage={step.invalid ? t('desktopClient.bind.problem.codeInvalid') : null}
+      errorMessage={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : null}
       onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} onEnroll={onBeginSetup} onLocal={onClose} exitLabel={t('common.cancel')} /></div>;
   }
   if (step.kind === 'codes') return <RecoveryCodesView codes={step.codes} busy={busy} onSaved={onSavedCodes} />;
@@ -202,7 +202,7 @@ export function BindComputerView({ step, account, computer, busy = false, onName
     {icon && <div className="mb-6 grid size-14 place-items-center rounded-2xl border border-edge bg-field">{icon}</div>}
     <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
   </div>;
-  const back = <Button variant="ghost" size="sm" className="mb-5 -ml-3" onClick={onClose}><ArrowLeft className="size-4" />{t('desktopClient.accountTitle')}</Button>;
+  const back = <Button variant="ghost" size="sm" className="mb-5 -ml-3" onClick={onClose}><ArrowLeft className="size-4" />{t('desktopAccount.accountTitle')}</Button>;
   const page = (children: ReactNode) => <div data-bind-step={step.kind} className="mx-auto w-full max-w-2xl pt-6">{back}{children}</div>;
   const warn = <TriangleAlert className="size-6 text-gold-ink" />;
 
@@ -212,21 +212,21 @@ export function BindComputerView({ step, account, computer, busy = false, onName
     const check = step.kind === 'name' ? step.check : null;
     const changed = (step.kind === 'name' || step.kind === 'existing') ? step.changed : undefined;
     const ready = (step.kind === 'name' && (check === 'free' || check === 'reclaim')) || step.kind === 'existing';
-    const hint = step.kind === 'existing' ? <span className="text-muted">{t('desktopClient.bind.existing')}</span>
+    const hint = step.kind === 'existing' ? <span className="text-muted">{t('desktopAccount.bind.existing')}</span>
       : check === 'taken' ? <span className="text-destructive-ink">{t('devices.claim.taken')}</span>
-      : check === 'checking' ? <span className="text-muted">{t('desktopClient.bind.checking')}</span>
-      : check === 'invalid' ? <span className="text-muted">{t('desktopClient.bind.invalid')}</span>
-      : check === 'reclaim' ? <span className="text-muted">{t('desktopClient.bind.reclaim')}</span>
+      : check === 'checking' ? <span className="text-muted">{t('desktopAccount.bind.checking')}</span>
+      : check === 'invalid' ? <span className="text-muted">{t('desktopAccount.bind.invalid')}</span>
+      : check === 'reclaim' ? <span className="text-muted">{t('desktopAccount.bind.reclaim')}</span>
       : check === 'free' ? <span className="text-muted">{t('devices.claim.domain', { host: `${name}${DOMAIN_SUFFIX}` })}</span>
       : null;
     const date = step.kind === 'limit' && step.earliest ? timeParts(step.earliest, language)?.date : null;
     return page(<>
-      {heading(t('desktopClient.bind.title'))}
-      {changed?.length ? <p role="status" className="-mt-3 mb-5 flex items-center gap-2 text-sm"><Check className="size-4 shrink-0 text-mint-ink" />{t('desktopClient.bind.changed', { fields: new Intl.ListFormat(language, { type: 'conjunction' }).format(changed.map((field) => t(`desktopClient.bind.field.${field}` as const))) })}</p> : null}
+      {heading(t('desktopAccount.bind.title'))}
+      {changed?.length ? <p role="status" className="-mt-3 mb-5 flex items-center gap-2 text-sm"><Check className="size-4 shrink-0 text-mint-ink" />{t('desktopAccount.bind.changed', { fields: new Intl.ListFormat(language, { type: 'conjunction' }).format(changed.map((field) => t(`desktopAccount.bind.field.${field}` as const))) })}</p> : null}
       <div className="rounded-xl border border-edge bg-surface">
         <div className="grid gap-x-6 gap-y-2 px-5 py-4 md:grid-cols-[72px_minmax(0,1fr)] md:items-center md:gap-y-3">
           <Field label={t('devices.claim.account')}><span className="flex min-w-0 items-center gap-2 text-sm"><AccountLine email={account} /><span className="shrink-0 text-xs text-muted">{t('devices.claim.signedInHere')}</span></span></Field>
-          <Field label={t('desktopClient.bind.computerLabel')}><span className="text-sm [overflow-wrap:anywhere]">{computer}</span></Field>
+          <Field label={t('desktopAccount.bind.computerLabel')}><span className="text-sm [overflow-wrap:anywhere]">{computer}</span></Field>
           {step.kind !== 'limit' && <Field label={t('devices.claim.name')}>
             {step.kind === 'opening' ? <Skeleton className="h-9 w-64" />
               : step.kind === 'existing' ? <span className="font-mono text-sm font-semibold">{step.host}</span>
@@ -238,19 +238,19 @@ export function BindComputerView({ step, account, computer, busy = false, onName
           {hint && <><span className="max-md:hidden" /><span className="text-xs leading-5 md:-mt-1.5">{hint}</span></>}
         </div>
         {step.kind === 'limit' && <div className="border-t border-edge px-5 py-4 text-sm leading-6">
-          <p>{step.held !== null ? t('desktopClient.bind.limit', { count: step.held }) : t('desktopClient.bind.limitPlain')}</p>
-          {date && <p className="text-muted">{t('desktopClient.bind.limitDate', { date })}</p>}
+          <p>{step.held !== null ? t('desktopAccount.bind.limit', { count: step.held }) : t('desktopAccount.bind.limitPlain')}</p>
+          {date && <p className="text-muted">{t('desktopAccount.bind.limitDate', { date })}</p>}
           {step.eligible.length > 0 && <>
-            <p className="mt-3 text-muted">{t('desktopClient.bind.takeBack')}</p>
+            <p className="mt-3 text-muted">{t('desktopAccount.bind.takeBack')}</p>
             <ul className="mt-2 flex flex-col gap-2">{step.eligible.map((each) => <li key={each.prefix} className="flex items-center justify-between gap-3">
               <span className="min-w-0 truncate font-mono text-sm">{each.host}</span>
-              <Button variant="outline" size="sm" disabled={busy} onClick={() => onPick(each.prefix)}>{t('desktopClient.bind.useName')}</Button>
+              <Button variant="outline" size="sm" disabled={busy} onClick={() => onPick(each.prefix)}>{t('desktopAccount.bind.useName')}</Button>
             </li>)}</ul>
           </>}
         </div>}
       </div>
       <div className="mt-6 flex flex-wrap gap-3">
-        {step.kind !== 'limit' && <Button variant="brand" disabled={busy || !ready} onClick={onConfirm}>{busy && ready ? t('desktopClient.bind.binding') : t('desktopClient.bind.confirm')}</Button>}
+        {step.kind !== 'limit' && <Button variant="brand" disabled={busy || !ready} onClick={onConfirm}>{busy && ready ? t('desktopAccount.bind.binding') : t('desktopAccount.bind.confirm')}</Button>}
         <Button variant={step.kind === 'limit' ? 'outline' : 'ghost'} onClick={onClose}>{t('common.cancel')}</Button>
       </div>
     </>);
@@ -258,10 +258,10 @@ export function BindComputerView({ step, account, computer, busy = false, onName
 
   if (step.kind === 'proof') {
     return page(<>
-      {heading(t('desktopClient.bind.proofTitle'))}
-      <p className="max-w-xl text-sm leading-6 text-muted">{t('desktopClient.bind.proofBody', { email: account })}</p>
+      {heading(t('desktopAccount.bind.proofTitle'))}
+      <p className="max-w-xl text-sm leading-6 text-muted">{t('desktopAccount.bind.proofBody', { email: account })}</p>
       <div className="mt-6 flex flex-wrap gap-3">
-        <Button variant="brand" disabled={busy} onClick={onSendCode}>{t('desktopClient.bind.sendCode')}</Button>
+        <Button variant="brand" disabled={busy} onClick={onSendCode}>{t('desktopAccount.bind.sendCode')}</Button>
         <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
       </div>
     </>);
@@ -269,11 +269,11 @@ export function BindComputerView({ step, account, computer, busy = false, onName
 
   if (step.kind === 'bound') {
     return page(<>
-      {heading(t('desktopClient.bind.boundTitle'), <Check className="size-6 text-mint-ink" />)}
+      {heading(t('desktopAccount.bind.boundTitle'), <Check className="size-6 text-mint-ink" />)}
       <div className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-x-4 gap-y-3 rounded-xl border border-edge bg-surface px-5 py-4">
-        <Row label={t('desktopClient.bind.domain')}><span className="font-mono font-semibold">{step.host}</span></Row>
+        <Row label={t('desktopAccount.bind.domain')}><span className="font-mono font-semibold">{step.host}</span></Row>
         <Row label={t('devices.claim.account')}><AccountLine email={account} /></Row>
-        <Row label={t('desktopClient.bind.computerLabel')}>{computer}</Row>
+        <Row label={t('desktopAccount.bind.computerLabel')}>{computer}</Row>
       </div>
       <Button variant="brand" className="mt-6" onClick={onClose}>{t('common.done')}</Button>
     </>);
@@ -281,8 +281,8 @@ export function BindComputerView({ step, account, computer, busy = false, onName
 
   if (step.kind === 'conflict') {
     return page(<>
-      {heading(t('desktopClient.bind.conflictTitle'), warn)}
-      <p className="max-w-xl text-sm leading-6 text-muted">{t('desktopClient.bind.conflictBody')}</p>
+      {heading(t('desktopAccount.bind.conflictTitle'), warn)}
+      <p className="max-w-xl text-sm leading-6 text-muted">{t('desktopAccount.bind.conflictBody')}</p>
       <Button variant="brand" className="mt-6" onClick={onClose}>{t('common.back')}</Button>
     </>);
   }
@@ -292,12 +292,12 @@ export function BindComputerView({ step, account, computer, busy = false, onName
   const problem = step.kind === 'problem' ? step.problem : null;
   const next = step.kind === 'upgrade' ? <Button variant="brand" onClick={onUpdates}>{t('update.action.check')}</Button>
     : problem && BACK_ONLY.includes(problem) ? <Button variant="brand" onClick={onClose}>{t('common.back')}</Button>
-    : <Button variant="brand" disabled={busy} onClick={onRestart}>{t('desktopClient.bind.restart')}</Button>;
+    : <Button variant="brand" disabled={busy} onClick={onRestart}>{t('desktopAccount.bind.restart')}</Button>;
   return page(<>
-    {heading(t('desktopClient.bind.title'))}
+    {heading(t('desktopAccount.bind.title'))}
     <div role="alert" className="flex max-w-xl gap-3 rounded-xl border border-gold/40 bg-gold/10 p-4 text-sm leading-6">
       <TriangleAlert className="mt-1 size-4 shrink-0 text-gold-ink" />
-      <p>{step.kind === 'upgrade' ? t('desktopClient.bind.upgrade') : t(`desktopClient.bind.problem.${problem ?? 'unknown'}` as const)}</p>
+      <p>{step.kind === 'upgrade' ? t('desktopAccount.bind.upgrade') : t(`desktopAccount.bind.problem.${problem ?? 'unknown'}` as const)}</p>
     </div>
     <div className="mt-6 flex flex-wrap gap-3">{next}</div>
   </>);

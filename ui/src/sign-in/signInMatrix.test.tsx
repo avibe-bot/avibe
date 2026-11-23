@@ -14,7 +14,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { DesktopSignIn } from '@/desktop/DesktopSignIn';
 import { isNewerClientState, type DesktopClientAction, type DesktopClientReply, type DesktopClientState } from '@/desktop/bridge';
-import en from '@/i18n/en.json';
+import { desktopEn as en } from '@/i18n/desktop';
 import { mobileSignInAdapter } from '@/mobile/signInAdapter';
 import type { MobileSessionState } from '@/mobile/bridge';
 import { advertisedSignInMethods, EMAIL_ONLY } from '@/mobile/useSignInMethods';
@@ -362,7 +362,7 @@ const HARNESSES: Harness[] = [
   },
   {
     name: 'Desktop',
-    back: en.desktopClient.previousStep,
+    back: en.desktopAccount.previousStep,
     mount: (account, options) => {
       const native = createDesktopNative(account, options);
       render(<I18nextProvider i18n={i18n}><DesktopHost native={native} /></I18nextProvider>);
