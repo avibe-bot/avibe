@@ -35,8 +35,11 @@ card states. Keep all Health data and instance services synthetic. Build unsigne
 use an existing DerivedData serially, and stop builds below 20 GiB free Data
 space. No signing, device installation, merge or TestFlight is in scope.
 
-The November 23 candidate is based on master
-`70593397399c1a7cce389abc1cada42c8c7f0977`. Its unsigned simulator build passes.
+The November 23 implementation began at master
+`70593397399c1a7cce389abc1cada42c8c7f0977` and was validated again after
+integrating master `56854d06f8b03e1b706f48edb1fcabef3211fa0b` in local merge
+`95b4f39e07bb0a596803af7f7a1666321dc09a2c`. The combined unsigned simulator
+build passes with Xcode 27.2 and the iOS 27.2 SDK, on the iOS 26.4.1 simulator.
 The affected native run passes 244 cases: HealthSync 102,
 HealthDataReader 18, and MobileOnboarding 124. These include actual SwiftUI
 sheet dismissal, an immediately returned authorization callback, blocked
@@ -46,7 +49,8 @@ remain separate evidence; they were not overwritten.
 
 Web lifecycle coverage passes 122 cases, including explicit retry after a
 settled failure and an older shell retaining its pending native owner.
-Localization coverage passes 20 cases; production, mobile, design, and test
+Localization coverage passes 20 cases, and the combined affected Web run passes
+165 cases including 23 API-fetch consumers; production, mobile, design, and test
 TypeScript builds pass. The first-query help consumer covers a complete empty
 window, an older sample, an explicit zero, a recent sample, a missing day,
 query error, and locked protected data without inferring a read grant.
@@ -73,3 +77,16 @@ for the sheet and alert presentation to finish; a controller acquiring a window
 alone does not mean its presentation is complete. The stricter capture-only
 wait is verified separately from the full native suite. No UI retry or relaxed
 success/identity assertion is used to hide a failed connection.
+
+Final combined-head evidence is kept separately from earlier attempts:
+`/tmp/health-connect-integrated-native-en.xcresult` (244 passed) and
+`/tmp/health-connect-integrated-native-zh.xcresult` (2 capture tests passed),
+both exit 0 with no skipped tests. The native runs report a SwiftUI
+"Publishing changes from within view updates" warning during notice captures;
+the alert host's existing binding setters are unchanged. This warning is
+recorded rather than counted as a test failure or a demonstrated field cause.
+Integrated AUTH-SETUP-186 passes twice, and changed-Python Ruff checks pass.
+The final English/Chinese light/dark captures and a SHA-256 manifest are under
+`/tmp/health-connect-previews-integrated`; the Chinese light consent image has
+zero pixel differences from the approved v4 reference. No physical-device or
+signed-build validation was performed for this change.
