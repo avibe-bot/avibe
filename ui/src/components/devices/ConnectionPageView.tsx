@@ -63,6 +63,8 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   path?: DeviceUsing | null;
   /** The Avibe App's own choice of path; absent where the shell offers none. */
   preference?: DirectPreference;
+  /** 「更改域名」 is offered in this release (features.ts). The frames draw it; the page passes the switch. */
+  renameEntry?: boolean;
   refused?: SwitchRefusal;
   /** A switch whose change is on its way: it waits. */
   sending?: ConnectionSetting;
@@ -284,7 +286,7 @@ function RelayRow({ relay, direct, inUse, refused, busy, onChange }: {
 }
 
 export function ConnectionPageView({
-  load, connection, tunnel, remote, via, path, preference, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
+  load, connection, tunnel, remote, via, path, preference, renameEntry = true, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
   rename, rebind, rebindDialog, canReset, rebindNeedsBrowser, rebindOpen, rebindBusy, ...actions
 }: ConnectionPageViewProps) {
   const { t, i18n } = useTranslation();
@@ -320,7 +322,7 @@ export function ConnectionPageView({
               </div>
             )}
           </div>
-          {address?.eligible && (
+          {renameEntry && address?.eligible && (
             <Button variant="ghost" size="compact" className="shrink-0 text-destructive-ink" onClick={actions.onChangeDomain}>
               {t('devices.connection.changeDomain')}
             </Button>

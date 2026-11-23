@@ -15,6 +15,9 @@ import { said } from './testText';
 import type { AddressState, ConnectionState, TunnelChange } from './types';
 
 // ui/design: settings/devices-connection/*, settings/devices-rename/*
+// The rename's own behaviour is tested with its entry turned on; this release ships it off
+// (features.ts, ConnectionPage.renameOff.test.tsx).
+vi.mock('./features', () => ({ RENAME_ENTRY_ENABLED: true }));
 const host = 'max-app.avibe.bot';
 const settings = { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: 'auto', edge_bind_address: '' } as const;
 const connection = (extra: Partial<ConnectionState> = {}): ConnectionState => ({ settings: { ...settings }, interfaces: [], direct: 'ready', ...extra });

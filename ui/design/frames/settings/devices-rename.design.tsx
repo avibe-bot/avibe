@@ -56,8 +56,12 @@ const CONNECTION = '/settings/remote-access/connection';
 /** The rename's frames sit at its own address; the rest at the connection page's. */
 function frame(name: string, title: string, size: { width: number; height: number }, props: Partial<ConnectionPageViewProps>, extra: Partial<FrameSpec> = {}): FrameSpec {
   const route = typeof extra.route === 'string' ? extra.route : `${CONNECTION}/address`;
+  // 「更改域名」 ships turned off in this release (features.ts): its dialogs, and a page that draws
+  // its entry, are the next one's.
+  const shown = { ...base, ...props };
+  const nextRelease = Boolean(shown.rename) || (shown.renameEntry !== false && Boolean(shown.address?.eligible));
   return {
-    name, title, ...size, status: 'shipped', themes: ['light'],
+    name, title: nextRelease ? `${title}（更改域名：下一版）` : title, ...size, status: 'shipped', themes: ['light'],
     fixtures: settingsFixtures({}),
     ...extra,
     route,
