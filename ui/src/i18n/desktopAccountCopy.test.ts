@@ -67,7 +67,8 @@ describe('the Desktop Account page copy', () => {
     const shell = readFileSync(join(SRC, '..', '..', 'desktop', 'src-tauri', 'src', 'lib.rs'), 'utf8');
     const keys = new Set([
       ...[...shell.matchAll(/native_copy\("(\w+)"\)/g)].map((match) => match[1]),
-      ...[...shell.matchAll(/\("desktop-client-[a-z-]+", "(\w+)"\)/g)].map((match) => match[1]),
+      // A menu item names its copy next to its id, as a tuple or as fields.
+      ...[...shell.matchAll(/"desktop-client-[a-z-]+",\s*(?:key:\s*)?"(\w+)"/g)].map((match) => match[1]),
     ]);
     expect([...keys].sort()).toEqual(['accountService', 'auxiliaryIncomplete', 'signOut', 'switchInstance']);
     for (const key of keys) {
