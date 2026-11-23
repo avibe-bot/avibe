@@ -8230,7 +8230,7 @@
     "free": "可用",
     "taken": "已被占用",
     "reclaim": "你用过的",
-    "checking": "正在查…",
+    "checking": "检查中…",
     "invalid": "只能用小写字母、数字和连字符"
   }
 }
