@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::time::Instant;
 
+use super::answers::Completion;
 /// Native submit APIs can return before their delivered/history entry exists.
 /// Absence is authoritative only once this bounded monotonic grace has passed.
 const NATIVE_DELIVERY_GRACE: Duration = Duration::from_secs(30);
@@ -26,6 +28,9 @@ pub struct NotificationReceipt {
     /// the message was committed, so its zero is a read, not a stale sample.
     sampled_since_confirmed: AtomicBool,
     posted_at: OnceLock<Instant>,
+    /// The OS submission result, independent of later read/dismissal cleanup.
+    submission: watch::Sender<Option<bool>>,
+    completion: OnceLock<Completion>,
     opens: OnceLock<String>,
 }
 
@@ -88,6 +93,32 @@ impl NotificationReceipt {
 
     pub fn posted(&self) {
         let _ = self.posted_at.set(Instant::now());
+        self.submission.send_replace(Some(true));
+    }
+
+    pub(super) fn submission(&self) -> watch::Receiver<Option<bool>> {
+        self.submission.subscribe()
+    }
+
+    pub(super) fn follow_answer(&self, completion: Completion) {
+        let _ = self.completion.set(completion);
+    }
+
+    /// Rechecked by the native sink immediately before submission, because
+    /// permission and main-thread work may finish after the detail lookup.
+    pub fn superseded(&self) -> bool {
+        self.completion.get().is_some_and(Completion::superseded)
+    }
+
+    fn not_posted(&self) {
+        self.submission.send_if_modified(|result| {
+            if result.is_none() {
+                *result = Some(false);
+                true
+            } else {
+                false
+            }
+        });
     }
 
     pub fn awaiting_native_delivery(&self) -> bool {
@@ -132,6 +163,8 @@ impl NotificationRegistry {
             unread_message: AtomicBool::new(false),
             sampled_since_confirmed: AtomicBool::new(false),
             posted_at: OnceLock::new(),
+            submission: watch::channel(None).0,
+            completion: OnceLock::new(),
             opens: OnceLock::new(),
         });
         if receipt.session_id.is_some() {
@@ -164,7 +197,14 @@ impl NotificationRegistry {
     }
 
     pub fn forget(&mut self, id: i32) {
-        self.receipts.retain(|receipt| receipt.id != id);
+        self.receipts.retain(|receipt| {
+            if receipt.id == id {
+                receipt.not_posted();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// A complete raw unread map, never the preference-filtered badge total.
@@ -189,8 +229,14 @@ impl NotificationRegistry {
                 }
             }
         }
-        self.receipts
-            .retain(|receipt| !receipt.retired() || receipt.posted_at.get().is_some());
+        self.receipts.retain(|receipt| {
+            if receipt.retired() && receipt.posted_at.get().is_none() {
+                receipt.not_posted();
+                false
+            } else {
+                true
+            }
+        });
         self.receipts
             .iter()
             .filter(|receipt| receipt.retired())
@@ -199,8 +245,13 @@ impl NotificationRegistry {
     }
 
     fn prune_abandoned(&mut self) {
-        self.receipts
-            .retain(|receipt| receipt.posted_at.get().is_some() || Arc::strong_count(receipt) > 1);
+        self.receipts.retain(|receipt| {
+            let keep = receipt.posted_at.get().is_some() || Arc::strong_count(receipt) > 1;
+            if !keep {
+                receipt.not_posted();
+            }
+            keep
+        });
     }
 }
 

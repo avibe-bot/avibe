@@ -926,6 +926,14 @@ v1 uses OS-default notification activation; explicit cross-platform show/focus
 and session deep-link targets require follow-up work. See
 `../docs/plans/desktop-notifications-sse.md` for the frozen contract.
 
+On macOS, Agent result messages with quick replies can offer those choices and
+a text reply directly in the notification. Once macOS accepts that answerable
+notification, it also serves as the success notice for the same Runtime,
+Session, and turn. A filtered or failed answerable post preserves the ordinary
+completion notice. Other turns, independent tasks, failures, and Vault requests
+keep their existing notifications. See
+`../docs/plans/desktop-answer-completion-dedup.md` for correlation and acceptance.
+
 The same shell-owned connection keeps the app icon badge (the macOS Dock and
 supported Linux docks) equal to the Runtime's Avibe inbox `unread_total`. Each
 connect and each SSE frame, heartbeats included, schedules one
