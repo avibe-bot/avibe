@@ -31,8 +31,8 @@ const review = (screen: Record<string, unknown>, revision = 'rev-1') => ({
 });
 const NEW = (prefix: string | null, extra: Record<string, unknown> = {}) => ({ state: 'new', prefilled_prefix: 'xiaoming', prefix, taken: false, names: null, ...extra });
 
-function mount(answers: Record<string, Answer>, state: DesktopClientState = signedIn) {
-  window.history.replaceState(null, '', '/account/index.html?view=account');
+function mount(answers: Record<string, Answer>, state: DesktopClientState = signedIn, documentView = 'account') {
+  window.history.replaceState(null, '', `/account/index.html?view=${documentView}`);
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', state);
   const actions: Action[] = [];
@@ -174,4 +174,89 @@ it('resumes an accepted sign-in only when the person presses Continue', async ()
   expect(page.types()).not.toContain('resume');
   fireEvent.click(button);
   await waitFor(() => expect(page.actions.find((each) => each.type === 'resume')).toEqual({ type: 'resume', receipt: 'rec-1' }));
+});
+
+/** Opens binding and verifies a code, up to the moment avibe.bot accepted it. */
+async function verify() {
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
+  fireEvent.click(await screen.findByRole('button', { name: copy.sendCode }));
+  fireEvent.change(await screen.findByLabelText(en.mobileApp.code.label), { target: { value: '123456' } });
+  fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.verify }));
+}
+const proofAnswers = {
+  open: { receipt: 'r' }, read: review(NEW('xiaoming')),
+  confirm: { state: 'confirmation_required', offer: 'o' },
+  send_proof_code: { state: 'mail_accepted', delivery: 'd' },
+  submit_proof_code: { state: 'verification_accepted', submission: 's' },
+};
+const broadcast = (state: DesktopClientState) => act(async () => {
+  window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: state }));
+});
+
+it('waits for the accepted sign-in to be published before reading the ticket again', async () => {
+  let published = false;
+  const page = mount({ ...proofAnswers, review_after_proof: () => { if (!published) throw { code: 'decision_changed' }; return { state: 'bound' }; } });
+  await verify();
+  await screen.findByText(copy.saving);
+  expect(screen.queryByText(copy.problem.expired)).toBeNull();
+  published = true;
+  await broadcast({ ...signedIn, revision: signedIn.revision + 5 });
+  await screen.findByRole('heading', { name: copy.boundTitle });
+  expect(page.types().filter((type) => type === 'submit_proof_code' || type === 'send_proof_code')).toEqual(['send_proof_code', 'submit_proof_code']);
+});
+
+it('a published sign-in that still owes a second factor asks for it, with the same submission', async () => {
+  const page = mount({ ...proofAnswers, review_after_proof: refuse('decision_changed'),
+    submit_factor_code: { state: 'verification_accepted', submission: 's2' } });
+  await verify();
+  await screen.findByText(copy.saving);
+  await broadcast({ ...signedIn, revision: signedIn.revision + 5,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['totp'] } });
+  const field = await screen.findByLabelText(en.mobileApp.twoFactor.totpLabel);
+  fireEvent.change(field, { target: { value: '654321' } });
+  fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.verify }));
+  await waitFor(() => expect(page.actions.find((each) => each.type === 'submit_factor_code'))
+    .toEqual({ type: 'submit_factor_code', receipt: 'r', submission: 's', method: 'totp', code: '654321' }));
+});
+
+it.each(['a', 'ab--cd', `${'a'.repeat(47)}`, '-ab', 'ab-'])('keeps %s in the field and never checks it', async (typed) => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  const field = await screen.findByRole('textbox');
+  const checks = page.types().filter((type) => type === 'check').length;
+  fireEvent.change(field, { target: { value: typed } });
+  await act(async () => { vi.advanceTimersByTime(1000); });
+  expect(page.types().filter((type) => type === 'check')).toHaveLength(checks);
+  expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe(typed);
+  expect(screen.getByText(copy.invalid)).toBeTruthy();
+});
+
+it('a resumed sign-in that still needs saving keeps its new receipt for the next press', async () => {
+  let resumes = 0;
+  const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-1' },
+    'recovery:resume': () => (++resumes === 1 ? { state: 'available', receipt: 'rec-2' } : { state: 'saved' }) });
+  fireEvent.click(await screen.findByRole('button', { name: en.common.continue }));
+  await waitFor(() => expect(resumes).toBe(1));
+  fireEvent.click(await screen.findByRole('button', { name: en.common.continue }));
+  await waitFor(() => expect(page.actions.filter((each) => each.type === 'resume')).toEqual([
+    { type: 'resume', receipt: 'rec-1' }, { type: 'resume', receipt: 'rec-2' }]));
+});
+
+it('another document never sends claim commands; its Account card opens a real Account document', async () => {
+  const assign = vi.fn();
+  const location = new Proxy({} as Location, { get: (_t, key) => key === 'assign' ? assign : Reflect.get(window.location, key) });
+  const original = window;
+  const receiver: Window = new Proxy(original, { get(target, key) {
+    if (key === 'location') return location;
+    if (key === 'top') return receiver;
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' && !String(key).startsWith('HTML') ? value.bind(target) : value;
+  } });
+  const page = mount({}, signedIn, 'instances');
+  vi.stubGlobal('window', receiver);
+  fireEvent.click(await screen.findByRole('button', { name: signedIn.account.identity!.email, exact: true }));
+  expect(assign).toHaveBeenCalledWith('avibe://desktop/account?locale=en');
+  expect(page.actions).toEqual([]);
 });

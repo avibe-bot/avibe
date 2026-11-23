@@ -35,7 +35,7 @@ const account = (binding: ComputerBinding, recovery: AccountRecovery | null = nu
 const bind = (step: BindStep, { busy = false, computer = COMPUTER } = {}) => column(
   <BindComputerView step={step} account={ACCOUNT} computer={computer} busy={busy}
     onNameChange={noop} onPick={noop} onConfirm={noop} onSendCode={noop} onCodeChange={noop} onSubmitCode={noop} onBeginSetup={noop} onSavedCodes={noop}
-    onFactorStep={noop} onPasskey={noop} onRestart={noop} onUpdates={noop} onClose={noop} />,
+    onFactorStep={noop} onPasskey={noop} onRestart={noop} onRecover={noop} onUpdates={noop} onClose={noop} />,
   step.kind === 'code' || step.kind === 'factor' || step.kind === 'factorSetup',
 );
 
@@ -78,6 +78,8 @@ const states: State[] = [
   { name: 'factor-totp-invalid', title: '两步验证码不对 · 留在原地再输', render: bind({ kind: 'factor', method: 'totp', methods: ['passkey', 'totp'], code: '', error: 'code' }), height: 900 },
   { name: 'factor-setup', title: '账号要求先开两步验证 · 在这里添加验证器', render: bind({ kind: 'factorSetup', material: null, code: '' }), height: 900 },
   { name: 'codes', title: '添加验证器后的恢复码 · 只显示这一次（帧里是假码）', render: bind({ kind: 'codes', codes: ['•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••'] }) },
+  { name: 'saving', title: '验证之后 · 正在保存登录（原生读回并保存好之前不重读）', render: bind({ kind: 'saving' }) },
+  { name: 'saving-recover', title: '验证之后 · 保存没完成：按「继续」接着做，不重发验证码', render: bind({ kind: 'saving', recover: true }) },
   { name: 'changed', title: '验证之后内容变了 · 说明变了什么，再按一次「绑定」（没变就直接绑定，不出这一屏）', render: bind({ kind: 'name', name: 'max', check: 'taken', changed: ['availability'] }) },
 
   // Ends.

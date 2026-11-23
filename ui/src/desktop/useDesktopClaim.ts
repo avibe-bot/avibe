@@ -34,8 +34,10 @@ async function invoke(command: Command, generation: number, action: Record<strin
 const str = (value: unknown): string | null => typeof value === 'string' ? value : null;
 const obj = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
-/** The page's own grammar check before asking avibe.bot: lowercase letters, digits, inner hyphens. */
-export const validPrefix = (name: string) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name);
+/** Native's grammar for a new name (machine/hosted/projection.rs `new_prefix`): 2 to 46 lowercase
+ *  letters, digits and hyphens, no hyphen first or last, and not `--` in third and fourth place. A
+ *  name that fails it stays in the field and is never sent: a refused Check ends the review. */
+export const validPrefix = (name: string) => /^[a-z0-9][a-z0-9-]{0,44}[a-z0-9]$/.test(name) && name.slice(2, 4) !== '--';
 const hostFor = (prefix: string) => `${prefix}-app.avibe.bot`;
 
 const PROBLEMS: Record<string, BindProblem> = {
@@ -49,11 +51,18 @@ const PROBLEMS: Record<string, BindProblem> = {
   claim_in_progress: 'busy', busy: 'busy', operation_in_progress: 'busy',
   local_runtime_unavailable: 'notResponding', local_admission_failed: 'notResponding', invalid_local_descriptor: 'notResponding',
   fresh_claim_required: 'lost',
+  reauthentication_failed: 'reauth',
 };
 const problemFor = (code: string): BindStep => code === 'local_runtime_upgrade_required'
   ? { kind: 'upgrade' } : { kind: 'problem', problem: PROBLEMS[code] ?? 'unknown' };
 /** avibe.bot said this exact code is wrong or expired: the person may type it again, in place. */
 const WRONG_CODE = new Set(['invalid_or_expired', 'invalid_code', 'invalid_otp', 'verification_invalid']);
+/** An authenticator being added keeps its setup only for a wrong code, not an expired one. */
+const WRONG_SETUP_CODE = new Set(['invalid_code', 'invalid_otp', 'verification_invalid']);
+/** The new sign-in is not published yet: the re-read is refused until it is, without being spent. */
+const NOT_YET = new Set(['decision_changed', 'claim_in_progress', 'busy', 'operation_in_progress']);
+const SAVE_TRIES = 20;
+const SAVE_WAIT_MS = 1500;
 const PASSKEY_FAILED = new Set(['passkey_unavailable', 'invalid_passkey_assertion', 'invalid_passkey_challenge']);
 
 const OBSERVED: Record<string, ComputerBinding['state']> = {
@@ -85,6 +94,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   const latest = useRef(state);
   useLayoutEffect(() => { latest.current = state; });
   const handles = useRef<Handles>({ ...NO_HANDLES });
+  const saving = useRef<{ tries: number; running: boolean; recover: string | null; timer: number | null } | null>(null);
   const [binding, setBinding] = useState<ComputerBinding>({ state: 'reading' });
   const [recovery, setRecovery] = useState<{ state: AccountRecovery; receipt: string | null } | null>(null);
   // The flow belongs to the generation it started in: a changed account or document generation
@@ -112,6 +122,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   const reset = useCallback(() => {
     epoch.current += 1;
+    if (saving.current?.timer) window.clearTimeout(saving.current.timer);
+    saving.current = null;
     handles.current = { ...NO_HANDLES };
     nameRef.current = '';
     setStep(null);
@@ -349,24 +361,79 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (account?.status !== 'second_factor_required') return false;
     if (account.gate === 'enroll') { setStep({ kind: 'factorSetup', material: null, code: '' }); return true; }
     const methods = account.methods.length ? account.methods : ['totp' as const];
-    setStep({ kind: 'factor', method: methods[0], methods, code: '' });
+    setStep({ kind: 'factor', method: methods[0] ?? 'totp', methods, code: '' });
     return true;
   }, [setStep]);
-  const afterVerification = useCallback(async (submission: string): Promise<void> => {
+  // After an accepted verification, native reads the new sign-in back and saves it on its own;
+  // `verification_accepted` arrives before that is done. Keep the submission and continue once the
+  // account is published: on each native broadcast, and a few times on a short timer, re-read the
+  // same ticket. If publication does not come, the account's own recovery continues it on a press,
+  // with no new code. This runs only after the person's own verification in this document; a new
+  // document starts with no flow.
+  const [saveTick, setSaveTick] = useState(0);
+  const stopSaving = useCallback(() => {
+    if (saving.current?.timer) window.clearTimeout(saving.current.timer);
+    saving.current = null;
+  }, []);
+  const afterVerification = useCallback((submission: string) => {
+    handles.current.submission = submission;
+    stopSaving();
+    saving.current = { tries: 0, running: false, recover: null, timer: null };
+    setStep({ kind: 'saving' });
+    setSaveTick((tick) => tick + 1);
+  }, [setStep, stopSaving]);
+  const settle = useCallback(async () => {
     const h = handles.current;
-    h.submission = submission;
-    if (owedFactor()) return;
-    if (!h.receipt) return;
-    const reply = await call('desktop_claim_review', { type: 'review_after_proof', receipt: h.receipt, submission });
-    if (!reply) return;
-    if (!reply.ok) {
-      // The new session may still owe its second factor; the account state says so.
-      if (reply.code === 'authentication_required' && owedFactor()) return;
-      setStep(problemFor(reply.code));
+    const current = saving.current;
+    if (!current || current.running || current.recover || !h.receipt || !h.submission) return;
+    // Published, and the new sign-in still owes a second factor.
+    if (owedFactor()) { stopSaving(); return; }
+    current.running = true;
+    const reply = await call('desktop_claim_review', { type: 'review_after_proof', receipt: h.receipt, submission: h.submission });
+    current.running = false;
+    if (!reply || saving.current !== current) return;
+    if (reply.ok) { stopSaving(); await decided(reply.value); return; }
+    if (reply.code === 'authentication_required' && owedFactor()) { stopSaving(); return; }
+    if (NOT_YET.has(reply.code) && ++current.tries < SAVE_TRIES) {
+      current.timer = window.setTimeout(() => setSaveTick((tick) => tick + 1), SAVE_WAIT_MS);
       return;
     }
-    await decided(reply.value);
-  }, [call, decided, owedFactor, setStep]);
+    if (NOT_YET.has(reply.code)) {
+      const inspected = await call('desktop_account_recovery', { type: 'inspect' });
+      if (saving.current !== current) return;
+      const receipt = inspected?.ok && inspected.value?.state === 'available' ? str(inspected.value.receipt) : null;
+      if (receipt) { current.recover = receipt; setStep({ kind: 'saving', recover: true }); return; }
+    }
+    stopSaving();
+    setStep(problemFor(reply.code));
+  }, [call, decided, owedFactor, setStep, stopSaving]);
+  const savingNow = step?.kind === 'saving' && !step.recover;
+  const revision = state?.revision;
+  useEffect(() => {
+    if (savingNow) void settle();
+  }, [savingNow, saveTick, revision, settle]);
+  useEffect(() => () => stopSaving(), [stopSaving]);
+  /** The person continues saving the accepted sign-in; then the same ticket is read again. */
+  const recoverSaving = useCallback(() => run(async () => {
+    const current = saving.current;
+    if (!current?.recover) return;
+    const reply = await call('desktop_account_recovery', { type: 'resume', receipt: current.recover });
+    if (!reply || saving.current !== current) return;
+    const answer = reply.ok ? str(reply.value?.state) : null;
+    const renewed = reply.ok && answer === 'available' ? str(reply.value?.receipt) : null;
+    if (answer === 'saved') {
+      current.recover = null;
+      current.tries = 0;
+      setStep({ kind: 'saving' });
+      setSaveTick((tick) => tick + 1);
+    } else if (renewed) {
+      // The sign-in was read back; saving it is a separate press.
+      current.recover = renewed;
+    } else {
+      stopSaving();
+      setStep({ kind: 'problem', problem: answer === 'storage_blocked' ? 'storage' : 'expired' });
+    }
+  }), [run, call, setStep, stopSaving]);
 
   const submissionFrom = (reply: Reply | null): string | null => reply?.ok ? str(reply.value?.submission) : null;
 
@@ -380,18 +447,18 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       const submission = submissionFrom(reply);
       if (!submission) { setStep(problemFor('invalid_response')); return; }
       h.delivery = null;
-      await afterVerification(submission);
+      afterVerification(submission);
     } else if (step?.kind === 'factor' && step.method !== 'passkey' && h.submission) {
       const reply = await call('desktop_claim_review', { type: 'submit_factor_code', receipt: h.receipt, submission: h.submission, method: step.method, code });
       if (!reply) return;
       if (!reply.ok) { setStep(WRONG_CODE.has(reply.code) ? { ...step, code: '', error: 'code' } : problemFor(reply.code)); return; }
       const submission = submissionFrom(reply);
       if (!submission) { setStep(problemFor('invalid_response')); return; }
-      await afterVerification(submission);
+      afterVerification(submission);
     } else if (step?.kind === 'factorSetup' && h.setup) {
       const reply = await call('desktop_claim_review', { type: 'finish_totp_setup', receipt: h.receipt, setup: h.setup, code });
       if (!reply) return;
-      if (!reply.ok) { setStep(WRONG_CODE.has(reply.code) ? { ...step, code: '', invalid: true } : problemFor(reply.code)); return; }
+      if (!reply.ok) { setStep(WRONG_SETUP_CODE.has(reply.code) ? { ...step, code: '', invalid: true } : problemFor(reply.code)); return; }
       const submission = submissionFrom(reply);
       if (!submission) { setStep(problemFor('invalid_response')); return; }
       h.setup = null;
@@ -399,7 +466,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       const codes = Array.isArray(recovered?.codes) ? recovered.codes.filter((each): each is string => typeof each === 'string') : [];
       // Recovery codes are shown once, here, until the person says they saved them.
       if (recovered?.state === 'issued' && codes.length) { h.submission = submission; setStep({ kind: 'codes', codes }); return; }
-      await afterVerification(submission);
+      afterVerification(submission);
     }
   }), [run, call, step, afterVerification, setStep]);
 
@@ -412,7 +479,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply.ok) { setStep(PASSKEY_FAILED.has(reply.code) ? { ...step, error: 'passkey' } : problemFor(reply.code)); return; }
     const submission = submissionFrom(reply);
     if (!submission) { setStep(problemFor('invalid_response')); return; }
-    await afterVerification(submission);
+    afterVerification(submission);
   }), [run, call, step, afterVerification, setStep]);
 
   const beginSetup = useCallback(() => run(async () => {
@@ -430,7 +497,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   const savedCodes = useCallback(() => run(async () => {
     const submission = handles.current.submission;
-    if (submission) await afterVerification(submission);
+    if (submission) afterVerification(submission);
   }), [run, afterVerification]);
 
   const setCode = useCallback((code: string) => {
@@ -461,6 +528,9 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply) return;
     const answer = reply.ok ? str(reply.value?.state) : null;
     if (answer === 'saved') { setRecovery(null); void observe(); return; }
+    // Read back but not saved yet, or a retryable save: a new receipt for the next press.
+    const renewed = reply.ok && answer === 'available' ? str(reply.value?.receipt) : null;
+    if (renewed) { setRecovery({ state: 'available', receipt: renewed }); return; }
     setRecovery({ state: answer === 'storage_blocked' ? 'blocked' : 'gone', receipt: null });
   }), [run, call, recovery, observe]);
 
@@ -468,6 +538,6 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     binding, recovery: recovery?.state ?? null, step, busy,
     account: review.account, computer: review.computer,
     start, changeName, pick, confirm, sendCode, submitCode, passkey, beginSetup, savedCodes, setCode, factorStep,
-    close, restart, resume, observe,
+    close, restart, resume, recoverSaving, observe,
   };
 }

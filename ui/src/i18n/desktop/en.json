@@ -161,7 +161,9 @@
         "changed": "This computer’s binding has just changed. Nothing more was done here.",
         "codeInvalid": "That code is wrong or has expired.",
         "lost": "After you confirmed, avibe.bot’s reply was lost and cannot be fetched again. This computer is not bound.",
-        "unknown": "This did not finish."
+        "unknown": "This did not finish.",
+        "reauth": "avibe.bot still asked to verify again. This did not finish.",
+        "storage": "This computer cannot save the sign-in right now. Sign in again later."
       },
       "changed": "Verified, but the {{fields}} changed since you confirmed. Check it, then press Bind again.",
       "field": {
@@ -169,7 +171,8 @@
         "computer": "computer",
         "name": "name",
         "availability": "name’s availability"
-      }
+      },
+      "saving": "Verified. Saving the sign-in…"
     }
   }
 }

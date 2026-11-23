@@ -55,16 +55,18 @@ it.each([['en', 'instances'], ['en', 'account'], ['zh', 'instances'], ['zh', 'ac
   }
   const beforeNavigation = invoke.mock.calls.length;
   expect(document.querySelector('[data-instance-id="offline-control"] button')?.hasAttribute('disabled')).toBe(true);
-  fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
-  expect(document.querySelector('[data-account-details]')).toBeTruthy();
-  expect(screen.queryByText(notice)).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Instances' : '实例', exact: true }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 1));
+  if (view === 'account') {
+    fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
+    expect(document.querySelector('[data-account-details]')).toBeTruthy();
+    expect(screen.queryByText(notice)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Instances' : '实例', exact: true }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 1));
+  }
   expect(screen.queryByText(notice)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Back to Workbench' : '返回工作台' }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 2));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + (view === 'account' ? 2 : 1)));
   expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(
-    view === 'account' ? ['get_state', 'refresh_instances', 'refresh_instances', 'cancel'] : ['get_state', 'refresh_instances', 'cancel']);
+    view === 'account' ? ['get_state', 'refresh_instances', 'refresh_instances', 'cancel'] : ['get_state', 'cancel']);
   expect(state.remote_auxiliary).toBe('disabled_incomplete');
   expect(state.connection.committed.kind).toBe('remote');
 });
@@ -416,23 +418,23 @@ it.each([
   let state = { ...states.signed_in, account: { ...states.signed_in.account,
     identity: identityEmail ? { id: 'entry-account', email: identityEmail } : null, email } };
   let finishRefresh: (() => void) | undefined;
+  // An Account document (claim commands are admitted only there) opens on the details.
+  window.history.replaceState(null, '', '/account/index.html?view=account');
   const invoke = mount(state, (request) => {
     const reply = { ...replies.success, state, request_id: request.request_id };
     if (request.action.type === 'refresh_instances') return new Promise((resolve) => { finishRefresh = () => resolve(reply); });
     return reply;
   });
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
-  // Email is absent here on the pre-fix product, before details can mask the omission.
-  const entry = screen.getByRole('button', { name: label, exact: true });
-  expect(within(entry).getByText(label)).toBeTruthy();
-  expect(screen.getByRole('heading', { name: 'Account', level: 2 })).toBeTruthy();
-  fireEvent.click(entry);
   const details = document.querySelector('[data-account-details]') as HTMLElement;
   expect(within(details).getByRole('heading', { name: 'Account' })).toBeTruthy();
   if (email || identityEmail) expect(within(details).getByText(label)).toBeTruthy();
-  expect(invoke).toHaveBeenCalledOnce();
   fireEvent.click(within(details).getByRole('button', { name: 'Instances', exact: true }));
   await waitFor(() => expect(finishRefresh).toBeDefined());
+  // The list's entry names the account itself, not a fixed Account label.
+  const entry = screen.getByRole('button', { name: label, exact: true });
+  expect(within(entry).getByText(label)).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Account', level: 2 })).toBeTruthy();
   expect(screen.getByRole('button', { name: label, exact: true }).hasAttribute('disabled')).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: label, exact: true }));
   expect(document.querySelector('[data-account-details]')).toBeNull();
@@ -457,11 +459,11 @@ it.each([
 // must retain them on the account page without treating presentation as consent.
 it.each(['on', 'off', 'starting', 'unavailable'])('account page shows no unobserved address and signs out explicitly (%s)', async (access) => {
   const state = { ...states.signed_in, local: { ...states.signed_in.local, remote_access: access, remote_access_url: 'https://local-fixture-app.avibe.bot' } };
+  window.history.replaceState(null, '', '/account/index.html?view=account');
   const invoke = mount(state, (request) => request.action.type === 'sign_out'
     ? { ...replies.success, state, request_id: request.request_id, ok: false, error: { code: 'cleanup_error' } }
     : { ...replies.success, state, request_id: request.request_id });
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
-  fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
   expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy();
   expect(screen.getByText(state.account.identity!.email)).toBeTruthy();
   // The address belongs to this computer's binding card, which shows it only for a binding

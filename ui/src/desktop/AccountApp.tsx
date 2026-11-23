@@ -180,8 +180,11 @@ export function AccountApp() {
     const initial = new URLSearchParams(window.location.search).get('view');
     return isDesktopClientView(initial) ? initial : 'account';
   });
+  // The view native opened this document for. Claim commands are admitted only in an Account
+  // document, so another document opens a real one rather than drawing the page itself.
+  const [documentView] = useState(() => new URLSearchParams(window.location.search).get('view') ?? 'account');
   // ui/design: desktop/bind/*. This computer's binding, read and changed only from the Account page.
-  const claim = useDesktopClaim(state, !popover && (view === 'account' || view === 'profile'));
+  const claim = useDesktopClaim(state, !popover && documentView === 'account' && (view === 'account' || view === 'profile'));
   // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -300,6 +303,12 @@ export function AccountApp() {
     });
     return () => { active = false; };
   }, [signOutIntent, state?.generation, send, popover]);
+  // The Account page in an Account document: here if this is one, else native opens one.
+  const openAccount = () => {
+    if (documentView === 'account') { setView('profile'); return; }
+    if (recoveryProtection.current) return;
+    presentDesktopClient('account', undefined, desktopLocale(i18n.resolvedLanguage ?? i18n.language));
+  };
   const instances = () => {
     if (recoveryProtection.current) return;
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
@@ -319,7 +328,7 @@ export function AccountApp() {
   const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null}
     busy={busy} pendingId={failedPending ? null : state.connection.status === 'switching' ? state.connection.pending?.instance_id ?? null : busy && activeSelection ? activeSelection.id : null}
     failure={activeSelection?.error ? { instanceId: activeSelection.id, message: explainError(activeSelection.error) } : null}
-    onAccount={() => setView('profile')} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
+    onAccount={openAccount} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
     onLocal={() => leave('return_local')} onCancel={() => leave('cancel')} onRefresh={() => void act({ type: 'refresh_instances' })}
     onConsent={(approve) => void act({ type: 'decide_consent', approve })} consentError={state.consent ? errorMessage : null} />;
   const failure = errorMessage && (popover || view === 'updates' || view === 'setup-complete'
@@ -346,7 +355,7 @@ export function AccountApp() {
   } else if (view === 'sign-out') {
     content = <AccountSignOutView signingOut={!!signOutIntent} errorMessage={errorMessage} onRetry={() => leave('sign_out')} onBack={() => leave('cancel')} />;
   } else if (view === 'setup-complete') {
-    content = <SetupCompleteView onLocal={() => leave('return_local')} onSignIn={() => setView('account')} failure={failure} />;
+    content = <SetupCompleteView onLocal={() => leave('return_local')} onSignIn={openAccount} failure={failure} />;
   } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
     content = <RecoveryCodesView codes={direct.recoveryCodes} busy={busy} onSaved={() => {
       recoveryProtection.current = null;
@@ -362,7 +371,7 @@ export function AccountApp() {
       onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
       onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
       onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
-      onRestart={claim.restart} onUpdates={() => setView('updates')} onClose={claim.close} />;
+      onRestart={claim.restart} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')} onClose={claim.close} />;
   } else if (state.account.status !== 'signed_in') {
     // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
     // "continue on this computer", Back to Workbench and the in-app authenticator setup below.

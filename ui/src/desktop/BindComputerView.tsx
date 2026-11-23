@@ -7,8 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { accountInitialFor } from '@/components/AccountAvatar';
-import { timeParts } from '@/components/devices/format';
-import { DOMAIN_SUFFIX } from '@/components/devices/rules';
 import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/sign-in/chromeContext';
 import { CodeEntry, SecondFactor } from '@/sign-in/screens';
 import type { SecondFactorMethod } from '@/sign-in/types';
@@ -37,6 +35,10 @@ export type ComputerBinding =
 
 /** An ordinary account step avibe.bot accepted that this App has not finished saving. */
 export type AccountRecovery = 'available' | 'blocked' | 'gone';
+
+/** The name a prefix becomes. Kept here, not imported from the Devices page: the account document
+ *  must not pull the Workbench's data layer into its bundle. */
+const DOMAIN_SUFFIX = '-app.avibe.bot';
 
 export type ComputerBindingCardProps = {
   binding: ComputerBinding;
@@ -99,9 +101,9 @@ export function ComputerBindingCard({ binding, account, computer, recovery, busy
 
 export type EligibleName = { prefix: string; host: string };
 /** Why a step could not go on, as one sentence; never a raw code. */
-export type BindProblem = 'unreachable' | 'signedOut' | 'rateLimited' | 'expired' | 'busy' | 'notResponding' | 'changed' | 'codeInvalid' | 'lost' | 'unknown';
+export type BindProblem = 'unreachable' | 'signedOut' | 'rateLimited' | 'expired' | 'busy' | 'notResponding' | 'changed' | 'codeInvalid' | 'lost' | 'reauth' | 'storage' | 'unknown';
 /** Problems whose only safe next step is going back, not another attempt right away. */
-const BACK_ONLY: BindProblem[] = ['busy', 'rateLimited', 'changed', 'signedOut'];
+const BACK_ONLY: BindProblem[] = ['busy', 'rateLimited', 'changed', 'signedOut', 'storage'];
 
 /** What a review native returned after a verification changed from the one the person confirmed. */
 export type BindField = 'account' | 'computer' | 'name' | 'availability';
@@ -115,6 +117,9 @@ export type BindStep =
   /** `name_holding_limit_reached`. Details only when avibe.bot sent them. */
   | { kind: 'limit'; name: string; held: number | null; earliest: string | null; eligible: EligibleName[] }
   | { kind: 'proof' }
+  /** avibe.bot accepted the verification; the new sign-in is being read back and saved. `recover`:
+   *  that stopped, and the person may continue it (the account's own recovery, no new code). */
+  | { kind: 'saving'; recover?: boolean }
   /** `invalid`: avibe.bot said the code typed was wrong or expired; the same email's code may be typed again. */
   | { kind: 'code'; code: string; invalid?: boolean }
   | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | null }
@@ -144,6 +149,8 @@ export type BindComputerViewProps = {
   onFactorStep: (method: SecondFactorMethod | 'recovery') => void;
   onPasskey: () => void;
   onRestart: () => void;
+  /** Continue saving an accepted sign-in (`desktop_account_recovery` resume). */
+  onRecover: () => void;
   onUpdates: () => void;
   /** Cancel (`cancel`) or leave a finished step: back to the Account page. */
   onClose: () => void;
@@ -173,7 +180,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
  * The page shows exactly what native read for this ticket, and every step that reaches avibe.bot
  * is a button the person pressed: nothing here runs on mount, reshow or reconnect.
  */
-export function BindComputerView({ step, account, computer, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onUpdates, onClose }: BindComputerViewProps) {
+export function BindComputerView({ step, account, computer, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindComputerViewProps) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
 
@@ -219,7 +226,8 @@ export function BindComputerView({ step, account, computer, busy = false, onName
       : check === 'reclaim' ? <span className="text-muted">{t('desktopAccount.bind.reclaim')}</span>
       : check === 'free' ? <span className="text-muted">{t('devices.claim.domain', { host: `${name}${DOMAIN_SUFFIX}` })}</span>
       : null;
-    const date = step.kind === 'limit' && step.earliest ? timeParts(step.earliest, language)?.date : null;
+    const at = step.kind === 'limit' && step.earliest ? Date.parse(step.earliest) : NaN;
+    const date = Number.isFinite(at) ? new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(at) : null;
     return page(<>
       {heading(t('desktopAccount.bind.title'))}
       {changed?.length ? <p role="status" className="-mt-3 mb-5 flex items-center gap-2 text-sm"><Check className="size-4 shrink-0 text-mint-ink" />{t('desktopAccount.bind.changed', { fields: new Intl.ListFormat(language, { type: 'conjunction' }).format(changed.map((field) => t(`desktopAccount.bind.field.${field}` as const))) })}</p> : null}
@@ -264,6 +272,18 @@ export function BindComputerView({ step, account, computer, busy = false, onName
         <Button variant="brand" disabled={busy} onClick={onSendCode}>{t('desktopAccount.bind.sendCode')}</Button>
         <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
       </div>
+    </>);
+  }
+
+  if (step.kind === 'saving') {
+    return page(<>
+      {heading(t('desktopAccount.bind.title'))}
+      <p role="status" className="mb-5 flex items-center gap-2 text-sm"><Check className="size-4 shrink-0 text-mint-ink" />{t('desktopAccount.bind.saving')}</p>
+      {step.recover ? <div className="max-w-xl rounded-xl border border-gold/40 bg-gold/10 p-4 text-sm leading-6">
+        <p>{t('desktopAccount.bind.recovery')}</p>
+        <Button variant="brand" size="sm" className="mt-3" disabled={busy} onClick={onRecover}>{t('common.continue')}</Button>
+      </div> : <Skeleton className="h-5 w-2/3" />}
+      <Button variant="ghost" className="mt-6" onClick={onClose}>{t('common.cancel')}</Button>
     </>);
   }
 
