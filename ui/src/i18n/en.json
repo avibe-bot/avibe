@@ -1777,7 +1777,7 @@
           "help": "Providers keep the repeated start of a conversation cached for a while; sending it again in that time is cheaper and faster. Avibe uses this duration to judge whether the cache is still there. Leave it on Automatic unless you know how long your provider keeps its cache. On a direct official connection, a longer duration is billed at a higher cache-write price.",
           "infoLabel": "What cache duration is"
         },
-        "undoDone": "Your earlier separate route is back.",
+        "undoDone": "Your earlier separate route is back as an unsaved draft.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
           "automatic": "After saving: follows default routing",

@@ -18,8 +18,7 @@ import { cn } from '@/lib/utils';
 
 /** Never exported: a label that does not name a control is the defect above, so
  *  `htmlFor` is required and `Field` is the only thing that can supply it. */
-/** The label on its own, for a control laid out beside it rather than under it. */
-export const FieldLabel: React.FC<{ htmlFor: string; mono?: boolean; className?: string; children: React.ReactNode }> = ({
+const FieldLabel: React.FC<{ htmlFor: string; mono?: boolean; className?: string; children: React.ReactNode }> = ({
   htmlFor,
   mono,
   className,
