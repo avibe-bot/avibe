@@ -1,7 +1,7 @@
 use super::{
     connect::Authority,
     credentials::{Grant, WindowRegistration},
-    listener::Listener,
+    listener::ListenerAccess,
     quiet::PublicCensus,
     transport::Link,
     SelectedPath,
@@ -50,16 +50,19 @@ pub struct Handover {
     pub(super) host: Authority,
     pub(super) links: watch::Receiver<Option<Arc<Link>>>,
     pub(super) health: watch::Receiver<()>,
-    pub(super) listener: std::sync::Weak<Listener>,
+    pub(super) listener: std::sync::Weak<ListenerAccess>,
 }
 impl Handover {
+    fn owned_listener(&self) -> Option<Arc<ListenerAccess>> {
+        self.listener.upgrade().filter(|l| l.owned())
+    }
     /// Independently usable while the session task holds its Client for refresh.
     pub fn window_credential(&self, window: &str) -> Option<WindowRegistration> {
         self.listener.upgrade()?.window_credential(window)
     }
     pub fn revoke_window(&self, registration: &WindowRegistration) {
         // An accept fault stops issuance, not revocation of existing streams.
-        if let Some(listener) = self.listener.upgrade() {
+        if let Some(listener) = self.owned_listener() {
             listener.windows.revoke(registration);
         }
     }
@@ -68,20 +71,20 @@ impl Handover {
     /// it is always dropped before sleeping. No window lock is needed for
     /// the entire three-second quiet interval.
     pub async fn close_quiet_public<G>(&self, host: &str, sole_document: impl Fn() -> Option<G>) -> HandoverResult {
-        let Some(grant) = self.listener.upgrade().map(|l| l.windows.legacy_grant()) else {
+        let Some(grant) = self.owned_listener().map(|l| l.windows.legacy_grant()) else {
             return HandoverResult::NotUsable;
         };
         self.close(host, grant, sole_document).await
     }
     /// A delayed call retains the originating registration, even before its first poll.
     pub async fn close_quiet_public_for_window(&self, host: &str, registration: &WindowRegistration) -> HandoverResult {
-        let Some(grant) = self.listener.upgrade().and_then(|l| l.windows.window(registration)) else {
+        let Some(grant) = self.owned_listener().and_then(|l| l.windows.window(registration)) else {
             return HandoverResult::NotUsable;
         };
         self.close(host, grant, || Some(())).await
     }
     pub fn window_census(&self, registration: &WindowRegistration) -> Option<PublicCensus> {
-        let grant = self.listener.upgrade()?.windows.window(registration)?;
+        let grant = self.owned_listener()?.windows.window(registration)?;
         let valid = grant.valid.borrow();
         (*valid).then(|| grant.legs.census())
     }
@@ -103,7 +106,8 @@ impl Handover {
                     return HandoverResult::NotUsable;
                 }
                 let current = self.links.borrow();
-                if self.health.has_changed().is_err()
+                if self.owned_listener().is_none()
+                    || self.health.has_changed().is_err()
                     || !current.as_ref().is_some_and(|l| Arc::ptr_eq(l, &start))
                     || !matches!(
                         start.selected_path(),

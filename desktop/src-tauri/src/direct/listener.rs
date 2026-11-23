@@ -7,7 +7,15 @@ use super::{
     public,
     transport::{Link, Stream},
 };
-use std::{future::Future, net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    net::Ipv4Addr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -19,38 +27,57 @@ use tokio::{
 pub(super) struct Listener {
     #[cfg(test)]
     pub(super) accept_fault: Arc<tokio::sync::Notify>,
-    pub windows: Arc<Windows>,
+    pub access: Arc<ListenerAccess>,
     pub port: u16,
     // Retain the bound port until the native owner detaches, even if the
     // accept worker dies. Another process must not inherit a published port.
     _reservation: Arc<TcpListener>,
+}
+// A handle operation can retain these references, never the port reservation or
+// the owner's decision to retire. Only Listener owns shutdown.
+pub(super) struct ListenerAccess {
+    pub windows: Arc<Windows>,
+    retired: AtomicBool,
     health: watch::Receiver<()>,
     task: JoinHandle<()>,
 }
-impl Drop for Listener {
-    fn drop(&mut self) {
-        self.task.abort()
-    }
-}
-impl Listener {
-    pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Arc<Self>> {
-        Self::bind_with_port(host, links, |h, port| async move { public::open(&h, port).await }).await
+impl ListenerAccess {
+    pub(super) fn owned(&self) -> bool {
+        !self.retired.load(Ordering::Acquire)
     }
     pub(super) fn is_alive(&self) -> bool {
-        self.health.has_changed().is_ok() && !self.task.is_finished()
+        self.owned() && self.health.has_changed().is_ok() && !self.task.is_finished()
     }
     pub(super) fn window_credential(&self, window: &str) -> Option<super::WindowRegistration> {
         self.is_alive().then(|| self.windows.credential(window)).flatten()
     }
+}
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.retire();
+    }
+}
+impl Listener {
+    pub(super) fn retire(&self) {
+        if !self.access.retired.swap(true, Ordering::AcqRel) {
+            self.access.task.abort();
+        }
+    }
+    pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Self> {
+        Self::bind_with_port(host, links, |h, port| async move { public::open(&h, port).await }).await
+    }
+    pub(super) fn is_alive(&self) -> bool {
+        self.access.is_alive()
+    }
     pub(super) fn health(&self) -> watch::Receiver<()> {
-        self.health.clone()
+        self.access.health.clone()
     }
     #[cfg(test)]
     pub(super) async fn bind_via<F, Fut>(
         host: Authority,
         links: watch::Receiver<Option<Arc<Link>>>,
         open_public: F,
-    ) -> Option<Arc<Self>>
+    ) -> Option<Self>
     where
         F: Fn(Authority) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Option<TcpStream>> + Send + 'static,
@@ -65,7 +92,7 @@ impl Listener {
         host: Authority,
         links: watch::Receiver<Option<Arc<Link>>>,
         open_public: F,
-    ) -> Option<Arc<Self>>
+    ) -> Option<Self>
     where
         F: Fn(Authority, u16) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Result<TcpStream, public::OpenError>> + Send + 'static,
@@ -120,15 +147,18 @@ impl Listener {
             drop(_live);
             while clients.join_next().await.is_some() {}
         });
-        Some(Arc::new(Self {
+        Some(Self {
             #[cfg(test)]
             accept_fault,
-            windows,
+            access: Arc::new(ListenerAccess {
+                windows,
+                task,
+                health,
+                retired: AtomicBool::new(false),
+            }),
             port,
-            task,
-            health,
             _reservation: reservation,
-        }))
+        })
     }
 }
 async fn accept_with_retry<T, F: Future<Output = std::io::Result<T>>>(
@@ -254,7 +284,7 @@ mod tests {
         let request = format!(
             "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
             host.host(),
-            basic(l.windows.legacy())
+            basic(l.access.windows.legacy())
         );
         browser.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
@@ -336,7 +366,7 @@ mod tests {
             .unwrap();
         let addr = c.route().unwrap().proxy;
         let mut life = c.listener_lifetime();
-        c.listener.task.abort();
+        c.listener.access.task.abort();
         assert!(life.changed().await.is_err());
         assert!(c.route().is_none());
         assert!(TcpListener::bind(addr).await.is_err());
