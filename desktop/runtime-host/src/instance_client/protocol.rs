@@ -554,6 +554,7 @@ pub fn account_view(url: &Url, owned_bundle_origin: &Url) -> Option<&'static str
     }
     match view.as_deref().unwrap_or("account") {
         "account" => Some("account"),
+        "claim" => Some("claim"),
         "instances" => Some("instances"),
         "setup-complete" => Some("setup-complete"),
         "sign-out" => Some("sign-out"),
@@ -575,6 +576,7 @@ pub fn presentation_view(url: &Url) -> Option<&'static str> {
     }
     match url.path() {
         "/account" => Some("account"),
+        "/claim" => Some("claim"),
         "/instances" => Some("instances"),
         "/setup-complete" => Some("setup-complete"),
         "/sign-out" => Some("sign-out"),

@@ -5,7 +5,7 @@ use avibe_runtime_host::{
     instance_client::{
         account::{Passkeys, SystemBrowser},
         coordinator::{
-            claims::{ClaimCaller, ClaimDocument, ClaimRequest},
+            claims::{ClaimAction, ClaimCaller, ClaimDocument, ClaimRequest},
             AccountRecoveryRequest, ClientView, Coordinator,
         },
         loopback::CallbackCopy,
@@ -59,6 +59,7 @@ struct PresentationQueue {
     window: u64,
     document: u64,
     source: Option<PresentationSource>,
+    claim_workbench: Option<(String, u64)>,
     link: Option<(u64, DeepLinkReturn)>,
     logout: Option<LogoutReceipt>,
 }
@@ -87,6 +88,7 @@ impl PresentationQueue {
     fn enqueue(&mut self, view: &'static str, owner: u64, guarded: bool, locale: Option<&'static str>) {
         self.logout = None;
         self.source = None;
+        self.claim_workbench = None;
         self.sequence += 1;
         self.guard = None;
         self.approval = None;
@@ -251,7 +253,8 @@ impl PresentationQueue {
         true
     }
     fn can_start(&self, intent: PresentationIntent, label: &str, url: &Url) -> bool {
-        self.pending == Some(intent) && (self.source.is_none() || self.source_matches(label, url))
+        self.pending == Some(intent)
+            && ((intent.view != "claim" && self.source.is_none()) || self.source_matches(label, url))
     }
     fn popup_is_current(&self, presentation: &PopupPresentation) -> bool {
         self.sequence == presentation.intent.id
@@ -295,6 +298,22 @@ struct Views {
     account: Option<AccountDocument>,
 }
 impl Views {
+    // Capture the actual Runtime document, never a candidate or an instance hidden by a sheet.
+    fn workbench(&self, label: &str, window: u64) -> Option<(String, u64)> {
+        let runtime = self.runtime.as_ref()?;
+        (self.account.is_none()
+            && self.candidate.is_none()
+            && !runtime.disposable
+            && runtime.window == window
+            && runtime.label == label)
+            .then(|| (runtime.label.clone(), runtime.document))
+    }
+    fn return_matches(&self, account: &AccountDocument) -> bool {
+        self.runtime.as_ref().is_some_and(|runtime| {
+            runtime.window == account.window
+                && account.returning.as_ref() == Some(&(runtime.label.clone(), runtime.document))
+        })
+    }
     /// The role on screen in the main window. An account document is on
     /// screen from the moment `open_account` shows it, including while it
     /// reloads (`loaded` is false from commit to finish). Until then, even when
@@ -328,6 +347,7 @@ impl RuntimeDocument {
 struct AccountDocument {
     claim: Option<ClaimDocument>,
     claim_visibility: u64,
+    sheet_open: SheetOpen,
     label: String,
     window: u64,
     destination: Url,
@@ -809,6 +829,15 @@ pub(crate) fn runtime_document_started(app: &AppHandle, label: &str, url: &Url) 
         let mut views = client.view.views.lock().expect("views");
         if let Some(runtime) = views.runtime.as_mut().filter(|runtime| runtime.label == label) {
             runtime.document += 1;
+            if let Some(sheet) = views
+                .account
+                .as_mut()
+                .filter(|a| account_view(&a.destination, &client.view.bundle) == Some("claim"))
+            {
+                // A same-origin reload is still a different Workbench. Don't transfer the original action.
+                sheet.returning = None;
+                sheet.claim.take();
+            }
         }
         if let Some(candidate) = views.candidate.as_mut().filter(|candidate| candidate.label == label) {
             candidate.document += 1;
@@ -1101,11 +1130,14 @@ pub(crate) async fn desktop_claim_review(
     }
     // Snapshot before any platform getter. A hide or same-URL reload during the getter
     // must not be recaptured as the document that made the request.
+    let observe = matches!(&request.action, ClaimAction::ObserveCurrentBinding {});
+    let open = matches!(&request.action, ClaimAction::Open {});
+    let generation = request.expected_generation;
     let (receipt, observed) = {
         let views = client.view.views.lock().expect("views");
         let role = views.account.as_ref().ok_or_else(deny)?;
         (
-            role.claim_receipt(window.label(), &client.view.bundle)
+            role.private_receipt(window.label(), &client.view.bundle, observe)
                 .ok_or_else(deny)?,
             role.claim.as_ref().and_then(|d| d.caller().ok()),
         )
@@ -1150,8 +1182,14 @@ pub(crate) async fn desktop_claim_review(
         let role = views
             .account
             .as_mut()
-            .filter(|a| a.claim_receipt(window.label(), &client.view.bundle).as_ref() == Some(&receipt))
+            .filter(|a| a.private_receipt(window.label(), &client.view.bundle, observe).as_ref() == Some(&receipt))
             .ok_or_else(deny)?;
+        if open && !role.sheet_open.take(generation, receipt.visibility) {
+            return Err(deny());
+        }
+        if observe {
+            role.sheet_open.unbound = None;
+        }
         if opens_document {
             role.claim = Some(
                 client
@@ -1196,7 +1234,7 @@ pub(crate) async fn desktop_claim_review(
             deny()
         })?)
     };
-    let views = client.view.views.lock().expect("views");
+    let mut views = client.view.views.lock().expect("views");
     let state = client.view.presentation.lock().expect("presentation");
     if !(state.account
         && !state.staging
@@ -1204,7 +1242,7 @@ pub(crate) async fn desktop_claim_review(
         && views
             .account
             .as_ref()
-            .and_then(|a| a.claim_receipt(window.label(), &client.view.bundle))
+            .and_then(|a| a.private_receipt(window.label(), &client.view.bundle, observe))
             .as_ref()
             == Some(&receipt))
     {
@@ -1213,7 +1251,13 @@ pub(crate) async fn desktop_claim_review(
     }
     // Only an admitted, qualified private reply can carry account-specific
     // errors or retry information. Admission failures carry no such facts.
-    reply.deliver()
+    let delivered = reply.deliver()?;
+    if observe && account_view(&receipt.destination, &client.view.bundle) == Some("claim") {
+        let role = views.account.as_mut().ok_or_else(deny)?;
+        role.sheet_open
+            .observed(generation, receipt.visibility, delivered.as_ref());
+    }
+    Ok(delivered)
 }
 // Native close/replacement/reload revoke synchronously. OS-level Hide/Minimize need
 // not generate a Tauri visibility event on either desktop. While this one attempt
@@ -1239,8 +1283,30 @@ struct ClaimReceipt {
     visibility: u64,
     destination: Url,
 }
+#[derive(Default)]
+struct SheetOpen {
+    unbound: Option<(u64, u64)>,
+    spent: bool,
+}
+impl SheetOpen {
+    fn observed(&mut self, generation: u64, visibility: u64, result: Option<&serde_json::Value>) {
+        self.unbound = (!self.spent
+            && result.and_then(|r| r.get("state")).and_then(|v| v.as_str()) == Some("no_published_binding"))
+        .then_some((generation, visibility));
+    }
+    fn take(&mut self, generation: u64, visibility: u64) -> bool {
+        if self.spent || self.unbound.take() != Some((generation, visibility)) {
+            return false;
+        }
+        self.spent = true;
+        true
+    }
+}
 impl AccountDocument {
     fn claim_receipt(&self, label: &str, bundle: &Url) -> Option<ClaimReceipt> {
+        self.private_receipt(label, bundle, false)
+    }
+    fn private_receipt(&self, label: &str, bundle: &Url, observe: bool) -> Option<ClaimReceipt> {
         if !self.shown
             || !self.admitted
             || !self.loaded
@@ -1251,7 +1317,11 @@ impl AccountDocument {
                 (bundle.scheme(), bundle.host_str(), bundle.port()),
                 ("tauri", Some("localhost"), None) | ("http", Some("tauri.localhost"), None)
             )
-            || account_view(&self.destination, bundle) != Some("account")
+            || !match account_view(&self.destination, bundle) {
+                Some("claim") => self.returning.is_some(),
+                Some("account") => observe,
+                _ => false,
+            }
         {
             return None;
         }
@@ -1468,6 +1538,21 @@ pub fn caller_can_present(app: &AppHandle, label: &str, current: &Url) -> bool {
 /// Source authority is independent of physical-window admission. A committed
 /// document can request presentation while the window serializer is occupied,
 /// but a hidden, not-yet-published candidate cannot acquire that authority.
+fn claim_source_allowed(state: &Presentation, local: Option<&LoopbackOrigin>, source: &Url) -> bool {
+    !state.account
+        && !state.staging
+        && state.pending_commit.is_none()
+        && state.state.connection.pending.is_none()
+        && state.remote.is_none()
+        && state.state.connection.status == ConnectionStatus::Local
+        && state.state.connection.committed.is_local()
+        && local.is_some_and(|origin| origin.matches_url_origin(source))
+        && source.username().is_empty()
+        && source.password().is_none()
+        // Enumerate the Workbench entry routes; never infer membership from a shared origin or a prefix.
+        && matches!(source.path(), "/" | "/setup" | "/settings/devices" | "/settings/remote-access")
+}
+
 fn presentation_source_allowed(
     view: &Presentation,
     bundle: &Url,
@@ -1518,6 +1603,9 @@ fn presentation_destination(destination: &Url) -> Option<(&'static str, Option<S
     }
     base.set_query(None);
     let view = presentation_view(&base).or_else(|| (base.as_str() == crate::updater::OPEN_URL).then_some("updates"))?;
+    if view == "claim" && token.is_some() {
+        return None;
+    }
     Some((view, token, locale))
 }
 fn account_url(bundle: &Url, view: &str, locale: Option<&str>) -> Option<Url> {
@@ -1562,6 +1650,16 @@ pub fn presentation_request(
     // Capture before reading the document. A newer explicit action must not be
     // recaptured as authority after this source was inspected.
     let owner = client.coordinator.presentation_owner();
+    let workbench = if view == "claim" {
+        let queue = client.presentations.lock().expect("presentation intent");
+        let views = client.view.views.lock().expect("views");
+        let Some(origin) = views.workbench(label, queue.window) else {
+            return true;
+        };
+        Some((queue.window, queue.document, queue.sequence, origin))
+    } else {
+        None
+    };
     let Some(receiver) = current() else { return true };
     if active_webview(app).is_none_or(|view| view.label() != label) {
         return true;
@@ -1571,18 +1669,54 @@ pub fn presentation_request(
     }
     let committed_receipt = client.coordinator.committed_view_generation();
     let allowed = {
-        let view = client.view.presentation.lock().expect("presentation");
+        let state = client.view.presentation.lock().expect("presentation");
         let local = client.view.local_origin.lock().expect("local origin");
-        presentation_source_allowed(
-            &view,
-            &client.view.bundle,
-            local.as_ref(),
-            committed_receipt,
-            MAIN_WINDOW,
-            &receiver,
-        )
+        if view == "claim" {
+            claim_source_allowed(&state, local.as_ref(), &receiver)
+        } else {
+            presentation_source_allowed(
+                &state,
+                &client.view.bundle,
+                local.as_ref(),
+                committed_receipt,
+                MAIN_WINDOW,
+                &receiver,
+            )
+        }
     };
     if allowed {
+        if let Some((window, document, sequence, origin)) = workbench {
+            let mut queue = client.presentations.lock().expect("presentation intent");
+            if queue.sequence != sequence
+                || queue.window != window
+                || queue.document != document
+                || queue.pending.is_some_and(|intent| intent.view == "claim")
+                || client.coordinator.presentation_owner() != owner
+                || client
+                    .view
+                    .views
+                    .lock()
+                    .expect("views")
+                    .workbench(label, window)
+                    .as_ref()
+                    != Some(&origin)
+            {
+                return true;
+            }
+            queue.enqueue(view, owner, false, locale);
+            queue.source = Some(PresentationSource {
+                window,
+                document,
+                label: label.to_owned(),
+                url: receiver.to_string(),
+            });
+            queue.claim_workbench = Some(origin);
+            drop(queue);
+            retire_stale_link(app);
+            schedule_presentation(app);
+            ensure_presentation_retry(app);
+            return true;
+        }
         let approval = if let Some(token) = token {
             let Some(approval) = client
                 .presentations
@@ -1639,6 +1773,10 @@ fn present_owned(
     let Some(client) = app.try_state::<Client>() else {
         return false;
     };
+    // Only a stamped request from the Workbench can present this role.
+    if view == "claim" {
+        return false;
+    }
     if account_url(&client.view.bundle, view, locale).is_none() {
         return false;
     }
@@ -1867,6 +2005,13 @@ fn apply_presentation(app: &AppHandle) {
             let epoch = native.presentation_epoch(intent.owner)?;
             let receiver = active_webview(&app).ok_or_else(|| failure("receiver missing"))?;
             let current = receiver.url().map_err(failure)?;
+            if intent.view == "claim" {
+                let state = native.presentation.lock().expect("presentation");
+                let local = native.local_origin.lock().expect("local origin");
+                if !claim_source_allowed(&state, local.as_ref(), &current) {
+                    return Err(ClientError::new("stale_generation"));
+                }
+            }
             if native.presentation.lock().expect("presentation").account && !trusted_page(&client, &receiver) {
                 return Err(ClientError::new("stale_generation"));
             }
@@ -1895,7 +2040,7 @@ fn apply_presentation(app: &AppHandle) {
                     Err(failure("update popup unavailable"))
                 };
             }
-            let continuation = {
+            let (continuation, workbench) = {
                 let mut queue = client.presentations.lock().expect("presentation intent");
                 if !queue.can_start(intent, receiver.label(), &current) {
                     return Err(ClientError::new("stale_generation"));
@@ -1928,9 +2073,28 @@ fn apply_presentation(app: &AppHandle) {
                 }
                 // Replacement admission, not the asynchronous completion of view disposal,
                 // ends an old document's claim. A mere presentation event does not start one.
+                let workbench = if intent.view == "claim" {
+                    let origin = queue
+                        .claim_workbench
+                        .as_ref()
+                        .ok_or_else(|| ClientError::new("stale_generation"))?;
+                    if native
+                        .views
+                        .lock()
+                        .expect("views")
+                        .workbench(receiver.label(), queue.window)
+                        .as_ref()
+                        != Some(origin)
+                    {
+                        return Err(ClientError::new("stale_generation"));
+                    }
+                    Some(origin.clone())
+                } else {
+                    None
+                };
                 retire_claim_presentation(&app);
                 native.presentation.lock().expect("presentation").staging = true;
-                continuation
+                (continuation, workbench)
             };
             if let Some(ticket) = continuation {
                 // The accepted local escape needs this serializer itself.
@@ -1952,7 +2116,7 @@ fn apply_presentation(app: &AppHandle) {
                     .finish_local_return(&ticket, accepted);
                 result.map(|_| ())
             } else {
-                let result = native.open_account(epoch, url).await;
+                let result = native.open_account(epoch, url, workbench).await;
                 drop(windows);
                 result
             }
@@ -2122,9 +2286,20 @@ impl NativeView {
         result
     }
 
-    async fn open_account(&self, epoch: Epoch, destination: Url) -> Result<(), ClientError> {
+    async fn open_account(
+        &self,
+        epoch: Epoch,
+        destination: Url,
+        workbench: Option<(String, u64)>,
+    ) -> Result<(), ClientError> {
         epoch.check()?;
-        self.close_account().await?;
+        if account_view(&destination, &self.bundle) == Some("claim") {
+            if workbench.is_none() || self.views.lock().expect("views").account.is_some() {
+                return Err(ClientError::new("stale_generation"));
+            }
+        } else {
+            self.close_account().await?;
+        }
         epoch.check()?;
         let physical = self
             .app
@@ -2141,9 +2316,13 @@ impl NativeView {
                 .runtime
                 .as_ref()
                 .map(|runtime| (runtime.label.clone(), runtime.document));
+            if workbench.is_some() && workbench != returning {
+                return Err(ClientError::new("stale_generation"));
+            }
             views.account = Some(AccountDocument {
                 claim: None,
                 claim_visibility: 0,
+                sheet_open: SheetOpen::default(),
                 label: label.clone(),
                 window: physical,
                 destination: destination.clone(),
@@ -2241,14 +2420,13 @@ impl NativeView {
                 .map_err(|_| ClientError::new("instance_navigation_timeout"))?
                 .map_err(failure)??;
             epoch.check()?;
-            if !self
-                .views
-                .lock()
-                .expect("views")
-                .account
-                .as_ref()
-                .is_some_and(|account| account.label == label && account.admitted)
-            {
+            let admitted = {
+                let views = self.views.lock().expect("views");
+                views.account.as_ref().is_some_and(|account| {
+                    account.label == label && account.admitted && (workbench.is_none() || views.return_matches(account))
+                })
+            };
+            if !admitted {
                 return Err(ClientError::new("stale_generation"));
             }
             if let Some(runtime) = runtime_webview(&self.app) {
@@ -2558,6 +2736,7 @@ impl NativeView {
                 let runtime = views.runtime.as_ref()?;
                 let receipt = (runtime.label.clone(), runtime.document);
                 (account.admitted
+                    && account_view(&account.destination, &self.bundle) != Some("claim")
                     && account.window == physical
                     && runtime.window == physical
                     && !runtime.disposable
@@ -2805,9 +2984,7 @@ impl ClientView for NativeView {
         if preserve_document {
             let views = self.views.lock().expect("views");
             if let Some(account) = &views.account {
-                if !views.runtime.as_ref().is_some_and(|runtime| {
-                    account.returning.as_ref() == Some(&(runtime.label.clone(), runtime.document))
-                }) {
+                if !views.return_matches(account) {
                     return Err(ClientError::new("instance_session_missing"));
                 }
             }
@@ -2889,7 +3066,7 @@ impl ClientView for NativeView {
             .lock()
             .expect("presentation intent")
             .logout = None;
-        self.open_account(epoch, url).await
+        self.open_account(epoch, url, None).await
     }
 }
 
@@ -2937,6 +3114,7 @@ mod tests {
             account: account.map(|(loaded, shown)| AccountDocument {
                 claim: None,
                 claim_visibility: 0,
+                sheet_open: SheetOpen::default(),
                 label: "main-account-2".into(),
                 window: 1,
                 destination: url.clone(),
@@ -3399,12 +3577,22 @@ mod tests {
     #[test]
     fn native_presentation_tokens_have_no_malformed_or_uncorrelated_fallback() {
         let parse = |url| presentation_destination(&Url::parse(url).unwrap());
+        assert_eq!(
+            parse("avibe://desktop/claim?locale=zh"),
+            Some(("claim", None, Some("zh")))
+        );
+        assert_eq!(parse("avibe://desktop/claim"), Some(("claim", None, None)));
         assert_eq!(parse("avibe://updates"), Some(("updates", None, None)));
         assert_eq!(
             parse("avibe://desktop/updates?native_request=1-2"),
             Some(("updates", Some("1-2".into()), None))
         );
         for url in [
+            "avibe://desktop/claim?target=local",
+            "avibe://desktop/claim?native_request=1-2",
+            "avibe://desktop/claim?locale=de",
+            "avibe://desktop/claim?locale=en&locale=zh",
+            "avibe://desktop/claim?locale=zh#claim",
             "avibe://desktop/updates?native_request=",
             "avibe://desktop/updates?native_request=1-2&native_request=3-4",
             "avibe://desktop/updates?native_request=1-2&view=account",
@@ -3476,12 +3664,82 @@ mod tests {
     }
 
     #[test]
+    fn claim_presentation_requires_a_committed_local_workbench() {
+        let local = LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap();
+        let mut p = Presentation {
+            locale: None,
+            state: ClientState::new("fixture".into(), "1".into(), serde_json::json!({})),
+            account: false,
+            staging: false,
+            pending_commit: None,
+            remote: None,
+        };
+        let source = Url::parse("http://127.0.0.1:1984/settings/remote-access").unwrap();
+        let allows = |p: &Presentation| claim_source_allowed(p, Some(&local), &source);
+        assert!(allows(&p));
+        assert!(!claim_source_allowed(&p, None, &source));
+        for url in [
+            "http://127.0.0.1:1985/",
+            "https://fixture.avibe.bot/",
+            "http://127.0.0.1:1984/show/fixture",
+            "http://127.0.0.1:1984/api/status",
+            "http://user@127.0.0.1:1984/",
+        ] {
+            assert!(!claim_source_allowed(&p, Some(&local), &Url::parse(url).unwrap()));
+        }
+        p.account = true;
+        assert!(!allows(&p));
+        p.account = false;
+        p.staging = true;
+        assert!(!allows(&p));
+        p.staging = false;
+        p.pending_commit = Some(7);
+        assert!(!allows(&p));
+        p.pending_commit = None;
+        p.state.connection.status = ConnectionStatus::Switching;
+        assert!(!allows(&p));
+        p.state.connection.status = ConnectionStatus::Local;
+        p.state.connection.pending = Some(p.state.connection.committed.clone());
+        assert!(!allows(&p));
+        p.state.connection.pending = None;
+        p.state.connection.committed = ClientTarget::Remote {
+            name: "fixture".into(),
+            instance_id: "fixture".into(),
+            canonical_origin: "https://fixture.avibe.bot".into(),
+        };
+        assert!(!allows(&p));
+    }
+    #[test]
+    fn only_a_delivered_unbound_observation_allows_one_sheet_open() {
+        let mut sheet = SheetOpen::default();
+        assert!(!sheet.take(7, 1));
+        for state in [
+            "owner_observed",
+            "legacy_wait",
+            "legacy_publication_pending",
+            "bound_owner_unconfirmed",
+        ] {
+            sheet.observed(7, 1, Some(&serde_json::json!({"state":state})));
+            assert!(!sheet.take(7, 1));
+        }
+        let result = serde_json::json!({"state":"no_published_binding"});
+        for (generation, visibility) in [(8, 1), (7, 2)] {
+            sheet.observed(7, 1, Some(&result));
+            assert!(!sheet.take(generation, visibility));
+        }
+        sheet.observed(7, 1, Some(&result));
+        assert!(sheet.take(7, 1));
+        sheet.observed(7, 1, Some(&result));
+        assert!(!sheet.take(7, 1));
+    }
+    #[test]
     fn specific_visible_claim_role_rejects_hidden_reloaded_updater_and_runtime_receivers() {
         let bundle = Url::parse("tauri://localhost/").unwrap();
-        let url = account_url(&bundle, "account", Some("en")).unwrap();
+        let url = account_url(&bundle, "claim", Some("en")).unwrap();
         let mut role = AccountDocument {
             claim: None,
             claim_visibility: 0,
+            sheet_open: SheetOpen::default(),
             label: "main-account-7".into(),
             window: 2,
             destination: url.clone(),
@@ -3493,7 +3751,13 @@ mod tests {
             returning: None,
             owner: 2,
         };
+        assert!(role.claim_receipt("main-account-7", &bundle).is_none());
+        role.returning = Some(("main-runtime-1".into(), 4));
         assert!(role.claim_receipt("main-account-7", &bundle).is_some());
+        role.destination = account_url(&bundle, "account", Some("en")).unwrap();
+        assert!(role.private_receipt("main-account-7", &bundle, true).is_some());
+        assert!(role.claim_receipt("main-account-7", &bundle).is_none());
+        role.destination = url.clone();
         for label in [
             "main",
             "main-runtime-7",
@@ -3516,9 +3780,36 @@ mod tests {
         role.loaded = false;
         assert!(role.claim_receipt("main-account-7", &bundle).is_none());
         let dev = Url::parse("http://localhost:1420/").unwrap();
-        role.destination = account_url(&dev, "account", Some("en")).unwrap();
+        role.destination = account_url(&dev, "claim", Some("en")).unwrap();
         role.loaded = true;
         assert!(role.claim_receipt("main-account-7", &dev).is_none());
+
+        // The shell retains the Workbench, not a URL to navigate to on close.
+        role.destination = account_url(&bundle, "claim", Some("en")).unwrap();
+        let mut views = Views {
+            runtime: Some(RuntimeDocument {
+                label: "main-runtime-1".into(),
+                window: 2,
+                destination: Url::parse("http://127.0.0.1:1984/").unwrap(),
+                disposable: false,
+                directory: None,
+                owner: 2,
+                document: 4,
+            }),
+            ..Views::default()
+        };
+        assert_eq!(views.workbench("main-runtime-1", 2), role.returning);
+        views.account = Some(role);
+        assert!(views.workbench("main-runtime-1", 2).is_none()); // duplicate presentation cannot replace this sheet
+        assert!(views.return_matches(views.account.as_ref().unwrap()));
+        views.runtime.as_mut().unwrap().document += 1;
+        assert!(!views.return_matches(views.account.as_ref().unwrap())); // same URL, different document
+        views.account.take();
+        assert!(views
+            .account
+            .as_ref()
+            .and_then(|a| a.claim_receipt("main-account-7", &bundle))
+            .is_none());
     }
     #[test]
     fn only_supported_static_bundle_enables_the_client() {
