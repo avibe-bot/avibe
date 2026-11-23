@@ -18,6 +18,8 @@ import aiohttp
 import pytest
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="The device plugin is a POSIX process")
+from tests.test_device_voice import short_device_dir  # noqa: F401
+
 PACKAGE = Path(__file__).parents[1] / "packaging" / "avibe-device"
 
 
@@ -291,7 +293,12 @@ async def test_old_listener_epoch_refuses_both_discovery_paths_and_new_sockets(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop_command", ["stop", "disable"])
-async def test_stop_enable_cannot_revive_paused_server_socket_or_provision_window(tmp_path, stop_command):
+@pytest.mark.parametrize("unresponsive", [False, True])
+async def test_stop_enable_cannot_revive_paused_server_socket_or_provision_window(tmp_path, stop_command, short_device_dir, monkeypatch, unresponsive):
+    tmp_path = short_device_dir
+    from avibe_device import lifecycle
+
+    monkeypatch.setattr(lifecycle, "CONTROL_TIMEOUT", 0.2 if unresponsive else 3)
     pytest.importorskip("opuslib_next")
     from avibe_device.cli import main
     from avibe_device.pairing import Pairing
@@ -329,16 +336,19 @@ async def test_stop_enable_cannot_revive_paused_server_socket_or_provision_windo
                 await ws.send_json({"type": "hello", "version": 2, "audio_params": AUDIO,
                                     "features": {"avibe_voice": 1}})
                 assert (await ws.receive_json(timeout=2))["type"] == "hello"
-                child.send_signal(signal.SIGSTOP)
+                if unresponsive:
+                    child.send_signal(signal.SIGSTOP)
                 # Guarantee the old scope cannot poll between stop and enable.
                 try:
-                    assert main(["--state-dir", str(root), stop_command]) == 0
+                    assert await asyncio.to_thread(main, ["--state-dir", str(root), stop_command]) == 0
                     assert main(["--state-dir", str(root), "enable"]) == 0
                     assert pairing.status()["enabled"]
                 finally:
-                    child.send_signal(signal.SIGCONT)
+                    if unresponsive and child.poll() is None:
+                        child.send_signal(signal.SIGCONT)
                 assert (await ws.receive(timeout=5)).type in {aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED}
-            assert await asyncio.to_thread(child.wait, 5) == 0
+            await asyncio.to_thread(child.wait, 5)
+            assert child.poll() is not None  # psutil may reap this owned child.
             assert not pairing.running()
             with pytest.raises(aiohttp.ClientConnectionError):
                 await client.post(url + "/device/ota", headers={"Device-Id": "board"})

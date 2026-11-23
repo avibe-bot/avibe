@@ -19,10 +19,106 @@ WAKE_IDS = {"xiaowai-xiaowai", "hi-xiaowai", "xiaowai-tongxue"}
 AUDIO = {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60}
 
 
+class ScopeEnded(ValueError):
+    """A device connection no longer owns permission to initiate work."""
+
+
+class ConnectionScope:
+    """One connection owns its guarded effects, tasks and host cleanup."""
+
+    def __init__(self, pairing, generation, device_id, authorization, ws, host):
+        self.pairing = pairing
+        self.generation = generation
+        self.device_id = device_id
+        self.authorization = authorization
+        self.open_attempted = False
+        self.ws, self.host = ws, host
+        self.tasks = set()
+        self.ended = False
+        self.conversation_id = None
+        self.cleanup_task = None
+
+    def spawn(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self.tasks.add(task)
+
+        def settled(done):
+            if not done.cancelled():
+                done.exception()  # Also consume failures that race scope shutdown.
+            self.tasks.discard(done)
+
+        task.add_done_callback(settled)
+        return task
+
+    async def _effect(self, factory):
+        async def invoke():
+            if self.ended or not self.pairing.accepts(
+                self.device_id, self.authorization, generation=self.generation
+            ):
+                raise ScopeEnded("device_scope_ended")
+            return await factory()
+        return await self.spawn(invoke())
+
+    async def call(self, action, **arguments):
+        if action not in {"open", "transcribe", "speech"}:
+            raise ValueError("invalid_scope_operation")
+
+        async def invoke():
+            if action == "open":
+                self.open_attempted = True
+            result = await self.host.call(action, **arguments)
+            if action == "open":
+                # Own cleanup before returning through any cancellable await.
+                self.conversation_id = result["conversation_id"]
+            return result
+        return await self._effect(invoke)
+
+    async def answer(self, conversation_id, request_id, text):
+        return await self._effect(lambda: self.host.answer(conversation_id, request_id, text))
+
+    async def prepare(self, request):
+        return await self._effect(lambda: self.ws.prepare(request))
+
+    async def send_json(self, value):
+        await self._effect(lambda: self.ws.send_json(value))
+
+    async def send_bytes(self, value):
+        await self._effect(lambda: self.ws.send_bytes(value))
+
+    async def watch(self):
+        while True:
+            if self.ended or not self.pairing.active(self.generation):
+                raise ScopeEnded("device_scope_ended")
+            await asyncio.sleep(0.25)
+
+    async def close(self):
+        if self.cleanup_task is None:
+            self.ended = True
+            self.cleanup_task = asyncio.create_task(self._close())
+        await asyncio.shield(self.cleanup_task)
+
+    async def _close(self):
+        self.ended = True
+        tasks = tuple(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.conversation_id is not None:
+            conversation_id, self.conversation_id = self.conversation_id, None
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.host.call("close", conversation_id=conversation_id), 2)
+        elif self.open_attempted:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.host.call("close_device", device_id=self.device_id), 2)
+        if self.ws.prepared:
+            await self.ws.close()
+
+
 class Conversation:
-    def __init__(self, ws, host, *, inactivity: float = 20, threshold: int = 600, settling: float = 0.2, device_id: str = ""):
+    def __init__(self, ws, scope, *, inactivity: float = 20, threshold: int = 600, settling: float = 0.2, device_id: str = ""):
         self.ws = ws
-        self.host = host
+        self.host = scope
+        self.scope = scope
         self.inactivity = inactivity
         self.threshold = threshold
         self.settling = settling
@@ -54,7 +150,7 @@ class Conversation:
         return await asyncio.wait_for(self.incoming.get(), timeout)
 
     async def send(self, kind: str, state: str, *, playback=False):
-        await self.ws.send_json({"type": kind, "state": state, "session_id": self.session_id,
+        await self.scope.send_json({"type": kind, "state": state, "session_id": self.session_id,
                                  "request_id": self.request_id,
                                  **({"playback_id": self.playback_id} if playback else {})})
 
@@ -89,7 +185,7 @@ class Conversation:
             or hello["features"]["avibe_voice"] != 1
         ):
             raise ValueError("voice_capability_required")
-        await self.ws.send_json({"type": "hello", "version": 2, "transport": "websocket",
+        await self.scope.send_json({"type": "hello", "version": 2, "transport": "websocket",
                                  "session_id": self.session_id, "audio_params": AUDIO,
                                  "avibe_voice": {"version": 1, "route_revision": 4}})
         wake = await self.event(self.inactivity)
@@ -128,7 +224,7 @@ class Conversation:
             await self.send("tts", "start", playback=True)
             await self.ack("playback", "started", playback=True)
             for frame in frames:
-                await self.ws.send_bytes(frame)
+                await self.scope.send_bytes(frame)
                 await asyncio.sleep(0.06)
             await self.send("tts", "stop", playback=True)
             await self.ack("playback", "drained", playback=True)
@@ -148,14 +244,15 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
                provision=None, generation=None) -> web.Application:
     generation = pairing.read().get("generation", 0) if generation is None else generation
     app = web.Application()
-    connections: set[web.WebSocketResponse] = set()
+    connections: dict[web.WebSocketResponse, ConnectionScope] = {}
     selected_host = host or Host()
     # Only failed Authorization attempts consume this bounded, per-peer budget.
     # Five failures impose a 60-second cooldown; a valid retry clears its count.
     ota_failures: dict[str, tuple[int, float]] = {}
+    stopping = False
 
     async def ota(request):
-        if not pairing.active(generation):
+        if stopping or not pairing.active(generation):
             if provision is not None:
                 provision.close()
             raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
@@ -194,49 +291,42 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
     async def websocket(request):
         device_id = request.headers.get("Device-Id", "")
         authorization = request.headers.get("Authorization", "")
-        if not pairing.accepts(device_id, authorization, generation=generation):
+        if stopping or not pairing.accepts(device_id, authorization, generation=generation):
             raise web.HTTPUnauthorized()
         if connections:
             raise web.HTTPConflict()
-        ws = web.WebSocketResponse(max_msg_size=16384, heartbeat=15)
-        connections.add(ws)  # Reserve before the first await.
-        tasks = []
-        conversation = None
+        ws = web.WebSocketResponse(max_msg_size=16384, heartbeat=15, timeout=1)
+        scope = ConnectionScope(pairing, generation, device_id, authorization, ws, selected_host)
+        connections[ws] = scope  # Reserve before the first await.
         try:
-            await ws.prepare(request)
-            conversation = Conversation(ws, selected_host, inactivity=inactivity, threshold=threshold, settling=settling, device_id=device_id)
-
-            async def revoked():
-                while pairing.accepts(device_id, authorization, generation=generation):
-                    await asyncio.sleep(0.25)
-                raise ValueError("device_revoked")
-
-            tasks = [asyncio.create_task(conversation.receive()), asyncio.create_task(conversation.run()),
-                     asyncio.create_task(revoked())]
+            await scope.prepare(request)
+            conversation = Conversation(ws, scope, inactivity=inactivity, threshold=threshold,
+                                        settling=settling, device_id=device_id)
+            tasks = [scope.spawn(conversation.receive()), scope.spawn(conversation.run()), scope.spawn(scope.watch())]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
+        except ScopeEnded:
+            if not ws.prepared:
+                # Returning an unprepared WebSocketResponse would let aiohttp
+                # prepare it automatically outside the connection's guard.
+                raise web.HTTPUnauthorized() from None
         except (ValueError, KeyError, TypeError, asyncio.TimeoutError, asyncio.QueueFull, ConnectionError):
             # Payload-free close, no transcripts, credentials or protocol bodies in logs.
             pass
         finally:
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-            if conversation is not None and conversation.conversation_id:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(selected_host.call("close", conversation_id=conversation.conversation_id), 2)
-            await ws.close()
-            connections.discard(ws)
+            try:
+                await scope.close()
+            finally:
+                connections.pop(ws, None)
         return ws
 
     async def shutdown(_app):
+        nonlocal stopping
+        stopping = True
         if provision is not None:
             provision.close()
-        for ws in tuple(connections):
-            await ws.close(code=1001)
+        await asyncio.gather(*(scope.close() for scope in tuple(connections.values())))
 
     app.router.add_get("/device/ws", websocket)
     app.router.add_post("/device/ota", ota)

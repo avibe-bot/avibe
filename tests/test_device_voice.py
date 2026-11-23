@@ -39,6 +39,13 @@ def plugin(monkeypatch):
 
 
 @pytest.fixture
+def short_device_dir():
+    # AF_UNIX paths on macOS have a 104-byte limit.
+    with tempfile.TemporaryDirectory(prefix="avdv-", dir="/tmp") as root:
+        yield Path(root)
+
+
+@pytest.fixture
 def controller():
     ensure_sqlite_state()
     agents = VibeAgentStore()
@@ -445,7 +452,8 @@ async def test_device_faults_do_not_replay_or_transcribe_playback(plugin, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_repeated_stop_releases_listener_preserves_pairing_and_host(plugin, controller, tmp_path):
+async def test_repeated_stop_releases_listener_preserves_pairing_and_host(plugin, controller, tmp_path, short_device_dir):
+    tmp_path = short_device_dir
     pytest.importorskip("opuslib_next")
     from avibe_device.cli import serve
     from avibe_device.pairing import Pairing
@@ -530,7 +538,8 @@ async def test_legacy_device_and_inactivity_fail_closed(plugin, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_plugin_process_crash_leaves_host_chat_available(plugin, controller, tmp_path):
+async def test_plugin_process_crash_leaves_host_chat_available(plugin, controller, tmp_path, short_device_dir):
+    tmp_path = short_device_dir
     pytest.importorskip("opuslib_next")
     from avibe_device.pairing import Pairing
 

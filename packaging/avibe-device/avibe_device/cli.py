@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import ipaddress
 import json
 import os
@@ -17,19 +18,28 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None,
     """One scope owns listeners and sockets; stopping preserves pairing."""
     from aiohttp import web
     from .server import create_app
-    import fcntl
+    from . import lifecycle
+    from .host import Host
 
-    # One optional process per pairing directory, even if a second launch names
-    # another port. The kernel releases ownership on a process crash.
-    lock = os.open(pairing.root / "serve.lock", os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(lock)
-        raise ValueError("device_already_running") from None
+    # Serialize startup with CLI routing. The command handler never acquires
+    # lifecycle.lock: its caller owns it until acknowledgement and process exit.
+    with lifecycle.locked(pairing):
+        lock = lifecycle.claim(pairing)
+        if lock is None:
+            raise ValueError("device_already_running")
+        try:
+            owner = lifecycle.register(lock)
+        except BaseException:
+            os.close(lock)
+            raise
 
     signals = []
     runner = None
+    control = None
+    handlers = set()
+    command = asyncio.get_running_loop().create_future()
+    acknowledged = asyncio.get_running_loop().create_future()
+    control_path = pairing.root / "control.sock"
     provision = None
     loop = asyncio.get_running_loop()
     try:
@@ -47,12 +57,42 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None,
 
             provision = ProvisionWindow(pairing, provision_file, bind=bind, port=port, seconds=provision_seconds,
                                         generation=generation)
+        async def handle_control(reader, writer):
+            task = asyncio.current_task()
+            handlers.add(task)
+            try:
+                data = await asyncio.wait_for(reader.readline(), 2)
+                request = json.loads(data)
+                if (request.get("nonce") != owner["nonce"] or command.done()
+                        or request.get("command") not in {"stop", "disable", "revoke"}):
+                    return
+                command.set_result(request["command"])
+                ok = await asyncio.shield(acknowledged)
+                writer.write(json.dumps({"ok": ok}).encode() + b"\n")
+                await writer.drain()
+            except (ValueError, OSError, asyncio.TimeoutError):
+                pass
+            finally:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+                handlers.discard(task)
+
+        control_path.unlink(missing_ok=True)
+        control = await asyncio.start_unix_server(handle_control, path=str(control_path), limit=1024)
+        os.chmod(control_path, 0o600)
+        # A previous process may have lost a successful open response. Pairing
+        # and diagnostics remain available if the host is temporarily absent.
+        try:
+            await asyncio.wait_for(Host().call("close_device", device_id=snapshot["device_id"]), 2)
+        except (ValueError, asyncio.TimeoutError):
+            pass
         runner = web.AppRunner(create_app(pairing, inactivity=inactivity, threshold=threshold, provision=provision,
                                           generation=generation),
                                access_log=None, shutdown_timeout=5)
         await runner.setup()
         await web.TCPSite(runner, bind, port).start()
-        while pairing.active(generation) and not stopped.is_set():
+        while pairing.active(generation) and not stopped.is_set() and not command.done():
             try:
                 await asyncio.wait_for(stopped.wait(), 0.25)
             except asyncio.TimeoutError:
@@ -60,10 +100,23 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None,
     finally:
         try:
             if runner is not None:
+                # Admission closes first; shutdown joins every connection and
+                # its request writer tasks before a new generation is visible.
                 await runner.cleanup()
+            if command.done():
+                lifecycle.commit(pairing, command.result())
+                acknowledged.set_result(True)
         finally:
             if provision is not None:
                 provision.close()
+            if not acknowledged.done():
+                acknowledged.set_result(False)
+            if control is not None:
+                control.close()
+                await control.wait_closed()
+            if handlers:
+                await asyncio.gather(*tuple(handlers), return_exceptions=True)
+            control_path.unlink(missing_ok=True)
             for sig in signals:
                 loop.remove_signal_handler(sig)
             os.close(lock)
@@ -98,10 +151,10 @@ def main(argv=None) -> int:
             websocket_address(args.websocket_url)
             pairing.pair(args.device_id, name=args.name, provision_file=args.provision_file,
                          websocket_url=args.websocket_url)
-        elif args.command == "revoke":
-            pairing.revoke()
-        elif args.command in {"enable", "disable", "stop"}:
-            pairing.enable(args.command == "enable")
+        elif args.command in {"revoke", "enable", "disable", "stop"}:
+            from .lifecycle import transition
+
+            transition(pairing, args.command)
         elif args.command == "history":
             from .host import Host
 

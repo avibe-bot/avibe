@@ -55,6 +55,7 @@ class DeviceChat:
         self.controller = controller
         self.root = get_state_dir() / "device-voice"
         self.active: Conversation | None = None
+        self.lifecycle = asyncio.Lock()
 
     async def _save(self, conversation: Conversation) -> None:
         from config.atomic_io import write_atomic
@@ -77,6 +78,10 @@ class DeviceChat:
             raise asyncio.CancelledError
 
     async def open(self, device_id: str) -> str:
+        async with self.lifecycle:
+            return await self._open(device_id)
+
+    async def _open(self, device_id: str) -> str:
         from core.bots import bot_from_agent
 
         agent = await asyncio.to_thread(self.controller.vibe_agent_store.require_enabled, "littlevibey")
@@ -91,14 +96,29 @@ class DeviceChat:
         # The single device process may have crashed. A fresh connection retires
         # its previous generation; it never adopts its transcript or pending work.
         if self.active is not None:
-            await self.close(self.active.id)
+            await self._close(self.active.id)
         conversation = Conversation(str(uuid4()), device_id, agent.id, agent.model,
                                     bot.role, bot.display_name or "littlevibey")
-        await self._save(conversation)
+        try:
+            await self._save(conversation)
+        except asyncio.CancelledError:
+            conversation.closed = True
+            await self._save(conversation)
+            raise
         self.active = conversation
         return conversation.id
 
+    async def close_device(self, device_id: str) -> None:
+        """Recover an open whose successful response the device process lost."""
+        async with self.lifecycle:
+            if self.active is not None and self.active.device_id == device_id:
+                await self._close(self.active.id)
+
     async def close(self, conversation_id: str) -> None:
+        async with self.lifecycle:
+            await self._close(conversation_id)
+
+    async def _close(self, conversation_id: str) -> None:
         conversation = self.active
         if conversation is None or conversation.id != identifier(conversation_id):
             return

@@ -209,6 +209,7 @@ async def handle_device_voice(controller, request: ControlRequest, *, run_sync=a
         "transcribe": {"action", "audio"},
         "speech": {"action", "text"},
         "open": {"action", "device_id"},
+        "close_device": {"action", "device_id"},
         "close": {"action", "conversation_id"},
         "chat": {"action", "conversation_id", "request_id", "text"},
         "history": {"action", "conversation_id"},
@@ -234,11 +235,15 @@ async def handle_device_voice(controller, request: ControlRequest, *, run_sync=a
             if chat is None:
                 chat = DeviceChat(controller)
                 controller.device_chat = chat
-            if action == "open":
+            if action in {"open", "close_device"}:
                 device_id = args["device_id"]
                 if not isinstance(device_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", device_id):
                     raise ValueError("invalid_device_id")
-                payload = {"conversation_id": await chat.open(device_id)}
+                if action == "open":
+                    payload = {"conversation_id": await chat.open(device_id)}
+                else:
+                    await chat.close_device(device_id)
+                    payload = {}
             elif action == "close":
                 await chat.close(args["conversation_id"])
                 payload = {}

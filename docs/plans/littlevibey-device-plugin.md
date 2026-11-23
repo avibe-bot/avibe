@@ -178,5 +178,54 @@ the generation in their startup snapshot. Enable does not restore a prior
 generation. Legacy hash-only rows without a generation start at zero.
 Validation uses actual subprocess lock contention, persistent ENOSPC and
 write/flush/fsync failures, hard exits at four publication boundaries, and a
-SIGSTOP/SIGCONT serve process that cannot observe the intermediate disabled
-flag. Old HTTP/WS handlers reject requests even before the shutdown poll.
+paused serve process. The follow-up below makes lifecycle publication wait
+for the old process scope to end, instead of relying on revocation polling.
+
+## Connection effect ownership
+
+Review `5e79f73648` found the remaining asynchronous lifecycle gap
+(`4670311412`): an already admitted connection could initiate a host operation
+after its generation changed but before the next revocation poll. The lane
+stopped again. The coordinator verified all eight threads and authorized a
+connection-scope change confined to the plugin server, with independent
+read-only review before the next push.
+
+Independent review found that guarding coroutine continuations did not cover
+library-created HTTP writer tasks or a successful open response lost during
+cancellation. The coordinator authorized a narrower ownership invariant:
+**when a lifecycle transition is committed, all old connection scopes and their
+I/O have already ended.** No per-await lock is used as an atomic I/O gate.
+
+The running serve process is the sole lifecycle committer. CLI stop/disable/
+revoke requests use an owner-only Unix control socket in the private state
+directory. Serve stops admission, cancels and joins connection tasks and their
+HTTP request writers, performs host cleanup, then commits the state and returns
+an acknowledgement. A separate lifecycle lock serializes CLI transitions and
+serve startup. Enable cannot overtake stop, and still requires explicit serve.
+If no acknowledgement arrives within 12 seconds, the CLI verifies the recorded
+PID, UID and process creation time, sends SIGTERM, waits one second, then uses
+SIGKILL if needed and confirms exit before committing. The explicit psutil
+optional-package dependency provides PID-reuse-safe process signaling; no Avibe
+service or process group is controlled.
+
+Each connection owns its tasks and known host conversation. The narrow
+close_device host operation handles an open result lost before consumption;
+serve also attempts it at startup. DeviceChat serializes open/close ownership,
+and the existing IPC disconnect monitor now covers device open. Host absence
+still permits pairing, diagnostics and provisioning. No model execution policy,
+projection, wire fixture, pairing transaction or OTA bearer semantics change.
+
+The consumer matrix uses production Host over real Unix HTTP and real device
+WebSockets: before/after HTTP 101, hello-to-wake, before open, transcribe-to-chat,
+chat-to-speech, speech-to-playback, audio playback, the library writer task and
+an open response paused before EOF. Each is crossed with stop/enable, disable
+and revoke. Subprocess tests cover rapid stop/enable and unresponsive serve
+termination. The standalone device_transport_probe.py exercises the real actor,
+Host and asynchronous writer cleanup on Python 3.10 and 3.11 with aiohttp 3.11.18.
+Only synthetic endpoints and temporary state are used. Independent reviewer
+sese5kdb3qcnc returned No findings on the complete uncommitted lifecycle diff
+on November 24, 2026, independently rerunning all 166 device tests and both
+Python-version probes. An additional 202 internal-server/control-request tests
+pass, as do changed-file Ruff, whitespace checks and the optional wheel build.
+The next exact-head Codex review and CI remain delivery gates. Another Codex
+finding in this lifecycle class pauses editing for coordinator diagnosis.

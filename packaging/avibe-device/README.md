@@ -111,6 +111,14 @@ the cloud accepts a synthesis request, not inferred from an ASR-ready flag.
 Each listener is bound to a lifecycle generation. Even an immediate
 `stop`/`disable` followed by `enable` invalidates the old listener, connections
 and provisioning window; enabling only changes the preference for a new serve.
+Lifecycle commands reach the running listener through its private control
+socket. It cancels and joins all connection and HTTP writer tasks, cleans up
+its host conversation, then commits the new generation. A stopped listener
+cannot initiate later work. If the listener does not acknowledge within 12
+seconds, the CLI verifies its PID and creation time, terminates only that plugin
+process, and confirms exit before changing state. The state directory and
+control socket are owner-only; keep the directory path short enough for the
+platform Unix socket limit (104 bytes on macOS).
 
 ## Conversation and failure behavior
 
@@ -182,6 +190,11 @@ fallback, bounded cooldown and an untrusted Host header.
 write/flush/fsync failures, process death at each pairing publication boundary,
 and retry without manual state repair. A paused real serve process verifies
 that stop/disable followed immediately by enable cannot revive an old scope.
+`tests/test_device_scope.py` adds real WebSocket interleavings across handshake,
+wake, host operations and playback using production Host and a real Unix HTTP
+endpoint. Lost open responses and library writer tasks are explicit cases.
+`tests/device_transport_probe.py` additionally checks writer cancellation and
+state publication on supported Python 3.10/3.11 interpreters.
 
 Adversarial model responses try terminal, files, Vault, MCP, delegation, background
 and hosted tools without creating effects or Runs. Duplicate/restart requests,

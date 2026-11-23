@@ -222,3 +222,63 @@ async def test_actual_ipc_disconnect_cancels_model_and_cannot_resume(controller,
         disconnected.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_device_cleanup_is_idempotent_scoped_and_waits_for_open(controller, monkeypatch):
+    controller.model_hub_runtime = SyntheticHub()
+    chat = DeviceChat(controller)
+    controller.device_chat = chat
+    reached, release = asyncio.Event(), asyncio.Event()
+    save = chat._save
+
+    async def pending_save(conversation):
+        if not conversation.closed:
+            reached.set()
+            await release.wait()
+        await save(conversation)
+
+    monkeypatch.setattr(chat, "_save", pending_save)
+    opening = asyncio.create_task(chat.open("board"))
+    await reached.wait()
+    cleanup = asyncio.create_task(chat.close_device("board"))
+    await asyncio.sleep(0)
+    assert not cleanup.done()
+    release.set()
+    conversation_id = await opening
+    await cleanup
+    assert chat.active is None
+    assert chat.history(conversation_id)["closed"]
+    other_id = await chat.open("another-board")
+    for _ in range(2):
+        response = await handle_control_request(controller, new_request("device.voice", {
+            "action": "close_device", "device_id": "board",
+        }).to_payload())
+        assert response["payload"]["ok"]
+        assert chat.active.id == other_id
+    await chat.close_device("another-board")
+    assert chat.active is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_open_leaves_no_active_or_replayable_context(controller, monkeypatch):
+    controller.model_hub_runtime = SyntheticHub()
+    chat = DeviceChat(controller)
+    reached = asyncio.Event()
+    save = chat._save
+
+    async def pending_save(conversation):
+        await save(conversation)
+        if not conversation.closed:
+            reached.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(chat, "_save", pending_save)
+    opening = asyncio.create_task(chat.open("board"))
+    await reached.wait()
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert chat.active is None
+    records = chat.history(None)["conversations"]
+    assert len(records) == 1 and chat.history(records[0])["closed"]
