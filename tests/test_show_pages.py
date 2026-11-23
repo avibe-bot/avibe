@@ -29,6 +29,7 @@ from core.show_pages import (
     show_cli_event_token,
     show_event_write_token,
     show_page_payload,
+    show_page_web_app_manifest,
     show_public_event_write_token,
 )
 from storage.pagination import PageRequest
@@ -1646,6 +1647,42 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert 'from "./router"' in app_tsx
     assert "<RouterView" in app_tsx
     assert (page_dir / "api" / "health.ts").exists()
+
+
+def test_show_page_web_app_manifest_stays_on_the_exact_show_route():
+    manifest = show_page_web_app_manifest(
+        title='Q4 "Roadmap"',
+        start_url="/p/limited-link/",
+        scope="/p/limited-link/",
+        icon_url="/p/limited-link/__show/icon?v=icon-v1",
+    )
+
+    assert manifest == {
+        "id": "/p/limited-link/",
+        "name": 'Q4 "Roadmap"',
+        "short_name": 'Q4 "Roadmap"',
+        "start_url": "/p/limited-link/",
+        "scope": "/p/limited-link/",
+        "display": "standalone",
+        "icons": [
+            {
+                "src": "/p/limited-link/__show/icon?v=icon-v1",
+                "sizes": "any",
+                "purpose": "any",
+            }
+        ],
+    }
+    assert manifest["start_url"] != "/"
+
+
+def test_show_page_web_app_manifest_requires_a_canonical_show_path():
+    with pytest.raises(ValueError, match="canonical Show Page path"):
+        show_page_web_app_manifest(
+            title="Demo",
+            start_url="/",
+            scope="/",
+            icon_url="/apple-touch-icon.png",
+        )
 
 
 def test_extract_icon_path_custom_relative_href(tmp_path):

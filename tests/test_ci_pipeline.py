@@ -899,8 +899,9 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
         assert "CODE_SIGN_ENTITLEMENTS = Avibe/Avibe.entitlements;" in block.split("name = ", 1)[0]
 
 
-# The PR browser selection before parallelization: preserve these exact callers,
-# including spec filters, rather than deriving expected coverage from the matrix.
+# The PR browser coverage contract: preserve these exact callers, including spec
+# filters, rather than deriving expected coverage from the matrix. New consumers
+# join this inventory together with their workflow command.
 _BROWSER_COMMANDS = (
     "run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts mobile-otp.spec.ts",
     "run test:home-media",
@@ -909,9 +910,10 @@ _BROWSER_COMMANDS = (
     "run test:chat-selection",
     "run test:badge-triggers",
     "run test:address-retired",
-    "run test:workbench-general-build -- composer-mention-picker.spec.ts",
+    "run test:workbench-general-build -- composer-mention-picker.spec.ts inbox-skeleton-loading.spec.ts",
     "run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts",
     "run test:safe-browser",
+    "run test:show-system-entry",
     "run test:pet-mini",
     "run test:project-order",
     "run test:inbox-return",

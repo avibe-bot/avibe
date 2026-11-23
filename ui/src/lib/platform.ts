@@ -53,13 +53,18 @@ const NON_SAFARI_IOS_UA = /CriOS|FxiOS|EdgiOS|OPiOS|mercury/i;
 const IN_APP_BROWSER_UA =
   /MicroMessenger|FBAN|FBAV|FB_IAB|Instagram|Line\/|Twitter|WhatsApp|Snapchat|DingTalk|QQ\/|QQTheme|Slack|Discord|Feishu|Lark|; wv\)/i;
 
-export function isRealMobileSafari(): boolean {
-  if (!isIosDevice()) return false;
+export function isRealSafari(): boolean {
+  if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
   return (
     /Safari/.test(ua) &&
     /Version\//.test(ua) &&
     !NON_SAFARI_IOS_UA.test(ua) &&
-    !IN_APP_BROWSER_UA.test(ua)
+    !IN_APP_BROWSER_UA.test(ua) &&
+    !/Android|Chrome|Chromium/i.test(ua)
   );
+}
+
+export function isRealMobileSafari(): boolean {
+  return isIosDevice() && isRealSafari();
 }

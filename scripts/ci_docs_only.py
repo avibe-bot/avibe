@@ -48,10 +48,12 @@ RUN, SKIP = "run", "skip"
 
 # The browser lanes check out exactly these paths (lint.yml's sparse checkout,
 # pinned equal by tests/test_ci_pipeline.py): the Web UI, plus the files Vite
-# serves to it and the build's out-of-tree import check reads. Nothing else in
-# the repository exists on those runners.
+# serves to it, the server-injected Show script its browser consumer executes,
+# and the build's out-of-tree import check reads. Nothing else in the repository
+# exists on those runners.
 BROWSER_CHECKOUT = (
     "ui/",
+    "vibe/ui_server.py",
     "vibe/message_types.json",
     "vibe/data/",
     "assets/mascot/cloud-tuanzi-v2.png",
