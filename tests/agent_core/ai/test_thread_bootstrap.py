@@ -16,6 +16,13 @@ from core.agent_core.messages import AssistantMessage, Origin, TextBlock, UserMe
 from tests.agent_core.ai.test_anthropic_prompt_cache import SUCCESS, _breakpoints, _request
 
 
+@pytest.fixture(autouse=True)
+def isolated_controller(monkeypatch):
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    monkeypatch.setattr(ledger, "_state", None)
+
+
 def user(text):
     return UserMessage((TextBlock(text),))
 
@@ -193,156 +200,81 @@ async def test_only_committed_conversation_delta_earns_exemption(rejected):
     )
 
 
-def test_shared_reservation_survives_restart_and_clock_boundaries(monkeypatch, tmp_path):
+def test_local_budget_loss_and_proof_survive_failed_snapshot_writes(monkeypatch, tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
     from concurrent.futures import ThreadPoolExecutor
-    from types import SimpleNamespace
     from core.agent_core.ai import thread_bootstrap as ledger
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.delenv("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", raising=False)
-    import time
-
-    now = [time.time() - 100]
-    monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
     routes = [bytes([i]) * 32 for i in range(6)]
-    assert ledger.reserve(routes[0], 10, preview=True)[0] is not None and list(tmp_path.iterdir()) == []
-
-    # No shared connection or Python lock: each reservation opens the same on-disk instance.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(lambda route: ledger.reserve(route, 10, preview=False), routes))
-    allowed = [(r, t) for r, (t, _) in zip(routes, outcomes) if t]
-    assert len(allowed) == 5 and [reason for t, reason in outcomes if not t] == ["bootstrap_daily_limit"]
-    route, owner = allowed[0]
-    assert ledger.reserve(route, 10, preview=False) == (None, "bootstrap_pending")
-    now[0] += 100
-    import sqlite3
-
-    # A competing writer at observation time must not truncate 24h from *loss* to 24h from reserve.
-    with sqlite3.connect(tmp_path / "state" / "message-thread-bootstrap.sqlite") as locked:
-        locked.execute("BEGIN IMMEDIATE")
-        assert ledger.settle(route, owner, "bootstrap_read_loss") == "bootstrap_read_loss"
-    assert ledger.settle(route, owner, "bootstrap_proven") == "bootstrap_stale"
-    now[0] = ledger._loss_marker(route).stat().st_mtime + ledger.DAY - 1
-    assert ledger.reserve(route, 10, preview=False) == (None, "bootstrap_read_loss")
-    now[0] += 1
-    assert ledger.reserve(route, 10, preview=False)[0] is not None
-
-
-def test_late_loss_at_capacity_preserves_both_routes_and_reclaims_expired_receipts(monkeypatch, tmp_path):
-    import os
-    import sqlite3
-    import time
-    from types import SimpleNamespace
-    from core.agent_core.ai import thread_bootstrap as ledger
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.setattr(ledger, "MAX_ROUTES", 1)
-    now = [time.time() - ledger.DAY - 10]
-    monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
-    a, b, c = (v * 32 for v in (b"A", b"B", b"C"))
-    owner, _ = ledger.reserve(a, 100, False)
-    now[0] += ledger.DAY + 1
-    second, _ = ledger.reserve(b, 100, False)
-    assert ledger.settle(b, second, "bootstrap_read_loss") == "bootstrap_read_loss"
-    assert ledger.settle(a, owner, "bootstrap_read_loss") == "bootstrap_read_loss"
-    with sqlite3.connect(tmp_path / "state" / "message-thread-bootstrap.sqlite") as db:
-        assert db.execute("SELECT route FROM routes").fetchall() == [(b,)]
-    marker = ledger._loss_marker(a)
-    assert marker.exists()
-    # No Python connection, Session registry or injected clock survives into this separate process.
-    import subprocess
-    import sys
-
-    subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from core.agent_core.ai import thread_bootstrap as b; assert all(b.reserve(r, 100, True)[1] == 'bootstrap_read_loss' for r in (b'A'*32, b'B'*32))",
-        ],
-        check=True,
-        timeout=10,
-    )
-    # Age the old receipt, then renew it. A scan must recheck under the receipt writer's lock.
-    os.utime(marker, (now[0] - ledger.DAY, now[0] - ledger.DAY))
-    assert ledger.settle(a, owner, "bootstrap_read_loss") == "bootstrap_read_loss"
-    now[0] = marker.stat().st_mtime + ledger.DAY - 1
-    assert ledger.reserve(a, 100, False)[1] == "bootstrap_read_loss"
-    assert ledger.reserve(c, 100, False)[0]  # B expired, A does not block C.
-    now[0] += 2
-    assert ledger.reserve(a, 100, True)[1] == "bootstrap_capacity"
-    assert marker.exists()  # preview is inert even on expired state
-    assert ledger.reserve(a, 100, False)[1] == "bootstrap_capacity"
-    assert not marker.exists()
-
-
-def test_sweep_is_bounded_and_only_reclaims_owned_regular_files(monkeypatch, tmp_path):
-    import os
-    import subprocess
-    import sys
-    import time
-    from core.agent_core.ai import thread_bootstrap as ledger
-    from storage.lock import MigrationFileLock
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    trial, _ = ledger.reserve(b"A" * 32, 10, False)
-    marker = ledger._loss_marker(b"D" * 32)
-    directory = marker.parent
-    directory.mkdir()
-    marker.touch()
-    junk = directory / ".DS_Store"
-    junk.write_text("foreign")
-    sub = directory / ("ab" * 32)
-    sub.mkdir()
-    link = directory / ("cd" * 32)
-    link.symlink_to(junk)
-    old = time.time() - 2 * ledger.DAY
-    for p in (junk, link, sub, marker):
-        os.utime(p, (old, old), follow_symlinks=False)
-    # The child cannot take this lock until after it returns; the timeout kills an unbounded regression.
-    with MigrationFileLock(directory.with_suffix(".lock")):
+    assert ledger.reserve(routes[0], 100, True)[0] and list(tmp_path.iterdir()) == []
+    path = tmp_path / "state" / "message-thread-bootstrap.sqlite"
+    path.parent.mkdir()
+    with sqlite3.connect(path) as writer:
+        writer.execute("BEGIN EXCLUSIVE")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda r: ledger.reserve(r, 100, False), routes))
+        assert sum(bool(trial) for trial, _ in results) == 5
+        assert sum(reason == "bootstrap_daily_limit" for _, reason in results) == 1
+        r, t = next((r, t) for r, (t, _) in zip(routes, results) if t)
+        assert ledger.settle(r, t, "bootstrap_read_loss") == "bootstrap_read_loss"
+        assert ledger.settle(r, t, "bootstrap_proven") == "bootstrap_stale"
+        assert ledger.reserve(r, 100, True)[1] == "bootstrap_read_loss"
+        # No shared lock, and no durable debit was possible: a new process has its own allowance.
         subprocess.run(
             [
                 sys.executable,
                 "-c",
-                f"""from core.agent_core.ai import thread_bootstrap as b
-r = b'B' * 32
-assert b.reserve(r, 10, True)[1] == 'bootstrap_trial'
-assert b.reserve(r, 10, False)[0] is None
-owner = b.Trial({trial.ticket!r}, 10, False)
-assert b.settle(b'A' * 32, owner, 'bootstrap_proven') != 'bootstrap_proven'
-assert b.settle(b'A' * 32, owner, 'bootstrap_read_loss') == 'bootstrap_read_loss'
-assert b.reserve(b'A' * 32, 10, True)[1] == 'bootstrap_read_loss'
-""",
+                "from core.agent_core.ai import thread_bootstrap as b; assert sum(bool(b.reserve(bytes([i])*32,100,False)[0]) for i in range(6)) == 5",
             ],
             check=True,
-            timeout=3,
+            timeout=5,
         )
-    assert ledger.reserve(b"B" * 32, 10, False)[0] is not None
-    assert not marker.exists() and junk.read_text() == "foreign" and link.is_symlink() and sub.is_dir()
+    assert ledger.reserve(r, 100, False)[1] == "bootstrap_read_loss"
+    assert ledger.reserve(b"X" * 32, 100, False)[1] == "bootstrap_daily_limit"
 
 
-def test_renewal_between_expiry_scan_and_retirement_survives(monkeypatch, tmp_path):
-    import os
-    import time
-    from pathlib import Path
+def test_snapshot_can_restore_negative_evidence_but_never_proof(monkeypatch):
     from core.agent_core.ai import thread_bootstrap as ledger
+    from types import SimpleNamespace
+    import time
 
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    route = bytes(range(32))
-    marker = ledger._loss_marker(route)
-    ledger._write_loss(route)
-    old = time.time() - 2 * ledger.DAY
-    os.utime(marker, (old, old))
-    rename = Path.rename
+    now = [time.time()]
+    monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
+    monkeypatch.setenv("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", "2")
+    a, b = b"A" * 32, b"B" * 32
+    one, _ = ledger.reserve(a, 100, False)
+    two, _ = ledger.reserve(b, 100, False)
+    assert ledger.settle(a, one, "bootstrap_proven") == "bootstrap_proven"
+    assert ledger.settle(b, two, "bootstrap_read_loss") == "bootstrap_read_loss"
+    assert ledger.reserve(a, 100, True)[1] == "bootstrap_recheck"
+    monkeypatch.setattr(ledger, "_state", None)  # Fresh process, coherent hint was available.
+    assert ledger.reserve(a, 100, True)[1] == "bootstrap_daily_limit"
+    assert ledger.reserve(b, 100, True)[1] == "bootstrap_read_loss"
+    now[0] += ledger.DAY
+    assert ledger.reserve(b, 100, False)[1] == "bootstrap_trial"
 
-    def renew_before_rename(self, target):
-        if self == marker:
-            ledger._write_loss(route)
-        return rename(self, target)
 
-    monkeypatch.setattr(Path, "rename", renew_before_rename)
-    assert ledger.reserve(route, 10, False)[1] == "bootstrap_read_loss"
-    assert not marker.exists() and ledger.reserve(route, 10, True)[1] == "bootstrap_read_loss"
+def test_local_capacity_fails_closed_for_late_loss(monkeypatch):
+    from core.agent_core.ai import thread_bootstrap as ledger
+    from types import SimpleNamespace
+    import time
+
+    now = [time.time()]
+    monkeypatch.setattr(ledger, "MAX_ROUTES", 1)
+    monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
+    a, b = b"A" * 32, b"B" * 32
+    old, _ = ledger.reserve(a, 100, False)
+    now[0] += ledger.DAY + 1
+    current, _ = ledger.reserve(b, 100, False)
+    assert ledger.settle(a, old, "bootstrap_read_loss") == "bootstrap_read_loss"
+    assert ledger.reserve(a, 100, False)[1] == "bootstrap_capacity"
+    assert ledger.settle(b, current, "bootstrap_proven") == "bootstrap_stale"
+    now[0] += ledger.DAY
+    assert ledger.reserve(a, 100, False)[1] == "bootstrap_trial"
 
 
 @pytest.mark.parametrize("change", ["session", "model", "edit", "disabled", "cold"])
