@@ -463,6 +463,7 @@ export function CodeEntry({
   onCodeChange,
   onVerify,
   onResend,
+  verifyLabel,
 }: {
   email: string;
   code: string;
@@ -472,16 +473,20 @@ export function CodeEntry({
   cooldown: number;
   providerCooldownActive: boolean;
   resent: boolean;
-  onBack: () => void;
+  /** Absent where the email is fixed (a binding's verification): no back and no change of email. */
+  onBack?: () => void;
   onCodeChange: (value: string) => void;
   onVerify: () => void;
-  onResend: () => void;
+  /** Absent where one code is all a step may send (a binding's verification). */
+  onResend?: () => void;
+  /** The primary action where it is not a sign-in (a binding's verification). */
+  verifyLabel?: string;
 }) {
   const { t } = useTranslation();
   const { codeActionRegion, revealCodeActions } = useCodeActionReveal<HTMLDivElement>();
 
   return (
-    <SignInFrame back={{ disabled: locked, onBack: onBack }}>
+    <SignInFrame back={onBack ? { disabled: locked, onBack } : undefined}>
       <div className="flex flex-col items-center pt-8 pb-6">
         <img src={mailMascot} alt="" className="mb-5 size-28 object-contain" />
         <h1 className="text-center text-3xl font-semibold leading-tight">
@@ -491,16 +496,18 @@ export function CodeEntry({
       <div className="pb-7 text-center">
         <p className="text-sm leading-7 text-muted">{t('mobileApp.code.sentTo')}</p>
         <p className="break-all text-sm font-medium leading-6">{email}</p>
-        <Button
-          type="button"
-          variant="link"
-          size="compact"
-          disabled={locked}
-          className="mt-1 px-0 text-muted underline"
-          onClick={onBack}
-        >
-          {t('mobileApp.code.changeEmail')}
-        </Button>
+        {onBack ? (
+          <Button
+            type="button"
+            variant="link"
+            size="compact"
+            disabled={locked}
+            className="mt-1 px-0 text-muted underline"
+            onClick={onBack}
+          >
+            {t('mobileApp.code.changeEmail')}
+          </Button>
+        ) : null}
       </div>
       <div ref={codeActionRegion} data-mobile-code-actions className="scroll-mb-4">
         <OtpCells
@@ -535,27 +542,29 @@ export function CodeEntry({
               ? t('mobileApp.code.verifying')
               : providerCooldownActive
                 ? t('mobileApp.email.sendIn', { count: cooldown })
-                : t('mobileApp.code.verify')}
+                : verifyLabel ?? t('mobileApp.code.verify')}
           </Primary>
         </div>
       </div>
-      <div className="mt-6 text-center text-sm leading-7">
-        <p className="text-muted">{t('mobileApp.code.resendPrompt')}</p>
-        <Button
-          type="button"
-          variant="link"
-          size="compact"
-          disabled={locked || cooldown > 0}
-          className={alternative}
-          onClick={onResend}
-        >
-          {busy === 'resend'
-            ? t('mobileApp.code.resending')
-            : cooldown > 0
-              ? t('mobileApp.code.resendIn', { count: cooldown })
-              : t('mobileApp.code.resend')}
-        </Button>
-      </div>
+      {onResend ? (
+        <div className="mt-6 text-center text-sm leading-7">
+          <p className="text-muted">{t('mobileApp.code.resendPrompt')}</p>
+          <Button
+            type="button"
+            variant="link"
+            size="compact"
+            disabled={locked || cooldown > 0}
+            className={alternative}
+            onClick={onResend}
+          >
+            {busy === 'resend'
+              ? t('mobileApp.code.resending')
+              : cooldown > 0
+                ? t('mobileApp.code.resendIn', { count: cooldown })
+                : t('mobileApp.code.resend')}
+          </Button>
+        </div>
+      ) : null}
       <p className="mt-auto pt-7 pb-3 text-center text-xs leading-6 text-muted">
         {t('mobileApp.code.footer')}
       </p>
@@ -591,9 +600,10 @@ export function SecondFactor({
   onCodeChange: (value: string) => void;
   onVerify: () => void;
   onPasskey: () => void;
-  onOpenSecurity: () => void;
-  onSetupDone: () => void;
-  onDifferentAccount: () => void;
+  onOpenSecurity?: () => void;
+  onSetupDone?: () => void;
+  /** Absent where the account is fixed (a binding's verification). */
+  onDifferentAccount?: () => void;
 }) {
   const { t } = useTranslation();
   const desktop = useSignInPlatform() === 'desktop';
@@ -766,18 +776,20 @@ export function SecondFactor({
           ))}
         </div>
       ) : null}
-      <div className="mt-auto pt-7 pb-3 text-center">
-        <Button
-          type="button"
-          variant="link"
-          size="compact"
-          disabled={locked}
-          className="h-auto px-0 text-xs text-muted underline"
-          onClick={onDifferentAccount}
-        >
-          {t('mobileApp.twoFactor.differentAccount')}
-        </Button>
-      </div>
+      {onDifferentAccount ? (
+        <div className="mt-auto pt-7 pb-3 text-center">
+          <Button
+            type="button"
+            variant="link"
+            size="compact"
+            disabled={locked}
+            className="h-auto px-0 text-xs text-muted underline"
+            onClick={onDifferentAccount}
+          >
+            {t('mobileApp.twoFactor.differentAccount')}
+          </Button>
+        </div>
+      ) : null}
     </SignInFrame>
   );
 }
