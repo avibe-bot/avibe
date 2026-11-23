@@ -379,3 +379,52 @@ it('a 429 on the email code waits in place', async () => {
   await screen.findByText(en.mobileApp.code.rateLimited);
   expect(screen.getByLabelText(en.mobileApp.code.label)).toBeTruthy();
 });
+
+it('a 429 keeps the step locked until its wait ends', async () => {
+  let tries = 0;
+  const page = mount({ ...proofAnswers,
+    review_after_proof: refuse('authentication_required'),
+    submit_factor_code: () => { tries += 1; if (tries === 1) throw { code: 'rate_limited', retry_after_seconds: 1 }; return { state: 'verification_accepted', submission: 's2' }; } });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['totp'] } });
+  fireEvent.change(await screen.findByLabelText(en.mobileApp.twoFactor.totpLabel, undefined, { timeout: 5000 }), { target: { value: '111111' } });
+  fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.verify }));
+  await screen.findByText(/Try again in 1 minute/);
+  expect((screen.getByLabelText(en.mobileApp.twoFactor.totpLabel) as HTMLInputElement).disabled).toBe(true);
+  await waitFor(() => expect((screen.getByLabelText(en.mobileApp.twoFactor.totpLabel) as HTMLInputElement).disabled).toBe(false), { timeout: 3000 });
+  expect(page.types().filter((type) => type === 'submit_factor_code')).toHaveLength(1);
+});
+
+it('keeps one name check on its way at a time while the person types', async () => {
+  let inFlight = 0; let most = 0;
+  const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')),
+    check: async (action: Action) => {
+      inFlight += 1; most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      inFlight -= 1;
+      return review(NEW(action.prefix as string), `rev-${action.prefix as string}`);
+    } });
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  const field = await screen.findByRole('textbox');
+  fireEvent.change(field, { target: { value: 'maxa' } });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+  fireEvent.change(field, { target: { value: 'maxab' } });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+  fireEvent.change(field, { target: { value: 'maxabc' } });
+  await screen.findByText('The domain is maxabc-app.avibe.bot.', undefined, { timeout: 5000 });
+  expect(most).toBe(1);
+  expect(page.actions.filter((each) => each.type === 'check').at(-1)?.prefix).toBe('maxabc');
+});
+
+it('a publication that stopped after verification offers the account recovery, not a new code', async () => {
+  let inspects = 0;
+  const page = mount({ ...proofAnswers, review_after_proof: refuse('decision_changed'),
+    'recovery:inspect': () => (++inspects === 1 ? { state: 'unavailable' } : { state: 'available', receipt: 'rec-9' }), 'recovery:resume': { state: 'saved' } });
+  await verify();
+  const go = await screen.findByRole('button', { name: en.common.continue }, { timeout: 5000 });
+  expect(screen.getByText(copy.recovery)).toBeTruthy();
+  fireEvent.click(go);
+  await waitFor(() => expect(page.actions.find((each) => each.type === 'resume')).toEqual({ type: 'resume', receipt: 'rec-9' }));
+  expect(page.types().filter((type) => type === 'send_proof_code')).toHaveLength(1);
+});

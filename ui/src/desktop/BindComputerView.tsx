@@ -121,9 +121,10 @@ export type BindStep =
    *  that stopped, and the person may continue it (the account's own recovery, no new code). */
   | { kind: 'saving'; recover?: boolean }
   /** `invalid`: avibe.bot said the code typed was wrong or expired; the same email's code may be typed again. */
-  | { kind: 'code'; code: string; invalid?: boolean; limited?: boolean }
+  /** `waitUntil`: a 429's wait, in epoch ms; the step stays locked until it ends. */
+  | { kind: 'code'; code: string; invalid?: boolean; limited?: boolean; waitUntil?: number }
   /** `error`: what the last try said, in place. `rateLimited` waits `retryMinutes` here. */
-  | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | 'rateLimited' | null; retryMinutes?: number }
+  | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | 'rateLimited' | null; retryMinutes?: number; waitUntil?: number }
   /** The account must add an authenticator first. `material` once native issued it. */
   | { kind: 'factorSetup'; material: { uri: string; secret: string } | null; code: string; invalid?: boolean }
   /** Recovery codes that setup returned, shown once. */
@@ -188,11 +189,11 @@ export function BindComputerView({ step, account, computer, busy = false, onName
   if (step.kind === 'code' || step.kind === 'factor') {
     return <Close.Provider value={onClose}><SignInChrome value={BIND_CHROME}>
       {step.kind === 'code'
-        ? <CodeEntry email={account} code={step.code} verifyLabel={t('mobileApp.twoFactor.verify')} busy={busy ? 'verify' : null} locked={busy} errorKey={null}
+        ? <CodeEntry email={account} code={step.code} verifyLabel={t('mobileApp.twoFactor.verify')} busy={busy ? 'verify' : null} locked={busy || Boolean(step.waitUntil)} errorKey={null}
           invalidText={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : step.limited ? t('mobileApp.code.rateLimited') : undefined} cooldown={0} providerCooldownActive={false} resent={false}
           onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} />
         : <SecondFactor session={{ status: 'secondFactor', email: account, gate: 'challenge', methods: step.methods }} step={step.method} code={step.code}
-          busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy} retryMinutes={step.retryMinutes ?? 1}
+          busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy || Boolean(step.waitUntil)} retryMinutes={step.retryMinutes ?? 1}
           errorKey={step.error === 'passkey' ? 'mobileApp.twoFactor.passkeyFailed' : step.error === 'rateLimited' ? 'mobileApp.twoFactor.rateLimited'
             : step.error === 'code' ? (step.method === 'recovery' ? 'mobileApp.twoFactor.recoveryInvalid' : 'mobileApp.twoFactor.codeInvalid') : null}
           onStep={(next) => { if (next !== 'setup') onFactorStep(next); }} onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} onPasskey={onPasskey} />}

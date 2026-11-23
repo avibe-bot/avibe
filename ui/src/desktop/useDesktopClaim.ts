@@ -56,6 +56,8 @@ const PROBLEMS: Record<string, BindProblem> = {
   fresh_claim_required: 'lost',
   reauthentication_failed: 'reauth',
 };
+/** When a 429's wait ends: native refuses an earlier try, so the step stays locked until then. */
+const until = (reply: Reply) => Date.now() + 1000 * (!reply.ok && reply.retryAfter ? reply.retryAfter : 60);
 const problemFor = (code: string): BindStep => code === 'local_runtime_upgrade_required'
   ? { kind: 'upgrade' } : { kind: 'problem', problem: PROBLEMS[code] ?? 'unknown' };
 /** avibe.bot said this exact code is wrong or expired: the person may type it again, in place. */
@@ -323,12 +325,16 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       timer.current = null;
       const h = handles.current;
       if (h.checking || !h.revision) return;
+      // The latch spans the whole chain: showReview checks again itself for a name typed since.
       h.checking = true;
       void call('desktop_claim_review', { type: 'check', revision: h.revision, prefix: nameRef.current }).then(async (reply) => {
-        h.checking = false;
-        if (!reply) return;
-        if (!reply.ok) { setStep(problemFor(reply.code)); return; }
-        await showReview(reply.value ?? {}, 'check');
+        try {
+          if (!reply) return;
+          if (!reply.ok) { setStep(problemFor(reply.code)); return; }
+          await showReview(reply.value ?? {}, 'check');
+        } finally {
+          h.checking = false;
+        }
       });
     }, 400);
   }, [call, showReview, setStep]);
@@ -336,12 +342,18 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   const pick = useCallback((prefix: string) => run(async () => {
     const h = handles.current;
-    if (!h.revision) return;
+    if (!h.revision || h.checking) return;
+    if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null; }
     nameRef.current = prefix;
-    const reply = await call('desktop_claim_review', { type: 'check', revision: h.revision, prefix });
-    if (!reply) return;
-    if (!reply.ok) { setStep(problemFor(reply.code)); return; }
-    await showReview(reply.value ?? {}, 'check');
+    h.checking = true;
+    try {
+      const reply = await call('desktop_claim_review', { type: 'check', revision: h.revision, prefix });
+      if (!reply) return;
+      if (!reply.ok) { setStep(problemFor(reply.code)); return; }
+      await showReview(reply.value ?? {}, 'check');
+    } finally {
+      h.checking = false;
+    }
   }), [run, call, showReview, setStep]);
 
   const confirm = useCallback(() => run(async () => {
@@ -419,24 +431,21 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply || saving.current !== current) return;
     const publishing = reply.ok && reply.value?.state === 'publishing';
     if (reply.ok && !publishing) { stopSaving(); await decided(reply.value); return; }
-    if (!reply.ok) {
+    if (!reply.ok && reply.code === 'authentication_required') {
       // Published, and the new sign-in owes a second factor: the account's gate says which.
-      if (reply.code === 'authentication_required') {
-        current.published = true;
-        if (owedFactor()) { stopSaving(); return; }
-        if (retry()) return;
-      }
-      stopSaving();
-      setStep(problemFor(reply.code));
-      return;
+      current.published = true;
+      if (owedFactor()) { stopSaving(); return; }
+      if (retry()) return;
     }
-    if (retry()) return;
+    if (reply.ok && retry()) return;
+    // Publishing stopped (a failed read-back or save pauses it for the account's own recovery),
+    // or did not end in time: continue that on a press, with no new code, if native offers it.
     const inspected = await call('desktop_account_recovery', { type: 'inspect' });
     if (saving.current !== current) return;
     const receipt = inspected?.ok && inspected.value?.state === 'available' ? str(inspected.value.receipt) : null;
     if (receipt) { current.recover = receipt; setStep({ kind: 'saving', recover: true }); return; }
     stopSaving();
-    setStep({ kind: 'problem', problem: 'expired' });
+    setStep(reply.ok ? { kind: 'problem', problem: 'expired' } : problemFor(reply.code));
   }, [call, decided, owedFactor, setStep, stopSaving]);
   const savingNow = step?.kind === 'saving' && !step.recover;
   const revision = state?.revision;
@@ -470,13 +479,13 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   const submitCode = useCallback((code: string) => run(async () => {
     const h = handles.current;
-    if (!h.receipt) return;
+    if (!h.receipt || waitUntil) return;
     if (step?.kind === 'code' && h.delivery) {
       const reply = await call('desktop_claim_review', { type: 'submit_proof_code', receipt: h.receipt, delivery: h.delivery, code });
       if (!reply) return;
       if (!reply.ok) {
         setStep(WRONG_CODE.has(reply.code) ? { kind: 'code', code: '', invalid: true }
-          : reply.code === 'rate_limited' ? { kind: 'code', code: '', limited: true } : problemFor(reply.code));
+          : reply.code === 'rate_limited' ? { kind: 'code', code: '', limited: true, waitUntil: until(reply) } : problemFor(reply.code));
         return;
       }
       const submission = submissionFrom(reply);
@@ -488,7 +497,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       if (!reply) return;
       if (!reply.ok) {
         setStep(WRONG_CODE.has(reply.code) ? { ...step, code: '', error: 'code' }
-          : reply.code === 'rate_limited' ? { ...step, code: '', error: 'rateLimited', retryMinutes: Math.max(1, Math.ceil((reply.retryAfter ?? 60) / 60)) }
+          : reply.code === 'rate_limited' ? { ...step, code: '', error: 'rateLimited', retryMinutes: Math.max(1, Math.ceil((reply.retryAfter ?? 60) / 60)), waitUntil: until(reply) }
             : problemFor(reply.code));
         return;
       }
@@ -512,13 +521,13 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   const passkey = useCallback(() => run(async () => {
     const h = handles.current;
-    if (!h.receipt || !h.submission || step?.kind !== 'factor') return;
+    if (!h.receipt || !h.submission || step?.kind !== 'factor' || step.waitUntil) return;
     setStep({ ...step, error: null });
     const reply = await call('desktop_claim_review', { type: 'submit_factor_passkey', receipt: h.receipt, submission: h.submission });
     if (!reply) return;
     if (!reply.ok) {
       setStep(PASSKEY_FAILED.has(reply.code) ? { ...step, error: 'passkey' }
-        : reply.code === 'rate_limited' ? { ...step, error: 'rateLimited', retryMinutes: Math.max(1, Math.ceil((reply.retryAfter ?? 60) / 60)) }
+        : reply.code === 'rate_limited' ? { ...step, error: 'rateLimited', retryMinutes: Math.max(1, Math.ceil((reply.retryAfter ?? 60) / 60)), waitUntil: until(reply) }
           : problemFor(reply.code));
       return;
     }
@@ -545,6 +554,15 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (submission) afterVerification(submission);
   }), [run, afterVerification]);
 
+  // A step waiting out a 429 unlocks itself when the wait ends, with its message cleared.
+  const waitUntil = step && (step.kind === 'code' || step.kind === 'factor') ? step.waitUntil : undefined;
+  useEffect(() => {
+    if (!waitUntil) return;
+    const unlock = window.setTimeout(() => setStep((current) => current && (current.kind === 'code' || current.kind === 'factor') && current.waitUntil === waitUntil
+      ? (current.kind === 'code' ? { ...current, limited: false, waitUntil: undefined } : { ...current, error: null, waitUntil: undefined })
+      : current), Math.max(0, waitUntil - Date.now()));
+    return () => window.clearTimeout(unlock);
+  }, [waitUntil, setStep]);
   const setCode = useCallback((code: string) => {
     setStep((current) => current && (current.kind === 'code' || current.kind === 'factor' || current.kind === 'factorSetup') ? { ...current, code } : current);
   }, [setStep]);
