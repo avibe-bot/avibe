@@ -843,7 +843,7 @@ async fn a_qualified_proof_refusal_needs_its_original_delivery_and_a_separate_ma
         // exercises its real monotonic deadline, without sleeping or changing the ticket.
         tokio::time::timeout(Duration::from_secs(330), check_cut(cut))
             .await
-            .unwrap();
+            .unwrap_or_else(|_| panic!("timed out at {cut}"));
     }
 }
 
@@ -1557,6 +1557,11 @@ async fn check_cut(cut: &'static str) {
                                     "rate_limited"
                                 );
                                 assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 2);
+                                // The second delivered refusal keeps the original delivery and
+                                // helper live. An empty arm channel is not a closed channel.
+                                peer.assert_unarmed();
+                                assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
+                                c.claims.lock().unwrap().cancel(receipt).unwrap();
                             }
                             "proof_start_limit_replaced" => {
                                 caller.retire();
