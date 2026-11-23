@@ -954,15 +954,17 @@ class AnthropicAdapter(ProviderAdapter):
                     wire = attempt.wire
 
                 def binding(reason: str) -> None:
+                    nonlocal parent_state
                     if attempt is None:
                         return
+                    parent_state = reason
                     attempt.record["binding"] = reason
                     # A reason is not a parent; never evict a reusable node from another overlapping stream.
                     if session and not isinstance(threads.parents.get(session), threads.Parent):
                         threads.remember(threads.parents, session, reason)
 
                 def record_send(size: int) -> None:
-                    attempt.record["parent_state"] = parent_state if not replay else "ordinary_replay"
+                    attempt.record["parent_state"] = parent_state
                     binding("no_terminal" if attempt.mode != "full" else "ordinary_full")
                     attempt.record["body_bytes"] = size
                     attempt.record["ordinary_baseline_bytes"] = (
@@ -1012,6 +1014,7 @@ class AnthropicAdapter(ProviderAdapter):
                             continued = True
                             break
                         if event is REFUSED:
+                            binding("ttl_refused")
                             rejected = True
                             break
                         if isinstance(event, ProviderError):

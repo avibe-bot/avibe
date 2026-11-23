@@ -324,8 +324,19 @@ async def test_a_continuation_whose_route_refuses_the_cache_lifetime_is_sent_aga
 
     import uuid
 
-    request = _request(cache="default", base_url=f"http://{uuid.uuid4().hex}.invalid/vibey/v1")
+    from core.agent_core.ai.provider import ThreadObservation
+
+    observation = ThreadObservation(f"paused-ttl-{uuid.uuid4().hex}")
+    request = replace(
+        _request(cache="default", base_url=f"http://{uuid.uuid4().hex}.invalid/vibey/v1"),
+        thread_observation=observation,
+    )
     sent, events = await _stream(answer, request)
+    assert [(a["parent_state"], a["binding"]) for a in observation.attempts] == [
+        ("no_local_entry", "pause_turn"),
+        ("pause_turn", "ttl_refused"),
+        ("ttl_refused", "ordinary_full"),
+    ]
 
     first, refused, retried = (json.loads(wire.content) for wire in sent)
     assert '"ttl"' in json.dumps(refused) and '"ttl"' not in json.dumps(retried)
