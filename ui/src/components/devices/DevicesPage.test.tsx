@@ -414,6 +414,31 @@ describe('DevicesPage · devices', () => {
     expect(await screen.findByText(said('连接良好'))).toBeTruthy();
   });
 
+  it('stops saying connecting a minute after binding when the metrics still cannot be read, and stops following', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'bound', hostname: host } as never);
+    // Running, and its metrics never read: no reading, and the zero it began with (fresh each time).
+    const status = vi.spyOn(devicesApi, 'status').mockImplementation(async () => ({ ...paired, tunnel_quality: {
+      schema_version: 2, state: 'unknown', grade: 'unknown', sampled_at: new Date().toISOString(), protocol: 'quic',
+      connector_count: 1, ha_connections: 0, rtt_ms: null, recovery: { state: 'idle', last_attempt_at: null, next_attempt_at: null },
+    } }) as never);
+    mount();
+    expect(await screen.findByText('正在连接…')).toBeTruthy();
+    for (let second = 0; second < 80; second += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+    // A minute on, this is no longer the start: said as it is, with nothing promised.
+    expect(await screen.findByText('现在读不到连接的状态')).toBeTruthy();
+    expect(screen.queryByText('正在连接…')).toBeNull();
+    // And the page no longer reads every two seconds: only its ordinary refresh is left.
+    const reads = status.mock.calls.length;
+    for (let second = 0; second < 10; second += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+    expect(status.mock.calls.length - reads).toBeLessThanOrEqual(1);
+  });
+
   it('says turning remote access off from afar as what it is: no answer comes back when it worked', async () => {
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([{ ...macbook, self: undefined }, { ...chrome, self: true }]));
     const status = vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);

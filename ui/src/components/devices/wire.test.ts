@@ -159,8 +159,11 @@ describe('tunnelFromStatus', () => {
   });
 
   it('never says a tunnel that has just started is lost: connecting until something is read from it', () => {
-    // Started, metrics not read yet: the sample carries no reading and the zero it began with.
-    expect(read({ tunnel_quality: sample({ state: 'unknown', grade: 'unknown', ha_connections: 0, rtt_ms: null }) }).state).toBe('connecting');
+    // No reading, and the zero it began with: connecting just after this page started it; at any
+    // other time the metrics cannot be read (they may never be), and that is what is said.
+    const unread = { tunnel_quality: sample({ state: 'unknown', grade: 'unknown', ha_connections: 0, rtt_ms: null }) };
+    expect(read(unread).state).toBe('unknown');
+    expect(tunnelFromStatus({ ok: true, enabled: true, paired: true, running: true, ...unread } as unknown as RemoteAccessStatus, NOW, true).state).toBe('connecting');
     // Metrics read, still registering: lost, unless this page started it a moment ago.
     const registering = { tunnel_quality: sample({ state: 'degraded', grade: 'unknown', ha_connections: 0, rtt_ms: null }) };
     expect(read(registering).state).toBe('down');

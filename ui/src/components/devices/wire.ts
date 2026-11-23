@@ -177,9 +177,9 @@ export function activityFromWire(raw: unknown, nameOf: (deviceId: string | undef
 /**
  * The tunnel, said only as strongly as the status supports. "Not connected" needs evidence that
  * there is no connection: the connector is not running, it registered none while its metrics were
- * read, or requests through it are failing. A connector just started gives no such evidence: its
- * first samples carry no reading (`state: unknown`, no connections yet), and a connector this page
- * itself started a moment ago (`justStarted`) is still registering. Slow, short of its connections
+ * read, or requests through it are failing. A connector this page itself started a moment ago
+ * (`justStarted`) gives no such evidence: its first samples carry no reading, or no connection
+ * yet, and it is connecting. At any other time a sample with no reading is unknown. Slow, short of its connections
  * or still settling is a connected tunnel; connected with no round trip measured yet is connected.
  * A connector whose process or metrics cannot be read, or a sample too old to speak for now, is
  * unknown.
@@ -193,8 +193,9 @@ export function tunnelFromStatus(status: RemoteAccessStatus | null, now: number 
   const effective = quality.transport?.effective || quality.protocol;
   const active = effective === 'quic' || effective === 'http2' ? effective : null;
   const connections = quality.ha_connections ?? 0;
-  // Nothing has been read from this connector since it started: no evidence either way.
-  if (quality.state === 'unknown' && connections === 0) return { state: 'connecting', active };
+  // Nothing read from the connector: just after this page started it, that is the start; at any
+  // other time its metrics cannot be read (they may never be), which is said as it is.
+  if (quality.state === 'unknown' && connections === 0) return { state: justStarted ? 'connecting' : 'unknown', active };
   if (connections === 0) return { state: justStarted ? 'connecting' : 'down', active };
   if (getTunnelRequestPathDisplayState(quality.request_path) === 'unavailable') return { state: 'down', active };
   // Its metrics could not be read for a while: the connections it last had say nothing about now.
