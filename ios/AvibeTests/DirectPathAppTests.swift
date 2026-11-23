@@ -3947,6 +3947,7 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
         app.registerRuntimeController(controller, for: runtime)
 
         enterBackground()
@@ -5263,7 +5264,8 @@ final class DirectPathAppTests: XCTestCase {
                 root = RootViewStandIn(
                     app: app,
                     notifications: notifications,
-                    registration: registration
+                    registration: registration,
+                    didMake: { [weak self] in self?.trackOwner($0) }
                 )
             }
         )
@@ -5295,7 +5297,8 @@ final class DirectPathAppTests: XCTestCase {
         let root = RootViewStandIn(
             app: app,
             notifications: notifications,
-            registration: registration
+            registration: registration,
+            didMake: { [weak self] in self?.trackOwner($0) }
         )
         for index in 0..<10 {
             let instanceID = index.isMultiple(of: 2) ? "instance-1" : "instance-2"
@@ -5478,6 +5481,7 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
         app.registerRuntimeController(controller, for: runtime)
         controller.loadViewIfNeeded()
         return controller
@@ -7852,8 +7856,15 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
-        fixtureOwnerIsAlive.append { [weak controller] in controller != nil }
+        trackOwner(controller)
         return controller
+    }
+
+    /// A runtime controller this test made on a tracked store keeps that
+    /// store until it is released (`removeTrackedStores`).
+    @MainActor
+    private func trackOwner(_ controller: WebViewController) {
+        fixtureOwnerIsAlive.append { [weak controller] in controller != nil }
     }
 
     /// The App made real named stores; remove exactly those.
@@ -9143,11 +9154,16 @@ private final class RootViewStandIn {
     private(set) var registrations: [Made] = []
     private var subscription: AnyCancellable?
 
+    /// Told of each controller made, for the test's store bookkeeping.
+    private let didMake: @MainActor (WebViewController) -> Void
+
     init(
         app: AppModel,
         notifications: NotificationsOn,
-        registration: Registration
+        registration: Registration,
+        didMake: @escaping @MainActor (WebViewController) -> Void
     ) {
+        self.didMake = didMake
         subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
             guard let self, let app, case .browser(let runtime) = route else {
                 return
@@ -9180,6 +9196,7 @@ private final class RootViewStandIn {
         }
     }
 
+    @MainActor
     private func register(_ runtime: MobileRuntimeContext, in app: AppModel) {
         guard let origin = WebOrigin(url: runtime.instance.url) else {
             return
@@ -9192,6 +9209,7 @@ private final class RootViewStandIn {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        didMake(controller)
         let inFlight = !app.mobileSessionCoordinator.isCurrentRuntime(runtime)
             && app.mobileSessionCoordinator.isSelectedRuntime(runtime)
         app.registerRuntimeController(controller, for: runtime)
