@@ -25,6 +25,7 @@ import {
   pickerGroups,
   readBackendCatalogBaseline,
   sameBackendModel,
+  settleBackendCatalogRenames,
 } from './backendCatalog';
 import type {
   AgentSupply,
@@ -562,6 +563,56 @@ describe('applyBackendCatalogIntent', () => {
     const intent = backendCatalogIntent([model('a'), model('b')], [model('b'), model('a')]);
 
     expect(applyBackendCatalogIntent([model('b')], intent).map((entry) => entry.id)).toEqual(['b']);
+  });
+});
+
+describe('settleBackendCatalogRenames', () => {
+  // The draft renamed a to x and widened it; b is untouched.
+  const draft = [model('x', { context_window: 2000 }), model('b')];
+  const renames = new Map([['x', 'a']]);
+  const settle = (current: BackendModel[]) => settleBackendCatalogRenames(current, draft, renames);
+
+  it('keeps a rename the newer list still allows', () => {
+    const settled = settle([model('a'), model('b'), model('c')]);
+
+    expect(settled.draft).toEqual(draft);
+    expect([...settled.renames]).toEqual([['x', 'a']]);
+  });
+
+  it('takes the row back to its saved ID when another editor took the new one', () => {
+    const theirs = model('x', { display_name: 'Theirs' });
+    const current = [model('a'), model('b'), theirs];
+    const settled = settle(current);
+
+    // The row keeps its other edit under the old ID, and is no rename any more.
+    expect(settled.draft).toEqual([model('a', { context_window: 2000 }), model('b')]);
+    expect(settled.renames.size).toBe(0);
+    // Replayed, the other editor's model is neither removed nor written over.
+    const replayed = applyBackendCatalogIntent(current, backendCatalogIntent([model('a'), model('b')], settled.draft));
+    expect(replayed).toEqual([model('a', { context_window: 2000 }), model('b'), theirs]);
+  });
+
+  it('takes the row back when its model was removed elsewhere, so no new model appears under the new ID', () => {
+    const settled = settle([model('b')]);
+
+    expect(settled.draft.map((row) => row.id)).toEqual(['a', 'b']);
+    expect(settled.renames.size).toBe(0);
+  });
+
+  it('adopts the server\'s row when the rename is already there', () => {
+    const landed = model('x', { context_window: 2000 });
+    const current = [landed, model('b')];
+    const settled = settle(current);
+
+    expect(settled.draft).toEqual(current);
+    expect(settled.renames.size).toBe(0);
+    expect(applyBackendCatalogIntent(current, backendCatalogIntent([model('a'), model('b')], settled.draft))).toEqual(current);
+  });
+
+  it('leaves a draft with no rename as it is', () => {
+    const settled = settleBackendCatalogRenames([model('b')], draft, new Map());
+
+    expect(settled.draft).toEqual(draft);
   });
 });
 
