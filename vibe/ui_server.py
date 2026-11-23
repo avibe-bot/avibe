@@ -15081,6 +15081,15 @@ async def sessions_messages_create(session_id: str):
                 },
                 getattr(g, "authorization_context", None),
             )
+            from vibe.input_source import resolve_source
+
+            # Overwrite caller-supplied resolved facts, including retries from old clients.
+            message_metadata["terminal_source"] = resolve_source(
+                conn, identity=getattr(g, "remote_session_identity", None),
+                authorization=getattr(g, "authorization_context", None),
+                client_hint=request.headers.get("X-Avibe-Input-Source"),
+                surface_hint=message_metadata.pop("input_surface", None),
+            )
             message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
             if web_push_authorization_context is not None:
                 message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [

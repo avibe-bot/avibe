@@ -306,7 +306,7 @@ describe('main-only resolution', () => {
     render(<PetPage />);
     await userEvent.type(await screen.findByRole('textbox'), 'main only{Enter}');
     await shellBound('another-session', 10);
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'main only' });
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'main only', metadata: { input_surface: 'mini' } });
     expect(api.getSessionResult).not.toHaveBeenCalledWith('legacy');
     expect(api.getSessionResult).not.toHaveBeenCalledWith('another-session');
     expect(invoke.mock.calls.some(([command]) => command === 'pet_bind' || command === 'pet_unbind')).toBe(false);
@@ -372,7 +372,7 @@ describe('main-only resolution', () => {
     }
     summon('listen');
     await userEvent.type(await screen.findByRole('textbox'), 'recovered{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'recovered' });
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'recovered', metadata: { input_surface: 'mini' } });
     expect(api.getMainSession).toHaveBeenCalledTimes(2);
   });
 
@@ -1280,7 +1280,7 @@ describe('PetPage live convergence', () => {
     await waitFor(() => expect(screen.getByLabelText('pet.keyboard.open').hasAttribute('disabled')).toBe(false));
     summon('listen');
     await userEvent.type(await screen.findByRole('textbox'), 'recovered{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'recovered' });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'recovered', metadata: { input_surface: 'mini' } });
   });
 
   it('reads the tail on a live row when no tail read has landed yet', async () => {
@@ -1883,7 +1883,7 @@ describe('desktop mini v2 interaction contract', () => {
       const input = await screen.findByRole('textbox');
       await finishUp(input);
       await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
-      expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text, ...(metadata ? { metadata } : {}) });
+      expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text, metadata: { ...metadata, input_surface: 'mini' } });
       expect(label).toBeTruthy();
     });
   });
@@ -1988,7 +1988,7 @@ describe('desktop mini v2 interaction contract', () => {
     await userEvent.type(await screen.findByRole('textbox'), 'my draft');
     await emit((h) => h.onAuthorizationChanged?.({}));
     await userEvent.keyboard('{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q' } });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q', input_surface: 'mini' } });
     await act(async () => pending.resolve(message('late-choice', 'S', { author: 'user', type: 'user', text: 'Yes' })));
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('my draft');
     expect(document.querySelector('.pet-mini-title')?.textContent).not.toBe('Yes');
@@ -2026,7 +2026,7 @@ describe('desktop mini v2 interaction contract', () => {
       await acknowledge();
       await update();
     }
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1', input_surface: 'mini' } });
     expect(screen.queryByRole('button', { name: 'Yes', exact: true })).toBeNull();
     expect(screen.queryByRole('button', { name: 'No', exact: true })).toBeNull();
     // The history stayed open above the input; Escape closes it, then the input.
@@ -2056,7 +2056,7 @@ describe('desktop mini v2 interaction contract', () => {
     await emit((h) => h.onMessageNew?.(message('q2', 'S', { content: { quick_replies: ['Continue', 'Wait'] } })));
     expect(screen.queryByRole('button', { name: 'Continue', exact: true })).toBeNull();
     await userEvent.keyboard('duplicate{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1', input_surface: 'mini' } });
   });
 
   it('does not label idle processes as working or completed, and hides unsupported run stops', async () => {
@@ -2352,7 +2352,7 @@ describe('desktop mini v2 interaction contract', () => {
     const input = await screen.findByRole('textbox');
     expect(historyIsOpen()).toBe(true);
     await userEvent.type(input, 'next{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'next' });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'next', metadata: { input_surface: 'mini' } });
   });
 
   it('opens the history above dictation without ending it, and Escape closes the history before cancelling', async () => {
@@ -2564,6 +2564,7 @@ describe('Personal Agent mini', () => {
     expect(api.sendSessionMessage).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      metadata: { input_surface: 'mini' },
       text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
     });
   });
@@ -2591,6 +2592,7 @@ describe('Personal Agent review invariants', () => {
     expect(screen.getByRole('button', { name: 'pet.removeReference' })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      metadata: { input_surface: 'mini' },
       text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
     });
     summon('listen');
@@ -2998,7 +3000,7 @@ describe('PetPage IME composition', () => {
     expect(input.value).toBe('hello');
     fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 });
     await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'hello' });
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'hello', metadata: { input_surface: 'mini' } });
   });
 
   it('leaves the composer and its draft open when Escape dismisses an IME candidate', async () => {
