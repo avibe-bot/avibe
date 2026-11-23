@@ -62,7 +62,7 @@ async def preview_wire_request(
                 request.endpoint,
                 gateway=gateway,
                 session=session_id,
-                parent=threads.parents.get(session_id),
+                parent=threads.parent_entry(session_id, claim=False)[0],
                 repair=bool(prepared.hosted_render_omitted),
                 preview=True,
             )

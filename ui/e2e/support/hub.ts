@@ -333,17 +333,9 @@ export class ModelHubPage {
     return this.pickerDialog.locator('.model-hub-picker-row:not(:disabled)');
   }
 
-  /** The editor's first field, which is also its models.dev search box. */
+  /** The editor's first field: the model's ID, as typed. */
   get modelIdField(): Locator {
     return this.modelEditorDialog.getByLabel(hub('gateway.modelEditor.id.label'), { exact: true });
-  }
-
-  /** The last row of the editor's typeahead: take the query as the id. It is
-   *  present in every open state, including "searching" and "unavailable", and
-   *  it names the id it will actually create, which is the query canonicalized
-   *  rather than the raw characters in the box. */
-  get literalIdOption(): Locator {
-    return this.modelEditorDialog.locator('.model-hub-model-match--literal');
   }
 
   /** The editor's `API` field, present for OpenCode rows only. */

@@ -50,7 +50,7 @@ def _lost_at(route: bytes) -> float:
         return 0
     # Order matters: GC can move active -> retiring, never the reverse. Read both even after restart.
     active = _regular_stamp(marker)
-    retiring = marker.parent / "retiring"
+    retiring = marker.parent.with_suffix(".retiring")
     return max(active, _regular_stamp(retiring / marker.name) if _directory(retiring) else 0)
 
 
@@ -60,18 +60,23 @@ def _write_loss(route: bytes) -> str:
     marker.parent.mkdir(parents=True, exist_ok=True)
     if not _directory(marker.parent):
         raise OSError("Invalid receipt directory")
-    try:
-        marker.touch(exist_ok=False)
-    except FileExistsError:
-        if not _regular_stamp(marker):
-            # A concurrent sweep may just have renamed it, leaving the renewal its own fresh name.
-            marker.touch(exist_ok=False)
-        else:
+    for _ in range(3):
+        try:
+            mode = marker.lstat().st_mode
+        except FileNotFoundError:
             try:
-                os.utime(marker, follow_symlinks=False)
-            except FileNotFoundError:
-                marker.touch(exist_ok=True)
-    return "bootstrap_read_loss"
+                marker.touch(exist_ok=False)
+                return "bootstrap_read_loss"
+            except FileExistsError:
+                continue  # Another renewal created it first.
+        if not stat.S_ISREG(mode):
+            raise OSError("Invalid loss receipt")
+        try:
+            os.utime(marker, follow_symlinks=False)
+            return "bootstrap_read_loss"
+        except FileNotFoundError:
+            continue  # GC just retired that generation; create the fresh active one.
+    raise OSError("Could not persist loss receipt")
 
 
 def _expired(directory, cutoff):
@@ -88,11 +93,11 @@ def _prune_losses(db, directory) -> None:
     # Busy => fail closed for admission/proof; the loss path can still write its active receipt.
     with MigrationFileLock(directory.with_suffix(".lock"), timeout_seconds=0):
         cutoff = time.time() - DAY
-        retiring = directory / "retiring"
+        retiring = directory.with_suffix(".retiring")
+        if os.path.lexists(retiring) and not _directory(retiring):
+            return  # Never claim a foreign path for housekeeping.
         for marker, _ in _expired(directory, cutoff):
             retiring.mkdir(exist_ok=True)
-            if not _directory(retiring):
-                raise OSError("Invalid receipt retirement directory")
             target = retiring / marker.name
             if not os.path.lexists(target):
                 marker.rename(target)

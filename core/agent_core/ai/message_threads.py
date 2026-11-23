@@ -67,8 +67,19 @@ class Parent:
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
-parents: OrderedDict[str, Parent] = OrderedDict()
+parents: OrderedDict[str, Parent | str] = OrderedDict()
 claims: OrderedDict[str, object] = OrderedDict()
+
+
+def parent_entry(session: str | None, *, claim: bool) -> tuple[Parent | None, str]:
+    if not session:
+        return None, "no_session"
+    entry = parents.pop(session, None) if claim else parents.get(session)
+    if isinstance(entry, Parent):
+        return entry, "bound" if entry.message_id else "warm_full"
+    return None, entry or "no_local_entry"
+
+
 failed_routes: OrderedDict[bytes, float] = OrderedDict()
 
 
@@ -106,6 +117,7 @@ class ReplayShape:
     index: int = -1
     block: str | None = None
     has_delta: bool = False
+    veto: str = "stream_lifecycle"
 
     def accepts(self, kind, chunk):
         if kind == "ping":
@@ -125,13 +137,17 @@ class ReplayShape:
                 "tool_use": {"type", "name", "id", "input"},
             }
             tag = block["type"]
-            if (
-                self.has_delta
-                or self.block is not None
-                or chunk["index"] != self.index + 1
-                or tag not in allowed
-                or set(block) - allowed[tag]
-            ):
+            if tag == "tool_use" and "caller" in block:
+                # An explicit direct invocation is the ordinary client tool call; it has no server-side
+                # execution context. Never erase an executor identity or an unknown caller extension.
+                if block["caller"] != {"type": "direct"}:
+                    self.veto = "unsupported_tool_caller"
+                    return False
+                allowed[tag].add("caller")
+            if tag not in allowed or set(block) - allowed[tag]:
+                self.veto = "unsupported_block_shape"
+                return False
+            if self.has_delta or self.block is not None or chunk["index"] != self.index + 1:
                 return False
             self.index += 1
             self.block = tag
@@ -161,11 +177,12 @@ class ReplayShape:
             self.has_delta = True
             usage = chunk.get("usage") or {}
             iterations = usage.get("iterations") or []
-            return (
-                self.block is None
-                and isinstance(iterations, list)
-                and all(isinstance(i, dict) and i.get("type") != "fallback_message" for i in iterations)
-            )
+            if isinstance(iterations, list) and any(
+                isinstance(i, dict) and i.get("type") == "fallback_message" for i in iterations
+            ):
+                self.veto = "provider_fallback"
+                return False
+            return self.block is None and isinstance(iterations, list) and all(isinstance(i, dict) for i in iterations)
         return kind == "message_stop" and self.has_delta and self.block is None
 
 

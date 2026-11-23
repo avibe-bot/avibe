@@ -117,6 +117,10 @@ async def test_bootstrap_measures_create_and_next_accepted_delta(loss, monkeypat
             preview = await preview_wire_request(warm, session_id="probe")
             assert preview.wire.body.get("thread") == {"type": "create"}
         follow = await send(adapter, warm)
+        assert warm.thread_observation.attempts[0]["parent_state"] == "warm_full"
+        assert warm.thread_observation.attempts[0]["binding"] == (
+            "bootstrap_read_loss" if loss == "create" else "bound"
+        )
         assert bodies[-1] == preview.wire.body and len(_breakpoints(bodies[-1])) == 3
         assert len(_breakpoints(bodies[0])) == 4
         assert warm.thread_observation.attempts[0]["bootstrap_outcome"] == (
@@ -315,6 +319,30 @@ assert b.reserve(b'A' * 32, 10, True)[1] == 'bootstrap_read_loss'
         )
     assert ledger.reserve(b"B" * 32, 10, False)[0] is not None
     assert not marker.exists() and junk.read_text() == "foreign" and link.is_symlink() and sub.is_dir()
+
+
+def test_renewal_between_expiry_scan_and_retirement_survives(monkeypatch, tmp_path):
+    import os
+    import time
+    from pathlib import Path
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    route = bytes(range(32))
+    marker = ledger._loss_marker(route)
+    ledger._write_loss(route)
+    old = time.time() - 2 * ledger.DAY
+    os.utime(marker, (old, old))
+    rename = Path.rename
+
+    def renew_before_rename(self, target):
+        if self == marker:
+            ledger._write_loss(route)
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", renew_before_rename)
+    assert ledger.reserve(route, 10, False)[1] == "bootstrap_read_loss"
+    assert not marker.exists() and ledger.reserve(route, 10, True)[1] == "bootstrap_read_loss"
 
 
 @pytest.mark.parametrize("change", ["session", "model", "edit", "disabled", "cold"])

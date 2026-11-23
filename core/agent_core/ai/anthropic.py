@@ -236,7 +236,7 @@ class AnthropicAdapter(ProviderAdapter):
         observation = request.thread_observation
         session = observation.session_id if observation else None
         # Claim before the first await: two requests can never continue the same response.
-        parent = threads.parents.pop(session, None) if session else None
+        parent, parent_state = threads.parent_entry(session, claim=True)
         claim = object()
         if session:
             threads.remember(threads.claims, session, claim)
@@ -958,7 +958,19 @@ class AnthropicAdapter(ProviderAdapter):
                     )
                     wire = attempt.wire
 
+                def binding(reason: str) -> None:
+                    nonlocal parent_state
+                    if attempt is None:
+                        return
+                    parent_state = reason
+                    attempt.record["binding"] = reason
+                    # A reason is not a parent; never evict a reusable node from another overlapping stream.
+                    if session and threads.claims.get(session) is claim and not isinstance(threads.parents.get(session), threads.Parent):
+                        threads.remember(threads.parents, session, reason)
+
                 def record_send(size: int) -> None:
+                    attempt.record["parent_state"] = parent_state
+                    binding("no_terminal" if attempt.mode != "full" else "ordinary_full")
                     attempt.record["body_bytes"] = size
                     attempt.record["ordinary_baseline_bytes"] = (
                         0 if replacement else (attempt.record["full_bytes"] or size)
@@ -996,18 +1008,22 @@ class AnthropicAdapter(ProviderAdapter):
                 try:
                     async for event in driver:
                         if isinstance(event, PinUnavailable):
+                            binding("pin_unavailable")
                             if speculative:
                                 failed = "pin_unavailable"
                                 break
                             unavailable = event
                             break
                         if event is PAUSE_TURN:
+                            binding("pause_turn")
                             continued = True
                             break
                         if event is REFUSED:
+                            binding("ttl_refused")
                             rejected = True
                             break
                         if isinstance(event, ProviderError):
+                            binding("provider_error")
                             if (
                                 speculative
                                 and not event.silence_exhausted
@@ -1044,21 +1060,28 @@ class AnthropicAdapter(ProviderAdapter):
                             message = event.message
                             if attempt and attempt.trial:
                                 await attempt.check_reads(route, message.usage.cache_read_tokens if message.usage else 0)
-                            if (
-                                attempt
-                                and (speculative or attempt.capture_warm)
-                                and session
-                                and (response_id or attempt.capture_warm)
-                                and message.usage
-                                and (not attempt.capture_warm or message.usage.cache_read_tokens > 0)
-                                and "bootstrap_outcome" not in attempt.record
-                                and message_stopped
-                                and lossless
-                                and message.stop_reason in ("stop", "tool_use")
-                                and (not self._gateway or served_as_pinned())
-                            ):
-                                assistant_hash = await asyncio.to_thread(_replayable_digest, message)
+                            if attempt and (speculative or attempt.capture_warm) and session:
+                                if speculative and not response_id:
+                                    veto = "missing_or_invalid_message_id"
+                                elif not message_stopped:
+                                    veto = "missing_message_stop"
+                                elif not lossless:
+                                    veto = shape.veto
+                                elif message.stop_reason not in ("stop", "tool_use"):
+                                    veto = "ineligible_stop"
+                                elif not message.usage:
+                                    veto = "missing_usage"
+                                elif self._gateway and not served_as_pinned():
+                                    veto = "unverified_origin"
+                                elif attempt.record.get("bootstrap_outcome") == "bootstrap_read_loss":
+                                    veto = "bootstrap_read_loss"
+                                elif attempt.capture_warm and not message.usage.cache_read_tokens:
+                                    veto = "cold_full"
+                                else:
+                                    veto = None
+                                assistant_hash = None if veto else await asyncio.to_thread(_replayable_digest, message)
                                 if assistant_hash is None:
+                                    binding(veto or "unreplayable_reply")
                                     yield event
                                     continue
                                 u = message.usage
@@ -1076,8 +1099,10 @@ class AnthropicAdapter(ProviderAdapter):
                                             threads.bootstrap.settle, route, attempt.trial, "bootstrap_no_byte_saving"
                                         )
                                 if threads.claims.get(session) is not claim:
+                                    binding("superseded")
                                     yield event
                                     continue
+                                attempt.record["binding"] = "warm_full" if attempt.capture_warm else "bound"
                                 next_trial = None
                                 if attempt.mode == "create" and attempt.trial:
                                     next_trial = replace(attempt.trial, reads=max(attempt.trial.reads, u.cache_read_tokens))
