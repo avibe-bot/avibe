@@ -152,6 +152,66 @@ def remote_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     remote_access.stop()
 
 
+@pytest.mark.parametrize("entry", ["page", "cli"])
+def test_restart_restores_legacy_intent_once_then_respects_explicit_stop(remote_home, tmp_path, monkeypatch, entry):
+    from types import SimpleNamespace
+
+    from vibe import cli, ui_server
+
+    _pin_test_cloudflared(tmp_path, monkeypatch)
+    request = remote_access._connector_requested_path()
+    events = []
+    monkeypatch.setattr(remote_access, "_record_device_access_switch", lambda config, enabled: events.append(enabled))
+    assert not request.exists()  # Old shutdown, with enabled still true on disk.
+    ui_server._reconcile_remote_access_for_ui_start(remote_home)
+    first = remote_access._read_pid()
+    assert first and remote_access._is_cloudflared_pid(first)
+    stamp = request.stat()
+    assert runtime.stop_remote_access_connector()
+    assert not remote_access._is_cloudflared_pid(first)
+    assert (request.stat().st_ino, request.stat().st_mtime_ns) == (stamp.st_ino, stamp.st_mtime_ns)
+    ui_server._reconcile_remote_access_for_ui_start(remote_home)
+    second = remote_access._read_pid()
+    assert second and remote_access._is_cloudflared_pid(second)
+    assert events == []
+
+    if entry == "cli":
+        assert cli.cmd_remote_stop(SimpleNamespace(json=False)) == 0
+    else:
+        monkeypatch.setattr(ui_server, "_remote_status_for_viewer", lambda result: result)
+        with ui_server.app.test_request_context("/api/remote-access/stop", method="POST"):
+            assert ui_server.remote_access_stop()[1] == 200
+    assert events == [False]
+    assert not request.exists() and not remote_access._is_cloudflared_pid(second)
+    for _ in range(2):
+        ui_server._reconcile_remote_access_for_ui_start(remote_home)
+        assert not request.exists() and remote_access._read_pid() is None
+    assert events == [False]
+    assert remote_access.start()["ok"] and events == [False, True]
+
+
+def test_first_disabled_start_consumes_upgrade_default(remote_home, monkeypatch):
+    cloud = remote_home.remote_access.vibe_cloud
+    cloud.enabled = False
+    remote_home.save()
+    def unexpected(*args, **kwargs):
+        pytest.fail("restore attempted a download or recorded a switch without a request")
+    monkeypatch.setattr(remote_access, "_ensure_cloudflared_pin", unexpected)
+    monkeypatch.setattr(remote_access, "_record_device_access_switch", unexpected)
+    assert remote_access.restore_connector()["ok"]
+    cloud.enabled = True
+    remote_home.save()
+    assert remote_access.restore_connector()["ok"]
+    assert not remote_access._connector_requested_path().exists()
+
+
+def test_explicit_stop_before_first_ui_start_overrides_upgrade_default(remote_home):
+    assert remote_access.stop()["ok"]
+    assert remote_access.restore_connector()["ok"]
+    assert not remote_access._connector_requested_path().exists()
+    assert remote_access._read_pid() is None
+
+
 def _start_released_connector(monkeypatch: pytest.MonkeyPatch, binary: Path) -> int:
     """Run a connector from ``binary`` the way a released version resolved it."""
 
@@ -179,7 +239,7 @@ def test_existing_connector_moves_to_the_pinned_copy(
     _pin_test_cloudflared(tmp_path, monkeypatch)
 
     # UI-start reconcile after the upgrade.
-    result = remote_access.start()
+    result = remote_access.restore_connector()
 
     pinned = CloudflaredRuntimeManager().resolve_binary()
     assert result["ok"] is True and result["started"] is True

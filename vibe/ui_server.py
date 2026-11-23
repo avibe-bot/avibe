@@ -20576,7 +20576,7 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
     try:
         from vibe import remote_access
 
-        result = remote_access.reconcile(config)
+        result = remote_access.restore_connector()
         if isinstance(result, dict) and result.get("ok") is False:
             logger.warning("Remote access reconcile after UI start failed: %s", result.get("error"))
     except Exception:
