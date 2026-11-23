@@ -593,7 +593,15 @@
 .model-hub-model-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .model-hub-origin-help { width: 340px; max-width: calc(100vw - 32px); white-space: pre-line; font-size: 12px; line-height: 1.6; }
 .model-hub-route-mode { gap: 6px; }
-.model-hub-route-mode-copy { font-size: 11.5px; line-height: 17px; }
+/* What the two modes mean sits behind the info control beside the switch. */
+.model-hub-route-mode-row { gap: 10px; }
+/* Settings a route rarely needs, folded under the hops. */
+.model-hub-route-advanced { gap: 10px; }
+.model-hub-route-advanced-toggle { gap: 4px; font-size: 12px; font-weight: 600; }
+.model-hub-route-advanced-toggle:hover { color: var(--foreground); }
+.model-hub-route-advanced-toggle > svg { width: 14px; height: 14px; transition: transform var(--motion-duration-fast) var(--motion-ease-move); }
+.model-hub-route-advanced-row { gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.model-hub-route-advanced-label { font-size: 12.5px; font-weight: 600; color: var(--foreground); }
 /* A switch that saving would apply, and the one way back from it. */
 .model-hub-route-pending { gap: 12px; padding: 8px 12px; border: 1px solid var(--model-hub-gold-4d); border-radius: 8px; background: var(--model-hub-gold-1a); color: var(--gold-ink); font-size: 11.5px; line-height: 17px; overflow-wrap: anywhere; }
 .model-hub-route-pending-undo { gap: 4px; color: inherit; }
@@ -1096,6 +1104,10 @@
 .model-hub-route-head { min-height: var(--model-hub-route-head-height); flex-shrink: 0; padding: 16px 20px; gap: 4px; border-color: var(--model-hub-wash-14); }
 .model-hub-route-close { width: 26px; height: 26px; margin: -5px -5px -5px 0; color: var(--model-hub-ink-59); }
 .model-hub-route-close > svg { width: 15px; height: 15px; }
+/* Edit and delete are the model list's own row actions, a size down; a rule
+ * keeps the destructive one away from close. */
+.model-hub-route-head-action { --model-hub-catalog-action-size: 28px; --model-hub-catalog-action-radius: 7px; }
+.model-hub-route-head-rule { width: 1px; height: 16px; margin: 0 4px 0 6px; background: var(--border); }
 .model-hub-route-title {
   --model-hub-route-title-size: 15px;
   min-width: 0;

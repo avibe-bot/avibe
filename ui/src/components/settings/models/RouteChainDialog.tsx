@@ -23,8 +23,9 @@ import { SegmentedRadio } from "@/components/ui/segmented";
 import { cn } from "@/lib/utils";
 import { getBackendUiMeta } from "@/lib/agentBackends";
 import { useIsMobile } from "@/lib/useIsMobile";
-import { GuardDialog } from "./GuardDialog";
 import { Field } from "./dialogFields";
+import { GuardDialog } from "./GuardDialog";
+import { ModelHubInfoHint } from "./ModelHubInfoHint";
 import { GuardImpact, type GuardPlan } from "./GuardImpact";
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from "./guardedWrite";
 import { RouteCandidatePopover } from "./RouteCandidatePopover";
@@ -178,7 +179,11 @@ export const RouteChainDialog: React.FC<{
   const cancelButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const isMobile = useIsMobile();
-  const [headMenu, setHeadMenu] = React.useState(false);
+  // Folded unless the route read carries one of its settings. It is decided when
+  // a route is read, not derived from the draft: choosing 「automatic」 must not
+  // fold the row away under the hand that chose it.
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const cacheTtlRef = React.useRef<HTMLSelectElement>(null);
   const [hopMenu, setHopMenu] = React.useState<number | null>(null);
   const [replacing, setReplacing] = React.useState<number | null>(null);
   const [recordDetails, setRecordDetails] = React.useState(false);
@@ -300,6 +305,7 @@ export const RouteChainDialog: React.FC<{
       setChain(next);
       setSavedOverride(next.manual_override);
       setCacheTtlDraft(next.manual_override?.cache_ttl ?? null);
+      setAdvancedOpen((next.manual_override?.cache_ttl ?? null) !== null);
       setManualDraft(next.manual_override !== null);
       setPreview(null);
       setPreviewFailed(false);
@@ -339,7 +345,6 @@ export const RouteChainDialog: React.FC<{
     setFailedMembers(new Set());
     setUnknownObservation("none");
     setUnknownSourceCurrent(false);
-    setHeadMenu(false);
     setHopMenu(null);
     setReplacing(null);
     setRecordDetails(false);
@@ -581,8 +586,11 @@ export const RouteChainDialog: React.FC<{
       setGuard(null);
       setSaveErrorCode(failure?.code ?? null);
       if (failure?.code === "cache_ttl_unsupported") {
+        // The refusal is about one field: open its fold and go to it, where the
+        // reason is written, rather than leave it folded or scrolled out of view.
         setPhase("ready");
-        focusAfterRender(retryButtonRef);
+        setAdvancedOpen(true);
+        focusAfterRender(cacheTtlRef);
         return;
       }
       const nextPhase = failure?.serverNamed ? "rejected" : "unknown";
@@ -791,7 +799,9 @@ export const RouteChainDialog: React.FC<{
     setPreviewFailed(false);
     const restored = restoreUndo.current;
     setManualDraft(restored?.manual ?? savedOverride !== null);
-    setCacheTtlDraft(restored ? restored.cacheTtl : savedOverride?.cache_ttl ?? null);
+    const restoredTtl = restored ? restored.cacheTtl : savedOverride?.cache_ttl ?? null;
+    setCacheTtlDraft(restoredTtl);
+    if (restoredTtl !== null) setAdvancedOpen(true);
     advanceInteraction({ type: 'reset', draft: restoreUndo.current?.hops ?? origin });
     restoreUndo.current = null;
     announce('settings.models.routing.undoDone');
@@ -1140,52 +1150,31 @@ export const RouteChainDialog: React.FC<{
     ) : (
       <div className="model-hub-route-body flex flex-col">
         <div className="model-hub-route-mode flex flex-col">
-          <div ref={modeRef}>
-            <SegmentedRadio<RouteMode>
-              ariaLabel={t("settings.models.routeDialog.mode.label") as string}
-              value={manualDraft ? "custom" : "follow"}
-              onChange={switchMode}
-              disabled={phase !== "ready" || previewPending}
-              className="model-hub-route-mode-switch"
-              options={[
-                { id: "follow", label: t("settings.models.routeDialog.mode.follow") as string },
-                { id: "custom", label: t("settings.models.routeDialog.mode.custom") as string },
-              ]}
+          <div ref={modeRef} className="model-hub-route-mode-row flex items-center">
+            <span className="min-w-0 flex-1">
+              <SegmentedRadio<RouteMode>
+                ariaLabel={t("settings.models.routeDialog.mode.label") as string}
+                value={manualDraft ? "custom" : "follow"}
+                onChange={switchMode}
+                disabled={phase !== "ready" || previewPending}
+                className="model-hub-route-mode-switch"
+                options={[
+                  { id: "follow", label: t("settings.models.routeDialog.mode.follow") as string },
+                  { id: "custom", label: t("settings.models.routeDialog.mode.custom") as string },
+                ]}
+              />
+            </span>
+            <ModelHubInfoHint
+              align="end"
+              label={t("settings.models.routeDialog.mode.infoLabel") as string}
+              content={
+                <span className="flex flex-col gap-2">
+                  <span><strong>{t("settings.models.routeDialog.mode.follow")}</strong>{t("settings.models.routeDialog.mode.followInfo", { backend })}</span>
+                  <span><strong>{t("settings.models.routeDialog.mode.custom")}</strong>{t("settings.models.routeDialog.mode.customInfo")}</span>
+                </span>
+              }
             />
           </div>
-          <p className="model-hub-route-mode-copy text-muted">
-            {t(manualDraft ? "settings.models.routing.manualHint" : "settings.models.routing.follows", { backend })}
-          </p>
-          {agent?.backend === "vibey" && manualDraft && (
-            <Field
-              className="mt-3 text-sm"
-              label={t("settings.models.routing.cacheTtl.label")}
-              hint={t("settings.models.routing.cacheTtl.help")}
-            >
-              {(id) => (
-                <>
-                  <Select
-                    id={id}
-                    wrapperClassName="w-fit"
-                    value={cacheTtlDraft ?? ""}
-                    onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
-                    disabled={phase !== "ready" || previewPending}
-                  >
-                    <option value="">{t("settings.models.routing.cacheTtl.default")}</option>
-                    <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
-                    <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
-                    <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
-                    <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
-                  </Select>
-                  {saveErrorCode === "cache_ttl_unsupported" && (
-                    <span role="alert" className="text-xs text-danger">
-                      {t("errors.cache_ttl_unsupported")}
-                    </span>
-                  )}
-                </>
-              )}
-            </Field>
-          )}
         </div>
         {!unresolvedPreview && <div inert={previewPending} className="model-hub-route-list flex flex-col">
           {draft.length ? (
@@ -1232,6 +1221,56 @@ export const RouteChainDialog: React.FC<{
             <ChevronRight aria-hidden="true" />
           </button>}
         </div>
+        {agent?.backend === "vibey" && manualDraft && (
+          <div className="model-hub-route-advanced flex flex-col">
+            <button
+              type="button"
+              aria-expanded={advancedOpen}
+              onClick={() => setAdvancedOpen((open) => !open)}
+              className="model-hub-route-advanced-toggle flex w-fit items-center text-muted"
+            >
+              <ChevronRight aria-hidden="true" className={cn(advancedOpen && "rotate-90")} />
+              {t("settings.models.routeDialog.advanced")}
+            </button>
+            {advancedOpen && (
+              <Field
+                className="model-hub-route-advanced-row flex-row flex-wrap items-center"
+                labelClassName="model-hub-route-advanced-label"
+                label={t("settings.models.routing.cacheTtl.label")}
+                aside={
+                  <ModelHubInfoHint
+                    label={t("settings.models.routing.cacheTtl.infoLabel") as string}
+                    content={t("settings.models.routing.cacheTtl.help")}
+                  />
+                }
+              >
+                {(id) => (
+                  <>
+                    <Select
+                      ref={cacheTtlRef}
+                      id={id}
+                      wrapperClassName="ml-auto w-fit"
+                      value={cacheTtlDraft ?? ""}
+                      onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
+                      disabled={phase !== "ready" || previewPending}
+                    >
+                      <option value="">{t("settings.models.routing.cacheTtl.default")}</option>
+                      <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
+                      <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
+                      <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
+                      <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
+                    </Select>
+                    {saveErrorCode === "cache_ttl_unsupported" && (
+                      <span role="alert" className="w-full text-xs text-danger">
+                        {t("errors.cache_ttl_unsupported")}
+                      </span>
+                    )}
+                  </>
+                )}
+              </Field>
+            )}
+          </div>
+        )}
         {addCandidates.length === 0 && (
           <span className="sr-only" id="model-hub-route-add-none">
             {t("settings.models.routeDialog.add.none")}
@@ -1291,46 +1330,27 @@ export const RouteChainDialog: React.FC<{
               </DialogPrimitive.Title>
               <span className="model-hub-route-head-actions flex shrink-0 items-center gap-1.5">
                 {manageableModel && (
-                  <ResponsiveMenu
-                    open={headMenu}
-                    onOpenChange={setHeadMenu}
-                    sheetTitle={modelId}
-                    trigger={
-                      <button
-                        type="button"
-                        aria-label={t("settings.models.routeDialog.modelActions") as string}
-                        title={t("settings.models.routeDialog.modelActions") as string}
-                        className="model-hub-route-close grid shrink-0 place-items-center"
-                      >
-                        <MoreHorizontal aria-hidden="true" />
-                      </button>
-                    }
-                  >
+                  <>
                     <button
                       type="button"
-                      role="menuitem"
-                      className={MENU_ITEM}
-                      onClick={() => {
-                        setHeadMenu(false);
-                        onManageModel?.("edit");
-                      }}
+                      aria-label={t("settings.models.routeDialog.editModel") as string}
+                      title={t("settings.models.routeDialog.editModel") as string}
+                      className="model-hub-catalog-action model-hub-route-head-action"
+                      onClick={() => onManageModel?.("edit")}
                     >
-                      <Pencil aria-hidden="true" />
-                      {t("settings.models.routeDialog.editModel")}
+                      <Pencil className="size-[15px]" aria-hidden="true" />
                     </button>
                     <button
                       type="button"
-                      role="menuitem"
-                      className={cn(MENU_ITEM, "text-destructive-ink hover:bg-destructive/[0.08]")}
-                      onClick={() => {
-                        setHeadMenu(false);
-                        onManageModel?.("remove");
-                      }}
+                      aria-label={t("settings.models.routeDialog.removeModel") as string}
+                      title={t("settings.models.routeDialog.removeModel") as string}
+                      className="model-hub-catalog-action model-hub-catalog-action--danger model-hub-route-head-action"
+                      onClick={() => onManageModel?.("remove")}
                     >
-                      <Trash2 aria-hidden="true" />
-                      {t("settings.models.routeDialog.removeModel")}
+                      <Trash2 className="size-[15px]" aria-hidden="true" />
                     </button>
-                  </ResponsiveMenu>
+                    <span aria-hidden="true" className="model-hub-route-head-rule" />
+                  </>
                 )}
                 <DialogPrimitive.Close
                   ref={closeButtonRef}

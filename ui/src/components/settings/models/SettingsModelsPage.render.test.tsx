@@ -1405,7 +1405,8 @@ describe('SettingsModelsPage surface branches', () => {
     }));
     await waitFor(() => expect(exactRead).toHaveBeenCalledOnce());
     expect(exactRead).toHaveBeenCalledWith('codex', 'gpt-5.6-sol');
-    expect(screen.getByText(/Changes to default routing do not overwrite|默认路由的调整不会覆盖/i)).toBeTruthy();
+    // The exact read is what the dialog draws: this model's own route, not the overview's row.
+    expect((await screen.findByRole('radio', { name: /^Set separately$|^单独设置$/ })).getAttribute('aria-checked')).toBe('true');
   });
 
   it('keeps a failed event read distinct from an empty history and retries it', async () => {
@@ -2211,8 +2212,7 @@ describe('SettingsModelsPage surface branches', () => {
     ], [agent]);
     const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i });
     await userEvent.click(opener);
-    await userEvent.click(await screen.findByRole('button', { name: /^Model actions$|^模型操作$/i }));
-    await userEvent.click(await screen.findByRole('menuitem', { name: /^Edit model$|^编辑模型$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Edit model$|^编辑模型$/i }));
     await waitFor(() => expect(document.querySelector('.model-hub-route-head')).toBeNull());
     // Edit opens the model editor over the catalog; leave both by keyboard.
     for (let open = 0; open < 3 && screen.queryAllByRole('dialog').length; open += 1) {
