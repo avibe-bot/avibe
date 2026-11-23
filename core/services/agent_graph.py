@@ -34,12 +34,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from functools import cached_property
 from itertools import islice
 from time import perf_counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import and_, func, literal_column, or_, select, text
+from sqlalchemy import and_, bindparam, func, literal_column, or_, select, text
 from sqlalchemy.engine import Engine
 
 from storage.agent_session_rows import session_openable_in_chat
@@ -210,6 +211,19 @@ class _GraphReader:
         self.timings = timings
         raw = conn.connection.driver_connection
         self.bind_limit = raw.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(raw, "getlimit") else 999
+
+    @cached_property
+    def timeline_query(self):
+        # A reader can overlap an upgrade. Detect the optional performance
+        # index once in the graph's pinned snapshot; never create or repair it
+        # on a GET. An older snapshot falls back to the same exact projection.
+        exists = next(iter(self.rows(text(
+            "SELECT 1 FROM sqlite_schema WHERE type='index' AND tbl_name='agent_runs' AND name='ix_agent_runs_timeline_times'"
+        ))), None)
+        index = "INDEXED BY ix_agent_runs_timeline_times" if exists else ""
+        return text(f"SELECT id, started_at, completed_at FROM agent_runs {index} WHERE id IN :ids").bindparams(
+            bindparam("ids", expanding=True)
+        )
 
     def batches(self, ids, *, reserved=0, copies=1):
         # The node cap does not bound lineage, candidate count, trigger IDs,
@@ -611,9 +625,12 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
     timeline = {}
     for runs in grouped.values():
         runs.sort(key=lambda r: (r["instant"], r["id"]), reverse=True)
-        timeline.update((r["rid"], r) for r in runs[:RUNS_PER_NODE])
+        timeline.update((r["id"], r) for r in runs[:RUNS_PER_NODE])
+    # The unique PK index also matches id, but would walk payload overflow
+    # pages for the two timestamps. Seek their exact (including NULL) values
+    # in the index built by revision 0099 instead.
     for batch in conn.batches(timeline):
-        for k, started, completed in conn.rows(select(rowid, r.started_at, r.completed_at).where(rowid.in_(batch))):
+        for k, started, completed in conn.rows(conn.timeline_query.params(ids=batch)):
             timeline[k].update(started_at=started, completed_at=completed)
 
     # A sent callback always draws an edge, even in failure-only mode. For
