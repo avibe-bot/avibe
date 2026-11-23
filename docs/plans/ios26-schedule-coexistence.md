@@ -37,6 +37,10 @@ permission category, entitlement or signing setting is required by this change.
 - Extend the existing coordinator idempotency test across both kinds.
   The same operation must replay its original identity and cancellation must
   remove it once, with authorization read for the requested kind.
+- Exercise each kind through the existing WK bridge and real AppModel:
+  no platform create before confirmation, the selected kind in confirmation
+  and receipts, and one exact cancellation despite a retry. Only OS effects
+  use the existing platform stand-in; this does not certify real OS effects.
 
 Run the changed owner-boundary tests against the baseline adapter before
 running the fixed adapter. Keep their failures and exits as red evidence.
@@ -60,13 +64,14 @@ coverage of the App, NotificationService, LiveActivity and Max's test device
 therefore cannot be established. Neither route is authorized for execution
 by this lane.
 
-Before a user-visible Native delivery, the lead coordinates one simulator
-window and agrees the physical acceptance route with main. If existing
-development provisioning covers the intended device and targets, Max must
-authorize the signing/install acceptance step. If the available route is
-master-only TestFlight, Max must explicitly approve the pre-acceptance PR
-exception before a PR is opened. Do not change Portal state, profiles, bundle
-identifiers or entitlements to manufacture a route.
+On 2026-11-23 at 16:02 +08, Max approved the exception allowing a PR before
+physical acceptance, followed by TestFlight after a separately authorized merge
+and dispatch. The lead relayed that approval in run `2c1c4e71a2a6`. After the
+coordinated simulator consumer checks, this lane may open an English PR and
+follow review and CI to Merge-ready. Merge, signing, installation and
+TestFlight dispatch remain separately authorized actions. Do not change
+Portal state, profiles, bundle identifiers or entitlements to manufacture
+another route.
 
 Physical acceptance uses a dedicated test context and unique titles: confirm,
 create, observe the matching receipt and exact cancellation for each kind;
@@ -74,7 +79,7 @@ check independent permission denial, replay without duplication, and logout
 retention. It must not inspect or delete unrelated personal items. Test results
 must name the actual binary, Runtime revision and evidence layer.
 
-No push, PR, signature, installation or TestFlight dispatch is authorized here.
+Push and PR creation wait for the coordinated simulator consumer checks.
 Do not start a simulator until the lead allocates it; stop heavy builds below
 20 GiB free space and retain existing devices and other owners' data.
 
@@ -84,5 +89,6 @@ The two production edits and their tests are prepared. Swift syntax parsing
 passes for both changed Swift files; the test-only EventKit overrides type
 check against the installed Simulator SDK. These are lightweight compiler
 checks, not an App build or XCTest execution. Baseline red, fixed green,
-confirmation/bridge consumers, unsigned builds and physical acceptance remain
-pending the coordinated simulator window and delivery-route decision.
+confirmation/bridge consumers and unsigned builds remain pending the
+coordinated simulator window. Physical acceptance remains pending the
+separately authorized merge and TestFlight route.
