@@ -224,6 +224,53 @@ def test_shared_reservation_survives_restart_and_clock_boundaries(monkeypatch, t
     assert ledger.reserve(route, 10, preview=False)[0] is not None
 
 
+def test_late_loss_at_capacity_preserves_both_routes_and_reclaims_expired_receipts(monkeypatch, tmp_path):
+    import os
+    import sqlite3
+    import time
+    from types import SimpleNamespace
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(ledger, "MAX_ROUTES", 1)
+    now = [time.time() - ledger.DAY - 10]
+    monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
+    a, b, c = b"A", b"B", b"C"
+    owner, _ = ledger.reserve(a, 100, False)
+    now[0] += ledger.DAY + 1
+    second, _ = ledger.reserve(b, 100, False)
+    assert ledger.settle(b, second, "bootstrap_read_loss") == "bootstrap_read_loss"
+    assert ledger.settle(a, owner, "bootstrap_read_loss") == "bootstrap_read_loss"
+    with sqlite3.connect(tmp_path / "state" / "message-thread-bootstrap.sqlite") as db:
+        assert db.execute("SELECT route FROM routes").fetchall() == [(b,)]
+    marker = ledger._loss_marker(a)
+    assert marker.exists()
+    # No Python connection, Session registry or injected clock survives into this separate process.
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from core.agent_core.ai import thread_bootstrap as b; assert all(b.reserve(r, 100, True)[1] == 'bootstrap_read_loss' for r in (b'A', b'B'))",
+        ],
+        check=True,
+        timeout=10,
+    )
+    # Age the old receipt, then renew it. A scan must recheck under the receipt writer's lock.
+    os.utime(marker, (now[0] - ledger.DAY, now[0] - ledger.DAY))
+    assert ledger.settle(a, owner, "bootstrap_read_loss") == "bootstrap_read_loss"
+    now[0] = marker.stat().st_mtime + ledger.DAY - 1
+    assert ledger.reserve(a, 100, False)[1] == "bootstrap_read_loss"
+    assert ledger.reserve(c, 100, False)[0]  # B expired, A does not block C.
+    now[0] += 2
+    assert ledger.reserve(a, 100, True)[1] == "bootstrap_capacity"
+    assert marker.exists()  # preview is inert even on expired state
+    assert ledger.reserve(a, 100, False)[1] == "bootstrap_capacity"
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("change", ["session", "model", "edit", "disabled", "cold"])
 async def test_only_immediately_preceding_warm_bound_full_can_bootstrap(change):
     from config.paths import get_state_dir

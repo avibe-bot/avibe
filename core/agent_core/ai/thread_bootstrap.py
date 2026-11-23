@@ -10,6 +10,7 @@ from contextlib import closing
 from dataclasses import dataclass
 
 from config.paths import get_state_dir
+from storage.lock import MigrationFileLock
 
 DAY = 86400
 MAX_ROUTES = 4096
@@ -31,6 +32,37 @@ def _lost_at(route: bytes) -> float:
         return _loss_marker(route).stat().st_mtime
     except FileNotFoundError:
         return 0
+
+
+def _receipt_lock(directory):
+    # Never wait for a receipt lock with a SQLite write transaction open.
+    return MigrationFileLock(directory.with_suffix(".lock"), timeout_seconds=None)
+
+
+def _write_loss(route: bytes) -> str:
+    marker = _loss_marker(route)
+    with _receipt_lock(marker.parent):
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    return "bootstrap_read_loss"
+
+
+def _prune_losses(db, directory) -> None:
+    if not directory.is_dir():
+        return
+    # Renew and delete share the same cross-process lock. Commit any revocation before unlinking:
+    # a crash between the two operations must not resurrect an older proof.
+    with _receipt_lock(directory):
+        cutoff = time.time() - DAY
+        expired = [(p, stamp) for p in directory.iterdir() if (stamp := p.stat().st_mtime) <= cutoff]
+        if expired:
+            with db:
+                db.executemany(
+                    "DELETE FROM routes WHERE route=? AND status='bootstrap_proven' AND until<=?",
+                    [(bytes.fromhex(p.name), stamp + DAY) for p, stamp in expired],
+                )
+            for marker, _ in expired:
+                marker.unlink()
 
 
 def _limit() -> int:
@@ -56,12 +88,13 @@ def reserve(route: bytes, reads: int, preview: bool) -> tuple[Trial | None, str]
             ) as db,
             db,
         ):
-            db.execute("BEGIN" if preview else "BEGIN IMMEDIATE")
             if not preview:
                 db.execute("CREATE TABLE IF NOT EXISTS budget (id INTEGER PRIMARY KEY, day INTEGER, used INTEGER)")
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS routes (route BLOB PRIMARY KEY, ticket TEXT, status TEXT, until REAL)"
                 )
+                _prune_losses(db, _loss_marker(route).parent)
+            db.execute("BEGIN" if preview else "BEGIN IMMEDIATE")
             now = time.time()
             day = int(now // DAY)
             row = db.execute("SELECT status,until FROM routes WHERE route=?", (route,)).fetchone()
@@ -121,11 +154,16 @@ def owns(route: bytes, trial: Trial) -> bool:
 def settle(route: bytes, trial: Trial, status: str) -> str:
     """Only the owning generation can prove a route. A lost read always wins over overlapping success."""
     path = get_state_dir() / "message-thread-bootstrap.sqlite"
+    orphaned = False
     try:
         with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0.2)) as db, db:
+            _prune_losses(db, _loss_marker(route).parent)
             now = time.time()
             if status == "bootstrap_read_loss":
-                db.execute("INSERT OR REPLACE INTO routes VALUES (?,?,?,?)", (route, "", status, now + DAY))
+                # Never resurrect an evicted reservation at the expense of a different live cooldown.
+                orphaned = not db.execute(
+                    "UPDATE routes SET ticket='',status=?,until=? WHERE route=?", (status, now + DAY, route)
+                ).rowcount
             else:
                 db.execute("BEGIN IMMEDIATE")
                 if (lost := _lost_at(route)) and lost + DAY > now:
@@ -137,16 +175,13 @@ def settle(route: bytes, trial: Trial, status: str) -> str:
                 )
                 if not changed.rowcount:
                     return "bootstrap_stale"
-        return status
+        return _write_loss(route) if orphaned else status
     except (sqlite3.Error, OSError, ValueError):
         # A contended ledger must not shorten a measured loss to 24h from the earlier reservation.
         # Independent of SQLite's write lock; a later process checks this receipt before admission/proof.
         if status == "bootstrap_read_loss":
             try:
-                marker = _loss_marker(route)
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.touch()
-                return status
+                return _write_loss(route)
             except OSError:
                 pass
         return "bootstrap_state_unavailable"
