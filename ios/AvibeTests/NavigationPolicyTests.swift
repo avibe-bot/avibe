@@ -5517,7 +5517,12 @@ extension NavigationPolicyTests {
             });
             const cache = await caches.open("pages");
             await cache.put("/page", new Response("x"));
-            document.cookie = "page_set=1; path=/; max-age=86400";
+            // A cookie the page sets, awaited until it is stored: one set
+            // through `document.cookie` reaches the store only after the
+            // script returns, and this page closes at once, so on a loaded
+            // runner it could be lost before it was stored.
+            if (!window.cookieStore) throw new Error("no Cookie Store API");
+            await cookieStore.set({ name: "page_set", value: "1", path: "/", expires: Date.now() + 86400000 });
             return "seeded";
             """
         let read = """
