@@ -52,7 +52,7 @@ export function RecoveryCodesView({ codes, busy, onSaved, children }: { codes: s
   const { t } = useTranslation();
   return <div className="mx-auto max-w-xl pt-12">
     <div className="mb-7"><h1 className="text-2xl font-semibold tracking-tight">{t('desktopAccount.recoveryTitle')}</h1><p className="mt-3 max-w-xl text-sm leading-6 text-muted">{t('desktopAccount.recoveryBody')}</p></div>
-    <ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{codes.map((value) => <li key={value}>{value}</li>)}</ul>
+    <ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{codes.map((value, index) => <li key={`${index}:${value}`}>{value}</li>)}</ul>
     <Button variant="brand" className="mt-7" disabled={busy} onClick={onSaved}>{t('desktopAccount.savedCodes')}</Button>
     {children}
   </div>;

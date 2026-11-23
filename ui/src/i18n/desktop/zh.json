@@ -168,7 +168,7 @@
         "account": "账号",
         "computer": "电脑",
         "name": "名称",
-        "availability": "能否使用"
+        "availability": "名称是否可用"
       }
     }
   }

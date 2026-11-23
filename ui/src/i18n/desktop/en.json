@@ -168,7 +168,7 @@
         "account": "account",
         "computer": "computer",
         "name": "name",
-        "availability": "availability"
+        "availability": "name’s availability"
       }
     }
   }
