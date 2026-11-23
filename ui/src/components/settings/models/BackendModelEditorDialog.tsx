@@ -29,6 +29,7 @@ import { cn } from '@/lib/utils';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 import { applyModelsDevParameters, blankBackendModel, clearModelsDevParameters, draftWithId, modelsDevBaseId } from './backendCatalog';
 import { Field } from './dialogFields';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { formatTokensCompact } from './format';
 import { apiFailure, modelsApi } from './modelsApi';
 import { modelsDevFillFailureKey } from './serverCopy';
@@ -49,9 +50,10 @@ import {
  *  short enough that the answer is there when the typing stops. */
 const LOOKUP_DEBOUNCE_MS = 250;
 
-/** Common limits, offered under an empty box: the value and how it reads. */
+/** Common limits, offered under an empty box: the value and how it reads. Round
+ *  thousands throughout, so 「64K」 is never more than a model sold as 64K allows. */
 const CONTEXT_PRESETS = [[128_000, '128K'], [200_000, '200K'], [400_000, '400K'], [1_000_000, '1M']] as const;
-const OUTPUT_PRESETS = [[8_192, '8K'], [32_768, '32K'], [65_536, '64K'], [128_000, '128K']] as const;
+const OUTPUT_PRESETS = [[8_000, '8K'], [32_000, '32K'], [64_000, '64K'], [128_000, '128K']] as const;
 
 /** What the catalog said about one ID: asked, answered with a model, or answered with none. */
 type IdAnswer = { id: string; match: ModelsDevMatch | null };
@@ -175,7 +177,7 @@ export const BackendModelEditorDialog: React.FC<{
   const [sourceSearch, setSourceSearch] = React.useState<SourceSearch | null>(null);
   const sourceToggleRef = React.useRef<HTMLButtonElement>(null);
 
-  const seed = React.useCallback((next: BackendModel) => {
+  const seed = React.useCallback((next: BackendModel, worked: boolean) => {
     setDraft(next);
     setNameText(next.display_name ?? '');
     setContextText(groupTokens(next.context_window));
@@ -184,7 +186,7 @@ export const BackendModelEditorDialog: React.FC<{
     setCustomEffort('');
     setSubmitted(false);
     setIdAnswer(null);
-    touched.current = false;
+    touched.current = worked;
     standsOn.current = next.models_dev_id ?? null;
     setSourceOpen(false);
     setSourceQuery('');
@@ -197,7 +199,9 @@ export const BackendModelEditorDialog: React.FC<{
     // there, and asking for it again would be the surface forgetting. The ID it
     // lands as goes through the one chokepoint like every other produced ID.
     const next = model ?? draftSeed ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend);
-    seed(next);
+    // A draft reopened after a refused write is the user's work already: the
+    // catalog may offer, never refill.
+    seed(next, model === null && draftSeed !== undefined);
   }, [backend, draftSeed, model, open, seed, seedId]);
 
   /** Take a registered model's parameters and leave the ID and the name alone:
@@ -269,14 +273,20 @@ export const BackendModelEditorDialog: React.FC<{
   const context = parseTokens(contextText);
   const output = parseTokens(outputText);
   const trimmedId = draft.id.trim();
-  /** The ID as a registry would know it: without a provider's path in front. */
-  const bareId = modelsDevBaseId(trimmedId);
   // A saved row that already has its limits is not asked to reconsider them each
   // time it is opened: the catalog speaks up about a row being added, an ID that
   // was just changed, or limits nobody has filled in.
   const wantsAnswer = creating || trimmedId !== model.id || (context.value === null && output.value === null);
   /** The parameters the ID would bring, when they are not the ones on screen. */
-  const offered = wantsAnswer && answered?.match && answeredId !== sourceId ? answered.match : null;
+  // Which model the parameters stand on is the whole catalog key: two providers'
+  // entries for one model name are different answers, with their own limits.
+  const offered = wantsAnswer && answered?.match && answered.match.models_dev_id !== draft.models_dev_id ? answered.match : null;
+  /** How the offer names its model: the registered name, or the whole key when
+   *  that name is the one the parameters already stand on. */
+  const offeredName = offered && answeredId === sourceId ? offered.models_dev_id : answeredId;
+  /** 「The closest」 is the catalog's own judgement about this ID, said only
+   *  while it stands: not for a model the user chose, nor for an ID it does not know. */
+  const closest = answered?.match?.match_kind === 'closest' && answered.match.models_dev_id === draft.models_dev_id;
   const unknownToCatalog = wantsAnswer && sourceId === null && answered !== null && answered.match === null;
   /**
    * The row as it would be stored.
@@ -475,7 +485,7 @@ export const BackendModelEditorDialog: React.FC<{
                 {sourceId !== null && (
                   <span className="min-w-0">
                     <Trans
-                      i18nKey={!offered && sourceId !== bareId ? 'settings.models.gateway.modelEditor.source.fromClosest' : 'settings.models.gateway.modelEditor.source.from'}
+                      i18nKey={closest ? 'settings.models.gateway.modelEditor.source.fromClosest' : 'settings.models.gateway.modelEditor.source.from'}
                       values={{ model: sourceId }}
                       components={{ id: <span className="model-hub-model-source-id" /> }}
                     />
@@ -486,7 +496,7 @@ export const BackendModelEditorDialog: React.FC<{
                   <button type="button" className="model-hub-model-source-offer" onClick={() => applyParameters(offered)}>
                     <Trans
                       i18nKey="settings.models.gateway.modelEditor.source.updateTo"
-                      values={{ model: answeredId }}
+                      values={{ model: offeredName }}
                       components={{ id: <span className="font-mono" /> }}
                     />
                   </button>
@@ -524,17 +534,16 @@ export const BackendModelEditorDialog: React.FC<{
                     <p className="model-hub-model-match-state" role="status">{t('settings.models.gateway.modelEditor.source.empty')}</p>
                   )}
                   {searchMatches !== null && searchMatches.length > 0 && (
-                    <div role="listbox" aria-label={t('settings.models.gateway.modelEditor.matches') as string} className="model-hub-model-source-list flex min-w-0 flex-col">
+                    <div role="group" aria-label={t('settings.models.gateway.modelEditor.matches') as string} className="model-hub-model-source-list flex min-w-0 flex-col">
                       {searchMatches.map((match) => {
                         const size = formatTokensCompact(match.context_window);
                         const registered = modelsDevBaseId(match.models_dev_id);
-                        const current = registered === sourceId;
+                        const current = match.models_dev_id === draft.models_dev_id;
                         return (
                           <button
                             key={match.models_dev_id}
                             type="button"
-                            role="option"
-                            aria-selected={current}
+                            aria-current={current || undefined}
                             onClick={() => chooseSource(match)}
                             className={cn('model-hub-model-match model-hub-model-source-row text-left', current && 'is-selected')}
                           >
@@ -642,7 +651,13 @@ export const BackendModelEditorDialog: React.FC<{
                 comes back. */}
             {draft.supports_reasoning !== false && (
               <div className="flex flex-col gap-1.5">
-                <p className="model-hub-model-field-label" id="model-hub-efforts">{t('settings.models.gateway.modelEditor.reasoningEfforts')}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="model-hub-model-field-label" id="model-hub-efforts">{t('settings.models.gateway.modelEditor.reasoningEfforts')}</p>
+                  <ModelHubInfoHint
+                    label={t('settings.models.gateway.modelEditor.effortInfoLabel') as string}
+                    content={t('settings.models.gateway.modelEditor.effortNote')}
+                  />
+                </div>
                 <div className="flex flex-wrap gap-2" role="group" aria-labelledby="model-hub-efforts">
                   {efforts.map((effort) => (
                     <ChipButton key={effort} on={draft.reasoning_efforts.includes(effort)} onClick={() => toggleEffort(effort)}>
@@ -679,7 +694,6 @@ export const BackendModelEditorDialog: React.FC<{
                     </button>
                   )}
                 </div>
-                <p className="model-hub-model-note">{t('settings.models.gateway.modelEditor.effortNote')}</p>
               </div>
             )}
           </section>
@@ -706,7 +720,7 @@ export const BackendModelEditorDialog: React.FC<{
                   <p className="model-hub-model-field-label">{protocolLabel}</p>
                   <SegmentedRadio
                     value={resolved.native_protocol!}
-                    onChange={(next: NativeProtocol) => patch({ native_protocol: next })}
+                    onChange={(next: NativeProtocol) => patchParameters({ native_protocol: next })}
                     options={NATIVE_PROTOCOLS.map((id) => ({
                       id,
                       label: t(`settings.models.gateway.modelEditor.nativeProtocol.${id}`) as string,

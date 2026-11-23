@@ -1614,7 +1614,7 @@
           "reasoningEfforts": "Reasoning effort",
           "customEffort": "Custom effort",
           "customEffortPlaceholder": "e.g. medium",
-          "effortNote": "List only options this model supports. Selecting Off in an Agent disables extended thinking; an empty option list does not mean Off. Other effort values are forwarded unchanged.",
+          "effortNote": "Tick the levels this model supports; Agents can then choose them. To let an Agent turn thinking off, tick Off; ticking none does not turn thinking off.",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -1629,13 +1629,14 @@
             "none": "The model catalog has no match for this model",
             "updateTo": "Update parameters to <id>{{model}}</id>",
             "change": "Change",
-            "pick": "Pick one from the catalog",
+            "pick": "Pick a model to copy parameters from",
             "search": "Search the model catalog",
             "applyNote": "Copies parameters only. The model ID stays.",
             "clear": "Fill in myself",
             "empty": "Nothing found. Try another keyword."
           },
-          "presets": "Common values"
+          "presets": "Common values",
+          "effortInfoLabel": "How to fill in reasoning effort"
         },
         "off": {
           "status": "Turned off",

@@ -367,6 +367,10 @@ describe('BackendModelEditorDialog', () => {
     const limits = screen.getAllByRole('group', { name: 'Common values' });
     expect(limits.map((group) => within(group).getAllByRole('button').map((button) => button.textContent)))
       .toEqual([['128K', '200K', '400K', '1M'], ['8K', '32K', '64K', '128K']]);
+    // Round thousands: 「64K」 must not exceed what a model sold as 64K allows.
+    await user.click(within(limits[1]).getByRole('button', { name: '64K' }));
+    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('64,000');
+    await user.clear(screen.getByLabelText('Maximum output'));
     await user.click(within(limits[0]).getByRole('button', { name: '200K' }));
     // A box with a value needs no suggestions.
     expect(screen.getAllByRole('group', { name: 'Common values' })).toHaveLength(1);
@@ -395,6 +399,42 @@ describe('BackendModelEditorDialog', () => {
     expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'claude-opus-4', models_dev_id: 'anthropic/claude-opus-4', context_window: 1000000 }));
   });
 
+  it('treats a draft reopened after a refused write as worked on: offered, not refilled', async () => {
+    search.mockResolvedValue([match()]);
+    const written: BackendModel = { ...blankBackendModel(), id: match().model_id, context_window: 32000 };
+    renderEditor({ draftSeed: written });
+
+    expect(await source().findByRole('button', { name: `Update parameters to ${match().model_id}` })).toBeTruthy();
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('32,000');
+  });
+
+  it('offers another provider\'s entry for the same model name, by its whole key', async () => {
+    const user = userEvent.setup();
+    const relay = match({ provider_id: 'relay', provider_name: 'Relay', model_id: `relay/${match().model_id}`, models_dev_id: `relay/${match().model_id}`, context_window: 2000 });
+    search.mockImplementation(async (query) => (query === match().model_id ? [match()] : query === relay.model_id ? [relay] : []));
+    renderEditor({ seedId: match().model_id });
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000'));
+
+    await user.clear(modelField());
+    await user.type(modelField(), relay.model_id);
+    // Same registered name, a different entry with its own limits: still an offer,
+    // and named so it cannot be mistaken for the one already applied.
+    await user.click(await source().findByRole('button', { name: `Update parameters to ${relay.models_dev_id}` }));
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('2,000');
+  });
+
+  it('keeps an API the user chose before the catalog answered', async () => {
+    const user = userEvent.setup();
+    search.mockResolvedValue([match({ model_id: 'glm-4.7' })]);
+    renderEditor({ backend: 'opencode' });
+
+    await user.click(protocol().getByRole('radio', { name: 'OpenAI Responses' }));
+    await user.type(modelField(), 'glm-4.7');
+    // Choosing the API is work on the form: the answer is offered, not poured in over it.
+    expect(await source().findByRole('button', { name: 'Update parameters to claude-sonnet-4-5' })).toBeTruthy();
+    expect(protocolAnswer()).toBe('OpenAI Responses');
+  });
+
   it('does not fill a form somebody has worked on; it offers instead', async () => {
     const user = userEvent.setup();
     search.mockImplementation(async (query) => (query === match().model_id ? [match()] : []));
@@ -414,13 +454,15 @@ describe('BackendModelEditorDialog', () => {
     await source().findByText('The model catalog has no match for this model');
     await user.type(screen.getByLabelText('Display name'), 'House model');
 
-    await user.click(source().getByRole('button', { name: 'Pick one from the catalog' }));
+    await user.click(source().getByRole('button', { name: 'Pick a model to copy parameters from' }));
     await user.type(screen.getByLabelText('Search the model catalog'), 'opus');
-    await user.click(await screen.findByRole('option', { name: /Claude Opus 4/ }));
+    await user.click(await source().findByRole('button', { name: /Claude Opus 4/ }));
 
-    // Applied and closed, focus back on the line it belongs to.
-    expect(screen.queryByRole('listbox')).toBeNull();
-    expect(sourceLine()).toContain('Parameters from the closest match, claude-opus-4');
+    // Applied and closed, focus back on the line it belongs to. The user chose
+    // this model; nobody judged it the closest, so the line does not say so.
+    expect(screen.queryByLabelText('Search the model catalog')).toBeNull();
+    expect(sourceLine()).toContain('Parameters from claude-opus-4');
+    expect(sourceLine()).not.toContain('closest');
     expect(document.activeElement).toBe(source().getByRole('button', { name: 'Change' }));
     expect(modelField().value).toBe('house-model');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
@@ -449,7 +491,7 @@ describe('BackendModelEditorDialog', () => {
   it('closes only the catalog search on the first Escape, and the editor on the next', async () => {
     const { onCancel } = renderEditor();
     const user = userEvent.setup();
-    await user.click(source().getByRole('button', { name: 'Pick one from the catalog' }));
+    await user.click(source().getByRole('button', { name: 'Pick a model to copy parameters from' }));
     await user.type(screen.getByLabelText('Search the model catalog'), 'qwen');
 
     await user.keyboard('{Escape}');
@@ -536,9 +578,9 @@ describe('BackendModelEditorDialog', () => {
 
     await user.type(modelField(), 'house-model');
     // No answer is no claim: the line neither names a model nor says none exists.
-    expect(sourceLine()).toBe('Pick one from the catalog');
+    expect(sourceLine()).toBe('Pick a model to copy parameters from');
     // Asked directly, it says why in its own words.
-    await user.click(source().getByRole('button', { name: 'Pick one from the catalog' }));
+    await user.click(source().getByRole('button', { name: 'Pick a model to copy parameters from' }));
     await user.type(screen.getByLabelText('Search the model catalog'), 'house');
     expect(await source().findByText('The model catalog is unavailable')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Add model' }));
@@ -551,10 +593,11 @@ describe('BackendModelEditorDialog', () => {
     const { onCommit } = renderEditor({ seedId: match().model_id });
     await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000'));
 
-    // A relay's name for the same model: the parameters stay, and the line says
-    // they are the closest model's, since no model is registered under the new ID.
+    // A relay's name for the same model: the parameters stay under the ID as it
+    // is retyped, and the line goes on naming the model they came from.
     await user.type(modelField(), '-relay');
-    await waitFor(() => expect(sourceLine()).toContain(`Parameters from the closest match, ${match().model_id}`));
+    await waitFor(() => expect(search).toHaveBeenCalledWith(`${match().model_id}-relay`, expect.anything()));
+    expect(sourceLine()).toContain(`Parameters from ${match().model_id}`);
     await user.click(screen.getByRole('button', { name: 'Add model' }));
 
     expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
@@ -590,7 +633,7 @@ describe('BackendModelEditorDialog', () => {
     await waitFor(() => expect(search).toHaveBeenCalled());
     await act(async () => {});
     // Opening a row to look at it is not a question about its numbers.
-    expect(sourceLine()).toBe('Pick one from the catalog');
+    expect(sourceLine()).toBe('Pick a model to copy parameters from');
     expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('180,000');
   });
 
