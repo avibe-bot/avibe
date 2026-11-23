@@ -149,7 +149,7 @@
         "unknown": "这次没有完成。",
         "reauth": "avibe.bot 还是要求重新验证，这次没有完成。",
         "storage": "这台电脑现在保存不了登录。稍后重新登录。",
-        "unavailable": "这台电脑现在不能绑定。请联系我们。"
+        "unavailable": "这台电脑现在不能绑定。请联系 {{support}}。"
       },
       "changed": "验证好了，但这几项和刚才不一样了：{{fields}}。看一下，再按「绑定」。",
       "field": {

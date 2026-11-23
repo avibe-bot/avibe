@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { DOMAIN_SUFFIX, DomainField, type DomainCheck } from '@/components/DomainField';
+import { SUPPORT_EMAIL } from '@/lib/support';
 import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/sign-in/chromeContext';
 import { CodeEntry, SecondFactor } from '@/sign-in/screens';
 import type { SecondFactorMethod } from '@/sign-in/types';
@@ -259,7 +260,8 @@ function BindDialogBody({ step, account, busy = false, onNameChange, onPick, onC
     {title(t('desktopAccount.bind.title'))}
     <div role="alert" className="flex gap-3 rounded-xl border border-gold/40 bg-gold/10 p-4 text-sm leading-6">
       <TriangleAlert className="mt-1 size-4 shrink-0 text-gold-ink" />
-      <p>{step.kind === 'upgrade' ? t('desktopAccount.bind.upgrade') : t(`desktopAccount.bind.problem.${problem ?? 'unknown'}` as const)}</p>
+      <p>{step.kind === 'upgrade' ? t('desktopAccount.bind.upgrade') : problem === 'unavailable' ? t('desktopAccount.bind.problem.unavailable', { support: SUPPORT_EMAIL })
+        : t(`desktopAccount.bind.problem.${problem ?? 'unknown'}` as const)}</p>
     </div>
     {actions(next, false)}
   </>;
