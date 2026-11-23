@@ -74,4 +74,22 @@ describe('AgentGraphTab 活跃/含历史 mode', () => {
     await waitFor(() => expect(api.getAgentsGraph).toHaveBeenCalled());
     expect(api.getAgentsGraph).toHaveBeenLastCalledWith(expect.objectContaining({ includeEnded: false }));
   });
+
+  it('opens with disabled triggers hidden every visit, even after showing them or with an older stored choice', () => {
+    // What earlier builds stored when the user turned 显示已禁用 on.
+    window.localStorage.setItem('vibe-remote:graph-show-disabled', '1');
+    const showDisabled = () => screen.getByRole('switch', { name: 'agents.graph.legend.showDisabled' });
+
+    const first = renderTab();
+    expect(showDisabled().getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(showDisabled());
+    expect(showDisabled().getAttribute('aria-checked')).toBe('true');
+    // The choice is not stored.
+    expect(window.localStorage.getItem('vibe-remote:graph-show-disabled')).toBe('1');
+
+    // Leave the tab and come back.
+    first.unmount();
+    renderTab();
+    expect(showDisabled().getAttribute('aria-checked')).toBe('false');
+  });
 });
