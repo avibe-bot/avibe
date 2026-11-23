@@ -171,7 +171,7 @@ async def test_opencode_pins_follow_only_the_menu_row_they_resolved_before_renam
     old, new = "base", "new/base"
     agent.models = [ModelHubBackendModelConfig(id=mid, native_protocol="anthropic") for mid in (old, "other/base")]
     baseline = [row.to_payload() for row in agent.models]
-    qualified = "provider/base"
+    qualified = "\tprovider/base\u2003"
     with engine.begin() as c:
         for name, model in (("fallback", qualified), ("exact", "other/base"), ("already", new)):
             _add_agent(c, name, model)
@@ -221,9 +221,85 @@ def test_new_definition_visible_to_candidate_read_is_included():
         assert json.loads(raw)["session_settings_snapshot"]["model"] == "new"
 
 
+def test_reclaim_after_definitions_read_replans_the_snapshot():
+    from sqlalchemy import event
+    from storage.model_selection_rename import rename_selections
+    from storage.sessions_service import _delete_agent_session_rows
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as c:
+        _add_session(c, "reclaimed-session", "old")
+        _add_definition(c, "bound-watch", snapshot=None)
+        c.execute(
+            run_definitions.update()
+            .where(run_definitions.c.id == "bound-watch")
+            .values(definition_type="watch", session_id="reclaimed-session")
+        )
+    reclaimed = False
+
+    def reclaim(conn, cursor, sql, params, context, many):
+        nonlocal reclaimed
+        if not reclaimed and sql.startswith("SELECT run_definitions.id,"):
+            reclaimed = True
+            with engine.begin() as c:
+                assert (
+                    _delete_agent_session_rows(
+                        c,
+                        select(agent_sessions.c.id).where(agent_sessions.c.id == "reclaimed-session"),
+                        reclaim_mode="pause",
+                        reclaim_reason=None,
+                    )
+                    == 1
+                )
+
+    event.listen(engine, "after_cursor_execute", reclaim)
+    try:
+        rename_selections("claude", {"old": "new"}, engine=engine)
+    finally:
+        event.remove(engine, "after_cursor_execute", reclaim)
+    assert reclaimed
+    with engine.connect() as c:
+        raw = c.scalar(select(run_definitions.c.metadata_json).where(run_definitions.c.id == "bound-watch"))
+        assert json.loads(raw)["session_settings_snapshot"]["model"] == "new"
+
+
+@pytest.mark.parametrize("initial,final,expected", [("claude", "codex", "old"), ("codex", "claude", "new")])
+def test_default_change_replans_included_and_excluded_sessions(initial, final, expected):
+    from sqlalchemy import event
+    from config import paths
+    from core.vibe_agents import VibeAgentStore
+    from storage.model_selection_rename import rename_selections
+
+    ensure_sqlite_state()
+    store = VibeAgentStore(paths.get_sqlite_state_path())
+    for backend in (initial, final):
+        store.create(name=f"default-{backend}", backend=backend, model="old")
+    store.set_default_agent_name(f"default-{initial}")
+    with store.engine.begin() as c:
+        _add_session(c, "floating", "old")
+        c.execute(agent_sessions.update().where(agent_sessions.c.id == "floating").values(agent_backend=""))
+    switched = False
+
+    def change_default(conn, cursor, sql, params, context, many):
+        nonlocal switched
+        if not switched and sql == "BEGIN IMMEDIATE":
+            switched = True
+            store.set_default_agent_name(f"default-{final}")
+
+    event.listen(store.engine, "before_cursor_execute", change_default)
+    try:
+        rename_selections("claude", {"old": "new"}, engine=store.engine)
+    finally:
+        event.remove(store.engine, "before_cursor_execute", change_default)
+    assert switched
+    with store.engine.connect() as c:
+        assert c.scalar(select(agent_sessions.c.model).where(agent_sessions.c.id == "floating")) == expected
+
+
 def test_stale_candidate_cannot_overwrite_a_later_selection():
     from sqlalchemy import event
-    from storage.model_selection_rename import SelectionChanged, rename_selections
+    from storage.model_selection_rename import rename_selections
 
     ensure_sqlite_state()
     engine = get_cached_sqlite_engine()
@@ -243,16 +319,17 @@ def test_stale_candidate_cannot_overwrite_a_later_selection():
 
     event.listen(engine, "before_cursor_execute", compete)
     try:
-        with pytest.raises(SelectionChanged):
-            rename_selections("claude", {"old": "new"}, engine=engine)
+        rename_selections("claude", {"old": "new"}, engine=engine)
     finally:
         event.remove(engine, "before_cursor_execute", compete)
     with engine.connect() as c:
-        assert c.scalar(select(agents.c.model).where(agents.c.id == "stale-agent")) == "old"
+        assert changed
+        assert c.scalar(select(agents.c.model).where(agents.c.id == "stale-agent")) == "new"
         assert c.scalar(select(agent_sessions.c.model).where(agent_sessions.c.id == "stale-session")) == "chosen"
 
 
-def test_unbound_pins_follow_effective_default_and_archived_scopes_keep_their_owner():
+@pytest.mark.parametrize("placeholder", ["", "default", "unknown"])
+def test_unbound_pins_follow_effective_default_and_archived_scopes_keep_their_owner(placeholder):
     from config import paths
     from core.vibe_agents import VibeAgentStore
     from storage.model_selection_rename import rename_selections
@@ -264,9 +341,9 @@ def test_unbound_pins_follow_effective_default_and_archived_scopes_keep_their_ow
     store.create(name="archive-test", backend="codex", model="old")
     with store.engine.begin() as c:
         _add_scope(c, "channel", model="old", routing={"agent_name": "archive-test", "model": "old"})
-        _add_session(c, "unbound", "old")
-        c.execute(agent_sessions.update().where(agent_sessions.c.id == "unbound").values(agent_backend=""))
-        _add_definition(c, "unbound-task", snapshot={"agent_backend": "", "model": "old"})
+        _add_session(c, "unbound", "\u2003old\t")
+        c.execute(agent_sessions.update().where(agent_sessions.c.id == "unbound").values(agent_backend=placeholder))
+        _add_definition(c, "unbound-task", snapshot={"agent_backend": placeholder, "model": " old "})
     archived = store.archive("archive-test")
     assert archived is not None
     rename_selections("codex", {"old": "codex-new"}, engine=store.engine)

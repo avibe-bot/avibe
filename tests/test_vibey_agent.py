@@ -2703,7 +2703,9 @@ async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_req
             from tests.test_model_selection_addresses import _add_agent
 
             _add_agent(conn, "inherit-agent", "test-model")
-            conn.exec_driver_sql("UPDATE agents SET backend='vibey' WHERE id='inherit-agent'")
+            _add_agent(conn, "previous-agent", "unchanged-model")
+            conn.exec_driver_sql("UPDATE agents SET backend='vibey' WHERE id IN ('inherit-agent', 'previous-agent')")
+            conn.exec_driver_sql("UPDATE agent_sessions SET agent_id='previous-agent', agent_name='previous-agent' WHERE id=?", (SESSION,))
         else:
             conn.exec_driver_sql("UPDATE agent_sessions SET model=? WHERE id=?", ("test-model", SESSION))
     started, release = asyncio.Event(), asyncio.Event()
@@ -2718,8 +2720,8 @@ async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_req
     harness = _Harness(engine, tmp_path, "avibe", [in_flight, second])
     request = harness.request("list files")
     if inherited:
-        request.vibe_agent_id = "inherit-agent"
-        request.vibe_agent_inherited_model = "test-model"
+        request.vibe_agent_id = "previous-agent"
+        request.vibe_agent_model = request.vibe_agent_inherited_model = "unchanged-model"
     running = asyncio.create_task(harness.agent.handle_message(request))
     try:
         await asyncio.wait_for(started.wait(), 5)
@@ -2727,7 +2729,11 @@ async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_req
             receipt = conn.exec_driver_sql(
                 "SELECT start_receipt_json FROM session_turns WHERE session_id=?", (SESSION,)
             ).scalar_one()
-        assert json.loads(receipt)["vibey_execution"]["model"] == "test-model"
+        first_id = "unchanged-model" if inherited else "test-model"
+        assert json.loads(receipt)["vibey_execution"]["model"] == first_id
+        if inherited:
+            with engine.begin() as conn:
+                conn.exec_driver_sql("UPDATE agent_sessions SET agent_id='inherit-agent', agent_name='inherit-agent' WHERE id=?", (SESSION,))
         await service.set_agent_models("vibey", baseline, desired, renames={"test-model": "new-model"})
         assert service.provenance.get("last-completed")["requested_model_id"] == "test-model"
         with engine.connect() as conn:
@@ -2742,7 +2748,7 @@ async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_req
     finally:
         release.set()
         await running
-    assert [call.endpoint.model_id for call in harness.provider.requests] == ["test-model", "new-model"]
+    assert [call.endpoint.model_id for call in harness.provider.requests] == [first_id, "new-model"]
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
 
 
@@ -2778,7 +2784,7 @@ def test_the_session_settings_a_turn_follows_are_read_by_primary_key(engine, ses
 
     try:
         with engine.connect() as conn:
-            assert session_route_settings(conn, SESSION) == {"model": None, "reasoning_effort": None, "metadata": {}}
+            assert session_route_settings(conn, SESSION) == {"model": None, "reasoning_effort": None, "metadata": {}, "agent_id": None, "agent_name": "vibey"}
             assert session_route_settings(conn, "ses_gone") is None
             (statement,) = set(statements)
             plan = [row[3] for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", ("ses_any",))]

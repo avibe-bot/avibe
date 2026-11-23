@@ -1075,10 +1075,20 @@ class VibeyAgent(BaseAgent):
     def _session_route_settings(self, session_id: str, agent_id: str | None) -> Optional[dict[str, Any]]:
         with self._engine.connect() as conn:
             row = session_route_settings(conn, session_id)
-            if row is not None and not row["model"] and agent_id:
-                # Dispatch suppresses scope overrides on a Session target. Its
-                # inherited model is the selected Agent's, not a Turn-local pin.
-                current = conn.execute(select(agents.c.model).where(agents.c.id == agent_id)).first()
+            if row is not None and not row["model"]:
+                # The Session can rebind within Vibey while this Turn runs. A
+                # name-only legacy binding also takes priority over dispatch.
+                if row["agent_id"]:
+                    binding = agents.c.id == row["agent_id"]
+                elif row["agent_name"]:
+                    from core.vibe_agents import normalize_agent_name
+
+                    binding = agents.c.normalized_name == normalize_agent_name(row["agent_name"])
+                elif agent_id:
+                    binding = agents.c.id == agent_id
+                else:
+                    return row
+                current = conn.execute(select(agents.c.model).where(binding)).first()
                 if current is not None:
                     row["inherited_model"] = current.model
             return row

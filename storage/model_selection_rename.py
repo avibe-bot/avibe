@@ -15,7 +15,11 @@ from core.vibe_agents import normalize_agent_name, resolve_effective_default_age
 from storage.db import get_cached_sqlite_engine, retry_sqlite_write
 from storage.models import agents, agent_sessions, run_definitions, scope_settings
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY, SESSION_SETTINGS_SNAPSHOT_KEY
-from storage.settings_revision import mark_runtime_settings_changed, read_runtime_settings_revision
+from storage.settings_revision import mark_runtime_settings_changed
+from storage.agent_session_rows import UNOWNED_SESSION_BACKENDS
+
+# Characters Python str.strip() removes. SQLite trim defaults to ASCII space only.
+_PIN_WHITESPACE = "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 
 
 def _object(raw):
@@ -50,8 +54,9 @@ def _owner_lookup(conn):
         return default.backend if default else None
 
     def lookup(row):
-        if row.get("agent_backend"):
-            return row["agent_backend"]
+        bound = str(row.get("agent_backend") or "").strip()
+        if bound not in UNOWNED_SESSION_BACKENDS:
+            return bound
         return backend(str(row.get("agent_id") or ""), str(row.get("agent_name") or ""))
 
     return lookup
@@ -140,20 +145,26 @@ def rename_selections(backend: str, moves: dict[str, str], *, opencode_menu_ids=
     old = select(func.json_each(_dump(list(moves))).table_valued("value").c.value)
 
     def candidates(value):
+        value = func.trim(value, _PIN_WHITESPACE)
         if opencode_menu_ids is None:
             return value.in_(old)
-        value = func.trim(value)
         return or_(value.in_(old), func.substr(value, func.instr(value, "/") + 1).in_(old))
 
     def replacement(value):
-        if not isinstance(value, str) or value in targets:
+        if not isinstance(value, str):
             return None
-        row_id = opencode_menu_model_id(value.strip(), opencode_menu_ids) if opencode_menu_ids is not None else value
+        value = value.strip()
+        if value in targets:
+            return None
+        row_id = opencode_menu_model_id(value, opencode_menu_ids) if opencode_menu_ids is not None else value
         return moves.get(row_id)
 
     def apply():
         with engine.connect() as conn:
-            revision = read_runtime_settings_revision(conn)
+            # data_version is connection-local and observes all commits by other
+            # connections, including reclaim and default-Agent changes. Compare
+            # on this SAME connection only after acquiring the writer lock.
+            generation = conn.exec_driver_sql("PRAGMA main.data_version").scalar_one()
             owner = _owner_lookup(conn)
             scopes = _plan_scopes(conn, backend, candidates, replacement, owner)
             definitions = _plan_definitions(conn, backend, candidates, replacement, owner)
@@ -167,7 +178,10 @@ def rename_selections(backend: str, moves: dict[str, str], *, opencode_menu_ids=
             cols = agent_sessions.c
             for row in conn.execute(
                 select(cols.id, cols.agent_name, cols.agent_id, cols.agent_backend, cols.model).where(
-                    cols.agent_backend.in_((backend, "")), candidates(cols.model)
+                    func.trim(func.coalesce(cols.agent_backend, ""), _PIN_WHITESPACE).in_(
+                        (backend, *UNOWNED_SESSION_BACKENDS)
+                    ),
+                    candidates(cols.model),
                 )
             ).mappings():
                 if owner(row) == backend and (new := replacement(row.model)):
@@ -178,11 +192,11 @@ def rename_selections(backend: str, moves: dict[str, str], *, opencode_menu_ids=
                             {"model": new},
                         )
                     )
-        # All discovery is complete. Only primary-key compare-and-set batches and
-        # the revision advance hold the writer. No file I/O or JSON discovery here.
-        with engine.begin() as conn:
+            # End the read transaction, not the connection. Only version checks
+            # and primary-key writes hold the writer; no discovery under lock.
+            conn.commit()
             conn.exec_driver_sql("BEGIN IMMEDIATE")
-            if read_runtime_settings_revision(conn) != revision:
+            if conn.exec_driver_sql("PRAGMA main.data_version").scalar_one() != generation:
                 raise SelectionChanged
             _apply_by_key(conn, agents, agents.c.id, agent_rows)
             _apply_by_key(conn, agent_sessions, cols.id, session_rows)
@@ -190,5 +204,11 @@ def rename_selections(backend: str, moves: dict[str, str], *, opencode_menu_ids=
             _apply_by_key(conn, run_definitions, run_definitions.c.id, definitions)
             if agent_rows or session_rows or scopes or definitions:
                 mark_runtime_settings_changed(conn)
+            conn.commit()
 
-    retry_sqlite_write(apply)
+    for attempt in range(3):
+        try:
+            return retry_sqlite_write(apply)
+        except SelectionChanged:
+            if attempt == 2:
+                raise
