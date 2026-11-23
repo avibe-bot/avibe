@@ -20,12 +20,14 @@ AUDIO = {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration"
 
 
 class Conversation:
-    def __init__(self, ws, host, *, inactivity: float = 20, threshold: int = 600, settling: float = 0.2):
+    def __init__(self, ws, host, *, inactivity: float = 20, threshold: int = 600, settling: float = 0.2, device_id: str = ""):
         self.ws = ws
         self.host = host
         self.inactivity = inactivity
         self.threshold = threshold
         self.settling = settling
+        self.device_id = device_id
+        self.conversation_id = None
         self.session_id = str(uuid4())
         self.request_id = ""
         self.playback_id = ""
@@ -99,6 +101,8 @@ class Conversation:
             or wake.get("session_id") != self.session_id
         ):
             raise ValueError("invalid_wake")
+        opened = await self.host.call("open", device_id=self.device_id)
+        self.conversation_id = opened["conversation_id"]
         for _ in range(128):
             self.request_id = str(uuid4())
             self.codec.decoder.reset_state()
@@ -135,7 +139,7 @@ class Conversation:
         text = transcript["text"]
         if re.sub(r"[\s。！？,.!?，]", "", text) == "先不聊了":
             return None
-        speech = await self.host.answer(self.request_id, text)
+        speech = await self.host.answer(self.conversation_id, self.request_id, text)
         response = await self.host.call("speech", text=speech)
         return self.codec.output_frames(base64.b64decode(response["audio"], validate=True))
 
@@ -155,9 +159,10 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
         ws = web.WebSocketResponse(max_msg_size=16384, heartbeat=15)
         connections.add(ws)  # Reserve before the first await.
         tasks = []
+        conversation = None
         try:
             await ws.prepare(request)
-            conversation = Conversation(ws, selected_host, inactivity=inactivity, threshold=threshold, settling=settling)
+            conversation = Conversation(ws, selected_host, inactivity=inactivity, threshold=threshold, settling=settling, device_id=device_id)
 
             async def revoked():
                 while pairing.accepts(device_id, authorization):
@@ -178,6 +183,9 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
             for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+            if conversation is not None and conversation.conversation_id:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(selected_host.call("close", conversation_id=conversation.conversation_id), 2)
             await ws.close()
             connections.discard(ws)
         return ws

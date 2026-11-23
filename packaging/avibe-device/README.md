@@ -1,7 +1,8 @@
 # Vibey LAN device plugin (candidate)
 
 `avibe-device` is an optional process for one CoreS3 named **Vibey**. Its
-conversation belongs to the existing **littlevibey** Bot. Installing Avibe does
+conversation uses the identity and configured model of the existing
+**littlevibey** Bot in a host-enforced chat-only path. Installing Avibe does
 not install or launch this plugin. It does not run an Avachan Core service.
 
 The host must include the `device.voice` private IPC interface from this
@@ -61,17 +62,29 @@ The accepted wake IDs are `xiaowai-xiaowai`, `hi-xiaowai`, and
 One wake starts capture. The host-controlled capture gate supplies each
 utterance a fresh UUID. The plugin performs bounded energy endpoint detection,
 sends `listen/stop`, and waits for the board to acknowledge capture is closed.
-ASR, the queued littlevibey Run, and TTS have a combined 55-second budget,
+ASR, isolated littlevibey text generation, and TTS have a combined 55-second budget,
 inside the firmware's processing watchdog. A missing cloud capability closes
 only that conversation; pairing and ordinary Avibe chat remain available.
 The next wake can retry after the dependency returns, without restarting Avibe.
 
-The host proves the reply belongs uniquely to this request using the durable
-Run, output provenance and accepted Turn inputs. A concurrent Web input,
-unproven callback, canceled request or unrelated final is withheld. It never
-reads the Bot's latest message. Up to two short complete sentences are spoken;
-an answer without a suitable complete sentence is withheld. Full replies stay
-in the Bot transcript. No extra summarizer/model is introduced.
+The host mints a conversation identity and binds each synchronous answer to
+its request ID. Context contains only this device's current conversation,
+bounded to the last eight exchanges. Shared Web/IM history is not read or
+updated. Full replies remain in owner-private Avibe voice transcripts. Inspect
+those locally with `vibe device history`, then
+`vibe device history --conversation-id <id>`.
+
+This surface can only chat and suggest. It uses the Bot's configured model
+through existing protocol adapters, with no executable Agent loop, tools,
+native hosted declarations, MCP, terminal/files, Vault, delegation or jobs.
+Tool-call responses are rejected at the host boundary. A work request must be
+sent as a new, specific request in signed-in Avibe Web; saying “confirm” to the
+device grants no authority. Normal Web turns keep their existing permissions.
+
+Up to two short complete sentences are spoken. Inline code and unfinished
+fragments are removed; an answer without a suitable complete sentence is withheld.
+No extra summarizer is introduced. Transcripts are never resumed as work after
+a restart, and duplicate or previous-connection requests are rejected.
 
 Cloud PCM16 mono WAV at 24 kHz is resampled and encoded to Opus at 16 kHz,
 60 ms per packet. Audio begins only after matching `playback/started`, and is
@@ -88,16 +101,21 @@ settling interval require later acoustic validation on a real device.
 
 ## Validation
 
-`tests/test_device_voice.py` uses isolated HOME/state, real loopback WebSockets,
-owner-only Unix IPC, real Opus/WAV conversion, real host Run admission and
-durable output/delivery records. Only cloud responses and native model output
-are synthetic. It exercises two contextual turns after one wake, spoken exit,
-pair/revoke/disable, invalid/duplicate receipts, own-microphone input during
-playback, disconnection, legacy negotiation, inactivity and repeated lifecycle
-disposal. It also enqueues ordinary synthetic Bot chat after plugin shutdown.
+`tests/test_device_voice.py` and `tests/test_device_chat.py` use isolated HOME/state,
+real loopback WebSockets, the production FastAPI Unix IPC server, real Opus/WAV
+conversion, and real model protocol parsing. Cloud/model responses and Model Hub
+route selection are synthetic. They exercise two contextual turns after one wake,
+spoken exit, unrelated Web admission, private pair/revoke/disable, invalid/duplicate
+receipts, own-mic input during playback, disconnection, legacy negotiation,
+inactivity and repeated lifecycle disposal. An owned child-process crash leaves
+ordinary host chat available.
 
-Run the tests with the optional package's codec dependencies and native
-`libopus` available. Codec cases skip when `opuslib-next` is absent; the host
-provenance/admission tests still run in the ordinary suite. Human acoustics,
-real synthesis, real littlevibey, device configuration, flashing and deployment
-remain separate unperformed acceptance gates.
+Adversarial model responses try terminal, files, Vault, MCP, delegation, background
+and hosted tools without creating effects or Runs. Duplicate/restart requests,
+old records and unsupported configurations fail closed. Real ASGI tests cover
+cancellation of ASR/TTS and model work when the plugin disconnects.
+
+Run codec tests with the optional Python dependencies and native `libopus`.
+Codec cases skip when `opuslib-next` is absent; host chat/authority tests run in
+the ordinary suite. No live keys, shared endpoint, real littlevibey conversation,
+service restart, device provisioning, flashing or deployment is part of these tests.

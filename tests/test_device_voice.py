@@ -24,11 +24,9 @@ import pytest
 from core.bots import BotService
 from core.control_requests import new_request
 from core.handlers.cli_requests import handle_control_request
-from core.handlers.device_voice import attributed_speech, speech_projection
+from core.handlers.device_voice import speech_projection
 from core.scheduled_tasks import TaskExecutionStore
 from core.vibe_agents import VibeAgentStore
-from storage import message_deliveries
-from storage.background import attach_agent_run_delivery_in_connection
 from storage.importer import ensure_sqlite_state
 
 
@@ -44,83 +42,15 @@ def controller():
     agents = VibeAgentStore()
     agents.ensure_builtin_default_agents([])
     with BotService() as bots:
-        bots.create_bot(display_name="Synthetic companion", handle="littlevibey")
+        bots.create_bot(display_name="Synthetic companion", handle="littlevibey", model="synthetic-model")
     requests = TaskExecutionStore()
-    controller = SimpleNamespace(vibe_agent_store=agents, scheduled_task_service=SimpleNamespace(request_store=requests))
+    from config.v2_config import V2Config
+
+    controller = SimpleNamespace(config=V2Config.default(), vibe_agent_store=agents,
+                                 scheduled_task_service=SimpleNamespace(request_store=requests))
     yield controller
     agents.close()
     requests.sqlite_backend.close()
-
-
-def finish_run(store, request_id, text, *, shared=False):
-    """Synthetic backend output; real persisted Run, Delivery, Turn and output."""
-    run = store.get_run(request_id)
-    session_id = run["session_id"]
-    turn_id = "turn_" + uuid4().hex
-    delivery_id = "delivery_" + uuid4().hex
-    with store.sqlite_backend.engine.begin() as conn:
-        snapshot = message_deliveries.message_snapshot(
-            scope_id=None, session_id=session_id, platform="avibe", author="harness", source="harness",
-            message_type="harness", text=run["prompt"],
-            metadata={"scheduled_provenance": {"platform_specific": {
-                "task_trigger_kind": "agent_run", "task_execution_id": request_id,
-            }}},
-        )
-        batch = [message_deliveries.insert_delivery(
-            conn, delivery_id=delivery_id, session_id=session_id, priority="p3", state="queued",
-            snapshot=snapshot, dispatch_text=run["prompt"],
-        )]
-        assert attach_agent_run_delivery_in_connection(conn, request_id, session_id=session_id, delivery_id=delivery_id)
-        message_deliveries.claim_start_batch(
-            conn, turn_id=turn_id, session_id=session_id, backend="vibey", deliveries=batch,
-            dispatch_text=run["prompt"], attempt_id="atm_" + turn_id,
-        )
-        turn = message_deliveries.get_turn(conn, turn_id)
-        message_deliveries.bind_native_start(conn, turn_id, expected_version=turn["version"],
-                                            runtime_key="test", runtime_turn_id=turn_id, native_turn_id=turn_id)
-        assert message_deliveries.materialize_start_acceptance(conn, turn_id=turn_id, evidence={"kind": "test"})
-        if shared:
-            extra = message_deliveries.insert_delivery(
-                conn, delivery_id="web_" + uuid4().hex, session_id=session_id, priority="p1", state="queued",
-                snapshot=message_deliveries.message_snapshot(
-                    scope_id=None, session_id=session_id, platform="avibe", author="user", source="web",
-                    message_type="user", text="Unrelated web input", metadata={},
-                ), dispatch_text="Unrelated web input",
-            )
-            message_deliveries.open_steer_attempt(
-                conn, extra["id"], expected_version=extra["version"], turn_id=turn_id,
-                attempt_id="steer_" + turn_id, expected_native_turn_id=turn_id,
-            )
-            assert message_deliveries.materialize_steer_acceptance(
-                conn, leader_delivery_id=extra["id"], expected_attempt_id="steer_" + turn_id,
-                turn_id=turn_id, evidence={"kind": "test"},
-            )
-        message_deliveries.terminalize_turn(conn, turn_id, outcome="completed", settled_by="test",
-                                           evidence_kind="synthetic_backend")
-    store.sqlite_backend.record_turn_run_outputs(
-        [request_id], output_id="terminal", text=text, provenance={"turn_id": turn_id, "run_id": request_id},
-        terminal_status="succeeded",
-    )
-    return store.get_run(request_id)
-
-
-def enqueue(store):
-    return store.enqueue_agent_run(agent_name="littlevibey", session_id="ses_littlevibey",
-                                   session_key="avibe::channel::ses_littlevibey", message="Synthetic voice").id
-
-
-@pytest.mark.parametrize("shared", [False, True])
-def test_result_requires_sole_durable_input(controller, shared):
-    store = controller.scheduled_task_service.request_store
-    run = finish_run(store, enqueue(store), "苹果是红色的。", shared=shared)
-    with store.sqlite_backend.engine.connect() as conn:
-        assert attributed_speech(run, conn) == (None if shared else "苹果是红色的。")
-        for changed in (
-            {**run, "status": "failed"},
-            {**run, "result_text": "Unrelated final"},
-            {**run, "result_payload": {"outputs": []}},
-        ):
-            assert attributed_speech(changed, conn) is None
 
 
 def test_projection_does_not_send_full_long_answer():
@@ -178,6 +108,7 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
     answers = iter(["苹果是红色的。", "可以，刚才说的苹果可以吃。"])
     store = controller.scheduled_task_service.request_store
     prompts = []
+    conversation_ids = []
 
     async def transcribe(request):
         assert request.headers["X-Vibe-Instance-Id"] == "synthetic-instance"
@@ -199,9 +130,22 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
         provider_calls.append(payload["text"])
         return web.Response(body=audio(), content_type="audio/wav")
 
+    async def model(request):
+        from tests.test_device_chat import served_headers, text_stream
+
+        body = await request.json()
+        assert not body.get("tools") and not body.get("functions")
+        prompts.append(body["messages"])
+        if len(prompts) == 2:
+            assert any("苹果是什么颜色" in str(m) for m in body["messages"])
+            assert any("苹果是红色的" in str(m) for m in body["messages"])
+            assert all("Unrelated Web" not in str(m) for m in body["messages"])
+        return web.Response(body=text_stream(next(answers)), headers=served_headers())
+
     cloud = web.Application()
     cloud.router.add_post("/v1/audio/transcriptions", transcribe)
     cloud.router.add_post("/v1/audio/speech", speech)
+    cloud.router.add_post("/v1/chat/completions", model)
     cloud_runner, cloud_port = await site(cloud)
     config = V2Config.default()
     # Inject only the established runtime credential boundary; never load config.
@@ -211,28 +155,22 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
                                                   instance_id="synthetic-instance", device_secret="synthetic-cloud-secret"))
     config.audio_asr.enabled = True
 
-    async def control(request):
-        assert "Authorization" not in request.headers
-        payload = await request.json()
-        response = await handle_control_request(controller, payload)
-        if payload["arguments"].get("action") == "submit" and response["payload"].get("ok"):
-            run_id = response["payload"]["run"]["id"]
-            run = store.get_run(run_id)
-            assert run["session_id"] == "ses_littlevibey"
-            prompts.append(run["prompt"])
-            # The second synthetic answer consumes the first prompt as context.
-            if len(prompts) == 2:
-                assert "苹果是什么颜色" in prompts[0] and "那它可以吃吗" in prompts[1]
-            finish_run(store, run_id, next(answers))
-        return web.json_response(response)
+    from tests.test_device_chat import SyntheticHub
+    from core.internal_server import create_app as host_app, _create_controller_loop_server
+    import uvicorn
 
-    ipc = web.Application(client_max_size=3_000_000)
-    ipc.router.add_post("/internal/control", control)
-    ipc_runner = web.AppRunner(ipc, access_log=None)
-    await ipc_runner.setup()
+    controller.model_hub_runtime = SyntheticHub(f"http://127.0.0.1:{cloud_port}/v1")
     socket_root = tempfile.TemporaryDirectory(prefix="avdv-", dir="/tmp")
     socket_path = Path(socket_root.name) / "host.sock"
-    await web.UnixSite(ipc_runner, str(socket_path)).start()
+    ipc_server = _create_controller_loop_server(uvicorn.Config(
+        host_app(controller), uds=str(socket_path), lifespan="off", log_config=None, log_level="critical",
+    ))
+    ipc_task = asyncio.create_task(ipc_server.serve())
+    for _ in range(100):
+        if ipc_server.started:
+            break
+        await asyncio.sleep(0.01)
+    assert ipc_server.started
     os.chmod(socket_path, 0o600)
     monkeypatch.setenv("VIBE_INTERNAL_DISPATCH_SOCKET", str(socket_path))
     pairing = Pairing(tmp_path / "plugin")
@@ -253,10 +191,16 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
                                     "route_revision": 4, "wakeword_id": "xiaowai-xiaowai",
                                     "session_id": hello["session_id"]})
                 request_ids = []
+                ordinary = await handle_control_request(controller, new_request("agent.run", {
+                    "bot": "littlevibey", "queue": True, "no_reply": True, "message": "Unrelated Web privileged context",
+                }).to_payload())
+                assert ordinary["payload"]["ok"]
                 for turn in range(3):
                     start = await ws.receive_json(timeout=10)
                     assert start["type"] == "listen" and start["state"] == "start"
                     request_ids.append(start["request_id"])
+                    if not conversation_ids:
+                        conversation_ids.append(controller.device_chat.active.id)
                     await ws.send_json(start)
                     encoder = Codec()
                     pcm = struct.pack("<960h", *[int(6000 * math.sin(2 * math.pi * 440 * i / 16000)) for i in range(960)])
@@ -292,12 +236,16 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
                                         "boundary": "queues_empty_after_output_write", "tail_guard_ms": 80})
                 assert len(set(request_ids)) == 3
         assert len(prompts) == 2
+        history = controller.device_chat.history(conversation_ids[0])
+        assert [row["output"] for row in history["turns"]] == ["苹果是红色的。", "可以，刚才说的苹果可以吃。"]
+        assert len(store.list_runs()) == 1  # Only the ordinary Web Run, never device input.
         assert provider_calls == ["asr", "苹果是红色的。", "asr", "可以，刚才说的苹果可以吃。", "asr"]
         assert "synthetic-cloud-secret" not in caplog.text
         assert "苹果是什么颜色" not in caplog.text
     finally:
         await device_runner.cleanup()
-        await ipc_runner.cleanup()
+        ipc_server.should_exit = True
+        await asyncio.wait_for(ipc_task, 5)
         socket_root.cleanup()
         await cloud_runner.cleanup()
 
@@ -327,14 +275,21 @@ async def test_device_faults_do_not_replay_or_transcribe_playback(plugin, tmp_pa
 
     fixture = json.loads((Path(__file__).parent / "fixtures/littlevibey-wire-v1.json").read_text())
 
+    closed = asyncio.Event()
+
     class FakeHost:
         calls = []
 
         async def call(self, action, **kwargs):
             self.calls.append(action)
+            if action == "open":
+                return {"conversation_id": str(uuid4())}
+            if action == "close":
+                closed.set()
+                return {}
             return {"text": "你好"} if action == "transcribe" else {"audio": base64.b64encode(audio()).decode()}
 
-        async def answer(self, request_id, text):
+        async def answer(self, conversation_id, request_id, text):
             self.calls.append("answer")
             return "你好。"
 
@@ -392,7 +347,8 @@ async def test_device_faults_do_not_replay_or_transcribe_playback(plugin, tmp_pa
                     assert fault == "duplicate_drain"
                     assert event.type == aiohttp.WSMsgType.TEXT
                     assert json.loads(event.data)["type"] == "listen"
-                assert host.calls == ["transcribe", "answer", "speech"]
+                await asyncio.wait_for(closed.wait(), 2)
+                assert host.calls == ["open", "transcribe", "answer", "speech", "close"]
     finally:
         await runner.cleanup()
 
@@ -543,6 +499,10 @@ async def test_abort_cancels_pending_voice_capability(plugin, tmp_path):
 
     class PendingHost:
         async def call(self, action, **kwargs):
+            if action == "open":
+                return {"conversation_id": str(uuid4())}
+            if action == "close":
+                return {}
             assert action == "transcribe"
             started.set()
             try:

@@ -5,73 +5,92 @@
 An independently installed `avibe-device` process serves one explicitly paired
 CoreS3. Avibe startup and ordinary IM/Web chat do not import or start it. The
 plugin owns its device credential, connection, bounded audio buffers and
-half-duplex conversation. The host owns cloud credentials and Bot admission.
-Only the host calls ASR/TTS. The device never receives instance credentials.
+half-duplex conversation. The host owns model/cloud credentials. The device
+never receives instance credentials, a model token, or host authority.
 
-The host's private control channel adds `device.voice` with five operations:
-`status`, `transcribe`, `submit`, `result`, and `speech`. Submission targets the
-existing `littlevibey` Bot, queued, with a device-origin instruction that voice
-is not privileged-action approval. A UUID request ID is the Harness Run ID.
-Results require the exact Run, terminal success, persisted output provenance,
-and a completed Turn with exactly this input. Shared or uncertain output is
-withheld. Full replies remain in the existing transcript; the plugin receives
-only a bounded, deterministic sentence projection for synthesis.
+The host's private control channel adds `device.voice`: status, ASR/TTS,
+open/close a device conversation, one synchronous chat request, and owner-only
+transcript inspection. The host creates the conversation identity and enforces
+`device_chat_only_v1`. Each request also has a fresh UUID. Voice is never admitted
+as a normal Bot Run or Delivery. Removed candidate `submit`/`result` operations
+fail closed; there is no compatibility fallback to Owner execution.
+
+The existing `littlevibey` Bot supplies its identity, configured Vibey model and
+role description. A separate, narrow host path calls the existing Model Hub and
+provider protocol adapter directly. It never constructs the tool-capable Agent
+loop, ToolSuite, MCP clients, native CLI processes, jobs or delegates. Its request
+has no function tools, native hosted declarations or image generation routes.
+Any returned tool-call event or final tool block is refused, without dispatch.
+The prompt explains the product behavior; it is not the permission boundary.
+
+Only plain user/assistant text from this device's current connection enters its
+model context, bounded to the last eight exchanges. No shared Bot/Web messages,
+filesystem instructions, opaque provider history or general session tail is
+read. Concurrent ordinary Bot work retains its normal path and permissions.
+Unsupported Bot/backend/model configuration or a model failure refuses voice;
+there is no alternate Owner/native-backend route.
+
+Durable owner-private JSON files under Avibe's `state/device-voice` retain full
+voice answers and request status. They are transcripts, never executable jobs.
+Restart does not restore a live conversation; duplicate IDs, prior connections
+and old record schemas cannot be resumed. The host CLI's `device history` entry
+lists these records or reads one explicitly. The interactive shared Bot Web
+session is not populated with voice input that could later acquire its tools.
+
+Voice can converse and suggest. Work must be sent as a new specific request in
+signed-in Avibe Web. A tool attempt receives a fixed localized explanation of
+that handoff. Neither a spoken confirmation nor a later unrelated Web message
+upgrades the voice conversation. No approval system is introduced.
 
 ASR uses the paired instance's existing endpoint and multipart WAV upload.
-TTS uses `POST /v1/audio/speech`, JSON `{"text":"..."}`, and returns bounded WAV
-bytes. Cloud headers stay inside the host. The TTS candidate contract specifies
-24 kHz mono PCM16; the plugin converts it to negotiated device Opus.
+TTS uses `POST /v1/audio/speech`, exactly JSON `{"text":"..."}`, and returns
+bounded 24 kHz mono PCM16 WAV. Cloud headers stay inside the host. The plugin
+converts WAV to negotiated 16 kHz Opus/60 ms. Audio/model IPC calls are canceled
+on disconnect using the actual FastAPI handler's existing lifetime monitor.
 
-The accepted device contract is copied to `littlevibey-wire-v1.md`, with
-`tests/fixtures/littlevibey-wire-v1.json` shared with the firmware lane.
-Avachan is a read-only reference, never a dependency. Wake route revision 4 is
-distinct from negotiated voice protocol v1.
+The frozen device contract is copied to `littlevibey-wire-v1.md`, with
+`tests/fixtures/littlevibey-wire-v1.json` agreed with the firmware lane.
+Avachan is a read-only reference, never a dependency. No wire fields changed for
+the host chat restriction. Wake route revision 4 remains separate from voice v1.
 
 The plugin uses scoped process/socket ownership and explicit capability
 dependencies, without a generic plugin framework, bus, or Cordis dependency.
-Local pairing/diagnosis survives missing voice capabilities. Unix-only host IPC
-keeps broad Windows host credentials out of the optional plugin; unsupported
-hosts fail explicitly. The process reads only its own pairing file.
+Pairing/diagnosis survives missing voice capabilities. V1 host IPC is Unix-only;
+the plugin does not acquire the broad Windows host bearer descriptor.
 
-The voice prompt identifies unverified device speech and is not an owner
-approval. This interface accepts text for an existing Bot; it does not approve
-tools or issue device MCP actions. Ordinary host approval policy still applies.
+## Validation contract
 
-## Evidence required
+Use real local WebSockets, Unix IPC through the production FastAPI server,
+Opus/WAV conversion and provider protocol parsing. Only cloud/model responses
+and Model Hub route selection are synthetic. Two contextual spoken turns after
+one wake and spoken exit must succeed. The device must never resume capture
+before matching software-drain evidence; disconnect/revoke/abort must not replay.
 
-Real local sockets, real Opus/WAV conversion, isolated persistent pairing state,
-and synthetic cloud/Bot peers must complete two contextual turns after one
-wake. Actual playback acknowledgement alone reopens capture. Disconnection,
-revocation, interruption, duplicate and unrelated output cannot replay speech.
-Missing plugin/codecs/cloud capability must fail locally and leave normal chat
-independent. Human acoustics, live cloud, a real Bot, deployment and flashing
-remain separate unperformed gates.
-
-## Candidate validation, 2026-11-23
-
-The focused host/CLI/Bot regression passed 427 tests; the final optional-device
-suite passed 18 cases after adding private provisioning and pending-ASR abort
-coverage. Real child-process crash, same-state duplicate process rejection,
-repeat stop/start, and two spoken turns run only in isolated state. Changed-file
-Ruff and optional wheel build passed. Ordinary CI skips codec-dependent tests
-when the optional dependencies are absent; this local run installed those
-dependencies into a disposable directory and used the existing native libopus.
-The cloud lane's `f0082aed` candidate was inspected read-only for its exact
-JSON, paired headers, MIME and 24 kHz PCM16 contract; no shared endpoint was used.
+Exercise tool attempts (including final-only native hosted blocks), duplicate
+requests, restart, unsupported configuration/old records, unrelated Web work,
+private provisioning, repeated lifecycle, process crash, and real ASGI disconnect
+cancellation for cloud audio and model work. Full answers stay in host transcripts;
+only a short complete sentence projection is sent to TTS. Real acoustics, live
+cloud/model/Bot use, deployment and flashing remain unperformed gates.
 
 ## Review inventory
 
-Head `0a6f4a8449` received four findings in its first Codex review: device-origin
-execution inherited local Owner authority; production IPC did not cancel audio
-on disconnect; sentence projection accepted unfinished fragments; inline code
-was retained. Root-cause classes are authority propagation, live-request lifetime,
-and speech projection (two comments, one class). No class has yet recurred on a
-second reviewed head.
+First reviewed head `0a6f4a8449` had four findings in three root-cause classes:
+authority propagation, live-request lifetime, and speech projection (two comments).
+The coordinator's 2026-11-23 decision replaced voice Run admission with the
+isolated chat-only path described above. The other fixes use actual IPC disconnect
+monitoring, require sentence punctuation, and remove inline-code spans. This is
+one findings-bearing reviewed head so far; subsequent reviews must track these
+classes and the repository's architecture-rewrite circuit breaker.
 
-The lifetime fix uses the existing FastAPI disconnect monitor only for ASR/TTS;
-admitted Bot submissions remain independent mutations. Real ASGI tests cover
-both audio actions. Projection now requires sentence terminators and removes
-inline code including unterminated tails. The focused device/IPC/Vault run passed
-61 tests with seven existing platform skips. The authority finding remains open
-pending the coordinator's scope decision: prompt text is not an enforcement
-boundary, and a fabricated cloud principal is not a valid substitute.
+## Candidate evidence after the chat-only decision
+
+485 focused device, host, CLI, Bot, IPC/Vault and ordinary Vibey backend tests
+passed; seven existing platform-specific cases skipped. Device codec tests ran
+with real native libopus. The two-turn test uses the production FastAPI server
+on a Unix socket and the real OpenAI Chat protocol parser; its second model
+request contains the first question and answer but excludes unrelated Web work.
+Seven adversarial function names, final-only function/native hosted blocks,
+duplicate IDs and restart all leave no executable Run or external effect.
+Model, ASR and TTS disconnect cancellation is tested at the actual ASGI boundary.
+Ruff, whitespace checks and the optional wheel build are separate local gates.

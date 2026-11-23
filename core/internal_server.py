@@ -290,15 +290,15 @@ def create_app(
             and arguments.get("sync_run") is True
         ) or (
             payload.get("operation") == "device.voice" and isinstance(arguments, dict)
-            and arguments.get("action") in {"transcribe", "speech"}
+            and arguments.get("action") in {"transcribe", "speech", "chat"}
         )
         if not live_waiter:
             response = await handle_control_request(controller, payload, run_sync=_run_store_step)
             content = await asyncio.to_thread(_json_bytes, response)
             return Response(content=content, media_type="application/json")
 
-        # Approval, sync-result and device audio waiters belong to this connection.
-        # Disconnect releases Vault ownership, sync-wait suppression and upstream audio,
+        # Approval, sync-result and device voice waiters belong to this connection.
+        # Disconnect releases Vault ownership, sync-wait suppression and upstream audio/model calls,
         # not later acknowledge a result which no caller can receive. Ordinary
         # admitted mutations still finish independently of their connection.
         operation = asyncio.create_task(handle_control_request(controller, payload, run_sync=_run_store_step))

@@ -1,5 +1,6 @@
 {
   "device": {
+    "chatOnly": "我在这里可以陪你聊、提供建议。要实际办事，请到已登录的 Avibe 网页发送具体任务。",
     "pluginMissing": "此 Avibe 环境尚未安装可选的 avibe-device 插件。",
     "expired": "设备语音请求已过期。",
     "localOnly": "设备语音需要通过本机宿主使用。",

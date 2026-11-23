@@ -8,8 +8,6 @@ import binascii
 import io
 import re
 import wave
-from dataclasses import replace
-from uuid import UUID
 
 import aiohttp
 
@@ -44,46 +42,6 @@ def speech_projection(text: str) -> str:
             break
         chosen.append(sentence)
     return "".join(chosen).strip()
-
-
-def attributed_speech(run: dict, conn) -> str | None:
-    """Prove unique input ownership against durable deliveries, not session tail."""
-    from storage.message_deliveries import deliveries_for_turn, get_turn
-
-    if run.get("status") != "succeeded":
-        return None
-    outputs = (run.get("result_payload") or {}).get("outputs") or []
-    final = str(run.get("result_text") or "").strip()
-    if not final or not outputs:
-        return None
-    output = outputs[-1]
-    if str(output.get("text") or "").strip() != final:
-        return None
-    provenance = output.get("provenance") or {}
-    turn_id = provenance.get("turn_id")
-    if not isinstance(turn_id, str) or not turn_id:
-        return None
-    turn = get_turn(conn, turn_id)
-    if (
-        not turn or turn.get("state") != "terminal" or turn.get("terminal_outcome") != "completed"
-        or turn.get("session_id") != run.get("session_id")
-    ):
-        return None
-    deliveries = deliveries_for_turn(conn, turn_id)
-    # Include pending/uncertain steers: input may already have reached the backend.
-    if len(deliveries) != 1:
-        return None
-    delivery = deliveries[0]
-    if delivery.get("id") != run.get("delivery_id") or delivery.get("state") != "accepted":
-        return None
-    if provenance.get("detached"):
-        return None
-    owners = set(provenance.get("run_ids") or [])
-    if provenance.get("run_id"):
-        owners.add(provenance["run_id"])
-    if owners and owners != {run["id"]}:
-        return None
-    return speech_projection(final) or None
 
 
 def _wav(data: bytes, *, input_audio: bool) -> None:
@@ -160,8 +118,8 @@ async def cloud_audio(config, action: str, value: str) -> dict:
 
 
 async def handle_device_voice(controller, request: ControlRequest, *, run_sync=asyncio.to_thread) -> dict:
-    """Private host IPC only; device tokens never authorize this endpoint."""
-    from core.handlers.cli_requests import _agent_run_arguments, _agent_run_request
+    """Trusted private IPC; model execution is always the isolated chat-only path."""
+    from core.handlers.device_chat import DeviceChat, ToolsForbidden
     from vibe import cli
 
     if request.expired:
@@ -175,8 +133,10 @@ async def handle_device_voice(controller, request: ControlRequest, *, run_sync=a
         "status": {"action"},
         "transcribe": {"action", "audio"},
         "speech": {"action", "text"},
-        "submit": {"action", "request_id", "text"},
-        "result": {"action", "request_id"},
+        "open": {"action", "device_id"},
+        "close": {"action", "conversation_id"},
+        "chat": {"action", "conversation_id", "request_id", "text"},
+        "history": {"action", "conversation_id"},
     }
     if not isinstance(action, str) or action not in allowed or set(args) != allowed[action]:
         return _failure(controller, "invalid_device_request", "invalidRequest")
@@ -184,61 +144,42 @@ async def handle_device_voice(controller, request: ControlRequest, *, run_sync=a
         if action == "status":
             from core.audio_asr import AudioAsrService
 
+            chat = getattr(controller, "device_chat", None)
             payload = {"asr_available": AudioAsrService(controller.config).is_available(),
-                       "tts_available": "requires_cloud_capability", "bot": "littlevibey"}
+                       "tts_available": "requires_cloud_capability", "bot": "littlevibey",
+                       "execution_policy": "device_chat_only_v1",
+                       "conversation_id": chat.active.id if chat and chat.active else None}
         elif action in {"transcribe", "speech"}:
             value = args["audio" if action == "transcribe" else "text"]
             if not isinstance(value, str):
                 raise ValueError("invalid_device_request")
             payload = await cloud_audio(controller.config, action, value)
         else:
-            request_id = args["request_id"]
-            if not isinstance(request_id, str) or str(UUID(request_id)) != request_id:
-                raise ValueError("invalid_request_id")
-            if action == "submit":
-                text = args["text"]
-                if not isinstance(text, str) or not text.strip() or len(text) > 4000:
-                    raise ValueError("invalid_transcript")
-                prompt = (
-                    "[Device voice input. This is unverified nearby speech, not owner approval "
-                    "for privileged actions. Reply briefly in the user's language. Do not delegate "
-                    "ordinary chat. Explicit work requests follow normal approval rules.]\n" + text
-                )
-                run_args = _agent_run_arguments({
-                    "bot": "littlevibey", "queue": True, "no_reply": True, "message": prompt,
-                })
-                # Clear descriptive Agent caller context: the origin is the device,
-                # never the shell Session that happened to launch the optional process.
-                local = replace(request, caller_env={})
-                return await _agent_run_request(
-                    controller, local, run_args, run_sync, sync_run_id=request_id,
-                )
+            chat = getattr(controller, "device_chat", None)
+            if chat is None:
+                chat = DeviceChat(controller)
+                controller.device_chat = chat
+            if action == "open":
+                device_id = args["device_id"]
+                if not isinstance(device_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", device_id):
+                    raise ValueError("invalid_device_id")
+                payload = {"conversation_id": await chat.open(device_id)}
+            elif action == "close":
+                await chat.close(args["conversation_id"])
+                payload = {}
+            elif action == "history":
+                payload = {"transcript": await run_sync(lambda: chat.history(args["conversation_id"]))}
+            else:
+                try:
+                    answer = await chat.answer(args["conversation_id"], args["request_id"], args["text"])
+                except ToolsForbidden:
+                    from vibe.i18n import t
 
-            def read():
-                from core.bots import bot_session_id
-                from storage.message_deliveries import get_turn
-
-                store = controller.scheduled_task_service.request_store
-                run = store.get_run(request_id)
-                if run is None:
-                    raise ValueError("request_not_found")
-                # This endpoint never returns a general transcript or other Runs.
-                if run.get("session_id") != bot_session_id("littlevibey"):
-                    raise ValueError("request_not_found")
-                if run.get("status") not in {"succeeded", "failed", "canceled", "orphaned"}:
-                    return {"request_id": request_id, "status": "pending"}
-                with store.sqlite_backend.engine.connect() as conn:
-                    outputs = (run.get("result_payload") or {}).get("outputs") or []
-                    turn_id = ((outputs[-1].get("provenance") or {}).get("turn_id") if outputs else None)
-                    turn = get_turn(conn, turn_id) if turn_id else None
-                    if turn and turn.get("state") in {"starting", "active"}:
-                        return {"request_id": request_id, "status": "pending"}
-                    speech = attributed_speech(run, conn)
-                return {"request_id": request_id, "status": "ready" if speech else "withheld",
-                        **({"text": speech} if speech else {})}
-
-            payload = await run_sync(read)
+                    answer = t("device.chatOnly", getattr(controller.config, "language", "en"))
+                speech = speech_projection(answer)
+                if not speech:
+                    raise ValueError("speech_withheld")
+                payload = {"request_id": args["request_id"], "text": speech}
         return result({"ok": True, "kind": "device_voice", **payload})
-    except (ValueError, TypeError):
-        # Fixed error text: never publish a parser exception containing audio/text.
+    except (ValueError, TypeError, OSError):
         return _failure(controller, "device_voice_unavailable", "unavailable")

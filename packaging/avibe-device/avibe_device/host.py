@@ -41,18 +41,8 @@ class Host:
             raise ValueError("host_voice_unavailable")
         return payload
 
-    async def answer(self, request_id: str, text: str) -> str:
-        response = await self.call("submit", request_id=request_id, text=text)
-        if (response.get("run") or {}).get("id") != request_id:
+    async def answer(self, conversation_id: str, request_id: str, text: str) -> str:
+        response = await self.call("chat", conversation_id=conversation_id, request_id=request_id, text=text)
+        if response.get("request_id") != request_id:
             raise ValueError("request_mismatch")
-        async def wait():
-            while True:
-                result = await self.call("result", request_id=request_id)
-                if result.get("request_id") != request_id:
-                    raise ValueError("request_mismatch")
-                if result.get("status") == "ready":
-                    return result["text"]
-                if result.get("status") != "pending":
-                    raise ValueError("speech_withheld")
-                await asyncio.sleep(0.25)
-        return await asyncio.wait_for(wait(), 180)
+        return response["text"]

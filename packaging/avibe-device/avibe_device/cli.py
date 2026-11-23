@@ -67,6 +67,8 @@ def main(argv=None) -> int:
     pair.add_argument("--name", default="Vibey")
     for name in ("revoke", "enable", "disable", "stop", "status", "doctor"):
         commands.add_parser(name)
+    history_parser = commands.add_parser("history")
+    history_parser.add_argument("--conversation-id")
     serve_parser = commands.add_parser("serve")
     serve_parser.add_argument("--bind", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8765)
@@ -95,6 +97,11 @@ def main(argv=None) -> int:
             pairing.revoke()
         elif args.command in {"enable", "disable", "stop"}:
             pairing.enable(args.command == "enable")
+        elif args.command == "history":
+            from .host import Host
+
+            print(json.dumps(asyncio.run(Host().call("history", conversation_id=args.conversation_id))))
+            return 0
         elif args.command == "doctor":
             from .host import Host
 
