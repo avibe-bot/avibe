@@ -2929,14 +2929,14 @@ final class NavigationPolicyTests: XCTestCase {
 
         XCTAssertFalse(webView.allowsBackForwardNavigationGestures)
         XCTAssertNotNil(webView.goBack())
-        try await Task.sleep(for: .milliseconds(400))
-        XCTAssertEqual(
-            WebOrigin(
-                url: try XCTUnwrap(webView.url),
-                requiresHTTPS: false
-            ),
-            instanceOrigin
-        )
+        // WebKit reports the back item's URL from `goBack()` until the App's
+        // cancel reaches it, one round trip through the web content process
+        // (a fixed 400 ms was too short on a loaded runner). A back that
+        // committed would keep the authentication page, and this wait would
+        // run out.
+        try await waitUntil("The refused back returned to the instance") {
+            webView.url.flatMap { WebOrigin(url: $0, requiresHTTPS: false) } == instanceOrigin
+        }
         let returnedTitle = try await webView.evaluateJavaScript(
             "document.title"
         ) as? String
@@ -5517,7 +5517,12 @@ extension NavigationPolicyTests {
             });
             const cache = await caches.open("pages");
             await cache.put("/page", new Response("x"));
-            document.cookie = "page_set=1; path=/; max-age=86400";
+            // A cookie the page sets, awaited until it is stored: one set
+            // through `document.cookie` reaches the store only after the
+            // script returns, and this page closes at once, so on a loaded
+            // runner it could be lost before it was stored.
+            if (!window.cookieStore) throw new Error("no Cookie Store API");
+            await cookieStore.set({ name: "page_set", value: "1", path: "/", expires: Date.now() + 86400000 });
             return "seeded";
             """
         let read = """

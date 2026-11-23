@@ -176,11 +176,10 @@ test.describe('OpenCode models · bare ids, and the one field that names the API
 
     const editor = hub.modelEditorDialog;
     await expect(editor).toBeVisible();
-    // An id models.dev has never heard of, which is the case the typeahead's
-    // last row exists for — and the case the default below is chosen for.
+    // An id the model catalog has never heard of, which is the case the
+    // default below is chosen for.
     const typed = `${E2E_SOURCE_PREFIX}model-${Date.now()}`;
     await hub.modelIdField.fill(typed);
-    await hub.literalIdOption.click();
     // Bare: the id the row will carry is the string that was typed. Nothing is
     // prefixed onto it, by the backend's scheme or by the protocol.
     expect(await hub.modelIdField.inputValue()).toBe(typed);

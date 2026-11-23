@@ -1197,8 +1197,8 @@ cleanup.
 
 This inventory is organized by the finite WebKit API surface instead of by
 individual Web UI call sites. It includes the iOS methods present through the
-local iOS 27 SDK; iOS 27-only methods are documentation-only while CI remains
-pinned to Xcode 26.6.
+local iOS 27 SDK; iOS 27-only methods are still documentation-only (CI now
+builds with Xcode 27.2; adopting them is separate work).
 
 ### `WKNavigationDelegate`
 
@@ -1219,7 +1219,7 @@ pinned to Xcode 26.6.
 | `navigationAction:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `navigationResponse:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `shouldGoTo backForwardListItem` | Uses WebKit default continuation. The ordinary action-policy delegate still rejects a primary `.backForward` target outside the selected instance origin. | Hermetic SPA/auth-history XCTest on iOS 26.4.1 and 27.2; gesture feel remains a device check. |
-| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when the shell needs to see or stop a form submission. |
 
 ### `WKUIDelegate`
 
@@ -1237,7 +1237,7 @@ pinned to Xcode 26.6.
 | `showLockdownModeFirstUseMessage` | Uses WebKit's default Lockdown Mode message. | System-owned behavior; no shell test. |
 | `willPresentEditMenuWithAnimator`, `willDismissEditMenuWithAnimator` | Use WebKit's default edit menu. This preserves selection, copy, paste, and the Web UI clipboard fallback. | Existing Web UI clipboard tests plus manual copy/paste check. |
 | `runOpenPanelWith` | Uses WebKit's Safari-matching iOS file picker. The shell declares localized camera and photo-library-add usage descriptions. | Simulator build validates resources; Files, Camera, and Save Image remain device checks. |
-| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when a page of an instance needs location and the shell should decide. |
 | `insertInputSuggestion` | Uses WebKit's default keyboard insertion behavior. | Manual keyboard suggestion check. |
 
 ### `WKDownloadDelegate`
@@ -1345,7 +1345,7 @@ bridge and do not run these Web UI branches.
 
 | Environment | Coverage |
 | --- | --- |
-| CI: Xcode 26.6, pinned iOS 26.5 / iPhone 17 Pro simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
+| CI: Xcode 27.2 (GitHub's `xcode-27` image), pinned iOS 27.2 / iPhone 18 Pro simulator (the image has no iPhone 17 Pro on 27.2) | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
 | Local: Xcode 27.2, iOS 26.4.1 simulator | Focused Debug XCTest for notification-driven viewport geometry and bundled onboarding, plus real-WebKit Home quick-task, conversation composer, background/foreground, and bundled OTP explicit-dismissal checks. Each path returned to its safe-area baseline. Interactive pull-down dismissal remains an owner device retest. |
 | Local: Xcode 27.2, iOS 27.2 simulator | Focused Home quick-task check with the software keyboard; explicit dismissal returned the tab bar to its safe-area baseline. |
 
@@ -1483,13 +1483,29 @@ A structural test derives both pull-request and push path lists from that
 single source, so new shared or out-of-tree UI inputs cannot silently skip the
 mobile build. The job installs the repository-pinned Node version and lockfile,
 runs `build:mobile`, generates the license notices, verifies the generated
-entry, assets and notices, then pins the same
-Xcode 26.6 toolchain used by the desktop native workflow. It builds against the
-iOS Simulator SDK without signing and runs the XCTest navigation, new-window,
-download, bundled-page, and WebKit capability contracts on an available iPhone
-simulator. Debug and Release use the same generated folder resource; the
-bundled-page XCTest resolves `MobileApp` from the built application bundle and
-executes its React entry through `avibe-app://bundle`.
+entry, assets and notices, then pins Xcode 27.2 and the iOS 27.2 SDK on
+GitHub's hosted `xcode-27` image (the desktop native workflow stays on Xcode
+26.6). It builds against the iOS Simulator SDK without signing and runs the
+XCTest navigation, new-window, download, bundled-page, and WebKit capability
+contracts on the pinned iPhone 18 Pro / iOS 27.2 simulator. Debug and Release
+use the same generated folder resource; the bundled-page XCTest resolves
+`MobileApp` from the built application bundle and executes its React entry
+through `avibe-app://bundle`.
+
+**Going back to Xcode 26.6.** GitHub lists the `xcode-27` image as a public
+preview. If it breaks or is withdrawn, revert the squash commit of
+avibe-bot/avibe#4128 (one commit; it restores both workflows, their lint
+expectations and the tests as they were on Xcode 26.6). To keep its test
+changes instead, change only these lines: in `ios-shell.yml` and
+`ios-testflight.yml`, `runs-on: macos-26`,
+`DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer`, the
+`Xcode 26.6` version check (dropping the 27.2 SDK check); in `ios-shell.yml`,
+the simulator `SimRuntime.iOS-26-5` / `iPhone 17 Pro`; and the matching
+expectations in `tests/test_ci_pipeline.py`. Everything else from that PR works on
+Xcode 26.6 as it is: the sheet fixture's scene life cycle (the comparison's 26.6
+build uses it), the deferred removal of fixture stores (it acts only on WebKit's
+"in use (by network process)" refusal), the cold-first-tap expected failure
+(only on an iOS 27 simulator) and the dispatch-only `ios-sdk-comparison`.
 
 ## TestFlight
 
@@ -1561,6 +1577,25 @@ read-only data groups, automatic synchronization, Agent/model access, and how to
 stop. Its response contains only `state`. Every other `health.*` bridge method
 is unsupported, including on Show pages. Health data never returns through the
 WebView bridge or notification service extension.
+
+After Allow and Continue, native setup has a 90-second deadline, including the
+consent sheet's dismissal, HealthKit authorization, replacement cleanup, the
+device handshake and failure rollback. Expiry retires that attempt's authority
+before returning failure; unfinished cleanup remains pending. A late callback
+can revoke its own provisional device but cannot pair or commit a new connection.
+The conversation can explicitly retry a settled failure while fresh request
+metadata still permits authorization. Older shells that never settle retain
+their execution slot and show a reopen-App recovery message after 100 seconds.
+An unreturned native operation is never unlocked by a JavaScript timeout.
+
+The first query after a new connection may offer dismissible settings help when
+all seven recent local-calendar step rows are successfully empty. A real sample,
+including zero, any query failure, a missing day, or unavailable protected data
+suppresses the offer. It does not diagnose permission denial or change connection
+or sync results. The same connection does not repeat the offer after dismissal
+or restoration. The help names the manual path through Settings, Privacy &
+Security, Health, and Avibe. It offers no settings shortcut: the public
+App-settings URL did not expose a Health entry in the simulator inspection.
 
 The main app reads steps, activity, workouts and sleep. It backfills 30 days
 and refreshes the most recent eight calendar days on foreground activation and

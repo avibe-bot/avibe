@@ -786,6 +786,45 @@ def test_active_graph_reads_metadata_only_for_a_callback_that_needs_it(isolated_
         engine.dispose()
 
 
+def test_history_proves_lineage_and_newest_callback_without_opening_older_modes(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        for sid in ("root", "known", "sent", "mode", "hidden"):
+            _insert_session(conn, sid, scope_id=None)
+        # All callback rows are older than the window. An independently
+        # reached caller and a sent callback establish two endpoints without
+        # consulting metadata. Two others need a mode check to decide closure.
+        _insert_run(conn, "spawn", session_id="root", source_kind="agent", source_actor="known")
+        for j in range(24):
+            _insert_run(conn, f"old-{j}", session_id="root", created=NOW - timedelta(days=6, seconds=j),
+                        callback_session_id="known", callback_status="skipped",
+                        metadata={"callback_mode": "failure", "probe": "irrelevant"})
+        for idx, (target, status, mode) in enumerate([
+            ("known", "sent", "failure"), ("sent", "sent", "failure"),
+            ("mode", "pending", "normal"), ("hidden", "skipped", "failure"),
+        ]):
+            _insert_run(conn, f"winner-{idx}", session_id="root", created=NOW - timedelta(days=4),
+                        callback_session_id=target, callback_status=status, callback_run_id=f"delivery-{idx}",
+                        metadata={"callback_mode": mode, "probe": target})
+        opened = []
+
+        def read_mode(raw, path):
+            meta = json.loads(raw)
+            opened.append(meta["probe"])
+            assert path == "$.callback_mode"
+            return meta["callback_mode"]
+
+        conn.connection.driver_connection.create_function("json_extract", 2, read_mode, deterministic=True)
+    try:
+        graph = agent_graph.build_graph(now=NOW, engine=engine)
+        assert set(_nodes_by_id(graph)) == {"root", "known", "sent", "mode"}
+        for idx, target in enumerate(("known", "sent", "mode")):
+            assert _edge(graph, "callback", "root", target)["last_run_id"] == f"delivery-{idx}"
+        assert set(opened) == {"mode", "hidden"}
+    finally:
+        engine.dispose()
+
+
 def test_active_graph_follows_noncanonical_pending_ancestor_through_missing_row(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -862,8 +901,8 @@ def test_history_candidate_discovery_reads_only_recent_runs_of_filtered_source(i
                 plans.extend(r[-1] for r in cursor.fetchall())
 
             class Reader(agent_graph._GraphReader):
-                def _fetch(self, result):
-                    rows = super()._fetch(result)
+                def _fetch(self, result, span=None):
+                    rows = super()._fetch(result, span)
                     fetched.append(len(rows))
                     return rows
 
@@ -874,6 +913,36 @@ def test_history_candidate_discovery_reads_only_recent_runs_of_filtered_source(i
             assert len(plans) == 1 and "ix_agent_runs_updated (updated_at>" in plans[0], plans
         graph = agent_graph.build_graph(now=NOW, engine=engine)
         assert {n["session_id"] for n in graph["nodes"]} == expected
+    finally:
+        engine.dispose()
+
+
+def test_history_statement_counts_consumed_rows_and_excludes_consumer_time(monkeypatch):
+    from itertools import count
+    from sqlalchemy import create_engine, event, text
+
+    # A real cursor with a partially consumed fetch batch, then another SQL
+    # parameter batch under the same label. Advance the clock in the consumer:
+    # its work must never be attributed to either execute or fetch.
+    engine = create_engine("sqlite://")
+    clock = count()
+    monkeypatch.setattr(agent_graph, "perf_counter", lambda: next(clock))
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda _, __, sql, *args: statements.append(sql))
+    try:
+        with engine.connect() as conn:
+            spans = agent_graph.HistoryStatementSpans()
+            reader = agent_graph._GraphReader(conn, {"execute": 0., "fetch": 0.}, spans)
+            stmt = text("select :value as sample union all select :value")
+            rows = reader.rows(stmt.params(value="private"), name="callback_modes", mappings=True)
+            assert next(rows) == {"sample": "private"}
+            for _ in range(100):
+                next(clock)
+            rows.close()
+            assert len(list(reader.rows(stmt.params(value="other"), name="callback_modes"))) == 2
+            assert spans.log_fields() == {"callback_modes": {"statements": 2, "batches": 2, "rows": 3,
+                                                            "execute_ms": 2000., "fetch_ms": 3000.}}
+            assert len(statements) == 2 and all(sql.startswith("select ? as sample") for sql in statements)
     finally:
         engine.dispose()
 

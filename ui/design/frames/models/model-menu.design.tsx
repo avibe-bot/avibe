@@ -1,7 +1,8 @@
 // A backend's model menu (管理模型): the shipped BackendModelCatalogDialog, its picker for adding
 // models providers supply, and its editor for one model.
-// The custom-model-* frames past the first draw a custom model built on a catalog pick: picked,
-// then its ID edited, the parameters staying.
+// The custom-model-* frames past the first draw where a custom model's parameters come from: the
+// model catalog's answer for the ID typed (the same model, the closest one, or none), the offer
+// when an edited ID answers to another model, and 「更换」, the catalog search that applies one.
 import { BackendModelCatalogDialog } from '@/components/settings/models/BackendModelCatalogDialog';
 import { BackendModelEditorDialog } from '@/components/settings/models/BackendModelEditorDialog';
 import { BackendModelPickerDialog } from '@/components/settings/models/BackendModelPickerDialog';
@@ -100,32 +101,60 @@ const opencodeListed = new Set(['deepseek-v4', 'deepseek-v4-reasoner', 'claude-s
 const codexListed = new Set(['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']);
 const claudeTaken = new Set(['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5']);
 
-// A custom model built on a catalog pick: the user searches 「claude-fable-5-1」, picks Claude
-// Fable 5.1 as the base, then edits the ID to their relay's name for it.
+// A custom model and the catalog: the ID is the user's; the catalog fills a blank form with what
+// it knows about the model that ID answers to, and after that only offers.
 const fable51: ModelsDevMatch = {
+  match_kind: 'exact',
   provider_id: 'anthropic', provider_name: 'Anthropic', model_id: 'claude-fable-5-1', models_dev_id: 'anthropic/claude-fable-5-1', display_name: 'Claude Fable 5.1',
   context_window: 400_000, max_output_tokens: 64_000, input_modalities: ['text', 'image'], output_modalities: ['text'],
   supports_tools: true, supports_reasoning: true, reasoning_efforts: ['low', 'medium', 'high'], native_protocol: 'anthropic', first_party: true,
 };
 const fable5: ModelsDevMatch = { ...fable51, model_id: 'claude-fable-5', models_dev_id: 'anthropic/claude-fable-5', display_name: 'Claude Fable 5', context_window: 200_000 };
-const searched = 'claude-fable-5-1';
-const editedId = 'claude-fable-5-1-relay';
+const fableLite: ModelsDevMatch = { ...fable51, model_id: 'claude-fable-5-1-lite', models_dev_id: 'anthropic/claude-fable-5-1-lite', display_name: 'Claude Fable 5.1 Lite', context_window: 200_000, max_output_tokens: 32_000 };
+const exactId = 'claude-fable-5-1';
+// A provider's name for a variant: no model is registered under it, so the catalog answers with its base.
+const variantId = 'claude-fable-5-1-thinking';
+const unknownId = 'my-private-model-v2';
 const lookup = (query: string) => `/api/models/catalog/models-dev?query=${encodeURIComponent(query)}&refresh=if-stale`;
 const customApi = {
   ...api,
-  [lookup(searched)]: ok({ matches: [fable51, fable5] }),
-  [lookup(editedId)]: ok({ matches: [fable51, fable5] }),
+  // The edit-model frame's row: the catalog is asked about a saved row's ID too, and here has nothing to add.
+  [lookup('claude-opus-4-8')]: ok({ matches: [] }),
+  [lookup(exactId)]: ok({ matches: [fable51, fableLite, fable5] }),
+  [lookup(variantId)]: ok({ matches: [{ ...fable51, match_kind: 'closest', model_id: variantId }] }),
+  [lookup(unknownId)]: ok({ matches: [] }),
+  [lookup('claude-fable-5')]: ok({ matches: [fable5, fable51, fableLite] }),
+  [lookup('fable')]: ok({ matches: [fable51, fableLite, fable5] }),
 };
 const vibeyTaken = new Set(['claude-opus-5', 'claude-sonnet-5']);
-/** Opened after mount, as the picker opens it, so a search it starts is not dropped by StrictMode's remount. */
-const customFromCatalog = () => (
+/** Opened after mount, as the picker opens it, so the read it starts is not dropped by StrictMode's remount. */
+const custom = (seedId?: string) => () => (
   <AfterMount>
-    {(open) => <BackendModelEditorDialog open={open} backend="vibey" model={null} takenIds={vibeyTaken} effortSuggestions={['low', 'medium', 'high']} onCancel={() => {}} onCommit={() => {}} />}
+    {(open) => <BackendModelEditorDialog open={open} backend="vibey" model={null} seedId={seedId} takenIds={vibeyTaken} effortSuggestions={['low', 'medium', 'high']} onCancel={() => {}} onCommit={() => {}} />}
   </AfterMount>
 );
-/** Searched and picked as the base; then the ID retyped as the relay names it. The list's reads are debounced. */
-const pickFable = { click: [{ fill: 'role=combobox', text: searched }, 'button[role=option]:has-text("Claude Fable 5.1")'], wait: 900 };
-const editId = { ...pickFable, click: [...pickFable.click, { fill: 'role=combobox', text: editedId }] };
+const idField = 'role=textbox[name="{t:settings.models.gateway.modelEditor.id.label}"]';
+const change = 'text={t:settings.models.gateway.modelEditor.source.change}';
+/** The reads behind the ID and behind the catalog search are debounced. */
+const customFrame = { width: 1000, height: 900, themes: ['light'] as ('light' | 'dark')[], status: 'shipped' as const, fixtures: { api: customApi }, wait: 900 };
+
+// Changing a saved model's ID, from the model list: what the change carries along is said under
+// the field once the ID differs. One provider lists 「gpt-5.5-turbo」; nobody lists 「gpt-5.5-house」.
+const listedBy = (ids: string[]) => ok({
+  candidates: {
+    builtin: [],
+    providers: [candidate('gpt-5.5-turbo', [supplier(relayGpt, 'gpt-5.5-turbo')])],
+    in_list: ids.map((id) => candidate(id, [supplier(relayGpt, id)])),
+  },
+});
+const renameApi = {
+  ...api,
+  '/api/models/agents/vibey/models/candidates': listedBy(vibeyLong),
+  '/api/models/agents/claude/models/candidates': listedBy(['claude-opus-4-8']),
+  ...Object.fromEntries(['gpt-5.5', 'gpt-5.5-turbo', 'gpt-5.5-house', 'claude-opus-4-8', 'claude-opus-4-8-relay'].map((id) => [lookup(id), ok({ matches: [] })])),
+};
+const editRow = (id: string) => `.model-hub-catalog-row:has-text("${id}") .model-hub-catalog-action >> nth=0`;
+const renameFrame = { width: 1000, height: 900, themes: ['light'] as ('light' | 'dark')[], status: 'shipped' as const, fixtures: { api: renameApi }, wait: 900 };
 
 const designFrames = frames([
   {
@@ -199,7 +228,28 @@ const designFrames = frames([
     width: 1000,
     height: 900,
     status: 'shipped',
-    fixtures: { api },
+    fixtures: { api: customApi },
+    render: () => (
+      <BackendModelEditorDialog
+        open
+        backend="claude"
+        model={editing}
+        takenIds={claudeTaken}
+        effortSuggestions={claudeEfforts}
+        onCancel={() => {}}
+        onCommit={() => {}}
+      />
+    ),
+  },
+  {
+    name: 'edit-model-effort-info',
+    title: '编辑模型 · 推理强度怎么填（ⓘ）',
+    width: 1000,
+    height: 900,
+    themes: ['light'],
+    status: 'shipped',
+    fixtures: { api: customApi },
+    click: ['[aria-label="{t:settings.models.gateway.modelEditor.effortInfoLabel}"]'],
     render: () => (
       <BackendModelEditorDialog
         open
@@ -232,37 +282,60 @@ const designFrames = frames([
     ),
   },
   {
-    name: 'custom-model-from-catalog',
-    title: '添加自定义模型 · 选了 Claude Fable 5.1 作为基础：ID 下写参数来自哪里，可以清空',
-    width: 1000,
-    height: 900,
-    themes: ['light'],
-    status: 'shipped',
-    fixtures: { api: customApi },
-    ...pickFable,
-    render: customFromCatalog,
+    name: 'rename-model',
+    title: '编辑模型 · 改了 ID（Vibey）：写明会带走什么',
+    ...renameFrame,
+    click: [editRow('gpt-5.5'), { fill: idField, text: 'gpt-5.5-turbo' }],
+    render: catalog('vibey'),
   },
   {
-    name: 'custom-model-id-edited',
-    title: '添加自定义模型 · 改了 ID：参数都留着，下拉第一行（回车）用输入的 ID 并保留参数',
-    width: 1000,
-    height: 900,
-    themes: ['light'],
-    status: 'shipped',
-    fixtures: { api: customApi },
-    ...editId,
-    render: customFromCatalog,
+    name: 'rename-model-unrouted',
+    title: '编辑模型 · 改了 ID，没有供应商列出新 ID：保存后要单独设置路由',
+    ...renameFrame,
+    click: [editRow('gpt-5.5'), { fill: idField, text: 'gpt-5.5-house' }],
+    render: catalog('vibey'),
   },
   {
-    name: 'custom-model-id-edited-phone',
-    title: '添加自定义模型 · 改了 ID · 手机',
+    name: 'rename-model-native',
+    title: '编辑模型 · 改了 ID（Claude Code）：正在进行的对话可能中断',
+    ...renameFrame,
+    click: [editRow('claude-opus-4-8'), { fill: idField, text: 'claude-opus-4-8-relay' }],
+    render: catalog('claude'),
+  },
+  {
+    name: 'rename-model-phone',
+    title: '编辑模型 · 改了 ID · 手机',
+    ...renameFrame,
     width: 390,
     height: 844,
-    themes: ['light'],
-    status: 'shipped',
-    fixtures: { api: customApi },
-    ...editId,
-    render: customFromCatalog,
+    click: [editRow('gpt-5.5'), { fill: idField, text: 'gpt-5.5-house' }],
+    render: catalog('vibey'),
+  },
+  { name: 'custom-model-exact', title: '添加自定义模型 · 目录里有这个 ID：自动填好，写明参数来自哪里', ...customFrame, render: custom(exactId) },
+  { name: 'custom-model-closest', title: '添加自定义模型 · 目录里没有这个 ID：按最接近的模型填，可以更换', ...customFrame, render: custom(variantId) },
+  { name: 'custom-model-unmatched', title: '添加自定义模型 · 目录里找不到：直说，并给常见值', ...customFrame, render: custom(unknownId) },
+  {
+    name: 'custom-model-offer',
+    title: '添加自定义模型 · 改了 ID：参数不动，多一个「按新 ID 更新参数」',
+    ...customFrame,
+    click: [{ fill: idField, text: 'claude-fable-5' }],
+    render: custom(exactId),
+  },
+  {
+    name: 'custom-model-change',
+    title: '添加自定义模型 · 更换：搜索模型目录，只套用参数',
+    ...customFrame,
+    click: [change, { fill: 'role=textbox[name="{t:settings.models.gateway.modelEditor.source.search}"]', text: 'fable' }],
+    render: custom(variantId),
+  },
+  {
+    name: 'custom-model-change-phone',
+    title: '添加自定义模型 · 更换 · 手机',
+    ...customFrame,
+    width: 390,
+    height: 844,
+    click: [change, { fill: 'role=textbox[name="{t:settings.models.gateway.modelEditor.source.search}"]', text: 'fable' }],
+    render: custom(variantId),
   },
 ]);
 

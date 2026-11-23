@@ -267,6 +267,8 @@ export type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode'> & { catal
  *  back executes. Absent on a save that removes nothing. */
 export type BackendModelsPut = {
   baseline: BackendModel[];
+  /** Baseline ID to desired ID; distinct non-overlapping pairs, not removals. */
+  renames?: Record<string, string>;
   models: BackendModel[];
   force?: true;
   would_remove_hops?: RouteHopRef[];
@@ -322,10 +324,13 @@ export type ModelCandidate = {
   group_if_removed?: 'builtin' | 'providers' | null;
 } & Partial<ModelCandidateModelsDev>;
 
-/** What an exact models.dev match states about a provider candidate (C2).
+export type ModelsDevMatchKind = 'exact' | 'closest';
+
+/** What a models.dev match states about a provider candidate (C2).
  *  All or none: the server sends these together, keyed by `models_dev_id`, and
- *  only when the id names one models.dev model exactly. */
+ *  only when the catalog describes this ID. */
 export type ModelCandidateModelsDev = {
+  match_kind?: ModelsDevMatchKind; // Absent on older servers.
   models_dev_id: string;
   context_window: number | null;
   max_output_tokens: number | null;
@@ -354,6 +359,7 @@ export type BackendModelCandidates = {
 /** One normalized models.dev candidate. Metadata only: choosing it fills the
  *  editor's fields and persists nothing until the catalog itself is saved. */
 export type ModelsDevMatch = {
+  match_kind?: ModelsDevMatchKind; // Absent on older servers.
   provider_id: string;
   provider_name: string;
   model_id: string;

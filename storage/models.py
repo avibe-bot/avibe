@@ -460,6 +460,7 @@ agent_runs = Table(
     Index("ix_agent_runs_definition_status", "definition_id", "status"),
     Index("ix_agent_runs_status_created", "status", "created_at"),
     Index("ix_agent_runs_type_status_created", "run_type", "status", "created_at"),
+    Index("ix_agent_runs_timeline_times", "id", "started_at", "completed_at"),
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
     Index("ix_agent_runs_session_status", "session_id", "status"),
     Index("ix_agent_runs_sender_status", "source_kind", "source_actor", "status"),

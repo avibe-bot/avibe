@@ -27,6 +27,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 from core.agent_input import HARNESS_SOURCE_FIELDS, is_voice_input
+from core.input_source import source_label
 from core.delivery_target import normalize_message_kind
 from storage.delivery_states import (
     CLAIMABLE_QUEUE_STATES,
@@ -684,6 +685,8 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
         # Dictated and typed inputs never share a batch: the merged Message keeps the first
         # one's metadata, and the Agent reads one input mode per input (``is_voice_input``).
         is_voice_input(metadata),
+        # A batch carries one terminal label, just as it carries one input mode.
+        source_label(metadata, value.get("platform")),
         # Nor do carried and fresh inputs: the carry line covers exactly what was carried.
         str(metadata.get("turn_carry") or "") if isinstance(metadata.get("turn_carry"), str) else "",
     )

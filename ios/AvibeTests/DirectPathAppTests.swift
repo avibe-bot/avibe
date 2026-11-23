@@ -591,6 +591,63 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testBothScheduleKindsKeepTheirIntentThroughConfirmationReceiptAndCancellation() async throws {
+        for kind in SystemScheduleKind.allCases {
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let platform = RuntimeSystemSchedulePlatform()
+            platform.supportsReminders = true
+            let app = try await makeApp(
+                directTransport: nil,
+                systemSchedulePlatform: platform,
+                systemScheduleNow: { now }
+            )
+            let runtime = try await select("instance-1", in: app)
+            let page = try await showRuntimePage(app, runtime)
+            defer { page.close() }
+            var params = scheduleParams(
+                requestID: "create-\(kind.rawValue)",
+                operationID: "operation-1",
+                now: now
+            )
+            params["kind"] = kind.rawValue
+            params["title"] = kind == .alarm ? "Wake up" : "取快递"
+            let requestParams = params
+            let creation = Task { @MainActor in
+                try await page.systemScheduleRequest(requestParams)
+            }
+            try await eventually { app.systemScheduleConfirmation != nil }
+            let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+            XCTAssertEqual(confirmation.request.kind, kind)
+            XCTAssertEqual(confirmation.request.title, params["title"] as? String)
+            XCTAssertEqual(platform.systemCreationCalls, 0)
+
+            app.confirmSystemSchedule(id: confirmation.id)
+            let receipt = try jsonObject(try await creation.value)
+            XCTAssertEqual(receipt["kind"] as? String, kind.rawValue)
+            XCTAssertEqual(receipt["state"] as? String, "scheduled")
+            XCTAssertEqual(receipt["systemIdentifier"] as? String, "system-1")
+            XCTAssertEqual(platform.systemCreationCalls, 1)
+            XCTAssertNil(app.systemScheduleConfirmation)
+
+            let cancellation = try jsonObject(try await page.systemScheduleCancel(
+                requestID: "cancel-\(kind.rawValue)",
+                operationID: "operation-1",
+                kind: kind.rawValue
+            ))
+            XCTAssertEqual(cancellation["kind"] as? String, kind.rawValue)
+            XCTAssertEqual(cancellation["state"] as? String, "cancelled")
+            XCTAssertEqual(platform.cancelIdentifiers, ["system-1"])
+            let repeated = try jsonObject(try await page.systemScheduleCancel(
+                requestID: "repeat-cancel-\(kind.rawValue)",
+                operationID: "operation-1",
+                kind: kind.rawValue
+            ))
+            XCTAssertEqual(repeated["state"] as? String, "cancelled")
+            XCTAssertEqual(platform.cancelCalls, 1)
+        }
+    }
+
+    @MainActor
     func testDeferredColdLogoutRemainsUnmanagedThroughAppRecoveryAndAccountReopen() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let directory = FileManager.default.temporaryDirectory
@@ -3947,6 +4004,7 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
         app.registerRuntimeController(controller, for: runtime)
 
         enterBackground()
@@ -5008,7 +5066,6 @@ final class DirectPathAppTests: XCTestCase {
         let controller = try makeRuntimeController(app, reopened)
         app.registerRuntimeController(controller, for: reopened)
         let page = try RuntimePage(controller: controller)
-        defer { page.close() }
         try await page.load(
             """
             <!doctype html><script>
@@ -5024,6 +5081,11 @@ final class DirectPathAppTests: XCTestCase {
         )
         app.didFinishRuntimeLoading()
         try await eventually { try await page.changes() == #"["/chat/waited"]"# }
+        // Closed before the App closes the page itself below: on iOS 27 a
+        // page closed after its controller was invalidated keeps the store
+        // in use past the teardown.
+        page.close()
+        withExtendedLifetime(controller) {}
 
         // No answer: the instance list, and what waited goes with it.
         confirmSession(in: defaults, daysAgo: 15)
@@ -5036,7 +5098,13 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertNil(app.runtimeOpenAttempt)
         XCTAssertFalse(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
-        withExtendedLifetime(controller) {}
+
+        // An answer again ends the test settled: no session read is left
+        // on its last transport when the teardown removes the store.
+        session.replace(with: Self.signedInSessionAnswer)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        _ = try await waitForBrowser("instance-2", in: app)
+        XCTAssertTrue(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
     }
 
     /// With a direct transport an open waits for its route before its
@@ -5253,7 +5321,8 @@ final class DirectPathAppTests: XCTestCase {
                 root = RootViewStandIn(
                     app: app,
                     notifications: notifications,
-                    registration: registration
+                    registration: registration,
+                    didMake: { [weak self] in self?.trackOwner($0) }
                 )
             }
         )
@@ -5285,7 +5354,8 @@ final class DirectPathAppTests: XCTestCase {
         let root = RootViewStandIn(
             app: app,
             notifications: notifications,
-            registration: registration
+            registration: registration,
+            didMake: { [weak self] in self?.trackOwner($0) }
         )
         for index in 0..<10 {
             let instanceID = index.isMultiple(of: 2) ? "instance-1" : "instance-2"
@@ -5468,6 +5538,7 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
         app.registerRuntimeController(controller, for: runtime)
         controller.loadViewIfNeeded()
         return controller
@@ -7190,6 +7261,32 @@ final class DirectPathAppTests: XCTestCase {
 
     private var storeIdentifiers: Set<UUID> = []
     private var releaseFixtureApps: [@MainActor () -> Void] = []
+    /// Whether an App or a runtime controller this test made is still
+    /// alive: either keeps its store (a controller through its WebViews).
+    private var fixtureOwnerIsAlive: [@MainActor () -> Bool] = []
+    /// Stores WebKit alone still held when their test ended, and since
+    /// when. Later teardowns try them again; see `removeTrackedStores`.
+    @MainActor private static var storesWebKitStillHolds: [UUID: Date] = [:]
+
+    /// The class is done: one more try for what WebKit still held. What it
+    /// still holds now is printed, with for how long, and is not a failure.
+    override class func tearDown() {
+        MainActor.assumeIsolated {
+            guard !DirectPathAppTests.storesWebKitStillHolds.isEmpty else { return }
+            let finished = XCTestExpectation(description: "final store sweep")
+            Task { @MainActor in
+                await DirectPathAppTests.retryStoresWebKitStillHolds()
+                finished.fulfill()
+            }
+            _ = XCTWaiter.wait(for: [finished], timeout: 10)
+            for (identifier, since) in DirectPathAppTests.storesWebKitStillHolds {
+                print("[iOS fixture] stage=class end, identifier=\(identifier), "
+                    + "WebKit still holds it after \(Int(Date().timeIntervalSince(since))) s")
+            }
+            DirectPathAppTests.storesWebKitStillHolds.removeAll()
+        }
+        super.tearDown()
+    }
     private func scheduleParams(
         requestID: String,
         operationID: String,
@@ -7791,7 +7888,7 @@ final class DirectPathAppTests: XCTestCase {
         onScheduleDelivery: ((SystemScheduleAdmission) -> Void)? = nil
     ) throws -> WebViewController {
         let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
-        return WebViewController(
+        let controller = WebViewController(
             instanceOrigin: origin,
             websiteDataStore: app.runtimeWebsiteDataStore,
             deviceID: { [weak app] in app?.systemScheduleDeviceID },
@@ -7816,14 +7913,70 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
+        return controller
+    }
+
+    /// A runtime controller this test made on a tracked store keeps that
+    /// store until it is released (`removeTrackedStores`).
+    @MainActor
+    private func trackOwner(_ controller: WebViewController) {
+        fixtureOwnerIsAlive.append { [weak controller] in controller != nil }
     }
 
     /// The App made real named stores; remove exactly those.
     @MainActor
     private func trackStore(of app: AppModel) {
         storeIdentifiers.insert(app.websiteDataStore.identifier)
+        fixtureOwnerIsAlive.append { [weak app] in app != nil }
     }
 
+    @MainActor
+    private static func registeredStores() async -> Set<UUID> {
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                continuation.resume(returning: Set($0))
+            }
+        }
+    }
+
+    /// WebKit's answer for a store none of our pages uses any more, while a
+    /// web process of its own for that store has not shut down yet (iOS 27).
+    /// A store one of our pages still uses is "Data store is in use".
+    private static func isHeldByWebKitAlone(_ error: Error?) -> Bool {
+        error?.localizedDescription == "Data store is in use (by network process)"
+    }
+
+    /// One try for each store WebKit still held at an earlier teardown.
+    @MainActor
+    private static func retryStoresWebKitStillHolds() async {
+        for (identifier, since) in storesWebKitStillHolds {
+            let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+            if await !registeredStores().contains(identifier) {
+                storesWebKitStillHolds[identifier] = nil
+                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
+                    + "\(Int(Date().timeIntervalSince(since))) s after its test")
+            } else if !isHeldByWebKitAlone(error) {
+                storesWebKitStillHolds[identifier] = nil
+                XCTFail("Fixture store still registered: \(identifier); error=\(String(describing: error))")
+            }
+        }
+    }
+
+    /// Removes the stores this test's Apps used.
+    ///
+    /// What the test owns is asserted here: its Apps and runtime controllers
+    /// are released and no page of theirs uses a store, within the same 5 s
+    /// as before.
+    ///
+    /// On iOS 27 WebKit keeps a store while a web process of its own for it
+    /// has not shut down, and answers every removal "in use (by network
+    /// process)" until then. That process waits for the web content to
+    /// answer what WebKit last asked it: 11 ms at the median on CI, but over
+    /// 30 s for 3 of 683 processes in one run of this class, and five
+    /// minutes for one that never answered. No wait covers that, so such a
+    /// store, once nothing of the test that holds it is alive, is left to
+    /// later teardowns (one try each) and to the class's own.
     @MainActor
     private func removeTrackedStores() async {
         // Release every App's runtime/account views before removing any
@@ -7832,24 +7985,31 @@ final class DirectPathAppTests: XCTestCase {
         for release in releaseFixtureApps { release() }
         releaseFixtureApps.removeAll()
         print("[iOS fixture] stage=App views invalidated before store removal")
+        await Self.retryStoresWebKitStillHolds()
         for identifier in storeIdentifiers {
             var removed = false
             var lastError: Error?
             for _ in 0..<50 {
                 lastError = await AccountWebsiteDataStoreOperations.live
                     .removeIdentifier(identifier)
-                let registered = await withCheckedContinuation { continuation in
-                    WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
-                        continuation.resume(returning: Set($0))
-                    }
-                }
-                if !registered.contains(identifier) {
+                if await !Self.registeredStores().contains(identifier) {
                     removed = true
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            XCTAssertTrue(removed, "Fixture store still registered: \(identifier); error=\(String(describing: lastError))")
+            let ownerAlive = fixtureOwnerIsAlive.contains { $0() }
+            if !removed, !ownerAlive, Self.isHeldByWebKitAlone(lastError) {
+                Self.storesWebKitStillHolds[identifier] = Date()
+                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false, "
+                    + "WebKit still holds it: left to a later teardown")
+                continue
+            }
+            XCTAssertTrue(
+                removed,
+                "Fixture store still registered: \(identifier); an App or controller of this test is still alive: \(ownerAlive); "
+                    + "error=\(String(describing: lastError))"
+            )
             print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
         }
         storeIdentifiers.removeAll()
@@ -8125,6 +8285,7 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
     private(set) var scheduleCalls = 0
     private(set) var systemCreationCalls = 0
     private(set) var cancelCalls = 0
+    var supportsReminders = false
     var holdBeforeSystemCreation = false
     var holdAfterSystemCreation = false
     var onCreationSuspended: (() -> Void)?
@@ -8147,9 +8308,9 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
             iosVersion: "26.6.2",
             alarmKitAvailable: true,
             alarmAuthorization: .authorized,
-            remindersAvailable: false,
-            remindersAuthorization: .unsupported,
-            supportedKinds: [.alarm]
+            remindersAvailable: supportsReminders,
+            remindersAuthorization: supportsReminders ? .authorized : .unsupported,
+            supportedKinds: supportsReminders ? [.alarm, .reminder] : [.alarm]
         )
     }
 
@@ -9051,11 +9212,16 @@ private final class RootViewStandIn {
     private(set) var registrations: [Made] = []
     private var subscription: AnyCancellable?
 
+    /// Told of each controller made, for the test's store bookkeeping.
+    private let didMake: @MainActor (WebViewController) -> Void
+
     init(
         app: AppModel,
         notifications: NotificationsOn,
-        registration: Registration
+        registration: Registration,
+        didMake: @escaping @MainActor (WebViewController) -> Void
     ) {
+        self.didMake = didMake
         subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
             guard let self, let app, case .browser(let runtime) = route else {
                 return
@@ -9088,6 +9254,7 @@ private final class RootViewStandIn {
         }
     }
 
+    @MainActor
     private func register(_ runtime: MobileRuntimeContext, in app: AppModel) {
         guard let origin = WebOrigin(url: runtime.instance.url) else {
             return
@@ -9100,6 +9267,7 @@ private final class RootViewStandIn {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        didMake(controller)
         let inFlight = !app.mobileSessionCoordinator.isCurrentRuntime(runtime)
             && app.mobileSessionCoordinator.isSelectedRuntime(runtime)
         app.registerRuntimeController(controller, for: runtime)

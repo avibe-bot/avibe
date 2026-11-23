@@ -59,6 +59,10 @@ _HARNESS_SOURCE_GUIDANCE = (
     "\nAn input whose first line is `[Harness: ...]` came from a Watch, Task, Agent run, or callback, not from the "
     "user, even where it quotes them."
 )
+_SYSTEM_SCHEDULE_GUIDANCE = (
+    "For a system alarm or personal reminder, load `use-system-schedule` to choose the iPhone or Mac path. "
+    "Use Harness when an Agent needs to do work later.\n"
+)
 _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE = (
     "- **Follow through.** Maintain ongoing responsibility for entrusted work rather than forgetting it "
     "when a turn ends. When repeatedly blocked, revisit assumptions and root causes; when necessary, "
@@ -658,6 +662,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         assert text.count(_FOLLOW_THROUGH_PRINCIPLE) == 1
         assert text.count(_NEW_SESSION_MODEL_GUIDANCE) == 1
         assert text.count(_HARNESS_SOURCE_GUIDANCE) == 1
+        assert text.count(_SYSTEM_SCHEDULE_GUIDANCE) == 1
         assert text.count(_SESSION_TITLE_STEPS) == 1
         assert text.count(_PROJECT_CONTEXT) == 1
         text = text.replace(_PROJECT_CONTEXT, _PREVIOUS_PREFERENCES_CONTEXT)
@@ -669,6 +674,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         text = text.replace(_CALLBACK_RULES, _PREVIOUS_CALLBACK_RULES)
         text = text.replace(_TYPED_MENTIONS, _PREVIOUS_MENTIONS)
         text = text.replace(_HARNESS_SOURCE_GUIDANCE, "")
+        text = text.replace(_SYSTEM_SCHEDULE_GUIDANCE, "")
         text = text.replace(_SESSION_TITLE_STEPS, _PREVIOUS_SESSION_TITLE_STEPS)
         text = text.replace(_NEW_SESSION_MODEL_GUIDANCE, _PREVIOUS_FORK_OVERRIDE_GUIDANCE)
         text = text.replace(_HISTORY_AS_MEMORY_GUIDANCE, _PREVIOUS_HISTORY_GUIDANCE)
@@ -681,7 +687,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
     # verification principle and conversation-history guidance and Follow-through
     # principle, and the Harness rule that a run's --model applies
     # only to forks (now: to any new Session a run creates), and without the
-    # Harness line that says what a `[Harness: ...]` input is, and restoring the
+    # Harness lines identifying `[Harness: ...]` input and routing system schedules, and restoring the
     # two-call Session Title steps that `--if-untitled` replaced, and restoring the
     # retired shared preferences file paragraphs and their section heading, and
     # restoring the Agents roster and untyped mentions the Bots roster replaced,

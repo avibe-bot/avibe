@@ -8,7 +8,7 @@ import type { AgentBackend, AgentSupply, Source, TurnProvenance } from '@/compon
 
 import { frames } from '../../frame';
 import { AfterMount } from '../../shell/AfterMount';
-import { agent, agentOf, at, chainOf, claudeMax, demoAgents, demoSources, hubApi, ok, relayClaude, type AgentSpec } from './fixtures';
+import { agent, agentOf, at, chainOf, claudeMax, demoAgents, demoSources, hubApi, ok, relayClaude, relayGpt, type AgentSpec } from './fixtures';
 
 const order = (backend: AgentBackend) => {
   const supply = agentOf(backend);
@@ -72,6 +72,13 @@ const relayFirstAgents: AgentSpec[] = demoAgents.map((spec) => spec.backend !== 
   routes: { ...spec.routes, 'claude-opus-5': { hops: [[relayClaude, 'claude-opus-5'], [claudeMax, 'claude-opus-5']], origin: 'manual' } },
 });
 
+// Vibey's routes carry one more setting, the cache duration, folded under 「高级」.
+const vibeyOwnRoute: AgentSpec[] = demoAgents.map((spec) => spec.backend !== 'vibey' ? spec : {
+  ...spec,
+  routes: { ...spec.routes, 'claude-opus-5': { hops: [[relayClaude, 'claude-opus-5'], [relayGpt, 'claude-opus-5']], origin: 'manual' } },
+});
+const vibeyApi = hubApi({ agents: vibeyOwnRoute });
+
 // A model added to the menu that no provider serves yet.
 const unroutedAgents: AgentSpec[] = demoAgents.map((spec) => spec.backend !== 'opencode' ? spec : {
   ...spec,
@@ -91,6 +98,17 @@ const designFrames = frames([
     render: order('codex'),
   },
   {
+    name: 'default-order-info',
+    title: '默认路由 · 这个顺序管什么（ⓘ）',
+    width: 1280,
+    height: 800,
+    status: 'shipped',
+    themes: ['light'],
+    fixtures: { api },
+    click: ['[aria-label="{t:settings.models.order.infoLabel}"]'],
+    render: order('codex'),
+  },
+  {
     name: 'default-order-phone',
     title: '默认路由 · 手机',
     width: 390,
@@ -101,7 +119,7 @@ const designFrames = frames([
   },
   {
     name: 'route-automatic',
-    title: '模型路由 · 自动（按默认路由）',
+    title: '模型路由 · 跟随默认路由',
     width: 1000,
     height: 760,
     status: 'shipped',
@@ -110,7 +128,7 @@ const designFrames = frames([
   },
   {
     name: 'route-manual',
-    title: '模型路由 · 手动',
+    title: '模型路由 · 单独设置',
     width: 1000,
     height: 760,
     status: 'shipped',
@@ -136,6 +154,36 @@ const designFrames = frames([
       api: { ...hubApi({ agents: relayFirstAgents }), '/api/models/agents/claude/provenance?model=claude-opus-5': ok({ provenance: upstreamError }) },
     },
     render: route('claude', 'claude-opus-5', relayFirstAgents),
+  },
+  {
+    name: 'route-mode-info',
+    title: '模型路由 · 两种方式的区别（ⓘ）',
+    width: 1000,
+    height: 760,
+    status: 'shipped',
+    fixtures: { api },
+    click: ['[aria-label="{t:settings.models.routeDialog.mode.infoLabel}"]'],
+    render: route('codex', 'gpt-5.6-sol'),
+  },
+  {
+    name: 'route-advanced',
+    title: '模型路由 · 单独设置 · 高级（Vibey）',
+    width: 1000,
+    height: 820,
+    status: 'shipped',
+    fixtures: { api: vibeyApi },
+    click: ['text={t:settings.models.routeDialog.advanced}', '[aria-label="{t:settings.models.routing.cacheTtl.infoLabel}"]'],
+    render: route('vibey', 'claude-opus-5', vibeyOwnRoute),
+  },
+  {
+    name: 'route-advanced-phone',
+    title: '模型路由 · 单独设置 · 高级 · 手机（Vibey）',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    fixtures: { api: vibeyApi },
+    click: ['text={t:settings.models.routeDialog.advanced}'],
+    render: route('vibey', 'claude-opus-5', vibeyOwnRoute),
   },
   {
     name: 'route-empty',

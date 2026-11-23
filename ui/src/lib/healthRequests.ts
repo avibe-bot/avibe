@@ -60,7 +60,7 @@ type RequestKnowledge =
   | { readonly kind: 'terminal'; readonly request: HealthRequest };
 type ConnectionAttempt = {
   readonly requestId: string;
-  readonly phase: 'pairing' | 'native';
+  readonly phase: 'pairing' | 'native' | 'unresponsive';
   readonly cancelPairing: () => void;
 };
 type HealthConnections = {
@@ -96,9 +96,11 @@ export function observeHealthTerminal(request: HealthRequest) {
 }
 
 export async function connectHealthRequest(request: HealthRequest, signal: AbortSignal) {
+  const previous = connections.entries.get(request.id);
   if (signal.aborted || healthRequestView(request) !== 'authorize'
-    || connections.active || connections.entries.has(request.id)) return;
+    || connections.active || (previous && !(previous.kind === 'receipt' && previous.result === 'failed'))) return;
   const pairing = new AbortController();
+  let nativeTimer: ReturnType<typeof setTimeout> | undefined;
   let attempt: ConnectionAttempt = {
     requestId: request.id,
     phase: 'pairing',
@@ -116,7 +118,9 @@ export async function connectHealthRequest(request: HealthRequest, signal: Abort
     publishConnection({ active: null, entries });
   };
   // Reserve synchronously, before POST, including when two consumers act in the same tick.
-  publishConnection({ ...connections, active: attempt });
+  const entries = new Map(connections.entries);
+  if (previous?.kind === 'receipt' && previous.result === 'failed') entries.delete(request.id);
+  publishConnection({ entries, active: attempt });
   signal.addEventListener('abort', attempt.cancelPairing, { once: true });
   try {
     const pairingCode = await withApiDeadline(HEALTH_HTTP_DEADLINE_MS, pairing.signal, async (requestSignal) => {
@@ -137,12 +141,20 @@ export async function connectHealthRequest(request: HealthRequest, signal: Abort
     attempt = { ...attempt, phase: 'native' };
     publishConnection({ ...connections, active: attempt });
     signal.removeEventListener('abort', attempt.cancelPairing);
+    // Older shells may never settle. Explain recovery without releasing their
+    // still-live Native owner or admitting a concurrent connect.
+    nativeTimer = setTimeout(() => {
+      if (getHealthConnection().active !== attempt) return;
+      attempt = { ...attempt, phase: 'unresponsive' };
+      publishConnection({ ...connections, active: attempt });
+    }, 100_000);
     const result = await nativeHealthConnect({ requestId: request.id, pairingCode });
     if (!result || !['connected', 'declined', 'failed'].includes(result.state)) throw new Error('health_connect_failed');
     settle(result.state);
   } catch {
     settle('failed');
   } finally {
+    clearTimeout(nativeTimer);
     signal.removeEventListener('abort', attempt.cancelPairing);
   }
 }

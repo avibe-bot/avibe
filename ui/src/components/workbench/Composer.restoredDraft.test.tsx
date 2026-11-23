@@ -75,7 +75,7 @@ describe('Composer restored draft', () => {
     expect(send.disabled).toBe(false);
     fireEvent.click(send);
     await waitFor(() => expect(onSend).toHaveBeenCalled());
-    expect(onSend.mock.calls[0]).toEqual(['restored draft', [], []]);
+    expect(onSend.mock.calls[0]).toEqual(['restored draft', [], [], undefined]);
   });
 
   it('queues a restored draft as it is while the agent is busy', async () => {

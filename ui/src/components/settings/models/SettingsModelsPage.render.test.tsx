@@ -336,7 +336,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Let Model Hub manage|交给模型网关管理/i }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
-    expect(within(dialog).getByText(/migration does not test keys online|迁移时不联网校验 Key/)).toBeTruthy();
+    expect(within(dialog).getByText(/Import authentication saved in configuration files|导入配置文件、Shell 启动文件/)).toBeTruthy();
     expect(setMode).not.toHaveBeenCalled();
     if (refused) {
       await userEvent.click(within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }));
@@ -679,7 +679,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Manage models$|^管理模型$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Add models$|^添加模型$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Add custom model…$|^添加自定义模型…$/i }));
-    await userEvent.type(await screen.findByLabelText(/^Model$|^模型$/i), addedId);
+    await userEvent.type(await screen.findByLabelText(/^Model ID$|^模型 ID$/i), addedId);
     await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
 
@@ -1405,7 +1405,8 @@ describe('SettingsModelsPage surface branches', () => {
     }));
     await waitFor(() => expect(exactRead).toHaveBeenCalledOnce());
     expect(exactRead).toHaveBeenCalledWith('codex', 'gpt-5.6-sol');
-    expect(screen.getByText(/Changes to default routing do not overwrite|默认路由的调整不会覆盖/i)).toBeTruthy();
+    // The exact read is what the dialog draws: this model's own route, not the overview's row.
+    expect((await screen.findByRole('radio', { name: /^Set separately$|^单独设置$/ })).getAttribute('aria-checked')).toBe('true');
   });
 
   it('keeps a failed event read distinct from an empty history and retries it', async () => {
@@ -2211,8 +2212,7 @@ describe('SettingsModelsPage surface branches', () => {
     ], [agent]);
     const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i });
     await userEvent.click(opener);
-    await userEvent.click(await screen.findByRole('button', { name: /^Model actions$|^模型操作$/i }));
-    await userEvent.click(await screen.findByRole('menuitem', { name: /^Edit model$|^编辑模型$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Edit model$|^编辑模型$/i }));
     await waitFor(() => expect(document.querySelector('.model-hub-route-head')).toBeNull());
     // Edit opens the model editor over the catalog; leave both by keyboard.
     for (let open = 0; open < 3 && screen.queryAllByRole('dialog').length; open += 1) {
@@ -2222,6 +2222,38 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(screen.queryAllByRole('dialog')).toHaveLength(0));
     await flushRouteFocus();
     expect(document.activeElement).toBe(opener);
+  });
+
+  it('comes back to the route dialog under the new ID after its model is renamed from there', async () => {
+    const catalogModel: BackendModel = {
+      id: 'gpt-5.6-sol', display_name: null, origin: 'manual', models_dev_id: null, context_window: null,
+      max_output_tokens: null, input_modalities: ['text'], output_modalities: ['text'], supports_tools: true,
+      supports_reasoning: false, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    const agent = { ...takeoverAgent, catalog_models: [catalogModel] };
+    const renamed = { ...agent, catalog_models: [{ ...catalogModel, id: 'renamed-model' }] };
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
+    const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue({ builtin: [], providers: [], in_list: [] });
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(renamed);
+    renderPage([
+      { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+      { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+    ], [agent]);
+    await userEvent.click(await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Edit model$/i }));
+    await userEvent.clear(await screen.findByLabelText('Model ID'));
+    await userEvent.type(screen.getByLabelText('Model ID'), 'renamed-model');
+    const readsBefore = chainRead.mock.calls.length;
+    await userEvent.click(screen.getByRole('button', { name: 'Save model' }));
+
+    await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+    expect(write.mock.calls[0][1].renames).toEqual({ 'gpt-5.6-sol': 'renamed-model' });
+    // The route dialog is back, and it asks about the model by the ID it has now.
+    await waitFor(() => expect(document.querySelector('.model-hub-route-head')).not.toBeNull());
+    expect(chainRead.mock.calls.slice(readsBefore).map((call) => call[1])).toContain('renamed-model');
+    expect(chainRead.mock.calls.slice(readsBefore).map((call) => call[1])).not.toContain('gpt-5.6-sol');
   });
 
   it('MH-ROUTING-007 keeps the previous retry fallback when another route opens', async () => {

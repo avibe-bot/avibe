@@ -441,6 +441,12 @@ _read_refusal: tuple[tuple[str, str], int, str] | None = None
 # that has not been reached since pairing. Not a switch: a fact, read from the
 # stored state, that ends by itself with the first state read that succeeds.
 STATE_UNKNOWN_REASON = "address_state_unknown"
+# The pairing whose latest state read was answered 404: avibe.bot does not have
+# the address endpoints now (not yet, or no longer, as after a rollback). Until a
+# read succeeds the address is treated as never answered. In memory only: every
+# opening of the page and every start reads first, and the stored state, with its
+# list of old names, is left as it is.
+_endpoint_absent: tuple[str, str] | None = None
 _known_cleanup: tuple[str, frozenset[str]] | None = None
 _read_lock = threading.Lock()
 _retired_at_flip: dict[str, str] = {}  # old host -> new origin, for streams open at the switch
@@ -743,7 +749,7 @@ def _read_state_once(binding: Binding, *, again: bool = False) -> _StateRead | N
     another pairing. ``again`` is for a person who asks now.
     """
 
-    global _read_refused, _standing_refusal, _read_refusal
+    global _read_refused, _standing_refusal, _read_refusal, _endpoint_absent
 
     from vibe import remote_access
 
@@ -775,6 +781,7 @@ def _read_state_once(binding: Binding, *, again: bool = False) -> _StateRead | N
                     # Another definitive answer takes a standing refusal's place;
                     # a throttle or a server fault says nothing about it.
                     _standing_refusal = None
+                    _endpoint_absent = binding.pairing if exc.status == 404 else None
                 worded = _READ_PAGE_ERRORS.get(code) if definitive else None
                 _read_refusal = (binding.pairing, *worded) if worded is not None else None
         if exc.status == 401:
@@ -797,6 +804,7 @@ def _read_state_once(binding: Binding, *, again: bool = False) -> _StateRead | N
         if not latest():
             return None
         _read_refusal = None
+        _endpoint_absent = None  # the endpoint answered, whatever the shape of its answer
         if state is None:
             return None
         _standing_refusal = None
@@ -974,8 +982,11 @@ def _eligibility(binding: Binding | None) -> str | None:
 
 
 def _state_ever_read(binding: Binding) -> bool:
-    """Whether avibe.bot has ever answered a state read for this instance (stored, so it survives a restart)."""
+    """Whether avibe.bot has answered a state read for this instance (stored, so it
+    survives a restart) and has the endpoint now (its latest read was not a 404)."""
 
+    if _endpoint_absent is not None and _endpoint_absent == binding.pairing:
+        return False
     return isinstance(_load_state(binding.instance_id).get("state_read_at"), int)
 
 
@@ -1040,6 +1051,8 @@ def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
         raise AddressError(409, "operation_in_progress")
     # The Owner asks now: one read, also when avibe.bot's last word was a standing refusal.
     refresh_state(force=True, again=True)
+    if not _state_ever_read(binding):
+        raise AddressError(409, "rename_ineligible", reason=STATE_UNKNOWN_REASON)
     refusal = _standing_refusal_for(binding)
     if refusal is not None:
         raise AddressError(409, refusal)
@@ -1159,7 +1172,7 @@ def describe() -> dict[str, Any]:
         # without a restart once it answers.
         refresh_state()
         state = _load_state(binding.instance_id)
-    if reason is None and not isinstance(state.get("state_read_at"), int):
+    if reason is None and not _state_ever_read(binding):
         reason = STATE_UNKNOWN_REASON
     journal = state.get("journal")
     operation = None

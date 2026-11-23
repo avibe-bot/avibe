@@ -180,6 +180,18 @@ describe('catalogSaveFailureKey', () => {
     ['backend_model_catalog_invalid', 'saveInvalid'],
   ] as const;
 
+  it('says a busy store wrote nothing and can be saved again, by its code alone', () => {
+    // The one refusal that arrives without a sentence of its own: nothing was
+    // written, so the user's draft stays and the same save is simply pressed again.
+    const resolved = catalogSaveFailureKey(undefined, 'backend_model_store_busy');
+    expect(resolved).toBe('settings.models.gateway.catalog.saveBusy');
+    expect(t('en')(resolved)).toBe('Could not save right now; nothing was changed. Press Save again in a moment.');
+    expect(t('zh')(resolved)).toBe('现在保存不了，没有改动任何东西。稍后再点一次保存。');
+    // A named sentence still wins over the code, and an unknown code stays generic.
+    expect(catalogSaveFailureKey('modelHub.errors.backend_model_locked', 'backend_model_store_busy')).toBe('settings.models.gateway.catalog.saveLocked');
+    expect(catalogSaveFailureKey(undefined, 'something_else')).toBe('settings.models.gateway.catalog.saveFailed');
+  });
+
   it.each(REFUSALS)('renders %s as copy, not as a key, in both locales', (code, key) => {
     const resolved = catalogSaveFailureKey(`modelHub.errors.${code}`);
     expect(resolved).toBe(`settings.models.gateway.catalog.${key}`);

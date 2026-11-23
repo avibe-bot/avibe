@@ -3,6 +3,7 @@ use crate::direct::{
     rendezvous::{Reply, Request},
     webview_windows,
     wiring::Material,
+    WindowRegistration,
 };
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, Webview};
@@ -59,7 +60,15 @@ pub fn ask(
 }
 
 /// Routing here is given at creation: nothing is installed later.
-pub fn install(_: &AppHandle, _: String, _: String, _: Material, _: impl Fn() -> bool + Send + 'static) {}
+pub fn install(
+    _: &AppHandle,
+    _: String,
+    _: String,
+    _: Material,
+    _: WindowRegistration,
+    _: impl Fn() -> bool + Send + 'static,
+) {
+}
 
 /// Registered when the window is made, before it is sent to its instance:
 /// the route applies to it from its first request, and an unanswered
@@ -68,7 +77,16 @@ pub fn install(_: &AppHandle, _: String, _: String, _: Material, _: impl Fn() ->
 /// `still` is asked on the main thread, at this work's turn: an answer
 /// queued for a session that has ended meanwhile is not registered, so the
 /// credential of an ended session is never put on a window.
-pub fn answer(app: &AppHandle, window: String, material: Material, still: impl Fn() -> bool + Send + 'static) {
+///
+/// The answer is the window's own: the credential of `registration`, which
+/// no other window presents.
+pub fn answer(
+    app: &AppHandle,
+    window: String,
+    material: Material,
+    registration: WindowRegistration,
+    still: impl Fn() -> bool + Send + 'static,
+) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(view) = handle.get_webview(&window) else {
@@ -82,12 +100,8 @@ pub fn answer(app: &AppHandle, window: String, material: Material, still: impl F
             let Ok(core) = (unsafe { platform.controller().CoreWebView2() }) else {
                 return;
             };
-            let registered = webview_windows::answer_listener_challenge(
-                &core,
-                material.proxy,
-                &material.username,
-                &material.password,
-            );
+            let (username, password) = registration.native_login();
+            let registered = webview_windows::answer_listener_challenge(&core, material.proxy, username, password);
             if let (Ok(registration), Ok(mut answering)) = (registered, ANSWERING.lock()) {
                 answering.put(window, registration);
             }

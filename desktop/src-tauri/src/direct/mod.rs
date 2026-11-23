@@ -40,6 +40,10 @@ mod offer_tests;
 mod path;
 pub use path::{AddressFamily, SelectedPath};
 mod public;
+mod registered;
+#[cfg(test)]
+#[path = "../../tests/direct/registered.rs"]
+mod registered_tests;
 pub mod rendezvous;
 #[cfg(test)]
 #[path = "../../tests/direct/rendezvous.rs"]

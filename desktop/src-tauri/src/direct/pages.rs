@@ -6,11 +6,16 @@
 //! the instance it was made for. Its page hears the truth about that one
 //! window: "direct" only while the window has a session's route and that
 //! session's client prefers a direct path.
+//!
+//! A routed window has a registration of its own with its session's
+//! listener (`registered.rs`), kept here: its credential is what the window
+//! presents, and its page's hand-over closes that window's connections only.
 use super::{choose, direct, lock, Direct};
 use crate::direct::{
-    bridge::{self, Ledger, Message, Method, Request},
+    bridge::{self, Ledger, Message, Method, Request, Told},
+    registered::Registered,
     rendezvous::origin_of,
-    Client, Handover, PathStatus,
+    Client, HandoverResult, PathStatus, WindowRegistration,
 };
 use crate::instance_client;
 use std::{
@@ -35,10 +40,10 @@ struct Page {
 /// before what is kept for it is dropped as a window that never was.
 const UNMADE: Duration = Duration::from_secs(60);
 
-/// What a session's client tells and does for its windows' pages.
+/// What a session's client tells and does for its windows and their pages.
 struct Live {
     paths: watch::Receiver<PathStatus>,
-    handover: Handover,
+    registered: Registered,
 }
 
 #[derive(Default)]
@@ -91,7 +96,7 @@ pub(super) fn session_started(app: &AppHandle, state: &Arc<Direct>, session: u64
         session,
         Live {
             paths: paths.clone(),
-            handover: client.handover(),
+            registered: Registered::new(client.handover()),
         },
     );
     let app = app.clone();
@@ -102,6 +107,26 @@ pub(super) fn session_started(app: &AppHandle, state: &Arc<Direct>, session: u64
             refresh(&app, &state, false);
         }
     });
+}
+
+/// A window of the session has just been routed: its own registration with
+/// the session's listener, whose credential the window presents. `None`
+/// when the session's client is gone or its listener takes no more windows;
+/// the window then gets no route.
+pub(super) fn register(state: &Arc<Direct>, session: u64, window: &str) -> Option<WindowRegistration> {
+    lock(&state.pages)
+        .sessions
+        .get_mut(&session)?
+        .registered
+        .register(window)
+}
+
+/// The session is ending and its client is about to be dropped: what its
+/// windows presented opens nothing from here on.
+pub(super) fn session_ending(state: &Arc<Direct>, session: u64) {
+    if let Some(live) = lock(&state.pages).sessions.get_mut(&session) {
+        live.registered.revoke_all();
+    }
 }
 
 /// A session's client is gone.
@@ -118,6 +143,13 @@ pub(super) fn refresh(app: &AppHandle, state: &Arc<Direct>, all: bool) {
         pages
             .windows
             .retain(|label, page| app.get_webview(label).is_some() || page.made.elapsed() < UNMADE);
+        // A window that is no longer routed by its session (it closed) is
+        // no longer registered with that session's listener.
+        let wiring = lock(&state.wiring);
+        for (session, live) in &mut pages.sessions {
+            live.registered.keep(|window| wiring.routes(*session, window));
+        }
+        drop(wiring);
         pages.windows.keys().cloned().collect()
     };
     for label in labels {
@@ -143,12 +175,17 @@ fn push(app: &AppHandle, state: &Arc<Direct>, label: &str, always: bool) {
         let mut pages = lock(&state.pages);
         let Pages { windows, sessions } = &mut *pages;
         let Some(page) = windows.get_mut(label) else { return };
-        let (routed, mode) = {
+        let (routed, (mode, order)) = {
             let wiring = lock(&state.wiring);
-            (wiring.routed_by(label), wiring.mode(&page.account, &page.origin))
+            (wiring.routed_by(label), wiring.choice(&page.account, &page.origin))
         };
-        // A route whose client is gone carries nothing.
-        let routed = routed.and_then(|session| sessions.get(&session).map(|live| (session, *live.paths.borrow())));
+        // A route whose client is gone, or that the window was never given
+        // (its registration was refused), carries nothing.
+        let routed = routed.and_then(|session| {
+            let live = sessions.get(&session)?;
+            live.registered.of(label)?;
+            Some((session, *live.paths.borrow()))
+        });
         if !page.ledger.observe(routed) && !always {
             return;
         }
@@ -156,7 +193,7 @@ fn push(app: &AppHandle, state: &Arc<Direct>, label: &str, always: bool) {
             &page.origin,
             &Message::State {
                 status: page.ledger.status(),
-                preference: bridge::preference(mode),
+                choice: Told::new(mode, order),
             },
         )
     };
@@ -202,51 +239,49 @@ fn act(view: &Webview, url: &url::Url) {
     }
     match request.method {
         Method::Preference => {
-            let preference = bridge::preference(lock(&state.wiring).mode(&account, &origin));
+            let (mode, order) = lock(&state.wiring).choice(&account, &origin);
+            let choice = Told::new(mode, order);
             let reply = Message::Reply {
                 id: request.id,
-                result: preference.clone(),
-                preference: Some(preference),
+                result: choice.preference.clone(),
+                choice: Some(choice),
             };
             answer(app, label, &origin, reply);
         }
         Method::SetPreference(mode) => {
-            choose(app, &state, &account, &origin, mode);
-            let preference = bridge::preference(mode);
+            let choice = Told::new(mode, choose(app, &state, &account, &origin, mode));
             let reply = Message::Reply {
                 id: request.id,
-                result: preference.clone(),
-                preference: Some(preference),
+                result: choice.preference.clone(),
+                choice: Some(choice),
             };
             answer(app, label, &origin, reply);
         }
         Method::Handover => {
-            let routed = lock(&state.wiring).routed_by(label);
-            let live =
-                routed.and_then(|session| Some((session, lock(&state.pages).sessions.get(&session)?.handover.clone())));
+            // The page's own window's registration, as it is now: what is
+            // closed is that window's quiet connections and no other's, and
+            // a window that takes this label later is not touched.
+            // (The wiring is let go before the pages are taken.)
+            let session = lock(&state.wiring).routed_by(label);
+            let own = session.and_then(|session| {
+                lock(&state.pages)
+                    .sessions
+                    .get(&session)?
+                    .registered
+                    .handing_over(label)
+            });
             let (app, label) = (app.clone(), label.to_owned());
             tauri::async_runtime::spawn(async move {
-                let result = match (live, origin.strip_prefix("https://")) {
-                    (Some((session, handover)), Some(host)) => {
-                        // The session's windows share one listener: its quiet
-                        // public connections are this page's to close only
-                        // while no other window has the route. The wiring is
-                        // held for each claim, so none can join during one.
-                        let sole = || {
-                            let open = app.webviews();
-                            let wiring = lock(&state.wiring);
-                            wiring
-                                .sole(session, &label, |window| open.contains_key(window))
-                                .then_some(wiring)
-                        };
-                        bridge::handover(&handover.close_quiet_public(host, sole).await)
+                let result = match (own, origin.strip_prefix("https://")) {
+                    (Some((handover, registration)), Some(host)) => {
+                        handover.close_quiet_public_for_window(host, &registration).await
                     }
-                    _ => bridge::handover(&crate::direct::HandoverResult::NotUsable),
+                    _ => HandoverResult::NotUsable,
                 };
                 let reply = Message::Reply {
                     id: request.id,
-                    result,
-                    preference: None,
+                    result: bridge::handover(&result),
+                    choice: None,
                 };
                 answer(&app, &label, &origin, reply);
             });

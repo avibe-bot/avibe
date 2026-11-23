@@ -149,7 +149,7 @@ def address(monkeypatch):
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
         ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
         ("_last_read_failed", None), ("_known_cleanup", None), ("_binding_failure_logged", None),
-        ("_read_refused", False), ("_standing_refusal", None), ("_read_refusal", None),
+        ("_read_refused", False), ("_standing_refusal", None), ("_read_refusal", None), ("_endpoint_absent", None),
     ):
         monkeypatch.setattr(instance_address, name, value)
     instance_address._worker_read_requested.clear()
@@ -889,7 +889,8 @@ def test_a_state_read_refused_for_more_than_one_pairing_stands_until_remote_acce
     (remote_access.BackendRequestError(403, {"error": "rename_ineligible"}), (409, "rename_ineligible")),
     (remote_access.BackendRequestError(403, {"error": "forbidden"}), (409, "rename_ineligible")),
     (remote_access.BackendRequestError(400, {"error": "invalid_request"}), (503, "unavailable")),
-    (remote_access.BackendRequestError(404, {"error": "resource_acl_device_rejected"}), (503, "unavailable")),
+    # No such endpoint: as an address avibe.bot has not answered for.
+    (remote_access.BackendRequestError(404, {"error": "resource_acl_device_rejected"}), (409, "rename_ineligible")),
     (remote_access.BackendRequestError(405, {}), (503, "unavailable")),
     (remote_access.BackendRequestError(415, {}), (503, "unavailable")),
     (remote_access.BackendRequestError(409, {"error": "binding_changed"}), (503, "unavailable")),
@@ -916,7 +917,8 @@ def test_another_answer_to_a_person_asking_ends_the_standing_refusal_and_is_word
     clocks.advance(61)
     with pytest.raises(instance_address.AddressError) as refused:
         instance_address.preview("third", ("loopback",))
-    assert refused.value.code == "unavailable"
+    # An endpoint known to be absent stays so until it answers; no answer does not change that.
+    assert refused.value.code == ("rename_ineligible" if getattr(answer, "status", None) == 404 else "unavailable")
 
 
 @pytest.mark.parametrize("error", [{"code": "conflict"}, ["rebind_required"], 409, None, True])
@@ -1054,6 +1056,58 @@ def test_the_change_is_offered_by_itself_once_avibe_bot_answers(address):
     assert binding().active_host == NEW and is_cleaning(get(OLD))
 
 
+def test_endpoints_that_go_away_hide_the_change_until_they_answer_again(address):
+    """avibe.bot rolled back after this instance had read the state once."""
+
+    import json
+
+    plane, clocks = address
+    rename_to("new")
+    run()
+    assert instance_address.describe()["eligible"] is True
+    stored = json.loads(instance_address._state_path().read_text(encoding="utf-8"))
+    plane.fail = remote_access.BackendRequestError(*NO_SUCH_ENDPOINT)
+    clocks.advance(61)
+    told = instance_address.describe()  # opening the page reads, and the endpoint is not there
+    assert told["eligible"] is False and told["ineligible_reason"] == "address_state_unknown"
+    # What was recorded stays: the address, the old name and its list.
+    assert told["hostname"] == NEW and [entry["hostname"] for entry in told["cleanup"]] == [OLD]
+    assert json.loads(instance_address._state_path().read_text(encoding="utf-8")) == stored
+    assert binding().active_host == NEW and binding().paired
+    # Neither request of a change asks anything.
+    calls = len(plane.calls)
+    for attempt in (lambda: instance_address.preview("third", ("loopback",)),
+                    lambda: instance_address.change("made-up-confirmation", ("loopback",))):
+        with pytest.raises(instance_address.AddressError) as refused:
+            attempt()
+        assert (refused.value.status, refused.value.code) == (409, "rename_ineligible")
+        assert refused.value.extra == {"reason": "address_state_unknown"}
+    assert len(plane.calls) == calls and instance_address._journal(binding()) is None
+    # No answer says nothing new; it stays hidden. Another definitive answer is not this fact.
+    plane.fail = TimeoutError("timed out")
+    clocks.advance(6)
+    assert instance_address.describe()["ineligible_reason"] == "address_state_unknown"
+    plane.fail = remote_access.BackendRequestError(403, {"error": "rename_ineligible"})
+    clocks.advance(6)
+    assert instance_address.describe()["eligible"] is True
+    plane.fail = remote_access.BackendRequestError(*NO_SUCH_ENDPOINT)
+    clocks.advance(6)
+    assert instance_address.describe()["eligible"] is False
+    # A 404 that arrives while the Owner asks is said the same way, not as "unavailable".
+    instance_address._endpoint_absent = None
+    with pytest.raises(instance_address.AddressError) as refused:
+        instance_address.preview("third", ("loopback",))
+    assert refused.value.extra == {"reason": "address_state_unknown"}
+    # The endpoints come back: the next opening of the page offers the change, with no restart.
+    plane.fail = None
+    clocks.advance(6)
+    told = instance_address.describe()
+    assert told["eligible"] is True and told["ineligible_reason"] is None
+    rename_to("third")
+    run()
+    assert binding().active_host == THIRD
+
+
 def test_without_the_page_the_owed_read_finds_avibe_bot_within_the_hour(address):
     plane, clocks = address
     never_answered()
@@ -1078,7 +1132,7 @@ def test_without_the_page_the_owed_read_finds_avibe_bot_within_the_hour(address)
     (remote_access.BackendRequestError(429, {"error": "rate_limited"}), "unavailable"),
     (remote_access.BackendRequestError(401, {"error": "invalid_device_secret"}), "pairing_invalid"),
     (remote_access.BackendRequestError(403, {"error": "forbidden"}), "rename_ineligible"),
-    (remote_access.BackendRequestError(404, {"error": "resource_acl_device_rejected"}), "unavailable"),
+    (remote_access.BackendRequestError(404, {"error": "resource_acl_device_rejected"}), "rename_ineligible"),
     (remote_access.BackendRequestError(409, {"error": "binding_changed"}), "unavailable"),
 ])
 def test_other_failures_of_the_state_read_are_asked_again_as_before(address, no_answer, told):
@@ -1093,7 +1147,9 @@ def test_other_failures_of_the_state_read_are_asked_again_as_before(address, no_
     with pytest.raises(instance_address.AddressError) as refused:
         instance_address.preview("third", ("loopback",))
     assert refused.value.code == told
-    assert asked(plane, "hostname-state") == 4 and asked(plane, "hostname-renames") == 0
+    # Once the endpoint is known to be absent, the Owner's request asks nothing more.
+    absent = getattr(no_answer, "status", None) == 404
+    assert asked(plane, "hostname-state") == (3 if absent else 4) and asked(plane, "hostname-renames") == 0
 
 
 def test_a_committed_change_waits_for_a_new_binding_without_asking(address):

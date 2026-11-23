@@ -386,6 +386,7 @@
         "model_id": {"type": "string", "minLength": 1}
       }
     },
+    "ModelsDevMatchKind": {"enum": ["exact", "closest"]},
     "ModelCandidate": {
       "type": "object",
       "required": ["id", "display_name", "reasoning_efforts", "suppliers", "origin"],
@@ -397,6 +398,7 @@
         "suppliers": {"type": "array", "items": {"$ref": "#/definitions/CandidateSupplier"}, "uniqueItems": true},
         "origin": {"enum": ["builtin", "provider", "models_dev", "manual"]},
         "models_dev_id": {"type": "string", "minLength": 3},
+        "match_kind": {"$ref": "#/definitions/ModelsDevMatchKind"},
         "context_window": {"type": ["integer", "null"], "minimum": 1},
         "max_output_tokens": {"type": ["integer", "null"], "minimum": 1},
         "input_modalities": {"type": "array", "items": {"enum": ["text", "image", "audio", "video", "pdf"]}, "uniqueItems": true},
@@ -407,6 +409,7 @@
         "group_if_removed": {"anyOf": [{"enum": ["builtin", "providers"]}, {"type": "null"}]}
       },
       "dependencies": {
+        "match_kind": ["models_dev_id"],
         "models_dev_id": ["context_window", "max_output_tokens", "input_modalities", "output_modalities", "supports_tools", "supports_reasoning"],
         "context_window": ["models_dev_id"],
         "max_output_tokens": ["models_dev_id"],
@@ -457,6 +460,7 @@
             "additionalProperties": false,
             "properties": {
               "provider_id": {"type": "string", "minLength": 1},
+              "match_kind": {"$ref": "#/definitions/ModelsDevMatchKind"},
               "provider_name": {"type": "string", "minLength": 1},
               "first_party": {"type": "boolean"},
               "model_id": {"type": "string", "minLength": 1},

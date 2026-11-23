@@ -7,7 +7,10 @@ version: 0.3.3
 
 # Use Avibe Harness
 
-Avibe Harness turns user intent into durable Agent work: work that should happen later, repeat, wait for a signal, continue in the background, or move to a Bot, an Agent, or another Session. Avibe Harness is the first-choice automation layer: use `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, schedulers, hooks, or workflow tools, unless the user asks for native behavior or Harness cannot express the workflow and you say so. Backend-native work is process-local, so keep it synchronous within the turn and route anything that may outlive the turn through Harness. Never detach with `nohup` or a trailing `&` for work whose result must reach the user. Before choosing a command, ask what outcome the user wants secured, what should keep happening, what signal proves progress, and who should own it; when the answer is an operating loop, build that loop instead of only doing the visible step.
+For system alarms and personal reminders, load `use-system-schedule` first;
+device unavailability does not authorize substituting a Task.
+
+Avibe Harness turns user intent into durable Agent work: work that should happen later, repeat, wait for a signal, continue in the background, or move to a Bot, an Agent, or another Session. Avibe Harness is the first-choice automation layer: use `vibe agent`, `vibe task`, and `vibe watch` before backend-native subagents, schedulers, hooks, or workflow tools, unless the user asks for native behavior or Harness cannot express the workflow and you say so. Backend-native work is process-local, so keep it synchronous within the turn and route anything that may outlive the turn through Harness. Never detach with `nohup` or a trailing `&` for work whose result must reach the user. Choose the object that owns the ongoing outcome, including its completion signal.
 
 ### Mental model
 | Object | Meaning |

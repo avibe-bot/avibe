@@ -72,6 +72,7 @@ def test_models_dev_search_normalizes_editable_metadata(monkeypatch, tmp_path):
             "provider_id": "deepseek",
             "provider_name": "DeepSeek",
             "first_party": True,
+            "match_kind": "exact",
             "model_id": "deepseek-v4",
             "models_dev_id": "deepseek/deepseek-v4",
             "display_name": "DeepSeek V4",
@@ -564,6 +565,113 @@ def test_models_dev_caps_matches_at_eight(monkeypatch):
 
     assert len(matches) == models_dev_catalog.MODELS_DEV_MAX_MATCHES == 8
     assert [item["model_id"] for item in matches] == sorted(item["model_id"] for item in matches)
+
+
+def test_metadata_resolves_only_known_variant_suffixes():
+    # Synthetic deployments: the same bare ID may have different limits at two relays.
+    catalog = {
+        "google": {"models": {key: {} for key in ("gemini-9-flash", "gemini-8-flash-image")}},
+        "anthropic": {"models": {"claude-opus-9-6": {}, "claude-fable-9-2": {}}},
+        "openai": {"models": {"gpt-9-example": {}, "gpt-8": {}}},
+        "xai": {"models": {key: {} for key in (
+            "grok-9.20-0309-reasoning", "grok-9.20-multi-agent-0309", "grok-9.3", "grok-9.5", "grok-9.7",
+        )}},
+        "relay-a": {"models": {"gpt-oss-999b": {"limit": {"context": 20}}, "kimi-9": {}}},
+        "relay-b": {"models": {"gpt-oss-999b": {"limit": {"context": 30}}, "kimi-9": {}}},
+    }
+    exact = ["grok-9.20-0309-reasoning", "gemini-8-flash-image", "claude-fable-9-2", "claude-opus-9-6", "gpt-9-example", "gpt-8"]
+    closest = {
+        "gemini-9-flash-high": "google/gemini-9-flash", "gemini-9-flash-tiered": "google/gemini-9-flash",
+        "claude-opus-9-6-thinking": "anthropic/claude-opus-9-6", "grok-9.3-latest": "xai/grok-9.3",
+        "grok/grok-9.3-latest": "xai/grok-9.3", "x-ai/grok-9.5-latest": "xai/grok-9.5",
+        "xai/grok-9.7-latest": "xai/grok-9.7", "kimi-9-medium": "relay-a/kimi-9",
+        **{f"gpt-8-{tail}": "openai/gpt-8" for tail in (
+            "low", "minimal", "xhigh", "20260503", "2026-05-03", "0503", "high-0503-latest",
+        )},
+    }
+    unknown = [
+        "gpt-oss-999b-medium", "grok-9.20-multi-agent-latest", "composer-9.2", "gpt-reserve", "codex-auto-review",
+        "claude-*", "gpt-*", "codex-*", "o1*", "grok", "grok-latest", "gpt-oss-999b-notreal",
+        "gemini-9-flash-image-unknown", "claude-opus-999-high", "foo-123-high", "gpt-8-2026-13-45",
+        *(f"gpt-8-{suffix}" for suffix in ("fast", "preview", "reasoning", "non-reasoning", "image", "multi-agent", "32b", "2")),
+    ]
+    rows = models_dev_catalog.models_dev_metadata_matches([*exact, *closest, *unknown], catalog)
+    assert {key: row["model_id"] for key, row in rows.items() if row["match_kind"] == "exact"} == {key: key for key in exact}
+    assert {key: row["models_dev_id"] for key, row in rows.items() if row["match_kind"] == "closest"} == closest
+    assert rows.keys().isdisjoint(unknown)
+
+
+def test_search_includes_the_longest_registered_base_without_displacing_exact_identity(monkeypatch):
+    catalog = {"openai": {"models": {key: {} for key in ("gpt-9", "gpt-9-high", "gpt-9-high-low-extra")}}}
+    monkeypatch.setattr(models_dev_catalog, "_catalog_for_search", lambda **_: catalog)
+    inferred, suggestion = models_dev_catalog.search_models_dev("relay/gpt-9-high-low")
+    assert (inferred["model_id"], inferred["models_dev_id"], inferred["match_kind"]) == (
+        "relay/gpt-9-high-low", "openai/gpt-9-high", "closest",
+    )
+    assert (suggestion["model_id"], suggestion["match_kind"]) == ("gpt-9-high-low-extra", "closest")
+    assert [(row["model_id"], row["match_kind"]) for row in models_dev_catalog.search_models_dev("gpt-9-high")] == [
+        ("gpt-9-high", "exact"), ("gpt-9-high-low-extra", "closest"),
+    ]
+
+
+def test_search_and_metadata_each_read_catalog_once_and_honor_deployment_authority(monkeypatch):
+    class Catalog(dict):
+        reads = 0
+
+        def items(self):
+            self.reads += 1
+            return super().items()
+
+    catalog = Catalog({
+        "openai": {"models": {"gpt-9": {"limit": {"context": 9000}}}},
+        "relay": {"models": {"gpt-9": {"limit": {"context": 2000}}}},
+    })
+    monkeypatch.setattr(models_dev_catalog, "_catalog_for_search", lambda **_: catalog)
+    for count, (query, expected) in enumerate((
+        ("relay/gpt-9", ("exact", "relay/gpt-9", 2000)),
+        ("unknown/gpt-9", ("exact", "openai/gpt-9", 9000)),
+        ("relay/gpt-9-high", ("closest", "openai/gpt-9", 9000)),
+    ), start=1):
+        row, = models_dev_catalog.search_models_dev(query)
+        assert (row["match_kind"], row["models_dev_id"], row["context_window"]) == expected
+        assert catalog.reads == count
+    rows = models_dev_catalog.models_dev_metadata_matches(["relay/gpt-9", "gpt-9-high"], catalog)
+    assert (rows["relay/gpt-9"]["context_window"], rows["gpt-9-high"]["context_window"]) == (2000, 9000)
+    assert catalog.reads == 4
+
+
+def test_fully_qualified_exact_deployment_precedes_the_search_result_cap(monkeypatch):
+    catalog = {
+        "relay": {"models": {"gpt-9": {}}},
+        "openai": {"models": {"gpt-9": {}, **{f"gpt-9-variant-{i}": {} for i in range(8)}}},
+    }
+    monkeypatch.setattr(models_dev_catalog, "_catalog_for_search", lambda **_: catalog)
+    qualified = models_dev_catalog.search_models_dev("relay/gpt-9")
+    assert len(qualified) == 8
+    first = qualified[0]
+    assert (first["provider_id"], first["model_id"], first["match_kind"]) == ("relay", "gpt-9", "exact")
+    assert models_dev_catalog.search_models_dev("gpt-9")[0]["models_dev_id"] == "openai/gpt-9"
+
+
+def test_disagreeing_first_party_copies_do_not_describe_a_variant():
+    copies = {key: {"id": "gpt-9", "limit": {"context": limit}} for key, limit in (("a", 100), ("b", 200))}
+    for items in (copies.items(), reversed(copies.items())):
+        catalog = {"openai": {"models": dict(items)}}
+        assert not models_dev_catalog.models_dev_metadata_matches(["gpt-9-high"], catalog)
+
+
+def test_ineligible_registered_bases_do_not_describe_variants():
+    bases = ("gpt-9*", "gpt-9?", "gpt-9[abc]", "gpt-9]", "foo-123", "gpt-reserve")
+    catalog = {"relay": {"models": dict.fromkeys(bases, {})}}
+    assert set(models_dev_catalog.exact_models_dev_matches(bases, catalog)) == set(bases)
+    assert not models_dev_catalog.models_dev_metadata_matches([key + "-high" for key in bases], catalog)
+
+
+def test_repeated_variant_tokens_can_only_match_registered_prefixes():
+    catalog = {"openai": {"models": {"gpt-9": {}, "gpt-9-high": {}}}}
+    model_id = "gpt-9" + "-high" * 512
+    row = models_dev_catalog.models_dev_metadata_matches([model_id], catalog)[model_id]
+    assert row["models_dev_id"] == "openai/gpt-9-high"
 
 
 def test_exact_models_dev_matches_never_borrow_a_neighbour():
