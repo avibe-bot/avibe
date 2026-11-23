@@ -1063,14 +1063,18 @@ class AnthropicAdapter(ProviderAdapter):
                                     continue
                                 u = message.usage
                                 if attempt.mode == "continue" and attempt.trial:
-                                    outcome = (
-                                        "bootstrap_proven"
-                                        if 0 < attempt.record.get("body_bytes", 0) < attempt.record["full_bytes"]
-                                        else "bootstrap_no_byte_saving"
-                                    )
-                                    attempt.record["bootstrap_outcome"] = await asyncio.to_thread(
-                                        threads.bootstrap.settle, route, attempt.trial, outcome
-                                    )
+                                    if 0 < attempt.record.get("body_bytes", 0) < attempt.record["full_bytes"]:
+                                        attempt.record["bootstrap_outcome"] = "retained_smaller"
+                                        trial = attempt.trial
+
+                                        async def accept_trial() -> None:
+                                            await asyncio.to_thread(threads.bootstrap.settle, route, trial, "bootstrap_proven")
+
+                                        observation.after_commit = accept_trial
+                                    else:
+                                        attempt.record["bootstrap_outcome"] = await asyncio.to_thread(
+                                            threads.bootstrap.settle, route, attempt.trial, "bootstrap_no_byte_saving"
+                                        )
                                 if threads.claims.get(session) is not claim:
                                     yield event
                                     continue
@@ -1092,6 +1096,7 @@ class AnthropicAdapter(ProviderAdapter):
                                         time.monotonic() + threads.PARENT_SECONDS,
                                         u.cache_read_tokens,
                                         next_trial,
+                                        threads.terminal_mark(wire.body),
                                     ),
                                 )
                         else:

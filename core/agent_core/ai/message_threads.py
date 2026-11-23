@@ -63,6 +63,7 @@ class Parent:
     expires: float
     reads: int = 0
     trial: bootstrap.Trial | None = None
+    terminal_mark: bool = False
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
@@ -221,6 +222,27 @@ def _cache_plan(full: dict) -> tuple[str | None, int | None]:
     return None, marks[0][1]
 
 
+def _reaches_parent_mark(assistant: dict, suffix: list) -> bool:
+    # Positions after the previous request's final block: a lookup covers itself and 19 predecessors.
+    content = assistant["content"]
+    distance = len(content) if isinstance(content, list) else 1
+    for msg in suffix:
+        blocks = msg["content"]
+        for block in blocks if isinstance(blocks, list) else (blocks,):
+            distance += 1
+            if distance >= 20:
+                return False
+            if isinstance(block, dict) and "cache_control" in block:
+                return True
+    return False
+
+
+def terminal_mark(body: dict) -> bool:
+    messages = body["messages"]
+    blocks = messages[-1]["content"] if messages else None
+    return bool(isinstance(blocks, list) and blocks and "cache_control" in blocks[-1])
+
+
 def _contains_image(messages: list) -> bool:
     def has_image(content) -> bool:
         return isinstance(content, list) and any(
@@ -322,6 +344,11 @@ def prepare(
                 reason = "large_static_or_delta"
             elif parent.message_id is None:
                 warm = parent.reads > 0
+            elif parent.trial is not None and not bootstrap.owns(route, parent.trial):
+                mode, reason = "full", "bootstrap_stale"
+            elif parent.terminal_mark and parent.trial is None and not _reaches_parent_mark(msgs[n], suffix):
+                mode, reason = "full", "terminal_marker_out_of_reach"
+                capture_warm = omitted_mark is not None
             else:
                 mode = "continue"
                 trial = parent.trial

@@ -22,6 +22,17 @@ class Trial:
     proven: bool
 
 
+def _loss_marker(route: bytes):
+    return get_state_dir() / "message-thread-loss" / route.hex()
+
+
+def _lost_at(route: bytes) -> float:
+    try:
+        return _loss_marker(route).stat().st_mtime
+    except FileNotFoundError:
+        return 0
+
+
 def _limit() -> int:
     try:
         return max(0, int(os.environ.get("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", "5")))
@@ -34,6 +45,8 @@ def reserve(route: bytes, reads: int, preview: bool) -> tuple[Trial | None, str]
     path = get_state_dir() / "message-thread-bootstrap.sqlite"
     try:
         if preview and not path.exists():
+            if (lost := _lost_at(route)) and lost + DAY > time.time():
+                return None, "bootstrap_read_loss"
             return (Trial("", reads, False), "bootstrap_trial") if _limit() else (None, "bootstrap_daily_limit")
         if not preview:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +65,10 @@ def reserve(route: bytes, reads: int, preview: bool) -> tuple[Trial | None, str]
             now = time.time()
             day = int(now // DAY)
             row = db.execute("SELECT status,until FROM routes WHERE route=?", (route,)).fetchone()
-            proven = bool(row and row[0] == "bootstrap_proven")
+            lost = _lost_at(route)
+            if lost and lost + DAY > now:
+                return None, "bootstrap_read_loss"
+            proven = bool(row and row[0] == "bootstrap_proven" and row[1] - DAY > lost)
             if row and not proven and row[1] > now:
                 return None, row[0]
             budget = db.execute("SELECT day,used FROM budget WHERE id=1").fetchone()
@@ -84,6 +100,24 @@ def reserve(route: bytes, reads: int, preview: bool) -> tuple[Trial | None, str]
         return None, "bootstrap_state_unavailable"
 
 
+def owns(route: bytes, trial: Trial) -> bool:
+    """A local parent is single-use, but is not authority to spend an expired or superseded reservation."""
+    path = get_state_dir() / "message-thread-bootstrap.sqlite"
+    try:
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as db:
+            now = time.time()
+            return (
+                not ((lost := _lost_at(route)) and lost + DAY > now)
+                and db.execute(
+                    "SELECT 1 FROM routes WHERE route=? AND ticket=? AND status='bootstrap_pending' AND until>?",
+                    (route, trial.ticket, now),
+                ).fetchone()
+                is not None
+            )
+    except (sqlite3.Error, OSError, ValueError):
+        return False
+
+
 def settle(route: bytes, trial: Trial, status: str) -> str:
     """Only the owning generation can prove a route. A lost read always wins over overlapping success."""
     path = get_state_dir() / "message-thread-bootstrap.sqlite"
@@ -93,6 +127,9 @@ def settle(route: bytes, trial: Trial, status: str) -> str:
             if status == "bootstrap_read_loss":
                 db.execute("INSERT OR REPLACE INTO routes VALUES (?,?,?,?)", (route, "", status, now + DAY))
             else:
+                db.execute("BEGIN IMMEDIATE")
+                if (lost := _lost_at(route)) and lost + DAY > now:
+                    return "bootstrap_stale"
                 # Keep the precharged lease until proof, or until an abandoned trial expires.
                 changed = db.execute(
                     "UPDATE routes SET status=?,until=? WHERE route=? AND ticket=? AND status='bootstrap_pending' AND until>?",
@@ -102,4 +139,14 @@ def settle(route: bytes, trial: Trial, status: str) -> str:
                     return "bootstrap_stale"
         return status
     except (sqlite3.Error, OSError, ValueError):
+        # A contended ledger must not shorten a measured loss to 24h from the earlier reservation.
+        # Independent of SQLite's write lock; a later process checks this receipt before admission/proof.
+        if status == "bootstrap_read_loss":
+            try:
+                marker = _loss_marker(route)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+                return status
+            except OSError:
+                pass
         return "bootstrap_state_unavailable"
