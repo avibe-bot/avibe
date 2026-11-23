@@ -119,21 +119,38 @@ GOLDENS = {
 
 
 @pytest.mark.parametrize('history', [False, True])
-def test_missing_session_created_index_preserves_long_history(isolated_state, history):  # noqa: F811
-    # Compatible snapshots need not retain this performance index. Empty or
-    # short histories never exercise either of the two long-session queries.
+@pytest.mark.parametrize(('index', 'keys', 'normal', 'fallback'), [
+    ('ix_agent_runs_session_created', 'session_id,created_at', 'trigger_runs', 'trigger_runs_fallback'),
+    ('ix_agent_runs_timeline_times', 'id,started_at,completed_at', 'timeline_timestamps_covered', 'timeline_timestamps_fallback'),
+])
+@pytest.mark.parametrize('layout', ['absent', 'partial', 'wrong_order', 'extra', 'collation', 'descending', 'expression'])
+def test_compatible_optional_index_layout(isolated_state, history, index, keys, normal, fallback, layout):  # noqa: F811
+    # A compatible future snapshot can omit or replace either performance
+    # index. Test the actual admission gate and both complete ordered graphs.
     engine = create_sqlite_engine()
     try:
         with engine.begin() as conn:
             seed(conn, 8)
-            conn.exec_driver_sql('DROP INDEX ix_agent_runs_session_created')
+            conn.exec_driver_sql(f'DROP INDEX {index}')
+            replacements = {
+                'partial': f"({keys}) WHERE status='running'",
+                'wrong_order': '(' + ','.join(reversed(keys.split(','))) + ')',
+                'extra': f'({keys},status)', 'collation': f'({keys} COLLATE NOCASE)',
+                'descending': f'({keys} DESC)', 'expression': f'({keys},length(status))',
+            }
+            if layout != 'absent':
+                conn.exec_driver_sql(f'CREATE INDEX {index} ON agent_runs {replacements[layout]}')
             conn.exec_driver_sql("UPDATE alembic_version SET version_num='20990101_9999'")
         assert migrations.preflight_database(Path(engine.url.database)).compatible_open
         spans = agent_graph.HistoryStatementSpans()
         graph = agent_graph.build_graph(now=NOW, live_agents=LIVE, engine=engine, include_ended=history, history_spans=spans)
         fields = spans.log_fields()
-        assert fields['history_index_probe']['statements'] == fields['history_index_probe']['rows'] == 1
-        assert 'trigger_runs' not in fields and fields['trigger_runs_fallback']['rows'] == 2
+        assert fields['history_index_probe']['statements'] == 1
+        other_columns = 3 if normal == 'trigger_runs' else 2
+        declared = len(keys.split(','))
+        observed = 0 if layout in {'absent', 'partial'} else declared + (layout in {'extra', 'expression'})
+        assert fields['history_index_probe']['rows'] == other_columns + observed
+        assert normal not in fields and fields[fallback]['rows'] == (2 if normal == 'trigger_runs' else 10 + history)
         assert hashlib.sha256(json.dumps(graph, separators=(',', ':')).encode()).hexdigest() == GOLDENS[8, history]
     finally:
         engine.dispose()
@@ -186,7 +203,7 @@ def test_read_budget_uses_actual_index_ranges(isolated_state, hit):  # noqa: F81
             if hit:
                 expected.update(dict.fromkeys(('callback_tie_ids', 'callback_modes', 'callback_delivery_ids'),
                                               'INTEGER PRIMARY KEY (rowid=?)'))
-            assert plans['history_index_probe'] == ['SCAN sqlite_schema']
+            assert all('agent_runs USING' not in p for p in plans['history_index_probe'])
             assert ('callback_modes' in plans) == hit
             # The all-short wave uses a different timestamp shape.
             agent_graph._load_runs(reader, {'parent'}, sessions, NOW-timedelta(days=1), totals)

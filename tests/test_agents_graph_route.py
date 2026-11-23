@@ -139,7 +139,7 @@ def test_slow_graph_log_reports_only_fixed_server_side_stage_times(monkeypatch, 
     for name, span in fields.items():
         assert set(span) == {"statements", "batches", "rows", "execute_ms", "fetch_ms"}
         assert span["statements"] == 1 and span["batches"] == int(not name.endswith("endpoints"))
-        assert span["rows"] == (2 if name == "history_index_probe" else span["batches"])
+        assert span["rows"] == (5 if name == "history_index_probe" else span["batches"])
         assert span["execute_ms"] >= 0 and span["fetch_ms"] >= 0
     assert "ses_ended" not in entry and "run_e1" not in entry and "SELECT" not in entry
     assert "history_statements" not in history.headers["Server-Timing"] and "history_statements" not in history.json()

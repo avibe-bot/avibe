@@ -242,13 +242,29 @@ class _GraphReader:
 
     @cached_property
     def history_indexes(self):
-        # One presence check in the pinned snapshot for both optional hints.
-        # Compatible newer layouts can omit either index. Never repair or
-        # optimistically try a hint and retry on a GET.
-        return {name for name, in self.rows(text(
-            "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='agent_runs' "
-            "AND name IN ('ix_agent_runs_timeline_times','ix_agent_runs_session_created')"
-        ), name="history_index_probe")}
+        # Same-name indexes in compatible future layouts can have different
+        # keys or a WHERE predicate. INDEXED BY on a partial index can fail
+        # with 'no query solution'. Validate both hints before executing either.
+        expected = {
+            'ix_agent_runs_session_created': ['session_id', 'created_at'],
+            'ix_agent_runs_timeline_times': ['id', 'started_at', 'completed_at'],
+        }
+        keys = {name: [] for name in expected}
+        # At most four key columns per index (one past the longest expected
+        # shape catches extra keys). Ignore SQLite's auxiliary rowid, *not*
+        # expressions, collation, or sort direction on declared key columns.
+        stmt = text("""
+            SELECT i.name, k.name, k.coll, k.desc
+            FROM pragma_index_list('agent_runs', 'main') AS i
+            CROSS JOIN pragma_index_xinfo(i.name, 'main') AS k
+            WHERE i.name IN ('ix_agent_runs_timeline_times','ix_agent_runs_session_created')
+              AND i.partial = 0 AND k.key = 1 AND k.seqno < 4
+            ORDER BY i.name, k.seqno
+        """)
+        for name, column, collation, descending in self.rows(stmt, name="history_index_probe"):
+            keys[name].append((column, collation, descending))
+        return {name for name, columns in expected.items()
+                if keys[name] == [(column, 'BINARY', 0) for column in columns]}
 
     @cached_property
     def timeline_query(self):
