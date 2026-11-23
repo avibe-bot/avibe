@@ -93,6 +93,12 @@ impl Transport for Hosted {
     async fn send(&self, req: Request) -> Result<Response> {
         let mut status = 200;
         let mut headers = reqwest::header::HeaderMap::new();
+        if self.publication_case.starts_with("monitor_check_") && req.url.path() == "/api/desktop/local-instance" {
+            assert_eq!(req.method, reqwest::Method::GET);
+            self.observing.notify_one();
+            self.resume_observation.notified().await;
+            return Err(ClientError::new("local_runtime_unavailable"));
+        }
         let raced_name = self.publication_case.starts_with("name_race_");
         let owed = self.review.is_some_and(|s| s.starts_with("factor_"));
         let verified = owed && self.factor_accepted.load(Ordering::SeqCst);
@@ -172,6 +178,7 @@ impl Transport for Hosted {
             "/api/v1/claims/read" => Some(
                 if self.ticket_reads.fetch_add(1, Ordering::SeqCst) == 0
                     || raced_name
+                    || self.publication_case.starts_with("monitor_check_")
                     || self.publication_case.starts_with("check_error_")
                 {
                     "session=synthetic"
@@ -238,7 +245,7 @@ impl Transport for Hosted {
                     });
                 }
                 if again {
-                    assert!(raced_name || self.review.is_some());
+                    assert!(raced_name || self.review.is_some() || self.publication_case.starts_with("monitor_check_"));
                 }
                 let mut projection = json!({"mode":"desktop","locale":"en","expires_at":self.expiry,"device_name":"fixture computer","account_subject":"fixture-a","account_email":"fixture@example.test","state":"new","prefilled_prefix":"desk","prefix":"desk","taken":false});
                 if again && self.review.is_some_and(|r| !matches!(r, "ok" | "refused" | "target")) {
@@ -735,6 +742,15 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
     }
 }
 #[tokio::test]
+async fn a_name_check_waits_for_the_descriptor_monitor_but_not_past_its_document() {
+    for cut in ["monitor_check_live", "monitor_check_retired"] {
+        tokio::time::timeout(Duration::from_secs(5), check_cut(cut))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn ordinary_read_refresh_stays_with_its_account_transaction_and_document() {
     for cut in [
         "read_refresh_before_reply",
@@ -827,7 +843,8 @@ async fn check_cut(cut: &'static str) {
     let store = ConnectionStore::new(root.path().join("connection.json"));
     let mut record = store.load("fixture computer").unwrap();
     let review = cut.strip_prefix("proof_start_review_");
-    let adopting = cut == "proof_start_bound"
+    let adopting = cut.starts_with("monitor_check_")
+        || cut == "proof_start_bound"
         || cut.starts_with("proof_start_auto_save")
         || cut.starts_with("proof_start_save_")
         || review.is_some()
@@ -897,6 +914,13 @@ async fn check_cut(cut: &'static str) {
         },
         view,
     ));
+    if cut.starts_with("monitor_check_") {
+        // Seed the fixture before its first document; no navigation or view invalidation.
+        c.inner.lock().unwrap().local = Some(NativeSession::new(
+            "http://127.0.0.1:1984".parse().unwrap(),
+            hosted.clone(),
+        ));
+    }
     let generation = c.state().generation;
     let doc = c.claim_document(generation).unwrap();
     let caller = doc.caller().unwrap();
@@ -1126,6 +1150,36 @@ async fn check_cut(cut: &'static str) {
             assert!(peer.arm().await.is_err());
         } else {
             assert!(delivered.is_err());
+        }
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 0);
+        return;
+    }
+    if cut.starts_with("monitor_check_") {
+        read_reply.deliver().unwrap().unwrap();
+        let refresh = c.refresh_local();
+        tokio::pin!(refresh);
+        tokio::select! { _ = &mut refresh => panic!("descriptor read not held"), _ = hosted.observing.notified() => () }
+        let check = output::dispatch(
+            &c,
+            &caller,
+            generation,
+            json!({"type":"check", "revision":revision.to_string(), "prefix":"desk"}),
+        );
+        tokio::pin!(check);
+        tokio::select! { biased; _ = &mut check => panic!("check did not queue behind monitor"), _ = tokio::task::yield_now() => () }
+        assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 1);
+        if cut == "monitor_check_retired" {
+            caller.retire();
+        }
+        hosted.resume_observation.notify_one();
+        refresh.await;
+        if cut == "monitor_check_retired" {
+            assert!(check.await.is_err());
+            assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 1);
+        } else {
+            let reply = check.await.unwrap().deliver().unwrap().unwrap();
+            assert!(reply["revision"].is_string());
+            assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 2);
         }
         assert_eq!(hosted.grants.load(Ordering::SeqCst), 0);
         return;

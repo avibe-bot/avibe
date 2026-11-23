@@ -96,6 +96,8 @@ pub struct Coordinator {
     binding: Mutex<claim_binding::BindingSlot>,
     generation: Arc<AtomicU64>,
     action_generation: Arc<AtomicU64>,
+    // Read/check may queue behind the descriptor monitor, never behind a grant as authority to retry it.
+    descriptor_refresh: tokio::sync::Mutex<()>,
     operation: tokio::sync::Mutex<()>,
     credential_io: Arc<tokio::sync::Mutex<CredentialWrites>>,
     signing_out: Arc<AtomicBool>,
@@ -160,6 +162,7 @@ impl Coordinator {
             binding: Mutex::new(claim_binding::BindingSlot::default()),
             generation,
             action_generation,
+            descriptor_refresh: tokio::sync::Mutex::new(()),
             operation: tokio::sync::Mutex::new(()),
             credential_io: Arc::new(tokio::sync::Mutex::new(CredentialWrites {
                 ids: credential_ids,
@@ -396,6 +399,9 @@ impl Coordinator {
         self.view.local_rebound(Epoch::new(self.generation.clone(), value));
     }
     pub async fn refresh_local(&self) {
+        // Always acquire this before operation. Only the descriptor monitor and the
+        // two short read/check admission sections participate in this queue.
+        let _monitor = self.descriptor_refresh.lock().await;
         // Share transaction ownership with account/enrollment publication.
         // Otherwise an older account clone can resurrect invalidated proof.
         let _operation = self.operation.lock().await;

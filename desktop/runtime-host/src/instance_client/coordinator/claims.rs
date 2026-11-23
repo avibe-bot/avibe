@@ -726,11 +726,15 @@ impl Coordinator {
         }
         let (interrupt, mut interrupted) = oneshot::channel();
         let (mut flow, state, receipt, work) = {
+            // A descriptor poll is not a competing user operation. Wait without owning
+            // the review, then repeat admission against the current document and account.
+            let _monitor = self.descriptor_refresh.lock().await;
             let _operation = self.operation.try_lock().map_err(|_| busy())?;
             self.check_claim_admission()?;
             let inner = self.inner.lock().expect("client state");
             let mut owner = self.claims.lock().expect("claim owner");
             epoch.check()?;
+            owner.expire();
             caller.check()?;
             if inner.state.account.status != AccountStatus::SignedIn || !inner.account.session.is_account() {
                 return Err(auth());
@@ -773,6 +777,9 @@ impl Coordinator {
             Ok(claim)
         };
         let read = tokio::select! {biased; _=&mut interrupted=>return Err(stale()), result=read=>result};
+        // A poll may also start during the hosted read. Cancellation still wins
+        // while waiting to publish; never repeat the read or queue a confirmation.
+        let _monitor = tokio::select! {biased; _=&mut interrupted=>return Err(stale()), guard=self.descriptor_refresh.lock()=>guard};
         match read.and_then(|claim| self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, None)) {
             Ok(review) => Ok(review),
             // Pre-admission and cancellation failures are generic. A helper or
