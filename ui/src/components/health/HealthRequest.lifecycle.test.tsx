@@ -147,7 +147,7 @@ describe('Health request live ownership and bounded network waits', () => {
     expect(screen.getByText(en.health.note.failed)).toBeTruthy();
     expect(call).not.toHaveBeenCalled();
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
-    expect(screen.queryByText(en.health.opening)).toBeNull();
+    expect(screen.queryByText(en.health.connecting)).toBeNull();
   });
 
   it('bounds consecutive failed status attempts instead of retrying forever', async () => {
@@ -234,7 +234,7 @@ describe('Route and completion consumers from the independent review', () => {
     view.rerender(renderCard(second)); await tick();
     const blocked = screen.getByRole('button', { name: 'Authorize on iPhone' }) as HTMLButtonElement;
     expect(blocked.disabled).toBe(true);
-    expect(screen.queryByText(en.health.opening)).toBeNull();
+    expect(screen.queryByText(en.health.connecting)).toBeNull();
     fireEvent.click(blocked); await tick();
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
     await act(async () => { resolveNative({ state: 'declined' }); });
@@ -302,7 +302,7 @@ describe('Retained-surface Native ownership regression from the independent revi
     expect(call).toHaveBeenCalledTimes(1);
     view.rerender(renderCard(false)); await tick();
     view.rerender(renderCard(true)); await tick();
-    const restored = screen.getByRole('button', { name: /Authorize on iPhone|Opening authorization/ });
+    const restored = screen.getByRole('button', { name: /Authorize on iPhone|Connecting Apple Health/ });
     fireEvent.click(restored); await tick();
     const pairingCalls = fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings').length;
     const nativeCalls = call.mock.calls.length;
@@ -345,7 +345,7 @@ describe('Document-owned connection attempts across consumers', () => {
     if (completion === 'before') await act(async () => { resolveNative({ state: 'connected' }); });
     mount(landing); await tick();
     if (completion === 'after') {
-      const button = screen.getByRole('button', { name: en.health.opening }) as HTMLButtonElement;
+      const button = screen.getByRole('button', { name: en.health.connecting }) as HTMLButtonElement;
       expect(button.disabled).toBe(true);
       fireEvent.click(button); await tick();
       await act(async () => { resolveNative({ state: 'connected' }); });
@@ -367,7 +367,7 @@ describe('Document-owned connection attempts across consumers', () => {
     act(() => { fireEvent.click(buttons[0]); fireEvent.click(buttons[1]); });
     await tick();
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
-    expect(screen.getAllByRole('button', { name: en.health.opening }).every(button => (button as HTMLButtonElement).disabled)).toBe(true);
+    expect(screen.getAllByRole('button', { name: en.health.preparing }).every(button => (button as HTMLButtonElement).disabled)).toBe(true);
     await act(async () => { resolvePairing(Response.json({ pairing_code: 'shared-synthetic-code' })); });
     expect(call).toHaveBeenCalledTimes(1);
     await act(async () => { resolveNative({ state: 'connected' }); });
@@ -393,7 +393,7 @@ describe('Document-owned connection attempts across consumers', () => {
     view.rerender(activeCard(true)); await tick();
     fireEvent.click(screen.getByRole('button', { name: 'Authorize on iPhone' })); await tick();
     await act(async () => { resolveBody({ pairing_code: 'abandoned-synthetic-code' }); });
-    const button = screen.getByRole('button', { name: en.health.opening }) as HTMLButtonElement;
+    const button = screen.getByRole('button', { name: en.health.connecting }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     fireEvent.click(button); await tick();
     expect(pairs).toBe(2);
@@ -431,6 +431,68 @@ describe('Document-owned connection attempts across consumers', () => {
     expect(call).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(2);
   });
+});
+
+describe('Recoverable native Health setup', () => {
+  it('permits explicit retry after Native settles failed and the server still offers authorization', async () => {
+    vi.useFakeTimers();
+    const call = installBridge();
+    call.mockResolvedValueOnce({ state: 'failed' }).mockResolvedValueOnce({ state: 'connected' });
+    mount(<HealthRequestCard request={request} />);
+    await tick();
+    fireEvent.click(screen.getByRole('button', { name: en.health.authorize }));
+    await tick();
+    const retry = screen.getByRole('button', { name: en.health.retry }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false);
+    fireEvent.click(retry);
+    await tick();
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(2);
+    expect(screen.getByText(en.health.note.connected)).toBeTruthy();
+  });
+
+  it('explains an unresponsive older shell without unlocking its live Native owner', async () => {
+    vi.useFakeTimers();
+    const call = installBridge();
+    let resolveNative!: (value: { state: string }) => void;
+    call.mockImplementationOnce(() => new Promise(resolve => { resolveNative = resolve; }));
+    const view = mount(<HealthRequestCard request={request} />);
+    await tick();
+    fireEvent.click(screen.getByRole('button', { name: en.health.authorize }));
+    await tick();
+    expect(screen.getByRole('button', { name: en.health.connecting })).toBeTruthy();
+    await tick(100_000);
+    expect(screen.getByText(en.health.reopenApp)).toBeTruthy();
+    expect((screen.getByRole('button', { name: en.health.connecting }) as HTMLButtonElement).disabled).toBe(true);
+    view.unmount();
+    mount(<HealthRequestCard request={request} />);
+    await tick();
+    expect(screen.getByText(en.health.reopenApp)).toBeTruthy();
+    await connectHealthRequest(request, new AbortController().signal);
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/mobile/pairings')).toHaveLength(1);
+    await act(async () => { resolveNative({ state: 'failed' }); });
+    await tick();
+    expect((screen.getByRole('button', { name: en.health.retry }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it.each(['claimed', 'failed', 'expired', 'canceled', 'succeeded'] as const)(
+    'never retries a local failed receipt over fresh server %s state', async (state) => {
+      vi.useFakeTimers();
+      const call = installBridge();
+      call.mockImplementationOnce(async () => {
+        current = { ...request, state };
+        return { state: 'failed' };
+      });
+      mount(<HealthRequestCard request={request} />);
+      await tick();
+      fireEvent.click(screen.getByRole('button', { name: en.health.authorize }));
+      await tick();
+      expect(screen.queryByRole('button', { name: en.health.retry })).toBeNull();
+      expect(screen.queryByRole('button', { name: en.health.authorize })).toBeNull();
+      expect(call).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 
@@ -672,7 +734,7 @@ describe('Per-request knowledge independently of the single active attempt', () 
     assertReceipt(first, 'connected'); expect(within(second.container).getByText(en.health.note.canceled)).toBeTruthy();
     const third = mount(<HealthRequestCard request={c} />); await tick(); authorizeIn(third); await tick();
     await act(async () => { resolveBody({ pairing_code: 'retired-b-code' }); });
-    const button = within(third.container).getByRole('button', { name: en.health.opening }) as HTMLButtonElement;
+    const button = within(third.container).getByRole('button', { name: en.health.connecting }) as HTMLButtonElement;
     expect(button.disabled).toBe(true); fireEvent.click(button); await tick();
     expect(pairingIds()).toEqual([a.id, b.id, c.id]); expect(call).toHaveBeenCalledTimes(2);
     await act(async () => { resolveNative({ state: 'connected' }); });
