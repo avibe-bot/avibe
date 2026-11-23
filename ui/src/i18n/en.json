@@ -5834,7 +5834,6 @@
       "pinnedConfirm": "Pinned — “{{title}}” is in your Dock",
       "addToHomeTitle": "Add to Home Screen",
       "addToHomeBodySafari": "Open this Show Page, then use Share → “Add to Home Screen”.",
-      "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”.",
       "addToDockTitle": "Add to Dock",
       "addToDockBodySafari": "Open this Show Page in Safari, click the Share button or open the File menu, then choose “Add to Dock”.",
       "openShowPage": "Open Show Page",
@@ -5843,8 +5842,7 @@
       "systemEntryUnavailableTitle": "Can’t add to Home Screen or Dock",
       "systemEntryUnavailableBody": "There is no share link here to open in Safari. Ask the instance owner to connect Avibe Cloud in Remote Access.",
       "openInBrowser": "Open in browser",
-      "openInBrowserBody": "Open this Show Page in your default browser. If it is not Safari, copy the link into Safari.",
-      "copyLink": "Copy link"
+      "openInBrowserBody": "Open this Show Page in your default browser. If it is not Safari, copy the link into Safari."
     },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",

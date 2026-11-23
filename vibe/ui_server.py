@@ -266,7 +266,8 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
     (navigator.standalone === true) ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
   );
-  if (standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
+  // Safari installs the top-level document, never an embedded Workbench Show.
+  if (window.top !== window.self || standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
   const storageKey = `avibe-show-system-entry:${window.location.pathname}`;
   const readPreference = () => {
     try {
@@ -19857,7 +19858,7 @@ def _inject_show_system_entry(
     escaped_payload = html.escape(payload, quote=True)
     base = base_path.rstrip("/") + "/"
     tags = (
-        f'<link rel="manifest" href="{html.escape(base + _SHOW_SYSTEM_ENTRY_MANIFEST, quote=True)}">'
+        f'<link rel="manifest" href="{html.escape(base + _SHOW_SYSTEM_ENTRY_MANIFEST, quote=True)}" crossorigin="use-credentials">'
         f'<link rel="apple-touch-icon" href="{html.escape(str(config["iconUrl"]), quote=True)}">'
         f'<meta name="apple-mobile-web-app-capable" content="yes">'
         f'<meta name="mobile-web-app-capable" content="yes">'

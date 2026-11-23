@@ -48,6 +48,9 @@ export interface FrameSpec {
   /** The screenshot asks for reduced motion (`prefers-reduced-motion: reduce`), for a moment's reduced
    *  form; the canvas follows the system setting. */
   reducedMotion?: boolean;
+  /** Match the browser preference to this frame's theme for surfaces that use
+   *  prefers-color-scheme directly rather than the Workbench theme provider. */
+  browserColorScheme?: boolean;
   /** For a frame that plays the product's own one-shot motion (keyframes named `motion-*` in
    *  `src/index.css`): the canvas starts it again every `replay` ms, so it loops. The screenshot shows
    *  where it settles. */

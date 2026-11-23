@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 
 import { Skeleton, SkeletonShimmer } from '../ui/skeleton';
 import { useSkeletonHandover } from '../ui/skeleton-handover';
-import { InboxSectionHeader } from './InboxSectionHeader';
 import { SESSION_ROW_INDENT_CLASS } from './sessionRowLayout';
 
 // The skeletons of the main lists (ui/design: system/skeleton/*). Each row copies
@@ -16,9 +15,11 @@ const TITLE_WIDTHS = ['w-[72%]', 'w-[52%]', 'w-[64%]', 'w-[44%]', 'w-[58%]'];
 const titleWidth = (index: number) => TITLE_WIDTHS[index % TITLE_WIDTHS.length];
 
 /** A line of text at `textClass`'s size: a box one line tall with a bar inside. */
-const TextLine = ({ textClass, barClass, className }: { textClass: string; barClass: string; className?: string }) => (
+export const TextLine = ({ textClass, barClass, className, titleIndex }: {
+  textClass: string; barClass: string; className?: string; titleIndex?: number;
+}) => (
   <span className={clsx('flex h-[1lh] min-w-0 items-center', textClass, className)}>
-    <Skeleton className={barClass} />
+    <Skeleton className={clsx(barClass, titleIndex !== undefined && titleWidth(titleIndex))} />
   </span>
 );
 
@@ -89,77 +90,6 @@ export const MobileProjectCardsSkeleton = ({ rows, quiet = false }: { rows: numb
           </div>
         </SkeletonShimmer>
       ))}
-    </div>
-  );
-};
-
-/** One Inbox card (`InboxCard`), drawn at the most common real card: an unread one (its
- *  「Mark read」 row), whose preview runs two lines on a phone and one on a wider screen.
- *  A Bot's card leads with its 24px avatar, a Session's with its project tag. */
-const InboxCardSkeleton = ({ kind, index }: { kind: 'bot' | 'session'; index: number }) => (
-  <SkeletonShimmer className="flex flex-col gap-3 rounded-xl border border-edge bg-surface p-4 shadow-elevation-0">
-    <div className={clsx('flex items-center gap-2 text-[11px]', kind === 'bot' && 'h-6')}>
-      {kind === 'bot' ? (
-        <Skeleton className="size-6 rounded-full" />
-      ) : (
-        <Skeleton className="border border-transparent px-2 py-0.5">
-          <span className="block h-[1lh] w-12" />
-        </Skeleton>
-      )}
-      <TextLine textClass="flex-1 text-[13px]" barClass={clsx('h-2.5', titleWidth(index))} />
-      <TextLine textClass="font-mono" barClass="h-2 w-10" />
-    </div>
-    <div className="flex flex-col gap-1">
-      <TextLine textClass="text-[10px]" barClass="h-1.5 w-10" />
-      <div className="flex flex-col text-[13px] leading-relaxed">
-        <TextLine textClass="" barClass={clsx('h-2', index % 2 ? 'w-full md:w-[46%]' : 'w-full md:w-[78%]')} />
-        <TextLine textClass="md:hidden" barClass={clsx('h-2', index % 2 ? 'w-[46%]' : 'w-[70%]')} />
-      </div>
-    </div>
-    {/* An unread card's 「Mark read」 row: the card itself opens the conversation. */}
-    <div className="flex items-center gap-2">
-      <Skeleton className="border border-transparent px-3 py-1.5 text-[11px]">
-        <span className="block h-[1lh] w-14" />
-      </Skeleton>
-    </div>
-  </SkeletonShimmer>
-);
-
-/** Conversation cards on the Inbox page before the first page arrives. With Bots the
- *  page files them in two sections, Bots first, so the skeleton does too: their heads
- *  are known and drawn as themselves (the Sessions head with the room its "mark this
- *  group read" takes), one Bot card and two Session cards under them. */
-export const InboxCardsSkeleton = ({ rows, sections = false }: { rows: number; sections?: boolean }) => {
-  const { t } = useTranslation();
-  return (
-    <div role="status" aria-busy="true" className="flex flex-col gap-3">
-      <span className="sr-only">{t('common.loading')}</span>
-      {sections ? (
-        <>
-          <section className="flex flex-col gap-3">
-            <InboxSectionHeader category="bot" unread={0} quiet={false} className="px-1 pt-1" />
-            <InboxCardSkeleton kind="bot" index={0} />
-          </section>
-          <section className="flex flex-col gap-3">
-            <InboxSectionHeader
-              category="session"
-              unread={0}
-              quiet={false}
-              className="px-1 pt-1"
-              action={
-                <Skeleton className="border border-transparent px-2 py-0.5 text-[11px]">
-                  <span className="block h-[1lh] w-16" />
-                </Skeleton>
-              }
-            />
-            {Array.from({ length: Math.max(1, rows - 1) }, (_, index) => (
-              <InboxCardSkeleton key={index} kind="session" index={index + 1} />
-            ))}
-          </section>
-        </>
-      ) : (
-        Array.from({ length: rows }, (_, index) => <InboxCardSkeleton key={index} kind="session" index={index} />)
-      )}
     </div>
   );
 };

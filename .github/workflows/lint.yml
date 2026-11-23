@@ -295,6 +295,7 @@ jobs:
             suites: |
               # Chromium and WebKit (the macOS shell's engine).
               npm run test:safe-browser
+              npm run test:show-system-entry
               npm run test:pet-mini
               npm run test:chat-interactions
               npm run test:inbox-return
@@ -302,7 +303,7 @@ jobs:
             suites: |
               npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts project-expansion-return.spec.ts
               # Against the built app: StrictMode's dev double-mount drops the picker's first open.
-              npm run test:workbench-general-build -- composer-mention-picker.spec.ts
+              npm run test:workbench-general-build -- composer-mention-picker.spec.ts inbox-skeleton-loading.spec.ts
               npm run test:project-order
               # Paging older history through the retained-window cap (Chromium, desktop and phone).
               npm run test:chat-paging

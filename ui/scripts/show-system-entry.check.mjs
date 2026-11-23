@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { launchSafeBrowser } from './safe-browser.mjs';
 
@@ -145,3 +146,100 @@ for (const mode of ['ios', 'display-mode']) {
     } finally { await browser.close(); }
   });
 }
+
+test('embedded Show keeps the outer handoff without offering to install Workbench', async () => {
+  const browser = await launchSafeBrowser();
+  try {
+    const { context } = browser;
+    await context.route('http://show.test/**', (route) => route.fulfill({
+      contentType: 'text/html',
+      body: new URL(route.request().url()).pathname === '/workbench'
+        ? '<!doctype html><a href="/p/limited/" target="_blank">Open Show Page</a><iframe src="/p/limited/"></iframe>'
+        : '<!doctype html><h1>Original Show</h1>',
+    }));
+    const page = await context.newPage();
+    await page.goto('http://show.test/workbench');
+    const embedded = page.frames().find((frame) => frame !== page.mainFrame());
+    await embedded.waitForSelector('h1');
+    await embedded.evaluate((copy) => {
+      const meta = document.createElement('meta');
+      meta.name = 'avibe-show-system-entry';
+      meta.content = JSON.stringify({ copy });
+      document.head.append(meta);
+    }, copy);
+    await embedded.addScriptTag({ content: script });
+    assert.equal(await embedded.locator('[data-avibe-show-system-entry]').count(), 0);
+    assert.equal(await embedded.getByRole('heading', { name: 'Original Show' }).count(), 1);
+    assert.equal(await page.getByRole('link', { name: 'Open Show Page' }).getAttribute('href'), '/p/limited/');
+    // The existing top-level viewport cases above exercise the same script with guidance visible.
+  } finally { await browser.close(); }
+});
+
+test('browser manifest loader carries test identity and rejects missing/revoked grants', async () => {
+  // Consume the product-generated link markup, not a parallel link with the desired attribute.
+  const template = server.match(/f'(<link rel="manifest"[^']+)'/)?.[1];
+  assert.ok(template);
+  const requests = [];
+  let revoked = false;
+  const fixture = createServer((req, res) => {
+    const path = new URL(req.url, 'http://fixture').pathname;
+    res.setHeader('Cache-Control', 'private, no-store');
+    if (path.endsWith('/__show/manifest.webmanifest')) {
+      const owner = path.startsWith('/show/') && req.headers.cookie === 'test_identity=owner';
+      const recipient = path.startsWith('/p/') && req.headers.cookie === 'test_identity=recipient' && !revoked;
+      const allowed = owner || recipient;
+      requests.push({ path, cookie: req.headers.cookie, allowed });
+      res.writeHead(allowed ? 200 : 403, { 'Content-Type': 'application/manifest+json' });
+      const route = path.replace('__show/manifest.webmanifest', '');
+      res.end(JSON.stringify(allowed
+        ? { id: route, name: 'Test Show', start_url: route, scope: route, display: 'standalone' }
+        : { error: 'forbidden' }));
+    } else {
+      const link = template.replace(/\{[^}]+\}/, `${path}__show/manifest.webmanifest`);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><head>${link}</head><body>Test Show</body>`);
+    }
+  });
+  await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${fixture.address().port}`;
+  const browser = await launchSafeBrowser();
+  try {
+    const { context } = browser;
+    for (const [identity, route, allowed] of [
+      ['owner', '/show/test-owner/', true],
+      ['recipient', '/p/test-limited/', true],
+      ['', '/p/test-limited/', false],
+      ['revoked', '/p/test-limited/', false],
+    ]) {
+      revoked = identity === 'revoked';
+      await context.clearCookies();
+      if (identity) await context.addCookies([{
+        name: 'test_identity', value: revoked ? 'recipient' : identity, url: origin,
+      }]);
+      const page = await context.newPage();
+      await page.goto(`${origin}${route}`);
+      const cdp = await context.newCDPSession(page);
+      // Page.getAppManifest invokes Chromium's manifest loader/parser, not page.fetch.
+      const manifest = await cdp.send('Page.getAppManifest');
+      const read = requests.at(-1);
+      assert.equal(read.path, `${route}__show/manifest.webmanifest`);
+      assert.equal(read.allowed, allowed, identity);
+      assert.equal(new URL(manifest.url).origin, origin);
+      if (allowed) {
+        assert.equal(read.cookie, `test_identity=${identity}`);
+        const parsed = JSON.parse(manifest.data);
+        assert.equal(parsed.start_url, route);
+        assert.equal(parsed.id, route);
+        assert.equal(parsed.scope, route);
+        assert.deepEqual(manifest.errors, []);
+      } else {
+        assert.ok(!manifest.data, 'the browser must not receive protected manifest contents');
+      }
+      await cdp.detach();
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+    await new Promise((resolve) => fixture.close(resolve));
+  }
+});

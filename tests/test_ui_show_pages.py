@@ -115,7 +115,7 @@ def test_show_runtime_entry_injection_adds_exact_manifest_and_platform_meta():
         base_path="/p/limited-link/",
     ).decode("utf-8")
 
-    assert '<link rel="manifest" href="/p/limited-link/__show/manifest.webmanifest">' in injected
+    assert '<link rel="manifest" href="/p/limited-link/__show/manifest.webmanifest" crossorigin="use-credentials">' in injected
     assert '<link rel="apple-touch-icon" href="/p/limited-link/__show/icon?v=icon-v1">' in injected
     assert 'name="apple-mobile-web-app-title" content="Q4 Roadmap"' in injected
     assert 'name="avibe-show-system-entry"' in injected
@@ -1544,6 +1544,16 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
     set_show_runtime_manager_for_tests(manager)
     try:
         client = app.test_client()
+        # Metadata must not turn a missing guest identity into public access.
+        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js", "__show/icon"):
+            anonymous = client.get(
+                f"/p/{share_id}/{installed_resource}",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+                follow_redirects=False,
+            )
+            assert anonymous.status_code == 302
+            assert anonymous.headers["Cache-Control"] == "private, no-store"
         login = client.get(
             f"/p/{share_id}/",
             base_url="https://alex.avibe.bot",
@@ -1652,7 +1662,7 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         finally:
             store.close()
 
-        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js"):
+        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js", "__show/icon"):
             denied = client.get(
                 f"/p/{share_id}/{installed_resource}",
                 base_url="https://alex.avibe.bot",
