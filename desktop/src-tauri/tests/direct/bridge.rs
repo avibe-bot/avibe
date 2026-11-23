@@ -1,5 +1,5 @@
 use super::{
-    bridge::{self, Ledger, Message, Method, Request},
+    bridge::{self, Ledger, Message, Method, Request, Told},
     choices::Mode,
     AddressFamily, HandoverResult, PathStatus, PreferredPath, SelectedPath,
 };
@@ -205,7 +205,7 @@ fn a_request_is_read_only_with_the_windows_token() {
 fn a_delivery_runs_only_in_the_instances_own_top_document() {
     let state = Message::State {
         status: Ledger::default().status(),
-        preference: bridge::preference(Mode::Automatic),
+        choice: Told::new(Mode::Automatic, 4),
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &state);
     assert!(script.starts_with(
@@ -216,13 +216,40 @@ fn a_delivery_runs_only_in_the_instances_own_top_document() {
     let reply = Message::Reply {
         id: "7c1e-a".to_owned(),
         result: bridge::handover(&HandoverResult::NotUsable),
-        preference: None,
+        choice: None,
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &reply);
     assert!(!script.contains("__AVIBE_DIRECT_EARLY__"));
     assert!(
         script.contains(r#"const m={"reply":{"id":"7c1e-a","result":{"closed":0,"kept":0,"skipped":"not_usable"}}};"#)
     );
+}
+
+#[test]
+fn the_choice_of_path_is_delivered_with_its_order() {
+    // With the state, and with an answer that is about the choice: the page
+    // keeps the newest by `preferenceOrder`, whichever arrives first.
+    let state = Message::State {
+        status: Ledger::default().status(),
+        choice: Told::new(Mode::Tunnel, 4),
+    };
+    let script = bridge::delivery("https://one-app.avibe.bot", &state);
+    assert!(
+        script.contains(r#""preference":{"mode":"tunnel","reverted":null},"preferenceOrder":4"#),
+        "{script}"
+    );
+    let reply = Message::Reply {
+        id: "7c1e-a".to_owned(),
+        result: bridge::preference(Mode::Automatic),
+        choice: Some(Told::new(Mode::Automatic, 5)),
+    };
+    let script = bridge::delivery("https://one-app.avibe.bot", &reply);
+    assert!(
+        script.contains(r#""preference":{"mode":"automatic","reverted":null},"preferenceOrder":5"#),
+        "{script}"
+    );
+    // The order is beside the choice, never inside what `direct.preference()` answers.
+    assert_eq!(Told::new(Mode::Tunnel, 9).preference, bridge::preference(Mode::Tunnel));
 }
 
 #[test]
