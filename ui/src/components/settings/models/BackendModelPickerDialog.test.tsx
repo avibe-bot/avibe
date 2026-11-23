@@ -193,6 +193,40 @@ describe('BackendModelPickerDialog', () => {
     expect(fold('Primary relay').getAttribute('aria-expanded')).toBe('true');
   });
 
+  it('opens, on a re-ask, every fold that holds a pick to look at again', async () => {
+    const relay = supplier('src_a', 'Primary relay', '');
+    const ids = [...Array.from({ length: 16 }, (_, index) => `nova-${index + 1}`), ...Array.from({ length: 16 }, (_, index) => `labs/nova-${index + 1}`)];
+    answers({
+      providers: [
+        ...ids.map((id) => candidate(id, { suppliers: [{ ...relay, model_id: id }] })),
+        candidate('glm-5.2', { suppliers: [supplier('src_b', 'Backup relay', 'glm-5.2')] }),
+      ],
+    });
+    renderPicker({ seedPicked: new Set(['labs/nova-3']) });
+    await screen.findByRole('group', { name: 'Primary relay' });
+    // The suppliers of this pick moved, and the user is asked to confirm them: the
+    // provider and the segment that hold it are open, the rest stay folded.
+    expect(group('labs/').getByRole('checkbox', { name: 'labs/nova-3' }).getAttribute('aria-checked')).toBe('true');
+    expect(fold('nova-').getAttribute('aria-expanded')).toBe('false');
+    expect(fold('Backup relay').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('shows no provider heading when a search leaves no provider model', async () => {
+    const user = userEvent.setup();
+    answers({
+      builtin: [candidate('gpt-6', { origin: 'builtin' })],
+      providers: [
+        candidate('glm-5.2', { suppliers: [supplier('src_a', 'Primary relay', 'glm-5.2')] }),
+        candidate('glm-5.2-air', { suppliers: [supplier('src_b', 'Backup relay', 'glm-5.2-air')] }),
+      ],
+    });
+    renderPicker();
+    await screen.findByRole('group', { name: PROVIDERS });
+    await user.type(search(), 'gpt-6');
+    expect(group(BUILT_IN).getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.queryByRole('group', { name: PROVIDERS })).toBeNull();
+  });
+
   it("folds one provider's long list again by how its model IDs begin, without guessing vendors", async () => {
     const user = userEvent.setup();
     const relay = supplier('src_a', 'Primary relay', '');

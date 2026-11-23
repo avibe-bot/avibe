@@ -322,6 +322,10 @@ export const BackendModelPickerDialog: React.FC<{
     // on what a search left of it, so searching never changes how the list is laid out.
     const providerCount = new Set(groups.providers.flatMap((candidate) => candidate.suppliers.map((supplier) => supplier.source_id))).size;
     if (providerCount < 2) return group('providers', label, rows);
+    if (rows.length === 0) return null;
+    // A re-ask reopens the picker on picks whose suppliers moved, to be looked at
+    // again: whatever holds one of them starts open, however long the inventory is.
+    const holdsSeed = (members: ModelCandidate[]) => members.some((candidate) => seed.has(candidate.id));
     // A row no provider is named for has no fold to sit under; it stays in the list, after them.
     const unnamed = rows.filter((candidate) => candidate.suppliers.length === 0);
     const openByDefault = groups.providers.length <= PROVIDER_FOLD_ABOVE;
@@ -332,7 +336,7 @@ export const BackendModelPickerDialog: React.FC<{
           <span>{rows.length}</span>
         </div>
         {[...bySource].map(([sourceId, entry]) => {
-          const unfolded = filtering || (folds.get(sourceId) ?? openByDefault);
+          const unfolded = filtering || (folds.get(sourceId) ?? (openByDefault || holdsSeed(entry.rows)));
           const pickedHere = entry.rows.filter((candidate) => chosen.has(candidate.id)).length;
           return (
             <div key={sourceId} role="group" aria-label={entry.name} className="model-hub-picker-source">
@@ -368,7 +372,7 @@ export const BackendModelPickerDialog: React.FC<{
                   <div className="model-hub-picker-source-rows">
                     {segments.map((segment) => {
                       const foldKey = `${sourceId}\0${segment.key}`;
-                      const shown = filtering || (folds.get(foldKey) ?? false);
+                      const shown = filtering || (folds.get(foldKey) ?? holdsSeed(segment.rows));
                       const picked = segment.rows.filter((candidate) => chosen.has(candidate.id)).length;
                       return (
                         <div key={segment.key} role="group" aria-label={segment.label ?? t('settings.models.gateway.picker.segmentOther') as string} className="model-hub-picker-source">
