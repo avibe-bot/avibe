@@ -35,7 +35,9 @@ export type ComputerBinding =
   | { state: 'upgrade' }
   /** Cannot be bound from here, and no press changes that: write to support. */
   | { state: 'unavailable' }
-  | { state: 'repair' };
+  | { state: 'repair' }
+  /** An older attempt still running, or accepted and not yet published: wait, then check again. */
+  | { state: 'pending' };
 
 export type ComputerBindingCardProps = {
   binding: ComputerBinding;
@@ -69,6 +71,7 @@ export function ComputerBindingCard({ binding, computer, busy = false, onBind, o
         <Button variant="ghost" disabled={busy} onClick={onRefresh}>{t('desktopAccount.bind.checkAgain')}</Button>
       </div></>}
     {binding.state === 'unknown' && <>{line(t('desktopAccount.bind.unknown'))}{action(t('desktopAccount.bind.checkAgain'), onRefresh)}</>}
+    {binding.state === 'pending' && <>{line(t('desktopAccount.bind.problem.busy'))}{action(t('desktopAccount.bind.checkAgain'), onRefresh)}</>}
     {binding.state === 'upgrade' && <>{line(t('desktopAccount.bind.upgrade'))}{action(t('update.action.check'), onUpdates)}</>}
     {binding.state === 'repair' && line(t('desktopAccount.bind.repair'))}
     {binding.state === 'unavailable' && line(<Trans i18nKey="desktopAccount.bind.problem.unavailable" values={{ support: SUPPORT_EMAIL }}
@@ -84,13 +87,14 @@ export function ThisComputerLine({ binding, busy = false, onBind, onRefresh, onU
   const text = binding.state === 'unbound' ? t('desktopAccount.bind.notBound')
     : binding.state === 'otherAccount' ? t('desktopAccount.bind.otherAccount')
       : binding.state === 'unknown' ? t('desktopAccount.bind.unknown')
+        : binding.state === 'pending' ? t('desktopAccount.bind.problem.busy')
         : binding.state === 'upgrade' ? t('desktopAccount.bind.upgrade')
           : binding.state === 'repair' ? t('desktopAccount.bind.repair')
             : binding.state === 'unavailable' ? <Trans i18nKey="desktopAccount.bind.problem.unavailable" values={{ support: SUPPORT_EMAIL }}
               components={{ mail: <a className="font-medium underline underline-offset-4" href={`mailto:${SUPPORT_EMAIL}`} /> }} /> : null;
   const button = binding.state === 'unbound' ? <Button variant="brand" size="sm" disabled={busy} onClick={onBind}>{t('desktopAccount.bind.action')}</Button>
     : binding.state === 'otherAccount' ? <><Button variant="outline" size="sm" disabled={busy} onClick={onSignInOther}>{t('desktopAccount.bind.signInOther')}</Button><Button variant="ghost" size="sm" disabled={busy} onClick={onRefresh}>{t('desktopAccount.bind.checkAgain')}</Button></>
-      : binding.state === 'unknown' ? <Button variant="outline" size="sm" disabled={busy} onClick={onRefresh}>{t('desktopAccount.bind.checkAgain')}</Button>
+      : binding.state === 'unknown' || binding.state === 'pending' ? <Button variant="outline" size="sm" disabled={busy} onClick={onRefresh}>{t('desktopAccount.bind.checkAgain')}</Button>
         : binding.state === 'upgrade' ? <Button variant="outline" size="sm" disabled={busy} onClick={onUpdates}>{t('update.action.check')}</Button> : null;
   return <div data-this-computer-line={binding.state} className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-edge px-4 py-3">
     {binding.state === 'reading' ? <Skeleton className="h-5 w-2/3" /> : <p className="min-w-0 flex-1 text-sm leading-6 text-muted [overflow-wrap:anywhere]">{text}</p>}
@@ -134,7 +138,7 @@ export type BindStep =
   | { kind: 'bound'; host: string }
   | { kind: 'conflict' }
   /** The claim view found a binding it cannot bind over: the card's sentence and its one button. */
-  | { kind: 'notHere'; reason: 'otherAccount' | 'unknown' | 'repair' }
+  | { kind: 'notHere'; reason: 'otherAccount' | 'unknown' | 'repair' | 'pending' }
   | { kind: 'upgrade' }
   | { kind: 'problem'; problem: BindProblem };
 
@@ -161,6 +165,8 @@ export type BindDialogProps = {
   onClose: () => void;
   /** The App's sign-in (DesktopSignIn) for the `signIn` step. */
   signIn?: ReactNode;
+  /** False in a claim view whose one review was sent: a problem's way on is closing. */
+  restartable?: boolean;
   /** `notHere`: observe again (「再看一次」), and sign in with the account the binding is under. */
   onCheckAgain?: () => void;
   onSignInOther?: () => void;
@@ -195,7 +201,7 @@ export function BindDialog(props: BindDialogProps) {
   </Dialog>;
 }
 
-function BindDialogBody({ signIn, onCheckAgain, onSignInOther, step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
+function BindDialogBody({ signIn, restartable = true, onCheckAgain, onSignInOther, step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
 
@@ -304,7 +310,7 @@ function BindDialogBody({ signIn, onCheckAgain, onSignInOther, step, account, bu
       {title(t('desktopAccount.bind.title'))}
       <div role="alert" className="flex gap-3 rounded-xl border border-gold/40 bg-gold/10 p-4 text-sm leading-6">
         <TriangleAlert className="mt-1 size-4 shrink-0 text-gold-ink" />
-        <p>{t(`desktopAccount.bind.${step.reason}` as const)}</p>
+        <p>{step.reason === 'pending' ? t('desktopAccount.bind.problem.busy') : t(`desktopAccount.bind.${step.reason}` as const)}</p>
       </div>
       {step.reason === 'repair' ? actions(<Button variant="brand" onClick={onClose}>{t('common.close')}</Button>, false)
         : actions(<>
@@ -320,7 +326,7 @@ function BindDialogBody({ signIn, onCheckAgain, onSignInOther, step, account, bu
   // review from the beginning, never a repeat of the step that failed.
   const problem = step.kind === 'problem' ? step.problem : null;
   const next = step.kind === 'upgrade' ? <Button variant="brand" onClick={onUpdates}>{t('update.action.check')}</Button>
-    : problem && CLOSE_ONLY.includes(problem) ? <Button variant="brand" onClick={onClose}>{t('common.close')}</Button>
+    : !restartable || (problem && CLOSE_ONLY.includes(problem)) ? <Button variant="brand" onClick={onClose}>{t('common.close')}</Button>
     : <Button variant="brand" disabled={busy} onClick={onRestart}>{t('desktopAccount.bind.restart')}</Button>;
   return <>
     {title(t('desktopAccount.bind.title'))}

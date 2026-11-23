@@ -408,7 +408,7 @@ export function AccountApp() {
       onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
       onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
       onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
-      onRestart={claim.restart} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')}
+      onRestart={claim.restart} restartable={claim.restartable} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')}
       onCheckAgain={() => void claim.recheck()} onSignInOther={() => { setView('sign-out'); leave('sign_out'); }} onClose={exitClaim} />;
   // A binding in progress keeps its dialog, also while its new sign-in owes a second factor.
   } else if (state.account.status !== 'signed_in') {

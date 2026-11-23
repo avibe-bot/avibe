@@ -94,9 +94,30 @@ it.each([
   expect(page.types().filter((type) => type === 'open')).toEqual([]);
 });
 
-it.each(['no_published_binding', 'legacy_wait'])('the claim view opens a review when native observed %s', async (answer) => {
-  const page = mount({ observe_current_binding: { state: answer }, open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
+it('the claim view opens a review only when native observed exactly no_published_binding', async () => {
+  const page = mount({ observe_current_binding: { state: 'no_published_binding' }, open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
   await screen.findByText(en.domainField.free);
+  expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
+});
+
+it.each(['legacy_wait', 'legacy_publication_pending'])('an older attempt (%s) is waited out: Check again, no review', async (answer) => {
+  let observes = 0;
+  const page = mount({ observe_current_binding: () => { observes += 1; return { state: observes === 1 ? answer : 'no_published_binding' }; },
+    open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
+  await screen.findByText(copy.problem.busy);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  expect(page.types()).not.toContain('open');
+  fireEvent.click(screen.getByRole('button', { name: copy.checkAgain }));
+  await screen.findByText(en.domainField.free);
+  expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
+});
+
+it('the claim view sends its one review once: after a failure the way on is closing', async () => {
+  const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')), confirm: refuse('network_unavailable') });
+  fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
+  await screen.findByRole('alert');
+  expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
+  expect(screen.getAllByRole('button', { name: en.common.close }).length).toBe(2);
   expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
 });
 
@@ -245,6 +266,18 @@ it('an accepted sign-in waiting to be saved shows as Continue, resumes only on t
   await waitFor(() => expect(page.actions.find((each) => each.type === 'resume')).toEqual({ type: 'resume', receipt: 'rec-1' }));
   await screen.findByText(en.domainField.free);
   expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
+  // Saved, it observed again before opening.
+  expect(page.types().slice(page.types().indexOf('resume'))).toEqual(['resume', 'observe_current_binding', 'open', 'read']);
+});
+
+it('an accepted sign-in saved onto a computer already bound opens no review', async () => {
+  let observes = 0;
+  const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-2' }, 'recovery:resume': { state: 'saved' },
+    observe_current_binding: () => { observes += 1; return { state: 'owner_observed' }; } });
+  fireEvent.click(await screen.findByRole('button', { name: en.common.continue }));
+  await screen.findByRole('heading', { name: copy.boundTitle });
+  expect(observes).toBe(1);
+  expect(page.types()).not.toContain('open');
 });
 
 /** Opens binding and verifies a code, up to the moment avibe.bot accepted it. */
@@ -455,7 +488,7 @@ it.each(['passkey_cancelled', 'passkey_unavailable', 'invalid_passkey_assertion'
   expect(page.actions.filter((each) => each.type === 'submit_factor_passkey').map((each) => each.submission)).toEqual(['s', 's']);
 });
 
-it('an unverifiable passkey challenge is final and starts again', async () => {
+it('an unverifiable passkey challenge is final: the claim view closes rather than opening again', async () => {
   mount({ ...proofAnswers,
     review_after_proof: refuse('authentication_required'),
     submit_factor_passkey: refuse('invalid_passkey_challenge') });
@@ -463,7 +496,9 @@ it('an unverifiable passkey challenge is final and starts again', async () => {
   await broadcast({ ...signedIn, revision: signedIn.revision + 3,
     account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['passkey'] } });
   fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.usePasskey }, { timeout: 5000 }));
-  await screen.findByRole('button', { name: copy.restart });
+  await screen.findByRole('alert');
+  expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
+  expect(screen.getAllByRole('button', { name: en.common.close }).length).toBe(2);
 });
 
 it('a real 429 on a second factor waits in place with its own time', async () => {
@@ -485,9 +520,10 @@ it('a new generation while an action is on its way leaves the dialog usable', as
   await screen.findByRole('heading', { name: copy.title });
   await broadcast({ ...signedIn, generation: signedIn.generation + 1, revision: signedIn.revision + 1 });
   await act(async () => { answer({ receipt: 'late' }); });
-  // The old review's reply is dropped; starting again is a press.
-  const again = await screen.findByRole('button', { name: copy.restart });
-  expect((again as HTMLButtonElement).disabled).toBe(false);
+  // The old review's reply is dropped; its one review was sent, so the way on is closing.
+  await screen.findByRole('alert');
+  expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
+  expect(screen.getAllByRole('button', { name: en.common.close }).every((each) => !(each as HTMLButtonElement).disabled)).toBe(true);
 });
 
 it('a review that changed in no field it shows still says it changed, and waits for a press', async () => {
@@ -576,8 +612,7 @@ it('offers held names other than the one already typed', async () => {
 });
 
 it.each(['local_instance_conflict', 'pairing_recovery_required'])('an older attempt still holding this computer (%s) says to wait, not to start again', async (code) => {
-  mount({ observe_current_binding: { state: code === 'local_instance_conflict' ? 'legacy_wait' : 'legacy_publication_pending' },
-    open: { receipt: 'r' }, read: refuse(code) });
+  mount({ open: { receipt: 'r' }, read: refuse(code) });
   await opened();
   await screen.findByText(copy.problem.busy);
   expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();

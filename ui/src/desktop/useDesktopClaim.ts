@@ -102,8 +102,10 @@ const PASSKEY_FAILED = new Set(['passkey_cancelled', 'passkey_unavailable', 'inv
 const OBSERVED: Record<string, ComputerBinding['state']> = {
   // An older Desktop's record that ended without a result: native does not replace it yet (rule
   // table, row 78), so Bind could only be refused. The same dead end as a computer avibe.bot refuses.
-  no_published_binding: 'unbound', legacy_review_required: 'unavailable', legacy_wait: 'unbound',
-  legacy_publication_pending: 'unbound', owner_observed: 'bound', bound_owner_unconfirmed: 'otherAccount',
+  // Only an exact `no_published_binding` admits a review (native, 2026-11-23): an older attempt
+  // still running or not yet published is waited out, never opened over.
+  no_published_binding: 'unbound', legacy_review_required: 'unavailable', legacy_wait: 'pending',
+  legacy_publication_pending: 'pending', owner_observed: 'bound', bound_owner_unconfirmed: 'otherAccount',
   legacy_recovery_required: 'repair',
 };
 /** Native read this computer's binding here, then could not read the account's list: bound, so
@@ -134,7 +136,7 @@ const NO_HANDLES: Handles = { receipt: null, revision: null, offer: null, delive
 function observedStep(binding: ComputerBinding, settled: boolean): BindStep {
   switch (binding.state) {
     case 'bound': return { kind: 'bound', host: binding.host ?? '' };
-    case 'otherAccount': case 'unknown': case 'repair': return { kind: 'notHere', reason: binding.state };
+    case 'otherAccount': case 'unknown': case 'repair': case 'pending': return { kind: 'notHere', reason: binding.state };
     case 'upgrade': return { kind: 'upgrade' };
     case 'unavailable': return { kind: 'problem', problem: 'unavailable' };
     // Unbound and nothing open once the opening settled: the review ended without a step to show.
@@ -383,7 +385,11 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   }, [busy]);
 
   /** Opens a review (one ticket) and shows what native read for it. */
+  // Native admits one review per claim document, after this generation observed an exact
+  // `no_published_binding`. Once sent, the way on after a failure is closing, not opening again.
+  const [opened, setOpened] = useState(false);
   const openReview = useCallback(async () => {
+    setOpened(true);
     setStep({ kind: 'opening' });
     const opened = await call('desktop_claim_review', { type: 'open' });
     if (!opened) return;
@@ -580,8 +586,11 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     // This receipt is spent: a renewed one, if any, is the only one left.
     recovery.current = renewed;
     if (answer === 'saved' && current.thenOpen) {
+      // Saved: observe again, and open only when nothing is bound.
       stopSaving();
-      await openReview();
+      if (await observe() === 'unbound') { await openReview(); return; }
+      handles.current = { ...NO_HANDLES };
+      setStep(null);
     } else if (answer === 'saved' && !handles.current.submission) {
       // Continued from the page, not from a binding: done; read this computer again.
       stopSaving();
@@ -720,8 +729,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     const receipt = handles.current.receipt;
     reset();
     if (receipt) void invoke('desktop_claim_review', latest.current?.generation ?? 0, { type: 'cancel', receipt });
-    void start();
-  }, [reset, start]);
+    // The claim view has one review: before it was sent, starting again observes first.
+    if (!claimView) void start();
+    else if (!opened) void begin();
+  }, [reset, start, begin, claimView, opened]);
 
 
   // The claim view always shows the dialog: the App's sign-in first if needed, then the flow, or
@@ -730,6 +741,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     : step ?? (state && state.account.status !== 'signed_in' ? { kind: 'signIn' } : observedStep(binding, settled));
   return {
     binding, step: shown, busy, recheck: begin,
+    /** Whether 「重新开始」 can do anything: the claim view's one review not yet sent. */
+    restartable: !claimView || !opened,
     account: review.account, computer: review.computer,
     start, changeName, pick, confirm, sendCode, submitCode, passkey, beginSetup, savedCodes, setCode, factorStep,
     close, restart, recoverSaving, observe,
