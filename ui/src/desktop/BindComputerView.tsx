@@ -133,6 +133,8 @@ export type BindStep =
   | { kind: 'codes'; codes: string[] }
   | { kind: 'bound'; host: string }
   | { kind: 'conflict' }
+  /** The claim view found a binding it cannot bind over: the card's sentence and its one button. */
+  | { kind: 'notHere'; reason: 'otherAccount' | 'unknown' | 'repair' }
   | { kind: 'upgrade' }
   | { kind: 'problem'; problem: BindProblem };
 
@@ -159,6 +161,9 @@ export type BindDialogProps = {
   onClose: () => void;
   /** The App's sign-in (DesktopSignIn) for the `signIn` step. */
   signIn?: ReactNode;
+  /** `notHere`: observe again (「再看一次」), and sign in with the account the binding is under. */
+  onCheckAgain?: () => void;
+  onSignInOther?: () => void;
 };
 
 /** The verification steps keep the sign-in's own screens; this column only changes the way out. */
@@ -190,7 +195,7 @@ export function BindDialog(props: BindDialogProps) {
   </Dialog>;
 }
 
-function BindDialogBody({ signIn, step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
+function BindDialogBody({ signIn, onCheckAgain, onSignInOther, step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
 
@@ -291,6 +296,23 @@ function BindDialogBody({ signIn, step, account, busy = false, onNameChange, onP
       {title(t('desktopAccount.bind.conflictTitle'), <TriangleAlert className="size-6 text-gold-ink" />)}
       <DialogDescription className="text-sm leading-6 text-muted">{t('desktopAccount.bind.conflictBody')}</DialogDescription>
       {actions(<Button variant="brand" onClick={onClose}>{t('common.back')}</Button>, false)}
+    </>;
+  }
+
+  if (step.kind === 'notHere') {
+    return <>
+      {title(t('desktopAccount.bind.title'))}
+      <div role="alert" className="flex gap-3 rounded-xl border border-gold/40 bg-gold/10 p-4 text-sm leading-6">
+        <TriangleAlert className="mt-1 size-4 shrink-0 text-gold-ink" />
+        <p>{t(`desktopAccount.bind.${step.reason}` as const)}</p>
+      </div>
+      {step.reason === 'repair' ? actions(<Button variant="brand" onClick={onClose}>{t('common.close')}</Button>, false)
+        : actions(<>
+          {step.reason === 'otherAccount' && <Button variant="outline" disabled={busy} onClick={onCheckAgain}>{t('desktopAccount.bind.checkAgain')}</Button>}
+          <Button variant="brand" disabled={busy} onClick={step.reason === 'otherAccount' ? onSignInOther : onCheckAgain}>
+            {t(step.reason === 'otherAccount' ? 'desktopAccount.bind.signInOther' : 'desktopAccount.bind.checkAgain')}
+          </Button>
+        </>)}
     </>;
   }
 

@@ -14,7 +14,7 @@ import { SetupCompleteView } from './SetupCompleteView';
 import { BindDialog, ComputerBindingCard } from './BindComputerView';
 import { useDesktopClaim } from './useDesktopClaim';
 import { AddInstanceView } from './AddInstanceView';
-import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
+import { DESKTOP_CLAIM_VIEW, DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
 import { UpdatePanel, UpdateSubjectsPanel } from '../components/update/UpdatePanel';
 import { instanceSection } from './instanceUpdateModel';
@@ -165,6 +165,8 @@ export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>
   />;
 }
 
+const noop = () => undefined;
+
 // Document-local replay suppression. Native owns one-time admission and consumption.
 const attemptedSignOutIntents = new Set<string>();
 
@@ -176,15 +178,18 @@ export function AccountApp() {
   const [controlsLeft] = useState(() => getComputedStyle(document.documentElement).getPropertyValue('--shell-window-controls-left').trim());
   const [popover] = useState(() => new URLSearchParams(window.location.search).get('view') === UPDATE_POPOVER);
   const install = useAcceptedInstall(state?.desktop.update.phase);
-  const [view, setView] = useState<DesktopClientView | 'profile' | 'add'>(() => {
+  const [view, setView] = useState<DesktopClientView | typeof DESKTOP_CLAIM_VIEW | 'profile' | 'add'>(() => {
     const initial = new URLSearchParams(window.location.search).get('view');
-    return isDesktopClientView(initial) ? initial : 'account';
+    return initial === DESKTOP_CLAIM_VIEW ? initial : isDesktopClientView(initial) ? initial : 'account';
   });
-  // The view native opened this document for. Claim commands are admitted only in an Account
-  // document, so another document opens a real one rather than drawing the page itself.
+  // The view native opened this document for. Claim commands are admitted only in an Account or
+  // claim document, so another document opens a real one rather than drawing the page itself.
   const [documentView] = useState(() => new URLSearchParams(window.location.search).get('view') ?? 'account');
-  // ui/design: desktop/bind/*. This computer's binding, read and changed only from the Account page.
-  const claim = useDesktopClaim(state, !popover && documentView === 'account' && (view === 'account' || view === 'profile'));
+  // ui/design: desktop/bind-home/*. This computer's binding: read on the Account page, claimed only
+  // in the claim view, which the Workbench's 「开启远程访问」 asks the shell to open.
+  const claimDocument = documentView === DESKTOP_CLAIM_VIEW;
+  const claim = useDesktopClaim(state, !popover && (claimDocument ? view === 'claim'
+    : documentView === 'account' && (view === 'account' || view === 'profile')), claimDocument ? 'claim' : 'account');
   // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -281,17 +286,28 @@ export function AccountApp() {
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
   }, [send]);
+  // Leaving the claim view ends its review (Cancel) before the shell returns to the Workbench; the
+  // shell also retires it when the document is hidden.
+  const { close: closeClaim } = claim;
+  const exitClaim = useCallback(() => {
+    if (claimCodesShown.current) return;
+    closeClaim();
+    leave('cancel');
+  }, [closeClaim, leave]);
+  const exit = claimDocument && view === 'claim' ? exitClaim : () => leave('cancel');
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       event.preventDefault();
       // The popup has no account flow to cancel: Escape closes it, as it closes a popover.
       if (popover) { closeUpdatePopover(); return; }
+      // The claim dialog closes itself on Escape (and leaves through exitClaim).
+      if (claimDocument && view === 'claim') return;
       leave('cancel');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [leave, popover]);
+  }, [leave, popover, claimDocument, view]);
   useEffect(() => {
     if (popover || !signOutIntent || signOutIntent.generation !== state?.generation || attemptedSignOutIntents.has(signOutIntent.intent_id)) return;
     // Like the hook's initial native read, defer dispatch until this effect is
@@ -348,6 +364,19 @@ export function AccountApp() {
       </>}
     </UpdatePopover>;
   }
+  /** The App's own sign-in, as its page or as the claim dialog's first face (whose way out cancels). */
+  const signIn = (inClaim: boolean) => state && <><DesktopSignIn state={state} send={send}
+      onLocal={() => { if (inClaim) exitClaim(); else leave('return_local'); }} exitLabel={inClaim ? t('common.cancel') : undefined}
+      onDifferentAccount={() => void send({ type: 'abort_sign_in' }).then((reply) => {
+        setForgetFailure(reply && 'ok' in reply && !reply.ok ? { code: reply.error.code, generation: reply.state.generation } : null);
+      })}
+      onOpenSecurity={() => { openLinkInNewContext(ACCOUNT_SECURITY_URL, 'noopener,noreferrer'); }}
+      renderEnroll={() => <AccountSecondFactorView code={code} busy={busy}
+        material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
+        onCodeChange={setCode}
+        onVerify={() => void act({ type: 'finish_totp_enrollment', code })}
+        onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onLocal={() => { if (inClaim) exitClaim(); else leave('return_local'); }} exitLabel={inClaim ? t('common.cancel') : undefined} />} />
+      {forgetFailure?.generation === state.generation && <p role="alert" className="mx-auto mt-4 w-full max-w-md text-sm leading-6 text-destructive-ink">{explainError(forgetFailure.code)}</p>}</>;
   let content: ReactNode;
   let centerLogin = false;
   if (!state) {
@@ -365,42 +394,39 @@ export function AccountApp() {
     content = <RecoveryCodesView codes={direct.recoveryCodes} busy={busy} onSaved={() => {
       recoveryProtection.current = null;
       setMaterial(null);
-      if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
+      // The claim view goes on to the name; elsewhere a finished sign-in returns to the Workbench.
+      if (claimDocument) setView('claim');
+      else if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
       else setView('account');
     }}>{failure}</RecoveryCodesView>;
+  } else if (claimDocument && view === 'claim') {
+    // ui/design: desktop/bind-home/*-sheet. The shell's own document in front of the Workbench, and
+    // the one dialog over it: the App's sign-in first if needed, then the name.
+    content = claim.step && <BindDialog step={claim.step} account={claim.account || (state.account.identity?.email ?? '')} busy={claim.busy}
+      signIn={signIn(true)}
+      onNameChange={claim.changeName} onPick={(prefix) => void claim.pick(prefix)} onConfirm={() => void claim.confirm()}
+      onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
+      onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
+      onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
+      onRestart={claim.restart} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')}
+      onCheckAgain={() => void claim.recheck()} onSignInOther={() => { setView('sign-out'); leave('sign_out'); }} onClose={exitClaim} />;
   // A binding in progress keeps its dialog, also while its new sign-in owes a second factor.
-  } else if (state.account.status !== 'signed_in' && !claim.step) {
+  } else if (state.account.status !== 'signed_in') {
     // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
     // "continue on this computer", Back to Workbench and the in-app authenticator setup below.
     centerLogin = true;
-    content = <><DesktopSignIn state={state} send={send}
-      onLocal={() => leave('return_local')}
-      onDifferentAccount={() => void send({ type: 'abort_sign_in' }).then((reply) => {
-        setForgetFailure(reply && 'ok' in reply && !reply.ok ? { code: reply.error.code, generation: reply.state.generation } : null);
-      })}
-      onOpenSecurity={() => { openLinkInNewContext(ACCOUNT_SECURITY_URL, 'noopener,noreferrer'); }}
-      renderEnroll={() => <AccountSecondFactorView code={code} busy={busy}
-        material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
-        onCodeChange={setCode}
-        onVerify={() => void act({ type: 'finish_totp_enrollment', code })}
-        onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onLocal={() => leave('return_local')} />} />
-      {forgetFailure?.generation === state.generation && <p role="alert" className="mx-auto mt-4 w-full max-w-md text-sm leading-6 text-destructive-ink">{explainError(forgetFailure.code)}</p>}</>;
+    content = signIn(false);
   } else if (state.consent || (state.connection.status === 'switching' && !failedPending) || (state.connection.status === 'remote_unreachable' && view === 'instances')) {
     content = switcher;
   } else if (view === 'profile' || view === 'account') {
     content = <AccountDetailsView email={state.account.identity?.email ?? state.account.email ?? ''}
       busy={busy} errorMessage={errorMessage} onBack={instances}
       onSignOut={() => { setView('sign-out'); leave('sign_out'); }}>
-      <ComputerBindingCard binding={claim.binding} computer={state.local.name} busy={claim.busy}
-        onBind={() => void claim.start()} onRefresh={() => void claim.observe()} onUpdates={() => setView('updates')}
-        onSignInOther={() => { setView('sign-out'); leave('sign_out'); }} />
-      {/* ui/design: desktop/bind/*. Binding happens in a dialog over the Account page. */}
-      {claim.step && <BindDialog step={claim.step} account={claim.account || (state.account.identity?.email ?? '')} busy={claim.busy}
-        onNameChange={claim.changeName} onPick={(prefix) => void claim.pick(prefix)} onConfirm={() => void claim.confirm()}
-        onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
-        onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
-        onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
-        onRestart={claim.restart} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')} onClose={claim.close} />}
+      {/* ui/design: desktop/bind-home/account-*. The Account page keeps only the account: this
+          computer shows only when bound, as one read-only line with its domain. Binding lives in
+          Settings › Devices (the claim view). */}
+      {claim.binding.state === 'bound' && <ComputerBindingCard binding={claim.binding} computer={state.local.name}
+        onBind={noop} onRefresh={noop} onUpdates={noop} onSignInOther={noop} />}
     </AccountDetailsView>;
   } else if (view === 'add') {
     content = <AddInstanceView onBack={() => setView('instances')} onRefresh={instances} busy={busy} />;
@@ -409,7 +435,7 @@ export function AccountApp() {
   }
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
-    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3" style={controlsLeft ? { paddingLeft: 'var(--shell-window-controls-left)' } : undefined}><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopAccount.backWorkbench')}</Button></header>}
+    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3" style={controlsLeft ? { paddingLeft: 'var(--shell-window-controls-left)' } : undefined}><Button variant="ghost" size="sm" onClick={exit}><ArrowLeft className="size-4" />{t('desktopAccount.backWorkbench')}</Button></header>}
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
   </div>;
 }

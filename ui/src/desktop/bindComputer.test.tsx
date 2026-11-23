@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-// AV-8: binding this computer from the Account page. Native owns every decision; these tests hold
-// the page to its half: what it calls on its own (two reads), what only a press calls, and what it
-// draws for each native answer.
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+// AV-8: binding this computer in the shell's claim view, which the Workbench's 「开启远程访问」
+// opens. Native owns every decision; these tests hold the page to its half: what it calls on its
+// own (observe, then one review only when nothing is bound), what only a press calls, and what it
+// draws for each native answer. The Account page only reads.
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -31,13 +32,17 @@ const review = (screen: Record<string, unknown>, revision = 'rev-1') => ({
 });
 const NEW = (prefix: string | null, extra: Record<string, unknown> = {}) => ({ state: 'new', prefilled_prefix: 'xiaoming', prefix, taken: false, names: null, ...extra });
 
-function mount(answers: Record<string, Answer>, state: DesktopClientState = signedIn, documentView = 'account') {
+function mount(answers: Record<string, Answer>, state: DesktopClientState = signedIn, documentView = 'claim') {
   window.history.replaceState(null, '', `/account/index.html?view=${documentView}`);
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
   vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', state);
   const actions: Action[] = [];
+  const leaves: string[] = [];
   const invoke = vi.fn(async (command: string, { request }: { request: { action: Action } & Partial<DesktopClientRequest> }) => {
-    if (command === 'desktop_client_request') return { ...replies.success, state, request_id: request.request_id };
+    if (command === 'desktop_client_request') {
+      if (['cancel', 'return_local', 'sign_out'].includes(request.action.type)) leaves.push(request.action.type);
+      return { ...replies.success, state, request_id: request.request_id };
+    }
     const action = request.action;
     actions.push(action);
     const key = command === 'desktop_account_recovery' ? `recovery:${action.type}` : action.type;
@@ -46,41 +51,102 @@ function mount(answers: Record<string, Answer>, state: DesktopClientState = sign
   });
   vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
   const view = render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
-  return { actions, types: () => actions.map((each) => each.type), view };
+  return { actions, leaves: () => [...leaves], types: () => actions.map((each) => each.type), view };
 }
 
-it('mounting, re-showing and reconnecting only read; nothing decides without a press', async () => {
+/** The claim view opens its review itself once it has observed nothing bound: wait for the dialog. */
+const opened = async () => { await screen.findByRole('dialog'); };
+const broadcast = (state: DesktopClientState) => act(async () => {
+  window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: state }));
+});
+
+it('the claim view opens one review by itself, once; re-showing and reconnecting decide nothing', async () => {
+  const deciding = Object.fromEntries(DECIDING.map((type) => [type, () => { throw new Error(`${type} without a press`); }]));
+  const page = mount({ ...deciding, open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
+  await screen.findByText(en.domainField.free);
+  // Observe first; open only because nothing is bound. The prefilled name is the read's own.
+  expect(page.types()).toEqual(['inspect', 'observe_current_binding', 'open', 'read']);
+  // A newer snapshot of the same account (a reconnect, a broadcast) opens nothing again.
+  await broadcast({ ...signedIn, revision: signedIn.revision + 1 });
+  await broadcast({ ...signedIn, generation: signedIn.generation + 1, revision: signedIn.revision + 2 });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
+  expect(page.types().filter((type) => DECIDING.includes(type))).toEqual([]);
+});
+
+it('an accepted sign-in waiting to be saved comes first in the claim view, and nothing resumes without a press', async () => {
   const deciding = Object.fromEntries(DECIDING.map((type) => [type, () => { throw new Error(`${type} without a press`); }]));
   const page = mount({ ...deciding, 'recovery:inspect': { state: 'available', receipt: 'rec-1' } });
   await screen.findByRole('button', { name: en.common.continue });
-  expect(page.types().sort()).toEqual(['inspect', 'observe_current_binding']);
-  // A newer snapshot of the same account (a reconnect, a broadcast) reads nothing again.
-  await act(async () => { window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...signedIn, revision: signedIn.revision + 1 } })); });
-  // Showing the page again is a new document: it reads again, and still decides nothing.
-  cleanup();
-  const again = mount({ ...deciding, 'recovery:inspect': { state: 'available', receipt: 'rec-1' } });
-  await screen.findByRole('button', { name: en.common.continue });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-  expect([...page.types(), ...again.types()].filter((type) => DECIDING.includes(type))).toEqual([]);
-  expect(again.types().filter((type) => type === 'open' || type === 'read')).toEqual([]);
+  expect(page.types()).toEqual(['inspect']);
 });
 
 it.each([
-  ['owner_observed', 'bound'],
-  ['no_published_binding', 'unbound'],
-  ['bound_owner_unconfirmed', 'otherAccount'],
-  ['legacy_wait', 'unbound'],
-  ['legacy_review_required', 'unavailable'],
-  ['legacy_recovery_required', 'repair'],
-])('shows what native observed: %s', async (answer, drawn) => {
-  mount({ observe_current_binding: { state: answer } });
-  await waitFor(() => expect(document.querySelector(`[data-computer-binding="${drawn}"]`)).toBeTruthy());
+  ['owner_observed', () => screen.findByRole('heading', { name: copy.boundTitle })],
+  ['bound_owner_unconfirmed', () => screen.findByText(copy.otherAccount)],
+  ['legacy_review_required', () => screen.findByRole('link', { name: 'support@avibe.bot' })],
+  ['legacy_recovery_required', () => screen.findByText(copy.repair)],
+])('the claim view opens no review over what native observed: %s', async (answer, shown) => {
+  const page = mount({ observe_current_binding: { state: answer } });
+  await shown();
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  expect(page.types().filter((type) => type === 'open')).toEqual([]);
 });
 
-it('a failed read of the binding is unknown, never unbound', async () => {
-  mount({ observe_current_binding: refuse('network_unavailable') });
+it.each(['no_published_binding', 'legacy_wait'])('the claim view opens a review when native observed %s', async (answer) => {
+  const page = mount({ observe_current_binding: { state: answer }, open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
+  await screen.findByText(en.domainField.free);
+  expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
+});
+
+it('a failed read of the binding is unknown, never unbound: Check again, no review', async () => {
+  let observes = 0;
+  const page = mount({ observe_current_binding: () => { observes += 1; if (observes === 1) throw { code: 'network_unavailable' }; return { state: 'no_published_binding' }; },
+    open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
   await screen.findByText(copy.unknown);
+  expect(page.types()).not.toContain('open');
+  fireEvent.click(screen.getByRole('button', { name: copy.checkAgain }));
+  await screen.findByText(en.domainField.free);
+  expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
+});
+
+it('signed out, the claim dialog starts with the App sign-in, then opens the name once', async () => {
+  const signedOut = states.signed_out as unknown as DesktopClientState;
+  const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')) }, signedOut);
+  const dialog = await screen.findByRole('dialog');
+  expect(dialog.querySelector('[data-account-login]')).toBeTruthy();
+  expect(within(dialog).getByRole('button', { name: en.common.cancel })).toBeTruthy();
+  expect(within(dialog).queryByRole('button', { name: en.desktopAccount.continueLocal })).toBeNull();
+  expect(page.types().filter((type) => type !== 'refresh_sign_in_methods')).toEqual([]);
+  await broadcast({ ...signedIn, revision: signedOut.revision + 1 });
+  await screen.findByText(en.domainField.free);
+  expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
+});
+
+it('closing the claim dialog cancels its review and returns to the Workbench', async () => {
+  const page = mount({ open: { receipt: 'r-close' }, read: review(NEW('xiaoming')) });
+  await screen.findByText(en.domainField.free);
+  fireEvent.click(screen.getAllByRole('button', { name: en.common.cancel })[0]);
+  await waitFor(() => expect(page.actions.find((each) => each.type === 'cancel')).toEqual({ type: 'cancel', receipt: 'r-close' }));
+  await waitFor(() => expect(page.leaves()).toEqual(['cancel']));
+});
+
+it('the Account page only reads, and shows this computer only when bound', async () => {
+  const page = mount({ observe_current_binding: { state: 'owner_observed' } }, signedIn, 'account');
+  await waitFor(() => expect(document.querySelector('[data-computer-binding="bound"]')).toBeTruthy());
+  expect(page.types()).toEqual(['observe_current_binding']);
   expect(screen.queryByRole('button', { name: copy.action })).toBeNull();
+  cleanup();
+  for (const state of ['no_published_binding', 'bound_owner_unconfirmed', 'legacy_review_required', 'legacy_recovery_required']) {
+    const other = mount({ observe_current_binding: { state }, 'recovery:inspect': { state: 'available', receipt: 'rec' } }, signedIn, 'account');
+    await waitFor(() => expect(other.types()).toEqual(['observe_current_binding']));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(document.querySelector('[data-computer-binding]')).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(other.types()).toEqual(['observe_current_binding']);
+    cleanup();
+  }
 });
 
 it('binds the exact name the person saw, only when they press Bind', async () => {
@@ -90,7 +156,7 @@ it('binds the exact name the person saw, only when they press Bind', async () =>
     check: (action: Action) => review(NEW(action.prefix as string), 'rev-2'),
     confirm: { state: 'bound' },
   });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   await screen.findByText(en.domainField.free);
   expect(page.types().filter((type) => type !== 'observe_current_binding' && type !== 'inspect')).toEqual(['open', 'read', 'check']);
   fireEvent.click(screen.getByRole('button', { name: copy.confirm }));
@@ -101,7 +167,7 @@ it('binds the exact name the person saw, only when they press Bind', async () =>
 
 it('a name someone else took stays editable and gets no number added', async () => {
   mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')), confirm: { state: 'name_taken', revision: 'rev-edit' } });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
   await screen.findByText(en.domainField.taken);
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('xiaoming');
@@ -117,7 +183,7 @@ it('sends the code only on its own press, keeps a wrong code in place, and binds
     submit_proof_code: () => { codes += 1; if (codes === 1) throw { code: 'invalid_or_expired' }; return { state: 'verification_accepted', submission: 'sub-1' }; },
     review_after_proof: { state: 'bound' },
   });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
   await screen.findByRole('heading', { name: copy.proofTitle });
   expect(page.types()).not.toContain('send_proof_code');
@@ -144,7 +210,7 @@ it('after verification, a changed review says what changed and waits for another
     submit_proof_code: { state: 'verification_accepted', submission: 's' },
     review_after_proof: review(NEW('xiaoming', { taken: true }), 'rev-3'),
   });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
   fireEvent.click(await screen.findByRole('button', { name: copy.sendCode }));
   fireEvent.change(await screen.findByLabelText(en.mobileApp.code.label), { target: { value: '123456' } });
@@ -155,38 +221,35 @@ it('after verification, a changed review says what changed and waits for another
 
 it('another account owning this computer is told, with nothing more called', async () => {
   const page = mount({ open: { receipt: 'r' }, read: review({ state: 'owner_conflict' }) });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   await screen.findByRole('heading', { name: copy.conflictTitle });
   expect(page.types().filter((type) => DECIDING.includes(type) || type === 'check')).toEqual([]);
 });
 
 it('an error is one sentence and one next step, never a code', async () => {
   mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')), confirm: refuse('authentication_required') });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
   await screen.findByText(copy.problem.signedOut);
   expect(screen.queryByText(/authentication_required/)).toBeNull();
   expect(screen.getAllByRole('button', { name: en.common.close }).length).toBeGreaterThan(0);
 });
 
-it('an accepted sign-in waiting to be saved shows as Continue, resumes only on the press, then reads this computer again', async () => {
-  let observes = 0;
+it('an accepted sign-in waiting to be saved shows as Continue, resumes only on the press, then opens the name', async () => {
   const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-1' }, 'recovery:resume': { state: 'saved' },
-    observe_current_binding: () => { observes += 1; return { state: 'no_published_binding' }; } });
+    open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
   const button = await screen.findByRole('button', { name: en.common.continue });
   expect(screen.getByText(copy.recovery)).toBeTruthy();
   expect(page.types()).not.toContain('resume');
-  const before = observes;
   fireEvent.click(button);
   await waitFor(() => expect(page.actions.find((each) => each.type === 'resume')).toEqual({ type: 'resume', receipt: 'rec-1' }));
-  await screen.findByRole('button', { name: copy.action });
-  expect(observes).toBeGreaterThan(before);
-  expect(page.types()).not.toContain('open');
+  await screen.findByText(en.domainField.free);
+  expect(page.types().filter((type) => type === 'open')).toEqual(['open']);
 });
 
 /** Opens binding and verifies a code, up to the moment avibe.bot accepted it. */
 async function verify() {
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
   fireEvent.click(await screen.findByRole('button', { name: copy.sendCode }));
   fireEvent.change(await screen.findByLabelText(en.mobileApp.code.label), { target: { value: '123456' } });
@@ -198,9 +261,6 @@ const proofAnswers = {
   send_proof_code: { state: 'mail_accepted', delivery: 'd' },
   submit_proof_code: { state: 'verification_accepted', submission: 's' },
 };
-const broadcast = (state: DesktopClientState) => act(async () => {
-  window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: state }));
-});
 
 it('waits for the accepted sign-in to be published before reading the ticket again', async () => {
   let published = false;
@@ -234,7 +294,7 @@ it('a published sign-in that still owes a second factor asks for it, with the sa
 it.each(['a', 'ab--cd', `${'a'.repeat(47)}`, '-ab', 'ab-'])('keeps %s in the field and never checks it', async (typed) => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   const field = await screen.findByRole('textbox');
   const checks = page.types().filter((type) => type === 'check').length;
   fireEvent.change(field, { target: { value: typed } });
@@ -418,13 +478,16 @@ it('a real 429 on a second factor waits in place with its own time', async () =>
   expect(screen.getByRole('button', { name: en.mobileApp.twoFactor.usePasskey })).toBeTruthy();
 });
 
-it('a new generation while an action is on its way leaves the page usable', async () => {
-  mount({ open: () => new Promise(() => {}) });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+it('a new generation while an action is on its way leaves the dialog usable', async () => {
+  let answer: (value: unknown) => void = () => {};
+  mount({ open: () => new Promise((resolve) => { answer = resolve; }) });
+  await opened();
   await screen.findByRole('heading', { name: copy.title });
   await broadcast({ ...signedIn, generation: signedIn.generation + 1, revision: signedIn.revision + 1 });
-  const bind = await screen.findByRole('button', { name: copy.action });
-  expect((bind as HTMLButtonElement).disabled).toBe(false);
+  await act(async () => { answer({ receipt: 'late' }); });
+  // The old review's reply is dropped; starting again is a press.
+  const again = await screen.findByRole('button', { name: copy.restart });
+  expect((again as HTMLButtonElement).disabled).toBe(false);
 });
 
 it('a review that changed in no field it shows still says it changed, and waits for a press', async () => {
@@ -468,7 +531,7 @@ it('keeps one name check on its way at a time while the person types', async () 
       inFlight -= 1;
       return review(NEW(action.prefix as string), `rev-${action.prefix as string}`);
     } });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   const field = await screen.findByRole('textbox');
   fireEvent.change(field, { target: { value: 'maxa' } });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
@@ -495,7 +558,7 @@ it('a publication that stopped after verification offers the account recovery, n
 
 it('a computer avibe.bot no longer accepts is a dead end that names the support address as a mail link', async () => {
   const page = mount({ open: { receipt: 'r' }, read: refuse('binding_unavailable') });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   const link = await screen.findByRole('link', { name: 'support@avibe.bot' });
   expect(link.getAttribute('href')).toBe('mailto:support@avibe.bot');
   expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
@@ -506,7 +569,7 @@ it('offers held names other than the one already typed', async () => {
   const names = { holding: { limit: 10, held_count: 3, active_count: 1, at_limit: false, reason: null, earliest_release_at: null },
     eligible: [{ prefix: 'maxlab', hostname: 'maxlab-app.avibe.bot', release_at: null }, { prefix: 'maxhome', hostname: 'maxhome-app.avibe.bot', release_at: null }] };
   mount({ open: { receipt: 'r' }, read: review(NEW('maxlab', { prefilled_prefix: 'maxlab', names })) });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   await screen.findByText(en.domainField.reclaim);
   expect(screen.queryByRole('button', { name: 'maxlab' })).toBeNull();
   expect(screen.getByRole('button', { name: 'maxhome' })).toBeTruthy();
@@ -515,14 +578,14 @@ it('offers held names other than the one already typed', async () => {
 it.each(['local_instance_conflict', 'pairing_recovery_required'])('an older attempt still holding this computer (%s) says to wait, not to start again', async (code) => {
   mount({ observe_current_binding: { state: code === 'local_instance_conflict' ? 'legacy_wait' : 'legacy_publication_pending' },
     open: { receipt: 'r' }, read: refuse(code) });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   await screen.findByText(copy.problem.busy);
   expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
 });
 
 it('a sign-in that no longer matches the account asks to sign in again', async () => {
   mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')), confirm: refuse('subject_mismatch') });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await opened();
   fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
   await screen.findByText(copy.problem.signedOut);
 });
@@ -554,12 +617,14 @@ it('a 429 while adding an authenticator keeps its key and QR, locked until the w
   expect(finishes).toBe(1);
 });
 
-it('an accepted sign-in shown as Continue and cancelled is offered again on Bind', async () => {
+it('an accepted sign-in shown as Continue and cancelled is offered again in the next claim view', async () => {
   const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-5' } });
   await screen.findByRole('button', { name: en.common.continue });
   fireEvent.click(screen.getAllByRole('button', { name: en.common.cancel })[0]);
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await waitFor(() => expect(page.leaves()).toEqual(['cancel']));
+  cleanup();
+  const again = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-5' } });
   await screen.findByRole('button', { name: en.common.continue });
-  expect(page.types()).not.toContain('open');
-  expect(page.types()).not.toContain('resume');
+  expect([...page.types(), ...again.types()]).not.toContain('open');
+  expect([...page.types(), ...again.types()]).not.toContain('resume');
 });

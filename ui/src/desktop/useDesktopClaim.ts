@@ -129,7 +129,27 @@ type Handles = {
 };
 const NO_HANDLES: Handles = { receipt: null, revision: null, offer: null, delivery: null, submission: null, setup: null, confirmed: null, shown: null, checking: false };
 
-export function useDesktopClaim(state: DesktopClientState | null, enabled: boolean) {
+/** The claim view's own face for what observing found, when no flow is open. Opening a review is
+ *  only for a computer with no published binding (native reviewer, 2026-11-23). */
+function observedStep(binding: ComputerBinding, settled: boolean): BindStep {
+  switch (binding.state) {
+    case 'bound': return { kind: 'bound', host: binding.host ?? '' };
+    case 'otherAccount': case 'unknown': case 'repair': return { kind: 'notHere', reason: binding.state };
+    case 'upgrade': return { kind: 'upgrade' };
+    case 'unavailable': return { kind: 'problem', problem: 'unavailable' };
+    // Unbound and nothing open once the opening settled: the review ended without a step to show.
+    case 'unbound': return settled ? { kind: 'problem', problem: 'unknown' } : { kind: 'opening' };
+    default: return { kind: 'opening' };
+  }
+}
+
+/**
+ * This computer's binding. `account`: the Account page reads it, read-only. `claim`: the shell's
+ * claim view (avibe://desktop/claim), which a person's 「开启远程访问」 in the Workbench opened; it
+ * signs in if needed, observes, and opens one review only when nothing is bound, once per document.
+ */
+export function useDesktopClaim(state: DesktopClientState | null, enabled: boolean, mode: 'account' | 'claim' = 'account') {
+  const claimView = mode === 'claim';
   const generation = state?.generation ?? 0;
   const latest = useRef(state);
   useLayoutEffect(() => { latest.current = state; });
@@ -184,11 +204,11 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     setBusyAt(null);
   }, [setStep]);
 
-  const observe = useCallback(async (quietly = false) => {
+  const observe = useCallback(async (quietly = false): Promise<ComputerBinding['state'] | null> => {
     if (quiet.current !== null) { window.clearTimeout(quiet.current); quiet.current = null; }
     if (!quietly) setBinding({ state: 'reading' });
     const reply = await call('desktop_claim_review', { type: 'observe_current_binding' });
-    if (!reply) return;
+    if (!reply) return null;
     const local = latest.current?.local;
     const listed = latest.current?.catalog.instances.find((each) => each.id === local?.instance_id);
     const url = local?.remote_access_url ?? null;
@@ -197,26 +217,28 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       if (reply.code === BOUND_UNREAD) {
         setBinding(bound());
         quiet.current = window.setTimeout(() => { quiet.current = null; void observe(true); }, QUIET_RETRY_MS);
-        return;
+        return 'bound';
       }
-      setBinding(reply.code === 'local_runtime_upgrade_required' ? { state: 'upgrade' } : { state: 'unknown' });
-      return;
+      const failed = reply.code === 'local_runtime_upgrade_required' ? 'upgrade' : 'unknown';
+      setBinding({ state: failed });
+      return failed;
     }
     const kind = OBSERVED[str(reply.value?.state) ?? ''];
     setBinding(kind === 'bound' ? bound() : kind ? { state: kind } as ComputerBinding : { state: 'unknown' });
+    return kind ?? 'unknown';
   }, [call]);
   useEffect(() => () => { if (quiet.current !== null) window.clearTimeout(quiet.current); }, []);
 
   // An accepted sign-in waiting to be saved is the one thing to do here, whatever the card can read
   // (an occupied binding slot blocks observation; an owed factor shows no card): show it as the
   // dialog's Continue. Showing it decides nothing; only the press resumes.
-  const inspect = useCallback(async () => {
+  const inspect = useCallback(async (show = true) => {
     const reply = await call('desktop_account_recovery', { type: 'inspect' });
     if (!reply) return;
     const receipt = reply.ok && reply.value?.state === 'available' ? str(reply.value?.receipt) : null;
     // Kept also while shown: a person who cancels the dialog meets it again on Bind.
     recovery.current = receipt;
-    if (!receipt || flowOpen.current) return;
+    if (!show || !receipt || flowOpen.current) return;
     if (saving.current?.timer) window.clearTimeout(saving.current.timer);
     saving.current = { tries: 0, running: false, recover: receipt, timer: null, published: false, thenOpen: false };
     setStep({ kind: 'saving', recover: true });
@@ -236,11 +258,13 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   // A sign-in accepted while binding may publish an account that still owes a second factor; its
   // recovery must stay reachable then too.
   useEffect(() => { flowOpen.current = step !== null; }, [step]);
-  const recoverable = enabled && (state?.account.status === 'signed_in' || state?.account.status === 'second_factor_required');
+  // Only the claim view binds, so only it finishes saving an accepted sign-in. Signed in, its
+  // opening reads that first (begin, below); owing a factor, it is shown as soon as it is read.
+  const recoverable = enabled && claimView && state?.account.status === 'second_factor_required';
   useEffect(() => {
-    if (!showing || flowOpen.current) return;
+    if (claimView || !showing || flowOpen.current) return;
     void observe();
-  }, [showing, generation, observe]);
+  }, [claimView, showing, generation, observe]);
   useEffect(() => {
     if (!recoverable || flowOpen.current) return;
     void inspect();
@@ -386,6 +410,28 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     }
     await openReview();
   }), [run, openReview, setStep, stopSaving]);
+
+  /** The claim view's opening: an accepted sign-in to finish saving comes first; otherwise observe,
+   *  and open a review only when nothing is bound. Also 「再看一次」, which a person presses. */
+  const [settled, setSettled] = useState(false);
+  const begin = useCallback(async () => {
+    setSettled(false);
+    try {
+      await inspect(false);
+      if (recovery.current) { await start(); return; }
+      if (await observe() === 'unbound' && !flowOpen.current) await start();
+    } finally {
+      setSettled(true);
+    }
+  }, [inspect, observe, start]);
+  // Once per document, the first time it is signed in: never again on a re-show, a reconnect, a
+  // changed generation or a state event. The shell opens a new document for each request.
+  const begun = useRef(false);
+  useEffect(() => {
+    if (!claimView || !showing || begun.current || flowOpen.current) return;
+    begun.current = true;
+    void begin();
+  }, [claimView, showing, begin]);
 
   const timer = useRef<number | null>(null);
   const changeName = useCallback((typed: string) => {
@@ -666,8 +712,9 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     const receipt = handles.current.receipt;
     reset();
     if (receipt) void invoke('desktop_claim_review', latest.current?.generation ?? 0, { type: 'cancel', receipt });
-    if (showing) void observe();
-  }, [reset, observe, showing]);
+    // The claim view leaves for the Workbench; the Account page shows the card again.
+    if (showing && !claimView) void observe();
+  }, [reset, observe, showing, claimView]);
 
   const restart = useCallback(() => {
     const receipt = handles.current.receipt;
@@ -677,8 +724,12 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   }, [reset, start]);
 
 
+  // The claim view always shows the dialog: the App's sign-in first if needed, then the flow, or
+  // what observing found.
+  const shown: BindStep | null = !claimView ? step
+    : step ?? (state && state.account.status !== 'signed_in' ? { kind: 'signIn' } : observedStep(binding, settled));
   return {
-    binding, step, busy,
+    binding, step: shown, busy, recheck: begin,
     account: review.account, computer: review.computer,
     start, changeName, pick, confirm, sendCode, submitCode, passkey, beginSetup, savedCodes, setCode, factorStep,
     close, restart, recoverSaving, observe,

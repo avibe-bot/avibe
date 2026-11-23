@@ -13,12 +13,12 @@ import type { DesktopClientState } from './bridge';
 import { createDesktopSignInAdapter, desktopSignInMethods, desktopSignInStep, type DesktopSend } from './signInAdapter';
 
 /** The way back to this computer's own instance, under every step. */
-const LocalExit = createContext<() => void>(() => undefined);
+const LocalExit = createContext<{ onLocal: () => void; label: string | null }>({ onLocal: () => undefined, label: null });
 
 /** The account window's column around one shared step; stable, so a step keeps its fields. */
 function DesktopSignInFrame({ children, back }: SignInFrameProps) {
   const { t } = useTranslation();
-  const onLocal = useContext(LocalExit);
+  const { onLocal, label } = useContext(LocalExit);
   return (
     <div data-account-login className="mx-auto my-auto flex w-full max-w-md shrink-0 flex-col py-4">
       {back ? (
@@ -37,7 +37,7 @@ function DesktopSignInFrame({ children, back }: SignInFrameProps) {
       ) : null}
       {children}
       <div className="mt-6 text-center">
-        <Button variant="ghost" onClick={onLocal}>{t('desktopAccount.continueLocal')}</Button>
+        <Button variant="ghost" onClick={onLocal}>{label ?? t('desktopAccount.continueLocal')}</Button>
       </div>
     </div>
   );
@@ -58,6 +58,8 @@ export type DesktopSignInProps = {
   methods?: SignInMethods;
   /** Leaves sign-in for this computer's own instance (`return_local`). */
   onLocal: () => void;
+  /** The way out's label when it is not 「继续使用本机」 (the claim dialog's 「取消」). */
+  exitLabel?: string;
   /** Leaves an owed second factor (`cancel`): native drops that attempt. */
   onDifferentAccount: () => void;
   /** Opens avibe.bot's Account security page. */
@@ -77,6 +79,7 @@ export function DesktopSignIn({
   send,
   methods,
   onLocal,
+  exitLabel,
   onDifferentAccount,
   onOpenSecurity,
   renderEnroll,
@@ -133,7 +136,7 @@ export function DesktopSignIn({
   }, [follow, key, retireOperation, step]);
 
   return (
-    <LocalExit.Provider value={onLocal}>
+    <LocalExit.Provider value={{ onLocal, label: exitLabel ?? null }}>
     <SignInChrome value={DESKTOP_SIGN_IN_CHROME}>
       {flow.render((actions) => (
         // The iPhone's first page, smaller and without its brand row, with the Desktop's own
@@ -144,7 +147,7 @@ export function DesktopSignIn({
           </SignInWelcome>
           <div className="mt-2 text-center">
             <Button variant="ghost" size="sm" className="text-muted" onClick={onLocal}>
-              {t('desktopAccount.continueLocal')}
+              {exitLabel ?? t('desktopAccount.continueLocal')}
             </Button>
           </div>
         </div>
