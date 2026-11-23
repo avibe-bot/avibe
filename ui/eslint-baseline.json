@@ -112,7 +112,7 @@
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/settings/models/BackendModelEditorDialog.tsx": {
-      "react-hooks/set-state-in-effect": 2
+      "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/models/BackendModelPickerDialog.tsx": {
       "react-hooks/set-state-in-effect": 1

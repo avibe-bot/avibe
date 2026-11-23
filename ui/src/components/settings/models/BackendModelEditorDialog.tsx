@@ -6,15 +6,17 @@ import type { TranslationKey } from '@/i18n/types';
 // baseline — an editor that saved on its own would make every row its own
 // mutation and leave no way to cancel a list still being arranged.
 //
-// models.dev is a metadata source here, not an authority: the first field is a
-// search, and choosing a suggestion fills the model id along with every fact the
-// catalog knows about it — all of them still editable, because what the user
-// wanted may be the model next to the one they found. A picked model is a base:
-// retyping the id afterwards (a relay's name for the same model) keeps every
-// parameter, and only 「Clear parameters」 takes them back.
-// ui/design: models/model-menu/custom-model-from-catalog, models/model-menu/custom-model-id-edited
+// The model catalog (models.dev) is a metadata source here, not an authority. The
+// ID is the user's: what their provider calls the model. Whatever registered
+// model that ID answers to — the same ID, or the closest one the server stands
+// behind — fills the parameters of a blank form and is named on the line above
+// them; once parameters are there, a different answer is only offered. 「更换」
+// searches the catalog and applies another model's parameters; neither path
+// touches the ID or the display name the user typed.
+// ui/design: models/model-menu/custom-model-closest, custom-model-unmatched,
+// custom-model-offer, custom-model-change
 import * as React from 'react';
-import { Check, Plus } from 'lucide-react';
+import { Check, LoaderCircle, Plus, Search } from 'lucide-react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -25,8 +27,9 @@ import { isComposingKey } from '@/lib/imeComposition';
 import { NO_REASONING_EFFORT } from '@/lib/effortOptions';
 import { cn } from '@/lib/utils';
 import { getBackendUiMeta } from '@/lib/agentBackends';
-import { applyModelsDevMatch, backendModelId, blankBackendModel, clearModelsDevParameters, draftWithId } from './backendCatalog';
+import { applyModelsDevParameters, blankBackendModel, clearModelsDevParameters, draftWithId, modelsDevBaseId } from './backendCatalog';
 import { Field } from './dialogFields';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { formatTokensCompact } from './format';
 import { apiFailure, modelsApi } from './modelsApi';
 import { modelsDevFillFailureKey } from './serverCopy';
@@ -43,11 +46,19 @@ import {
   type NativeProtocol,
 } from './types';
 
-type FillState = 'idle' | 'loading' | 'error';
-
 /** Long enough that a typed word is one read rather than one per keystroke,
- *  short enough that the list is there when the typing stops. */
+ *  short enough that the answer is there when the typing stops. */
 const LOOKUP_DEBOUNCE_MS = 250;
+
+/** Common limits, offered under an empty box: the value and how it reads. Round
+ *  thousands throughout, so 「64K」 is never more than a model sold as 64K allows. */
+const CONTEXT_PRESETS = [[128_000, '128K'], [200_000, '200K'], [400_000, '400K'], [1_000_000, '1M']] as const;
+const OUTPUT_PRESETS = [[8_000, '8K'], [32_000, '32K'], [64_000, '64K'], [128_000, '128K']] as const;
+
+/** What the catalog said about one ID: asked, answered with a model, or answered with none. */
+type IdAnswer = { id: string; match: ModelsDevMatch | null };
+/** The catalog search under 「更换」. */
+type SourceSearch = { query: string } & ({ matches: ModelsDevMatch[] } | { failed: TranslationKey });
 
 /** Digits only. A pasted 「163,840」 is the same number as 「163840」, and the
  *  field renders the grouped form itself, so refusing the separator would refuse
@@ -149,104 +160,134 @@ export const BackendModelEditorDialog: React.FC<{
   const [nameText, setNameText] = React.useState('');
   const [contextText, setContextText] = React.useState('');
   const [outputText, setOutputText] = React.useState('');
-  const [fillState, setFillState] = React.useState<FillState>('idle');
-  /** Which sentence `fillState === 'error'` shows, resolved while the server's
-   *  own answer is still in hand. */
-  const [fillFailedKey, setFillFailedKey] = React.useState<TranslationKey>('settings.models.gateway.modelEditor.fillFailed');
-  const [matches, setMatches] = React.useState<ModelsDevMatch[]>([]);
-  /** The query the typeahead is answering; empty closes it. Held apart from
-   *  `draft.id` because choosing a suggestion writes the id, and a list keyed on
-   *  the id would reopen on the answer it just gave. */
-  const [lookup, setLookup] = React.useState('');
-  const [active, setActive] = React.useState(0);
   const [customOpen, setCustomOpen] = React.useState(false);
   const [customEffort, setCustomEffort] = React.useState('');
   const [submitted, setSubmitted] = React.useState(false);
-  const fillAttempt = React.useRef(0);
-  /** The catalog model the parameters were filled from, by the name the list
-   *  showed it under; null while they are the user's own. It is what the line
-   *  under the id names, and what puts 「keep these parameters」 first in the
-   *  list: once a model is picked as a base, the id typed next is that model
-   *  under another name far more often than a search for a different one. */
-  const [base, setBase] = React.useState<string | null>(null);
-  const listId = React.useId();
-  const idRef = React.useRef<HTMLInputElement>(null);
+  /** The catalog's answer about the ID as it stands; null until it has one. */
+  const [idAnswer, setIdAnswer] = React.useState<IdAnswer | null>(null);
+  /** Whether a parameter has been set by hand since the form opened, and which
+   *  registered model the parameters stand on. A blank form takes the catalog's
+   *  answer by itself; a form somebody has worked on is only offered it. Read
+   *  when an answer lands, so they are refs: nothing is drawn from them. */
+  const touched = React.useRef(false);
+  const standsOn = React.useRef<string | null>(null);
+  const [sourceOpen, setSourceOpen] = React.useState(false);
+  const [sourceQuery, setSourceQuery] = React.useState('');
+  /** The last catalog search answered; it is the answer only while its query is the one typed. */
+  const [sourceSearch, setSourceSearch] = React.useState<SourceSearch | null>(null);
+  const sourceToggleRef = React.useRef<HTMLButtonElement>(null);
 
-  const seed = React.useCallback((next: BackendModel) => {
+  const seed = React.useCallback((next: BackendModel, worked: boolean) => {
     setDraft(next);
     setNameText(next.display_name ?? '');
     setContextText(groupTokens(next.context_window));
     setOutputText(groupTokens(next.max_output_tokens));
-    setFillState('idle');
-    setMatches([]);
-    setActive(0);
     setCustomOpen(false);
     setCustomEffort('');
     setSubmitted(false);
-    setBase(null);
+    setIdAnswer(null);
+    touched.current = worked;
+    standsOn.current = next.models_dev_id ?? null;
+    setSourceOpen(false);
+    setSourceQuery('');
+    setSourceSearch(null);
   }, []);
 
   React.useEffect(() => {
-    if (!open) {
-      fillAttempt.current += 1;
-      return;
-    }
-    // A seeded add opens with the query already running: the user typed it in
-    // the picker, and asking for it again would be the surface forgetting. The
-    // id it lands as goes through the one chokepoint like every other produced
-    // id — a seed that skipped it would be a row missing what that chokepoint
-    // is the only place to give it, arriving by the one route nobody watches.
+    if (!open) return;
+    // A seeded add opens on the ID the picker carried over: the user typed it
+    // there, and asking for it again would be the surface forgetting. The ID it
+    // lands as goes through the one chokepoint like every other produced ID.
     const next = model ?? draftSeed ?? draftWithId(blankBackendModel(), seedId?.trim() ?? '', backend);
-    seed(next);
-    setLookup(model === null && !draftSeed ? seedId?.trim() ?? '' : '');
+    // A draft reopened after a refused write is the user's work already: the
+    // catalog may offer, never refill.
+    seed(next, model === null && draftSeed !== undefined);
   }, [backend, draftSeed, model, open, seed, seedId]);
 
+  /** Take a registered model's parameters and leave the ID and the name alone:
+   *  the row stays the model the user named, described by the one chosen. A row
+   *  being added records that it was described from the catalog; a saved row
+   *  keeps how it was first created, and the API it is answered on. */
+  const applyParameters = React.useCallback((match: ModelsDevMatch) => {
+    standsOn.current = match.models_dev_id;
+    setDraft((current) => applyModelsDevParameters(current, match, creating ? 'models_dev' : current.origin, creating ? backend : null));
+    setContextText(groupTokens(match.context_window));
+    setOutputText(groupTokens(match.max_output_tokens));
+  }, [backend, creating]);
+
   /**
-   * The typeahead: what has been typed so far, answered by models.dev.
+   * What the catalog knows about the ID as it stands.
    *
-   * Debounced, because the query is a keystroke and the answer is a network
-   * hop. Aborted on the way out, so a reply to a query the user has already
-   * replaced never lands — and the attempt counter is bumped on every exit,
-   * because aborting raises inside the request, and a stale attempt that still
-   * matched would report 「models.dev could not be reached」 about a search
-   * nobody is waiting for.
+   * Debounced, because the ID is typed and the answer is a network hop; aborted
+   * on the way out, so an answer about an ID the user has already replaced never
+   * lands. An unreachable catalog is no answer at all: the form stays the
+   * user's, and 「更换」 says why when it is opened.
    */
+  const askedId = open ? draft.id.trim() : '';
   React.useEffect(() => {
-    if (!creating || lookup === '') {
-      fillAttempt.current += 1;
-      setFillState('idle');
-      setMatches([]);
-      return;
-    }
-    const attempt = ++fillAttempt.current;
-    setFillState('loading');
-    setMatches([]);
+    if (askedId === '') return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const found = await modelsApi.searchModelsDev(lookup, controller.signal);
-          if (attempt !== fillAttempt.current) return;
-          setMatches(found);
-          setActive(0);
-          setFillState('idle');
-        } catch (error) {
-          if (attempt !== fillAttempt.current) return;
-          setFillFailedKey(modelsDevFillFailureKey(apiFailure(error)?.detail));
-          setFillState('error');
-        }
-      })();
+      void modelsApi.searchModelsDev(askedId, controller.signal).then((found) => {
+        if (controller.signal.aborted) return;
+        const bare = modelsDevBaseId(askedId);
+        const match = found.find((candidate) => candidate.model_id === askedId || candidate.model_id === bare) ?? null;
+        setIdAnswer({ id: askedId, match });
+        // A blank form takes the answer by itself: the model being added is the
+        // one named, and nothing on screen is anyone's work yet. Only the
+        // parameters: the display name is the user's to give.
+        if (match && creating && !touched.current && standsOn.current === null) applyParameters(match);
+      }, () => {});
     }, LOOKUP_DEBOUNCE_MS);
     return () => {
       window.clearTimeout(timer);
       controller.abort();
-      fillAttempt.current += 1;
     };
-  }, [creating, lookup]);
+  }, [applyParameters, askedId, creating]);
+
+  const sourceId = draft.models_dev_id ? modelsDevBaseId(draft.models_dev_id) : null;
+  const answered = idAnswer !== null && idAnswer.id === draft.id.trim() ? idAnswer : null;
+  const answeredId = answered?.match ? modelsDevBaseId(answered.match.models_dev_id) : null;
+
+
+  // 「更换」: a search of the catalog, answered like the ID was.
+  const searchedFor = sourceOpen ? sourceQuery.trim() : '';
+  React.useEffect(() => {
+    if (searchedFor === '') return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void modelsApi.searchModelsDev(searchedFor, controller.signal).then(
+        (matches) => { if (!controller.signal.aborted) setSourceSearch({ query: searchedFor, matches }); },
+        (error) => { if (!controller.signal.aborted) setSourceSearch({ query: searchedFor, failed: modelsDevFillFailureKey(apiFailure(error)?.detail) }); },
+      );
+    }, LOOKUP_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [searchedFor]);
+  const searchAnswer = searchedFor !== '' && sourceSearch?.query === searchedFor ? sourceSearch : null;
+  const searching = searchedFor !== '' && searchAnswer === null;
+  const searchMatches = searchAnswer && 'matches' in searchAnswer ? searchAnswer.matches : null;
 
   const context = parseTokens(contextText);
   const output = parseTokens(outputText);
   const trimmedId = draft.id.trim();
+  // A saved row that already has its limits is not asked to reconsider them each
+  // time it is opened: the catalog speaks up about a row being added, an ID that
+  // was just changed, or limits nobody has filled in.
+  const wantsAnswer = creating || trimmedId !== model.id || (context.value === null && output.value === null);
+  /** The parameters the ID would bring, when they are not the ones on screen. */
+  // Which model the parameters stand on is the whole catalog key: two providers'
+  // entries for one model name are different answers, with their own limits.
+  const offered = wantsAnswer && answered?.match && answered.match.models_dev_id !== draft.models_dev_id ? answered.match : null;
+  /** How the offer names its model: the registered name, or the whole key when
+   *  that name is the one the parameters already stand on. */
+  const offeredName = offered && answeredId === sourceId ? offered.models_dev_id : answeredId;
+  /** 「The closest」 is the catalog's own judgement about this ID, said only
+   *  while it stands: not for a model the user chose, nor for an ID it does not know. */
+  const closest = answered?.match?.match_kind === 'closest' && answered.match.models_dev_id === draft.models_dev_id;
+  const unknownToCatalog = wantsAnswer && sourceId === null && answered !== null && answered.match === null;
   /**
    * The row as it would be stored.
    *
@@ -272,102 +313,58 @@ export const BackendModelEditorDialog: React.FC<{
   const valid = idError === null && context.ok && output.ok;
 
   const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
+  /** A parameter set by hand: from here on the catalog offers, it does not fill. */
+  const patchParameters = (next: Partial<BackendModel>) => {
+    touched.current = true;
+    patch(next);
+  };
 
-  const toggleInput = (value: BackendModelInputModality) => patch({
+  const toggleInput = (value: BackendModelInputModality) => patchParameters({
     input_modalities: draft.input_modalities.includes(value)
       ? draft.input_modalities.filter((entry) => entry !== value)
       : [...draft.input_modalities, value],
   });
-  const toggleOutput = (value: BackendModelOutputModality) => patch({
+  const toggleOutput = (value: BackendModelOutputModality) => patchParameters({
     output_modalities: draft.output_modalities.includes(value)
       ? draft.output_modalities.filter((entry) => entry !== value)
       : [...draft.output_modalities, value],
   });
-  const toggleEffort = (value: string) => patch({
+  const toggleEffort = (value: string) => patchParameters({
     reasoning_efforts: draft.reasoning_efforts.includes(value)
       ? draft.reasoning_efforts.filter((entry) => entry !== value)
       : [...draft.reasoning_efforts, value],
   });
 
-  const applyMatch = (match: ModelsDevMatch) => {
-    // The id comes with it — the row is the model that was chosen, under the id
-    // its provider publishes it as. `origin` is `models_dev` unconditionally
-    // because the typeahead is add mode's field: a saved row's own creation path
-    // is never re-decided here.
-    // Another catalog row replaces the whole fill, the user's edits to it
-    // included: picking a model is asking for that model's parameters.
-    setDraft(applyModelsDevMatch(draft, match, 'models_dev', backend));
-    setNameText(match.display_name ?? '');
-    setContextText(groupTokens(match.context_window));
-    setOutputText(groupTokens(match.max_output_tokens));
-    setBase(match.display_name ?? match.model_id);
-    setLookup('');
+  /** 「更换」 opens on the model the parameters stand on, so the list starts
+   *  where the user is. */
+  const toggleSource = () => {
+    setSourceQuery(sourceOpen ? '' : sourceId ?? '');
+    setSourceOpen(!sourceOpen);
   };
-
-  /** Take the query as the id itself, resolved to one this backend accepts,
-   *  and leave every other field as it stands. */
-  const takeLookupAsId = () => {
-    setDraft((current) => draftWithId(current, lookup.trim(), backend));
-    setLookup('');
+  const closeSource = () => {
+    setSourceOpen(false);
+    setSourceQuery('');
+    sourceToggleRef.current?.focus();
   };
-
-  /** Retype the id. The request for the old query is dropped by the lookup
-   *  effect; the parameters stay, whoever filled them — correcting or renaming
-   *  the id is not a decision to retype the rest of the form. */
-  const changeId = (nextId: string) => {
-    setActive(0);
-    setLookup(nextId.trim());
-    patch({ id: nextId });
+  const chooseSource = (match: ModelsDevMatch) => {
+    applyParameters(match);
+    closeSource();
   };
-
-  /** 「Clear parameters」: back to the blank form under the same id and name.
-   *  The button goes with the line it sits on, so the caret goes back to the
-   *  id — where an open list and its Escape still belong. */
+  /** 「不套用，自己填」: the parameters go back to empty under the same ID and
+   *  name, and the catalog stops filling them. */
   const clearParameters = () => {
-    setDraft(clearModelsDevParameters);
+    setDraft((current) => {
+      const cleared = clearModelsDevParameters(current);
+      return creating ? cleared : { ...cleared, origin: current.origin, ...(current.native_protocol ? { native_protocol: current.native_protocol } : {}) };
+    });
     setContextText('');
     setOutputText('');
-    setBase(null);
-    idRef.current?.focus();
+    touched.current = true;
+    standsOn.current = null;
+    closeSource();
   };
 
-  // The escape is in the list in every open state, including 「searching」 and
-  // 「unavailable」: models.dev being slow or down is not a reason the user may
-  // not name their own model. It is the last row while the form is the user's
-  // own, so Enter on a search takes the first match; once a catalog model is
-  // the base it is the first row, so Enter keeps that model's parameters under
-  // the id just typed and a different model is a deliberate pick.
-  const lookupOpen = creating && lookup !== '';
-  const keepFirst = base !== null;
-  const rowCount = matches.length + 1;
-  const literalRow = keepFirst ? 0 : matches.length;
-  const matchRow = (index: number) => (keepFirst ? index + 1 : index);
-  const activeRow = Math.min(active, rowCount - 1);
-  const chooseRow = (row: number) => {
-    if (row === literalRow) takeLookupAsId();
-    else applyMatch(matches[keepFirst ? row - 1 : row]);
-  };
-
-  const onIdKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    // Every key below is one an IME candidate window uses too — Enter accepts
-    // the characters being composed, the arrows move through the candidates —
-    // so while one is open none of them are aimed at this list.
-    if (isComposingKey(event)) return;
-    if (!lookupOpen) return;
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      const step = event.key === 'ArrowDown' ? 1 : rowCount - 1;
-      setActive((current) => (Math.min(current, rowCount - 1) + step) % rowCount);
-    } else if (event.key === 'Home' || event.key === 'End') {
-      event.preventDefault();
-      setActive(event.key === 'Home' ? 0 : rowCount - 1);
-    } else if (event.key === 'Enter') {
-      event.preventDefault();
-      chooseRow(activeRow);
-    }
-  };
-
-  // Escape closes the innermost open thing first: the ID's suggestion list, or
+  // Escape closes the innermost open thing first: the catalog search, or
   // the custom effort being typed, then the editor. It is decided here because
   // the dialog hears Escape on the document's capture phase, before a field's own
   // key handler could stop it — so a field cannot keep the key for itself.
@@ -378,9 +375,9 @@ export const BackendModelEditorDialog: React.FC<{
       return;
     }
     const target = event.target instanceof Element ? event.target : null;
-    if (lookupOpen && target?.closest('[data-model-id-lookup]')) {
+    if (sourceOpen && target?.closest('[data-model-source]')) {
       event.preventDefault();
-      setLookup('');
+      closeSource();
     } else if (customOpen && target?.closest('[data-custom-effort]')) {
       event.preventDefault();
       setCustomOpen(false);
@@ -391,7 +388,7 @@ export const BackendModelEditorDialog: React.FC<{
   const addCustomEffort = () => {
     const value = customEffort.trim();
     if (value === '' || value.length > BACKEND_MODEL_EFFORT_MAX_LENGTH) return;
-    if (!draft.reasoning_efforts.includes(value)) patch({ reasoning_efforts: [...draft.reasoning_efforts, value] });
+    if (!draft.reasoning_efforts.includes(value)) patchParameters({ reasoning_efforts: [...draft.reasoning_efforts, value] });
     setCustomEffort('');
     setCustomOpen(false);
   };
@@ -417,38 +414,6 @@ export const BackendModelEditorDialog: React.FC<{
   // A suggestion is not a capability declaration: Off stays unchecked until
   // the operator adds it to this exact model, just like any custom effort.
   const efforts = [...new Set([NO_REASONING_EFFORT, ...effortSuggestions, ...draft.reasoning_efforts])];
-  const literalOption = (
-    <button
-      type="button"
-      role="option"
-      id={`${listId}-${literalRow}`}
-      aria-selected={activeRow === literalRow}
-      onMouseDown={(event) => event.preventDefault()}
-      onMouseEnter={() => setActive(literalRow)}
-      onClick={takeLookupAsId}
-      // First, it is the list's default answer and is drawn like a suggestion;
-      // last, it is the escape under them.
-      className={cn(
-        'model-hub-model-match flex min-w-0 items-center gap-2.5 text-left',
-        !keepFirst && 'model-hub-model-match--literal',
-        activeRow === literalRow && 'is-selected',
-      )}
-    >
-      {/* The id it will create, through the same resolver `commit` uses — not
-          the raw query, whose surrounding whitespace is not part of the id.
-          A long id gives way, never the words that say what the row does. */}
-      <span className="model-hub-model-match-literal flex min-w-0 whitespace-pre">
-        <Trans
-          i18nKey={keepFirst ? 'settings.models.gateway.modelEditor.useAsIdKeep' : 'settings.models.gateway.modelEditor.useAsId'}
-          values={{ query: backendModelId(lookup.trim()) }}
-          components={{ id: <span className="min-w-0 truncate" /> }}
-        />
-      </span>
-      {keepFirst && activeRow === literalRow && (
-        <span className="model-hub-model-match-meta ml-auto shrink-0 max-md:hidden" aria-hidden="true">{t('settings.shortcuts.keyLabels.enter')}</span>
-      )}
-    </button>
-  );
   const backendName = getBackendUiMeta(backend).label;
   const protocolLabel = t('settings.models.gateway.modelEditor.nativeProtocol.label') as string;
   const idHint = submitted && idError ? t(`settings.models.gateway.modelEditor.id.${idError}`) as string : null;
@@ -479,108 +444,17 @@ export const BackendModelEditorDialog: React.FC<{
               labelClassName="model-hub-model-field-label"
             >
               {(id) => (
-                <div
-                  className="relative min-w-0"
-                  // The list is an overlay over the fields below it, so it lives
-                  // exactly as long as the user is in it: focus moving anywhere
-                  // outside closes it, the same containment check
-                  // `SourceDetailPanel` uses. Its own rows never trigger this —
-                  // they refuse focus on mousedown to keep the caret in the
-                  // field — so choosing one still runs.
-                  onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setLookup(''); }}
-                  data-model-id-lookup
-                >
-                  <Input
-                    ref={idRef}
-                    id={id}
-                    value={draft.id}
-                    readOnly={!creating}
-                    role="combobox"
-                    aria-expanded={lookupOpen}
-                    aria-controls={listId}
-                    aria-autocomplete="list"
-                    aria-activedescendant={lookupOpen ? `${listId}-${activeRow}` : undefined}
-                    aria-invalid={Boolean(idHint)}
-                    spellCheck={false}
-                    autoComplete="off"
-                    onChange={(event) => changeId(event.target.value)}
-                    onKeyDown={onIdKeyDown}
-                    placeholder={t('settings.models.gateway.modelEditor.id.placeholder') as string}
-                    className="model-hub-model-control w-full font-mono text-[12.5px] read-only:text-muted"
-                  />
-                  {/* Where the parameters came from, and the way back to an
-                      empty form. Inside the lookup's box, so the list opens
-                      under it and choosing 「clear」 does not count as leaving. */}
-                  {base !== null && (
-                    <p className="model-hub-model-note mt-1.5 flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 truncate">{t('settings.models.gateway.modelEditor.parametersFrom', { name: base })}</span>
-                      <span aria-hidden="true" className="shrink-0 before:content-['·']" />
-                      <button
-                        type="button"
-                        // A click keeps the caret in the id, like the list's rows.
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={clearParameters}
-                        className="shrink-0 font-semibold text-foreground underline underline-offset-2"
-                      >
-                        {t('settings.models.gateway.modelEditor.clearParameters')}
-                      </button>
-                    </p>
-                  )}
-                  {lookupOpen && (
-                    // Over the form, not in it: the fields below keep their
-                    // places while the list opens and closes on every keystroke.
-                    <div className="model-hub-model-match-list absolute inset-x-0 top-full z-30 mt-1.5 flex flex-col">
-                      {fillState !== 'idle' && (
-                        <p className="model-hub-model-match-state" role="status">
-                          {t(fillState === 'loading' ? 'settings.models.gateway.modelEditor.lookupLoading' : fillFailedKey)}
-                        </p>
-                      )}
-                      <div
-                        id={listId}
-                        role="listbox"
-                        aria-label={t('settings.models.gateway.modelEditor.matches') as string}
-                        className="flex min-w-0 flex-col"
-                      >
-                        {keepFirst && literalOption}
-                        {matches.map((match, index) => {
-                          const context = formatTokensCompact(match.context_window);
-                          const row = matchRow(index);
-                          return (
-                            <button
-                              key={match.models_dev_id}
-                              type="button"
-                              role="option"
-                              id={`${listId}-${row}`}
-                              aria-selected={activeRow === row}
-                              // The field keeps the caret: a click that moved
-                              // focus would close the list before it fired.
-                              onMouseDown={(event) => event.preventDefault()}
-                              onMouseEnter={() => setActive(row)}
-                              onClick={() => applyMatch(match)}
-                              className={cn('model-hub-model-match flex min-w-0 items-center gap-2.5 text-left', activeRow === row && 'is-selected')}
-                            >
-                              <span className="flex min-w-0 flex-1 items-center gap-2">
-                                {/* No `shrink-0`: pinning the name at its full
-                                  * width is what its own `truncate` is there
-                                  * to prevent, and a name long enough to need
-                                  * cutting would instead squeeze the id and
-                                  * the provider out of the row before running
-                                  * past its edge. Left to shrink, the three
-                                  * yield in proportion to what they show, so
-                                  * the longest gives up the most. */}
-                                <span className="model-hub-model-match-name truncate">{match.display_name ?? match.model_id}</span>
-                                <span className="model-hub-model-match-id truncate font-mono">{match.model_id}</span>
-                                <span className="model-hub-model-match-meta truncate">{match.provider_name}</span>
-                              </span>
-                              {context && <span className="model-hub-model-match-meta shrink-0">{context}</span>}
-                            </button>
-                          );
-                        })}
-                        {!keepFirst && literalOption}
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <Input
+                  id={id}
+                  value={draft.id}
+                  readOnly={!creating}
+                  aria-invalid={Boolean(idHint)}
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(event) => patch({ id: event.target.value })}
+                  placeholder={t('settings.models.gateway.modelEditor.id.placeholder') as string}
+                  className="model-hub-model-control w-full font-mono text-[12.5px] read-only:text-muted"
+                />
               )}
             </Field>
             {idHint && <p className="model-hub-model-error" role="alert">{idHint}</p>}
@@ -604,6 +478,101 @@ export const BackendModelEditorDialog: React.FC<{
 
           <section className="model-hub-model-section">
             <SectionLabel>{t('settings.models.gateway.modelEditor.section.parameters')}</SectionLabel>
+            {/* Where the parameters came from, and the two ways to change that:
+                take what the ID itself answers to, or look another model up. */}
+            <div className="model-hub-model-source" data-model-source>
+              <p className="model-hub-model-source-line">
+                {sourceId !== null && (
+                  <span className="min-w-0">
+                    <Trans
+                      i18nKey={closest ? 'settings.models.gateway.modelEditor.source.fromClosest' : 'settings.models.gateway.modelEditor.source.from'}
+                      values={{ model: sourceId }}
+                      components={{ id: <span className="model-hub-model-source-id" /> }}
+                    />
+                  </span>
+                )}
+                {unknownToCatalog && <span role="status">{t('settings.models.gateway.modelEditor.source.none')}</span>}
+                {offered && (
+                  <button type="button" className="model-hub-model-source-offer" onClick={() => applyParameters(offered)}>
+                    <Trans
+                      i18nKey="settings.models.gateway.modelEditor.source.updateTo"
+                      values={{ model: offeredName }}
+                      components={{ id: <span className="font-mono" /> }}
+                    />
+                  </button>
+                )}
+                {!offered && (sourceId !== null || unknownToCatalog) && <span aria-hidden="true" className="shrink-0 before:content-['·']" />}
+                <button
+                  ref={sourceToggleRef}
+                  type="button"
+                  aria-expanded={sourceOpen}
+                  className="model-hub-model-source-action"
+                  onClick={toggleSource}
+                >
+                  {t(sourceId !== null ? 'settings.models.gateway.modelEditor.source.change' : 'settings.models.gateway.modelEditor.source.pick')}
+                </button>
+              </p>
+              {sourceOpen && (
+                <div className="model-hub-model-source-panel">
+                  <div className="model-hub-model-control model-hub-model-source-search flex min-w-0 items-center gap-2">
+                    <Search className="size-4 shrink-0 text-muted" aria-hidden="true" />
+                    <Input
+                      variant="bare"
+                      autoFocus
+                      value={sourceQuery}
+                      onChange={(event) => setSourceQuery(event.target.value)}
+                      placeholder={t('settings.models.gateway.modelEditor.source.search') as string}
+                      aria-label={t('settings.models.gateway.modelEditor.source.search') as string}
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="min-w-0 flex-1 text-[12.5px]"
+                    />
+                    {searching && <LoaderCircle className="size-4 shrink-0 animate-spin text-muted" aria-label={t('settings.models.gateway.modelEditor.lookupLoading') as string} />}
+                  </div>
+                  {searchAnswer && 'failed' in searchAnswer && <p className="model-hub-model-match-state" role="status">{t(searchAnswer.failed)}</p>}
+                  {searchMatches !== null && searchMatches.length === 0 && (
+                    <p className="model-hub-model-match-state" role="status">{t('settings.models.gateway.modelEditor.source.empty')}</p>
+                  )}
+                  {searchMatches !== null && searchMatches.length > 0 && (
+                    <div role="group" aria-label={t('settings.models.gateway.modelEditor.matches') as string} className="model-hub-model-source-list flex min-w-0 flex-col">
+                      {searchMatches.map((match) => {
+                        const size = formatTokensCompact(match.context_window);
+                        const registered = modelsDevBaseId(match.models_dev_id);
+                        const current = match.models_dev_id === draft.models_dev_id;
+                        return (
+                          <button
+                            key={match.models_dev_id}
+                            type="button"
+                            aria-current={current || undefined}
+                            onClick={() => chooseSource(match)}
+                            className={cn('model-hub-model-match model-hub-model-source-row text-left', current && 'is-selected')}
+                          >
+                            <span className="model-hub-model-match-name truncate">{match.display_name ?? registered}</span>
+                            {/* Name on its own line on a phone, the rest under it: neither is cut to fit the other. */}
+                            <span className="model-hub-model-source-row-detail">
+                              <span className="model-hub-model-match-id truncate font-mono">{registered}</span>
+                              <span className="model-hub-model-match-meta truncate">{match.provider_name}</span>
+                              <span className="model-hub-model-source-row-end">
+                                {current && <Check className="size-3.5 shrink-0" aria-hidden="true" />}
+                                {size && <span className="model-hub-model-match-meta">{size}</span>}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div className="model-hub-model-source-foot">
+                    <span>{t('settings.models.gateway.modelEditor.source.applyNote')}</span>
+                    {sourceId !== null && (
+                      <button type="button" className="model-hub-model-source-action shrink-0" onClick={clearParameters}>
+                        {t('settings.models.gateway.modelEditor.source.clear')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="grid gap-3 sm:grid-cols-2 sm:gap-6">
               <Field
                 label={t('settings.models.gateway.modelEditor.contextWindow')}
@@ -615,8 +584,9 @@ export const BackendModelEditorDialog: React.FC<{
                     id={id}
                     value={contextText}
                     invalid={!context.ok}
-                    onChange={setContextText}
+                    onChange={(next) => { touched.current = true; setContextText(next); }}
                     onBlur={() => context.ok && setContextText(groupTokens(context.value))}
+                    presets={CONTEXT_PRESETS}
                   />
                 )}
               </Field>
@@ -630,8 +600,9 @@ export const BackendModelEditorDialog: React.FC<{
                     id={id}
                     value={outputText}
                     invalid={!output.ok}
-                    onChange={setOutputText}
+                    onChange={(next) => { touched.current = true; setOutputText(next); }}
                     onBlur={() => output.ok && setOutputText(groupTokens(output.value))}
+                    presets={OUTPUT_PRESETS}
                   />
                 )}
               </Field>
@@ -666,12 +637,12 @@ export const BackendModelEditorDialog: React.FC<{
               <CapabilityField
                 label={t('settings.models.gateway.modelEditor.supportsTools') as string}
                 value={draft.supports_tools}
-                onChange={(next) => patch({ supports_tools: next })}
+                onChange={(next) => patchParameters({ supports_tools: next })}
               />
               <CapabilityField
                 label={t('settings.models.gateway.modelEditor.supportsReasoning') as string}
                 value={draft.supports_reasoning}
-                onChange={(next) => patch({ supports_reasoning: next })}
+                onChange={(next) => patchParameters({ supports_reasoning: next })}
               />
             </div>
             {/* An unstated capability still owns its efforts, so hide the list
@@ -680,7 +651,13 @@ export const BackendModelEditorDialog: React.FC<{
                 comes back. */}
             {draft.supports_reasoning !== false && (
               <div className="flex flex-col gap-1.5">
-                <p className="model-hub-model-field-label" id="model-hub-efforts">{t('settings.models.gateway.modelEditor.reasoningEfforts')}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="model-hub-model-field-label" id="model-hub-efforts">{t('settings.models.gateway.modelEditor.reasoningEfforts')}</p>
+                  <ModelHubInfoHint
+                    label={t('settings.models.gateway.modelEditor.effortInfoLabel') as string}
+                    content={t('settings.models.gateway.modelEditor.effortNote')}
+                  />
+                </div>
                 <div className="flex flex-wrap gap-2" role="group" aria-labelledby="model-hub-efforts">
                   {efforts.map((effort) => (
                     <ChipButton key={effort} on={draft.reasoning_efforts.includes(effort)} onClick={() => toggleEffort(effort)}>
@@ -717,7 +694,6 @@ export const BackendModelEditorDialog: React.FC<{
                     </button>
                   )}
                 </div>
-                <p className="model-hub-model-note">{t('settings.models.gateway.modelEditor.effortNote')}</p>
               </div>
             )}
           </section>
@@ -744,7 +720,7 @@ export const BackendModelEditorDialog: React.FC<{
                   <p className="model-hub-model-field-label">{protocolLabel}</p>
                   <SegmentedRadio
                     value={resolved.native_protocol!}
-                    onChange={(next: NativeProtocol) => patch({ native_protocol: next })}
+                    onChange={(next: NativeProtocol) => patchParameters({ native_protocol: next })}
                     options={NATIVE_PROTOCOLS.map((id) => ({
                       id,
                       label: t(`settings.models.gateway.modelEditor.nativeProtocol.${id}`) as string,
@@ -776,9 +752,12 @@ const TokenInput: React.FC<{
   invalid: boolean;
   onChange: (next: string) => void;
   onBlur: () => void;
-}> = ({ id, value, invalid, onChange, onBlur }) => {
+  /** Common values, offered only while the box is empty. */
+  presets: readonly (readonly [number, string])[];
+}> = ({ id, value, invalid, onChange, onBlur, presets }) => {
   const { t } = useTranslation();
   return (
+    <>
     <div className={cn('model-hub-model-control model-hub-model-token flex min-w-0 items-center gap-2', invalid && 'is-invalid')}>
       <Input
         id={id}
@@ -792,6 +771,16 @@ const TokenInput: React.FC<{
       />
       <span className="model-hub-model-token-suffix shrink-0" aria-hidden="true">{t('settings.models.gateway.modelEditor.tokens')}</span>
     </div>
+    {value.trim() === '' && (
+      <div className="model-hub-model-presets" role="group" aria-label={t('settings.models.gateway.modelEditor.presets') as string}>
+        {presets.map(([tokens, label]) => (
+          <button key={tokens} type="button" className="model-hub-model-preset" onClick={() => onChange(groupTokens(tokens))}>
+            {label}
+          </button>
+        ))}
+      </div>
+    )}
+    </>
   );
 };
 

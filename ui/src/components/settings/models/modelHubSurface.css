@@ -236,6 +236,17 @@
   --model-hub-model-note-size: 11px;
   --model-hub-model-match-height: 31px;
 
+  /* Where a model's parameters came from, and the catalog search under it. */
+  --model-hub-model-source-size: 12px;
+  --model-hub-model-source-line: 18px;
+  --model-hub-model-source-id-size: 11.5px;
+  --model-hub-model-source-gap: 8px;
+  --model-hub-model-source-pad: 10px;
+  --model-hub-model-preset-height: 24px;
+  --model-hub-model-preset-pad-x: 9px;
+  --model-hub-model-preset-gap: 6px;
+  --model-hub-model-preset-radius: 999px;
+
   /* Model picker. */
   --model-hub-picker-row-pad-x: 12px;
   --model-hub-picker-row-gap: 10px;
@@ -3709,21 +3720,7 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-chip--add { border-style: dashed; }
 .model-hub-model-chip--custom { padding-right: 6px; }
 
-/* The 「Model」 typeahead. It floats over the fields below it rather than
- * displacing them: the frame draws it in layout flow, but every field it can
- * fill sits underneath, and pushing them down on each keystroke moves the very
- * values the user is about to check. Same metrics, overlay layering. */
-.model-hub-model-match-list {
-  /* Nine rows: the ranked read returns at most eight matches, and the 「use what
-   * I typed」 escape is always one more, so the cap is reached rather than
-   * guessed — and a shorter list is still exactly as tall as its rows. */
-  max-height: calc(var(--model-hub-model-match-height) * 9);
-  overflow: hidden auto;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--model-hub-model-control-radius);
-  background: var(--surface-2);
-  box-shadow: var(--model-hub-menu-shadow);
-}
+/* One catalog model in the search under 「更换」. */
 .model-hub-model-match {
   min-height: var(--model-hub-model-match-height);
   padding: 8px 12px;
@@ -3732,11 +3729,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-match:last-child { border-bottom: none; }
 .model-hub-model-match:hover { background: var(--model-hub-wash-05); }
 .model-hub-model-match.is-selected { background: var(--model-hub-mint-14); }
-/* The 「use what I typed」 row as the escape under the suggestions: no fill, so it
- * reads as the plain sentence the frame draws. (First in the list, once a
- * catalog model is the base, it is drawn as a plain match row instead.) */
-.model-hub-model-match--literal { border-bottom: none; }
-.model-hub-model-match--literal.is-selected { background: var(--model-hub-wash-08); }
 .model-hub-model-match-name {
   font-size: 12.5px;
   font-weight: 600;
@@ -3749,11 +3741,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   font-size: 11px;
   color: var(--muted);
 }
-.model-hub-model-match-literal {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--foreground);
-}
 .model-hub-model-match-state {
   min-height: var(--model-hub-model-match-height);
   padding: 8px 12px;
@@ -3761,10 +3748,74 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   color: var(--muted);
 }
 
-.model-hub-model-note {
-  font-size: var(--model-hub-model-note-size);
+/* The line that says which registered model the parameters stand on. It wraps:
+ * on a phone the offer and 「更换」 drop under the sentence rather than cut it. */
+.model-hub-model-source { display: flex; flex-direction: column; gap: var(--model-hub-model-source-gap); min-width: 0; }
+.model-hub-model-source-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px var(--model-hub-model-source-gap);
+  min-width: 0;
+  font-size: var(--model-hub-model-source-size);
+  line-height: var(--model-hub-model-source-line);
   color: var(--muted);
 }
+.model-hub-model-source-id { font-family: var(--font-mono); font-size: var(--model-hub-model-source-id-size); color: var(--foreground); overflow-wrap: anywhere; }
+.model-hub-model-source-action { font-weight: 600; color: var(--foreground); text-decoration: underline; text-underline-offset: 2px; }
+/* The parameters the ID itself would bring, offered as one press. */
+.model-hub-model-source-offer {
+  min-height: var(--model-hub-model-preset-height);
+  padding: 0 var(--model-hub-model-preset-pad-x);
+  border: 1px solid var(--mint);
+  border-radius: var(--model-hub-model-preset-radius);
+  background: var(--mint-soft);
+  font-size: var(--model-hub-model-source-id-size);
+  font-weight: 600;
+  color: var(--model-hub-mint-ink);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.model-hub-model-source-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-model-preset-gap);
+  padding: var(--model-hub-model-source-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+}
+.model-hub-model-source-list { max-height: calc(var(--model-hub-model-match-height) * 6); overflow-y: auto; }
+/* One catalog model: name, ID, provider, size on a line; on a phone the name
+ * takes its own line so neither it nor the ID is cut to fit the other. */
+.model-hub-model-source-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.model-hub-model-source-row-detail { display: flex; flex: 1 1 auto; align-items: center; gap: var(--model-hub-model-source-gap); min-width: 0; }
+.model-hub-model-source-row-end { display: flex; flex-shrink: 0; align-items: center; gap: var(--model-hub-model-source-gap); margin-left: auto; color: var(--model-hub-mint-ink); }
+@media (max-width: 640px) {
+  .model-hub-model-source-row { flex-direction: column; align-items: stretch; gap: 2px; padding-block: 6px; }
+}
+.model-hub-model-source-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--model-hub-model-source-gap);
+  font-size: var(--model-hub-model-source-id-size);
+  color: var(--muted);
+}
+/* Common limits under an empty box. */
+.model-hub-model-presets { display: flex; flex-wrap: wrap; gap: var(--model-hub-model-preset-gap); }
+.model-hub-model-preset {
+  height: var(--model-hub-model-preset-height);
+  padding: 0 var(--model-hub-model-preset-pad-x);
+  border: 1px solid var(--border);
+  border-radius: var(--model-hub-model-preset-radius);
+  background: var(--background);
+  font-size: var(--model-hub-model-source-id-size);
+  font-weight: 600;
+  color: var(--muted);
+}
+.model-hub-model-preset:hover { border-color: var(--border-strong); color: var(--foreground); }
+
 .model-hub-model-error {
   font-size: var(--model-hub-model-note-size);
   font-weight: 600;
