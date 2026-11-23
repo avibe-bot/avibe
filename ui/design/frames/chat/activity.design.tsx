@@ -88,6 +88,14 @@ const settledFixture = (extra: { ui?: Record<string, unknown> } = {}) =>
 
 const openChip = 'button[title="{t:chat.agentActivity.expand}"] >> nth=0';
 
+// One finished turn on the phone: its group closed, opened, and opened at 360 px.
+const settledPhone = chatFixtures({
+  session: claude,
+  ui,
+  messages: [ask1, reply1],
+  activity: [activityGroup('grp_done', reply1, doneRows, { duration_ms: 83_000 })],
+});
+
 const designFrames = frames([
   {
     name: 'running',
@@ -185,12 +193,7 @@ const designFrames = frames([
     height: 844,
     status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({
-      session: claude,
-      ui,
-      messages: [ask1, reply1],
-      activity: [activityGroup('grp_done', reply1, doneRows, { duration_ms: 83_000 })],
-    }),
+    fixtures: settledPhone,
     render: chatPhone,
   },
   {
@@ -200,12 +203,7 @@ const designFrames = frames([
     height: 844,
     status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({
-      session: claude,
-      ui,
-      messages: [ask1, reply1],
-      activity: [activityGroup('grp_done', reply1, doneRows, { duration_ms: 83_000 })],
-    }),
+    fixtures: settledPhone,
     click: [openChip],
     render: chatPhone,
   },
@@ -216,12 +214,7 @@ const designFrames = frames([
     height: 844,
     status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({
-      session: claude,
-      ui,
-      messages: [ask1, reply1],
-      activity: [activityGroup('grp_done', reply1, doneRows, { duration_ms: 83_000 })],
-    }),
+    fixtures: settledPhone,
     click: [openChip],
     render: chatPhone,
   },

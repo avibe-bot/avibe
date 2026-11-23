@@ -27,6 +27,9 @@ for (const width of [360, 390]) {
     // The closed pill stays one control.
     await expect(chip.getByRole('button', { name: CLOSE })).toHaveCount(0);
     await chip.locator(':scope > div > button').click();
+    // A label too long for the header (a long turn, a large count, a longer language): spaced out here,
+    // so the label must give way while the controls stay whole.
+    await page.addStyleTag({ content: `${CHIP} [data-transcript-summary-head] [data-transcript-shared="label"] { letter-spacing: 1.5em; }` });
     const close = chip.getByRole('button', { name: CLOSE });
     await expect(close).toBeVisible();
     await page.waitForTimeout(400);
@@ -37,7 +40,9 @@ for (const width of [360, 390]) {
       const [label, eye, x, chevron] = [...head.children].map(box);
       const xButton = root.querySelector(`button[aria-label="${close}"]`)!;
       const centre = box(xButton);
+      const text = head.querySelector('[data-transcript-shared="label"]')!;
       return {
+        truncated: text.scrollWidth > text.clientWidth,
         head: box(head),
         label, eye, x, chevron,
         order: [...head.children].map((el) => el.getAttribute('aria-label') ?? el.tagName),
@@ -46,6 +51,7 @@ for (const width of [360, 390]) {
     }, CLOSE);
     // Eye pill, X, chevron, in that order, each whole inside the header; the label ends before them.
     expect(layout.order.slice(2)).toEqual([CLOSE, COLLAPSE]);
+    expect(layout.truncated).toBe(true);
     expect(layout.label.right).toBeLessThanOrEqual(layout.eye.left);
     expect(layout.eye.right).toBeLessThanOrEqual(layout.x.left);
     expect(layout.x.right).toBeLessThanOrEqual(layout.chevron.left);

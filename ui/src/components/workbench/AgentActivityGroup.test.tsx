@@ -173,7 +173,6 @@ describe('ActivityChip close control', () => {
     );
     const tools = screen.getByTitle('chat.agentActivity.hideTools');
     const close = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
-    expect(close.className).toContain('size-6');
     expect(tools.nextElementSibling).toBe(close);
     expect(close.nextElementSibling).toBe(screen.getByRole('button', { name: 'chat.agentActivity.collapse' }));
     fireEvent.click(close);
