@@ -1780,12 +1780,12 @@
         "undoDone": "已恢复之前单独设置的草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "preview": {
-          "automatic": "恢复后：自动匹配",
-          "passthrough": "恢复后：原样转发",
-          "unconfigured": "恢复后：没有供应商提供"
+          "automatic": "保存后：跟随默认路由",
+          "passthrough": "保存后：原样转发",
+          "unconfigured": "保存后：没有供应商提供"
         },
-        "previewLoading": "正在读取继承路由…",
-        "previewFailed": "无法预览继承路由，尚未保存任何更改。请重试或撤销恢复。",
+        "previewLoading": "正在读取默认路由…",
+        "previewFailed": "读不到默认路由，还没有保存任何更改。请重试，或撤销这次切换。",
         "draftEmpty": "草稿中暂无路由条目。",
         "noDefaults": "默认路由里没有列出这个模型的供应商。可以添加一个列出它的供应商，或把已有的加入默认路由；如果你的供应商其实提供它，在「单独设置」里为它指定。",
         "inventoryNotProvided": "模型列表未提供",

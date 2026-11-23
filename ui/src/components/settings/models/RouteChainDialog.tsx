@@ -23,7 +23,7 @@ import { SegmentedRadio } from "@/components/ui/segmented";
 import { cn } from "@/lib/utils";
 import { getBackendUiMeta } from "@/lib/agentBackends";
 import { useIsMobile } from "@/lib/useIsMobile";
-import { FieldLabel } from "./dialogFields";
+import { Field } from "./dialogFields";
 import { GuardDialog } from "./GuardDialog";
 import { ModelHubInfoHint } from "./ModelHubInfoHint";
 import { GuardImpact, type GuardPlan } from "./GuardImpact";
@@ -179,11 +179,11 @@ export const RouteChainDialog: React.FC<{
   const cancelButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const closeButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const isMobile = useIsMobile();
-  // Folded unless the route already carries one of its settings; after that the
-  // user's own toggle decides, until the dialog opens on another route.
-  const [advancedChoice, setAdvancedChoice] = React.useState<boolean | null>(null);
-  const cacheTtlId = React.useId();
-  const advancedOpen = saveErrorCode === "cache_ttl_unsupported" || (advancedChoice ?? cacheTtlDraft !== null);
+  // Folded unless the route read carries one of its settings. It is decided when
+  // a route is read, not derived from the draft: choosing 「automatic」 must not
+  // fold the row away under the hand that chose it.
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const cacheTtlRef = React.useRef<HTMLSelectElement>(null);
   const [hopMenu, setHopMenu] = React.useState<number | null>(null);
   const [replacing, setReplacing] = React.useState<number | null>(null);
   const [recordDetails, setRecordDetails] = React.useState(false);
@@ -305,7 +305,7 @@ export const RouteChainDialog: React.FC<{
       setChain(next);
       setSavedOverride(next.manual_override);
       setCacheTtlDraft(next.manual_override?.cache_ttl ?? null);
-      setAdvancedChoice(null);
+      setAdvancedOpen((next.manual_override?.cache_ttl ?? null) !== null);
       setManualDraft(next.manual_override !== null);
       setPreview(null);
       setPreviewFailed(false);
@@ -586,8 +586,11 @@ export const RouteChainDialog: React.FC<{
       setGuard(null);
       setSaveErrorCode(failure?.code ?? null);
       if (failure?.code === "cache_ttl_unsupported") {
+        // The refusal is about one field: open its fold and go to it, where the
+        // reason is written, rather than leave it folded or scrolled out of view.
         setPhase("ready");
-        focusAfterRender(retryButtonRef);
+        setAdvancedOpen(true);
+        focusAfterRender(cacheTtlRef);
         return;
       }
       const nextPhase = failure?.serverNamed ? "rejected" : "unknown";
@@ -796,7 +799,9 @@ export const RouteChainDialog: React.FC<{
     setPreviewFailed(false);
     const restored = restoreUndo.current;
     setManualDraft(restored?.manual ?? savedOverride !== null);
-    setCacheTtlDraft(restored ? restored.cacheTtl : savedOverride?.cache_ttl ?? null);
+    const restoredTtl = restored ? restored.cacheTtl : savedOverride?.cache_ttl ?? null;
+    setCacheTtlDraft(restoredTtl);
+    if (restoredTtl !== null) setAdvancedOpen(true);
     advanceInteraction({ type: 'reset', draft: restoreUndo.current?.hops ?? origin });
     restoreUndo.current = null;
     announce('settings.models.routing.undoDone');
@@ -1221,38 +1226,48 @@ export const RouteChainDialog: React.FC<{
             <button
               type="button"
               aria-expanded={advancedOpen}
-              onClick={() => setAdvancedChoice(!advancedOpen)}
+              onClick={() => setAdvancedOpen((open) => !open)}
               className="model-hub-route-advanced-toggle flex w-fit items-center text-muted"
             >
               <ChevronRight aria-hidden="true" className={cn(advancedOpen && "rotate-90")} />
               {t("settings.models.routeDialog.advanced")}
             </button>
             {advancedOpen && (
-              <div className="model-hub-route-advanced-row flex flex-wrap items-center">
-                <FieldLabel htmlFor={cacheTtlId} className="model-hub-route-advanced-label">{t("settings.models.routing.cacheTtl.label")}</FieldLabel>
-                <ModelHubInfoHint
-                  label={t("settings.models.routing.cacheTtl.infoLabel") as string}
-                  content={t("settings.models.routing.cacheTtl.help")}
-                />
-                <Select
-                  id={cacheTtlId}
-                  wrapperClassName="ml-auto w-fit"
-                  value={cacheTtlDraft ?? ""}
-                  onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
-                  disabled={phase !== "ready" || previewPending}
-                >
-                  <option value="">{t("settings.models.routing.cacheTtl.default")}</option>
-                  <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
-                  <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
-                  <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
-                  <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
-                </Select>
-                {saveErrorCode === "cache_ttl_unsupported" && (
-                  <span role="alert" className="w-full text-xs text-danger">
-                    {t("errors.cache_ttl_unsupported")}
-                  </span>
+              <Field
+                className="model-hub-route-advanced-row flex-row flex-wrap items-center"
+                labelClassName="model-hub-route-advanced-label"
+                label={t("settings.models.routing.cacheTtl.label")}
+                aside={
+                  <ModelHubInfoHint
+                    label={t("settings.models.routing.cacheTtl.infoLabel") as string}
+                    content={t("settings.models.routing.cacheTtl.help")}
+                  />
+                }
+              >
+                {(id) => (
+                  <>
+                    <Select
+                      ref={cacheTtlRef}
+                      id={id}
+                      wrapperClassName="ml-auto w-fit"
+                      value={cacheTtlDraft ?? ""}
+                      onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
+                      disabled={phase !== "ready" || previewPending}
+                    >
+                      <option value="">{t("settings.models.routing.cacheTtl.default")}</option>
+                      <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
+                      <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
+                      <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
+                      <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
+                    </Select>
+                    {saveErrorCode === "cache_ttl_unsupported" && (
+                      <span role="alert" className="w-full text-xs text-danger">
+                        {t("errors.cache_ttl_unsupported")}
+                      </span>
+                    )}
+                  </>
                 )}
-              </div>
+              </Field>
             )}
           </div>
         )}

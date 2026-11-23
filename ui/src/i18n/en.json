@@ -1777,15 +1777,15 @@
           "help": "Providers keep the repeated start of a conversation cached for a while; sending it again in that time is cheaper and faster. Avibe uses this duration to judge whether the cache is still there. Leave it on Automatic unless you know how long your provider keeps its cache. On a direct official connection, a longer duration is billed at a higher cache-write price.",
           "infoLabel": "What cache duration is"
         },
-        "undoDone": "Previous separate draft restored.",
+        "undoDone": "Your earlier separate route is back.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
-          "automatic": "After restore: automatic matching",
-          "passthrough": "After restore: forwarded as is",
-          "unconfigured": "After restore: no provider supplies it"
+          "automatic": "After saving: follows default routing",
+          "passthrough": "After saving: forwarded as is",
+          "unconfigured": "After saving: no provider supplies it"
         },
-        "previewLoading": "Reading inherited routing...",
-        "previewFailed": "Could not preview inherited routing. Nothing has been saved. Retry or undo the restore.",
+        "previewLoading": "Reading default routing…",
+        "previewFailed": "Could not read default routing. Nothing has been saved. Retry, or undo this switch.",
         "draftEmpty": "No route entries in this draft.",
         "noDefaults": "No provider in default routing lists this model. Add one that lists it or put an existing one in default routing; if your provider does serve it, choose it under Set separately.",
         "inventoryNotProvided": "Model list not provided",
@@ -2363,7 +2363,7 @@
           "undo": "Undo",
           "viewDefaults": "View default routing",
           "adjustDefaults": "Adjust default routing",
-          "infoLabel": "How the two differ",
+          "infoLabel": "How the routing modes differ",
           "followInfo": ": uses the provider order in {{backend}}'s default routing. When default routing changes, this changes with it.",
           "customInfo": ": this model uses its own providers and order. Default routing does not affect it."
         },

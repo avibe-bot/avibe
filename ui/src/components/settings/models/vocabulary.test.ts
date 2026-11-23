@@ -31,8 +31,11 @@ describe('Models page vocabulary', () => {
     expect(en.settings.models.billing.metered).toBe('Pay as you go');
     // A model either follows default routing or has a route set separately; the
     // page uses those two names everywhere and none of the older ones.
-    expect(copy).not.toMatch(/手动路由|固定路由|自动路由/);
-    expect(leaves(en.settings.models).join('\n')).not.toMatch(/manual routes?|fixed routes?|automatic routes?/i);
+    expect(copy).not.toMatch(/手动路由|固定路由|自动路由|继承路由/);
+    expect(leaves(en.settings.models).join('\n')).not.toMatch(/manual routes?|fixed routes?|automatic routes?|inherited rout/i);
+    // Switching a model back is saved like any other change; the dialog does not call it a restore.
+    expect(leaves(zh.settings.models.routing).join('\n')).not.toMatch(/恢复后|撤销恢复/);
+    expect(leaves(en.settings.models.routing).join('\n')).not.toMatch(/after restore|undo the restore/i);
     expect(zh.settings.models.routeDialog.mode.follow).toBe('跟随默认路由');
     expect(zh.settings.models.routeDialog.mode.custom).toBe('单独设置');
     expect(en.settings.models.routeDialog.mode.follow).toBe('Follow default routing');
