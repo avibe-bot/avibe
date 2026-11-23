@@ -34,11 +34,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from functools import cached_property
+from itertools import islice
 from time import perf_counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import and_, func, literal_column, or_, select, text
+from sqlalchemy import and_, bindparam, func, literal_column, or_, select, text
 from sqlalchemy.engine import Engine
 
 from storage.agent_session_rows import session_openable_in_chat
@@ -210,6 +212,19 @@ class _GraphReader:
         raw = conn.connection.driver_connection
         self.bind_limit = raw.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(raw, "getlimit") else 999
 
+    @cached_property
+    def timeline_query(self):
+        # A reader can overlap an upgrade. Detect the optional performance
+        # index once in the graph's pinned snapshot; never create or repair it
+        # on a GET. An older snapshot falls back to the same exact projection.
+        exists = next(iter(self.rows(text(
+            "SELECT 1 FROM sqlite_schema WHERE type='index' AND tbl_name='agent_runs' AND name='ix_agent_runs_timeline_times'"
+        ))), None)
+        index = "INDEXED BY ix_agent_runs_timeline_times" if exists else ""
+        return text(f"SELECT id, started_at, completed_at FROM agent_runs {index} WHERE id IN :ids").bindparams(
+            bindparam("ids", expanding=True)
+        )
+
     def batches(self, ids, *, reserved=0, copies=1):
         # The node cap does not bound lineage, candidate count, trigger IDs,
         # or tied timeline rows. Honor a connection's configured bind limit.
@@ -327,7 +342,7 @@ def build_graph(
             follow_refs = include_ended or candidate_truncated or check_imported
             waves = [loaded_ids]
             while follow_refs and waves[-1]:
-                extra = _lineage_refs(conn, waves[-1]) - loaded_ids
+                extra = _lineage_refs(conn, waves[-1], loaded_ids)
                 if not extra:
                     break
                 waves.append(extra)
@@ -610,27 +625,54 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
     timeline = {}
     for runs in grouped.values():
         runs.sort(key=lambda r: (r["instant"], r["id"]), reverse=True)
-        timeline.update((r["rid"], r) for r in runs[:RUNS_PER_NODE])
+        timeline.update((r["id"], r) for r in runs[:RUNS_PER_NODE])
+    # The unique PK index also matches id, but would walk payload overflow
+    # pages for the two timestamps. Seek their exact (including NULL) values
+    # in the index built by revision 0099 instead.
     for batch in conn.batches(timeline):
-        for k, started, completed in conn.rows(select(rowid, r.started_at, r.completed_at).where(rowid.in_(batch))):
+        for k, started, completed in conn.rows(conn.timeline_query.params(ids=batch)):
             timeline[k].update(started_at=started, completed_at=completed)
 
     # A sent callback always draws an edge, even in failure-only mode. For
     # the other candidates evaluate the JSON predicate only on their own rows.
     if callbacks:
-        by_callback = {run["rid"]: run for runs in grouped.values() for run in runs if run["rid"] in callbacks}
-        for batch in conn.batches((k for k, (_, status) in callbacks.items() if status != "sent"), reserved=1):
-            mode = func.json_extract(r.metadata_json, "$.callback_mode")
-            for k, callback_mode in conn.rows(select(rowid, mode).where(rowid.in_(batch))):
-                by_callback[k]["callback_mode"] = callback_mode
-        # Only the newest drawable callback per (sender, target) contributes
-        # its delivery ID. Reading that trailing field on all historical sent
-        # callbacks can otherwise cost as much as reading all the payloads.
-        latest = {}
+        # Only the newest drawable run per endpoint pair contributes a
+        # callback edge. Keep the candidates in timeline order and stop at
+        # that winner; mode lives beyond the payload on the table record.
+        # Batch probes across pairs, growing the lookahead if a long series
+        # of failure-only callbacks really must be disproved.
+        by_callback = {}
+        pairs = {}
         for sid, runs in grouped.items():
             for run in runs:
-                if _draws_callback_edge(run):
-                    latest.setdefault((sid, run["callback_session_id"]), run)
+                if (target := run.pop("callback_session_id", None)) is not None:
+                    by_callback[run["rid"]] = run
+                    pairs.setdefault((sid, target), []).append(run)
+        pending = {pair: iter(rows) for pair, rows in pairs.items()}
+        latest = {}
+        width = 1
+        while pending:
+            probes = {}
+            for pair, rows in pending.items():
+                group = []
+                for run in islice(rows, width):
+                    group.append(run)
+                    if run["callback_status"] == "sent":
+                        break
+                probes[pair] = group
+            modes = {}
+            unsent = (run["rid"] for group in probes.values() for run in group if run["callback_status"] != "sent")
+            for batch in conn.batches(unsent, reserved=1):
+                mode = func.json_extract(r.metadata_json, "$.callback_mode")
+                modes.update(conn.rows(select(rowid, mode).where(rowid.in_(batch))))
+            for pair, group in probes.items():
+                winner = next((run for run in group if modes.get(run["rid"]) != "failure"), None)
+                if winner is not None:
+                    winner["callback_session_id"] = pair[1]
+                    latest[pair] = winner
+                if winner is not None or len(group) < width:
+                    del pending[pair]
+            width = min(width * 2, 64)
         for batch in conn.batches(run["rid"] for run in latest.values()):
             for k, callback_id in conn.rows(select(rowid, r.callback_run_id).where(rowid.in_(batch))):
                 by_callback[k]["callback_run_id"] = callback_id
@@ -645,26 +687,41 @@ def _draws_callback_edge(run: Mapping[str, Any]) -> bool:
     return run.get("callback_mode") != "failure" or run.get("callback_status") == "sent"
 
 
-def _lineage_refs(conn, frontier: set[str]) -> set[str]:
-    """Advance one wave, including old delegations. The two probes use the
-    source/session and session/callback indexes; only an unsent callback can
-    require touching the run's metadata to decide if it draws an edge."""
+def _lineage_refs(conn, frontier: set[str], visited: set[str] | None = None) -> set[str]:
+    """Discover new endpoints, not whether every historical callback drew an
+    edge. The latter needs payload I/O; the former can usually be answered
+    using two covering indexes without reading any run table records.
+    """
     r = agent_runs.c
-    # Group in index order, including the session. DISTINCT source_actor
-    # alone invites SQLite to walk *all* agent-authored runs via the actor
-    # index once per wave, filtering session_id from the table afterwards.
-    callers = select(r.session_id, r.source_actor).where(r.source_kind == "agent").group_by(r.session_id, r.source_actor)
-    targets = select(r.session_id, r.callback_session_id).where(
-        r.callback_session_id.is_not(None),
-        r.callback_status.is_not(None), r.callback_status != "",
-        or_(r.callback_status == "sent",
-            func.json_extract(r.metadata_json, "$.callback_mode").is_distinct_from("failure")),
-    ).group_by(r.session_id, r.callback_session_id)
+    visited = visited or set()
     refs = set()
-    for batch in conn.batches(frontier, reserved=5, copies=2):
+    uncertain = set()
+    callers = select(r.session_id, r.source_actor).where(r.source_kind == "agent").group_by(r.session_id, r.source_actor)
+    # Group by the index prefix; don't walk the table to extract JSON while
+    # deduplicating targets already reached by a spawn or sent callback.
+    targets = select(r.session_id, r.callback_session_id, r.callback_status).where(
+        r.callback_session_id.is_not(None), r.callback_status.is_not(None), r.callback_status != "",
+    ).group_by(r.session_id, r.callback_session_id, r.callback_status)
+    for batch in conn.batches(frontier, reserved=1):
         wave = r.session_id.in_(batch)
-        refs.update(sid for _, sid in conn.rows(callers.where(wave).union_all(targets.where(wave))) if sid)
-    return refs
+        refs.update(sid for _, sid in conn.rows(callers.where(wave)) if sid)
+        for _, sid, status in conn.rows(targets.where(wave)):
+            if sid:
+                (refs if status == "sent" else uncertain).add(sid)
+
+    # Only unresolved, not-yet-reached targets need a mode check. Restrict
+    # both ends to *this wave*; other senders don't establish reachability.
+    uncertain.difference_update(visited, refs)
+    if uncertain:
+        candidate = select(r.session_id, r.callback_session_id).where(
+            r.callback_status.is_not(None), r.callback_status != "",
+            func.json_extract(r.metadata_json, "$.callback_mode").is_distinct_from("failure"),
+        ).group_by(r.session_id, r.callback_session_id)
+        for batch in conn.batches(frontier, reserved=3, copies=2):
+            for targets_batch in conn.batches(uncertain - refs, reserved=3 + len(batch)):
+                stmt = candidate.where(r.session_id.in_(batch), r.callback_session_id.in_(targets_batch))
+                refs.update(sid for _, sid in conn.rows(stmt))
+    return refs - visited
 
 
 def _build_edges(
