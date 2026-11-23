@@ -108,6 +108,9 @@ const CLOSE_ONLY: BindProblem[] = ['busy', 'rateLimited', 'changed', 'signedOut'
 export type BindField = 'account' | 'computer' | 'name' | 'availability';
 
 export type BindStep =
+  /** Not signed in yet (a new install, Setup): the dialog's first face is the App's own sign-in,
+   *  then the name, in the same dialog. */
+  | { kind: 'signIn' }
   | { kind: 'opening' }
   /** `new`. `check`: what the last read of this exact name said. `changed`: after a verification. */
   | { kind: 'name'; name: string; check: DomainCheck; held?: EligibleName[]; changed?: BindField[] }
@@ -154,6 +157,8 @@ export type BindDialogProps = {
   onUpdates: () => void;
   /** Cancel (`cancel`) or leave a finished step. */
   onClose: () => void;
+  /** The App's sign-in (DesktopSignIn) for the `signIn` step. */
+  signIn?: ReactNode;
 };
 
 /** The verification steps keep the sign-in's own screens; this column only changes the way out. */
@@ -185,10 +190,13 @@ export function BindDialog(props: BindDialogProps) {
   </Dialog>;
 }
 
-function BindDialogBody({ step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
+function BindDialogBody({ signIn, step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
 
+  if (step.kind === 'signIn') {
+    return <Close.Provider value={onClose}><DialogTitle className="sr-only">{t('desktopAccount.bind.title')}</DialogTitle>{signIn}</Close.Provider>;
+  }
   if (step.kind === 'code' || step.kind === 'factor') {
     return <Close.Provider value={onClose}><SignInChrome value={BIND_CHROME}>
       <DialogTitle className="sr-only">{t('desktopAccount.bind.title')}</DialogTitle>
