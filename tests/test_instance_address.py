@@ -1240,6 +1240,7 @@ def test_a_refused_repeat_after_pending_holds_the_change_until_the_state_says_wh
 
     plane, clocks = address
     _cookie, sid = sign_in()
+    phone = health_pairing()
     plane.pending_answers = 1
     plane.refuse = refusal
     rename_to("new")
@@ -1262,17 +1263,19 @@ def test_a_refused_repeat_after_pending_holds_the_change_until_the_state_says_wh
     with pytest.raises(instance_address.AddressError) as busy:
         instance_address.preview("third", ("loopback",))
     assert busy.value.code in {"operation_in_progress", said}
-    # avibe.bot finishes the operation it took; the state names it, and it is ours.
+    # avibe.bot finishes the operation it took. The Owner looking at the page reads
+    # the state (also past a standing refusal), which names it: the address is ours.
     plane.refuse = None
-    instance_address._standing_refusal = None
     plane.move(NEW, journal["operation_id"])
-    instance_address.note_generation_hint(plane.generation)
-    clocks.advance(6)
+    clocks.advance(61)
+    instance_address.describe()
     run()
     assert binding().active_host == NEW and instance_address._journal(binding()) is None
     assert len(renames_sent(plane)) == 2
     with get_cached_sqlite_engine().connect() as conn:
         assert conn.execute(select(remote_device_sessions.c.session_id)).scalars().all() == []
+    # Not the permission to delete Health data: the generation it was committed at is unknown.
+    assert phone in active_health_devices()
 
 
 def test_a_lost_receipt_then_a_refused_credential_stops_sending_and_the_state_settles_it(address, monkeypatch):
@@ -1310,6 +1313,87 @@ def test_a_lost_receipt_then_a_refused_credential_stops_sending_and_the_state_se
     assert instance_address.refresh_state(force=True)
     run()
     assert binding().active_host == NEW and instance_address._journal(binding()) is None
+
+
+def test_a_held_change_is_not_given_the_generation_of_a_later_operation(address):
+    """A→B committed at 8, its receipt lost; a later operation raises the generation to 9 while B stays."""
+
+    plane, clocks = address
+    phone = health_pairing()
+    answer = plane.rename
+
+    def committed_but_lost(body):
+        answer(body)
+        raise TimeoutError("the answer was lost")
+
+    plane.rename = committed_but_lost
+    rename_to("new")
+    assert instance_address._advance_operation() > 0
+    plane.rename = lambda _body: (_ for _ in ()).throw(remote_access.BackendRequestError(409, {"error": "binding_changed"}))
+    plane.state_answer = plane.state
+    plane.state = lambda: (_ for _ in ()).throw(TimeoutError("not now"))
+    instance_address._advance_operation()
+    held_journal()
+    plane.generation += 1  # another operation only prepared, the address unchanged
+    plane.state = plane.state_answer
+    clocks.advance(61)
+    instance_address.describe()
+    run()
+    assert binding().active_host == NEW and instance_address._journal(binding()) is None
+    assert phone in active_health_devices()
+
+
+def test_an_id_of_the_earlier_form_refused_by_the_wire_rule_never_landed_and_settles(address):
+    plane, _ = address
+    rename_to("new")
+    journal = instance_address._journal(binding())
+    old = {**journal, "operation_id": "x" * 43}  # as an earlier version made it
+    instance_address._set_journal(binding(), old)
+    plane.rename = lambda _body: (_ for _ in ()).throw(TimeoutError("no answer"))
+    assert instance_address._advance_operation() > 0
+    assert instance_address._journal(binding())["may_have_landed"] is True
+    plane.rename = lambda _body: (_ for _ in ()).throw(remote_access.BackendRequestError(400, {"error": "invalid_request"}))
+    instance_address._advance_operation()
+    assert instance_address._journal(binding()) is None
+    assert instance_address.describe()["operation"] == {"state": "failed", "hostname": NEW, "error": "invalid_request"}
+    # Only that: a UUID refused the same way after an uncertain sending is held.
+    plane.rename = lambda _body: (_ for _ in ()).throw(TimeoutError("no answer"))
+    rename_to("new")
+    assert instance_address._advance_operation() > 0
+    plane.rename = lambda _body: (_ for _ in ()).throw(remote_access.BackendRequestError(400, {"error": "invalid_request"}))
+    instance_address._advance_operation()
+    assert held_journal()["held"]["error"] == "invalid_request"
+
+
+def test_the_owner_can_check_a_held_change_past_a_standing_refusal_without_sending_it(address):
+    plane, clocks = address
+    plane.pending_answers = 1
+    plane.refuse = (409, {"error": "rebind_required"})
+    rename_to("new")
+    run()
+    journal = held_journal()
+    assert instance_address._standing_refusal is not None
+    reads, renames = asked(plane, "hostname-state"), len(renames_sent(plane))
+    # Nothing asks by itself.
+    clocks.advance(3600)
+    instance_address.note_generation_hint(plane.generation + 1)
+    run()
+    assert asked(plane, "hostname-state") == reads
+    # The Owner opens the page: one read; again within the minute: none.
+    instance_address.describe()
+    instance_address.describe()
+    assert asked(plane, "hostname-state") == reads + 1 and held_journal()
+    # The Owner asks for a change: one read, and the answer is that one is held.
+    with pytest.raises(instance_address.AddressError) as busy:
+        instance_address.preview("third", ("loopback",))
+    assert busy.value.code == "operation_in_progress" and asked(plane, "hostname-state") == reads + 2
+    # Once avibe.bot has settled it, that read finds it; nothing was ever sent again.
+    plane.refuse = None
+    plane.move(NEW, journal["operation_id"])
+    with pytest.raises(instance_address.AddressError):
+        instance_address.preview("third", ("loopback",))
+    run()
+    assert binding().active_host == NEW and len(renames_sent(plane)) == renames
 
 
 def test_a_held_change_that_the_state_shows_went_another_way_is_adopted_as_made_elsewhere(address):

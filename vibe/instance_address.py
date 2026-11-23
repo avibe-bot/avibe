@@ -921,15 +921,19 @@ def _note_other_active_name(
             return
         target = journal.get("target_hostname")
         if state["active_hostname"] == target and state["last_rename_operation_id"] == journal.get("operation_id"):
-            # avibe.bot names this operation as the one that made the change: it
-            # is our own, committed, as a receipt would have said.
+            # avibe.bot names this operation as the one that made the change: the
+            # address is ours to take. Not the permission to delete Health data:
+            # that needs the generation the operation was committed at (rule A5),
+            # which only its receipt carries, and the current one is no proof of
+            # it (a later operation may have raised it). Without it, nothing is
+            # deleted.
             release = next((entry.get("release_at") for entry in state["cleanup"]
                             if entry.get("hostname") == journal.get("previous_hostname")), None)
             _set_journal(binding, {
                 **{key: value for key, value in journal.items() if key != "held"},
                 "phase": "committed",
                 "receipt": {
-                    "committed_generation": state["generation"],
+                    "committed_generation": None,
                     "previous_hostname": journal.get("previous_hostname"),
                     "hostname": target,
                     "previous_release_at": release if _parse_instant(release) is not None else None,
@@ -1062,6 +1066,24 @@ def _hold_days(state: Mapping[str, Any]) -> int | None:
     return max(1, round(delay / 86400)) if isinstance(delay, int) and delay > 0 else None
 
 
+_held_checked_at: float | None = None
+
+
+def _check_held(binding: Binding, *, force: bool = False) -> bool:
+    """One read of the state for a held change, asked for by the Owner; past a
+    standing refusal, but at most once a minute unless ``force``. Whether it read."""
+
+    global _held_checked_at
+
+    now = _monotonic()
+    with _LOCK:
+        if not force and _held_checked_at is not None and now - _held_checked_at < DISPLAY_REFRESH_SECONDS:
+            return False
+        _held_checked_at = now
+    refresh_state(force=True, again=True)
+    return True
+
+
 def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
     """First of the two requests: what a change to ``prefix`` would do (rule A2)."""
 
@@ -1077,7 +1099,14 @@ def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
     target = hostname_for_prefix(prefix)
     if target == binding.active_host:
         raise AddressError(409, "same_address")
-    if isinstance(_load_state(binding.instance_id).get("journal"), dict):
+    journal = _load_state(binding.instance_id).get("journal")
+    if isinstance(journal, dict) and isinstance(journal.get("held"), dict):
+        # A held change: the Owner asking is one read of the state, also past a
+        # standing refusal, which may show what became of it. Read only: nothing
+        # is sent again and no refusal is set aside.
+        _check_held(binding, force=True)
+        journal = _load_state(binding.instance_id).get("journal")
+    if isinstance(journal, dict):
         raise AddressError(409, "operation_in_progress")
     # The Owner asks now: one read, also when avibe.bot's last word was a standing refusal.
     refresh_state(force=True, again=True)
@@ -1206,6 +1235,10 @@ def describe() -> dict[str, Any]:
         state = _load_state(binding.instance_id)
     if reason is None and not _state_ever_read(binding):
         reason = STATE_UNKNOWN_REASON
+    if isinstance(state.get("journal"), dict) and isinstance(state["journal"].get("held"), dict):
+        # The Owner looking at a held change checks it, at most once a minute.
+        if _check_held(binding):
+            state = _load_state(binding.instance_id)
     journal = state.get("journal")
     operation = None
     if isinstance(journal, dict):
@@ -1412,6 +1445,10 @@ _LIMIT_FIELDS = ("limit", "held_count", "earliest_release_at")
 # A code avibe.bot sends that the page has no own word for is passed on as it is,
 # when it looks like one; the page says the change was not made, with the code.
 _WIRE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The form avibe.bot's request rule takes for an operation id. An id made by an
+# earlier version (a 43-character token) is refused by that rule before the
+# rename is looked at, so such a refusal proves the request never landed.
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
@@ -1476,7 +1513,10 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
                    "error": page_code, "status": page_status}
         if page_code == "name_holding_limit_reached":
             failure.update({field: payload.get(field) for field in _LIMIT_FIELDS})
-        if landed_before:
+        old_id_refused = (
+            status == 400 and code == "invalid_request" and not _UUID.fullmatch(str(journal["operation_id"]))
+        )
+        if landed_before and not old_id_refused:
             # This sending was refused, but an earlier one may have been taken and
             # still be in avibe.bot's hands (a refusal of a repeat does not cancel
             # it). Not a failure of the change: stop sending, keep the journal with

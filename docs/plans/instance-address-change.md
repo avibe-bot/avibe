@@ -362,11 +362,27 @@ request, its UUID and its local origin, marked `held` with the refusal; the
 request is not sent again; `401` still drops every permission, and
 `rebind_required` still stands. `GET` shows `operation: {state: "pending",
 hostname, error, unconfirmed: true}`. A state read that shows the outcome
-settles it: the target active with `last_rename_operation_id` equal to the
-journal's is our own change, applied as if its receipt had arrived (Health
-data included); any other change is adopted as one made elsewhere, which
-deletes nothing. Until such a state, the Owner cannot start another change
-(`operation_in_progress`).
+settles it. The target active with `last_rename_operation_id` equal to the
+journal's is our own change: the address is taken, sessions end and the old
+name is cleaned, but Health data is not deleted, because that needs the
+generation the operation was committed at (A5), which only its receipt
+carries; the current generation is no proof of it. Any other change is
+adopted as one made elsewhere, which deletes nothing. Until such a state, the
+Owner cannot start another change (`operation_in_progress`).
+
+- A held change is not sent again and nothing unlocks it by time: avibe.bot's
+  state does not report a cancelled operation, so waiting, an unchanged
+  address or a restart prove nothing. The way out without evidence is
+  support confirming the operation's end at avibe.bot.
+- The Owner can check it: opening the page (at most once a minute) and asking
+  for a change each make one read of the state, also past a standing
+  `rebind_required`. Read only: nothing is sent and no refusal is set aside.
+- One refusal does prove a request never landed: `400 invalid_request` to an
+  operation id of the earlier, non-UUID form, which avibe.bot's request rule
+  refuses before the rename is looked at. That settles even after an
+  uncertain sending; the Owner previews and confirms again, with a new UUID.
+- Rollback: an earlier version does not know `held` and sends the journal's
+  request again, with its valid UUID.
 
 What the instance does with every answer of the two endpoints (the codes are
 the backend's, `docs/plans/personal-hostname-release.md`). At a state read the
