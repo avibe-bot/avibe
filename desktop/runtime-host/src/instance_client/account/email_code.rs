@@ -259,13 +259,16 @@ impl PreparedCode {
             (429, reason) => {
                 let secs = retry_after(&r);
                 let until = Instant::now() + Duration::from_secs(secs);
-                delivery.set(
-                    if reason == Some("rate_limited") && body["code_delivery"] == "not_forwarded" {
-                        Phase::Wait(until)
-                    } else {
-                        Phase::Spent(Some(until))
-                    },
-                );
+                if reason == Some("rate_limited") && body["code_delivery"] == "not_forwarded" {
+                    delivery.set(Phase::Wait(until));
+                } else {
+                    delivery.set(Phase::Spent(Some(until)));
+                    // Same-account claim submission may restore its input on a rate limit.
+                    // A wait is not evidence that this code was never forwarded.
+                    if delivery.mailbox.subject().is_some() {
+                        return Err(ClientError::new("code_delivery_unknown"));
+                    }
+                }
                 Err(limited(secs))
             }
             (503, Some("unavailable")) if body["code_delivery"] == "not_forwarded" => {

@@ -420,6 +420,14 @@ impl Transport for Hosted {
                         });
                     }
                 }
+                if self.publication_case == "proof_start_unknown_limited" {
+                    headers.insert(reqwest::header::RETRY_AFTER, "47".parse().unwrap());
+                    return Ok(Response {
+                        status: 429,
+                        headers,
+                        body: br#"{"error":"rate_limited"}"#.to_vec(),
+                    });
+                }
                 if self.unknown {
                     return Err(ClientError::new("network_unavailable"));
                 }
@@ -687,6 +695,7 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_save_rollback_error",
         "proof_start_unknown",
         "proof_start_unknown_live",
+        "proof_start_unknown_limited",
         "proof_start_unknown_credential",
         "proof_start_unknown_successor",
         "proof_start_auto_save_direct",
@@ -1668,7 +1677,7 @@ async fn check_cut(cut: &'static str) {
                             let error = direct.deliver().unwrap_err();
                             assert_eq!(
                                 error.code,
-                                if cut == "proof_start_unknown_live" {
+                                if matches!(cut, "proof_start_unknown_live" | "proof_start_unknown_limited") {
                                     "code_delivery_unknown"
                                 } else {
                                     "stale_generation"
