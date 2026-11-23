@@ -71,7 +71,8 @@ an explicit process-local window (1–300 seconds). The file must match the
 currently enabled device token and this listener's WebSocket address.
 Only a matching Device-Id receives a `websocket` object with `url`, `token` and `version:2`;
 there are no MQTT, activation or firmware fields, nor host/cloud credentials.
-An absent/expired window or disabled/revoked pairing rejects the request.
+An absent/expired window rejects unauthenticated bootstrap; a disabled/revoked
+pairing rejects every request.
 Retries are allowed within the window; stop/restart never restores a window
 implicitly. Ordinary WebSocket authorization remains unchanged.
 
@@ -79,8 +80,20 @@ The MAC identifies the paired device but is not a secret: this is an explicitly
 opened trusted-LAN bootstrap window, not cryptographic device attestation.
 No new durable plaintext credential or generalized OTA/update service is added.
 The plugin keeps its own port, independent of any existing Avachan service.
-Later board OTA checks require another explicit window. The frozen voice wire
-does not change.
+The frozen voice wire does not change.
+
+The coordinator's 2026-11-24 recovery-discovery contract adds device Bearer
+authentication to the same `POST /device/ota` path. Matching the enabled device
+ID and token returns the current listener's WebSocket URL/version **without**
+returning a token, irrespective of the bootstrap window. Firmware sends its
+saved device token and retains it when a successful response omits `token`.
+Restart therefore needs no new window or plaintext artifact. Wrong, empty or
+duplicate Authorization never falls back to bootstrap. Five failed bearer
+attempts per peer cause a 60-second cooldown, with a bounded 64-peer counter.
+The listener address comes from the local socket, not the HTTP Host header.
+No public ingress or TLS listener is introduced. `pair` and `serve` share the
+local WebSocket URL validation, so unsupported WSS is refused before state is
+created.
 
 ## Validation contract
 
@@ -124,3 +137,17 @@ WebSocket URL/token through `POST /device/ota`, plus real HTTP refusal/retry/
 expiry/disable/revoke and listener lifecycle cases. Private-file/token/URL
 validation has isolated fixtures. The clean review of `795ab1c062` applies to
 the prior candidate; this follow-up requires a new exact-head review and CI.
+
+Review `3c07a4dcbc` repeated the speech-projection root cause. The orchestrator
+independently verified the inventory and approved structural Markdown
+extraction, scoped to projection and its tests. `4582ce2d6a` contains that fix;
+its review found no new projection issue, but identified inconsistent WSS
+acceptance at pairing. Shared local URL validation fixes that configuration
+boundary. There are three findings-bearing heads overall, two since the last
+clean pass. A further findings-bearing head requires orchestrator diagnosis;
+any further projection finding must stop the lane without another patch.
+
+The recovery-discovery tests cover first bootstrap, expired/closed window plus
+valid Bearer, process restart with hash-only state, revoke/disable, wrong token/
+device, cooldown and hostile Host headers. The real two-turn conversation now
+uses authenticated discovery after closing its initial bootstrap window.

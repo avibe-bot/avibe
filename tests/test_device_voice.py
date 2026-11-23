@@ -262,6 +262,13 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
                 config = (await response.json())["websocket"]
                 assert config["version"] == 2
             headers = {"Device-Id": "test-device", "Authorization": "Bearer " + config["token"]}
+            provision.close()
+            async with client.post(f"http://127.0.0.1:{port}/device/ota", headers=headers) as response:
+                assert response.status == 200
+                renewed = await response.json()
+                assert renewed == {"websocket": {"url": config["url"], "version": 2}}
+                # Reboot discovery retains the device's token; none is returned.
+                config.update(renewed["websocket"])
             with pytest.raises(aiohttp.WSServerHandshakeError):
                 await client.ws_connect(f"http://127.0.0.1:{port}/device/ws")
             async with client.ws_connect(config["url"], headers=headers) as ws:
@@ -471,6 +478,12 @@ async def test_repeated_stop_releases_listener_preserves_pairing_and_host(plugin
                 async with client.post(f"http://127.0.0.1:{port}/device/ota",
                                        headers={"Device-Id": "test-device"}) as response:
                     assert response.status == (200 if cycle == 0 else 403)
+                async with client.post(f"http://127.0.0.1:{port}/device/ota",
+                                       headers={"Device-Id": "test-device", "Authorization": "Bearer " + token}) as response:
+                    assert response.status == 200
+                    assert await response.json() == {"websocket": {
+                        "url": f"ws://127.0.0.1:{port}/device/ws", "version": 2,
+                    }}
             assert pairing.status()["running"]
             with pytest.raises(ValueError, match="device_already_running"):
                 await serve(pairing, bind="127.0.0.1", port=0, inactivity=20,
@@ -584,6 +597,9 @@ def test_pair_cli_emits_only_private_device_provisioning(plugin, tmp_path, capsy
     "ws://127.0.0.1:8765/device/ws?token=x", "ws://127.0.0.1:8765/device/ws#fragment",
     "ws://user@127.0.0.1:8765/device/ws", "ws://127.0.0.1:8765/other",
     "ws://0.0.0.0:8765/device/ws", "ws://8.8.8.8:8765/device/ws", "ws://localhost:8765/device/ws",
+    "ws://[::1]:8765/device/ws",
+    "ws://127.0.0.1:8765/device/ws?", "ws://127.0.0.1:8765/device/ws#",
+    "ws://127.0.0.1:8765/device/\nws",
 ])
 def test_pair_rejects_unservable_url_before_persisting(plugin, tmp_path, url, capsys):
     from avibe_device.cli import main
@@ -642,6 +658,94 @@ async def test_ota_window_is_explicit_bounded_and_device_scoped(plugin, tmp_path
                 assert response.status == 403 and token not in await response.text()
             assert window.document is None
             assert token not in pairing.path.read_text() and token not in caplog.text
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_authenticated_ota_survives_restart_without_provision_file(plugin, tmp_path, caplog):
+    pytest.importorskip("audioop")
+    from avibe_device.pairing import Pairing
+    from avibe_device.server import create_app
+
+    pairing = Pairing(tmp_path / "plugin")
+    token = pairing.pair("aa:bb:cc:dd:ee:ff")
+    pairing.enable(True)
+    headers = {"Device-Id": "aa:bb:cc:dd:ee:ff", "Authorization": "Bearer " + token, "Host": "attacker.invalid:9999"}
+    for _ in range(2):
+        # Only the existing hash-only pairing survives a plugin restart.
+        pairing = Pairing(pairing.root)
+        runner, port = await site(create_app(pairing, object()))
+        try:
+            async with aiohttp.ClientSession() as client:
+                url = f"http://127.0.0.1:{port}/device/ota"
+                async with client.post(url, headers=headers) as response:
+                    assert response.status == 200
+                    assert await response.json() == {"websocket": {
+                        "url": f"ws://127.0.0.1:{port}/device/ws", "version": 2,
+                    }}
+                    assert response.headers["Cache-Control"] == "no-store"
+                for wrong in ({"Device-Id": "aa:bb:cc:dd:ee:ff"},
+                              {**headers, "Device-Id": "unpaired"},
+                              {**headers, "Authorization": "Bearer different-device"}):
+                    async with client.post(url, headers=wrong) as response:
+                        assert response.status == 403 and token not in await response.text()
+        finally:
+            await runner.cleanup()
+    runner, port = await site(create_app(pairing, object()))
+    try:
+        async with aiohttp.ClientSession() as client:
+            pairing.enable(False)
+            async with client.post(f"http://127.0.0.1:{port}/device/ota", headers=headers) as response:
+                assert response.status == 403
+            pairing.enable(True)
+            pairing.revoke()
+            async with client.post(f"http://127.0.0.1:{port}/device/ota", headers=headers) as response:
+                assert response.status == 403
+        assert token not in pairing.path.read_text() and token not in caplog.text
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="The optional provisioning file is Unix owner-private")
+async def test_wrong_bearer_never_falls_back_to_bootstrap_and_is_rate_limited(plugin, tmp_path, monkeypatch, caplog):
+    pytest.importorskip("audioop")
+    from avibe_device.pairing import Pairing
+    from avibe_device.provision import ProvisionWindow
+    from avibe_device import server
+
+    pairing = Pairing(tmp_path / "plugin")
+    token = pairing.pair("board")
+    pairing.enable(True)
+    path = tmp_path / "provision.json"
+    path.write_text(json.dumps({"websocket": {
+        "url": "ws://127.0.0.1:8765/device/ws", "token": token, "version": 2,
+    }}))
+    path.chmod(0o600)
+    window = ProvisionWindow(pairing, path, bind="127.0.0.1", port=8765)
+    clock = [0]
+    monkeypatch.setattr(server, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    runner, port = await site(server.create_app(pairing, object(), provision=window))
+    try:
+        async with aiohttp.ClientSession() as client:
+            url = f"http://127.0.0.1:{port}/device/ota"
+            for wrong in ("", "Basic secret", "Bearer wrong-1", "Bearer wrong-2", "Bearer wrong-3"):
+                async with client.post(url, headers={"Device-Id": "board", "Authorization": wrong}) as response:
+                    assert response.status == 403 and token not in await response.text()
+            async with client.post(url, headers={"Device-Id": "board", "Authorization": "Bearer " + token}) as response:
+                assert response.status == 429 and response.headers["Retry-After"] == "60"
+                assert token not in await response.text()
+            window.close()
+            async with client.post(url, headers={"Device-Id": "board"}) as response:
+                assert response.status == 403  # No bearer, no open bootstrap window.
+            clock[0] = 61
+            async with client.post(url, headers={"Device-Id": "board", "Authorization": "Bearer " + token}) as response:
+                assert response.status == 200
+                assert await response.json() == {"websocket": {
+                    "url": f"ws://127.0.0.1:{port}/device/ws", "version": 2,
+                }}
+            assert token not in caplog.text
     finally:
         await runner.cleanup()
 

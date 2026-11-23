@@ -14,13 +14,16 @@ from .pairing import Pairing
 
 def websocket_address(value: str) -> tuple[str, int]:
     """The local listener is plaintext, on one concrete private IP address."""
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value) or "?" in value or "#" in value:
+        raise ValueError("invalid_device_url")
     url = urlparse(value)
     if (url.scheme != "ws" or not url.hostname or url.path != "/device/ws"
             or url.username is not None or url.password is not None or url.query or url.fragment):
         raise ValueError("invalid_device_url")
     address = ipaddress.ip_address(url.hostname)
     port = url.port if url.port is not None else 80
-    if not (address.is_private or address.is_loopback) or address.is_unspecified or not 1 <= port <= 65535:
+    if (address.version != 4 or not (address.is_private or address.is_loopback)
+            or address.is_unspecified or not 1 <= port <= 65535):
         raise ValueError("invalid_device_url")
     return str(address), port
 

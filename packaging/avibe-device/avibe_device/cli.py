@@ -131,7 +131,7 @@ def main(argv=None) -> int:
             return 0
         elif args.command == "serve":
             address = ipaddress.ip_address(args.bind)
-            if not (address.is_loopback or address.is_private) or address.is_unspecified:
+            if address.version != 4 or not (address.is_loopback or address.is_private) or address.is_unspecified:
                 raise ValueError("explicit_lan_address_required")
             if not 0 < args.inactivity <= 25 or not 1 <= args.vad_threshold <= 32767:
                 raise ValueError("invalid_capture_options")

@@ -148,11 +148,108 @@ The existing provisioning response is:
 {"websocket":{"url":"ws://host.invalid/device/ws","token":"DEVICE_SCOPED_EXAMPLE","version":2}}
 ```
 
-The firmware consumes the response from its configured OTA check URL and
-persists the websocket settings in NVS. Omit `mqtt`, `activation`, `firmware`,
-and asset-download fields. MQTT wins protocol selection if both transport
-objects are present. This response configures a transport; it is not a
-firmware update or device ownership proof.
+The Vibey variant has an empty default `CONFIG_OTA_URL`. With no user-saved
+Custom OTA URL, it creates no discovery HTTP client and initializes no
+transport. Other boards keep their existing OTA default and MQTT behavior.
+An already saved Custom OTA URL remains an explicit user setting; this
+candidate does not erase it.
+
+On this board the existing Wi-Fi setup page exposes **Custom OTA URL**.
+From Idle, hold the screen for at least two seconds and release to enter
+the existing setup AP (`Vibey-<suffix>`). Open its displayed address and fill
+`http://<current-host-LAN-address>:8765/device/ota`. There is no compiled host
+IP or automatic discovery service. Reserve the host's DHCP lease or update
+the saved URL when its address changes. A short touch retains its existing
+chat behavior; holds between 500 ms and two seconds do nothing.
+
+The device sends **POST** with its existing nonempty system-information JSON.
+`Device-Id` is the Wi-Fi STA MAC, six lowercase hexadecimal octets separated
+by colons (synthetic example: `02:00:00:00:00:01`); `Client-Id` is the existing
+board UUID. The plugin accepts POST `/device/ota`, not GET.
+If NVS contains a device token, the firmware also sends
+`Authorization: Bearer <device-token>` on this discovery request. Without a
+stored token it omits Authorization entirely. This is the device credential
+already used for its WebSocket, never a host/instance/cloud credential.
+
+The optional plugin supports two authorization paths on this same endpoint:
+
+- **Initial pairing, no Authorization header:** explicitly start
+  `serve --provision-file <original-private-pair-file> --provision-seconds 120`
+  (maximum 300 seconds). During that short window only the exact currently
+  enabled paired Device-Id receives the complete device-scoped WebSocket
+  object above, including the initial token. Retries tolerate a lost response.
+  Without Authorization and outside the window, discovery is rejected.
+- **Recovery with Authorization:** an exact Device-Id and a constant-time
+  match of its Bearer against the currently enabled pair authorize discovery
+  at any time, independently of the initial window. The response contains
+  only the current advertised URL and version; it never echoes the token:
+
+  ```json
+  {"websocket":{"url":"ws://host.invalid:8765/device/ws","version":2}}
+  ```
+
+An empty, malformed or incorrect Authorization header never falls back to
+the initial window, even while that window is open. Unknown, disabled,
+revoked or mismatched pairs are rejected. Wrong-Bearer attempts have bounded
+counting and short-term rate limiting. Neither credentials nor request bodies
+belong in logs; recovery responses never contain tokens.
+
+Both paths share the plugin's existing LAN port and `/device/ota` path. Its
+listener address/port must match its advertised URL. The MAC is public
+identity, not a password: initial bootstrap requires a trusted LAN and an
+explicitly opened window. It is not ownership proof. Firmware HTTP header
+debug dumps would include Authorization in the existing vendor client, so
+this board's canonical configuration explicitly limits compiled logging to
+INFO. Offline artifact validation checks the DEBUG request-header format
+is absent; no vendor source is changed.
+
+The firmware validates the `url` (`ws://` or `wss://`) against the existing
+client's supported DNS/IPv4 authority syntax, bounded numeric port 1–65535,
+and absence of whitespace/control characters before persisting the response.
+IPv6/userinfo and fragments are unsupported by that client; a query needs
+an explicit `/` path. The total URL is bounded to 2048 bytes. A literal colon
+in a path requires an explicit authority port because of the client's parser.
+Version is exactly 2. Initial pairing requires a nonempty device token.
+A successful later response may omit `token` to retain the stored device
+credential; an explicitly empty or malformed token is rejected, and omission
+without a stored token is rejected. Failed discovery never authorizes reuse
+of a persisted transport.
+Responses containing `mqtt`, `activation`, `firmware` or `assets` are rejected
+before writes. Missing/partial/invalid responses, HTTP errors, an unauthorized request
+or unreachable URL leave the device in Idle without a protocol; it does not
+fall back to old NVS MQTT or old WebSocket credentials, and does not spend
+the legacy exponential retry period before exposing setup. No success chime
+is played. Local image-health confirmation occurs after display/audio,
+timers and callbacks initialize and before network startup, independently of
+Wi-Fi and discovery availability. Neither a missing SSID nor an unconfigured
+endpoint keeps an otherwise healthy image pending verification and causes
+rollback to an older build's external-service default. These behaviors apply only to this
+product; other boards retain their existing transport selection.
+
+After initial pairing, subsequent firmware startups use authenticated
+discovery without reopening the initial window. They still require a fresh
+successful response; an unreachable plugin or rejected/revoked credential
+leaves the device offline and cannot authorize old transports. Saving the
+URL alone is not authorization. This response configures a transport; it is
+not a firmware update.
+
+The existing setup page preserves multiple networks: a successful save calls
+`SsidManager::AddSsid`. A new SSID is inserted at the front without deleting
+other entries, up to ten saved networks. The same SSID updates its password;
+an eleventh distinct SSID evicts the last entry. This is verified from the
+existing page handler and manager implementation; this candidate does not
+change SSID storage or station-selection code.
+
+Public access is a later target, not implemented or validated by this LAN
+slice. The URL is user configured rather than compiled as a LAN-only route:
+an explicit `https://<instance-domain>/device/ota` and a returned `wss://`
+endpoint remain supported schemes through the existing certificate-bundle
+transport. Later public discovery must authenticate with the stored
+device-scoped token using the same Authorization mechanism, and may omit a
+new token in its successful response. The Bearer mechanism is implemented
+for this LAN slice; a public listener or public unauthenticated pairing route
+is not provided. HTTPS/WSS certificate and clock readiness, public deployment,
+reachability and revocation acceptance remain separate gates.
 
 WebSocket headers are `Protocol-Version:2`, `Device-Id` (MAC), `Client-Id`
 (board UUID), and optional `Authorization:Bearer <device token>`. Device
@@ -165,13 +262,14 @@ serial access, and flashing are separate approval gates. Offline artifacts do
 not alter current device settings. An unreachable old provisioning URL cannot
 be repaired by merely installing the optional plugin.
 
+### App lane acceptance (2026-11-24)
 
-## App lane acceptance
-
-The avibe-app lane (`sesrng8hqsvbp`, 2026-11-23) accepts this frozen v1 wire.
-Its shared subset fixture is `tests/fixtures/littlevibey-wire-v1.json` in the
-`feat/littlevibey-device-plugin` worktree. The firmware lane confirmed the field
-shapes and corrected the wake session/event IDs; those corrections are included.
-The app's synthetic integration uses real WebSocket v2 framing, Opus conversion,
-and request/playback gates. This agreement does not claim real-device or acoustic
-validation, and `drained` retains only the software-boundary meaning above.
+The optional plugin lane (`sesrng8hqsvbp`, PR #4221) accepts the two-path
+`POST /device/ota` contract above. Bootstrap remains explicitly windowed;
+authenticated recovery uses the currently enabled device pair and returns
+only the actual listener URL/version, never a token. A present invalid
+Authorization cannot use the bootstrap path. The LAN candidate serves
+plaintext HTTP/WS on a concrete private IPv4 address; it does not advertise
+WSS or IPv6 to this firmware. Failed Bearers have bounded per-peer accounting
+and a 60-second cooldown after five failures. The voice JSON fixture and
+capture/playback protocol remain unchanged.

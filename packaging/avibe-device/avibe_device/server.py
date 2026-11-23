@@ -149,9 +149,37 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
     app = web.Application()
     connections: set[web.WebSocketResponse] = set()
     selected_host = host or Host()
+    # Only failed Authorization attempts consume this bounded, per-peer budget.
+    # Five failures impose a 60-second cooldown; a valid retry clears its count.
+    ota_failures: dict[str, tuple[int, float]] = {}
 
     async def ota(request):
-        payload = provision.response(request.headers.get("Device-Id", "")) if provision is not None else None
+        device_id = request.headers.get("Device-Id", "")
+        authorization = request.headers.get("Authorization")
+        if authorization is not None:
+            now = time.monotonic()
+            for peer, (_, expiry) in tuple(ota_failures.items()):
+                if expiry <= now:
+                    del ota_failures[peer]
+            peer = request.remote or ""
+            count, expiry = ota_failures.get(peer, (0, now + 60))
+            if count >= 5 or (peer not in ota_failures and len(ota_failures) >= 64):
+                raise web.HTTPTooManyRequests(headers={"Cache-Control": "no-store", "Retry-After": "60"})
+            if len(request.headers.getall("Authorization")) != 1 or not pairing.accepts(device_id, authorization):
+                ota_failures[peer] = (count + 1, now + 60 if count == 4 else expiry)
+                raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
+            ota_failures.pop(peer, None)
+            # This is the actual local address, not the untrusted Host header or
+            # stale pairing artifact. No credential is echoed on rediscovery.
+            address = request.transport.get_extra_info("sockname") if request.transport else None
+            if not address:
+                raise web.HTTPServiceUnavailable(headers={"Cache-Control": "no-store"})
+            host, port = address[:2]
+            authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+            payload = {"websocket": {"url": f"ws://{authority}/device/ws", "version": 2}}
+        else:
+            # A present but wrong/empty bearer must never fall back to bootstrap.
+            payload = provision.response(device_id) if provision is not None else None
         if payload is None:
             raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
         # The firmware's OTA check only receives local WebSocket configuration:

@@ -44,6 +44,10 @@ are refused. In the board's Wi-Fi setup page, set **Custom OTA URL** to
 `http://192.168.1.10:8765/device/ota` before starting its connection check.
 This firmware page writes `ota_url`; installing the plugin alone does not change
 the board. Device configuration and flashing remain separate operator actions.
+Pairing validates this local listener's capabilities before writing state:
+use `ws://` with a concrete private IPv4 address and valid port. `wss://`, hostnames, IPv6,
+wildcard/public addresses, credentials, query strings and fragments are refused.
+This LAN plugin does not terminate TLS.
 
 The explicit `serve --provision-file` option opens a 120-second window (at most
 300 seconds) on the **same plugin port**. `POST /device/ota` checks `Device-Id`
@@ -55,14 +59,30 @@ activation or firmware-update response is served. No cloud or host credential
 is read or returned. The board uses this response for its authenticated
 WebSocket connection; no token needs to be pasted into its setup page.
 
-Missing/other device IDs, disabled/revoked pairings, absent windows and expired
-windows are refused. Retries during the window are allowed because a response
-can be lost. Expiry closes credential delivery; it does not revoke the paired
-WebSocket token or interrupt an established conversation. Stopping the plugin
-also closes the window, and a normal later `serve` without the option leaves it
-closed. A later board boot/OTA check needs a newly opened window: explicitly
-start the plugin with the provisioning options again. Keep the private file
-for that purpose; after revoke, remove it and create a fresh pair/file.
+Missing/other device IDs and disabled/revoked pairings are refused. A request
+without Authorization requires the open bootstrap window; retries are allowed
+within it because a response can be lost. Expiry closes credential delivery;
+it does not revoke the paired WebSocket token or interrupt a conversation.
+Stopping the plugin also closes the window, and a normal later `serve` without
+the option leaves it closed.
+
+After pairing, the firmware keeps its device token and sends
+`Authorization: Bearer <device token>` on each OTA check, including after a
+power cycle. Matching the enabled device ID and token returns only
+`{"websocket":{"url":"ws://192.168.1.10:8765/device/ws","version":2}}`,
+using the actual listener address. It **does not return the token**; the
+firmware retains its existing one. This path works without a provisioning
+file/window, including after the plugin restarts. An incorrect or empty
+Authorization header is rejected without falling back to bootstrap. Five
+failed bearer checks from one peer impose a 60-second discovery cooldown.
+Revoke invalidates both WebSocket access and authenticated discovery.
+
+Keep the private artifact only for an explicitly authorized fresh setup, such
+as after clearing the board's saved token; after revoke, remove it and create a
+fresh pair/file. Normal device power cycles no longer require reopening a window.
+If the board still stores a revoked token, clear that credential through a
+separately authorized device setup before initial bootstrap; an old Bearer
+cannot use the new window.
 
 This is trusted-LAN provisioning: a MAC address is **not proof of possession**
 and another LAN peer that knows it could fetch the device token during the
@@ -143,6 +163,9 @@ The two-turn test first obtains its WebSocket URL/token through the real local
 OTA response. Separate HTTP tests cover exact device identity, retries, expiry,
 disable/revoke, listener stop/restart with no reopened window, private-file
 validation and absence of extra response fields or leaked credentials.
+Authenticated rediscovery survives window expiry and plugin restart without
+returning a token; tests also cover old-token rejection, no invalid-bearer
+fallback, bounded cooldown and an untrusted Host header.
 
 Adversarial model responses try terminal, files, Vault, MCP, delegation, background
 and hosted tools without creating effects or Runs. Duplicate/restart requests,
