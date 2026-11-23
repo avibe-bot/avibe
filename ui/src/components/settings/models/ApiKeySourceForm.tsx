@@ -20,6 +20,7 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { localizedApiKeyVendorOptions, modelApiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
 import {
   applyDetectedProtocol,
@@ -243,8 +244,8 @@ export const ApiKeySourceForm: React.FC<{
   // A preset fills in its official address, so the field waits under 「更多设置」;
   // a custom provider has to type it, so there it stays in view.
   const baseUrlField = (
-    <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
-        {(id) => <Input id={id} value={draft.baseUrl} disabled={disabled} autoComplete="url" spellCheck={false} onChange={(event) => onChange({ ...draft, baseUrl: event.target.value }, 'baseUrl')} className="model-hub-add-key-input font-mono" />}
+    <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.baseUrl')} aside={<ModelHubInfoHint label={t('settings.models.addKey.field.baseUrl.infoLabel') as string} content={t('settings.models.addKey.field.baseUrl.hint')} />}>
+        {(id) => <Input id={id} value={draft.baseUrl} placeholder={t('settings.models.addKey.field.baseUrl.placeholder') as string} disabled={disabled} autoComplete="url" spellCheck={false} onChange={(event) => onChange({ ...draft, baseUrl: event.target.value }, 'baseUrl')} className="model-hub-add-key-input font-mono" />}
     </Field>
   );
 
@@ -256,9 +257,7 @@ export const ApiKeySourceForm: React.FC<{
       <Field
         className="model-hub-add-key-field"
         labelClassName="model-hub-add-key-label"
-        hintClassName="model-hub-add-key-hint"
         label={t('settings.models.addKey.field.vendor')}
-        hint={t('settings.models.addKey.field.vendor.hint')}
       >
         {(id) => (
           <Combobox

@@ -1,7 +1,7 @@
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { keepOpenOnOutsideClick } from '@/components/ui/dialogOutsideClick';
-import { FlaskConical, Info, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { FlaskConical, Loader2, LogIn, MoreHorizontal, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -1082,7 +1082,6 @@ export const SourceDetailPanel: React.FC<{
                 {canEditSourceEndpoint(source) && <Field label={t('settings.models.sourceDetail.edit.baseUrl')} mono>
                   {(id) => <Input id={id} type="text" inputMode="url" autoComplete="url" spellCheck={false} value={editDraft.baseUrl} disabled={busy} aria-invalid={editAssessment.reason?.startsWith('baseUrl') || undefined} className="font-mono" onChange={(event) => editManageDraft({ ...editDraft, baseUrl: event.target.value })} />}
                 </Field>}
-                <p className="model-hub-guard-hint"><Info aria-hidden />{t('settings.models.sourceDetail.edit.hint')}</p>
                 {editAssessment.reason && <p data-source-edit-validation className="text-[11.5px] text-destructive-ink">{t(SOURCE_EDIT_REASON_KEY[editAssessment.reason])}</p>}
                 {manageStage.kind === 'edit_failed' && <p data-manage-failure="edit" data-manage-retry-read={String(manageStage.retryRead)} className="text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.edit.verifyFail' : 'settings.models.sourceDetail.edit.fail')}</p>}
               </div>}

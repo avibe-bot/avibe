@@ -425,15 +425,20 @@ describe('MigrationDialog — the settings default', () => {
 
 describe('MigrationDialog — persisted authentication', () => {
   it.each([
-    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.'],
-    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留，迁移时不联网校验 Key 或拉取模型列表。Key 是否可用由后续模型调用确认。'],
-  ] as const)('explains the saved source boundary and consequence in %s', async (language, sentence) => {
+    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores.', 'What an import does', /An import does not test keys online or fetch model lists/],
+    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。', '导入时会做什么', /导入时不联网检查 Key，也不拉取模型列表/],
+  ] as const)('says what is imported, and keeps what an import does and does not do one press away in %s', async (language, sentence, label, detail) => {
     await i18n.changeLanguage(language);
     serve([CODEX_KEY]);
     renderDialog();
 
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText(sentence)).toBeTruthy();
+    // The boundary (keys are copied as saved, originals kept, nothing checked
+    // online) is an explanation, so it sits behind the info control beside it.
+    expect(screen.queryByText(detail)).toBeNull();
+    await userEvent.setup().click(within(dialog).getByRole('button', { name: label }));
+    expect(await screen.findByText(detail)).toBeTruthy();
   });
 
   it.each(['dynamic_shell', 'ambiguous_shell', 'unreadable', 'reference', 'helper', 'token', 'headers', 'transport'])(
@@ -768,7 +773,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
 
     expect(visibleText(dialog)).toEqual([
       'Migrate to the Model Hub',
-      'Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.',
+      'Import authentication saved in configuration files, shell startup files, or supported credential stores.',
       'Claude Code',
       'Anthropic',
       'Claude 账号登录（OAuth） · Claude Code configuration',
@@ -776,13 +781,14 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
       'OpenAI',
       'sk-…9f21 · Codex configuration',
       'Also remove the API keys from the native CLI configuration',
-      'Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.',
+      'Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.',
       'Migrating interrupts any task the selected assistants are running in Avibe.',
       'Later',
       'Start migration',
       'Close',
     ]);
     expect(controls(dialog)).toEqual([
+      { role: null, name: 'What an import does', disabled: false },
       { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: false },
       { role: 'checkbox', name: 'OpenAI · sk-…9f21 · Codex configuration', disabled: false },
       { role: 'checkbox', name: 'Also remove the API keys from the native CLI configuration', disabled: false },
@@ -812,6 +818,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
     // No narrower scope was passed, so neither row is out of reach and the group
     // is not blocked: the whole backend migrates together, as it always has.
     expect(controls(dialog)).toEqual([
+      { role: null, name: 'What an import does', disabled: false },
       { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: false },
       { role: 'checkbox', name: 'Anthropic · sk-ant-…1c05 · Claude Code configuration', disabled: false },
       { role: 'checkbox', name: 'Also remove the API keys from the native CLI configuration', disabled: false },

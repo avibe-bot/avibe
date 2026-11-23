@@ -336,7 +336,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Let Model Hub manage|交给模型网关管理/i }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
-    expect(within(dialog).getByText(/migration does not test keys online|迁移时不联网校验 Key/)).toBeTruthy();
+    expect(within(dialog).getByText(/Import authentication saved in configuration files|导入配置文件、Shell 启动文件/)).toBeTruthy();
     expect(setMode).not.toHaveBeenCalled();
     if (refused) {
       await userEvent.click(within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }));
