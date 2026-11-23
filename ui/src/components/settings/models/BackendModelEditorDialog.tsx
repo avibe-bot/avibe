@@ -245,8 +245,6 @@ export const BackendModelEditorDialog: React.FC<{
   const answered = idAnswer !== null && idAnswer.id === draft.id.trim() ? idAnswer : null;
   const answeredId = answered?.match ? modelsDevBaseId(answered.match.models_dev_id) : null;
 
-  /** The parameters the ID would bring, when they are not the ones on screen. */
-  const offered = answered?.match && answeredId !== sourceId ? answered.match : null;
 
   // 「更换」: a search of the catalog, answered like the ID was.
   const searchedFor = sourceOpen ? sourceQuery.trim() : '';
@@ -273,6 +271,13 @@ export const BackendModelEditorDialog: React.FC<{
   const trimmedId = draft.id.trim();
   /** The ID as a registry would know it: without a provider's path in front. */
   const bareId = modelsDevBaseId(trimmedId);
+  // A saved row that already has its limits is not asked to reconsider them each
+  // time it is opened: the catalog speaks up about a row being added, an ID that
+  // was just changed, or limits nobody has filled in.
+  const wantsAnswer = creating || trimmedId !== model.id || (context.value === null && output.value === null);
+  /** The parameters the ID would bring, when they are not the ones on screen. */
+  const offered = wantsAnswer && answered?.match && answeredId !== sourceId ? answered.match : null;
+  const unknownToCatalog = wantsAnswer && sourceId === null && answered !== null && answered.match === null;
   /**
    * The row as it would be stored.
    *
@@ -476,9 +481,7 @@ export const BackendModelEditorDialog: React.FC<{
                     />
                   </span>
                 )}
-                {sourceId === null && answered !== null && answered.match === null && (
-                  <span role="status">{t('settings.models.gateway.modelEditor.source.none')}</span>
-                )}
+                {unknownToCatalog && <span role="status">{t('settings.models.gateway.modelEditor.source.none')}</span>}
                 {offered && (
                   <button type="button" className="model-hub-model-source-offer" onClick={() => applyParameters(offered)}>
                     <Trans
@@ -488,7 +491,7 @@ export const BackendModelEditorDialog: React.FC<{
                     />
                   </button>
                 )}
-                {!offered && (sourceId !== null || (answered !== null && answered.match === null)) && <span aria-hidden="true" className="shrink-0 before:content-['·']" />}
+                {!offered && (sourceId !== null || unknownToCatalog) && <span aria-hidden="true" className="shrink-0 before:content-['·']" />}
                 <button
                   ref={sourceToggleRef}
                   type="button"

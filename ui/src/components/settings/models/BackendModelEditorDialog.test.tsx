@@ -582,6 +582,18 @@ describe('BackendModelEditorDialog', () => {
     }));
   });
 
+  it('leaves a saved row that has its limits alone, whatever the catalog would say', async () => {
+    const existing: BackendModel = { ...blankBackendModel(), id: 'claude-sonnet-4-5', origin: 'builtin', context_window: 180000, max_output_tokens: 32000 };
+    search.mockResolvedValue([match()]);
+    renderEditor({ model: existing, takenIds: new Set([existing.id]) });
+
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    await act(async () => {});
+    // Opening a row to look at it is not a question about its numbers.
+    expect(sourceLine()).toBe('Pick one from the catalog');
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('180,000');
+  });
+
   it('offers a saved row what its ID answers to, and changes nothing about how the row was created', async () => {
     const user = userEvent.setup();
     // A row added before the catalog could describe it: no parameters, no source.
