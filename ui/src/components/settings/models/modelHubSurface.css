@@ -242,6 +242,8 @@
   --model-hub-picker-name-size: 12.5px;
   /* The folds of 「From your providers」: a provider's line is as tall as a row
    * and reads at the row's own size; a long provider's second fold is lighter. */
+  /* Declared with the surface, not on the group: the list's scroller reads it too. */
+  --model-hub-picker-group-inner-gap: 4px;
   --model-hub-picker-fold-height: 36px;
   --model-hub-picker-fold-pad-x: 10px;
   --model-hub-picker-fold-gap: 8px;
@@ -3781,7 +3783,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   gap: var(--model-hub-picker-group-gap);
 }
 .model-hub-picker-group {
-  --model-hub-picker-group-inner-gap: 4px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-picker-group-inner-gap);
