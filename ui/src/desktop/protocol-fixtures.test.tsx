@@ -450,7 +450,7 @@ it.each([
 
 // The removed popup used to own the local link and sign-out. The real container
 // must retain them on the account page without treating presentation as consent.
-it.each(['on', 'off', 'starting', 'unavailable'])('account page shows only the enabled local address and signs out explicitly (%s)', async (access) => {
+it.each(['on', 'off', 'starting', 'unavailable'])('account page shows no unobserved address and signs out explicitly (%s)', async (access) => {
   const state = { ...states.signed_in, local: { ...states.signed_in.local, remote_access: access, remote_access_url: 'https://local-fixture-app.avibe.bot' } };
   const invoke = mount(state, (request) => request.action.type === 'sign_out'
     ? { ...replies.success, state, request_id: request.request_id, ok: false, error: { code: 'cleanup_error' } }
@@ -459,9 +459,9 @@ it.each(['on', 'off', 'starting', 'unavailable'])('account page shows only the e
   fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
   expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy();
   expect(screen.getByText(state.account.identity!.email)).toBeTruthy();
-  const link = screen.queryByRole('link', { name: state.local.remote_access_url });
-  if (access === 'on') expect(link?.getAttribute('href')).toBe(state.local.remote_access_url);
-  else expect(link).toBeNull();
+  // The address belongs to this computer's binding card, which shows it only for a binding
+  // native has observed; the local descriptor alone never draws it.
+  expect(screen.queryByRole('link', { name: state.local.remote_access_url })).toBeNull();
   expect(invoke).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole('button', { name: 'Sign out on this device' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
@@ -639,7 +639,6 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
     await waitFor(() => expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull());
     const cancels = invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel');
     expect(cancels).toHaveLength(status === 'paired_this_account' ? 1 : 0);
-    if (status === 'failed') expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     if (status === 'paired_error') expect(screen.getByRole('alert')).toBeTruthy();
     const back = screen.getByRole('button', { name: 'Back to Workbench' });
     expect(back.hasAttribute('disabled')).toBe(false);

@@ -54,9 +54,8 @@ it.each([['en', en], ['zh', zh]] as const)(
     // The Desktop's own subtitle, not the App's.
     expect(page.textContent).toContain(`${copy.desktopClient.welcomeLine1}${copy.desktopClient.welcomeLine2}`);
     expect(page.textContent).not.toContain(welcome.bodyLine1);
-    // No brand row and no registration note; "continue on this computer" stays.
+    // No brand row; "continue on this computer" stays.
     expect(page.textContent).not.toContain(copy.mobileApp.brand.agentOs);
-    expect(page.textContent).not.toContain(copy.desktopClient.registrationDisclosure);
     expect(screen.getByRole('button', { name: copy.desktopClient.continueLocal })).toBeTruthy();
     expect(screen.getByRole('button', { name: copy.mobileApp.welcome.continueWithEmail })).toBeTruthy();
   },

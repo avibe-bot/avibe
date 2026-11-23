@@ -27,7 +27,7 @@ const column = (children: ReactNode, centered = false) => () => <div className={
   : 'h-full overflow-y-auto bg-background px-10 py-5 text-foreground'}>{children}</div>;
 
 const account = (binding: ComputerBinding, recovery: AccountRecovery | null = null) => column(
-  <AccountDetailsView email={ACCOUNT} localRemoteUrl={null} busy={false} onBack={noop} onSignOut={noop}>
+  <AccountDetailsView email={ACCOUNT} busy={false} onBack={noop} onSignOut={noop}>
     <ComputerBindingCard binding={binding} account={ACCOUNT} computer={COMPUTER} recovery={recovery}
       onBind={noop} onRefresh={noop} onUpdates={noop} onRecover={noop} />
   </AccountDetailsView>,

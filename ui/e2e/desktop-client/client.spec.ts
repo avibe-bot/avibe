@@ -251,14 +251,15 @@ for (const lang of ['en', 'zh'] as const) for (const persistenceError of [false,
   expect(requests.find((request) => request.action.type === 'finish_totp_enrollment')?.action).toEqual({ type: 'finish_totp_enrollment', code: '654321' });
 });
 
-for (const status of ['conflict', 'failed', 'paired_tunnel_unavailable'] as const) test(`AUTH-SETUP-173 ${status} keeps local escape and other instances`, async ({ page }, info) => {
+// Signing in no longer registers this computer (AV-8): a status an older shell may still report
+// opens the Account page, with no enrollment retry and no registration screen.
+for (const status of ['conflict', 'failed', 'paired_tunnel_unavailable'] as const) test(`AUTH-SETUP-173 ${status} opens the Account page and retries no enrollment`, async ({ page }, info) => {
   await isolateAccount(page); await language(page, 'en');
   const state = clientState(); signIn(state); state.enrollment.status = status;
   const requests = await installBridge(page, state); await page.goto(ACCOUNT);
-  await expect(page.getByRole('button', { name: 'Other instances' })).toBeVisible();
-  if (status === 'conflict') { await page.getByRole('button', { name: 'Review account change' }).click(); await expect(page.getByText(/Ask the current owner/)).toBeVisible(); }
+  await expect(page.getByRole('heading', { name: 'Account' })).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: info.outputPath(`${status}.png`) });
-  await page.getByRole('button', { name: 'Other instances' }).click();
+  await page.getByRole('button', { name: 'Instances' }).click();
   await expect(page.getByText('工作室 Studio', { exact: true })).toBeVisible();
   expect(requests.map((request) => request.action.type)).toEqual(['get_state', 'refresh_instances']);
 });

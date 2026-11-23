@@ -27,7 +27,6 @@ const states: [DesktopInstanceState, string][] = [
   ['current-shared', 'Current shared instance · ownership retained'],
   ['offline-shared', 'Shared offline instance · disabled'],
   ['profile', 'Account · local remote access address'],
-  ['profile-disabled', 'Account · remote access off'],
   ['profile-error', 'Account · unresolved persistence error'],
   ['sign-out-error', 'Sign-out cleanup failure · explicit retry'],
   ['empty', 'Signed in · no other instances'],
@@ -126,7 +125,7 @@ export function factorViewProps(fixture: DesktopInstanceFixture): AccountSecondF
 }
 
 export function profileViewProps(fixture: DesktopInstanceFixture): AccountDetailsViewProps | null {
-  if (!['profile', 'profile-disabled', 'profile-error'].includes(fixture.state)) return null;
-  return { errorMessage: fixture.state === 'profile-error' ? (fixture.lang === 'en' ? en : zh).desktopClient.errors.request : null, email: 'long-research-account-name@example.test', localRemoteUrl: fixture.state === 'profile-disabled' ? null : 'https://local-fixture-app.avibe.bot', busy: false,
+  if (!['profile', 'profile-error'].includes(fixture.state)) return null;
+  return { errorMessage: fixture.state === 'profile-error' ? (fixture.lang === 'en' ? en : zh).desktopClient.errors.request : null, email: 'long-research-account-name@example.test', busy: false,
     onBack: () => {}, onSignOut: () => {} };
 }
