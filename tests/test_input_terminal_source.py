@@ -34,6 +34,7 @@ from vibe.input_source import resolve_source
     ('forged', ['mini'], 'unknown'),
 ])
 def test_http_delivery_reaches_native_consumer(isolated_state, hint, surface, expected, registered):
+    """MESSAGE-DELIVERY-341: source survives HTTP admission to native Agent input."""
     from modules.agents.base import BaseAgent
     from vibe.ui_server import app
 
@@ -106,6 +107,7 @@ def test_http_delivery_reaches_native_consumer(isolated_state, hint, surface, ex
 
 @pytest.mark.parametrize(('kind', 'terminal'), [('iphone_app', 'iphone_app'), ('desktop_app', 'mac_app'), ('browser', 'browser')])
 def test_authenticated_session_wins_over_hint(isolated_state, kind, terminal):
+    """MESSAGE-DELIVERY-341: authenticated device kind takes precedence over hints."""
     now = int(time.time())
     engine = create_sqlite_engine()
     identity = {'sub': 'alice', '_device_binding': 'binding', 'browser_session_id': 'sid'}
@@ -128,6 +130,7 @@ def test_authenticated_session_wins_over_hint(isolated_state, kind, terminal):
 
 @pytest.mark.parametrize('platform', ['slack', 'discord', 'telegram', 'feishu', 'wechat'])
 def test_im_native_consumer_uses_transport(platform):
+    """MESSAGE-DELIVERY-341: IM input uses the admitted platform at the consumer."""
     from modules.agents.base import BaseAgent
     from modules.im import MessageContext
 

@@ -9570,6 +9570,7 @@ def test_runtime_recovery_reads_a_starting_turns_owner_off_the_controller_loop(m
 
 
 def test_queue_preserves_each_inputs_terminal_at_the_consumer(managers):
+    """MESSAGE-DELIVERY-341: queued messages retain their own source at consumption."""
     from core.handlers.message_handler import MessageHandler
 
     manager, _other, engine, _engine_b, starts = managers
