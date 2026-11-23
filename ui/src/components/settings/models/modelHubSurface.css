@@ -3796,6 +3796,10 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   font-size: var(--model-hub-model-source-id-size);
   color: var(--muted);
 }
+/* What changing a saved model's ID carries along; the line that means work for
+ * the user afterwards is in danger ink, on its own line. */
+.model-hub-model-rename { font-size: var(--model-hub-model-source-size); line-height: var(--model-hub-model-source-line); color: var(--muted); }
+.model-hub-model-rename-warn { display: block; color: var(--model-hub-danger-ink); }
 /* Common limits under an empty box. */
 .model-hub-model-presets { display: flex; flex-wrap: wrap; gap: var(--model-hub-model-preset-gap); }
 .model-hub-model-preset {

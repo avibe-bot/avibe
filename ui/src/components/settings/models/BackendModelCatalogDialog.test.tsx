@@ -561,12 +561,89 @@ describe('BackendModelCatalogDialog', () => {
     renderDialog();
 
     await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
-    expect((screen.getByLabelText('Model ID') as HTMLInputElement).readOnly).toBe(true);
     await user.clear(screen.getByLabelText('Context window'));
     await user.type(screen.getByLabelText('Context window'), '2000');
     await user.click(screen.getByRole('button', { name: 'Save model' }));
     await user.click(await screen.findByRole('button', { name: 'Save' }));
 
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
+      baseline: catalog,
+      models: [model('alpha', { context_window: 2000 })],
+    }));
+  });
+
+  it('saves a changed ID as a rename, however many times it was retyped before saving', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 }), model('beta')];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog();
+    const renameTo = async (from: string, to: string) => {
+      await user.click(await screen.findByRole('button', { name: `Edit ${from}` }));
+      await user.clear(screen.getByLabelText('Model ID'));
+      await user.type(screen.getByLabelText('Model ID'), to);
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+    };
+
+    // Twice before saving is one rename, from the ID the server knows.
+    await renameTo('alpha', 'alpha-2');
+    await renameTo('alpha-2', 'alpha-3');
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
+      baseline: catalog,
+      models: [model('alpha-3', { context_window: 1000 }), model('beta')],
+      renames: { alpha: 'alpha-3' },
+    }));
+  });
+
+  it('keeps a refused rename in the draft and sends the same rename when Save is pressed again', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 })];
+    // The server wrote nothing, or stopped between its two writes: either way the
+    // list it serves still holds the old ID, and the same save must complete it.
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError('backend_model_store_busy', undefined, true))
+      .mockResolvedValue(agent([model('alpha-2', { context_window: 1000 })]));
+    renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
+    await user.clear(screen.getByLabelText('Model ID'));
+    await user.type(screen.getByLabelText('Model ID'), 'alpha-2');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Could not save right now; nothing was changed. Press Save again in a moment.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Edit alpha-2' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /^(Save|Retry|Try again)$/ }));
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledTimes(2));
+    expect(putAgentModels.mock.calls[1]).toEqual(putAgentModels.mock.calls[0]);
+    expect(putAgentModels.mock.calls[1][1].renames).toEqual({ alpha: 'alpha-2' });
+  });
+
+  it('says nothing of a rename once the ID is typed back to what it was', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 })];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog();
+    const edit = async (from: string, to: string, contextWindow?: string) => {
+      await user.click(await screen.findByRole('button', { name: `Edit ${from}` }));
+      await user.clear(screen.getByLabelText('Model ID'));
+      await user.type(screen.getByLabelText('Model ID'), to);
+      if (contextWindow) {
+        await user.clear(screen.getByLabelText('Context window'));
+        await user.type(screen.getByLabelText('Context window'), contextWindow);
+      }
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+    };
+
+    await edit('alpha', 'alpha-2');
+    await edit('alpha-2', 'alpha', '2000');
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
     await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
       baseline: catalog,
       models: [model('alpha', { context_window: 2000 })],

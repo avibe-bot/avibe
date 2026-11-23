@@ -1543,7 +1543,8 @@
           "dropped_other": "Dropped {{model}} at position {{position}} of {{count}}.",
           "grabCancelled": "Cancelled moving {{model}} and restored its original position.",
           "added_one": "Added {{model}}",
-          "added_other": "Added {{count}} models"
+          "added_other": "Added {{count}} models",
+          "saveBusy": "Could not save right now; nothing was changed. Press Save again in a moment."
         },
         "picker": {
           "title": "Add {{backend}} models",
@@ -1584,7 +1585,10 @@
             "label": "Model ID",
             "placeholder": "Enter a model ID",
             "required": "Enter a backend model ID.",
-            "duplicate": "This list already has a model with this ID."
+            "duplicate": "This list already has a model with this ID.",
+            "renameNote": "After saving, Agents and Sessions that use this model switch to the new ID. An old ID written in a command or script does not change.",
+            "renameRunning": " A conversation in progress may be interrupted.",
+            "renameNoRoute": "No provider lists this ID. After saving, set its route separately."
           },
           "displayName": {
             "label": "Display name",

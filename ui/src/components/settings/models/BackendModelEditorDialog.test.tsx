@@ -212,7 +212,7 @@ describe('BackendModelEditorDialog', () => {
     }));
   });
 
-  it('keeps the ID read-only in edit mode and commits the edited row', async () => {
+  it('keeps a saved row under its ID when the ID is left alone, and commits the edited row', async () => {
     const user = userEvent.setup();
     const existing: BackendModel = {
       ...blankBackendModel(),
@@ -226,14 +226,10 @@ describe('BackendModelEditorDialog', () => {
     const { onCommit } = renderEditor({ model: existing, takenIds: new Set([existing.id]) });
 
     expect(screen.getByRole('heading', { name: 'Edit model' })).toBeTruthy();
-    expect(modelField().readOnly).toBe(true);
-    await user.type(modelField(), 'suffix');
-    expect(modelField().value).toBe('anthropic/claude-opus-4');
-    // A saved row names the registered model it was described from, as a row
-    // being added does; the catalog is asked about its ID, and has nothing to add.
+    expect(modelField().readOnly).toBe(false);
+    // Nothing was changed, so nothing is said about changing it.
+    expect(screen.queryByText(/switch to the new ID/)).toBeNull();
     expect(document.querySelector('.model-hub-model-source-line')?.textContent).toContain('Parameters from claude-opus-4');
-    await waitFor(() => expect(search).toHaveBeenCalledWith('anthropic/claude-opus-4', expect.anything()));
-    expect(screen.queryByRole('button', { name: /Update parameters/ })).toBeNull();
 
     // The grouped form is what the field shows, so the grouped form is what it
     // must accept back.
@@ -248,6 +244,77 @@ describe('BackendModelEditorDialog', () => {
       max_output_tokens: 128000,
       context_window: 200000,
     }));
+  });
+
+  // ui/design: models/model-menu/rename-model, rename-model-unrouted
+  describe('changing a saved model\'s ID', () => {
+    const saved: BackendModel = { ...blankBackendModel(), id: 'relay-opus', origin: 'provider', context_window: 200000, max_output_tokens: 32000 };
+    const rename = async (user: ReturnType<typeof userEvent.setup>, to: string) => {
+      await user.clear(modelField());
+      if (to) await user.type(modelField(), to);
+    };
+
+    it.each([
+      ['vibey', false],
+      ['claude', true],
+      ['codex', true],
+      ['opencode', true],
+    ] as const)('says what the change carries along on %s, and warns of a running conversation only where one can break', async (backend, warns) => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ backend, model: { ...saved, ...(backend === 'opencode' ? { native_protocol: 'openai_responses' as const } : {}) }, takenIds: new Set([saved.id, 'taken']) });
+
+      await rename(user, 'relay-opus-2');
+      const note = screen.getByText(/Agents and Sessions that use this model switch to the new ID/);
+      expect(note.textContent).toContain('An old ID written in a command or script does not change.');
+      expect(note.textContent?.includes('A conversation in progress may be interrupted.')).toBe(warns);
+      // Every parameter stays; only the ID moves.
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'relay-opus-2', origin: 'provider', context_window: 200000, max_output_tokens: 32000 }));
+    });
+
+    it('refuses an empty ID or one another row holds, and lets the row keep its own', async () => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ model: saved, takenIds: new Set([saved.id, 'taken']) });
+
+      await rename(user, 'taken');
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(screen.getByRole('alert').textContent).toBe('This list already has a model with this ID.');
+      // A refused ID is not a rename to describe.
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      await rename(user, '');
+      expect(screen.getByRole('alert').textContent).toBe('Enter a backend model ID.');
+      expect(onCommit).not.toHaveBeenCalled();
+      // Typed back to what it was: its own ID is not somebody else's.
+      await rename(user, saved.id);
+      expect(screen.queryByRole('alert')).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: saved.id }));
+    });
+
+    it('warns that a row following default routing has no route under an ID no provider lists', async () => {
+      const user = userEvent.setup();
+      const readListedIds = vi.fn().mockResolvedValue(new Set(['listed-by-a-provider']));
+      renderEditor({ model: saved, takenIds: new Set([saved.id]), readListedIds });
+      // Opening the row asks nothing: the question exists only once the ID changes.
+      expect(readListedIds).not.toHaveBeenCalled();
+
+      await rename(user, 'nobody-lists-this');
+      expect(await screen.findByText('No provider lists this ID. After saving, set its route separately.')).toBeTruthy();
+      await rename(user, 'listed-by-a-provider');
+      expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
+      expect(screen.getByText(/switch to the new ID/)).toBeTruthy();
+    });
+
+    it('does not warn about routing for a row that has a route of its own, which moves with it', async () => {
+      const user = userEvent.setup();
+      const readListedIds = vi.fn().mockResolvedValue(new Set<string>());
+      renderEditor({ model: saved, takenIds: new Set([saved.id]), ownRoute: true, readListedIds });
+
+      await rename(user, 'nobody-lists-this');
+      expect(screen.getByText(/switch to the new ID/)).toBeTruthy();
+      expect(readListedIds).not.toHaveBeenCalled();
+      expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
+    });
   });
 
   it('refuses a token count that is not a whole number', async () => {
