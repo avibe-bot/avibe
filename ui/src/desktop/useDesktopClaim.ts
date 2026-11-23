@@ -214,8 +214,9 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     const reply = await call('desktop_account_recovery', { type: 'inspect' });
     if (!reply) return;
     const receipt = reply.ok && reply.value?.state === 'available' ? str(reply.value?.receipt) : null;
-    recovery.current = null;
-    if (!receipt || flowOpen.current) { recovery.current = receipt; return; }
+    // Kept also while shown: a person who cancels the dialog meets it again on Bind.
+    recovery.current = receipt;
+    if (!receipt || flowOpen.current) return;
     if (saving.current?.timer) window.clearTimeout(saving.current.timer);
     saving.current = { tries: 0, running: false, recover: receipt, timer: null, published: false, thenOpen: false };
     setStep({ kind: 'saving', recover: true });
@@ -530,6 +531,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!reply || saving.current !== current) return;
     const answer = reply.ok ? str(reply.value?.state) : null;
     const renewed = reply.ok && answer === 'available' ? str(reply.value?.receipt) : null;
+    // This receipt is spent: a renewed one, if any, is the only one left.
+    recovery.current = renewed;
     if (answer === 'saved' && current.thenOpen) {
       stopSaving();
       await openReview();

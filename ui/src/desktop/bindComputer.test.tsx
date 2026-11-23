@@ -553,3 +553,13 @@ it('a 429 while adding an authenticator keeps its key and QR, locked until the w
   await waitFor(() => expect((screen.getByLabelText(en.desktopAccount.authenticatorCode) as HTMLInputElement).disabled).toBe(false), { timeout: 3000 });
   expect(finishes).toBe(1);
 });
+
+it('an accepted sign-in shown as Continue and cancelled is offered again on Bind', async () => {
+  const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-5' } });
+  await screen.findByRole('button', { name: en.common.continue });
+  fireEvent.click(screen.getAllByRole('button', { name: en.common.cancel })[0]);
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await screen.findByRole('button', { name: en.common.continue });
+  expect(page.types()).not.toContain('open');
+  expect(page.types()).not.toContain('resume');
+});
