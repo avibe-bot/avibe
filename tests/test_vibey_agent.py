@@ -4360,20 +4360,24 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
 
     def gateway(request: httpx.Request) -> httpx.Response:
         seen.append(request.url.path)
+        response = body.replace('"hi"', '"wrong model"') if "thread" in json.loads(request.content) else body
         return httpx.Response(
-            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=body
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=response
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(
             engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
         )
+        harness.controller.hub_source_id = "src_registry01"
         harness.controller.hub_protocol = hub_protocol
         await harness.agent.handle_message(harness.request("hello"))
 
     # Each protocol's adapter from the real registry speaks to its own gateway path; the served origin comes from
     # x-avibe-served-hop.
-    assert seen == [path.format(model=harness.controller.hub_calls[-1])]
+    # The mock deliberately reports a different origin. The ordinary replay may follow that route; the pinned
+    # Anthropic create may not expose its answer.
+    assert seen == [path.format(model=harness.controller.hub_calls[-1])] * (2 if hub_protocol == "anthropic" else 1)
     final = (await harness.context_rows())[-1].message
     assert final.content == (TextBlock(text="hi"),)
     assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", hub_protocol, "served-model")
@@ -4533,8 +4537,9 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     from modules.agents.vibey.models import registry_providers
 
     path, body = _TEXT_STREAMS[hub_protocol]
+    source = "src_nativepin01"
     served = json.dumps(
-        {"provider": "upstream", "api": hub_protocol, "model": "served-model", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": hub_protocol, "model": "test-model", "source": source},
         separators=(",", ":"),
     )
     seen: list[httpx.Request] = []
@@ -4549,6 +4554,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
         harness = _Harness(
             engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
         )
+        harness.controller.hub_source_id = source
         harness.controller.hub_protocol = hub_protocol
         harness.controller.hub_hosted_tools = {
             "web_search": {"native": "assumed", "declaration": declaration, "include": include, "replay": "assumed"},
@@ -4559,7 +4565,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     (request,) = seen
     sent = json.loads(request.content)
     assert request.url.path == path
-    assert request.headers["x-avibe-pin-source"] == "src_test"
+    assert request.headers["x-avibe-pin-source"] == source
     # The hosted tools lead the Turn's tools: the native one as the provider's declaration, the proxied one as its
     # canonical function.
     assert sent["tools"][0] == declaration
@@ -5009,8 +5015,9 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
 
     from modules.agents.vibey.models import registry_providers
 
+    source = "src_proxytool01"
     served = json.dumps(
-        {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": source},
         separators=(",", ":"),
     )
     call = '{"type":"tool_use","id":"toolu_1","name":"web_search","input":{"query":"avibe release"}}'
@@ -5043,6 +5050,7 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
             providers=registry_providers(media_loader=None, client=client),
             gateway_client=client,
         )
+        harness.controller.hub_source_id = source
         harness.controller.hub_hosted_tools = {"web_search": {"native": "unsupported", "replay": "unsupported"}}
         message = harness.request("search")
         await harness.agent.handle_message(message)
@@ -6936,8 +6944,9 @@ async def test_a_turns_failed_model_request_is_kept_with_its_session_and_turn(en
     from tests.agent_core.ai import test_hosted_replay as replay
 
     sent: list[bytes] = []
+    source = "src_artifacts01"
     headers = {"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(
-        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": replay.SOURCE}
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": source}
     )}
 
     def gateway(request):
@@ -6948,6 +6957,7 @@ async def test_a_turns_failed_model_request_is_kept_with_its_session_and_turn(en
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = source
         await harness.agent.handle_message(harness.request("first"))
         assert harness.agent.request_artifacts.entries() == []
         failing = harness.request("second")
@@ -6955,7 +6965,9 @@ async def test_a_turns_failed_model_request_is_kept_with_its_session_and_turn(en
 
     store = harness.agent.request_artifacts
     assert store.root == tmp_path / "agent_core" / "model-requests"
-    (meta,) = store.entries()
-    assert meta["session_id"] == SESSION and meta["turn_id"] == _turn(failing.context)
-    assert meta["state"] == "failed" and meta["outcome"]["http_status"] == 400
-    assert (store.path(meta["id"]) / REQUEST_FILE).read_bytes() == sent[-1]
+    entries = store.entries()
+    assert len(entries) == len(sent) - 1 == 2  # rejected create and its ordinary replay
+    for meta in entries:
+        assert meta["session_id"] == SESSION and meta["turn_id"] == _turn(failing.context)
+        assert meta["state"] == "failed" and meta["outcome"]["http_status"] == 400
+    assert sorted((store.path(m['id']) / REQUEST_FILE).read_bytes() for m in entries) == sorted(sent[1:])

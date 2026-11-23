@@ -537,7 +537,7 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
     from modules.agents.vibey.models import registry_providers
 
     served = json.dumps(
-        {"provider": "upstream", "api": "anthropic", "model": "served-model", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_threshold01"},
         separators=(",", ":"),
     )
     overflow = json.dumps(
@@ -553,7 +553,8 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
         phase["seen"].append((phase["turn"], kind))
         pending = refusals.get(phase["turn"], [])
         if pending and pending[0] == kind:
-            pending.pop(0)
+            if 'thread' not in body:
+                pending.pop(0)
             return httpx.Response(400, headers={"content-type": "application/json"}, text=overflow)
         answer = CHECKPOINT if kind == "checkpoint" else replies[phase["turn"]]
         return httpx.Response(
@@ -562,6 +563,7 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = "src_threshold01"
         for turn, body in ((1, tokens(11_000)), (2, tokens(12_000)), (3, "and now?")):
             phase["turn"] = turn
             await _turn(harness, body)
@@ -572,7 +574,8 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
         (1, "conversation"),
         (2, "checkpoint"),
         (2, "conversation"),
-        (3, "conversation"),  # refused as overflow
+        (3, "conversation"),  # speculative full create is also too large
+        (3, "conversation"),  # ordinary replay refused as overflow
         (3, "checkpoint"),  # the normal checkpoint request, refused as overflow
         (3, "checkpoint"),  # the rolling one
         (3, "conversation"),
