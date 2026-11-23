@@ -187,6 +187,13 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    /// Refused by the capability check itself (Tauri's ACL says "… not allowed …"),
+    /// never by a missing argument or an unknown command, so a call this grant
+    /// wrongly allowed could not pass as refused.
+    fn denied(result: Result<(), String>) -> bool {
+        result.is_err_and(|error| error.contains(" not allowed"))
+    }
+
     /// Another computer's instance in main, through the real capability files:
     /// its drag strip is refused before the grant, may drag and zoom after it,
     /// and nothing else; another view, or another origin in this one, gains nothing.
@@ -208,7 +215,7 @@ mod tests {
         let view = child("main-runtime-7");
         let other = child("main-runtime-8");
         let drag = "plugin:window|start_dragging";
-        assert!(invoke(&view, remote, drag).is_err(), "refused before the grant");
+        assert!(denied(invoke(&view, remote, drag)), "refused before the grant");
 
         grant_remote_drag(app.handle(), "main-runtime-7", &remote.parse().unwrap());
         assert_eq!(invoke(&view, remote, drag), Ok(()));
@@ -220,11 +227,11 @@ mod tests {
             "pet_bind",
             "open_app_window",
         ] {
-            assert!(invoke(&view, remote, cmd).is_err(), "{cmd} stays refused");
+            assert!(denied(invoke(&view, remote, cmd)), "{cmd} stays refused");
         }
-        assert!(invoke(&other, remote, drag).is_err(), "another view gains nothing");
+        assert!(denied(invoke(&other, remote, drag)), "another view gains nothing");
         assert!(
-            invoke(&view, "https://elsewhere.example/", drag).is_err(),
+            denied(invoke(&view, "https://elsewhere.example/", drag)),
             "another origin gains nothing"
         );
     }
