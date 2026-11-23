@@ -381,6 +381,7 @@ enum ReplyBody<'a> {
     Observation(&'a Coordinator, Box<binding_observation::BindingObservation<'a>>),
     Decision(&'a Coordinator, Box<decision::DecisionOutcome<'a>>),
     Mail(Box<proof::PendingMail<'a>>),
+    StartLimited(&'a Coordinator, Box<proof::StartLimit<'a>>),
     Submission(Box<proof::SubmittedReply>),
     PasskeyRefusal(Box<proof::PasskeyRefusal<'a>>),
     Setup(Box<proof::TotpSetupReply<'a>>),
@@ -420,6 +421,7 @@ impl ClaimReply<'_> {
                     json!({"state":"mail_accepted", "delivery":mail.deliver()?.to_string()}),
                 ))
             }
+            ReplyBody::StartLimited(c, limit) => return limit.deliver(c, &self.caller, &self.account),
             ReplyBody::PasskeyRefusal(refusal) => return refusal.deliver(),
             ReplyBody::Submission(s) => {
                 return Ok(Some(
@@ -633,9 +635,14 @@ impl Coordinator {
                 let start = self
                     .prepare_proof_code(caller, r.expected_generation, opaque(receipt)?, opaque(delivery)?, code)
                     .await?;
-                let reply = self.forward_proof_code(start).await?;
+                let body = match start {
+                    proof::StartOutcome::Ready(start) => {
+                        ReplyBody::Submission(Box::new(self.forward_proof_code(*start).await?))
+                    }
+                    proof::StartOutcome::Limited(limit) => ReplyBody::StartLimited(self, Box::new(limit)),
+                };
                 return Ok(ClaimReply {
-                    body: ReplyBody::Submission(Box::new(reply)),
+                    body,
                     account: epoch,
                     caller: caller.clone(),
                 });

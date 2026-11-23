@@ -367,7 +367,18 @@ impl Transport for Hosted {
                     self.starting.notify_one();
                     wait.await.map_err(|_| stale())?;
                 } else {
-                    assert!(n == 1 && self.review == Some("email_retry"), "unexpected start");
+                    assert!(
+                        n == 1 && (self.review == Some("email_retry") || self.publication_case == "proof_start_limit"),
+                        "unexpected start"
+                    );
+                }
+                if self.publication_case.starts_with("proof_start_limit") {
+                    headers.insert(reqwest::header::RETRY_AFTER, "47".parse().unwrap());
+                    return Ok(Response {
+                        status: 429,
+                        headers,
+                        body: b"{}".to_vec(),
+                    });
                 }
                 let cookie = if n == 0 { "fixture" } else { "retry" };
                 headers.insert(
@@ -791,6 +802,10 @@ async fn a_qualified_proof_refusal_needs_its_original_delivery_and_a_separate_ma
         "proof_mail_limited",
         "proof_mail_limited_replaced",
         "proof_mail_limited_credential",
+        "proof_start_limit",
+        "proof_start_limit_replaced",
+        "proof_start_limit_credential",
+        "proof_start_limit_drop",
     ] {
         // The fixture ticket lasts five minutes. Advancing only Tokio's clock
         // exercises its real monotonic deadline, without sleeping or changing the ticket.
@@ -1395,10 +1410,12 @@ async fn check_cut(cut: &'static str) {
                     tokio::pin!(preparing);
                     tokio::select! { _ = &mut preparing => panic!("start was held"), _ = hosted.starting.notified() => () }
                     start_reply.send(()).unwrap();
-                    let prepared = preparing.await.unwrap();
+                    let proof::StartOutcome::Ready(prepared) = preparing.await.unwrap() else {
+                        panic!("expected a prepared start")
+                    };
                     if cut == "proof_start_no_owner" {
                         c.inner.lock().unwrap().account.resumes = None;
-                        assert!(c.forward_proof_code(prepared).await.is_err());
+                        assert!(c.forward_proof_code(*prepared).await.is_err());
                     } else {
                         drop(prepared);
                     }
@@ -1421,6 +1438,47 @@ async fn check_cut(cut: &'static str) {
                 unlocked();
                 assert!(submit("000001").await.is_err());
                 match cut {
+                    limited if limited.starts_with("proof_start_limit") => {
+                        start_reply.send(()).unwrap();
+                        let refusal = start.await.expect("admitted refusal, not a shell admission error");
+                        assert!(submit("000001").await.is_err());
+                        match limited {
+                            "proof_start_limit" => {
+                                let err = refusal.deliver().unwrap_err();
+                                assert_eq!((err.code.as_str(), err.retry_after_seconds), ("rate_limited", Some(47)));
+                                assert!(submit("000001").await.is_err());
+                                assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 1);
+                                tokio::time::advance(Duration::from_secs(48)).await;
+                                assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 1);
+                                assert_eq!(
+                                    submit("000001").await.unwrap().deliver().unwrap_err().code,
+                                    "rate_limited"
+                                );
+                                assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 2);
+                            }
+                            "proof_start_limit_replaced" => {
+                                caller.retire();
+                                let _next = c.claim_document(generation).unwrap();
+                                let successor = c.claims.lock().unwrap().reserve(a.clone()).unwrap();
+                                let err = refusal.deliver().unwrap_err();
+                                assert_eq!((err.code.as_str(), err.retry_after_seconds), ("stale_generation", None));
+                                assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
+                            }
+                            "proof_start_limit_credential" => {
+                                replace_credential();
+                                let err = refusal.deliver().unwrap_err();
+                                assert_eq!((err.code.as_str(), err.retry_after_seconds), ("stale_generation", None));
+                            }
+                            _ => {
+                                drop(refusal);
+                                assert!(submit("000001").await.is_err());
+                            }
+                        }
+                        assert_eq!(hosted.codes_sent.load(Ordering::SeqCst), 0);
+                        assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
+                        assert!(peer.arm().await.is_err());
+                        return;
+                    }
                     "proof_start_cancel" => {
                         c.claims.lock().unwrap().cancel(receipt).unwrap();
                         let next = c.claim_document(generation).unwrap();

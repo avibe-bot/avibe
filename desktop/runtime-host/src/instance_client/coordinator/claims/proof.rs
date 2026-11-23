@@ -156,9 +156,32 @@ impl PendingMail<'_> {
 pub(super) struct ClaimStart<'a> {
     prepared: PreparedClaimCode,
     borrow: Borrow<'a>,
-    caller: &'a ClaimCaller,
+    caller: ClaimCaller,
     epoch: Epoch,
     delivery: Uuid,
+}
+pub(super) enum StartOutcome<'a> {
+    Ready(Box<ClaimStart<'a>>),
+    Limited(StartLimit<'a>),
+}
+pub(super) struct StartLimit<'a> {
+    borrow: Borrow<'a>,
+    delivery: Uuid,
+    error: ClientError,
+}
+impl StartLimit<'_> {
+    pub(super) fn deliver(mut self, c: &Coordinator, caller: &ClaimCaller, epoch: &Epoch) -> Result<Option<Value>> {
+        c.with_proof(caller, epoch, self.borrow.receipt, self.delivery, |_, _, step| {
+            if !matches!(step.phase, Phase::Preparing { .. }) {
+                return Err(stale());
+            }
+            step.phase = step.retry_phase.take().ok_or_else(stale)?;
+            step.retry_until = self.error.retry_until;
+            Ok(())
+        })?;
+        self.borrow.returned = true;
+        Err(self.error)
+    }
 }
 impl StepUp {
     fn check_wait(&self) -> Result<()> {
@@ -366,12 +389,12 @@ impl Coordinator {
     /// subject and mailbox; even a response racing cancellation cannot send the code.
     pub(super) async fn prepare_proof_code<'a>(
         &'a self,
-        caller: &'a ClaimCaller,
+        caller: &ClaimCaller,
         generation: u64,
         receipt: Uuid,
         delivery: Uuid,
         code: &str,
-    ) -> Result<ClaimStart<'a>> {
+    ) -> Result<StartOutcome<'a>> {
         let epoch = Epoch::new(self.generation.clone(), generation);
         let (wake, mut interrupted) = oneshot::channel();
         let (flow, account, deadline) = self.with_proof(caller, &epoch, receipt, delivery, |_, account, step| {
@@ -387,7 +410,7 @@ impl Coordinator {
             step.retry_phase = Some(Phase::Delivered(flow.clone()));
             Ok((flow, account.clone(), step.proof.deadline()))
         })?;
-        let mut borrow = Borrow {
+        let borrow = Borrow {
             owner: &self.claims,
             receipt,
             returned: false,
@@ -398,17 +421,12 @@ impl Coordinator {
             r = flow.prepare_claim_code(&account, code) => r,
         };
         let prepared = match prepared {
-            Err(e) if e.retry_until.is_some() => {
-                self.with_proof(caller, &epoch, receipt, delivery, |_, _, step| {
-                    if !matches!(step.phase, Phase::Preparing { .. }) {
-                        return Err(stale());
-                    }
-                    step.phase = step.retry_phase.take().ok_or_else(stale)?;
-                    step.retry_until = e.retry_until;
-                    Ok(())
-                })?;
-                borrow.returned = true;
-                return Err(e);
+            Err(error) if error.code == "rate_limited" && error.retry_until.is_some() => {
+                return Ok(StartOutcome::Limited(StartLimit {
+                    borrow,
+                    delivery,
+                    error,
+                }));
             }
             r => r?,
         };
@@ -419,13 +437,13 @@ impl Coordinator {
             step.phase = Phase::Prepared;
             Ok(())
         })?;
-        Ok(ClaimStart {
+        Ok(StartOutcome::Ready(Box::new(ClaimStart {
             prepared,
             borrow,
-            caller,
+            caller: caller.clone(),
             epoch,
             delivery,
-        })
+        })))
     }
     /// The waiting document owns cancellation up to the final admission in the worker.
     /// Once admitted, dropping that waiter may retire the sheet, not the account task.
@@ -438,7 +456,6 @@ impl Coordinator {
             delivery,
         } = start;
         let receipt = borrow.receipt;
-        let caller = (*caller).clone();
         let ordinary = self.clone();
         let result = tokio::spawn(async move {
             let (id, cookies) = ordinary.with_proof(&caller, &epoch, receipt, delivery, |inner, a, step| {
