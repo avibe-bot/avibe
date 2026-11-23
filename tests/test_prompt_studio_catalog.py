@@ -95,6 +95,7 @@ def test_studio_catalog_contains_runtime_modules_and_builtin_skills() -> None:
         "use-avibe-vault",
         "use-mobile-health",
         "use-show-pages",
+        "use-system-schedule",
     }
 
 
