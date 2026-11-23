@@ -8,8 +8,9 @@ use reqwest::{header::HeaderMap, Method};
 use serde_json::{json, Value};
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
+use tokio::time::Instant;
 use url::Url;
 
 #[derive(Clone)]
@@ -118,7 +119,7 @@ pub(super) fn retry_after(r: &Response) -> u64 {
 }
 pub(super) fn limited(seconds: u64) -> ClientError {
     let mut e = ClientError::new("rate_limited");
-    e.retry_until = Some(tokio::time::Instant::now() + Duration::from_secs(seconds));
+    e.retry_until = Some(Instant::now() + Duration::from_secs(seconds));
     e.retry_after_seconds = Some(seconds.clamp(1, 255) as u8);
     e
 }
