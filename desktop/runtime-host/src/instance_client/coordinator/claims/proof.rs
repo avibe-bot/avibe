@@ -538,6 +538,9 @@ impl Coordinator {
         let epoch = Epoch::new(self.generation.clone(), generation);
         let (wake, mut interrupted) = oneshot::channel();
         let (proof, origin, mut flow, state) = {
+            // Wait before taking the submission. All account/document checks below
+            // use live state after the monitor releases its operation lock.
+            let _monitor = self.descriptor_refresh.lock().await;
             let _operation = self.operation.try_lock().map_err(|_| busy())?;
             if self.signing_out.load(Ordering::SeqCst) {
                 return Err(stale());
@@ -616,11 +619,22 @@ impl Coordinator {
             _ = tokio::time::sleep_until(deadline) => return Err(stale()),
             result = proof.reread(&mut flow, &state) => result,
         };
-        match claim.and_then(|(claim, unchanged)| {
-            let revision = claim.revision();
-            let review = self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, Some(&origin))?;
-            Ok((review, unchanged.then_some(revision)))
-        }) {
+        let finished = {
+            // A poll may have started during the hosted read. Keep its one result;
+            // never reissue it. Release this guard before any confirmation awaits.
+            let _monitor = tokio::select! { biased;
+                _ = &mut interrupted => return Err(stale()),
+                _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+                guard = self.descriptor_refresh.lock() => guard,
+            };
+            claim.and_then(|(claim, unchanged)| {
+                let revision = claim.revision();
+                let review =
+                    self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, Some(&origin))?;
+                Ok((review, unchanged.then_some(revision)))
+            })
+        };
+        match finished {
             Ok((_review, Some(revision))) => {
                 // This revision was never released to the page. If confirmation
                 // loses admission, do not strand an undisplayable review.

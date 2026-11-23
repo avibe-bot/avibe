@@ -85,6 +85,31 @@ pub(super) async fn exercise(
         assert_eq!(memory.read("fixture-a").unwrap().unwrap(), stored);
         return;
     }
+    if cut == "monitor_reread" {
+        let pending = again(receipt, current);
+        tokio::pin!(pending);
+        // Hold the same two locks, in monitor order, across each admission boundary.
+        let monitor = c.descriptor_refresh.lock().await;
+        let operation = c.operation.lock().await;
+        tokio::select! { biased; _ = &mut pending => panic!("reread did not wait"), _ = tokio::task::yield_now() => () }
+        assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 1);
+        drop(operation);
+        drop(monitor);
+        tokio::select! { _ = &mut pending => panic!("hosted read not held"), _ = hosted.observing.notified() => () }
+        let monitor = c.descriptor_refresh.lock().await;
+        let operation = c.operation.lock().await;
+        hosted.resume_observation.notify_one();
+        tokio::select! { biased; _ = &mut pending => panic!("publication did not wait"), _ = tokio::task::yield_now() => () }
+        drop(operation);
+        drop(monitor);
+        let view = pending.await.unwrap().deliver().unwrap().unwrap();
+        assert_eq!(view["screen"]["prefilled_prefix"], "changed-suggestion");
+        assert_eq!(hosted.ticket_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
+        assert_eq!(hosted.codes_sent.load(Ordering::SeqCst), 1);
+        peer.assert_unarmed();
+        return;
+    }
     let read = again(receipt, current).await;
     assert_eq!(hosted.reads.load(Ordering::SeqCst), if factor { 5 } else { 3 });
     assert_eq!(

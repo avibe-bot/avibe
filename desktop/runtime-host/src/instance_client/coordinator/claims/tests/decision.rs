@@ -276,6 +276,10 @@ impl Transport for Hosted {
                         "owner_hint":"x***@y***"
                     })).unwrap() });
                 }
+                if again && self.review == Some("monitor_reread") {
+                    self.observing.notify_one();
+                    self.resume_observation.notified().await;
+                }
                 if again && self.review == Some("target") {
                     let v = projection.as_object_mut().unwrap();
                     v.remove("prefilled_prefix");
@@ -709,6 +713,7 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_start_review_mfa_late_credential",
         "proof_start_review_mfa_late_successor",
         "proof_start_review_target",
+        "proof_start_review_monitor_reread",
         "proof_start_review_close",
         "proof_start_review_replaced",
         "proof_start_review_factor_ok",
