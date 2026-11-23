@@ -49,6 +49,14 @@ use `ws://` with a concrete private IPv4 address and valid port. `wss://`, hostn
 wildcard/public addresses, credentials, query strings and fragments are refused.
 This LAN plugin does not terminate TLS.
 
+Pairing publishes the private provisioning file before committing the device
+record. If writing fails or the process exits partway through, rerun the same
+`pair` command after fixing the filesystem problem: the next state operation
+cleans up an uncommitted attempt, or recognizes an already complete pair.
+Existing unrelated files and pairings are never overwritten. State changes
+and authentication reads share a process-safe lock, so concurrent enable and
+revoke commands cannot restore a revoked token.
+
 The explicit `serve --provision-file` option opens a 120-second window (at most
 300 seconds) on the **same plugin port**. `POST /device/ota` checks `Device-Id`
 against the currently enabled pairing and returns only
@@ -100,6 +108,9 @@ autostart integration, automatic host restart, subscription, or durable speech
 outbox. `status` describes the configured pairing; `doctor` checks the codec
 and host capability separately. TTS availability is authoritative only when
 the cloud accepts a synthesis request, not inferred from an ASR-ready flag.
+Each listener is bound to a lifecycle generation. Even an immediate
+`stop`/`disable` followed by `enable` invalidates the old listener, connections
+and provisioning window; enabling only changes the preference for a new serve.
 
 ## Conversation and failure behavior
 
@@ -166,6 +177,11 @@ validation and absence of extra response fields or leaked credentials.
 Authenticated rediscovery survives window expiry and plugin restart without
 returning a token; tests also cover old-token rejection, no invalid-bearer
 fallback, bounded cooldown and an untrusted Host header.
+
+`tests/test_device_pairing.py` exercises concurrent mutations across processes,
+write/flush/fsync failures, process death at each pairing publication boundary,
+and retry without manual state repair. A paused real serve process verifies
+that stop/disable followed immediately by enable cannot revive an old scope.
 
 Adversarial model responses try terminal, files, Vault, MCP, delegation, background
 and hosted tools without creating effects or Runs. Duplicate/restart requests,

@@ -29,7 +29,8 @@ def websocket_address(value: str) -> tuple[str, int]:
 
 
 class ProvisionWindow:
-    def __init__(self, pairing: Pairing, path: Path, *, bind: str, port: int, seconds: int = 120):
+    def __init__(self, pairing: Pairing, path: Path, *, bind: str, port: int, seconds: int = 120,
+                 generation: int | None = None):
         if not 1 <= seconds <= 300:
             raise ValueError("invalid_provision_window")
         # Read only an explicitly selected owner-private regular file. No
@@ -52,8 +53,10 @@ class ProvisionWindow:
                 or type(websocket["version"]) is not int or websocket["version"] != 2):
             raise ValueError("provision_url_must_match_listener")
         self.pairing = pairing
-        self.device_id = pairing.read().get("device_id")
-        if not pairing.accepts(self.device_id, "Bearer " + websocket["token"]):
+        snapshot = pairing.read()
+        self.device_id = snapshot.get("device_id")
+        self.generation = snapshot.get("generation", 0) if generation is None else generation
+        if not pairing.accepts(self.device_id, "Bearer " + websocket["token"], generation=self.generation):
             raise ValueError("provision_pairing_mismatch")
         self.document = document
         self.deadline = time.monotonic() + seconds
@@ -62,7 +65,7 @@ class ProvisionWindow:
         if self.document is None:
             return None
         token = self.document["websocket"]["token"]
-        if time.monotonic() >= self.deadline or not self.pairing.accepts(self.device_id, "Bearer " + token):
+        if time.monotonic() >= self.deadline or not self.pairing.accepts(self.device_id, "Bearer " + token, generation=self.generation):
             self.close()
             return None
         return self.document if device_id == self.device_id else None

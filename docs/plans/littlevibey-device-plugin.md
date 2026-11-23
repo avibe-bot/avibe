@@ -151,3 +151,32 @@ The recovery-discovery tests cover first bootstrap, expired/closed window plus
 valid Bearer, process restart with hash-only state, revoke/disable, wrong token/
 device, cooldown and hostile Host headers. The real two-turn conversation now
 uses authenticated discovery after closing its initial bootstrap window.
+
+## Local state transaction and lifecycle follow-up
+
+The `92db5c8ce2` review added a pairing-publication failure finding
+(`4670042657`), making three consecutive findings-bearing heads since the
+chat-only clean pass. The lane stopped. On 2026-11-24 the coordinator verified
+all seven threads (six resolved), commissioned an independent read-only
+review, and approved one complete follow-up for the three related defects:
+concurrent enable/revoke, incomplete pairing publication, and stop/enable ABA.
+No chat-only, speech projection, voice wire or OTA authorization semantics
+change in this follow-up. Any finding on its new head requires another stop.
+
+The state-directory flock covers every mutation's read/check/publication and
+authentication snapshots. A durable pending-pair record precedes token-file
+creation. The owner-private file is staged beside its destination, flushed and
+fsynced, published without replacement using a hard link, and its directory is
+fsynced before atomic state publication. The staging link remains until commit
+so recovery identifies only this attempt's artifact. Interrupted uncommitted
+pairs are aborted under the lock; committed pairs retain their artifact and a
+retry of the same command is idempotent. No plaintext token enters state.
+
+Stop, disable and revoke advance a persisted generation. The listener,
+WebSocket admission/revocation check and initial provisioning window bind to
+the generation in their startup snapshot. Enable does not restore a prior
+generation. Legacy hash-only rows without a generation start at zero.
+Validation uses actual subprocess lock contention, persistent ENOSPC and
+write/flush/fsync failures, hard exits at four publication boundaries, and a
+SIGSTOP/SIGCONT serve process that cannot observe the intermediate disabled
+flag. Old HTTP/WS handlers reject requests even before the shutdown poll.

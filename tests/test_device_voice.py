@@ -32,6 +32,8 @@ from storage.importer import ensure_sqlite_state
 
 @pytest.fixture
 def plugin(monkeypatch):
+    if os.name == "nt":
+        pytest.skip("The optional device process uses POSIX state and listener locks")
     monkeypatch.syspath_prepend(str(Path(__file__).parents[1] / "packaging" / "avibe-device"))
     return __import__("avibe_device")
 

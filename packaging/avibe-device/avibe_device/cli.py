@@ -33,6 +33,10 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None,
     provision = None
     loop = asyncio.get_running_loop()
     try:
+        snapshot = pairing.read()
+        if not snapshot.get("enabled"):
+            raise ValueError("device_disabled")
+        generation = snapshot.get("generation", 0)
         install_signals = stopped is None
         stopped = stopped or asyncio.Event()
         for sig in ((signal.SIGINT, signal.SIGTERM) if install_signals else ()):
@@ -41,12 +45,14 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None,
         if provision_file is not None:
             from .provision import ProvisionWindow
 
-            provision = ProvisionWindow(pairing, provision_file, bind=bind, port=port, seconds=provision_seconds)
-        runner = web.AppRunner(create_app(pairing, inactivity=inactivity, threshold=threshold, provision=provision),
+            provision = ProvisionWindow(pairing, provision_file, bind=bind, port=port, seconds=provision_seconds,
+                                        generation=generation)
+        runner = web.AppRunner(create_app(pairing, inactivity=inactivity, threshold=threshold, provision=provision,
+                                          generation=generation),
                                access_log=None, shutdown_timeout=5)
         await runner.setup()
         await web.TCPSite(runner, bind, port).start()
-        while pairing.status()["enabled"] and not stopped.is_set():
+        while pairing.active(generation) and not stopped.is_set():
             try:
                 await asyncio.wait_for(stopped.wait(), 0.25)
             except asyncio.TimeoutError:
@@ -90,18 +96,8 @@ def main(argv=None) -> int:
             from .provision import websocket_address
 
             websocket_address(args.websocket_url)
-            # Refuse overwriting a provisioning artifact; tokens are never stdout/log output.
-            fd = os.open(args.provision_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                token = pairing.pair(args.device_id, name=args.name)
-                with os.fdopen(fd, "w") as output:
-                    fd = -1
-                    json.dump({"websocket": {"url": args.websocket_url, "token": token, "version": 2}}, output)
-            except Exception:
-                if fd >= 0:
-                    os.close(fd)
-                args.provision_file.unlink(missing_ok=True)
-                raise
+            pairing.pair(args.device_id, name=args.name, provision_file=args.provision_file,
+                         websocket_url=args.websocket_url)
         elif args.command == "revoke":
             pairing.revoke()
         elif args.command in {"enable", "disable", "stop"}:

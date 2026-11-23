@@ -145,7 +145,8 @@ class Conversation:
 
 
 def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, settling=0.2,
-               provision=None) -> web.Application:
+               provision=None, generation=None) -> web.Application:
+    generation = pairing.read().get("generation", 0) if generation is None else generation
     app = web.Application()
     connections: set[web.WebSocketResponse] = set()
     selected_host = host or Host()
@@ -154,6 +155,10 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
     ota_failures: dict[str, tuple[int, float]] = {}
 
     async def ota(request):
+        if not pairing.active(generation):
+            if provision is not None:
+                provision.close()
+            raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
         device_id = request.headers.get("Device-Id", "")
         authorization = request.headers.get("Authorization")
         if authorization is not None:
@@ -165,7 +170,7 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
             count, expiry = ota_failures.get(peer, (0, now + 60))
             if count >= 5 or (peer not in ota_failures and len(ota_failures) >= 64):
                 raise web.HTTPTooManyRequests(headers={"Cache-Control": "no-store", "Retry-After": "60"})
-            if len(request.headers.getall("Authorization")) != 1 or not pairing.accepts(device_id, authorization):
+            if len(request.headers.getall("Authorization")) != 1 or not pairing.accepts(device_id, authorization, generation=generation):
                 ota_failures[peer] = (count + 1, now + 60 if count == 4 else expiry)
                 raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
             ota_failures.pop(peer, None)
@@ -189,7 +194,7 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
     async def websocket(request):
         device_id = request.headers.get("Device-Id", "")
         authorization = request.headers.get("Authorization", "")
-        if not pairing.accepts(device_id, authorization):
+        if not pairing.accepts(device_id, authorization, generation=generation):
             raise web.HTTPUnauthorized()
         if connections:
             raise web.HTTPConflict()
@@ -202,7 +207,7 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
             conversation = Conversation(ws, selected_host, inactivity=inactivity, threshold=threshold, settling=settling, device_id=device_id)
 
             async def revoked():
-                while pairing.accepts(device_id, authorization):
+                while pairing.accepts(device_id, authorization, generation=generation):
                     await asyncio.sleep(0.25)
                 raise ValueError("device_revoked")
 
