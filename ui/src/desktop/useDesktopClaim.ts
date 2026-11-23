@@ -54,6 +54,12 @@ const PROBLEMS: Record<string, BindProblem> = {
   claim_in_progress: 'busy', busy: 'busy', operation_in_progress: 'busy',
   local_runtime_unavailable: 'notResponding', local_admission_failed: 'notResponding', invalid_local_descriptor: 'notResponding',
   fresh_claim_required: 'lost',
+  // avibe.bot no longer accepts this computer (a deleted, never-paired one; or one whose earlier
+  // pairing needs a browser on it): trying again cannot change it, so it is a dead end.
+  binding_unavailable: 'unavailable', paired_installation_loopback_required: 'unavailable',
+  already_bound: 'changed', local_binding_changed: 'changed', local_instance_conflict: 'changed',
+  local_binding_unavailable: 'notResponding', local_claim_unavailable: 'notResponding',
+  claim_unavailable: 'expired',
   reauthentication_failed: 'reauth',
 };
 /** When a 429's wait ends: native refuses an earlier try, so the step stays locked until then. */

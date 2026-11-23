@@ -149,7 +149,7 @@
         "unknown": "This did not finish.",
         "reauth": "avibe.bot still asked to verify again. This did not finish.",
         "storage": "This computer cannot save the sign-in right now. Sign in again later.",
-        "unavailable": "This computer cannot be bound right now. Please contact {{support}}."
+        "unavailable": "This computer cannot be bound right now. Please contact <mail>{{support}}</mail>."
       },
       "changed": "Verified, but these changed since you confirmed: {{fields}}. Check them, then press Bind again.",
       "field": {

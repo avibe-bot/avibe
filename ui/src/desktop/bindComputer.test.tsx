@@ -438,3 +438,12 @@ it('a publication that stopped after verification offers the account recovery, n
   await waitFor(() => expect(page.actions.find((each) => each.type === 'resume')).toEqual({ type: 'resume', receipt: 'rec-9' }));
   expect(page.types().filter((type) => type === 'send_proof_code')).toHaveLength(1);
 });
+
+it('a computer avibe.bot no longer accepts is a dead end that names the support address as a mail link', async () => {
+  const page = mount({ open: { receipt: 'r' }, read: refuse('binding_unavailable') });
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  const link = await screen.findByRole('link', { name: 'support@avibe.bot' });
+  expect(link.getAttribute('href')).toBe('mailto:support@avibe.bot');
+  expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
+  expect(page.types().filter((type) => type === 'read')).toHaveLength(1);
+});
