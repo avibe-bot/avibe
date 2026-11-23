@@ -423,8 +423,8 @@ impl SignInProvider {
 pub struct ClientError {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_after_seconds: Option<u8>,
-    // Full issuer deadline; the public countdown is only a bounded display hint.
+    pub retry_after_seconds: Option<u64>,
+    // Keep the monotonic admission deadline private; the wire carries whole seconds.
     #[serde(skip)]
     pub(super) retry_until: Option<tokio::time::Instant>,
 }
@@ -437,7 +437,7 @@ impl ClientError {
         }
     }
     pub fn pending(code: &str, delay: &serde_json::Value) -> Self {
-        let delay = delay.as_u64().filter(|n| (1..=60).contains(n)).map(|n| n as u8);
+        let delay = delay.as_u64().filter(|n| (1..=60).contains(n));
         if delay.is_some() {
             Self {
                 code: code.to_owned(),

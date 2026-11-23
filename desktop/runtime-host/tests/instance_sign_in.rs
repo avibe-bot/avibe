@@ -952,7 +952,8 @@ async fn ambiguous_completion_blocks_another_submission_and_unforwarded_requires
         let error = act(&f.client, verify()).await.error.unwrap();
         assert_eq!(error.code, first);
         if status == 429 {
-            assert_eq!(error.retry_after_seconds, Some(255));
+            assert_eq!(error.retry_after_seconds, Some(420));
+            assert_eq!(serde_json::to_value(&error).unwrap()["retry_after_seconds"], 420);
         }
         assert_eq!(f.http.seen.lock().unwrap().len(), 4);
         let next_reply = act(&f.client, verify()).await;

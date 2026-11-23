@@ -854,7 +854,7 @@ fn primary_passkey_error(response: &Response) -> ClientError {
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
-            .map(|seconds| seconds.clamp(1, 255) as u8);
+            .map(|seconds| seconds.clamp(1, 255));
     }
     mapped
 }

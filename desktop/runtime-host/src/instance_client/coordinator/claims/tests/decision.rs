@@ -380,7 +380,7 @@ impl Transport for Hosted {
                     );
                 }
                 if self.publication_case.starts_with("proof_start_limit") {
-                    headers.insert(reqwest::header::RETRY_AFTER, "47".parse().unwrap());
+                    headers.insert(reqwest::header::RETRY_AFTER, "280".parse().unwrap());
                     return Ok(Response {
                         status: 429,
                         headers,
@@ -1536,10 +1536,16 @@ async fn check_cut(cut: &'static str) {
                         match limited {
                             "proof_start_limit" => {
                                 let err = refusal.deliver().unwrap_err();
-                                assert_eq!((err.code.as_str(), err.retry_after_seconds), ("rate_limited", Some(47)));
-                                assert!(submit("000001").await.is_err());
+                                assert_eq!(
+                                    (err.code.as_str(), err.retry_after_seconds),
+                                    ("rate_limited", Some(280))
+                                );
+                                assert_eq!(serde_json::to_value(&err).unwrap()["retry_after_seconds"], 280);
+                                tokio::time::advance(Duration::from_secs(255)).await;
+                                let remaining = submit("000001").await.err().expect("still cooling down");
+                                assert_eq!(remaining.retry_after_seconds, Some(25));
                                 assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 1);
-                                tokio::time::advance(Duration::from_secs(48)).await;
+                                tokio::time::advance(Duration::from_secs(26)).await;
                                 assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 1);
                                 assert_eq!(
                                     submit("000001").await.unwrap().deliver().unwrap_err().code,

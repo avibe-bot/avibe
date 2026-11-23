@@ -107,7 +107,7 @@ enum Phase {
 }
 pub(super) fn retry_after(r: &Response) -> u64 {
     // Both pinned producers emit integral seconds, issuer forwarding accepts
-    // up to seven digits. Keep the native deadline even past the u8 wire hint.
+    // up to seven digits. The admission deadline and the wire duration use the same wait.
     r.headers
         .get("retry-after")
         .and_then(|h| h.to_str().ok())
@@ -120,7 +120,7 @@ pub(super) fn retry_after(r: &Response) -> u64 {
 pub(super) fn limited(seconds: u64) -> ClientError {
     let mut e = ClientError::new("rate_limited");
     e.retry_until = Some(Instant::now() + Duration::from_secs(seconds));
-    e.retry_after_seconds = Some(seconds.clamp(1, 255) as u8);
+    e.retry_after_seconds = Some(seconds);
     e
 }
 pub(super) fn transport_error(e: ClientError) -> ClientError {

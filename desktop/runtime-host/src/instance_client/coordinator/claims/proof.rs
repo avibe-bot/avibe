@@ -188,7 +188,7 @@ impl StepUp {
         if let Some(until) = self.retry_until.filter(|until| *until > Instant::now()) {
             let mut e = ClientError::new("rate_limited");
             let left = until.saturating_duration_since(Instant::now());
-            e.retry_after_seconds = Some((left.as_secs() + u64::from(left.subsec_nanos() != 0)).clamp(1, 255) as u8);
+            e.retry_after_seconds = Some((left.as_secs() + u64::from(left.subsec_nanos() != 0)).max(1));
             e.retry_until = Some(until);
             return Err(e);
         }
