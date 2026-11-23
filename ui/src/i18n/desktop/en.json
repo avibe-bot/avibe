@@ -168,7 +168,8 @@
         "name": "name",
         "availability": "name’s availability"
       },
-      "saving": "Verified. Saving the sign-in…"
+      "saving": "Verified. Saving the sign-in…",
+      "changedPlain": "Verified, but this screen changed since you confirmed. Check it, then press Bind again."
     }
   }
 }

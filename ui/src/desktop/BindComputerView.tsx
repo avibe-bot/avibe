@@ -121,7 +121,7 @@ export type BindStep =
    *  that stopped, and the person may continue it (the account's own recovery, no new code). */
   | { kind: 'saving'; recover?: boolean }
   /** `invalid`: avibe.bot said the code typed was wrong or expired; the same email's code may be typed again. */
-  | { kind: 'code'; code: string; invalid?: boolean }
+  | { kind: 'code'; code: string; invalid?: boolean; limited?: boolean }
   /** `error`: what the last try said, in place. `rateLimited` waits `retryMinutes` here. */
   | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | 'rateLimited' | null; retryMinutes?: number }
   /** The account must add an authenticator first. `material` once native issued it. */
@@ -189,7 +189,7 @@ export function BindComputerView({ step, account, computer, busy = false, onName
     return <Close.Provider value={onClose}><SignInChrome value={BIND_CHROME}>
       {step.kind === 'code'
         ? <CodeEntry email={account} code={step.code} verifyLabel={t('mobileApp.twoFactor.verify')} busy={busy ? 'verify' : null} locked={busy} errorKey={null}
-          invalidText={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : undefined} cooldown={0} providerCooldownActive={false} resent={false}
+          invalidText={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : step.limited ? t('mobileApp.code.rateLimited') : undefined} cooldown={0} providerCooldownActive={false} resent={false}
           onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} />
         : <SecondFactor session={{ status: 'secondFactor', email: account, gate: 'challenge', methods: step.methods }} step={step.method} code={step.code}
           busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy} retryMinutes={step.retryMinutes ?? 1}
@@ -232,7 +232,9 @@ export function BindComputerView({ step, account, computer, busy = false, onName
     const date = Number.isFinite(at) ? new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(at) : null;
     return page(<>
       {heading(t('desktopAccount.bind.title'))}
-      {changed?.length ? <p role="status" className="-mt-3 mb-5 flex items-center gap-2 text-sm"><Check className="size-4 shrink-0 text-mint-ink" />{t('desktopAccount.bind.changed', { fields: new Intl.ListFormat(language, { type: 'conjunction' }).format(changed.map((field) => t(`desktopAccount.bind.field.${field}` as const))) })}</p> : null}
+      {changed ? <p role="status" className="-mt-3 mb-5 flex items-center gap-2 text-sm"><Check className="size-4 shrink-0 text-mint-ink" />{changed.length
+        ? t('desktopAccount.bind.changed', { fields: new Intl.ListFormat(language, { type: 'conjunction' }).format(changed.map((field) => t(`desktopAccount.bind.field.${field}` as const))) })
+        : t('desktopAccount.bind.changedPlain')}</p> : null}
       <div className="rounded-xl border border-edge bg-surface">
         <div className="grid gap-x-6 gap-y-2 px-5 py-4 md:grid-cols-[72px_minmax(0,1fr)] md:items-center md:gap-y-3">
           <Field label={t('devices.claim.account')}><span className="flex min-w-0 items-center gap-2 text-sm"><AccountLine email={account} /><span className="shrink-0 text-xs text-muted">{t('devices.claim.signedInHere')}</span></span></Field>

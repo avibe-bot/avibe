@@ -363,3 +363,19 @@ it('a new generation while an action is on its way leaves the page usable', asyn
   const bind = await screen.findByRole('button', { name: copy.action });
   expect((bind as HTMLButtonElement).disabled).toBe(false);
 });
+
+it('a review that changed in no field it shows still says it changed, and waits for a press', async () => {
+  const page = mount({ ...proofAnswers, review_after_proof: review(NEW('xiaoming', { prefilled_prefix: 'xiaoming-mac' }), 'rev-9') });
+  await verify();
+  await screen.findByText(copy.changedPlain);
+  expect(page.types().filter((type) => type === 'confirm')).toHaveLength(1);
+  fireEvent.click(screen.getByRole('button', { name: copy.confirm }));
+  await waitFor(() => expect(page.actions.filter((each) => each.type === 'confirm').at(-1)).toEqual({ type: 'confirm', receipt: 'r', revision: 'rev-9' }));
+});
+
+it('a 429 on the email code waits in place', async () => {
+  mount({ ...proofAnswers, submit_proof_code: () => { throw { code: 'rate_limited', retry_after_seconds: 30 }; } });
+  await verify();
+  await screen.findByText(en.mobileApp.code.rateLimited);
+  expect(screen.getByLabelText(en.mobileApp.code.label)).toBeTruthy();
+});

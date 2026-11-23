@@ -44,7 +44,9 @@ const hostFor = (prefix: string) => `${prefix}-app.avibe.bot`;
 const PROBLEMS: Record<string, BindProblem> = {
   network_unavailable: 'unreachable', control_plane_unreachable: 'unreachable', request_failed: 'unreachable',
   provider_unavailable: 'unreachable', provider_timeout: 'unreachable', invalid_response: 'unreachable',
-  response_too_large: 'unreachable', code_delivery_unknown: 'unreachable', factor_delivery_unknown: 'unreachable',
+  response_too_large: 'unreachable',
+  // avibe.bot answered, but not with a verdict this page can name: say only that it did not finish.
+  code_delivery_unknown: 'unknown', factor_delivery_unknown: 'unknown',
   bridge_unavailable: 'unreachable',
   authentication_required: 'signedOut', account_changed: 'signedOut', signed_out: 'signedOut',
   rate_limited: 'rateLimited',
@@ -262,7 +264,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
           ...(before.host !== shown.host ? ['name' as const] : []),
           ...(before.available !== shown.available ? ['availability' as const] : []),
         ];
-        next = { ...next, changed: changed.length ? changed : ['availability'] };
+        // A change no field shows (avibe.bot's suggestion, say) is still a change: say so plainly.
+        next = { ...next, changed };
       }
       setStep(next);
       return;
@@ -471,7 +474,11 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (step?.kind === 'code' && h.delivery) {
       const reply = await call('desktop_claim_review', { type: 'submit_proof_code', receipt: h.receipt, delivery: h.delivery, code });
       if (!reply) return;
-      if (!reply.ok) { setStep(WRONG_CODE.has(reply.code) ? { kind: 'code', code: '', invalid: true } : problemFor(reply.code)); return; }
+      if (!reply.ok) {
+        setStep(WRONG_CODE.has(reply.code) ? { kind: 'code', code: '', invalid: true }
+          : reply.code === 'rate_limited' ? { kind: 'code', code: '', limited: true } : problemFor(reply.code));
+        return;
+      }
       const submission = submissionFrom(reply);
       if (!submission) { setStep(problemFor('invalid_response')); return; }
       h.delivery = null;
