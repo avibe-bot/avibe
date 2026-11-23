@@ -1566,7 +1566,10 @@
           "noSuppliedMatch": "你的供应商没有列出这个模型。先选一个列出的；其他模型可以之后在「设置 › 模型」里添加。",
           "notListed": "供应商未列出",
           "customFromQueryNote": "模型 ID 按你输入的原样使用，参数取默认值，以后可以在「管理模型」里改。",
-          "searchingCatalog": "正在搜索模型目录"
+          "searchingCatalog": "正在搜索模型目录",
+          "sourcePicked_one": "已选 {{count}}",
+          "sourcePicked_other": "已选 {{count}}",
+          "segmentOther": "其他"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · 模型列表",
