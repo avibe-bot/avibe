@@ -81,6 +81,13 @@ const designFrames = frames([
     height: 1100,
     click: [provider('mega-relay'), segment('nova-'), 'text="nova-4.1-latest"', 'text="nova-4.2"'],
   },
+  {
+    name: 'large-provider-scrolled',
+    title: '添加模型 · 滚到一组中间：供应商和分组的名字留在顶上',
+    ...desktop,
+    themes: ['light'],
+    click: [provider('mega-relay'), segment('n-labs/'), 'text="n-labs/nova-4.5-fast"'],
+  },
   { name: 'folded-phone', title: '添加模型 · 180 个模型 · 手机', ...phone, click: [provider('ChatGPT Pro')] },
   { name: 'large-provider-phone', title: '添加模型 · 145 个模型的供应商 · 手机', ...phone, click: [provider('mega-relay')] },
 ]);

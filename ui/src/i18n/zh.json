@@ -1562,10 +1562,9 @@
           "confirm_one": "添加 {{count}} 个模型",
           "confirm_other": "添加 {{count}} 个模型",
           "groupCatalog": "模型目录",
-          "catalogNote": "你的供应商没有列出这些模型。添加后，要在这个模型的路由里指定一个供应商才能使用。",
+          "catalogNote": "没有供应商列出这些模型，添加后要为它单独设置路由。",
           "noSuppliedMatch": "你的供应商没有列出这个模型。先选一个列出的；其他模型可以之后在「设置 › 模型」里添加。",
           "notListed": "供应商未列出",
-          "customFromQueryNote": "模型 ID 按你输入的原样使用，参数取默认值，以后可以在「管理模型」里改。",
           "searchingCatalog": "正在搜索模型目录",
           "sourcePicked_one": "已选 {{count}}",
           "sourcePicked_other": "已选 {{count}}",
@@ -2400,17 +2399,18 @@
         "field": {
           "vendor": "供应商",
           "vendor.custom": "其他供应商 · 自己填写地址",
-          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址",
           "vendor.search": "搜索供应商",
           "vendor.empty": "没有同名的供应商",
           "name": "名称(可选)",
           "protocol": "API 格式",
           "protocol.hint": "指定接口不代表凭证有效，也不代表实际模型调用兼容",
           "baseUrl": "Base URL",
-          "baseUrl.hint": "填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径",
+          "baseUrl.hint": "填 API 根地址。只填域名时，会用标准的 /v1 路径。",
           "apiKey": "API Key",
           "apiKey.reveal": "显示 API Key",
-          "apiKey.conceal": "隐藏 API Key"
+          "apiKey.conceal": "隐藏 API Key",
+          "baseUrl.infoLabel": "Base URL 怎么填",
+          "baseUrl.placeholder": "https://api.example.com/v1"
         },
         "pull": {
           "result_one": "拉到 {{count}} 个模型",
@@ -2603,7 +2603,7 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留，迁移时不联网校验 Key 或拉取模型列表。Key 是否可用由后续模型调用确认。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。",
         "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
         "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
@@ -2650,13 +2650,15 @@
           "claude": "Claude Code 配置",
           "codex": "Codex 配置",
           "opencode": "OpenCode 配置"
-        }
+        },
+        "detailsLabel": "导入时会做什么",
+        "details": "订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留。导入时不联网检查 Key，也不拉取模型列表，Key 能不能用要等实际调用时才知道。"
       },
       "sourceTest": {
         "open": "测试",
         "testNow": "立即测试",
         "title": "测试 {{source}}",
-        "hint": "使用此供应商和选中的模型发送一次简短请求，可能产生少量费用。结果仅代表这个模型。",
+        "hint": "会发一次很短的请求，可能产生少量费用。",
         "cooldownHint": "测试成功会立即恢复这个供应商。",
         "stillUnavailable": "供应商仍标记为暂不可用。",
         "model": "测试模型",
@@ -2718,7 +2720,6 @@
           "title": "编辑 {{source}}",
           "name": "显示名称",
           "baseUrl": "Base URL",
-          "hint": "协议保持不变。更改 Base URL 可能改变可用模型和路由；应用前会先让你确认影响。",
           "cancel": "取消",
           "save": "保存",
           "saving": "保存中…",

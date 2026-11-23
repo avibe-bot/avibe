@@ -1562,10 +1562,9 @@
           "confirm_one": "Add {{count}} model",
           "confirm_other": "Add {{count}} models",
           "groupCatalog": "Model catalog",
-          "catalogNote": "No provider lists these. After adding one, choose a provider for it in its route before you use it.",
+          "catalogNote": "No provider lists these. After adding one, set its route separately.",
           "noSuppliedMatch": "None of your providers lists this model. Pick one they list; you can add others later in Settings › Models.",
           "notListed": "Not listed by a provider",
-          "customFromQueryNote": "Uses the ID exactly as typed, with default parameters. You can change them later in Manage models.",
           "searchingCatalog": "Searching the model catalog",
           "sourcePicked_one": "{{count}} selected",
           "sourcePicked_other": "{{count}} selected",
@@ -2400,17 +2399,18 @@
         "field": {
           "vendor": "Provider",
           "vendor.custom": "Other provider · enter its address",
-          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address is filled in for you",
           "vendor.search": "Search providers",
           "vendor.empty": "No provider by that name",
           "name": "Name (optional)",
           "protocol": "API format",
           "protocol.hint": "A declared interface is not proof of credential validity or model compatibility",
           "baseUrl": "Base URL",
-          "baseUrl.hint": "API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path",
+          "baseUrl.hint": "Enter the API root. A bare host uses the standard /v1 path.",
           "apiKey": "API key",
           "apiKey.reveal": "Show API key",
-          "apiKey.conceal": "Hide API key"
+          "apiKey.conceal": "Hide API key",
+          "baseUrl.infoLabel": "How to fill in the Base URL",
+          "baseUrl.placeholder": "https://api.example.com/v1"
         },
         "pull": {
           "result_one": "Fetched {{count}} model",
@@ -2603,7 +2603,7 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores.",
         "cleanApiKeys": "Also remove the API keys from the native CLI configuration",
         "cleanApiKeysHint": "Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.",
         "empty": "No configuration found to migrate.",
@@ -2650,13 +2650,15 @@
           "claude": "Claude Code configuration",
           "codex": "Codex configuration",
           "opencode": "OpenCode configuration"
-        }
+        },
+        "detailsLabel": "What an import does",
+        "details": "Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default. An import does not test keys online or fetch model lists; whether a key works shows when a model is first called."
       },
       "sourceTest": {
         "open": "Test",
         "testNow": "Test now",
         "title": "Test {{source}}",
-        "hint": "Send one short request using this provider and the selected model. This can incur a small charge. The result applies only to this model.",
+        "hint": "Sends one short request, which can incur a small charge.",
         "cooldownHint": "A successful test makes this provider available again right away.",
         "stillUnavailable": "The provider is still marked unavailable.",
         "model": "Test model",
@@ -2718,7 +2720,6 @@
           "title": "Edit {{source}}",
           "name": "Display name",
           "baseUrl": "Base URL",
-          "hint": "The protocol stays fixed. Changing the Base URL can change available models and routes; you will review any impact before it is applied.",
           "cancel": "Cancel",
           "save": "Save",
           "saving": "Saving…",

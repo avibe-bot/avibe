@@ -275,7 +275,6 @@ export const BackendModelPickerDialog: React.FC<{
         <span className="model-hub-picker-typed-title">
           {t('settings.models.gateway.picker.customFromQuery', { query: typedId })}
         </span>
-        <span className="model-hub-picker-typed-note">{t('settings.models.gateway.picker.customFromQueryNote')}</span>
       </span>
     </button>
   );

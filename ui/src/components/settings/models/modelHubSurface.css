@@ -253,6 +253,8 @@
   --model-hub-picker-name-size: 12.5px;
   /* The folds of 「From your providers」: a provider's line is as tall as a row
    * and reads at the row's own size; a long provider's second fold is lighter. */
+  /* Declared with the surface, not on the group: the list's scroller reads it too. */
+  --model-hub-picker-group-inner-gap: 4px;
   --model-hub-picker-fold-height: 36px;
   --model-hub-picker-fold-pad-x: 10px;
   --model-hub-picker-fold-gap: 8px;
@@ -1884,7 +1886,6 @@
   --model-hub-order-head-gap: 6px;
   --model-hub-order-head-padding-x: 20px;
   --model-hub-order-head-padding-y: 18px;
-  min-height: 82px;
   padding: var(--model-hub-order-head-padding-y) var(--model-hub-order-head-padding-x);
   display: flex;
   flex-direction: column;
@@ -1895,13 +1896,6 @@
   font-size: var(--model-hub-order-title-size);
 }
 .model-hub-order-info { width: 13px; height: 13px; color: var(--model-hub-ink-59); }
-.model-hub-order-subtitle {
-  --model-hub-order-subtitle-line: 17px;
-  --model-hub-order-subtitle-size: 11.5px;
-  color: var(--model-hub-ink-73);
-  font-size: var(--model-hub-order-subtitle-size);
-  line-height: var(--model-hub-order-subtitle-line);
-}
 .model-hub-order-close { color: var(--model-hub-ink-59); }
 .model-hub-order-body {
   --model-hub-order-body-gap: 18px;
@@ -3840,7 +3834,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   gap: var(--model-hub-picker-group-gap);
 }
 .model-hub-picker-group {
-  --model-hub-picker-group-inner-gap: 4px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-picker-group-inner-gap);
@@ -3900,10 +3893,27 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   color: var(--foreground);
   text-align: left;
 }
+/* An open fold's heading stays at the top of the list while its rows scroll
+ * under it, so the rows on screen always say whose they are. It sticks inside its
+ * own fold only, and is opaque: the wash is drawn over the dialog's surface. */
+.model-hub-picker-source-head,
+.model-hub-picker-segment-head {
+  position: sticky;
+  background-color: var(--popover);
+  /* The same surface, spread over the gap around the heading, so no edge of a
+   * row passing under it shows at its corners or in the gap between the two. */
+  box-shadow: 0 0 0 var(--model-hub-picker-group-inner-gap) var(--popover);
+}
+/* A row brought into view by focus stops below both headings, not under them. */
+.model-hub-catalog-scroll:has(> .model-hub-picker-list) {
+  scroll-padding-top: calc(var(--model-hub-picker-fold-height) + var(--model-hub-picker-segment-height) + var(--model-hub-picker-group-inner-gap) * 2);
+}
+.model-hub-picker-source-head { top: 0; z-index: 2; }
+.model-hub-picker-segment-head { top: calc(var(--model-hub-picker-fold-height) + var(--model-hub-picker-group-inner-gap)); z-index: 1; }
 .model-hub-picker-source-head {
   min-height: var(--model-hub-picker-fold-height);
   border: 1px solid var(--border);
-  background: var(--model-hub-wash-08);
+  background-image: linear-gradient(var(--model-hub-wash-08), var(--model-hub-wash-08));
   font-size: var(--model-hub-picker-name-size);
   font-weight: 600;
 }
@@ -3915,7 +3925,7 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   font-size: var(--model-hub-picker-segment-size);
   font-weight: 500;
 }
-.model-hub-picker-segment-head:hover:not(:disabled) { background: var(--model-hub-wash-08); }
+.model-hub-picker-segment-head:hover:not(:disabled) { background-image: linear-gradient(var(--model-hub-wash-08), var(--model-hub-wash-08)); }
 .model-hub-picker-source-head > svg,
 .model-hub-picker-segment-head > svg {
   flex-shrink: 0;
@@ -4012,12 +4022,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   font-size: var(--model-hub-picker-name-size);
   font-weight: 600;
   color: var(--foreground);
-}
-.model-hub-picker-typed-note {
-  display: block;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--muted);
 }
 
 .model-hub-picker-empty {

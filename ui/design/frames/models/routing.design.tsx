@@ -98,6 +98,17 @@ const designFrames = frames([
     render: order('codex'),
   },
   {
+    name: 'default-order-info',
+    title: '默认路由 · 这个顺序管什么（ⓘ）',
+    width: 1280,
+    height: 800,
+    status: 'shipped',
+    themes: ['light'],
+    fixtures: { api },
+    click: ['[aria-label="{t:settings.models.order.infoLabel}"]'],
+    render: order('codex'),
+  },
+  {
     name: 'default-order-phone',
     title: '默认路由 · 手机',
     width: 390,
