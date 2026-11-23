@@ -290,6 +290,70 @@ async def test_image_suffix_uses_ordinary_even_when_wire_is_tiny(nested):
     assert (send.mode, send.reason) == ("full", "image_delta") and send.wire.body == wire.body
 
 
+@pytest.mark.parametrize(
+    "caller,expected",
+    [
+        ({"type": "direct"}, "continue"),
+        ({"type": "code_execution_20260120", "tool_id": "srv_1"}, "create"),
+        ({"type": "direct", "extra": 1}, "create"),
+    ],
+)
+async def test_client_tool_reply_carries_its_parent_into_next_inner_request(caller, expected):
+    from core.agent_core.messages import ToolResultMessage
+    from tests.agent_core.ai import test_hosted_pause_turn as pause
+
+    req = _request(
+        messages=(UserMessage((TextBlock("history " * 18000),)),), source_id=pause.SOURCE, model_id=pause.MODEL
+    )
+    ep = replace(req.endpoint, source_identity="tool-account")
+    req = replace(req, endpoint=ep, thread_observation=ThreadObservation("tool-parent"))
+    call = [
+        {
+            "type": "content_block_start",
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_ordinary",
+                "name": "read",
+                "input": {},
+                "caller": caller,
+            },
+        },
+        {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"path":"a"}'}},
+    ]
+    first = pause._response(
+        pause._thinking(), call, stop_reason="tool_use", input_tokens=54000, output_tokens=17
+    ).replace('"message": {"usage"', '"message": {"id":"msg_parent", "usage"')
+    seen = []
+
+    def gateway(wire):
+        seen.append(json.loads(wire.content))
+        return httpx.Response(
+            200,
+            headers=pause._served(),
+            text=first if len(seen) == 1 else SUCCESS.replace('"input_tokens":1', '"input_tokens":54020'),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        initial = [e async for e in AnthropicAdapter(client, gateway=True).stream(req, CancelToken())]
+        assert isinstance(initial[-1], Done) and initial[-1].message.stop_reason == "tool_use"
+        follow = replace(
+            req,
+            messages=(
+                *req.messages,
+                initial[-1].message,
+                ToolResultMessage("toolu_ordinary", "read", (TextBlock("found"),)),
+            ),
+            thread_observation=ThreadObservation("tool-parent"),
+        )
+        result = [e async for e in AnthropicAdapter(client, gateway=True).stream(follow, CancelToken())]
+    assert isinstance(result[-1], Done)
+    assert [b["thread"]["type"] for b in seen] == ["create", expected]
+    prev = req.thread_observation.attempts[0]
+    nxt = follow.thread_observation.attempts[0]
+    assert prev["binding"] == ("bound" if expected == "continue" else "unsupported_tool_caller")
+    assert nxt["parent_state"] == prev["binding"]
+
+
 async def test_gateway_ttl_refusal_is_shared_by_live_and_inert_thread_plans(monkeypatch):
     import time
     from types import SimpleNamespace

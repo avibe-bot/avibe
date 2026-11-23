@@ -236,7 +236,7 @@ class AnthropicAdapter(ProviderAdapter):
         observation = request.thread_observation
         session = observation.session_id if observation else None
         # Claim before the first await: two requests can never continue the same response.
-        parent = threads.parents.pop(session, None) if session else None
+        parent, parent_state = threads.parent_entry(session, claim=True)
         route = threads.route_key(request.endpoint, self._gateway)
         replay: str | None = None
         replacement = False
@@ -953,7 +953,19 @@ class AnthropicAdapter(ProviderAdapter):
                     )
                     wire = attempt.wire
 
+                def binding(reason: str) -> None:
+                    nonlocal parent_state
+                    if attempt is None:
+                        return
+                    parent_state = reason
+                    attempt.record["binding"] = reason
+                    # A reason is not a parent; never evict a reusable node from another overlapping stream.
+                    if session and not isinstance(threads.parents.get(session), threads.Parent):
+                        threads.remember(threads.parents, session, reason)
+
                 def record_send(size: int) -> None:
+                    attempt.record["parent_state"] = parent_state
+                    binding("no_terminal" if attempt.mode != "full" else "ordinary_full")
                     attempt.record["body_bytes"] = size
                     attempt.record["ordinary_baseline_bytes"] = (
                         0 if replacement else (attempt.record["full_bytes"] or size)
@@ -991,18 +1003,22 @@ class AnthropicAdapter(ProviderAdapter):
                 try:
                     async for event in driver:
                         if isinstance(event, PinUnavailable):
+                            binding("pin_unavailable")
                             if speculative:
                                 failed = "pin_unavailable"
                                 break
                             unavailable = event
                             break
                         if event is PAUSE_TURN:
+                            binding("pause_turn")
                             continued = True
                             break
                         if event is REFUSED:
+                            binding("ttl_refused")
                             rejected = True
                             break
                         if isinstance(event, ProviderError):
+                            binding("provider_error")
                             if (
                                 speculative
                                 and not event.silence_exhausted
@@ -1037,20 +1053,27 @@ class AnthropicAdapter(ProviderAdapter):
                                 event = replace(event, retryable=False, continuable=False, after_thinking=False)
                         elif isinstance(event, Done):
                             message = event.message
-                            if (
-                                speculative
-                                and session
-                                and response_id
-                                and message.usage
-                                and message_stopped
-                                and lossless
-                                and message.stop_reason in ("stop", "tool_use")
-                                and (not self._gateway or served_as_pinned())
-                            ):
-                                assistant_hash = await asyncio.to_thread(_replayable_digest, message)
+                            if speculative and session:
+                                if not response_id:
+                                    veto = "missing_or_invalid_message_id"
+                                elif not message_stopped:
+                                    veto = "missing_message_stop"
+                                elif not lossless:
+                                    veto = shape.veto
+                                elif message.stop_reason not in ("stop", "tool_use"):
+                                    veto = "ineligible_stop"
+                                elif not message.usage:
+                                    veto = "missing_usage"
+                                elif self._gateway and not served_as_pinned():
+                                    veto = "unverified_origin"
+                                else:
+                                    veto = None
+                                assistant_hash = None if veto else await asyncio.to_thread(_replayable_digest, message)
                                 if assistant_hash is None:
+                                    binding(veto or "unreplayable_reply")
                                     yield event
                                     continue
+                                attempt.record["binding"] = "bound"
                                 u = message.usage
                                 threads.remember(
                                     threads.parents,
