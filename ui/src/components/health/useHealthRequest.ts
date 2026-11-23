@@ -106,5 +106,8 @@ export function useHealthRequest(id: string, initial?: HealthRequest) {
     if (active && owner.current?.id === id) await owner.current.authorize();
   };
   return { request, state, busy: pending?.requestId === id, loadError: current.loadError,
-    canAuthorize: active && current.known && !current.loadError && !pending && !entry, authorize };
+    busyPhase: pending?.requestId === id ? pending.phase : undefined,
+    retryable: receipt === 'failed' && serverView === 'authorize',
+    canAuthorize: active && current.known && !current.loadError && !pending
+      && (!entry || (receipt === 'failed' && serverView === 'authorize')), authorize };
 }

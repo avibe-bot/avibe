@@ -1543,7 +1543,8 @@
           "dropped_other": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
           "grabCancelled": "已取消移动 {{model}}，位置已还原。",
           "added_one": "已添加 {{model}}",
-          "added_other": "已添加 {{count}} 个模型"
+          "added_other": "已添加 {{count}} 个模型",
+          "saveBusy": "现在保存不了，没有改动任何东西。稍后再点一次保存。"
         },
         "picker": {
           "title": "添加 {{backend}} 模型",
@@ -1584,7 +1585,11 @@
             "label": "模型 ID",
             "placeholder": "输入模型 ID",
             "required": "请填写 Backend 模型 ID。",
-            "duplicate": "列表中已存在相同 ID 的模型。"
+            "duplicate": "列表中已存在相同 ID 的模型。",
+            "renameNote": "保存后，用这个模型的 Agent 和会话改用新 ID。命令或脚本里写的旧 ID 不会改。",
+            "renameRunning": "正在进行的对话可能中断。",
+            "renameNoRoute": "没有供应商列出这个 ID，保存后要为它单独设置路由。",
+            "reserved": "这个 ID 现在还不能用：先保存模型列表，再用它。"
           },
           "displayName": {
             "label": "显示名称",
@@ -8097,6 +8102,10 @@
     },
     "authorize": "在 iPhone 上授权",
     "opening": "正在打开授权…",
+    "preparing": "正在准备连接…",
+    "connecting": "正在连接 Apple 健康…",
+    "retry": "重试",
+    "reopenApp": "连接未响应。请重新打开 Avibe 后再试。",
     "loading": "正在读取请求…",
     "loadError": "暂时无法获取请求状态。请稍后重新打开此页面。",
     "readOnly": "只读取，不写入健康 App。",

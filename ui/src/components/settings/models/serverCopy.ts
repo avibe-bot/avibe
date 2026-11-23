@@ -171,8 +171,12 @@ const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, TranslationKey>> = {
   'modelHub.errors.backend_model_catalog_invalid': 'settings.models.gateway.catalog.saveInvalid',
 };
 
-export const catalogSaveFailureKey = (detail: string | undefined): TranslationKey =>
-  CATALOG_SAVE_FAILURE_COPY[detail ?? ''] ?? 'settings.models.gateway.catalog.saveFailed';
+/** `code` names the one refusal that comes without a sentence of its own: the
+ *  stores were busy and nothing was written, so the same save can simply be
+ *  pressed again. */
+export const catalogSaveFailureKey = (detail: string | undefined, code?: string): TranslationKey =>
+  CATALOG_SAVE_FAILURE_COPY[detail ?? '']
+    ?? (code === 'backend_model_store_busy' ? 'settings.models.gateway.catalog.saveBusy' : 'settings.models.gateway.catalog.saveFailed');
 
 /**
  * Whether a refused save is the one the server can answer AFTER it has already

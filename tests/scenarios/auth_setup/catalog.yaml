@@ -1488,7 +1488,15 @@ scenarios:
     layer: scenario
     backend: mobile
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
-    reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
+    reason: >-
+      Real CLI, message mirror, owner CSRF, device HTTP, private storage and
+      revocation run with synthetic data; control-plane and push transports
+      are fixtures. An abandoned pre-pair attempt leaves the request queued;
+      an explicit retry obtains a fresh code, pairs and completes the same
+      request, and the abandoned code cannot replay after pairing. Native
+      consent dismissal, bounded setup/cleanup, callback ownership and optional
+      empty-step help are owned by HealthSyncTests; page retry and legacy
+      pending-owner recovery by HealthRequest.lifecycle.test.tsx.
   - id: AUTH-SETUP-914
     name: The initiating owner browser completes a personal installation claim without disclosing the pairing key
     status: covered

@@ -1578,6 +1578,25 @@ stop. Its response contains only `state`. Every other `health.*` bridge method
 is unsupported, including on Show pages. Health data never returns through the
 WebView bridge or notification service extension.
 
+After Allow and Continue, native setup has a 90-second deadline, including the
+consent sheet's dismissal, HealthKit authorization, replacement cleanup, the
+device handshake and failure rollback. Expiry retires that attempt's authority
+before returning failure; unfinished cleanup remains pending. A late callback
+can revoke its own provisional device but cannot pair or commit a new connection.
+The conversation can explicitly retry a settled failure while fresh request
+metadata still permits authorization. Older shells that never settle retain
+their execution slot and show a reopen-App recovery message after 100 seconds.
+An unreturned native operation is never unlocked by a JavaScript timeout.
+
+The first query after a new connection may offer dismissible settings help when
+all seven recent local-calendar step rows are successfully empty. A real sample,
+including zero, any query failure, a missing day, or unavailable protected data
+suppresses the offer. It does not diagnose permission denial or change connection
+or sync results. The same connection does not repeat the offer after dismissal
+or restoration. The help names the manual path through Settings, Privacy &
+Security, Health, and Avibe. It offers no settings shortcut: the public
+App-settings URL did not expose a Health entry in the simulator inspection.
+
 The main app reads steps, activity, workouts and sleep. It backfills 30 days
 and refreshes the most recent eight calendar days on foreground activation and
 HealthKit observer delivery. Sleep uses the local 18:00 boundary and interval

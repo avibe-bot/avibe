@@ -327,6 +327,11 @@ const reachSecondFactor = async (state: SecondFactorState = owed()) => {
   });
 };
 
+// Welcome's read of the sign-in list, and its foreground listener, start in an effect that runs
+// after the row is drawn. A test that finds the row can resume before that effect under load, so
+// its first read is not yet counted and a foreground event it sends is never heard. Wait for it.
+const welcomeAsked = () => waitFor(() => expect(mobile.readProviders).toHaveBeenCalled());
+
 beforeEach(() => {
   window.history.replaceState({}, '', '/');
   resetMobileMocks();
@@ -1019,6 +1024,7 @@ describe('mobile onboarding', () => {
       mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: marks.google });
+      await welcomeAsked();
       expect(offered()).toEqual({ providers: ['google'], passkey: false });
       mobile.readProviders.mockResolvedValueOnce({ providers: ['google'], passkey: true });
       document.dispatchEvent(new Event('visibilitychange'));
@@ -1051,6 +1057,7 @@ describe('mobile onboarding', () => {
       mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' });
+      await welcomeAsked();
       expect(mobile.readProviders).toHaveBeenCalledTimes(1);
       const seen: string[][] = [];
       const observer = new MutationObserver(() => seen.push(marks()));
@@ -1066,6 +1073,7 @@ describe('mobile onboarding', () => {
       mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut' });
       render(<MobileOnboarding />);
       await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      await welcomeAsked();
       expect(marks()).toEqual([]);
       mobile.readProviders.mockResolvedValueOnce({ providers: ['github'] });
       document.dispatchEvent(new Event('visibilitychange'));
