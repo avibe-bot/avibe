@@ -320,6 +320,16 @@ route, and its middleware does not run under `/api/v1/`). That is a
 definitive refusal of the second kind below. It is not `401`: only `401`
 means the binding is refused and drops permissions.
 
+**When the endpoints go away again** (avibe.bot rolled back after this
+instance had read the state), the same rule applies: while the latest state
+read for the pairing in use was answered `404`, the address counts as never
+answered (`address_state_unknown`), so the change is not offered and
+`preview` and `change` send nothing. This is kept in memory only; the stored
+state, with its list of old names, is left as it is, and every opening of the
+page and every start reads first. No answer (a timeout, `429`, `5xx`) leaves
+it as it is; any other answer, and first of all a state read that succeeds,
+ends it, and the next opening of the page offers the change again.
+
 A definitive refusal of a state read is one of two kinds, and they differ in
 who asks again:
 
