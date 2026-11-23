@@ -84,7 +84,9 @@ const PASSKEY_FAILED = new Set(['passkey_cancelled', 'passkey_unavailable', 'inv
  *  attempt still running or ended is "not bound": native refuses or replaces it on Bind, and the
  *  dialog says the one sentence. Only a repair no button here can do keeps its own line. */
 const OBSERVED: Record<string, ComputerBinding['state']> = {
-  no_published_binding: 'unbound', legacy_review_required: 'unbound', legacy_wait: 'unbound',
+  // An older Desktop's record that ended without a result: native does not replace it yet (rule
+  // table, row 78), so Bind could only be refused. The same dead end as a computer avibe.bot refuses.
+  no_published_binding: 'unbound', legacy_review_required: 'unavailable', legacy_wait: 'unbound',
   legacy_publication_pending: 'unbound', owner_observed: 'bound', bound_owner_unconfirmed: 'otherAccount',
   legacy_recovery_required: 'repair',
 };

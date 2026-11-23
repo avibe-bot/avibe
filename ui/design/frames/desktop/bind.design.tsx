@@ -54,6 +54,7 @@ const states: State[] = [
   { name: 'account-other-account', title: '卡 · 绑定在另一个账号下：用那个账号登录（保留：要人做不同的事）', render: account({ state: 'otherAccount' }) },
   { name: 'account-unknown', title: '卡 · 现在确认不了：再看一次', render: account({ state: 'unknown' }) },
   { name: 'account-upgrade', title: '卡 · 要先更新（保留：要人做不同的事）', render: account({ state: 'upgrade' }) },
+  { name: 'account-unavailable', title: '卡 · 旧版记录已结束、原生还不能替换：死路，请联系我们（与墓碑同一句）', render: account({ state: 'unavailable' }) },
   { name: 'account-repair', title: '卡 · 要在终端修复（保留，等 #4133）', render: account({ state: 'repair' }) },
 
   // The dialog: claim your own domain.

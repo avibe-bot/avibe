@@ -70,7 +70,7 @@ it.each([
   ['no_published_binding', 'unbound'],
   ['bound_owner_unconfirmed', 'otherAccount'],
   ['legacy_wait', 'unbound'],
-  ['legacy_review_required', 'unbound'],
+  ['legacy_review_required', 'unavailable'],
   ['legacy_recovery_required', 'repair'],
 ])('shows what native observed: %s', async (answer, drawn) => {
   mount({ observe_current_binding: { state: answer } });
@@ -471,4 +471,12 @@ it('a sign-in that no longer matches the account asks to sign in again', async (
   fireEvent.click(await screen.findByRole('button', { name: copy.action }));
   fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
   await screen.findByText(copy.problem.signedOut);
+});
+
+it('an older record that ended without a result is a dead end on the card: support, no Bind', async () => {
+  const page = mount({ observe_current_binding: { state: 'legacy_review_required' } });
+  const link = await screen.findByRole('link', { name: 'support@avibe.bot' });
+  expect(link.getAttribute('href')).toBe('mailto:support@avibe.bot');
+  expect(screen.queryByRole('button', { name: copy.action })).toBeNull();
+  expect(page.types().filter((type) => type === 'open')).toEqual([]);
 });

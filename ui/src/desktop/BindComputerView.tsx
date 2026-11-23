@@ -32,6 +32,8 @@ export type ComputerBinding =
   | { state: 'unknown' }
   /** Something only the person can do, that no button here does for them. */
   | { state: 'upgrade' }
+  /** Cannot be bound from here, and no press changes that: write to support. */
+  | { state: 'unavailable' }
   | { state: 'repair' };
 
 export type ComputerBindingCardProps = {
@@ -64,6 +66,8 @@ export function ComputerBindingCard({ binding, computer, busy = false, onBind, o
     {binding.state === 'unknown' && <>{line(t('desktopAccount.bind.unknown'))}{action(t('desktopAccount.bind.checkAgain'), onRefresh)}</>}
     {binding.state === 'upgrade' && <>{line(t('desktopAccount.bind.upgrade'))}{action(t('update.action.check'), onUpdates)}</>}
     {binding.state === 'repair' && line(t('desktopAccount.bind.repair'))}
+    {binding.state === 'unavailable' && line(<Trans i18nKey="desktopAccount.bind.problem.unavailable" values={{ support: SUPPORT_EMAIL }}
+      components={{ mail: <a className="font-medium underline underline-offset-4" href={`mailto:${SUPPORT_EMAIL}`} /> }} />)}
   </div>;
 }
 
