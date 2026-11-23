@@ -24,9 +24,15 @@ function mount(initial: unknown, response: (request: DesktopClientRequest) => un
     expect(command).toBe('desktop_client_request');
     return response(request);
   });
-  vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+  // The Account page's two reads of this computer's binding (useDesktopClaim) have their own
+  // commands; they answer "not bound, nothing to recover" here. Binding has its own tests.
+  const claim = vi.fn(async (command: string, { request }: { request: { action: { type: string } } }) =>
+    command === 'desktop_account_recovery' ? { state: 'unavailable' }
+      : request.action.type === 'observe_current_binding' ? { state: 'no_published_binding' } : null);
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: vi.fn((command: string, args: { request: DesktopClientRequest }) =>
+    command === 'desktop_client_request' ? invoke(command, args) : claim(command, args as never)) });
   render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
-  return invoke;
+  return Object.assign(invoke, { claim });
 }
 
 // Remote restrictions remain native-owned; the retired static notice must not

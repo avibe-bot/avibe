@@ -35,9 +35,9 @@ const account = (binding: ComputerBinding, recovery: AccountRecovery | null = nu
 
 const bind = (step: BindStep, { busy = false, computer = COMPUTER } = {}) => column(
   <BindComputerView step={step} account={ACCOUNT} computer={computer} busy={busy}
-    onNameChange={noop} onPick={noop} onConfirm={noop} onSendCode={noop} onCodeChange={noop} onSubmitCode={noop}
+    onNameChange={noop} onPick={noop} onConfirm={noop} onSendCode={noop} onCodeChange={noop} onSubmitCode={noop} onBeginSetup={noop} onSavedCodes={noop}
     onFactorStep={noop} onPasskey={noop} onRestart={noop} onUpdates={noop} onClose={noop} />,
-  step.kind === 'code' || step.kind === 'factor',
+  step.kind === 'code' || step.kind === 'factor' || step.kind === 'factorSetup',
 );
 
 type State = { name: string; title: string; render: () => ReactNode; height?: number; both?: boolean };
@@ -75,14 +75,17 @@ const states: State[] = [
   { name: 'code', title: '邮件验证码 · 登录同款，没有「修改邮箱」和「重新发送」', render: bind({ kind: 'code', code: '' }), height: 900 },
   { name: 'factor-totp', title: '两步验证 · 身份验证器', render: bind({ kind: 'factor', method: 'totp', methods: ['passkey', 'totp'], code: '' }), height: 900 },
   { name: 'factor-passkey', title: '两步验证 · 通行密钥', render: bind({ kind: 'factor', method: 'passkey', methods: ['passkey', 'totp'], code: '' }), height: 900 },
-  { name: 'again', title: '验证之后 · 重新读同一张票，再确认一次', render: bind({ kind: 'name', name: 'max', check: 'free', again: true }) },
+  { name: 'code-invalid', title: '邮件验证码不对或已过期 · 留在原地再输', render: bind({ kind: 'code', code: '', invalid: true }), height: 900 },
+  { name: 'factor-totp-invalid', title: '两步验证码不对 · 留在原地再输', render: bind({ kind: 'factor', method: 'totp', methods: ['passkey', 'totp'], code: '', error: 'code' }), height: 900 },
+  { name: 'factor-setup', title: '账号要求先开两步验证 · 在这里添加验证器', render: bind({ kind: 'factorSetup', material: null, code: '' }), height: 900 },
+  { name: 'codes', title: '添加验证器后的恢复码 · 只显示这一次（帧里是假码）', render: bind({ kind: 'codes', codes: ['•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••', '•••••-•••••'] }) },
+  { name: 'changed', title: '验证之后内容变了 · 说明变了什么，再按一次「绑定」（没变就直接绑定，不出这一屏）', render: bind({ kind: 'name', name: 'max', check: 'taken', changed: ['availability'] }) },
 
   // Ends.
   { name: 'bound', title: '已绑定 · 域名、账号、电脑（不说「已连通」）', render: bind({ kind: 'bound', host: HOST }), both: true },
-  { name: 'conflict', title: '这台电脑属于另一个账号（owner_conflict）：什么都没改，换账号登录', render: bind({ kind: 'conflict' }) },
+  { name: 'conflict', title: '这台电脑属于另一个账号（owner_conflict）：什么都没改，退出后用那个账号登录', render: bind({ kind: 'conflict' }) },
   { name: 'upgrade', title: '需要先更新本机的 Avibe', render: bind({ kind: 'upgrade' }) },
   { name: 'problem-unreachable', title: '出错 · 连不上 avibe.bot：重新开始', render: bind({ kind: 'problem', problem: 'unreachable' }) },
-  { name: 'problem-code', title: '出错 · 验证码不对或已过期：重新开始', render: bind({ kind: 'problem', problem: 'codeInvalid' }) },
   { name: 'problem-busy', title: '出错 · 另一项更改在进行：返回', render: bind({ kind: 'problem', problem: 'busy' }) },
   { name: 'problem-lost', title: '出错 · 确认后回复丢了，无法再取：重新开始', render: bind({ kind: 'problem', problem: 'lost' }) },
 

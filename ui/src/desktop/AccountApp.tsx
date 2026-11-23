@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ArrowLeft } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { cn } from '../lib/utils';
-import { AccountSecondFactorView } from './AccountSecondFactorView';
+import { AccountSecondFactorView, RecoveryCodesView } from './AccountSecondFactorView';
 import { DesktopSignIn } from './DesktopSignIn';
 import { openLinkInNewContext } from '../lib/pwaNavigation';
 import { ACCOUNT_SECURITY_URL } from '../sign-in/links';
@@ -11,6 +11,8 @@ import { InstanceSwitcherView } from './InstanceSwitcherView';
 import { AccountSignOutView } from './AccountSignOutView';
 import { AccountDetailsView } from './AccountDetailsView';
 import { SetupCompleteView } from './SetupCompleteView';
+import { BindComputerView, ComputerBindingCard } from './BindComputerView';
+import { useDesktopClaim } from './useDesktopClaim';
 import { AddInstanceView } from './AddInstanceView';
 import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
@@ -178,6 +180,8 @@ export function AccountApp() {
     const initial = new URLSearchParams(window.location.search).get('view');
     return isDesktopClientView(initial) ? initial : 'account';
   });
+  // ui/design: desktop/bind/*. This computer's binding, read and changed only from the Account page.
+  const claim = useDesktopClaim(state, !popover && (view === 'account' || view === 'profile'));
   // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -344,12 +348,21 @@ export function AccountApp() {
   } else if (view === 'setup-complete') {
     content = <SetupCompleteView onLocal={() => leave('return_local')} onSignIn={() => setView('account')} failure={failure} />;
   } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" disabled={busy} onClick={() => {
+    content = <RecoveryCodesView codes={direct.recoveryCodes} busy={busy} onSaved={() => {
       recoveryProtection.current = null;
       setMaterial(null);
       if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
       else setView('account');
-    }}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
+    }}>{failure}</RecoveryCodesView>;
+  } else if (claim.step) {
+    // A binding in progress keeps its own verification, also while the new session owes a second factor.
+    centerLogin = claim.step.kind === 'code' || claim.step.kind === 'factor' || claim.step.kind === 'factorSetup';
+    content = <BindComputerView step={claim.step} account={claim.account} computer={claim.computer} busy={claim.busy}
+      onNameChange={claim.changeName} onPick={(prefix) => void claim.pick(prefix)} onConfirm={() => void claim.confirm()}
+      onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
+      onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
+      onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
+      onRestart={claim.restart} onUpdates={() => setView('updates')} onClose={claim.close} />;
   } else if (state.account.status !== 'signed_in') {
     // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
     // "continue on this computer", Back to Workbench and the in-app authenticator setup below.
@@ -371,7 +384,11 @@ export function AccountApp() {
   } else if (view === 'profile' || view === 'account') {
     content = <AccountDetailsView email={state.account.identity?.email ?? state.account.email ?? ''}
       busy={busy} errorMessage={errorMessage} onBack={instances}
-      onSignOut={() => { setView('sign-out'); leave('sign_out'); }} />;
+      onSignOut={() => { setView('sign-out'); leave('sign_out'); }}>
+      <ComputerBindingCard binding={claim.binding} account={state.account.identity?.email ?? ''} computer={state.local.name}
+        recovery={claim.recovery} busy={claim.busy} onBind={() => void claim.start()} onRefresh={() => void claim.observe()}
+        onUpdates={() => setView('updates')} onRecover={() => void claim.resume()} />
+    </AccountDetailsView>;
   } else if (view === 'add') {
     content = <AddInstanceView onBack={() => setView('instances')} onRefresh={instances} busy={busy} />;
   } else {

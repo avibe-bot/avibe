@@ -7907,14 +7907,13 @@
       "recoveryGone": "This step can no longer continue.",
       "title": "Bind this computer",
       "computerLabel": "Computer",
-      "again": "Verified. Confirm once more.",
       "checking": "Checking…",
       "invalid": "A name uses lowercase letters, digits and hyphens only.",
       "reclaim": "You used this name before. You can take it back.",
       "existing": "This computer already has this domain in this account and keeps it.",
-      "limit_one": "This account already holds {{count}} name, including those still waiting, which is the limit.",
-      "limit_other": "This account already holds {{count}} names, including those still waiting, which is the limit.",
-      "limitPlain": "This account holds as many names as it can, including those still waiting.",
+      "limit_one": "This account can hold {{count}} name, including those still waiting, and has reached it.",
+      "limit_other": "This account can hold {{count}} names, including those still waiting, and has reached that limit.",
+      "limitPlain": "This account holds as many names as it may, including those still waiting.",
       "limitDate": "The earliest is expected to be released on {{date}}.",
       "takeBack": "You can take back a name of your own:",
       "useName": "Use this name",
@@ -7925,7 +7924,7 @@
       "sendCode": "Send code",
       "boundTitle": "Bound",
       "conflictTitle": "This computer belongs to another account",
-      "conflictBody": "On avibe.bot, this computer is registered to another account. Nothing changed. To use that account, sign out here and sign in with it.",
+      "conflictBody": "On avibe.bot, this computer is registered to another account. Nothing changed. To use it, sign out here and sign in with that account.",
       "restart": "Start again",
       "problem": {
         "unreachable": "avibe.bot cannot be reached right now. This did not finish.",
@@ -7938,6 +7937,13 @@
         "codeInvalid": "That code is wrong or has expired.",
         "lost": "After you confirmed, avibe.bot’s reply was lost and cannot be fetched again. This computer is not bound.",
         "unknown": "This did not finish."
+      },
+      "changed": "Verified, but the {{fields}} changed since you confirmed. Check it, then press Bind again.",
+      "field": {
+        "account": "account",
+        "computer": "computer",
+        "name": "name",
+        "availability": "availability"
       }
     }
   },

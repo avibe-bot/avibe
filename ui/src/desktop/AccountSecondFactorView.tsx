@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShieldCheck } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -15,12 +16,14 @@ export interface AccountSecondFactorViewProps {
   onVerify: () => void;
   onEnroll: () => void;
   onLocal: () => void;
+  /** The way out under the card; by default "continue on this computer" (`onLocal`). */
+  exitLabel?: string;
 }
 /** An account that must turn two-step verification on adds an authenticator here, in the app.
  *  The second step itself is the shared sign-in flow's (DesktopSignIn); the recovery codes this
  *  setup returns stay container-owned (AccountApp). ui/design: desktop/instances/enroll-*. */
 export function AccountSecondFactorView({ code, busy, material, errorMessage,
-  onCodeChange, onVerify, onEnroll, onLocal }: AccountSecondFactorViewProps) {
+  onCodeChange, onVerify, onEnroll, onLocal, exitLabel }: AccountSecondFactorViewProps) {
   const { t } = useTranslation();
   return <div data-account-factor className="mx-auto my-auto w-full max-w-md shrink-0 py-6">
     <ShieldCheck className="mx-auto mb-5 size-12 text-mint-ink" />
@@ -40,6 +43,17 @@ export function AccountSecondFactorView({ code, busy, material, errorMessage,
         </form>}
       {errorMessage && <p role="alert" className="mt-4 text-sm leading-6 text-destructive-ink">{errorMessage}</p>}
     </div>
-    <div className="mt-4 text-center"><Button variant="ghost" onClick={onLocal}>{t('desktopClient.continueLocal')}</Button></div>
+    <div className="mt-4 text-center"><Button variant="ghost" onClick={onLocal}>{exitLabel ?? t('desktopClient.continueLocal')}</Button></div>
+  </div>;
+}
+
+/** Recovery codes an authenticator setup returned, shown once until the person says they saved them. */
+export function RecoveryCodesView({ codes, busy, onSaved, children }: { codes: string[]; busy: boolean; onSaved: () => void; children?: ReactNode }) {
+  const { t } = useTranslation();
+  return <div className="mx-auto max-w-xl pt-12">
+    <div className="mb-7"><h1 className="text-2xl font-semibold tracking-tight">{t('desktopClient.recoveryTitle')}</h1><p className="mt-3 max-w-xl text-sm leading-6 text-muted">{t('desktopClient.recoveryBody')}</p></div>
+    <ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{codes.map((value) => <li key={value}>{value}</li>)}</ul>
+    <Button variant="brand" className="mt-7" disabled={busy} onClick={onSaved}>{t('desktopClient.savedCodes')}</Button>
+    {children}
   </div>;
 }

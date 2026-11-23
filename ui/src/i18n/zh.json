@@ -7907,14 +7907,13 @@
       "recoveryGone": "这一步已经不能继续了。",
       "title": "绑定这台电脑",
       "computerLabel": "电脑",
-      "again": "验证好了，再确认一次。",
       "checking": "正在查看…",
       "invalid": "名称只能用小写字母、数字和连字符。",
       "reclaim": "这是你用过的名字，可以直接用回来。",
       "existing": "这台电脑在这个账号下已经有这个域名，会继续用它。",
-      "limit_one": "这个账号已持有 {{count}} 个名字（包括冷却中的），已到上限。",
-      "limit_other": "这个账号已持有 {{count}} 个名字（包括冷却中的），已到上限。",
-      "limitPlain": "这个账号持有的名字（包括冷却中的）已到上限。",
+      "limit_one": "这个账号最多持有 {{count}} 个名字（包括为你保留的），已经到上限。",
+      "limit_other": "这个账号最多持有 {{count}} 个名字（包括为你保留的），已经到上限。",
+      "limitPlain": "这个账号持有的名字（包括为你保留的）已经到上限。",
       "limitDate": "最早的一个预计在 {{date}}释放。",
       "takeBack": "可以用回你自己的名字：",
       "useName": "用这个名字",
@@ -7925,7 +7924,7 @@
       "sendCode": "发送验证码",
       "boundTitle": "已绑定",
       "conflictTitle": "这台电脑属于另一个账号",
-      "conflictBody": "在 avibe.bot 上，这台电脑登记在另一个账号名下。什么都没有改变。要用那个账号，先在这里退出，再用它登录。",
+      "conflictBody": "在 avibe.bot 上，这台电脑登记在另一个账号名下，什么都没有改变。要用它，就在这里退出，再用那个账号登录。",
       "restart": "重新开始",
       "problem": {
         "unreachable": "暂时连不上 avibe.bot，这次没有完成。",
@@ -7938,6 +7937,13 @@
         "codeInvalid": "验证码不对或已过期。",
         "lost": "你确认之后，avibe.bot 的回复没有送到，而且无法重新获取。这台电脑没有绑定。",
         "unknown": "这次没有完成。"
+      },
+      "changed": "验证好了，但{{fields}}和刚才不一样了。看一下，再按「绑定」。",
+      "field": {
+        "account": "账号",
+        "computer": "电脑",
+        "name": "名称",
+        "availability": "能否使用"
       }
     }
   },

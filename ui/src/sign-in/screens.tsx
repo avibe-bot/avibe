@@ -464,6 +464,7 @@ export function CodeEntry({
   onVerify,
   onResend,
   verifyLabel,
+  invalidText,
 }: {
   email: string;
   code: string;
@@ -481,6 +482,8 @@ export function CodeEntry({
   onResend?: () => void;
   /** The primary action where it is not a sign-in (a binding's verification). */
   verifyLabel?: string;
+  /** A wrong code said in the step's own words, in place of `errorKey`. */
+  invalidText?: string;
 }) {
   const { t } = useTranslation();
   const { codeActionRegion, revealCodeActions } = useCodeActionReveal<HTMLDivElement>();
@@ -513,7 +516,7 @@ export function CodeEntry({
         <OtpCells
           code={code}
           label={t('mobileApp.code.label')}
-          invalid={errorKey === 'mobileApp.code.invalid'}
+          invalid={Boolean(invalidText) || errorKey === 'mobileApp.code.invalid'}
           busy={locked}
           onChange={onCodeChange}
           onFocus={revealCodeActions}
@@ -525,9 +528,9 @@ export function CodeEntry({
           id="mobile-login-code-feedback"
           className="mt-3 min-h-6 text-center text-xs leading-6"
         >
-          {errorKey ? (
+          {invalidText || errorKey ? (
             <p role="alert" className="text-destructive-ink">
-              {t(errorKey as TranslationKey)}
+              {invalidText ?? t(errorKey as TranslationKey)}
             </p>
           ) : resent ? (
             <p role="status" className="text-mint-ink">{t('mobileApp.code.resent')}</p>

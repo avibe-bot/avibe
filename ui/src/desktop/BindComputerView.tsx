@@ -13,6 +13,8 @@ import { SignInChrome, type SignInChromeValue, type SignInFrameProps } from '@/s
 import { CodeEntry, SecondFactor } from '@/sign-in/screens';
 import type { SecondFactorMethod } from '@/sign-in/types';
 
+import { AccountSecondFactorView, RecoveryCodesView } from './AccountSecondFactorView';
+
 /**
  * This computer's binding, as the Account page shows it. Each state is one native answer
  * (`observe_current_binding`), never a guess from a missing row or a failed read.
@@ -101,17 +103,25 @@ export type BindProblem = 'unreachable' | 'signedOut' | 'rateLimited' | 'expired
 /** Problems whose only safe next step is going back, not another attempt right away. */
 const BACK_ONLY: BindProblem[] = ['busy', 'rateLimited', 'changed', 'signedOut'];
 
+/** What a review native returned after a verification changed from the one the person confirmed. */
+export type BindField = 'account' | 'computer' | 'name' | 'availability';
+
 export type BindStep =
   | { kind: 'opening' }
-  /** `new`. `check`: what the last read of this exact name said. `again`: after a verification. */
-  | { kind: 'name'; name: string; check: 'free' | 'taken' | 'checking' | 'invalid' | 'reclaim'; again?: boolean }
+  /** `new`. `check`: what the last read of this exact name said. `changed`: after a verification. */
+  | { kind: 'name'; name: string; check: 'free' | 'taken' | 'checking' | 'invalid' | 'reclaim'; changed?: BindField[] }
   /** `existing`: a fixed address this account already holds for this computer. */
-  | { kind: 'existing'; host: string; again?: boolean }
+  | { kind: 'existing'; host: string; changed?: BindField[] }
   /** `name_holding_limit_reached`. Details only when avibe.bot sent them. */
   | { kind: 'limit'; name: string; held: number | null; earliest: string | null; eligible: EligibleName[] }
   | { kind: 'proof' }
-  | { kind: 'code'; code: string }
-  | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; passkeyWaiting?: boolean }
+  /** `invalid`: avibe.bot said the code typed was wrong or expired; the same email's code may be typed again. */
+  | { kind: 'code'; code: string; invalid?: boolean }
+  | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | null }
+  /** The account must add an authenticator first. `material` once native issued it. */
+  | { kind: 'factorSetup'; material: { uri: string; secret: string } | null; code: string; invalid?: boolean }
+  /** Recovery codes that setup returned, shown once. */
+  | { kind: 'codes'; codes: string[] }
   | { kind: 'bound'; host: string }
   | { kind: 'conflict' }
   | { kind: 'upgrade' }
@@ -128,7 +138,9 @@ export type BindComputerViewProps = {
   onConfirm: () => void;
   onSendCode: () => void;
   onCodeChange: (code: string) => void;
-  onSubmitCode: () => void;
+  onSubmitCode: (code: string) => void;
+  onBeginSetup: () => void;
+  onSavedCodes: () => void;
   onFactorStep: (method: SecondFactorMethod | 'recovery') => void;
   onPasskey: () => void;
   onRestart: () => void;
@@ -161,20 +173,30 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
  * The page shows exactly what native read for this ticket, and every step that reaches avibe.bot
  * is a button the person pressed: nothing here runs on mount, reshow or reconnect.
  */
-export function BindComputerView({ step, account, computer, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onFactorStep, onPasskey, onRestart, onUpdates, onClose }: BindComputerViewProps) {
+export function BindComputerView({ step, account, computer, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onUpdates, onClose }: BindComputerViewProps) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
 
   if (step.kind === 'code' || step.kind === 'factor') {
     return <Close.Provider value={onClose}><SignInChrome value={BIND_CHROME}>
       {step.kind === 'code'
-        ? <CodeEntry email={account} code={step.code} verifyLabel={t('mobileApp.twoFactor.verify')} busy={busy ? 'verify' : null} locked={busy} errorKey={null} cooldown={0} providerCooldownActive={false} resent={false}
-          onCodeChange={onCodeChange} onVerify={onSubmitCode} />
+        ? <CodeEntry email={account} code={step.code} verifyLabel={t('mobileApp.twoFactor.verify')} busy={busy ? 'verify' : null} locked={busy} errorKey={null}
+          invalidText={step.invalid ? t('desktopClient.bind.problem.codeInvalid') : undefined} cooldown={0} providerCooldownActive={false} resent={false}
+          onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} />
         : <SecondFactor session={{ status: 'secondFactor', email: account, gate: 'challenge', methods: step.methods }} step={step.method} code={step.code}
-          busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy} errorKey={null} retryMinutes={0}
-          onStep={(next) => { if (next !== 'setup') onFactorStep(next); }} onCodeChange={onCodeChange} onVerify={onSubmitCode} onPasskey={onPasskey} />}
+          busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy} retryMinutes={0}
+          errorKey={step.error === 'passkey' ? 'mobileApp.twoFactor.passkeyFailed' : step.error === 'code' ? (step.method === 'recovery' ? 'mobileApp.twoFactor.recoveryInvalid' : 'mobileApp.twoFactor.codeInvalid') : null}
+          onStep={(next) => { if (next !== 'setup') onFactorStep(next); }} onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} onPasskey={onPasskey} />}
     </SignInChrome></Close.Provider>;
   }
+
+  if (step.kind === 'factorSetup') {
+    return <div className="flex min-h-full flex-col"><AccountSecondFactorView code={step.code} busy={busy}
+      material={step.material ? { type: 'totp_enrollment', uri: step.material.uri, secret: step.material.secret, qrSvg: '' } : null}
+      errorMessage={step.invalid ? t('desktopClient.bind.problem.codeInvalid') : null}
+      onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} onEnroll={onBeginSetup} onLocal={onClose} exitLabel={t('common.cancel')} /></div>;
+  }
+  if (step.kind === 'codes') return <RecoveryCodesView codes={step.codes} busy={busy} onSaved={onSavedCodes} />;
 
   const heading = (title: string, icon?: ReactNode) => <div className="mb-6">
     {icon && <div className="mb-6 grid size-14 place-items-center rounded-2xl border border-edge bg-field">{icon}</div>}
@@ -188,7 +210,7 @@ export function BindComputerView({ step, account, computer, busy = false, onName
     const editable = step.kind === 'name' || step.kind === 'limit';
     const name = editable ? step.name : '';
     const check = step.kind === 'name' ? step.check : null;
-    const again = (step.kind === 'name' || step.kind === 'existing') && step.again;
+    const changed = (step.kind === 'name' || step.kind === 'existing') ? step.changed : undefined;
     const ready = (step.kind === 'name' && (check === 'free' || check === 'reclaim')) || step.kind === 'existing';
     const hint = step.kind === 'existing' ? <span className="text-muted">{t('desktopClient.bind.existing')}</span>
       : check === 'taken' ? <span className="text-destructive-ink">{t('devices.claim.taken')}</span>
@@ -200,7 +222,7 @@ export function BindComputerView({ step, account, computer, busy = false, onName
     const date = step.kind === 'limit' && step.earliest ? timeParts(step.earliest, language)?.date : null;
     return page(<>
       {heading(t('desktopClient.bind.title'))}
-      {again && <p role="status" className="-mt-3 mb-5 flex items-center gap-2 text-sm"><Check className="size-4 text-mint-ink" />{t('desktopClient.bind.again')}</p>}
+      {changed?.length ? <p role="status" className="-mt-3 mb-5 flex items-center gap-2 text-sm"><Check className="size-4 shrink-0 text-mint-ink" />{t('desktopClient.bind.changed', { fields: new Intl.ListFormat(language, { type: 'conjunction' }).format(changed.map((field) => t(`desktopClient.bind.field.${field}` as const))) })}</p> : null}
       <div className="rounded-xl border border-edge bg-surface">
         <div className="grid gap-x-6 gap-y-2 px-5 py-4 md:grid-cols-[72px_minmax(0,1fr)] md:items-center md:gap-y-3">
           <Field label={t('devices.claim.account')}><span className="flex min-w-0 items-center gap-2 text-sm"><AccountLine email={account} /><span className="shrink-0 text-xs text-muted">{t('devices.claim.signedInHere')}</span></span></Field>
