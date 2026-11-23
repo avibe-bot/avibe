@@ -314,17 +314,24 @@ fn route_window(app: &AppHandle, state: &Arc<Direct>, effect: Effect) -> Option<
         move || lock(&state.wiring).routes(session, &window)
     };
     match effect {
+        // Each window is registered with the session's listener as it is
+        // routed, and presents that registration's credential and no other.
+        // A window the listener would not register gets no route.
         Effect::Install { session, window } => {
-            if let Some((host, material)) = route(state, session) {
+            if let Some(((host, material), registration)) =
+                route(state, session).zip(pages::register(state, session, &window))
+            {
                 let still = still(session, &window);
-                native::install(app, window, host, material, still);
+                native::install(app, window, host, material, registration, still);
             }
             None
         }
         Effect::Answer { session, window } => {
-            if let Some((_, material)) = route(state, session) {
+            if let Some(((_, material), registration)) =
+                route(state, session).zip(pages::register(state, session, &window))
+            {
                 let still = still(session, &window);
-                native::answer(app, window, material, still);
+                native::answer(app, window, material, registration, still);
             }
             None
         }
@@ -363,12 +370,11 @@ fn route(state: &Arc<Direct>, session: u64) -> Option<(String, Material)> {
     Some((host.to_owned(), material.clone()))
 }
 
+/// Where the client's listener is. What each window presents to it is that
+/// window's own registration (`pages::register`).
 fn material(client: &Client) -> Option<Material> {
-    let route = client.route()?;
     Some(Material {
-        proxy: route.proxy,
-        username: route.username.to_owned(),
-        password: route.password.to_owned(),
+        proxy: client.route()?.proxy,
     })
 }
 
@@ -466,6 +472,9 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
         state.wake.notify_one();
     }
     lock(&state.stops).remove(&session);
+    // Every window's registration is revoked, then the listener goes with
+    // the client.
+    pages::session_ending(&state, session);
     drop(client);
     pages::session_ended(&app, &state, session);
 }
@@ -730,7 +739,9 @@ pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
     let Some(state) = direct(app) else { return true };
     let shown = lock(&state.shown).as_ref().map(|shown| shown.target.clone());
     match shown {
-        Some(target) => choose(app, &state, &target.account, &target.origin, mode),
+        Some(target) => {
+            choose(app, &state, &target.account, &target.origin, mode);
+        }
         // Nothing to choose for; the ticks go back to what they were.
         None => refresh_menu(app, &state),
     }
@@ -743,8 +754,13 @@ pub(crate) mod app_lock_menu;
 
 /// The choice of path for the instance of `account` at `origin` is now
 /// `mode`: from the menu, or from a page of that instance. Nothing reloads.
-fn choose(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, mode: Mode) {
-    let effects = lock(&state.wiring).choose(account, origin, mode);
+/// Returns the choice's place among this run's choices (`Wiring::choice`).
+fn choose(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, mode: Mode) -> u64 {
+    let (effects, order) = {
+        let mut wiring = lock(&state.wiring);
+        let effects = wiring.choose(account, origin, mode);
+        (effects, wiring.choice(account, origin).1)
+    };
     refresh_menu(app, state);
     let (app, state) = (app.clone(), state.clone());
     tauri::async_runtime::spawn(async move {
@@ -757,6 +773,7 @@ fn choose(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, mod
         // route can be put on an open window.
         state.wake.notify_one();
     });
+    order
 }
 
 #[path = "pages.rs"]
