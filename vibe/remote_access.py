@@ -263,6 +263,18 @@ def _connector_requested_path() -> Path:
     return paths.get_runtime_dir() / "remote-access-connector-requested"
 
 
+def _intent_marker() -> Path:
+    # Separate from connector process records, which are removed on shutdown.
+    return paths.get_state_dir() / "remote-access-connector-intent-v1"
+
+
+def _finish_intent_upgrade() -> None:
+    marker = _intent_marker()
+    if not marker.is_file():
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(exist_ok=False)
+
+
 def _connector_lifecycle_lock_path() -> Path:
     # Never unlinked: every waiter must lock the same inode.
     return paths.get_runtime_dir() / "remote-access-connector.lock"
@@ -4738,6 +4750,9 @@ def stop(config: V2Config | None = None) -> dict[str, Any]:
         with _connector_lifecycle():
             requested = _connector_requested_path().is_file()
             try:
+                # A new-version Stop can arrive before the first UI startup.
+                # Consume the legacy default first; never let startup undo it.
+                _finish_intent_upgrade()
                 _connector_requested_path().unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("Could not withdraw the tunnel connector request", exc_info=True)
@@ -4747,6 +4762,15 @@ def stop(config: V2Config | None = None) -> dict[str, Any]:
             if requested and result.get('ok'):
                 _record_device_access_switch(config, False)
             return result
+    except _ConnectorLifecycleBusy:
+        return {"ok": False, "error": "remote_access_busy", "stopped": False}
+
+
+def stop_connector() -> dict[str, Any]:
+    """Stop the process for shutdown, retaining the user's request and activity."""
+    try:
+        with _connector_lifecycle():
+            return _stop_connector()
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "stopped": False}
 
@@ -5003,6 +5027,37 @@ def _start(
         _retire_legacy_cloudflared(config, binary)
         _report_runtime_status_async(config, event="start")
         return result
+
+
+def restore_connector() -> dict[str, Any]:
+    """Restore saved intent at UI startup without recording a user's switch."""
+    request = _connector_requested_path()
+    try:
+        with _connector_lifecycle():
+            config = V2Config.load()
+            cloud = config.remote_access.vibe_cloud
+            enabled = config.remote_access.provider == "vibe_cloud" and cloud.enabled
+            if not _intent_marker().is_file():
+                # Old shutdown removed a request even when access was on. Adopt
+                # enabled once; publish the request before marking it adopted so
+                # an interrupted migration can safely repeat without a false Off.
+                if enabled and not request.is_file():
+                    request.parent.mkdir(parents=True, exist_ok=True)
+                    request.touch(exist_ok=False)
+                _finish_intent_upgrade()
+            if not enabled or not request.is_file():
+                return _stop_connector(config)
+        # Downloads must not hold the lifecycle lock. An explicit Stop can win
+        # in between, so check the request again in the same lock as the spawn.
+        install_failure = _ensure_cloudflared_pin(config)
+        with _connector_lifecycle():
+            if not request.is_file():
+                return {"ok": True, "started": False}
+            return _start(config, record_request=False, install_failure=install_failure)
+    except _ConnectorLifecycleBusy:
+        return {"ok": False, "error": "remote_access_busy", "started": False}
+    except OSError as exc:
+        return {"ok": False, "error": "remote_access_intent_restore_failed", "detail": str(exc)}
 
 
 def reconcile(config: V2Config | None = None) -> dict[str, Any]:

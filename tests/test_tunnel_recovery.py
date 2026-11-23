@@ -2169,7 +2169,8 @@ try:
 except remote_access._ConnectorLifecycleBusy:
     probe = "busy"
 report.with_suffix(".probe").write_text(probe, encoding="utf-8")
-result = remote_access.stop() if action == "stop" else remote_access.start()
+result = {"stop": remote_access.stop, "start": remote_access.start,
+          "restore": remote_access.restore_connector, "shutdown": remote_access.stop_connector}[action]()
 report.write_text(json.dumps({"ok": result.get("ok"), "error": result.get("error")}), encoding="utf-8")
 """
 
@@ -2200,6 +2201,38 @@ def _live_connectors(binary: Path) -> list[int]:
         if str(binary) in cmdline and process.info.get("status") != psutil.STATUS_ZOMBIE:
             live.append(process.info["pid"])
     return live
+
+
+@pytest.mark.parametrize("actions", [("restore", "restore"), ("shutdown", "shutdown"), ("restore", "stop")])
+def test_processes_serialize_upgrade_restore_and_shutdown(monkeypatch, tmp_path, actions):
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    binary = Path(config.remote_access.vibe_cloud.cloudflared_path)
+    network_up.touch()
+    children = []
+    try:
+        if actions[0] == "shutdown":
+            assert remote_access.restore_connector()["started"]
+        with remote_access._connector_lifecycle():
+            for i, action in enumerate(actions):
+                children.append(_lifecycle_child(tmp_path, action, f"worker-{i}"))
+            for process, report in children:
+                assert _wait_for_file(report.with_suffix(".probe")) == "busy"
+                assert process.poll() is None and not report.exists()
+        for process, report in children:
+            assert process.wait(timeout=60) == 0
+            assert json.loads(_wait_for_file(report))["ok"]
+        assert remote_access._intent_marker().is_file()
+        assert remote_access._connector_requested_path().is_file() == ("stop" not in actions)
+        if actions == ("restore", "restore"):
+            assert _live_connectors(binary) == [remote_access._read_pid()]
+        else:
+            assert not _live_connectors(binary)
+    finally:
+        for process, _ in children:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        remote_access.stop()
 
 
 @pytest.mark.parametrize("children", [("stop",), ("stop", "start")])
