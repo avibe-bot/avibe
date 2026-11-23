@@ -76,6 +76,28 @@ export function ComputerBindingCard({ binding, computer, busy = false, onBind, o
   </div>;
 }
 
+/** Proposal (ui/design: desktop/bind-in-instances/*): the same answers as the card, as one line
+ *  under this computer's row in Instances. Bound needs no line: the row shows the domain. */
+export function ThisComputerLine({ binding, busy = false, onBind, onRefresh, onUpdates, onSignInOther }: Omit<ComputerBindingCardProps, 'computer'>) {
+  const { t } = useTranslation();
+  if (binding.state === 'bound') return null;
+  const text = binding.state === 'unbound' ? t('desktopAccount.bind.notBound')
+    : binding.state === 'otherAccount' ? t('desktopAccount.bind.otherAccount')
+      : binding.state === 'unknown' ? t('desktopAccount.bind.unknown')
+        : binding.state === 'upgrade' ? t('desktopAccount.bind.upgrade')
+          : binding.state === 'repair' ? t('desktopAccount.bind.repair')
+            : binding.state === 'unavailable' ? <Trans i18nKey="desktopAccount.bind.problem.unavailable" values={{ support: SUPPORT_EMAIL }}
+              components={{ mail: <a className="font-medium underline underline-offset-4" href={`mailto:${SUPPORT_EMAIL}`} /> }} /> : null;
+  const button = binding.state === 'unbound' ? <Button variant="brand" size="sm" disabled={busy} onClick={onBind}>{t('desktopAccount.bind.action')}</Button>
+    : binding.state === 'otherAccount' ? <><Button variant="outline" size="sm" disabled={busy} onClick={onSignInOther}>{t('desktopAccount.bind.signInOther')}</Button><Button variant="ghost" size="sm" disabled={busy} onClick={onRefresh}>{t('desktopAccount.bind.checkAgain')}</Button></>
+      : binding.state === 'unknown' ? <Button variant="outline" size="sm" disabled={busy} onClick={onRefresh}>{t('desktopAccount.bind.checkAgain')}</Button>
+        : binding.state === 'upgrade' ? <Button variant="outline" size="sm" disabled={busy} onClick={onUpdates}>{t('update.action.check')}</Button> : null;
+  return <div data-this-computer-line={binding.state} className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-edge px-4 py-3">
+    {binding.state === 'reading' ? <Skeleton className="h-5 w-2/3" /> : <p className="min-w-0 flex-1 text-sm leading-6 text-muted [overflow-wrap:anywhere]">{text}</p>}
+    {button && <div className="flex shrink-0 gap-2">{button}</div>}
+  </div>;
+}
+
 export type EligibleName = { prefix: string; host: string };
 /** Why a step could not go on, as one sentence; never a raw code. */
 export type BindProblem = 'unreachable' | 'signedOut' | 'rateLimited' | 'expired' | 'busy' | 'notResponding' | 'changed' | 'codeInvalid' | 'lost' | 'reauth' | 'storage' | 'unavailable' | 'unknown';

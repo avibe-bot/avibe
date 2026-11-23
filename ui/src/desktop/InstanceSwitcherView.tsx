@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, ChevronRight, Globe, Laptop, Plus, RefreshCw, UserRound, UsersRound } from 'lucide-react';
 import { Button } from '../components/ui/button';
@@ -21,12 +22,15 @@ export interface InstanceSwitcherViewProps {
   onAccount: () => void;
   onAdd: () => void;
   consentError?: string | null;
+  /** Proposal (ui/design: desktop/bind-in-instances/*): this computer's binding, under its own row.
+   *  `dim` greys the row while the binding cannot be confirmed. */
+  thisComputer?: { line: ReactNode; dim?: boolean } | null;
 }
 
 /** ui/design: desktop/instances/instances-*, switching-*, offline-*, consent-*; desktop/status-dots/*.
  * Native owns identity and recency. Keep catalog order; never infer identity from a URL or name. */
 export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, failure,
-  onSelect, onLocal, onCancel, onRefresh, onConsent, onAccount, onAdd, consentError }: InstanceSwitcherViewProps) {
+  onSelect, onLocal, onCancel, onRefresh, onConsent, onAccount, onAdd, consentError, thisComputer }: InstanceSwitcherViewProps) {
   const { t } = useTranslation();
   const current = state.connection.committed;
   const currentRemote = current.kind === 'remote';
@@ -45,8 +49,12 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
   const detail = (item: Instance) => [!item.available && t('desktopAccount.offline'), item.relationship === 'shared' && (item.owner_email ? t('desktopAccount.sharedBy', { owner: item.owner_email }) : t('desktopAccount.shared')), item.host].filter(Boolean).join(' · ');
   // This computer always opens, so its row is never offline: listed among the others, a catalog
   // entry that reports it reachable draws the green dot, and anything else leaves the column empty.
-  const local = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')} detail={localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected}
+  const localRow = (selected: boolean) => <InstanceRow key="local" id="local" name={state.local.slug ?? t('desktopClient.thisDevice')}
+    detail={thisComputer && localItem?.host ? `${localItem.host} · ${t('desktopClient.thisDevice')}` : localItem?.host ?? (state.local.slug ? t('desktopClient.thisDevice') : '')} relationship="owner" selected={selected}
     dot={selected ? currentDot() : catalogDot(false, localItem?.available ? true : undefined)} disabled={blocked} onClick={selected ? onCancel : onLocal} />;
+  const local = (selected: boolean) => thisComputer
+    ? <div key="local" data-this-computer className={cn(thisComputer.dim && '[&_[data-instance-row]]:opacity-60')}>{localRow(selected)}{thisComputer.line}</div>
+    : localRow(selected);
   // The current remote reads offline only when the connection says so; its catalog entry, if any, does not decide.
   const remoteRow = (item: Instance, selected = false) => {
     const opening = pendingId === item.id;
