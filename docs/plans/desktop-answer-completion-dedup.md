@@ -9,9 +9,11 @@ An answerable candidate that was filtered, refused, or failed to submit cannot
 suppress a success notification. Existing reply actions and their authority stay
 unchanged.
 
-The owner authorized a local candidate only on 2026-11-23: no push, PR, release,
-installation, service restart, or real notification test. Main coordinates
-acceptance in the next Desktop package.
+The initial authorization on 2026-11-23 covered a local candidate. At 20:11
++08 the owner authorized an independent English PR and squash merge after
+exact-head review and CI. This delivery excludes D2b, changes to answer
+eligibility or read-triggered withdrawal, releases, installation, and further
+real notification tests.
 
 ## Evidence and identity
 
@@ -71,7 +73,12 @@ changing the Runtime connection or presentation cannot reuse it.
    completion notifications remain.
 4. Confirm a failed run still reports failure.
 
-No real notifications have been sent for this implementation.
+The installed `3.2.8-rc.14+d2b.1` combination contains the candidate. The owner
+completed a native text reply on 2026-11-23 at 12:06:28 +08: the exact native
+`avibe.reply` response matched the Runtime's accepted text-answer operation.
+That verifies reply interaction in the combination, not an independent manual
+acceptance of same-turn completion suppression. Checklist items 1, 3, and 4
+remain unclaimed as manual tests; no further visible test is part of this PR.
 
 ## Local validation
 
@@ -92,6 +99,13 @@ No real notifications have been sent for this implementation.
   when it qualifies without that read. Without exact turn evidence, this may
   retain a duplicate; it never guesses which completion to suppress.
 
-The local candidate is on `fix/desktop-answer-completion-dedup`. Its commit and
-independent review outcome are supplied with the handoff; no push or PR is
-authorized.
+The original local candidate `ee689160bb2c5c537ccec27105789284e37fd177`
+received an independent exact-head review with no findings. PR delivery rebases
+the same implementation onto current master and requires a new exact-head
+review and passing CI; the original review does not stand in for that gate.
+
+At PR preparation, the message/run/turn association above was read back from
+the Runtime and confirmed. On master
+`56d35ffbc20760d9ac012a215f09f9f0eef254d8`, the same delivery-path assertion was
+rerun against the unchanged production implementation, then against the fix.
+The focused suite and native compilation are rerun on the rebased candidate.
