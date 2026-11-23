@@ -191,7 +191,9 @@ function BindDialogBody({ step, account, busy = false, onNameChange, onPick, onC
   if (step.kind === 'opening' || step.kind === 'name' || step.kind === 'existing' || step.kind === 'limit') {
     const changed = step.kind === 'name' || step.kind === 'existing' ? step.changed : undefined;
     const ready = (step.kind === 'name' && (step.check === 'free' || step.check === 'reclaim')) || step.kind === 'existing';
-    const held = step.kind === 'name' ? step.held ?? [] : step.kind === 'limit' ? step.eligible : [];
+    // Held names other than the one already in the field: that one says 「你用过的」 itself.
+    const typed = step.kind === 'name' || step.kind === 'limit' ? step.name : '';
+    const held = (step.kind === 'name' ? step.held ?? [] : step.kind === 'limit' ? step.eligible : []).filter((each) => each.prefix !== typed);
     const at = step.kind === 'limit' && step.earliest ? Date.parse(step.earliest) : NaN;
     const date = Number.isFinite(at) ? new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(at) : null;
     return <>

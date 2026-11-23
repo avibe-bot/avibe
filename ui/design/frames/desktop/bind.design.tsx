@@ -42,7 +42,7 @@ const bind = (step: BindStep, { busy = false } = {}) => column(
   </AccountDetailsView>,
 );
 
-const HELD = [{ prefix: 'maxlab', host: 'maxlab-app.avibe.bot' }];
+const HELD = [{ prefix: 'maxlab', host: 'maxlab-app.avibe.bot' }, { prefix: 'maxhome', host: 'maxhome-app.avibe.bot' }];
 type State = { name: string; title: string; render: () => ReactNode; height?: number; both?: boolean };
 
 const states: State[] = [
@@ -62,7 +62,7 @@ const states: State[] = [
   { name: 'name-held', title: '弹窗 · 自己保留着的名字放在输入框下面', render: bind({ kind: 'name', name: 'max-macmini', check: 'free', held: HELD }) },
   { name: 'name-checking', title: '弹窗 · 正在查', render: bind({ kind: 'name', name: 'maxwell', check: 'checking' }) },
   { name: 'name-taken', title: '弹窗 · 已被占用：不加数字', render: bind({ kind: 'name', name: 'max', check: 'taken' }) },
-  { name: 'name-reclaim', title: '弹窗 · 你用过的', render: bind({ kind: 'name', name: 'maxlab', check: 'reclaim', held: HELD }) },
+  { name: 'name-reclaim', title: '弹窗 · 你用过的：只说这个词，小按钮只放其他保留着的名字', render: bind({ kind: 'name', name: 'maxlab', check: 'reclaim', held: HELD }) },
   { name: 'name-invalid', title: '弹窗 · 不合规则：留在输入框里，不去查', render: bind({ kind: 'name', name: 'a', check: 'invalid' }) },
   { name: 'limit', title: '弹窗 · 名字到上限（数字来自服务器）', render: bind({ kind: 'limit', name: 'max', held: 10, earliest: inDays(11), eligible: HELD }) },
   { name: 'existing', title: '弹窗 · 这台电脑在账号里已有域名：只能确认', render: bind({ kind: 'existing', host: 'mac-7f3k-app.avibe.bot' }) },

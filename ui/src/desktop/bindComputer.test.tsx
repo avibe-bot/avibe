@@ -447,3 +447,13 @@ it('a computer avibe.bot no longer accepts is a dead end that names the support 
   expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
   expect(page.types().filter((type) => type === 'read')).toHaveLength(1);
 });
+
+it('offers held names other than the one already typed', async () => {
+  const names = { holding: { limit: 10, held_count: 3, active_count: 1, at_limit: false, reason: null, earliest_release_at: null },
+    eligible: [{ prefix: 'maxlab', hostname: 'maxlab-app.avibe.bot', release_at: null }, { prefix: 'maxhome', hostname: 'maxhome-app.avibe.bot', release_at: null }] };
+  mount({ open: { receipt: 'r' }, read: review(NEW('maxlab', { prefilled_prefix: 'maxlab', names })) });
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await screen.findByText(en.domainField.reclaim);
+  expect(screen.queryByRole('button', { name: 'maxlab' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'maxhome' })).toBeTruthy();
+});
