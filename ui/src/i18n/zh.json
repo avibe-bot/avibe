@@ -5836,7 +5836,7 @@
       "addToSystemTitle": "添加到主屏幕或程序坞",
       "addToSystemBodyOther": "复制链接，在 Safari 中打开此 Show Page 后添加。",
       "systemEntryUnavailableTitle": "无法添加到主屏幕或程序坞",
-      "systemEntryUnavailableBody": "此实例没有远程访问地址，此 Show Page 只能在 Avibe 内访问。请联系实例所有者在「远程访问」中连接 Avibe Cloud，再用 Safari 打开链接并添加。",
+      "systemEntryUnavailableBody": "这里没有可在 Safari 中打开的分享链接。请联系实例所有者，在「远程访问」中连接 Avibe Cloud。",
       "openInBrowser": "在浏览器中打开",
       "openInBrowserBody": "在默认浏览器中打开此 Show Page；如果不是 Safari，请复制链接到 Safari。",
       "copyLink": "复制链接"

@@ -5836,7 +5836,7 @@
       "addToSystemTitle": "Add to Home Screen or Dock",
       "addToSystemBodyOther": "Copy the link and open it in Safari to add this Show Page.",
       "systemEntryUnavailableTitle": "Can’t add to Home Screen or Dock",
-      "systemEntryUnavailableBody": "This Show Page is only reachable inside Avibe because this instance has no remote access address. Ask the instance owner to connect Avibe Cloud in Remote Access, then open the link in Safari to add it.",
+      "systemEntryUnavailableBody": "There is no share link here to open in Safari. Ask the instance owner to connect Avibe Cloud in Remote Access.",
       "openInBrowser": "Open in browser",
       "openInBrowserBody": "Open this Show Page in your default browser. If it is not Safari, copy the link into Safari.",
       "copyLink": "Copy link"

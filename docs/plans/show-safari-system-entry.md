@@ -10,7 +10,7 @@ The sharing control offers platform guidance and a default-browser handoff/copy 
 
 The candidate from `83176d6b` incorporates remote master `56854d06f8b03e1b706f48edb1fcabef3211fa0b`; the native PDF/image sharing flow from master is retained. The former expanded fixed panel covered the last authored line despite an appended spacer. Expanded guidance now occupies document flow after authored content. Clicking the compact entry brings that footer into view and focuses its collapse button. Collapse/Escape returns focus to the compact entry; dismissal removes the entry and annotation subscription. Space below the panel keeps the annotation button separately reachable. No author nodes are wrapped or restyled.
 
-Unavailable copy explains that the instance has no remote-access address and directs the reader to the instance owner and Remote Access → Avibe Cloud. `url_available` is derived from configured enabled cloud URL, not a live connectivity probe, so copy does not promise that toggling a switch alone guarantees reachability. Mac instructions include both Safari Share and File menu routes.
+Unavailable copy states that this control has no share link to open in Safari and directs the reader to the instance owner and Remote Access → Avibe Cloud. It makes no claim about custom domains or other access methods. `url_available` is derived from configured enabled cloud URL, not a live connectivity probe, so copy does not promise that toggling a switch alone guarantees reachability. Mac instructions include both Safari Share and File menu routes.
 
 ## Verification and limits
 
