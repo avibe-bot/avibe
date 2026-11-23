@@ -865,7 +865,8 @@ async fn check_cut(cut: &'static str) {
     let store = ConnectionStore::new(root.path().join("connection.json"));
     let mut record = store.load("fixture computer").unwrap();
     let review = cut.strip_prefix("proof_start_review_");
-    let adopting = cut.starts_with("monitor_")
+    let monitors_descriptor = cut.starts_with("monitor_") || cut.starts_with("proof_start_monitor_");
+    let adopting = monitors_descriptor
         || cut == "proof_start_bound"
         || cut.starts_with("proof_start_auto_save")
         || cut.starts_with("proof_start_save_")
@@ -936,7 +937,7 @@ async fn check_cut(cut: &'static str) {
         },
         view,
     ));
-    if cut.starts_with("monitor_") || cut.starts_with("proof_start_monitor_") {
+    if monitors_descriptor {
         // Seed the fixture before its first document; no navigation or view invalidation.
         c.inner.lock().unwrap().local = Some(NativeSession::new(
             "http://127.0.0.1:1984".parse().unwrap(),
@@ -1520,9 +1521,20 @@ async fn check_cut(cut: &'static str) {
                 tokio::select! { _ = &mut refresh => panic!("descriptor not held"), _ = hosted.observing.notified() => () }
                 // Direct delivery is synchronous. A monitor does not write the
                 // account and must not make this original reply undeliverable.
+                let before = memory.changed.load(Ordering::SeqCst);
                 let accepted = mail.deliver().unwrap().unwrap();
+                assert_eq!(
+                    memory.changed.load(Ordering::SeqCst),
+                    before,
+                    "private mail receipt broadcast"
+                );
                 hosted.resume_observation.notify_one();
                 refresh.await;
+                assert_eq!(
+                    memory.changed.load(Ordering::SeqCst),
+                    before + 1,
+                    "descriptor publication"
+                );
                 accepted
             } else {
                 mail.deliver().unwrap().unwrap()
