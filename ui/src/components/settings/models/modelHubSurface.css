@@ -3807,6 +3807,48 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   border-color: var(--mint);
   background: var(--mint-soft);
 }
+/* 「From your providers」, one fold per provider: its name, how many models it
+ * offers, and how many of them are picked. Rows sit indented under the fold. */
+.model-hub-picker-source { display: flex; flex-direction: column; gap: var(--model-hub-picker-group-inner-gap, 4px); }
+.model-hub-picker-source-head {
+  --model-hub-picker-source-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--model-hub-picker-row-height, 36px);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--model-hub-wash-08);
+  font-size: var(--model-hub-picker-source-size);
+  font-weight: 600;
+  color: var(--foreground);
+  text-align: left;
+}
+.model-hub-picker-source-head:hover:not(:disabled) { border-color: var(--border-strong); }
+.model-hub-picker-source-head > svg,
+.model-hub-picker-segment-head > svg { flex-shrink: 0; color: var(--muted); transition: transform var(--motion-duration-fast) var(--motion-ease-move); }
+.model-hub-picker-source-head > svg { width: 14px; height: 14px; }
+.model-hub-picker-source-count { font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.model-hub-picker-source-picked { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--model-hub-mint-ink); }
+.model-hub-picker-source-rows { display: flex; flex-direction: column; gap: var(--model-hub-picker-group-inner-gap, 4px); padding-left: 14px; }
+/* A long provider list's second fold, by how the IDs begin: lighter than the
+ * provider's own line, so the two levels read as two. */
+.model-hub-picker-segment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--foreground);
+  text-align: left;
+}
+.model-hub-picker-segment-head:hover:not(:disabled) { background: var(--model-hub-wash-08); }
+.model-hub-picker-segment-head > svg { width: 13px; height: 13px; }
+
 /* An already-listed row is shown, not offered: it stays legible so the search
  * answers 「it exists」, and greys its name so it never looks pickable. */
 .model-hub-picker-row--listed .model-hub-picker-name { color: var(--muted); }
