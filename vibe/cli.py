@@ -16447,6 +16447,12 @@ def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
         _err("Another pairing step is running on this computer, so this command was not accepted. "
              "Nothing from it was sent or saved. Run the same command again in a moment.")
         return True
+    if state == "terminated" and result.get("operation_owner") == "desktop_app":
+        _err("This pairing is managed by the Avibe desktop app, which renews it.")
+        return True
+    if state == "terminated" and result.get("operation_owner") == "personal_claim":
+        _err("This sign-in has ended. Start again from the page or command that began it.")
+        return True
     if error_code == "pairing_needs_reconciliation" or state in {"needs_reconciliation", "terminated"}:
         _print_pairing_needs_check()
         return True
@@ -16480,7 +16486,7 @@ def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
         _err("This pairing key expired before it was used. Get a new one at https://avibe.bot, then enter it here:")
         _err("  vibe remote pair")
         return True
-    if first_send and error_code in {"invalid_pairing_key", "pairing_key_used"}:
+    if error_code == "pairing_input_rejected" and result.get("cause") in {"invalid_pairing_key", "pairing_key_used"}:
         _err("This pairing key was not accepted. Check it, or get a new one at https://avibe.bot, then enter it here:")
         _err("  vibe remote pair")
         return True
@@ -16706,6 +16712,21 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         # record is gone again Avibe Cloud's answer is about that one send.
         first_send = bool(pairing_key) and not pending_operation_exists \
             and not remote_access.pending_pairing_record_exists()
+        if not pairing_key and result.get("replay_state") is None:
+            # An ended saved request answers with its own final error; whose it
+            # is (the desktop app, a sign-in, this command) is in the status.
+            try:
+                from config.v2_config import V2Config
+
+                config = V2Config.load()
+            except Exception:
+                config = None
+            try:
+                pending = remote_access.pending_pairing_status(config) or {}
+            except Exception:
+                pending = {}
+            if pending.get("replay_state") == "terminated":
+                result = {**result, "replay_state": "terminated", "operation_owner": pending.get("operation_owner")}
         _print_remote_pair_failure(result, first_send=first_send)
         return 1
 

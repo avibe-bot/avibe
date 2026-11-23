@@ -187,15 +187,42 @@ def test_received_with_a_receipt_is_archived_here_without_sending(setup_replay, 
     assert ra.pending_pairing_status(None) is None
 
 
-def test_terminated_app_owned_request_offers_no_key(setup_replay, capsys, no_prompt):
+def test_ended_desktop_app_request_is_left_to_the_app(setup_replay, capsys, no_prompt):
     wire, clock, payload, post = setup_replay
     wire.status, wire.body = 400, b'{"error":"pairing_key_expired"}'
     post(payload)
-    assert view()["replay_state"] == "terminated"
+    assert view()["replay_state"] == "terminated" and view()["operation_owner"] == "desktop_app"
     capsys.readouterr()
     assert run_pair() == 1
-    assert_needs_check(lines(capsys))
+    err = lines(capsys)
+    assert err == "This pairing is managed by the Avibe desktop app, which renews it.\n"
+    assert not any(offer in err.lower() for offer in KEY_OFFERS)
     assert len(wire.sent) == 1
+
+
+@pytest.mark.parametrize(("owner", "expected"), [
+    ("personal_claim", "This sign-in has ended. Start again from the page or command that began it.\n"),
+    ("cli", NEEDS_CHECK),
+    (None, NEEDS_CHECK),
+])
+def test_ended_request_copy_follows_its_owner(monkeypatch, capsys, no_prompt, owner, expected):
+    # Display only: which sentence an ended saved request gets. The sends are counted above.
+    monkeypatch.setattr(ra, "pending_pairing_record_exists", lambda: True)
+    monkeypatch.setattr(ra, "pair", lambda *a, **kw: {"ok": False, "error": "pairing_key_expired", "status": 400})
+    monkeypatch.setattr(ra, "pending_pairing_status", lambda config: {
+        "phase": "prepared", "can_resume": False, "replay_state": "terminated", "operation_owner": owner})
+    assert run_pair() == 1
+    assert lines(capsys) == expected
+
+
+@pytest.mark.parametrize("error", ["invalid_pairing_key", "pairing_key_used"])
+def test_a_replay_refused_as_invalid_or_used_needs_check(monkeypatch, capsys, no_prompt, error):
+    # Only the backend's pairing_input_rejected names this command's own first send.
+    monkeypatch.setattr(ra, "pending_pairing_record_exists", lambda: True)
+    monkeypatch.setattr(ra, "pair", lambda *a, **kw: {"ok": False, "error": error, "status": 400})
+    monkeypatch.setattr(ra, "pending_pairing_status", lambda config: None)
+    assert run_pair() == 1
+    assert_needs_check(lines(capsys))
 
 
 def test_local_busy_is_not_pending_and_queues_nothing(setup_replay, monkeypatch, capsys, no_prompt):

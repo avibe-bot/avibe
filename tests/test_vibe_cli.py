@@ -5023,7 +5023,8 @@ def test_cmd_remote_pair_maps_invalid_key_to_user_action(monkeypatch, capsys):
     monkeypatch.setattr(
         remote_access,
         "pair",
-        lambda *args, **kwargs: {"ok": False, "error": "invalid_pairing_key", "status": 400},
+        lambda *args, **kwargs: {"ok": False, "error": "pairing_input_rejected", "cause": "invalid_pairing_key",
+                                 "status": 400},
     )
 
     result = cli.cmd_remote_pair(
