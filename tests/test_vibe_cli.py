@@ -5037,9 +5037,11 @@ def test_cmd_remote_pair_maps_invalid_key_to_user_action(monkeypatch, capsys):
 
     assert result == 1
     error_output = capsys.readouterr().err
-    assert "Pairing key is invalid or expired." in error_output
-    assert "https://avibe.bot" in error_output
-    assert "vibe remote" in error_output
+    # A key typed now and refused on its first send: check it or enter another, hidden.
+    assert error_output == (
+        "This pairing key was not accepted. Check it, or get a new one at https://avibe.bot, then enter it here:\n"
+        "  vibe remote pair\n"
+    )
 
 
 def test_cmd_remote_pair_missing_key_fails_without_request(monkeypatch, capsys):

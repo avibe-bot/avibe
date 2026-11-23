@@ -16412,12 +16412,87 @@ def _print_remote_pair_start() -> None:
     print("Step 2: Pair this device")
 
 
-def _print_remote_pair_failure(result: dict) -> None:
+_PAIRING_NEEDS_CHECK_ERRORS = frozenset({
+    "pairing_needs_reconciliation", "pairing_redeem_indeterminate", "pairing_superseded_after_redeem",
+    "pairing_recovery_not_ready", "invalid_pairing_key", "pairing_key_expired", "pairing_key_used",
+})
+
+
+def _err(line: str) -> None:
+    print(line, file=sys.stderr)
+
+
+def _seconds_text(value: Any) -> str | None:
+    if type(value) is not int or value < 1:
+        return None
+    return "1 second" if value == 1 else f"{value} seconds"
+
+
+def _print_pairing_needs_check() -> None:
+    # One sentence for every outcome this computer cannot settle by itself:
+    # nothing is sent again, and no new key is offered in its place.
+    from vibe.support_contact import SUPPORT_EMAIL
+
+    _err("This computer cannot tell whether Avibe Cloud accepted its pairing request, "
+         "so it will not send it again, and a new key cannot replace it.")
+    _err(f"To have it checked, email Avibe support at {SUPPORT_EMAIL}. Do not delete Avibe's files.")
+
+
+def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
+    """Print the replay-state copy for ``result``; ``False`` leaves it to the older branches."""
+
+    error_code = str(result.get("error") or "")
+    state = result.get("replay_state")
+    if error_code == "pairing_local_busy":
+        _err("Another pairing step is running on this computer, so this command was not accepted. "
+             "Nothing from it was sent or saved. Run the same command again in a moment.")
+        return True
+    if error_code == "pairing_needs_reconciliation" or state in {"needs_reconciliation", "terminated"}:
+        _print_pairing_needs_check()
+        return True
+    if error_code == "pairing_local_archive_required" or state == "local_archive":
+        _err("Avibe Cloud accepted this pairing, but this computer has not finished saving it. "
+             "Finish here; nothing is sent to Avibe Cloud:")
+        _err("  vibe remote pair")
+        return True
+    if error_code == "pairing_redeem_pending":
+        wait = _seconds_text(result.get("retry_after_seconds")) or "a few seconds"
+        _err(f"Avibe Cloud is still processing this pairing. Wait {wait}, then run the same command again.")
+        return True
+    if state == "scheduled":
+        at = result.get("next_retry_at")
+        when = (f"at {time.strftime('%H:%M:%S', time.localtime(at))}"
+                if type(at) in (int, float) and at > 0 else "shortly")
+        _err(f"Avibe Cloud has not confirmed this pairing yet. Avibe will send the same request again {when} "
+             "while it is running; you do not need a new key.")
+        _err("To check on it: vibe remote status")
+        return True
+    if error_code == "pairing_retry_wait":
+        wait = _seconds_text(result.get("retry_after_seconds")) or "a minute"
+        _err(f"Avibe Cloud asked this computer to wait before trying again. Wait {wait}, then run the same command again.")
+        return True
+    if state == "manual":
+        _err("Avibe stopped retrying this pairing on its own. You can send the same request once more; "
+             "your key is not needed again:")
+        _err("  vibe remote pair")
+        return True
+    if first_send and error_code == "pairing_key_expired":
+        _err("This pairing key expired before it was used. Get a new one at https://avibe.bot, then enter it here:")
+        _err("  vibe remote pair")
+        return True
+    if first_send and error_code in {"invalid_pairing_key", "pairing_key_used"}:
+        _err("This pairing key was not accepted. Check it, or get a new one at https://avibe.bot, then enter it here:")
+        _err("  vibe remote pair")
+        return True
+    if error_code in _PAIRING_NEEDS_CHECK_ERRORS:
+        _print_pairing_needs_check()
+        return True
+    return False
+
+
+def _print_remote_pair_failure(result: dict, *, first_send: bool = False) -> None:
     error_code = str(result.get("error") or "unknown_error")
-    if error_code in {"invalid_pairing_key", "pairing_key_expired", "pairing_key_used"}:
-        print("Pairing key is invalid or expired.", file=sys.stderr)
-        print("Create a new pairing key at https://avibe.bot, then run:", file=sys.stderr)
-        print("  vibe remote", file=sys.stderr)
+    if _print_pairing_replay_state(result, first_send=first_send):
         return
     if error_code in {"pairing_request_failed", "backend_http_error"}:
         print("Could not reach Avibe Cloud.", file=sys.stderr)
@@ -16456,20 +16531,6 @@ def _print_remote_pair_failure(result: dict) -> None:
             print(f"Detail: {result['detail']}", file=sys.stderr)
         print("Fix the local config problem, then run:", file=sys.stderr)
         print("  vibe remote pair", file=sys.stderr)
-        return
-    if error_code in {
-        "pairing_recovery_not_ready", "pairing_superseded_after_redeem", "pairing_redeem_indeterminate",
-    }:
-        message = (
-            "A pairing operation has no durably recorded response. It may still be running or may have consumed the key. A keyless retry cannot recover it."
-            if error_code == "pairing_recovery_not_ready"
-            else "The pairing outcome is uncertain or was superseded locally. No recoverable response is guaranteed; do not reuse the submitted key."
-        )
-        print(message, file=sys.stderr)
-        print("Check the cloud console and ensure no pairing is still running. To explicitly replace the pending attempt, substitute a fresh key and the intended backend URL in this command (the default backend is https://avibe.bot):", file=sys.stderr)
-        print("  vibe remote pair NEW_PAIRING_KEY --backend-url BACKEND_URL", file=sys.stderr)
-        if result.get("detail"):
-            print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_recovery_revoked":
         print("The saved pairing recovery was invalidated by a local unpair operation.", file=sys.stderr)
@@ -16622,10 +16683,13 @@ def _run_remote_pair(args, *, guided: bool) -> int:
 
     if not getattr(args, "json", False):
         print("Pairing this device with Avibe Cloud remote access...", flush=True)
+    # Without a key this command continues the saved request; it never starts
+    # another. ``manual_only`` leaves a scheduled retry to the running service.
     result = remote_access.pair(
         pairing_key,
         getattr(args, "backend_url", "https://avibe.bot"),
         getattr(args, "device_name", "avibe"),
+        **({} if pairing_key else {"manual_only": True}),
     )
     start_result = result.get("start") if isinstance(result.get("start"), dict) else {}
     command_ok = bool(result.get("ok") and start_result.get("ok"))
@@ -16638,7 +16702,11 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         return 0 if command_ok else 1
 
     if not result.get("ok"):
-        _print_remote_pair_failure(result)
+        # A key entered now, with no earlier record, was sent once; when the
+        # record is gone again Avibe Cloud's answer is about that one send.
+        first_send = bool(pairing_key) and not pending_operation_exists \
+            and not remote_access.pending_pairing_record_exists()
+        _print_remote_pair_failure(result, first_send=first_send)
         return 1
 
     _print_remote_pair_success(result, start_result)
