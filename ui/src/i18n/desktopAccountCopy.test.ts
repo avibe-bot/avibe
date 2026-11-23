@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import i18n from './index';
+import en from './en.json';
+import zh from './zh.json';
 import { desktopAccountCopy } from './desktop';
 
 // The Desktop Account page's copy (`desktopAccount.*`, ./desktop) is not in the Web UI's locale
@@ -57,5 +59,20 @@ describe('the Desktop Account page copy', () => {
     expect(reachable(join(SRC, 'desktop', 'mount.tsx')).has(join(SRC, 'i18n', 'desktop', 'en.json'))).toBe(true);
     expect(i18n.t('desktopAccount.accountTitle', { lng: 'en' })).toBe(desktopAccountCopy.en.desktopAccount.accountTitle);
     expect(i18n.t('desktopAccount.accountTitle', { lng: 'zh' })).toBe(desktopAccountCopy.zh.desktopAccount.accountTitle);
+  });
+
+  // The Desktop shell compiles en.json and zh.json in and reads its menu copy from
+  // `desktopClient` there (desktop/src-tauri/src/lib.rs, instance_client::native_copy).
+  it('leaves the copy the native menus read where the shell reads it', () => {
+    const shell = readFileSync(join(SRC, '..', '..', 'desktop', 'src-tauri', 'src', 'lib.rs'), 'utf8');
+    const keys = new Set([
+      ...[...shell.matchAll(/native_copy\("(\w+)"\)/g)].map((match) => match[1]),
+      ...[...shell.matchAll(/\("desktop-client-[a-z-]+", "(\w+)"\)/g)].map((match) => match[1]),
+    ]);
+    expect([...keys].sort()).toEqual(['accountService', 'auxiliaryIncomplete', 'signOut', 'switchInstance']);
+    for (const key of keys) {
+      expect(typeof (en.desktopClient as Record<string, unknown>)[key!]).toBe('string');
+      expect(typeof (zh.desktopClient as Record<string, unknown>)[key!]).toBe('string');
+    }
   });
 });

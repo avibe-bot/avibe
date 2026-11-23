@@ -113,7 +113,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     });
   }, []);
   const [review, setReview] = useState<{ account: string; computer: string }>({ account: '', computer: '' });
-  const [busy, setBusy] = useState(false);
+  // Busy belongs to the generation its action started in, like the flow: a retired generation's
+  // action cannot leave the page disabled, whether or not its finalizer still runs.
+  const [busyAt, setBusyAt] = useState<number | null>(null);
+  const busy = busyAt === generation;
   const nameRef = useRef('');
   // A reply for a document, account or flow that is gone is dropped, never drawn.
   const epoch = useRef(0);
@@ -131,7 +134,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     handles.current = { ...NO_HANDLES };
     nameRef.current = '';
     setStep(null);
-    setBusy(false);
+    setBusyAt(null);
   }, [setStep]);
 
   const observe = useCallback(async () => {
@@ -160,6 +163,15 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   }, [call]);
 
   // The two reads, once per showing of the Account page and per account generation.
+  // A changed generation drops the old flow's handles and any reply still on its way.
+  const seen = useRef(generation);
+  useEffect(() => {
+    if (seen.current === generation) return;
+    seen.current = generation;
+    epoch.current += 1;
+    handles.current = { ...NO_HANDLES };
+  }, [generation]);
+  // (Before the reads below, so a new generation's read is not dropped as the old one's.)
   const showing = enabled && state?.account.status === 'signed_in';
   // Closing the flow reads again itself (close()); a flow opening or ending is not a new showing.
   const flowOpen = useRef(false);
@@ -170,14 +182,6 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     void inspect();
   }, [showing, generation, observe, inspect]);
 
-  // A changed generation also drops the old flow's handles and any reply still on its way.
-  const seen = useRef(generation);
-  useEffect(() => {
-    if (seen.current === generation) return;
-    seen.current = generation;
-    epoch.current += 1;
-    handles.current = { ...NO_HANDLES };
-  }, [generation]);
 
   // Leaving the page ends the review it held. Cancelling only attenuates this receipt.
   useEffect(() => () => {
@@ -284,9 +288,9 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   /** Runs one pressed action; nothing else runs while it is on its way. */
   const run = useCallback(async (work: () => Promise<void>) => {
     if (busy) return;
-    setBusy(true);
+    setBusyAt(latest.current?.generation ?? 0);
     const mine = epoch.current;
-    try { await work(); } finally { if (mine === epoch.current) setBusy(false); }
+    try { await work(); } finally { if (mine === epoch.current) setBusyAt(null); }
   }, [busy]);
 
   const start = useCallback(() => run(async () => {

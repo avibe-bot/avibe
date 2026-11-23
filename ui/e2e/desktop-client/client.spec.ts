@@ -163,7 +163,7 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await expect(page.locator('[data-account-label]')).toHaveText('Studio');
     await expect(row.locator('[data-account-avatar],[data-account-chevron]')).toHaveCount(0);
     await expect(row).not.toContainText('max@example.test');
-    await expect(row).not.toContainText((lang === 'en' ? accountEn : accountZh).desktopAccount.auxiliaryIncomplete);
+    await expect(row).not.toContainText((lang === 'en' ? en : zh).desktopClient.auxiliaryIncomplete);
     const chip = row.locator('[data-version-chip]');
     // Beside another computer's name is that instance's own version, as its page reads /api/version
     // (serveProduct answers 2.4.0), not this computer's desktop app's (#4071).

@@ -63,11 +63,11 @@ export function ConnectionChoiceMenu({ choice, system }: { choice: ConnectionCho
     { label: t('desktopBootstrap.pet.shortcutSettings') },
     'separator',
     { label: t('desktopBootstrap.tray.quit'), shortcut: mac ? '⌘Q' : 'Ctrl+Q' },
-    { label: t('desktopAccount.accountService') },
-    { label: t('desktopAccount.switchInstance') },
+    { label: t('desktopClient.accountService') },
+    { label: t('desktopClient.switchInstance') },
     choice ? { label: t('devices.connection.title'), open: true } : { label: t('devices.connection.title'), open: false, disabled: true },
-    { label: t('desktopAccount.signOut') },
-    ...(remote ? [{ label: t('desktopAccount.auxiliaryIncomplete'), disabled: true }] : []),
+    { label: t('desktopClient.signOut') },
+    ...(remote ? [{ label: t('desktopClient.auxiliaryIncomplete'), disabled: true }] : []),
   ];
   const choices: Item[] = [
     { label: t('devices.connection.automatic'), ticked: choice === 'automatic' },

@@ -7774,7 +7774,11 @@
     "disconnected": "Current instance disconnected",
     "connecting": "Connecting",
     "instanceVersion": "{{name}} is on {{version}}",
-    "thisDevice": "This computer"
+    "thisDevice": "This computer",
+    "accountService": "avibe.bot",
+    "switchInstance": "Switch instance",
+    "signOut": "Sign out on this device",
+    "auxiliaryIncomplete": "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them."
   },
   "update": {
     "row": {

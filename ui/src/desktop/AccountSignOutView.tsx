@@ -13,7 +13,7 @@ export interface AccountSignOutViewProps {
  * page's admission; rendering it never authorizes a sign-out action. */
 export function AccountSignOutView({ signingOut, errorMessage, onRetry, onBack }: AccountSignOutViewProps) {
   const { t } = useTranslation();
-  const title = t(signingOut && !errorMessage ? 'desktopAccount.signingOut' : 'desktopAccount.signOut');
+  const title = t(signingOut && !errorMessage ? 'desktopAccount.signingOut' : 'desktopClient.signOut');
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { heading.current?.focus(); }, [title]);
   return <div data-account-sign-out className="mx-auto max-w-xl pt-12">

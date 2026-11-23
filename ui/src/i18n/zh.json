@@ -7774,7 +7774,11 @@
     "disconnected": "当前实例已断开",
     "connecting": "连接中",
     "instanceVersion": "{{name}} 的版本 {{version}}",
-    "thisDevice": "本机"
+    "thisDevice": "本机",
+    "accountService": "avibe.bot",
+    "switchInstance": "切换实例",
+    "signOut": "在此设备退出",
+    "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。"
   },
   "update": {
     "row": {

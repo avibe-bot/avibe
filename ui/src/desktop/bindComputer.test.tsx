@@ -354,3 +354,12 @@ it('a real 429 on a second factor waits in place with its own time', async () =>
   await screen.findByText(en.mobileApp.twoFactor.rateLimited.replace('{{count}}', '2'));
   expect(screen.getByRole('button', { name: en.mobileApp.twoFactor.usePasskey })).toBeTruthy();
 });
+
+it('a new generation while an action is on its way leaves the page usable', async () => {
+  mount({ open: () => new Promise(() => {}) });
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await screen.findByRole('heading', { name: copy.title });
+  await broadcast({ ...signedIn, generation: signedIn.generation + 1, revision: signedIn.revision + 1 });
+  const bind = await screen.findByRole('button', { name: copy.action });
+  expect((bind as HTMLButtonElement).disabled).toBe(false);
+});

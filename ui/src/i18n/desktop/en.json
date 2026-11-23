@@ -2,10 +2,6 @@
   "desktopAccount": {
     "localName": "This Mac · {{name}}",
     "switchLabel": "{{from}} → {{to}}",
-    "accountService": "avibe.bot",
-    "switchInstance": "Switch instance",
-    "auxiliaryIncomplete": "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them.",
-    "signOut": "Sign out on this device",
     "signOutBody": "Sign out on this Desktop and return to this computer. Its binding, remote access preferences and running tasks are kept.",
     "continueLocal": "Continue on this Mac",
     "loading": "Loading…",

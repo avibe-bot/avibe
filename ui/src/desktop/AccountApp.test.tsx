@@ -108,7 +108,7 @@ it('AUTH-SETUP-179 full pages do not repeat the remote-instance note', async () 
   window.history.replaceState(null, '', '/account/index.html?view=instances');
   const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
   render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
-  expect(screen.queryByText(en.desktopAccount.auxiliaryIncomplete)).toBeNull();
+  expect(screen.queryByText(en.desktopClient.auxiliaryIncomplete)).toBeNull();
 });
 
 // ui/design: update/instance-and-app. The owner clicked Update here meaning the instance he was looking at,

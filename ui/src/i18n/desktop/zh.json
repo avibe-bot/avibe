@@ -2,10 +2,6 @@
   "desktopAccount": {
     "localName": "本机 · {{name}}",
     "switchLabel": "{{from}} → {{to}}",
-    "accountService": "avibe.bot",
-    "switchInstance": "切换实例",
-    "auxiliaryIncomplete": "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。",
-    "signOut": "在此设备退出",
     "signOutBody": "退出此 Desktop 上的账号并返回本机。这台电脑的绑定、远程访问设置和正在运行的任务都会保留。",
     "continueLocal": "继续使用本机",
     "loading": "正在加载…",

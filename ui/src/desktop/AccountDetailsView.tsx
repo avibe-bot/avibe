@@ -26,6 +26,6 @@ export function AccountDetailsView({ email, busy, errorMessage, onBack, onSignOu
     </div>
     {children}
     {errorMessage && <p role="alert" className="mt-4 text-sm leading-6 text-destructive-ink">{errorMessage}</p>}
-    <Button variant="outline" className="mt-6 gap-3 [--press-scale:1]" disabled={busy} onClick={onSignOut}><LogOut className="size-4" />{t('desktopAccount.signOut')}</Button>
+    <Button variant="outline" className="mt-6 gap-3 [--press-scale:1]" disabled={busy} onClick={onSignOut}><LogOut className="size-4" />{t('desktopClient.signOut')}</Button>
   </div>;
 }
