@@ -1483,13 +1483,29 @@ A structural test derives both pull-request and push path lists from that
 single source, so new shared or out-of-tree UI inputs cannot silently skip the
 mobile build. The job installs the repository-pinned Node version and lockfile,
 runs `build:mobile`, generates the license notices, verifies the generated
-entry, assets and notices, then pins the same
-Xcode 26.6 toolchain used by the desktop native workflow. It builds against the
-iOS Simulator SDK without signing and runs the XCTest navigation, new-window,
-download, bundled-page, and WebKit capability contracts on an available iPhone
-simulator. Debug and Release use the same generated folder resource; the
-bundled-page XCTest resolves `MobileApp` from the built application bundle and
-executes its React entry through `avibe-app://bundle`.
+entry, assets and notices, then pins Xcode 27.2 and the iOS 27.2 SDK on
+GitHub's hosted `xcode-27` image (the desktop native workflow stays on Xcode
+26.6). It builds against the iOS Simulator SDK without signing and runs the
+XCTest navigation, new-window, download, bundled-page, and WebKit capability
+contracts on the pinned iPhone 18 Pro / iOS 27.2 simulator. Debug and Release
+use the same generated folder resource; the bundled-page XCTest resolves
+`MobileApp` from the built application bundle and executes its React entry
+through `avibe-app://bundle`.
+
+**Going back to Xcode 26.6.** GitHub lists the `xcode-27` image as a public
+preview. If it breaks or is withdrawn, revert the squash commit of
+avibe-bot/avibe#4128 (one commit; it restores both workflows, their lint
+expectations and the tests as they were on Xcode 26.6). To keep its test
+changes instead, change only these lines: in `ios-shell.yml` and
+`ios-testflight.yml`, `runs-on: macos-26`,
+`DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer`, the
+`Xcode 26.6` version check (dropping the 27.2 SDK check); in `ios-shell.yml`,
+the simulator `SimRuntime.iOS-26-5` / `iPhone 17 Pro`; and the matching
+expectations in `tests/test_ci_pipeline.py`. Everything else from that PR works on
+Xcode 26.6 as it is: the sheet fixture's scene life cycle (the comparison's 26.6
+build uses it), the deferred removal of fixture stores (it acts only on WebKit's
+"in use (by network process)" refusal), the cold-first-tap expected failure
+(only on an iOS 27 simulator) and the dispatch-only `ios-sdk-comparison`.
 
 ## TestFlight
 
