@@ -59,8 +59,6 @@ const problemFor = (code: string): BindStep => code === 'local_runtime_upgrade_r
 const WRONG_CODE = new Set(['invalid_or_expired', 'invalid_code', 'invalid_otp', 'verification_invalid']);
 /** An authenticator being added keeps its setup only for a wrong code, not an expired one. */
 const WRONG_SETUP_CODE = new Set(['invalid_code', 'invalid_otp', 'verification_invalid']);
-/** The new sign-in is not published yet: the re-read is refused until it is, without being spent. */
-const NOT_YET = new Set(['decision_changed', 'claim_in_progress', 'busy', 'operation_in_progress']);
 const SAVE_TRIES = 20;
 const SAVE_WAIT_MS = 1500;
 const PASSKEY_FAILED = new Set(['passkey_unavailable', 'invalid_passkey_assertion', 'invalid_passkey_challenge']);
@@ -365,11 +363,12 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     return true;
   }, [setStep]);
   // After an accepted verification, native reads the new sign-in back and saves it on its own;
-  // `verification_accepted` arrives before that is done. Keep the submission and continue once the
-  // account is published: on each native broadcast, and a few times on a short timer, re-read the
-  // same ticket. If publication does not come, the account's own recovery continues it on a press,
-  // with no new code. This runs only after the person's own verification in this document; a new
-  // document starts with no flow.
+  // `verification_accepted` arrives before that is done. `review_after_proof` answers
+  // `{state:"publishing"}` while it is, without spending the submission or reaching avibe.bot: only
+  // that answer is asked again, one request at a time, on each native broadcast and on a short
+  // timer. Any other refusal is final. If publishing does not end, the account's own recovery
+  // continues it on a press, with no new code. This runs only after the person's own verification
+  // in this document; a new document starts with no flow.
   const [saveTick, setSaveTick] = useState(0);
   const stopSaving = useCallback(() => {
     if (saving.current?.timer) window.clearTimeout(saving.current.timer);
@@ -392,20 +391,25 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     const reply = await call('desktop_claim_review', { type: 'review_after_proof', receipt: h.receipt, submission: h.submission });
     current.running = false;
     if (!reply || saving.current !== current) return;
-    if (reply.ok) { stopSaving(); await decided(reply.value); return; }
-    if (reply.code === 'authentication_required' && owedFactor()) { stopSaving(); return; }
-    if (NOT_YET.has(reply.code) && ++current.tries < SAVE_TRIES) {
+    const publishing = reply.ok && reply.value?.state === 'publishing';
+    if (reply.ok && !publishing) { stopSaving(); await decided(reply.value); return; }
+    if (!reply.ok) {
+      // Published, and the new sign-in owes a second factor: the account's gate says which.
+      if (reply.code === 'authentication_required' && owedFactor()) { stopSaving(); return; }
+      stopSaving();
+      setStep(problemFor(reply.code));
+      return;
+    }
+    if (++current.tries < SAVE_TRIES) {
       current.timer = window.setTimeout(() => setSaveTick((tick) => tick + 1), SAVE_WAIT_MS);
       return;
     }
-    if (NOT_YET.has(reply.code)) {
-      const inspected = await call('desktop_account_recovery', { type: 'inspect' });
-      if (saving.current !== current) return;
-      const receipt = inspected?.ok && inspected.value?.state === 'available' ? str(inspected.value.receipt) : null;
-      if (receipt) { current.recover = receipt; setStep({ kind: 'saving', recover: true }); return; }
-    }
+    const inspected = await call('desktop_account_recovery', { type: 'inspect' });
+    if (saving.current !== current) return;
+    const receipt = inspected?.ok && inspected.value?.state === 'available' ? str(inspected.value.receipt) : null;
+    if (receipt) { current.recover = receipt; setStep({ kind: 'saving', recover: true }); return; }
     stopSaving();
-    setStep(problemFor(reply.code));
+    setStep({ kind: 'problem', problem: 'expired' });
   }, [call, decided, owedFactor, setStep, stopSaving]);
   const savingNow = step?.kind === 'saving' && !step.recover;
   const revision = state?.revision;

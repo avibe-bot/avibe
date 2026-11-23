@@ -196,7 +196,7 @@ const broadcast = (state: DesktopClientState) => act(async () => {
 
 it('waits for the accepted sign-in to be published before reading the ticket again', async () => {
   let published = false;
-  const page = mount({ ...proofAnswers, review_after_proof: () => { if (!published) throw { code: 'decision_changed' }; return { state: 'bound' }; } });
+  const page = mount({ ...proofAnswers, review_after_proof: () => (published ? { state: 'bound' } : { state: 'publishing' }) });
   await verify();
   await screen.findByText(copy.saving);
   expect(screen.queryByText(copy.problem.expired)).toBeNull();
@@ -207,7 +207,7 @@ it('waits for the accepted sign-in to be published before reading the ticket aga
 });
 
 it('a published sign-in that still owes a second factor asks for it, with the same submission', async () => {
-  const page = mount({ ...proofAnswers, review_after_proof: refuse('decision_changed'),
+  const page = mount({ ...proofAnswers, review_after_proof: (action: Action) => (action.submission === 's' ? { state: 'publishing' } : { state: 'bound' }),
     submit_factor_code: { state: 'verification_accepted', submission: 's2' } });
   await verify();
   await screen.findByText(copy.saving);
@@ -259,4 +259,28 @@ it('another document never sends claim commands; its Account card opens a real A
   fireEvent.click(await screen.findByRole('button', { name: signedIn.account.identity!.email, exact: true }));
   expect(assign).toHaveBeenCalledWith('avibe://desktop/account?locale=en');
   expect(page.actions).toEqual([]);
+});
+
+it.each(['decision_changed', 'claim_in_progress'])('treats %s after verification as final, asking no more', async (code) => {
+  const page = mount({ ...proofAnswers, review_after_proof: refuse(code) });
+  await verify();
+  await screen.findByText(code === 'claim_in_progress' ? copy.problem.busy : copy.problem.expired);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1700)); });
+  expect(page.types().filter((type) => type === 'review_after_proof')).toHaveLength(1);
+});
+
+it('asks again only while native says publishing, one request at a time', async () => {
+  let inFlight = 0; let most = 0; let asks = 0;
+  const page = mount({ ...proofAnswers, review_after_proof: async () => {
+    inFlight += 1; most = Math.max(most, inFlight); asks += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return asks < 3 ? { state: 'publishing' } : { state: 'bound' };
+  } });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 7 });
+  await broadcast({ ...signedIn, revision: signedIn.revision + 8 });
+  await screen.findByRole('heading', { name: copy.boundTitle }, { timeout: 5000 });
+  expect(most).toBe(1);
+  expect(page.types().filter((type) => type === 'submit_proof_code')).toHaveLength(1);
 });
