@@ -237,6 +237,9 @@ class AnthropicAdapter(ProviderAdapter):
         session = observation.session_id if observation else None
         # Claim before the first await: two requests can never continue the same response.
         parent, parent_state = threads.parent_entry(session, claim=True)
+        claim = object()
+        if session:
+            threads.remember(threads.claims, session, claim)
         route = threads.route_key(request.endpoint, self._gateway)
         replay: str | None = None
         replacement = False
@@ -398,7 +401,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if speculative and self._gateway and not served_as_pinned() and event_type != "message_start":
                         yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                         return
-                    if speculative and lossless:
+                    if (speculative or (attempt and attempt.capture_warm)) and lossless:
                         lossless = shape.accepts(event_type, chunk)
                     if (
                         attempt
@@ -458,6 +461,8 @@ class AnthropicAdapter(ProviderAdapter):
                         if speculative and self._gateway and not served_as_pinned():
                             yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                             return
+                        if attempt and attempt.trial:
+                            await attempt.check_reads(route, response_usage.cache_read_tokens if response_usage else 0)
                         if attempt and attempt.mode == "continue":
                             total = (
                                 (
@@ -960,7 +965,7 @@ class AnthropicAdapter(ProviderAdapter):
                     parent_state = reason
                     attempt.record["binding"] = reason
                     # A reason is not a parent; never evict a reusable node from another overlapping stream.
-                    if session and not isinstance(threads.parents.get(session), threads.Parent):
+                    if session and threads.claims.get(session) is claim and not isinstance(threads.parents.get(session), threads.Parent):
                         threads.remember(threads.parents, session, reason)
 
                 def record_send(size: int) -> None:
@@ -1053,8 +1058,10 @@ class AnthropicAdapter(ProviderAdapter):
                                 event = replace(event, retryable=False, continuable=False, after_thinking=False)
                         elif isinstance(event, Done):
                             message = event.message
-                            if speculative and session:
-                                if not response_id:
+                            if attempt and attempt.trial:
+                                await attempt.check_reads(route, message.usage.cache_read_tokens if message.usage else 0)
+                            if attempt and (speculative or attempt.capture_warm) and session:
+                                if speculative and not response_id:
                                     veto = "missing_or_invalid_message_id"
                                 elif not message_stopped:
                                     veto = "missing_message_stop"
@@ -1066,6 +1073,10 @@ class AnthropicAdapter(ProviderAdapter):
                                     veto = "missing_usage"
                                 elif self._gateway and not served_as_pinned():
                                     veto = "unverified_origin"
+                                elif attempt.record.get("bootstrap_outcome") == "bootstrap_read_loss":
+                                    veto = "bootstrap_read_loss"
+                                elif attempt.capture_warm and not message.usage.cache_read_tokens:
+                                    veto = "cold_full"
                                 else:
                                     veto = None
                                 assistant_hash = None if veto else await asyncio.to_thread(_replayable_digest, message)
@@ -1073,8 +1084,29 @@ class AnthropicAdapter(ProviderAdapter):
                                     binding(veto or "unreplayable_reply")
                                     yield event
                                     continue
-                                attempt.record["binding"] = "bound"
                                 u = message.usage
+                                if attempt.mode == "continue" and attempt.trial:
+                                    if 0 < attempt.record.get("body_bytes", 0) < attempt.record["full_bytes"]:
+                                        attempt.record["bootstrap_outcome"] = "retained_smaller"
+                                        trial = attempt.trial
+
+                                        async def accept_trial() -> None:
+                                            await asyncio.to_thread(threads.bootstrap.settle, route, trial, "bootstrap_proven")
+
+                                        observation.after_commit = accept_trial
+                                    else:
+                                        attempt.record["bootstrap_outcome"] = await asyncio.to_thread(
+                                            threads.bootstrap.settle, route, attempt.trial, "bootstrap_no_byte_saving"
+                                        )
+                                if threads.claims.get(session) is not claim:
+                                    binding("superseded")
+                                    yield event
+                                    continue
+                                attempt.record["binding"] = "warm_full" if attempt.capture_warm else "bound"
+                                next_trial = None
+                                if attempt.mode == "create" and attempt.trial:
+                                    next_trial = replace(attempt.trial, reads=max(attempt.trial.reads, u.cache_read_tokens))
+                                    attempt.record["bootstrap_outcome"] = "awaiting_continuation"
                                 threads.remember(
                                     threads.parents,
                                     session,
@@ -1084,9 +1116,12 @@ class AnthropicAdapter(ProviderAdapter):
                                         len(full_wire.body["messages"]),
                                         attempt.history,
                                         assistant_hash,
-                                        response_id,
+                                        response_id if speculative else None,
                                         u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens,
                                         time.monotonic() + threads.PARENT_SECONDS,
+                                        u.cache_read_tokens,
+                                        next_trial,
+                                        threads.terminal_mark(wire.body),
                                     ),
                                 )
                         else:

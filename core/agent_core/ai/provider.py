@@ -182,6 +182,8 @@ class ThreadObservation:
     attempts: list[dict[str, Any]] = field(default_factory=list)
     settle_discard: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     ordinary_retry: bool = False
+    # A provider can propose a measured optimization; only a committed conversation response accepts it.
+    after_commit: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)

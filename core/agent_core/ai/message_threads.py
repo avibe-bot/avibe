@@ -12,6 +12,7 @@ from typing import Any
 
 from config.paths import get_state_dir
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
+from core.agent_core.ai import thread_bootstrap as bootstrap
 from core.agent_core.ai.provider import ModelEndpoint
 
 BETA = "message-threads-2026-08-12"
@@ -57,20 +58,26 @@ class Parent:
     count: int
     history: bytes
     assistant: bytes
-    message_id: str
+    message_id: str | None  # None: ordinary warm witness, never a server parent.
     tokens: int
     expires: float
+    reads: int = 0
+    trial: bootstrap.Trial | None = None
+    terminal_mark: bool = False
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
 parents: OrderedDict[str, Parent | str] = OrderedDict()
+claims: OrderedDict[str, object] = OrderedDict()
 
 
 def parent_entry(session: str | None, *, claim: bool) -> tuple[Parent | None, str]:
     if not session:
         return None, "no_session"
     entry = parents.pop(session, None) if claim else parents.get(session)
-    return (entry, "bound") if isinstance(entry, Parent) else (None, entry or "no_local_entry")
+    if isinstance(entry, Parent):
+        return entry, "bound" if entry.message_id else "warm_full"
+    return None, entry or "no_local_entry"
 
 
 failed_routes: OrderedDict[bytes, float] = OrderedDict()
@@ -188,6 +195,19 @@ class Attempt:
     fixed: bytes
     history: bytes
     record: dict
+    capture_warm: bool
+    trial: bootstrap.Trial | None
+
+    async def check_reads(self, route: bytes, reads: int) -> None:
+        if self.trial is None:
+            return
+        self.record["bootstrap_observed_reads"] = reads
+        if reads * 100 < self.trial.reads * MIN_USAGE_PERCENT:
+            self.record["bootstrap_outcome"] = "bootstrap_read_loss"
+            saved = await asyncio.to_thread(bootstrap.settle, route, self.trial, "bootstrap_read_loss")
+            if saved != "bootstrap_read_loss":
+                self.record["bootstrap_ledger"] = saved
+            self.trial = None
 
 
 def _cache_plan(full: dict) -> tuple[str | None, int | None]:
@@ -212,9 +232,32 @@ def _cache_plan(full: dict) -> tuple[str | None, int | None]:
             offset += 1
     if static + len(marks) <= 3:
         return None, None
-    if len(marks) != 2 or marks[-1][0] - marks[0][0] >= 20:
+    if len(marks) != 2 or static != 2:
         return "preserve_cache_breakpoints", None
+    if offset > 20 or marks[-1][0] - marks[0][0] >= 20:
+        return "preserve_cache_breakpoints", marks[0][1]
     return None, marks[0][1]
+
+
+def _reaches_parent_mark(assistant: dict, suffix: list) -> bool:
+    # Positions after the previous request's final block: a lookup covers itself and 19 predecessors.
+    content = assistant["content"]
+    distance = len(content) if isinstance(content, list) else 1
+    for msg in suffix:
+        blocks = msg["content"]
+        for block in blocks if isinstance(blocks, list) else (blocks,):
+            distance += 1
+            if distance >= 20:
+                return False
+            if isinstance(block, dict) and "cache_control" in block:
+                return True
+    return False
+
+
+def terminal_mark(body: dict) -> bool:
+    messages = body["messages"]
+    blocks = messages[-1]["content"] if messages else None
+    return bool(isinstance(blocks, list) and blocks and "cache_control" in blocks[-1])
 
 
 def _contains_image(messages: list) -> bool:
@@ -236,6 +279,7 @@ async def plan_send(
     parent: Parent | None,
     repair: bool = False,
     ordinary: str | None = None,
+    preview: bool = False,
 ) -> Attempt:
     route = route_key(ep, gateway)
     if not ordinary:
@@ -247,11 +291,18 @@ async def plan_send(
             ordinary = "history_repair"
         elif failed_routes.get(route, 0) > time.monotonic():
             ordinary = "route_cooldown"
-    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary)
+    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary, preview=preview)
 
 
 def prepare(
-    wire: WireRequest, ep: ModelEndpoint, gateway: bool, parent: Parent | None, route: bytes, ordinary: str | None
+    wire: WireRequest,
+    ep: ModelEndpoint,
+    gateway: bool,
+    parent: Parent | None,
+    route: bytes,
+    ordinary: str | None,
+    *,
+    preview: bool = False,
 ) -> Attempt:
     full = wire.body
     msgs = full["messages"]
@@ -270,9 +321,15 @@ def prepare(
     )
     body = full
     reason = ordinary
+    cache_reason = None
     omitted_mark = None
     if not ordinary:
-        ordinary, omitted_mark = _cache_plan(full)
+        cache_reason, omitted_mark = _cache_plan(full)
+        if cache_reason == "native_history":
+            ordinary = cache_reason
+    warm = False
+    trial = None
+    capture_warm = False
     mode = "full" if ordinary or (get_state_dir() / "disable-message-threads").exists() else "create"
     if mode == "full":
         reason = ordinary or "disabled"
@@ -302,19 +359,27 @@ def prepare(
                 encoded([full.get("tools"), full.get("system"), suffix])
             ):
                 reason = "large_static_or_delta"
+            elif parent.message_id is None:
+                warm = parent.reads > 0
+            elif parent.trial is not None and not bootstrap.owns(route, parent.trial):
+                mode, reason = "full", "bootstrap_stale"
+            elif parent.terminal_mark and parent.trial is None and not _reaches_parent_mark(msgs[n], suffix):
+                mode, reason = "full", "terminal_marker_out_of_reach"
+                capture_warm = omitted_mark is not None
             else:
                 mode = "continue"
+                trial = parent.trial
                 body = {k: v for k, v in full.items() if k not in ("system", "tools")}
                 body.update(messages=suffix, thread={"type": "continue", "previous_message_id": parent.message_id})
-    # The older mark can look back *before* its own position. On create only
-    # remove it if the newest mark also searches the entire message prefix;
-    # a fork or resume has no evidence of which earlier block is warm.
-    if (
-        mode == "create"
-        and omitted_mark is not None
-        and sum(len(m["content"]) if isinstance(m["content"], list) else 1 for m in msgs) > 20
-    ):
-        mode, reason = "full", "preserve_cache_breakpoints"
+    # Only a create actually sends the marker-stripped full history. For a verified delta,
+    # the unsent full body's lookup windows are irrelevant.
+    if mode == "create" and cache_reason:
+        reason = cache_reason
+        if warm and omitted_mark is not None:
+            trial, reason = bootstrap.reserve(route, parent.reads, preview)
+        if trial is None:
+            mode = "full"
+            capture_warm = omitted_mark is not None
     if mode == "create":
         body = {**full, "thread": {"type": "create"}}
         if omitted_mark is not None:
@@ -337,12 +402,16 @@ def prepare(
     # The transport records actual bytes only once a send is handed to HTTPX.
     # A plain send needs no extra serialization to measure the counterfactual.
     record = {"mode": mode, "reason": reason, "full_bytes": len(encoded(full)) if mode != "full" else 0}
+    if trial:
+        record.update(bootstrap_baseline_reads=trial.reads, bootstrap_prior_proven=trial.proven)
     return Attempt(
         replace(wire, headers=headers, body=body),
         mode,
         reason,
         parent,
         fixed,
-        message_digest(msgs) if mode != "full" else b"",
+        message_digest(msgs) if mode != "full" or capture_warm else b"",
         record,
+        capture_warm,
+        trial,
     )
