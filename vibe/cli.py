@@ -16447,6 +16447,12 @@ def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
         _err("Another pairing step is running on this computer, so this command was not accepted. "
              "Nothing from it was sent or saved. Run the same command again in a moment.")
         return True
+    if error_code == "local_instance_conflict" and result.get("operation_owner") == "personal_claim":
+        # A key pasted here while a sign-in from the app or a browser still owns
+        # this computer's saved request: the key is not used, the sign-in stays.
+        _err("This key was not used. This computer is still finishing a sign-in that was started "
+             "in the Avibe app or a browser; continue it there.")
+        return True
     if state == "terminated" and result.get("operation_owner") == "desktop_app":
         _err("This pairing is managed by the Avibe desktop app, which renews it.")
         return True

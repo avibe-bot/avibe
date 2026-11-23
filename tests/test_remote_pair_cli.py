@@ -12,6 +12,7 @@ import pytest
 from tests.test_pairing_recovery import _response, pairing_host as pairing_host  # noqa: F401
 from tests.test_desktop_local_instance import desktop_host as desktop_host  # noqa: F401
 from tests.test_pairing_replay import setup_replay as setup_replay, view  # noqa: F401
+from tests.test_personal_claims import claim_peer as claim_peer  # noqa: F401
 from vibe import cli, pairing_replay as replay, remote_access as ra
 from vibe.support_contact import SUPPORT_EMAIL
 
@@ -311,3 +312,26 @@ def test_typed_key_with_unknown_outcome_is_never_replaced(pairing_host, monkeypa
         assert run_pair(entered) == 1
         assert_needs_check(lines(capsys))
     assert sent == ["uncertain-key"]
+
+
+def test_a_pasted_key_leaves_an_unfinished_sign_in_alone(monkeypatch, capsys, request):
+    from tests.test_personal_claim_journal import _claim
+    from vibe import personal_claims as claims
+
+    request.getfixturevalue("claim_peer")
+    sends = []
+
+    def rejected(url, payload, **kwargs):
+        sends.append(payload.get("pairing_key"))
+        raise ra.BackendRequestError(422, {"error": "pairing_request_failed"})
+
+    monkeypatch.setattr(ra, "_json_request", rejected)
+    assert _claim()["code"] == "pairing_recovery_required"
+    evidence = [ra._pending_pairing_path(), replay._path(), claims._marker()]
+    before = [path.read_bytes() for path in evidence]
+    capsys.readouterr()
+    assert run_pair("fixture-unrelated-key") == 1
+    assert lines(capsys) == ("This key was not used. This computer is still finishing a sign-in that was started "
+                             "in the Avibe app or a browser; continue it there.\n")
+    assert [path.read_bytes() for path in evidence] == before
+    assert len(sends) == 1 and "fixture-unrelated-key" not in sends
