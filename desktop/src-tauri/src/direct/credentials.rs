@@ -152,3 +152,62 @@ impl Windows {
         found.map(Entry::grant)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{handover_tests::public_browser, Client};
+    use std::{
+        sync::{mpsc, TryLockError},
+        time::Duration,
+    };
+    use tokio::{io::AsyncReadExt, net::TcpStream, sync::oneshot, time::timeout};
+
+    #[tokio::test]
+    async fn healthy_owner_drop_stops_listener_before_an_inflight_revoke_finishes() {
+        timeout(Duration::from_secs(4), async {
+            let mut c = Client::new("one-app.avibe.bot", "one".into()).await.unwrap();
+            let mut browser = public_browser(&mut c).await;
+            let proxy = c.route().unwrap().proxy;
+            let h = c.handover();
+            let mut lifetime = c.listener_lifetime();
+            let a = h.window_credential("a").unwrap();
+            let grant = c.listener.access.windows.window(&a).unwrap();
+            let (locked, ready) = oneshot::channel();
+            let (release, wait) = mpsc::channel();
+            let reader = tokio::task::spawn_blocking(move || {
+                let _guard = grant.valid.borrow();
+                locked.send(()).unwrap();
+                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            ready.await.unwrap();
+            let current = a.clone();
+            let worker = h.clone();
+            let revoke = tokio::task::spawn_blocking(move || worker.revoke_window(&a));
+            // No other registry user: contention proves revoke is inside its
+            // critical section, unable to finish until we release the grant read.
+            while !matches!(
+                c.listener.access.windows.windows.try_lock(),
+                Err(TryLockError::WouldBlock)
+            ) {
+                tokio::task::yield_now().await;
+            }
+            drop(c); // Healthy accept loop; keep the overlapping revoke blocked.
+            assert!(h.window_credential("late").is_none());
+            h.revoke_window(&current);
+            assert_eq!(h.window_census(&current), None);
+            assert_eq!(
+                h.close_quiet_public_for_window("one-app.avibe.bot", &current).await,
+                super::super::HandoverResult::NotUsable
+            );
+            assert!(lifetime.changed().await.is_err());
+            assert!(matches!(browser.read(&mut [0]).await, Ok(0) | Err(_)));
+            assert!(TcpStream::connect(proxy).await.is_err());
+            assert!(!revoke.is_finished());
+            release.send(()).unwrap();
+            reader.await.unwrap();
+            revoke.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+}

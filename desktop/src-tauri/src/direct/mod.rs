@@ -218,7 +218,7 @@ impl Client {
         if !listener.is_alive() {
             return None;
         }
-        let (username, password) = listener.windows.legacy().native_login();
+        let (username, password) = listener.access.windows.legacy().native_login();
         Some(Route {
             host: self.host.host(),
             proxy: std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, listener.port),
@@ -251,20 +251,17 @@ impl Client {
     /// Trusted shell window identity. Idempotent until revoked; reopening a
     /// window with the same label gets an unrelated secret and census.
     pub fn window_credential(&self, window: &str) -> Option<WindowRegistration> {
-        self.listener
-            .is_alive()
-            .then(|| self.listener.windows.credential(window))
-            .flatten()
+        self.listener.access.window_credential(window)
     }
     pub fn revoke_window(&self, registration: &WindowRegistration) {
-        self.listener.windows.revoke(registration)
+        self.listener.access.windows.revoke(registration)
     }
     pub fn handover(&self) -> Handover {
         Handover {
             host: self.host.clone(),
             links: self.links.subscribe(),
             health: self.listener.health(),
-            windows: Arc::downgrade(&self.listener.windows),
+            listener: Arc::downgrade(&self.listener.access),
         }
     }
 
@@ -397,6 +394,7 @@ impl Client {
 }
 impl Drop for Client {
     fn drop(&mut self) {
+        self.listener.retire();
         // Detach rather than abort: the signalled monitor and drain own shutdown.
         drop(self.withdraw(false));
     }
