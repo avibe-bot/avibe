@@ -239,8 +239,14 @@ mod tests {
     #[test]
     fn the_remote_grant_names_one_origin_and_ignores_other_schemes() {
         let built = |raw: &str| {
-            remote_drag_capability("main-runtime-3", &raw.parse().unwrap())
-                .map(|c| serde_json::to_value(tauri::ipc::RuntimeCapability::build(c)).unwrap())
+            remote_drag_capability("main-runtime-3", &raw.parse().unwrap()).map(|c| {
+                match tauri::ipc::RuntimeCapability::build(c) {
+                    tauri::utils::acl::capability::CapabilityFile::Capability(capability) => {
+                        serde_json::to_value(capability).unwrap()
+                    }
+                    _ => panic!("one capability"),
+                }
+            })
         };
         let file = built("https://studio-app.avibe.bot/chat/1?x=2").unwrap();
         assert_eq!(
