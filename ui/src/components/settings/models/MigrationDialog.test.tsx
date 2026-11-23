@@ -781,7 +781,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
       'OpenAI',
       'sk-…9f21 · Codex configuration',
       'Also remove the API keys from the native CLI configuration',
-      'Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.',
+      'Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.',
       'Migrating interrupts any task the selected assistants are running in Avibe.',
       'Later',
       'Start migration',

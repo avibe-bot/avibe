@@ -3852,6 +3852,10 @@ a.model-hub-order-price:hover { text-decoration: underline; }
    * row passing under it shows at its corners or in the gap between the two. */
   box-shadow: 0 0 0 var(--model-hub-picker-group-inner-gap) var(--popover);
 }
+/* A row brought into view by focus stops below both headings, not under them. */
+.model-hub-catalog-scroll:has(> .model-hub-picker-list) {
+  scroll-padding-top: calc(var(--model-hub-picker-fold-height) + var(--model-hub-picker-segment-height) + var(--model-hub-picker-group-inner-gap) * 2);
+}
 .model-hub-picker-source-head { top: 0; z-index: 2; }
 .model-hub-picker-segment-head { top: calc(var(--model-hub-picker-fold-height) + var(--model-hub-picker-group-inner-gap)); z-index: 1; }
 .model-hub-picker-source-head {

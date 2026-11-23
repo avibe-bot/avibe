@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -106,6 +106,9 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     // What the order does is behind the title's info control; only the held-out
     // list keeps a line of its own, because it says what those providers are for.
     expect(screen.queryByText(locale.t('settings.models.order.section.ordered.note'))).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: locale.t('settings.models.order.infoLabel') }));
+    expect(screen.getByText(locale.t('settings.models.order.section.ordered.note'))).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
     for (const kind of ['heldOut'] as const) {
       const note = screen.getByText(locale.t(`settings.models.order.section.${kind}.note`));
       expect(note.classList.contains('model-hub-order-section-explanation')).toBe(true);

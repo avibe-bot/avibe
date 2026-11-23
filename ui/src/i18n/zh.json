@@ -2595,7 +2595,7 @@
         "title": "迁移到模型网关",
         "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。",
         "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
-        "cleanApiKeysHint": "不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
+        "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
         "sharedFiles": "这些后端共用文件中保存的认证，需要一起迁移：{{backends}}。勾选或取消其中一个，会同时更新全部关联后端。",
         "scanFailed": "扫描 Agent 配置失败，请重试",
