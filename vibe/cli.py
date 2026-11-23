@@ -19019,6 +19019,8 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
 def build_parser():
     parser = VibeArgumentParser(prog="vibe")
     subparsers = parser.add_subparsers(dest="command")
+    device_parser = subparsers.add_parser("device", help="Optional LAN voice device", add_help=False)
+    device_parser.add_argument("device_args", nargs=argparse.REMAINDER)
     from vibe.cli_mobile import add_mobile_parser
 
     add_mobile_parser(subparsers)
@@ -21724,6 +21726,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("mcp",): "owner",
     ("mcp-add",): "owner",
     ("mcp-discover",): "owner",
+    ("device",): "owner",
 }
 
 #: Argv-level entry points the supervisor, the installer and the launch-at-login
@@ -21859,7 +21862,7 @@ def main():
 
     cache_running_vibe_path()
     argv = sys.argv[1:]
-    if not (argv and argv[0] in (*_INTERNAL_ACTIVATION_COMMANDS, "mcp", "mcp-add", "mcp-discover")):
+    if not (argv and argv[0] in (*_INTERNAL_ACTIVATION_COMMANDS, "mcp", "mcp-add", "mcp-discover", "device")):
         parser = build_parser()
         args = parser.parse_args()
         if args.command == "version":
@@ -21878,6 +21881,15 @@ def main():
     from vibe.authorization import invocation_authority
 
     with invocation_authority(_cli_invocation_authority()):
+        if argv and argv[0] == "device":
+            from vibe.cli_device import main as device_main
+
+            try:
+                _require_command_path_admission(("device",))
+            except TaskCliError as exc:
+                _print_task_error(exc)
+                sys.exit(1)
+            sys.exit(device_main(argv[1:]))
         if argv and argv[0] in _INTERNAL_ACTIVATION_COMMANDS:
             _require_internal_activation_admission(argv[0])
         if argv and argv[0] == "__restart-supervisor":
@@ -21928,6 +21940,10 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         if _generation_downgrade_blocks("restart", allow_downgrade=args.allow_downgrade):
             sys.exit(1)
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
+    if args.command == "device":
+        from vibe.cli_device import main as device_main
+
+        sys.exit(device_main(args.device_args))
     if args.command == "status":
         sys.exit(cmd_status())
     if args.command == "schedule":

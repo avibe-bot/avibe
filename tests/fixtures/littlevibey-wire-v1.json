@@ -1,0 +1,11 @@
+{
+  "device_hello": {"type":"hello","version":2,"transport":"websocket","features":{"avibe_voice":1},"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}},
+  "server_hello": {"type":"hello","version":2,"transport":"websocket","session_id":"s1","audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60},"avibe_voice":{"version":1,"route_revision":4}},
+  "wake": {"type":"listen","state":"detect","session_id":"s1","text":"小歪小歪","wakeword_id":"xiaowai-xiaowai","protocol_version":1,"route_revision":4,"model_id":"mn7_cn","model_package_version":"esp-sr-2.4.7","event_id":"s1:wake:1","sequence":1,"timestamp_ms":1000},
+  "capture_start": {"type":"listen","state":"start","session_id":"s1","request_id":"r1"},
+  "capture_stop": {"type":"listen","state":"stop","session_id":"s1","request_id":"r1"},
+  "tts_start": {"type":"tts","state":"start","session_id":"s1","request_id":"r1","playback_id":"p1"},
+  "playback_started": {"type":"playback","state":"started","session_id":"s1","request_id":"r1","playback_id":"p1"},
+  "tts_stop": {"type":"tts","state":"stop","session_id":"s1","request_id":"r1","playback_id":"p1"},
+  "playback_drained": {"type":"playback","state":"drained","session_id":"s1","request_id":"r1","playback_id":"p1","boundary":"queues_empty_after_output_write","tail_guard_ms":80}
+}

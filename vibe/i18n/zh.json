@@ -1,4 +1,11 @@
 {
+  "device": {
+    "pluginMissing": "此 Avibe 环境尚未安装可选的 avibe-device 插件。",
+    "expired": "设备语音请求已过期。",
+    "localOnly": "设备语音需要通过本机宿主使用。",
+    "invalidRequest": "设备语音请求无效。",
+    "unavailable": "设备语音请求暂时无法完成。"
+  },
   "systemSchedule": {
     "waitingForDevice": "正在等待设备返回结果。",
     "enableOnDevice": "能接收这条的手机都关着「闹钟与提醒」。先请用户在「设备」中打开，再发新的闹钟或提醒。"
