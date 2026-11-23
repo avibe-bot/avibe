@@ -640,6 +640,19 @@ def test_search_and_metadata_each_read_catalog_once_and_honor_deployment_authori
     assert catalog.reads == 4
 
 
+def test_fully_qualified_exact_deployment_precedes_the_search_result_cap(monkeypatch):
+    catalog = {
+        "relay": {"models": {"gpt-9": {}}},
+        "openai": {"models": {"gpt-9": {}, **{f"gpt-9-variant-{i}": {} for i in range(8)}}},
+    }
+    monkeypatch.setattr(models_dev_catalog, "_catalog_for_search", lambda **_: catalog)
+    qualified = models_dev_catalog.search_models_dev("relay/gpt-9")
+    assert len(qualified) == 8
+    first = qualified[0]
+    assert (first["provider_id"], first["model_id"], first["match_kind"]) == ("relay", "gpt-9", "exact")
+    assert models_dev_catalog.search_models_dev("gpt-9")[0]["models_dev_id"] == "openai/gpt-9"
+
+
 def test_disagreeing_first_party_copies_do_not_describe_a_variant():
     copies = {key: {"id": "gpt-9", "limit": {"context": limit}} for key, limit in (("a", 100), ("b", 200))}
     for items in (copies.items(), reversed(copies.items())):

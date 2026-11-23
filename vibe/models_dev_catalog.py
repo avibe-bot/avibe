@@ -729,7 +729,11 @@ def _lookup(
                 row = match
             else:
                 row = {**_preferred_copy(mid, copies, vendor_map), "match_kind": "closest"}
-            ranked.append((not row["first_party"], min(c[0] for c in copies), row["display_name"].lower(), mid, row))
+            # An explicit provider/model identifies a particular deployment even
+            # when many first-party text suggestions would otherwise crowd it out.
+            qualified = row["match_kind"] == "exact" and row["models_dev_id"] == identity
+            ranked.append((not qualified, not row["first_party"], min(c[0] for c in copies),
+                           row["display_name"].lower(), mid, row))
         ranked.sort(key=lambda item: item[:-1])
         rows = [row for *_, row in ranked]
         if match and match["match_kind"] == "closest" and admissible_backend_model(None, identity, {}) is not None:
