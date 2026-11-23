@@ -370,6 +370,7 @@ export function AccountApp() {
   /** The App's own sign-in, as its page or as the claim dialog's first face (whose way out cancels). */
   const signIn = (inClaim: boolean) => state && <><DesktopSignIn state={state} send={send}
       onLocal={() => { if (inClaim) exitClaim(); else leave('return_local'); }} exitLabel={inClaim ? t('common.cancel') : undefined}
+      heading={inClaim ? <h2 className="mb-2 text-xl font-semibold tracking-tight">{t('desktopAccount.bind.signInTitle')}</h2> : undefined}
       onDifferentAccount={() => void send({ type: 'abort_sign_in' }).then((reply) => {
         setForgetFailure(reply && 'ok' in reply && !reply.ok ? { code: reply.error.code, generation: reply.state.generation } : null);
       })}

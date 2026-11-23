@@ -60,6 +60,9 @@ export type DesktopSignInProps = {
   onLocal: () => void;
   /** The way out's label when it is not 「继续使用本机」 (the claim dialog's 「取消」). */
   exitLabel?: string;
+  /** In place of the welcome (mascot, the App's title and lines): a heading that says why this
+   *  sign-in is here, over the same ways in (the claim dialog's 「登录以领取你的专属域名」). */
+  heading?: ReactNode;
   /** Leaves an owed second factor (`cancel`): native drops that attempt. */
   onDifferentAccount: () => void;
   /** Opens avibe.bot's Account security page. */
@@ -80,6 +83,7 @@ export function DesktopSignIn({
   methods,
   onLocal,
   exitLabel,
+  heading,
   onDifferentAccount,
   onOpenSecurity,
   renderEnroll,
@@ -138,7 +142,15 @@ export function DesktopSignIn({
   return (
     <LocalExit.Provider value={{ onLocal, label: exitLabel ?? null }}>
     <SignInChrome value={DESKTOP_SIGN_IN_CHROME}>
-      {flow.render((actions) => (
+      {flow.render((actions) => heading ? (
+        <div data-account-login className="flex w-full flex-col gap-3">
+          {heading}
+          {actions}
+          <div className="text-center">
+            <Button variant="ghost" size="sm" className="text-muted" onClick={onLocal}>{exitLabel ?? t('desktopAccount.continueLocal')}</Button>
+          </div>
+        </div>
+      ) : (
         // The iPhone's first page, smaller and without its brand row, with the Desktop's own
         // subtitle (Max, 2026-11-20); "continue on this computer" stays, quieter, below it.
         <div data-account-login className="mx-auto my-auto flex w-full max-w-sm shrink-0 flex-col py-4">

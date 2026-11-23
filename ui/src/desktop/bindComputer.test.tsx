@@ -137,6 +137,11 @@ it('signed out, the claim dialog starts with the App sign-in, then opens the nam
   const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')) }, signedOut);
   const dialog = await screen.findByRole('dialog');
   expect(dialog.querySelector('[data-account-login]')).toBeTruthy();
+  // The dialog's own heading over the same ways in; not the App's welcome.
+  expect(within(dialog).getByRole('heading', { name: copy.signInTitle })).toBeTruthy();
+  expect(within(dialog).queryByRole('img')).toBeNull();
+  expect(within(dialog).queryByText(en.mobileApp.welcome.titleLine1)).toBeNull();
+  expect(within(dialog).getByRole('button', { name: en.mobileApp.welcome.continueWithEmail })).toBeTruthy();
   expect(within(dialog).getByRole('button', { name: en.common.cancel })).toBeTruthy();
   expect(within(dialog).queryByRole('button', { name: en.desktopAccount.continueLocal })).toBeNull();
   expect(page.types().filter((type) => type !== 'refresh_sign_in_methods')).toEqual([]);

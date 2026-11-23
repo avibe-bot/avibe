@@ -163,6 +163,7 @@
       "otherAccount": "这台电脑的绑定不在这个账号名下。",
       "signInOther": "用绑定它的账号登录",
       "existingTitle": "绑定这台电脑",
+      "signInTitle": "登录以领取你的专属域名",
       "boundTo": "绑定到",
       "confirmExisting": "绑定"
     }

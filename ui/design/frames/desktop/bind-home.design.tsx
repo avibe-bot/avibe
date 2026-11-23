@@ -10,11 +10,9 @@ import type { Device } from '@/components/devices/types';
 import { SetupRemoteAccessView } from '@/components/onboarding/SetupRemoteAccessView';
 import { AccountDetailsView } from '@/desktop/AccountDetailsView';
 import { BindDialog, ComputerBindingCard, type BindStep } from '@/desktop/BindComputerView';
-import { DesktopSignIn } from '@/desktop/DesktopSignIn';
 import type { DesktopClientState } from '@/desktop/bridge';
-import { SIGN_IN_PROVIDERS } from '@/sign-in/types';
 import { frames, type FrameSpec } from '../../frame';
-import { DesktopBackHeader } from '../../kit/desktop-back-header';
+import { ClaimDialogSignIn, DesktopBackHeader } from '../../kit/desktop-back-header';
 import { settingsFixtures, settingsPage } from '../settings/fixtures';
 import { setupFixtures } from '../setup/fixtures';
 import { copyFor } from './instances-fixtures';
@@ -46,8 +44,7 @@ const signedOut: DesktopClientState = {
 };
 
 const dialog = (step: BindStep) => <BindDialog step={step} account={EMAIL}
-  signIn={<DesktopSignIn state={signedOut} send={async () => null} methods={{ providers: SIGN_IN_PROVIDERS, passkey: true }}
-    onLocal={noop} onDifferentAccount={noop} onOpenSecurity={noop} renderEnroll={() => null} />}
+  signIn={<ClaimDialogSignIn state={signedOut} />}
   onNameChange={noop} onPick={noop} onConfirm={noop} onSendCode={noop} onCodeChange={noop} onSubmitCode={noop} onBeginSetup={noop} onSavedCodes={noop}
   onFactorStep={noop} onPasskey={noop} onRestart={noop} onRecover={noop} onUpdates={noop} onClose={noop} />;
 
@@ -71,7 +68,7 @@ const states: State[] = [
   // Setup's optional step.
   { name: 'setup-step', title: '设置向导 · 可选的一步：开启远程访问，或者跳过', route: '/setup', setup: true, render: () => <SetupRemoteAccessView surface="browser" onTurnOn={noop} onSkip={noop} /> },
   { name: 'setup-signed-in-sheet', title: '设置向导 · 已登录：按下后，受信界面里的弹窗直接从起名开始', render: sheet({ kind: 'name', name: 'max', check: 'free' }) },
-  { name: 'setup-signed-out-sheet', title: '设置向导 · 未登录（新装）：弹窗第一面是 App 自己的登录，登好以后在同一个弹窗里起名', render: sheet({ kind: 'signIn' }), height: 900 },
+  { name: 'setup-signed-out-sheet', title: '设置向导 · 未登录（新装）：弹窗第一面是登录（弹窗自己的标题，同样的登录方式，「取消」），登好以后在同一个弹窗里起名', render: sheet({ kind: 'signIn' }), height: 900 },
   // The Account page keeps only the account.
   { name: 'account-bound', title: '「账号」页 · 只留账号本身；这台电脑绑定了，就显示一行只读的域名', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground">
     <AccountDetailsView email={EMAIL} busy={false} onBack={noop} onSignOut={noop}>

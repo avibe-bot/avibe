@@ -163,6 +163,7 @@
       "otherAccount": "This computer’s binding is not under this account.",
       "signInOther": "Sign in with the account it is bound to",
       "existingTitle": "Bind this computer",
+      "signInTitle": "Sign in to claim your own domain",
       "boundTo": "Binds to",
       "confirmExisting": "Bind"
     }
