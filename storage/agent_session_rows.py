@@ -17,6 +17,7 @@ from storage.session_reclaim import (
     reconcile_explicit_overrides,
 )
 
+UNOWNED_SESSION_BACKENDS = ("", "default", "unknown")
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JSON_VALUE_PREFIX = "__json__:"
 
@@ -67,7 +68,8 @@ def session_route_settings(conn: Connection, session_id: str) -> dict[str, Any] 
     """
 
     row = conn.execute(
-        select(agent_sessions.c.model, agent_sessions.c.reasoning_effort, agent_sessions.c.metadata_json)
+        select(agent_sessions.c.model, agent_sessions.c.reasoning_effort, agent_sessions.c.metadata_json,
+               agent_sessions.c.agent_id, agent_sessions.c.agent_name)
         .where(agent_sessions.c.id == str(session_id))
     ).first()
     if row is None:
@@ -76,6 +78,8 @@ def session_route_settings(conn: Connection, session_id: str) -> dict[str, Any] 
         "model": row.model,
         "reasoning_effort": row.reasoning_effort,
         "metadata": decode_metadata_object(row.metadata_json),
+        "agent_id": row.agent_id,
+        "agent_name": row.agent_name,
     }
 
 

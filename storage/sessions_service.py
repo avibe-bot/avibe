@@ -21,6 +21,7 @@ from storage import loop_writers
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import (
     SUPERSEDED_ANCHOR_INFIX,
+    UNOWNED_SESSION_BACKENDS,
     create_agent_session_row,
     decode_session_value,
     encode_session_value,
@@ -2589,7 +2590,7 @@ def _agent_backend(agent_name: str) -> str:
 
 
 def _is_owned_backend(agent_backend: str) -> bool:
-    return str(agent_backend or "").strip() not in {"", "default", "unknown"}
+    return str(agent_backend or "").strip() not in UNOWNED_SESSION_BACKENDS
 
 
 def _is_sentinel_variant(agent_variant: str) -> bool:

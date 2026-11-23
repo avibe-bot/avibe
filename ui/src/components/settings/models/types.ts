@@ -267,6 +267,8 @@ export type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode'> & { catal
  *  back executes. Absent on a save that removes nothing. */
 export type BackendModelsPut = {
   baseline: BackendModel[];
+  /** Baseline ID to desired ID; distinct non-overlapping pairs, not removals. */
+  renames?: Record<string, string>;
   models: BackendModel[];
   force?: true;
   would_remove_hops?: RouteHopRef[];
