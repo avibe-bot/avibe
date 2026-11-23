@@ -144,10 +144,19 @@ class Conversation:
         return self.codec.output_frames(base64.b64decode(response["audio"], validate=True))
 
 
-def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, settling=0.2) -> web.Application:
+def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, settling=0.2,
+               provision=None) -> web.Application:
     app = web.Application()
     connections: set[web.WebSocketResponse] = set()
     selected_host = host or Host()
+
+    async def ota(request):
+        payload = provision.response(request.headers.get("Device-Id", "")) if provision is not None else None
+        if payload is None:
+            raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
+        # The firmware's OTA check only receives local WebSocket configuration:
+        # no activation, MQTT, firmware update, instance or model credentials.
+        return web.json_response(payload, headers={"Cache-Control": "no-store"})
 
     async def websocket(request):
         device_id = request.headers.get("Device-Id", "")
@@ -191,9 +200,12 @@ def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, set
         return ws
 
     async def shutdown(_app):
+        if provision is not None:
+            provision.close()
         for ws in tuple(connections):
             await ws.close(code=1001)
 
     app.router.add_get("/device/ws", websocket)
+    app.router.add_post("/device/ota", ota)
     app.on_shutdown.append(shutdown)
     return app

@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 from .pairing import Pairing
 
 
-async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None):
+async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None,
+                provision_file=None, provision_seconds=120):
     """One scope owns listeners and sockets; stopping preserves pairing."""
     from aiohttp import web
     from .server import create_app
@@ -30,6 +31,7 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None):
 
     signals = []
     runner = None
+    provision = None
     loop = asyncio.get_running_loop()
     try:
         install_signals = stopped is None
@@ -37,7 +39,11 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None):
         for sig in ((signal.SIGINT, signal.SIGTERM) if install_signals else ()):
             loop.add_signal_handler(sig, stopped.set)
             signals.append(sig)
-        runner = web.AppRunner(create_app(pairing, inactivity=inactivity, threshold=threshold),
+        if provision_file is not None:
+            from .provision import ProvisionWindow
+
+            provision = ProvisionWindow(pairing, provision_file, bind=bind, port=port, seconds=provision_seconds)
+        runner = web.AppRunner(create_app(pairing, inactivity=inactivity, threshold=threshold, provision=provision),
                                access_log=None, shutdown_timeout=5)
         await runner.setup()
         await web.TCPSite(runner, bind, port).start()
@@ -51,6 +57,8 @@ async def serve(pairing, *, bind, port, inactivity, threshold, stopped=None):
             if runner is not None:
                 await runner.cleanup()
         finally:
+            if provision is not None:
+                provision.close()
             for sig in signals:
                 loop.remove_signal_handler(sig)
             os.close(lock)
@@ -74,6 +82,8 @@ def main(argv=None) -> int:
     serve_parser.add_argument("--port", type=int, default=8765)
     serve_parser.add_argument("--inactivity", type=float, default=20)
     serve_parser.add_argument("--vad-threshold", type=int, default=600)
+    serve_parser.add_argument("--provision-file", type=Path)
+    serve_parser.add_argument("--provision-seconds", type=int, default=120)
     args = parser.parse_args(argv)
     pairing = Pairing(args.state_dir)
     try:
@@ -132,7 +142,8 @@ def main(argv=None) -> int:
 
             Codec()  # Fail dependency checks before opening a listener.
             asyncio.run(serve(pairing, bind=args.bind, port=args.port, inactivity=args.inactivity,
-                              threshold=args.vad_threshold))
+                              threshold=args.vad_threshold, provision_file=args.provision_file,
+                              provision_seconds=args.provision_seconds))
             return 0
         print(json.dumps({"ok": True, **pairing.status()}))
         return 0

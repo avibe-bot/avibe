@@ -27,20 +27,49 @@ not to stdout. The plugin's durable record contains only its hash.
 
 ```sh
 avibe-device --state-dir /path/to/device-state pair \
-  --device-id 'CORE-S3-MAC' --name 'Vibey' \
+  --device-id 'aa:bb:cc:dd:ee:ff' --name 'Vibey' \
   --websocket-url 'ws://192.168.1.10:8765/device/ws' \
   --provision-file /private/path/vibey-provision.json
 avibe-device --state-dir /path/to/device-state status
 avibe-device --state-dir /path/to/device-state doctor
 avibe-device --state-dir /path/to/device-state enable
-avibe-device --state-dir /path/to/device-state serve --bind 192.168.1.10 --port 8765
+avibe-device --state-dir /path/to/device-state serve \
+  --bind 192.168.1.10 --port 8765 \
+  --provision-file /private/path/vibey-provision.json --provision-seconds 120
 ```
 
-Use a concrete LAN address; wildcard/public binds are refused. The pairing file
-is provisioning material for an authorized device setup step, **not** an open
-OTA endpoint. Installation alone cannot replace the board's existing OTA URL.
-Changing device configuration/NVS or flashing is a separate operator action.
-Keep the LAN trusted: this candidate does not add TLS termination.
+Replace the example device ID with the board's **Wi-Fi STA MAC**, exactly
+lowercase and colon-separated. Use a concrete LAN address; wildcard/public binds
+are refused. In the board's Wi-Fi setup page, set **Custom OTA URL** to
+`http://192.168.1.10:8765/device/ota` before starting its connection check.
+This firmware page writes `ota_url`; installing the plugin alone does not change
+the board. Device configuration and flashing remain separate operator actions.
+
+The explicit `serve --provision-file` option opens a 120-second window (at most
+300 seconds) on the **same plugin port**. `POST /device/ota` checks `Device-Id`
+against the currently enabled pairing and returns only
+`{"websocket":{"url":"ws://192.168.1.10:8765/device/ws","token":"<device-only token>","version":2}}`.
+The existing file must be an owner-private regular file whose token matches
+this pairing and whose WebSocket address matches this listener. No MQTT,
+activation or firmware-update response is served. No cloud or host credential
+is read or returned. The board uses this response for its authenticated
+WebSocket connection; no token needs to be pasted into its setup page.
+
+Missing/other device IDs, disabled/revoked pairings, absent windows and expired
+windows are refused. Retries during the window are allowed because a response
+can be lost. Expiry closes credential delivery; it does not revoke the paired
+WebSocket token or interrupt an established conversation. Stopping the plugin
+also closes the window, and a normal later `serve` without the option leaves it
+closed. A later board boot/OTA check needs a newly opened window: explicitly
+start the plugin with the provisioning options again. Keep the private file
+for that purpose; after revoke, remove it and create a fresh pair/file.
+
+This is trusted-LAN provisioning: a MAC address is **not proof of possession**
+and another LAN peer that knows it could fetch the device token during the
+explicit window. Keep the LAN trusted and the window short; this candidate does
+not add TLS termination. The plugin uses its own port, so an existing Avachan
+service need not be stopped. Reserve the host's LAN address or update both the
+private provisioning file's URL and the board's Custom OTA URL when it changes.
 
 In a second local shell, `stop` or `disable` ends the listener and its current
 connection within the bounded shutdown path while preserving pairing and alias.
@@ -109,6 +138,11 @@ spoken exit, unrelated Web admission, private pair/revoke/disable, invalid/dupli
 receipts, own-mic input during playback, disconnection, legacy negotiation,
 inactivity and repeated lifecycle disposal. An owned child-process crash leaves
 ordinary host chat available.
+
+The two-turn test first obtains its WebSocket URL/token through the real local
+OTA response. Separate HTTP tests cover exact device identity, retries, expiry,
+disable/revoke, listener stop/restart with no reopened window, private-file
+validation and absence of extra response fields or leaked credentials.
 
 Adversarial model responses try terminal, files, Vault, MCP, delegation, background
 and hosted tools without creating effects or Runs. Duplicate/restart requests,

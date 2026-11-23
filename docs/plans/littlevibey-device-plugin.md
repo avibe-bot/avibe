@@ -58,6 +58,30 @@ dependencies, without a generic plugin framework, bus, or Cordis dependency.
 Pairing/diagnosis survives missing voice capabilities. V1 host IPC is Unix-only;
 the plugin does not acquire the broad Windows host bearer descriptor.
 
+### Explicit LAN provisioning response
+
+The 2026-11-24 board preflight exposed a missing connection-discovery step.
+The firmware performs `POST` with a nonempty system-info JSON body to its
+configured `ota_url`, carrying `Device-Id` as the lowercase colon-separated
+Wi-Fi STA MAC. The firmware lane confirmed `/device/ota` on the plugin port
+and exposes Custom OTA URL for this board, with no third-party default address.
+
+`serve --provision-file <private pair artifact> --provision-seconds 120` opens
+an explicit process-local window (1–300 seconds). The file must match the
+currently enabled device token and this listener's WebSocket address.
+Only a matching Device-Id receives a `websocket` object with `url`, `token` and `version:2`;
+there are no MQTT, activation or firmware fields, nor host/cloud credentials.
+An absent/expired window or disabled/revoked pairing rejects the request.
+Retries are allowed within the window; stop/restart never restores a window
+implicitly. Ordinary WebSocket authorization remains unchanged.
+
+The MAC identifies the paired device but is not a secret: this is an explicitly
+opened trusted-LAN bootstrap window, not cryptographic device attestation.
+No new durable plaintext credential or generalized OTA/update service is added.
+The plugin keeps its own port, independent of any existing Avachan service.
+Later board OTA checks require another explicit window. The frozen voice wire
+does not change.
+
 ## Validation contract
 
 Use real local WebSockets, Unix IPC through the production FastAPI server,
@@ -94,3 +118,9 @@ Seven adversarial function names, final-only function/native hosted blocks,
 duplicate IDs and restart all leave no executable Run or external effect.
 Model, ASR and TTS disconnect cancellation is tested at the actual ASGI boundary.
 Ruff, whitespace checks and the optional wheel build are separate local gates.
+
+The provisioning follow-up extends the real two-turn integration to obtain its
+WebSocket URL/token through `POST /device/ota`, plus real HTTP refusal/retry/
+expiry/disable/revoke and listener lifecycle cases. Private-file/token/URL
+validation has isolated fixtures. The clean review of `795ab1c062` applies to
+the prior candidate; this follow-up requires a new exact-head review and CI.

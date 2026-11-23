@@ -64,10 +64,10 @@ def test_projection_does_not_send_full_long_answer():
     assert speech_projection("Use ``secret`value`` carefully.") == "Use carefully."
 
 
-async def site(app):
+async def site(app, bound_socket=None):
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    listener = web.TCPSite(runner, "127.0.0.1", 0)
+    listener = web.SockSite(runner, bound_socket) if bound_socket else web.TCPSite(runner, "127.0.0.1", 0)
     await listener.start()
     return runner, listener._server.sockets[0].getsockname()[1]
 
@@ -100,6 +100,7 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
     from avibe_device.codec import Codec
     from avibe_device.host import Host
     from avibe_device.pairing import Pairing
+    from avibe_device.provision import ProvisionWindow
     from avibe_device.server import AUDIO, create_app
     from config.v2_config import V2Config
 
@@ -176,13 +177,27 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
     pairing = Pairing(tmp_path / "plugin")
     token = pairing.pair("test-device")
     pairing.enable(True)
-    device_runner, port = await site(create_app(pairing, Host(), settling=0.01))
-    headers = {"Device-Id": "test-device", "Authorization": f"Bearer {token}"}
+    bound_socket = socket.socket()
+    bound_socket.bind(("127.0.0.1", 0))
+    port = bound_socket.getsockname()[1]
+    provision_file = tmp_path / "provision.json"
+    provision_file.write_text(json.dumps({"websocket": {
+        "url": f"ws://127.0.0.1:{port}/device/ws", "token": token, "version": 2,
+    }}))
+    provision_file.chmod(0o600)
+    provision = ProvisionWindow(pairing, provision_file, bind="127.0.0.1", port=port)
+    device_runner, port = await site(create_app(pairing, Host(), settling=0.01, provision=provision), bound_socket)
     try:
         async with aiohttp.ClientSession() as client:
+            async with client.post(f"http://127.0.0.1:{port}/device/ota",
+                                   headers={"Device-Id": "test-device"}, json={"version": 2}) as response:
+                assert response.status == 200
+                config = (await response.json())["websocket"]
+                assert config["version"] == 2
+            headers = {"Device-Id": "test-device", "Authorization": "Bearer " + config["token"]}
             with pytest.raises(aiohttp.WSServerHandshakeError):
                 await client.ws_connect(f"http://127.0.0.1:{port}/device/ws")
-            async with client.ws_connect(f"http://127.0.0.1:{port}/device/ws", headers=headers) as ws:
+            async with client.ws_connect(config["url"], headers=headers) as ws:
                 await ws.send_json({"type": "hello", "version": 2, "features": {"avibe_voice": 1}, "audio_params": AUDIO})
                 hello = await ws.receive_json(timeout=5)
                 assert hello["avibe_voice"] == {"version": 1, "route_revision": 4}
@@ -360,15 +375,21 @@ async def test_repeated_stop_releases_listener_preserves_pairing_and_host(plugin
     from avibe_device.pairing import Pairing
 
     pairing = Pairing(tmp_path / "plugin")
-    pairing.pair("test-device", name="My Vibey")
+    token = pairing.pair("test-device", name="My Vibey")
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
-    for _ in range(2):
+    provision_file = tmp_path / "provision.json"
+    provision_file.write_text(json.dumps({"websocket": {
+        "url": f"ws://127.0.0.1:{port}/device/ws", "token": token, "version": 2,
+    }}))
+    provision_file.chmod(0o600)
+    for cycle in range(2):
         pairing.enable(True)
         stopped = asyncio.Event()
         task = asyncio.create_task(serve(pairing, bind="127.0.0.1", port=port, inactivity=20,
-                                         threshold=600, stopped=stopped))
+                                         threshold=600, stopped=stopped,
+                                         provision_file=provision_file if cycle == 0 else None))
         try:
             async with aiohttp.ClientSession() as client:
                 for attempt in range(30):
@@ -380,6 +401,9 @@ async def test_repeated_stop_releases_listener_preserves_pairing_and_host(plugin
                         await asyncio.sleep(0.01)
                 else:
                     pytest.fail("device listener did not start")
+                async with client.post(f"http://127.0.0.1:{port}/device/ota",
+                                       headers={"Device-Id": "test-device"}) as response:
+                    assert response.status == (200 if cycle == 0 else 403)
             assert pairing.status()["running"]
             with pytest.raises(ValueError, match="device_already_running"):
                 await serve(pairing, bind="127.0.0.1", port=0, inactivity=20,
@@ -486,6 +510,86 @@ def test_pair_cli_emits_only_private_device_provisioning(plugin, tmp_path, capsy
     assert provision.stat().st_mode & 0o777 == 0o600
     assert (root / "device.json").stat().st_mode & 0o777 == 0o600
     assert Pairing(root).status()["name"] == "My Vibey"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="The optional provisioning file is Unix owner-private")
+@pytest.mark.parametrize("end", ["expiry", "disable", "revoke", "shutdown"])
+async def test_ota_window_is_explicit_bounded_and_device_scoped(plugin, tmp_path, caplog, end):
+    pytest.importorskip("audioop")  # Optional codec dependency on Python 3.13+.
+    from avibe_device.pairing import Pairing
+    from avibe_device.provision import ProvisionWindow
+    from avibe_device.server import create_app
+
+    pairing = Pairing(tmp_path / "plugin")
+    token = pairing.pair("aa:bb:cc:dd:ee:ff")
+    pairing.enable(True)
+    payload = {"websocket": {"url": "ws://127.0.0.1:8765/device/ws", "token": token, "version": 2}}
+    path = tmp_path / "provision.json"
+    path.write_text(json.dumps(payload))
+    path.chmod(0o600)
+    window = ProvisionWindow(pairing, path, bind="127.0.0.1", port=8765)
+    # Provisioning uses no cloud/model capability and no host credential.
+    runner, port = await site(create_app(pairing, object(), provision=window))
+    url = f"http://127.0.0.1:{port}/device/ota"
+    try:
+        async with aiohttp.ClientSession() as client:
+            for device_id in ("", "unpaired", "AA:BB:CC:DD:EE:FF"):
+                async with client.post(url, headers={"Device-Id": device_id}) as response:
+                    assert response.status == 403
+                    assert token not in await response.text()
+            for _ in range(2):  # A lost OTA response may be retried during the window.
+                async with client.post(url, headers={"Device-Id": "aa:bb:cc:dd:ee:ff"},
+                                       json={"firmware": {"version": "synthetic"}}) as response:
+                    assert response.status == 200 and await response.json() == payload
+                    assert response.headers["Cache-Control"] == "no-store"
+            if end == "expiry":
+                window.deadline = 0
+            elif end == "disable":
+                pairing.enable(False)
+            elif end == "revoke":
+                pairing.revoke()
+            else:
+                await runner.cleanup()
+                runner, port = await site(create_app(pairing, object()))
+                url = f"http://127.0.0.1:{port}/device/ota"
+            async with client.post(url, headers={"Device-Id": "aa:bb:cc:dd:ee:ff"}) as response:
+                assert response.status == 403 and token not in await response.text()
+            assert window.document is None
+            assert token not in pairing.path.read_text() and token not in caplog.text
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="The optional provisioning file is Unix owner-private")
+@pytest.mark.parametrize("invalid", ["disabled", "revoked", "token", "url", "extra", "permissions", "symlink", "seconds"])
+def test_ota_window_rejects_invalid_provisioning_material(plugin, tmp_path, invalid):
+    from avibe_device.pairing import Pairing
+    from avibe_device.provision import ProvisionWindow
+
+    pairing = Pairing(tmp_path / "plugin")
+    token = pairing.pair("board")
+    pairing.enable(True)
+    payload = {"websocket": {"url": "ws://127.0.0.1:8765/device/ws", "token": token, "version": 2}}
+    if invalid == "disabled":
+        pairing.enable(False)
+    elif invalid == "revoked":
+        pairing.revoke()
+    elif invalid == "token":
+        payload["websocket"]["token"] = "different-device-token"
+    elif invalid == "url":
+        payload["websocket"]["url"] = "ws://127.0.0.1:9999/device/ws"
+    elif invalid == "extra":
+        payload["firmware"] = {"url": "must-not-serve"}
+    path = tmp_path / "provision.json"
+    path.write_text(json.dumps(payload))
+    path.chmod(0o644 if invalid == "permissions" else 0o600)
+    if invalid == "symlink":
+        link = tmp_path / "link.json"
+        link.symlink_to(path)
+        path = link
+    with pytest.raises((ValueError, OSError)):
+        ProvisionWindow(pairing, path, bind="127.0.0.1", port=8765, seconds=301 if invalid == "seconds" else 120)
 
 
 @pytest.mark.asyncio
