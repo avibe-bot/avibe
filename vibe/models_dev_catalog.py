@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from bisect import bisect_left
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -598,40 +599,7 @@ def search_models_dev(
 ) -> list[dict[str, Any]]:
     tokens = _search_tokens(query)
     catalog = _catalog_for_search(refresh_if_stale=refresh_if_stale)
-    vendor_map = load_model_vendor_map()
-    candidates = _catalog_rows(
-        catalog,
-        vendor_map,
-        lambda provider_id, model_id, display_name: _match_score(
-            tokens, provider_id, model_id, display_name
-        ),
-    )
-
-    matches: list[tuple[bool, int, str, str, dict[str, Any]]] = []
-    for model_id, copies in candidates.items():
-        row = _preferred_copy(model_id, copies, vendor_map)
-        matches.append(
-            (
-                not row["first_party"],
-                min(item[0] for item in copies),
-                row["display_name"].lower(),
-                model_id,
-                row,
-            )
-        )
-    matches.sort(key=lambda item: item[:-1])
-    rows = [row for *_, row in matches]
-    identity = query.strip()
-    leaf = identity.rsplit("/", 1)[-1]
-    for row in rows:
-        row["match_kind"] = (
-            "exact" if identity == row["models_dev_id"] or row["model_id"] in (identity, leaf) else "closest"
-        )
-    if _variant_bases(identity, vendor_map) and not any(row["match_kind"] == "exact" for row in rows):
-        inferred = models_dev_metadata_matches([identity], catalog).get(identity)
-        if inferred is not None:
-            rows = [inferred, *(row for row in rows if row["model_id"] != inferred["model_id"])]
-    return rows[:MODELS_DEV_MAX_MATCHES]
+    return _lookup((query.strip(),), catalog, suggestions=tokens)[1]
 
 
 def exact_models_dev_matches(
@@ -647,37 +615,8 @@ def exact_models_dev_matches(
     lets a near neighbour silently describe a different model.
     """
 
-    wanted: dict[str, list[str]] = {}
-    for model_id in dict.fromkeys(model_ids):
-        for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
-            wanted.setdefault(key, []).append(model_id)
-    if not wanted or not catalog:
-        return {}
-    vendor_map = load_model_vendor_map()
-    by_request: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
-
-    def admit(provider_id: str, model_id: str, _display_name: str):
-        hits = [(0, requested) for requested in wanted.get(f"{provider_id}/{model_id}", ())]
-        hits += [(1, requested) for requested in wanted.get(model_id, ())]
-        return hits or None
-
-    for copies in _catalog_rows(catalog, vendor_map, admit).values():
-        for hits, provider_id, row in copies:
-            for requested in dict.fromkeys(requested for _rank, requested in hits):
-                rank = min(rank for rank, other in hits if other == requested)
-                by_request.setdefault(requested, []).append((rank, provider_id, row))
-    matches: dict[str, dict[str, Any]] = {}
-    for requested, copies in by_request.items():
-        best = min(rank for rank, _provider, _row in copies)
-        closest = [copy for copy in copies if copy[0] == best]
-        # Every closest copy names one catalog model id, so the family that
-        # decides first-party ownership is read off the catalog row.
-        matches[requested] = _preferred_copy(
-            closest[0][2]["model_id"],
-            closest,
-            vendor_map,
-        )
-    return matches
+    matches, _ = _lookup(model_ids, catalog, variants=False)
+    return {key: {k: v for k, v in row.items() if k != "match_kind"} for key, row in matches.items()}
 
 
 # A date token is one suffix even when its year/month/day contain hyphens.
@@ -692,45 +631,115 @@ _PARAMETER_FIELDS = (
 )
 
 
-def _variant_bases(identity: str, vendor_map: dict[str, Any]) -> list[str]:
-    """Only literal prefixes are possible, so distinct equal-length bases cannot tie."""
-    stem = identity.rsplit("/", 1)[-1]
-    vendor = _first_party_vendor(stem, vendor_map)
-    if vendor is None or any(c in stem for c in "*?[]"):
-        return []
-    bases = []
-    while match := _VARIANT.search(stem):
-        stem = stem[:match.start()]
-        if re.search(r"[0-9]", stem) and _first_party_vendor(stem, vendor_map) == vendor:
-            bases.append(stem)
-    return bases
+def _variant_boundaries(leaf: str, vendor_map: dict[str, Any]) -> set[int]:
+    """Offsets, not copies of progressively shorter prefixes of an unbounded ID."""
+    digit = re.search(r"[0-9]", leaf)
+    if not digit or any(c in leaf for c in "*?[]") or _first_party_vendor(leaf, vendor_map) is None:
+        return set()
+    ends = set()
+    end = len(leaf)
+    # The longest token, including its leading hyphen, is -YYYY-MM-DD.
+    while match := _VARIANT.search(leaf, max(0, end - len("-YYYY-MM-DD")), end):
+        end = match.start()
+        if end <= digit.start():
+            break
+        ends.add(end)
+    return ends
+
+
+def _identity_ranker(ids: tuple[str, ...], vendor_map: dict[str, Any], variants: bool):
+    """Index requested leaves so only real registered IDs are ever tried as bases."""
+    wanted: dict[str, list[str]] = {}
+    leaves: dict[str, list[str]] = {}
+    ends = {}
+    for key in ids:
+        leaf = key.rsplit("/", 1)[-1]
+        for spelling in dict.fromkeys((key, leaf)):
+            wanted.setdefault(spelling, []).append(key)
+        if variants and leaf not in ends:
+            ends[leaf] = _variant_boundaries(leaf, vendor_map)
+        if ends.get(leaf):
+            leaves.setdefault(leaf, []).append(key)
+    ordered = sorted(leaves)
+
+    def ranks(provider, mid):
+        hits = [((0, 0), key) for key in wanted.get(f"{provider}/{mid}", ())]
+        hits.extend(((1, 0), key) for key in wanted.get(mid, ()))
+        prefix = mid + "-"
+        i = bisect_left(ordered, prefix)
+        while i < len(ordered) and ordered[i].startswith(prefix):
+            leaf = ordered[i]
+            if len(mid) in ends[leaf] and _first_party_vendor(mid, vendor_map) == _first_party_vendor(leaf, vendor_map):
+                hits.extend(((2, -len(mid)), key) for key in leaves[leaf])
+            i += 1
+        return hits
+
+    return ranks
+
+
+def _lookup(
+    model_ids: Iterable[str],
+    catalog: dict[str, Any],
+    *,
+    variants: bool = True,
+    suggestions: tuple[str, ...] = (),
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve identities and optional text suggestions from one catalog admission pass."""
+    ids = tuple(dict.fromkeys(model_ids))
+    if not ids or not catalog:
+        return {}, []
+    vendor_map = load_model_vendor_map()
+    ranks = _identity_ranker(ids, vendor_map, variants)
+
+    def admit(provider, mid, name):
+        hits = ranks(provider, mid)
+        score = _match_score(suggestions, provider, mid, name) if suggestions else None
+        return (hits, score) if hits or score is not None else None
+
+    by_request = {}
+    text = {}
+    for mid, copies in _catalog_rows(catalog, vendor_map, admit).items():
+        for (hits, score), provider, row in copies:
+            for rank, key in hits:
+                by_request.setdefault(key, []).append((rank, provider, row))
+            if score is not None:
+                text.setdefault(mid, []).append((score, provider, row))
+
+    matches = {}
+    for key, copies in by_request.items():
+        best = min(rank for rank, _, _ in copies)
+        same = [copy for copy in copies if copy[0] == best]
+        # Distinct literal prefixes of one ID cannot tie at the same length.
+        row = _preferred_copy(same[0][2]["model_id"], same, vendor_map)
+        if best[0] == 2:
+            authorities = [c for c in same if not row["first_party"] or c[1] == row["provider_id"]]
+            if any(other[field] != row[field] for _, _, other in authorities for field in _PARAMETER_FIELDS):
+                continue
+        matches[key] = {**row, "match_kind": "closest" if best[0] == 2 else "exact"}
+
+    rows = []
+    if suggestions:
+        identity = ids[0]
+        match = matches.get(identity)
+        ranked = []
+        for mid, copies in text.items():
+            if match and mid == match["model_id"]:
+                if match["match_kind"] == "closest":
+                    continue  # The inferred selection below carries the requested ID.
+                row = match
+            else:
+                row = {**_preferred_copy(mid, copies, vendor_map), "match_kind": "closest"}
+            ranked.append((not row["first_party"], min(c[0] for c in copies), row["display_name"].lower(), mid, row))
+        ranked.sort(key=lambda item: item[:-1])
+        rows = [row for *_, row in ranked]
+        if match and match["match_kind"] == "closest" and admissible_backend_model(None, identity, {}) is not None:
+            rows.insert(0, {**match, "model_id": identity})
+    return matches, rows[:MODELS_DEV_MAX_MATCHES]
 
 
 def models_dev_metadata_matches(model_ids: Iterable[str], catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Describe a requested ID without changing it or attributing another deployment's limits to it."""
-    ids = tuple(dict.fromkeys(model_ids))
-    exact = exact_models_dev_matches(ids, catalog)
-    result = {key: {**row, "match_kind": "exact"} for key, row in exact.items()}
-    if not catalog or len(result) == len(ids):
-        return result
-    vendor_map = load_model_vendor_map()
-    bases = {key: _variant_bases(key, vendor_map) for key in ids if key not in result}
-    wanted = {base for options in bases.values() for base in options}
-    if not wanted:
-        return result
-    copies_by_id = _catalog_rows(catalog, vendor_map, lambda _p, mid, _n: 0 if mid in wanted else None)
-    for key, options in bases.items():
-        base = next((base for base in options if base in copies_by_id), None)
-        if base is None:
-            continue
-        copies = copies_by_id[base]
-        row = _preferred_copy(base, copies, vendor_map)
-        if not row["first_party"] and any(
-            other[field] != row[field] for _, _, other in copies for field in _PARAMETER_FIELDS
-        ):
-            continue
-        result[key] = {**row, "match_kind": "closest"}
-    return result
+    """A registered exact match or a guarded base, keyed by the unchanged requested ID."""
+    return _lookup(model_ids, catalog)[0]
 
 
 def text_only_model_ids(

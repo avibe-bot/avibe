@@ -562,6 +562,11 @@ async def test_vibey_candidate_capabilities_survive_catalog_admission_without_gu
     candidate, = service.agent_model_candidates("vibey")["providers"]
     desired = {key: value for key, value in candidate.items() if key != "suppliers"}
     await service.set_agent_models("vibey", [], [desired])
+    stored = service.store.load().agents["vibey"].models[0].to_payload()
+    assert "match_kind" not in stored
+    if metadata == "catalog":
+        assert candidate["match_kind"] == "exact"
+        assert stored["models_dev_id"] == "fixture/claude-unknown"
     gateway = ModelHubTurnGateway(service)
     try:
         hop = await ModelHubRuntimeRouter(service=service, turn_gateway=gateway).resolve_hop(

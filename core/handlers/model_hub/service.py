@@ -8226,6 +8226,10 @@ class ModelHubService:
             raise ModelHubError("backend_model_catalog_invalid")
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
+            # A caller may echo the candidate projection. Provenance describes
+            # the lookup, not the stored backend row (which keeps models_dev_id).
+            if isinstance(item, dict) and "match_kind" in item:
+                item = {key: value for key, value in item.items() if key != "match_kind"}
             if backend == "claude" and isinstance(item, dict) and item.get("id") == "default":
                 raise ModelHubError("backend_model_id_invalid")
             try:

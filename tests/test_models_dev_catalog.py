@@ -604,12 +604,61 @@ def test_metadata_resolves_only_known_variant_suffixes():
 def test_search_includes_the_longest_registered_base_without_displacing_exact_identity(monkeypatch):
     catalog = {"openai": {"models": {key: {} for key in ("gpt-9", "gpt-9-high", "gpt-9-high-low-extra")}}}
     monkeypatch.setattr(models_dev_catalog, "_catalog_for_search", lambda **_: catalog)
-    assert [(row["model_id"], row["match_kind"]) for row in models_dev_catalog.search_models_dev("gpt-9-high-low")] == [
-        ("gpt-9-high", "closest"), ("gpt-9-high-low-extra", "closest"),
-    ]
+    inferred, suggestion = models_dev_catalog.search_models_dev("relay/gpt-9-high-low")
+    assert (inferred["model_id"], inferred["models_dev_id"], inferred["match_kind"]) == (
+        "relay/gpt-9-high-low", "openai/gpt-9-high", "closest",
+    )
+    assert (suggestion["model_id"], suggestion["match_kind"]) == ("gpt-9-high-low-extra", "closest")
     assert [(row["model_id"], row["match_kind"]) for row in models_dev_catalog.search_models_dev("gpt-9-high")] == [
         ("gpt-9-high", "exact"), ("gpt-9-high-low-extra", "closest"),
     ]
+
+
+def test_search_and_metadata_each_read_catalog_once_and_honor_deployment_authority(monkeypatch):
+    class Catalog(dict):
+        reads = 0
+
+        def items(self):
+            self.reads += 1
+            return super().items()
+
+    catalog = Catalog({
+        "openai": {"models": {"gpt-9": {"limit": {"context": 9000}}}},
+        "relay": {"models": {"gpt-9": {"limit": {"context": 2000}}}},
+    })
+    monkeypatch.setattr(models_dev_catalog, "_catalog_for_search", lambda **_: catalog)
+    for count, (query, expected) in enumerate((
+        ("relay/gpt-9", ("exact", "relay/gpt-9", 2000)),
+        ("unknown/gpt-9", ("exact", "openai/gpt-9", 9000)),
+        ("relay/gpt-9-high", ("closest", "openai/gpt-9", 9000)),
+    ), start=1):
+        row, = models_dev_catalog.search_models_dev(query)
+        assert (row["match_kind"], row["models_dev_id"], row["context_window"]) == expected
+        assert catalog.reads == count
+    rows = models_dev_catalog.models_dev_metadata_matches(["relay/gpt-9", "gpt-9-high"], catalog)
+    assert (rows["relay/gpt-9"]["context_window"], rows["gpt-9-high"]["context_window"]) == (2000, 9000)
+    assert catalog.reads == 4
+
+
+def test_disagreeing_first_party_copies_do_not_describe_a_variant():
+    copies = {key: {"id": "gpt-9", "limit": {"context": limit}} for key, limit in (("a", 100), ("b", 200))}
+    for items in (copies.items(), reversed(copies.items())):
+        catalog = {"openai": {"models": dict(items)}}
+        assert not models_dev_catalog.models_dev_metadata_matches(["gpt-9-high"], catalog)
+
+
+def test_ineligible_registered_bases_do_not_describe_variants():
+    bases = ("gpt-9*", "gpt-9?", "gpt-9[abc]", "gpt-9]", "foo-123", "gpt-reserve")
+    catalog = {"relay": {"models": dict.fromkeys(bases, {})}}
+    assert set(models_dev_catalog.exact_models_dev_matches(bases, catalog)) == set(bases)
+    assert not models_dev_catalog.models_dev_metadata_matches([key + "-high" for key in bases], catalog)
+
+
+def test_repeated_variant_tokens_can_only_match_registered_prefixes():
+    catalog = {"openai": {"models": {"gpt-9": {}, "gpt-9-high": {}}}}
+    model_id = "gpt-9" + "-high" * 512
+    row = models_dev_catalog.models_dev_metadata_matches([model_id], catalog)[model_id]
+    assert row["models_dev_id"] == "openai/gpt-9-high"
 
 
 def test_exact_models_dev_matches_never_borrow_a_neighbour():
