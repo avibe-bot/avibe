@@ -84,7 +84,10 @@ def test_retry_from_disk_uses_identical_wire_request_and_safe_log(setup_replay, 
 def test_server_pending_is_a_floor_for_manual_and_auto_then_expiry_stops(setup_replay):
     wire, clock, payload, post = setup_replay
     wire.status, wire.body = 409, b'{"error":"pairing_redeem_pending","retry_after_seconds":7}'
-    assert post(payload).status_code == 409
+    pending = post(payload)
+    assert pending.status_code == 400
+    assert pending.get_json()['status'] == 409 and pending.get_json()['retry_after_seconds'] == 7
+    assert pending.get_json()['pairing'] == {'ok': False, 'recoverable': True, 'cause': 'pairing_redeem_pending'}
     clock[0] += 3
     assert post({}).get_json()['retry_after_seconds'] == 4
     replay.tick()
@@ -133,9 +136,20 @@ def test_rate_limit_advice_is_not_shortened(setup_replay):
     assert len(wire.sent) == 1
 
 
-@pytest.mark.parametrize('age, expected', [(10, 'scheduled'), (901, 'manual')])
-def test_upgrade_only_adopts_recent_legacy_journal(setup_replay, age, expected):
+@pytest.mark.parametrize('age', [10, 901])
+@pytest.mark.parametrize('outcome', ['unarchived_success', 'rate_limited', 'server_error'])
+def test_upgrade_cannot_distinguish_legacy_deliveries(setup_replay, monkeypatch, age, outcome):
     wire, clock, payload, post = setup_replay
+    if outcome == 'unarchived_success':
+        wire.status, wire.body = 200, json.dumps(_response('received')).encode()
+        write = ra._write_pending_pairing_record
+        def fail_archive(record):
+            if record['phase'] == 'redeemed':
+                raise OSError('fixture: full')
+            write(record)
+        monkeypatch.setattr(ra, '_write_pending_pairing_record', fail_archive)
+    elif outcome == 'rate_limited':
+        wire.status, wire.advice = 429, '900'
     post(payload)
     record, _ = ra._read_pending_pairing_record()
     record.pop('redeem_prepared_at')
@@ -143,9 +157,15 @@ def test_upgrade_only_adopts_recent_legacy_journal(setup_replay, age, expected):
     record['prepared_at'] = clock[0] - age
     ra._write_pending_pairing_record(record)
     replay._path().unlink()
-    assert view()['replay_state'] == expected
-    replay.tick()
-    assert len(wire.sent) == (2 if expected == 'scheduled' else 1)
+    assert view() == dict(phase='prepared', can_resume=False, replay_state='needs_reconciliation')
+    before = ra._pending_pairing_path().read_bytes()
+    for advance in (0, 60, 901):
+        clock[0] += advance
+        replay.tick()
+        assert post({}).get_json()['error'] == 'pairing_needs_reconciliation'
+        assert not post({**payload, 'pairing_key': 'fixture-renewal'}).get_json()['ok']
+        assert not ra.pair('other-fixture', payload['backend_url'])['ok']
+    assert len(wire.sent) == 1 and ra._pending_pairing_path().read_bytes() == before
 
 
 @pytest.mark.parametrize('failed_before_post', [False, True])
@@ -177,16 +197,20 @@ def test_received_success_cannot_be_automatically_redeemed_again(setup_replay, m
         return write(record)
     monkeypatch.setattr(ra, '_write_pending_pairing_record', fail_archive)
     assert post(payload).get_json()['pairing']['recoverable'] is False
-    assert view()['replay_state'] == 'manual'
+    assert view() == dict(phase='prepared', can_resume=False, replay_state='needs_reconciliation')
     clock[0] += 120
     replay.tick()
+    assert post({}).get_json()['error'] == 'pairing_needs_reconciliation'
+    assert not ra.pair('another-key', payload['backend_url'])['ok']
     assert len(wire.sent) == 1
 
 
 @pytest.mark.parametrize('lost', ['crash', 'write_failed'])
-def test_unsettled_reservation_preserves_pending_floor(setup_replay, monkeypatch, lost):
+@pytest.mark.parametrize('status', [409, 429])
+def test_unsettled_reservation_never_acquires_permission_with_time(setup_replay, monkeypatch, lost, status):
     wire, clock, payload, post = setup_replay
-    wire.status, wire.body = 409, b'{"error":"pairing_redeem_pending","retry_after_seconds":60}'
+    wire.status, wire.advice = status, '900' if status == 429 else None
+    wire.body = b'{"error":"pairing_redeem_pending","retry_after_seconds":60}'
     save = replay._save
     class Crash(BaseException):
         pass
@@ -207,14 +231,11 @@ def test_unsettled_reservation_preserves_pending_floor(setup_replay, monkeypatch
                 send()
         else:
             assert send()['ok'] is False
-    replay.tick()
-    assert post({}).get_json()['retry_after_seconds'] == 60
-    clock[0] += 59
-    assert post({}).get_json()['retry_after_seconds'] == 1
+    for advance in (0, 60, 901):
+        clock[0] += advance
+        replay.tick()
+        assert post({}).get_json()['error'] == 'pairing_needs_reconciliation'
     assert len(wire.sent) == 1
-    clock[0] += 1
-    post({})
-    assert len(wire.sent) == 2
 
 
 @pytest.mark.parametrize('damage', ['missing', 'no_key', 'wrong_key'])
@@ -230,9 +251,9 @@ def test_claimed_scheduler_damage_cannot_buy_more_sends(setup_replay, damage):
             saved['key'] = 'unrelated'
         replay._save(saved)
     clock[0] += 120
-    assert view()['replay_state'] == 'terminated'
+    assert view()['replay_state'] == 'needs_reconciliation'
     replay.tick()
-    assert not post({}).get_json()['ok']
+    assert post({}).get_json()['error'] == 'pairing_needs_reconciliation'
     assert len(wire.sent) == 1
 
 
@@ -252,11 +273,16 @@ def test_concurrent_cli_cannot_dispatch_during_automatic_replay(setup_replay, mo
     worker.start()
     try:
         assert entered.wait(10)
+        busy = post({'pairing_key': ''})
+        assert busy.status_code == 400
+        data = busy.get_json()
+        assert data['error'] == 'pairing_local_busy' and data['accepted'] is False
+        assert 'retry_after_seconds' not in data and 'pairing' not in data
         child = subprocess.run([sys.executable, '-c',
             'from vibe import remote_access as r; '
             'r._json_request=lambda *a,**kw: (_ for _ in ()).throw(AssertionError("duplicate send")); '
-            'assert r.pair("", "") ["error"] == "pairing_redeem_pending"; '
-            'assert r.pair("different-test-key", "https://other.test") ["error"] == "pairing_redeem_pending"'],
+            'assert r.pair("", "") ["error"] == "pairing_local_busy"; '
+            'assert r.pair("different-test-key", "https://other.test") ["error"] == "pairing_local_busy"'],
             env=dict(os.environ), timeout=15, check=False)
         assert child.returncode == 0 and len(wire.sent) == 2
         assert ra._pending_pairing_path().read_bytes() == before

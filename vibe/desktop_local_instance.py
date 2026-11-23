@@ -88,10 +88,16 @@ def _revision(config: V2Config, installation_id: str | None, pending: Mapping | 
     ], separators=(",", ":")).encode()).hexdigest()
 
 
+def claim_snapshot(pending: Mapping | None):
+    if pending is None:
+        return None
+    return {k: v for k, v in pending.items() if k != 'replay_budget_claimed'}
+
+
 def claim_revision(config: V2Config, installation_id: str | None, pending: Mapping | None) -> str:
     # A pending operation may advance from prepared to redeemed without changing its ID.
     # A fresh claim must never supersede that sealed success or a different saved request.
-    snapshot = [_revision(config, installation_id, pending), pending]
+    snapshot = [_revision(config, installation_id, pending), claim_snapshot(pending)]
     return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -165,6 +171,9 @@ def prepare(account_id: Any, expected_binding_revision: Any) -> dict[str, Any]:
             ):
                 raise LocalInstanceError("local_instance_conflict")
         else:
+            from vibe import pairing_replay
+            if pairing_replay.orphaned_delivery():
+                raise LocalInstanceError('pairing_needs_reconciliation')
             if installation_id is None:
                 installation_id = ensure_installation_id()
             pending = remote_access._new_pairing_claim(config, "", socket.gethostname())

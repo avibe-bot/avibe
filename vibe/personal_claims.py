@@ -14,7 +14,7 @@ from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import config_file_lock
 from storage.lock import MigrationFileLock, MigrationLockTimeout
-from vibe import desktop_local_instance as local, remote_access
+from vibe import desktop_local_instance as local, pairing_replay, remote_access
 from vibe.personal_claim_client import ClaimError, ClaimsClient, Grant, Pending, Ticket, local_origin, return_proof, text
 
 
@@ -33,7 +33,7 @@ class _Source:
         with config_file_lock():
             config, pending = local._config(), local._pending()
             cloud = config.remote_access.vibe_cloud
-            if pending != replaceable:
+            if local.claim_snapshot(pending) != local.claim_snapshot(replaceable):
                 raise ClaimError("local_binding_changed")
             if cloud.instance_id and cloud.instance_secret and cloud.backend_url:
                 raise ClaimError("already_bound")
@@ -54,6 +54,8 @@ def _recover_before_start(on_bound):
     with config_file_lock():
         pending = local._pending()
         if not pending:
+            if pairing_replay.orphaned_delivery():
+                raise ClaimError('pairing_needs_reconciliation')
             return None
         phase = pending["phase"]
         if phase == "revoked":
@@ -67,7 +69,7 @@ def _recover_before_start(on_bound):
             if pending.get("desktop_enrollment"):
                 raise ClaimError("local_instance_conflict")
             if not pending.get("redeem_request"):
-                return pending
+                raise ClaimError('pairing_needs_reconciliation')
             if not pending.get("personal_claim"):
                 raise ClaimError("local_instance_conflict")
             # A missing correlation file need not make a saved request unreplayable.
@@ -90,6 +92,8 @@ def _recover_before_start(on_bound):
         if on_bound:
             on_bound()
         raise ClaimError("already_bound")
+    if result.get('error') in ('pairing_needs_reconciliation', 'pairing_local_busy'):
+        raise ClaimError(result['error'])
     if result.get("error") in ("pairing_failure_retired", "pairing_key_expired"):
         return None
     raise ClaimError("pairing_recovery_required", result.get("retry_after_seconds", 5))
@@ -281,33 +285,47 @@ class _Flow:
                             raise ClaimError("local_binding_unavailable")
                         remote_access._run_pending_deferred_context_migration()
                         ensure_sqlite_state()
-                        with self.lock:
-                            if self.cancelled:
-                                continue
-                            self._check_time()
-                            # Write before sending: a crash from here until durable pairing handoff is ambiguous.
-                            _record_attempt(ticket)
-                            self.accepting, grant = True, result
-                            self.update("accepting", account={"email": grant.email}, hostname=grant.hostname)
+                        grant = result
                         continue
                 else:
-                    source.validate()
-                    result = client.accept(ticket, grant)
-                    if not isinstance(result, Pending):
-                        self.update("pairing")
-                        paired = remote_access.pair_personal_claim(
-                            key=result.key, backend_url=client.base, device=source.device, revision=source.revision,
-                            installation=source.installation, subject=grant.subject, claim_id=ticket.id,
-                            instance_id=result.instance_id, hostname=grant.hostname,
-                        )
-                        if not paired.get("ok"):
-                            if paired.get("error") in ("local_binding_changed", "pairing_superseded_after_redeem"):
-                                raise ClaimError("local_binding_changed")
-                            raise ClaimError("pairing_recovery_required" if _journal_for(ticket.id) else "fresh_claim_required")
-                        if self.on_bound:
-                            self.on_bound()
-                        self.update("bound", account={"email": grant.email}, hostname=grant.hostname)
-                        return
+                    try:
+                        with pairing_replay._send_lock():
+                            with self.lock, config_file_lock():
+                                if self.cancelled:
+                                    continue
+                                self._check_time()
+                                source.validate()
+                                if pairing_replay.replacement_blocked(
+                                    local._pending(), active_claim_id=ticket.id if self.accepting else None,
+                                ):
+                                    raise ClaimError('pairing_needs_reconciliation')
+                                if not self.accepting:
+                                    _record_attempt(ticket)
+                                    self.accepting = True
+                                    self.update('accepting', account={'email': grant.email}, hostname=grant.hostname)
+                            # Keep the send right through publication, not the config lock.
+                            result = client.accept(ticket, grant)
+                            if not isinstance(result, Pending):
+                                self.update('pairing')
+                                paired = remote_access.pair_personal_claim(
+                                    key=result.key, backend_url=client.base, device=source.device, revision=source.revision,
+                                    installation=source.installation, subject=grant.subject, claim_id=ticket.id,
+                                    instance_id=result.instance_id, hostname=grant.hostname,
+                                )
+                                if not paired.get('ok'):
+                                    if paired.get('error') in ('local_binding_changed', 'pairing_superseded_after_redeem'):
+                                        raise ClaimError('local_binding_changed')
+                                    if paired.get('error') == 'pairing_needs_reconciliation' or not _journal_for(ticket.id):
+                                        raise ClaimError('pairing_needs_reconciliation')
+                                    raise ClaimError('pairing_recovery_required')
+                                if self.on_bound:
+                                    self.on_bound()
+                                self.update('bound', account={'email': grant.email}, hostname=grant.hostname)
+                                return
+                    except MigrationLockTimeout:
+                        # A busy handoff is not cancellation or a queued accept.
+                        self._cleanup_client = None
+                        raise ClaimError('pairing_needs_reconciliation' if self.accepting else 'pairing_local_busy') from None
                 delay = max(ticket.interval, result.delay)
                 backoff = ticket.interval
             except ClaimError as exc:
@@ -334,12 +352,14 @@ class _Flow:
                             pass  # An unconfirmed cleanup never reports that the hold is free.
                     self._cleanup_client = None
         except (ClaimError, local.LocalInstanceError) as exc:
-            self.update("error", code=exc.code, **({"retry_after_seconds": exc.retry_after} if getattr(exc, "retry_after", 0) else {}))
+            extra = {'accepted': False} if exc.code == 'pairing_local_busy' and not self.accepting else {}
+            code = 'pairing_needs_reconciliation' if self.accepting and exc.code == 'fresh_claim_required' else exc.code
+            self.update("error", code=code, **extra, **({"retry_after_seconds": exc.retry_after} if getattr(exc, "retry_after", 0) else {}))
         except MigrationLockTimeout:
             self.update("error", code="claim_in_progress")
         except Exception:
             # Request bodies, exception locals and underlying HTTP detail are not diagnostics.
-            self.update("error", code="fresh_claim_required" if self.accepting else "local_claim_unavailable")
+            self.update("error", code="pairing_needs_reconciliation" if self.accepting else "local_claim_unavailable")
         finally:
             self._browser = self._proof = None
             self.confirm = self.show = None
@@ -357,18 +377,36 @@ def _journal_for(claim_id):
         return record if record and record.get("personal_claim", {}).get("claim_id") == claim_id else None
 
 
+def _claim_recovery_view(claim_id):
+    """Never describe another claim's action. Check the journal and project under C."""
+    with config_file_lock():
+        if _journal_for(claim_id):
+            action = remote_access.pending_pairing_status(local._config()) or {}
+            state = action.get('replay_state', 'terminated')
+            code = 'pairing_needs_reconciliation' if state == 'needs_reconciliation' else 'pairing_recovery_required'
+            return {'state': 'error', 'code': code, 'replay_state': state}
+        if _outcome().get('claim_id') == claim_id:
+            return {'state': 'error', 'code': 'pairing_needs_reconciliation', 'replay_state': 'needs_reconciliation'}
+        return None
+
+
 def recover_pairing(claim_id: str) -> dict:
     """Retry only the existing guarded pairing request, not the one-shot claim acceptance."""
     with MigrationFileLock(paths.get_state_dir() / "personal-claim.lock", timeout_seconds=0):
         record = _journal_for(claim_id)
         if not record:
+            view = _claim_recovery_view(claim_id)
+            if view is not None:
+                return view
             raise ClaimError("fresh_claim_required")
         if record["phase"] == "prepared":
             result = remote_access._retry_installation_pairing(record)
         else:
             result = remote_access._persist_pairing(None, device_name=record["device_name"], operation_id=record["operation_id"])
         if not result.get("ok"):
-            return {"state": "error", "code": "pairing_recovery_required" if _journal_for(claim_id) else "fresh_claim_required"}
+            if result.get('error') == 'pairing_local_busy':
+                return {'state': 'error', 'code': 'pairing_local_busy', 'accepted': False}
+            return _claim_recovery_view(claim_id) or {'state': 'error', 'code': 'fresh_claim_required'}
         return {"state": "bound", "claim_id": claim_id}
 
 
@@ -428,8 +466,9 @@ class RedirectClaims:
             if view["state"] not in ("bound", "error"):
                 return view
         with config_file_lock():
-            if _journal_for(claim_id):
-                return {"state": "error", "code": "pairing_recovery_required"}
+            recovery = _claim_recovery_view(claim_id)
+            if recovery:
+                return recovery
             saved = _outcome()
             bound = saved.get("bound", {})
             if bound.get("claim_id") == claim_id:
@@ -437,8 +476,6 @@ class RedirectClaims:
                 if _binding_stamp(identity) != bound["generation"]:
                     return {"state": "error", "code": "local_binding_changed"}
                 return view if view and view["state"] == "bound" else {"state": "bound"}
-            if saved.get("claim_id") == claim_id and (view is None or view.get("code") == "pairing_recovery_required"):
-                return {"state": "error", "code": "fresh_claim_required", "expires_at": saved.get("expires_at")}
         if view is not None:
             return {"state": "error", "code": "local_binding_changed"} if view["state"] == "bound" else view
         raise ClaimError("claim_unavailable")

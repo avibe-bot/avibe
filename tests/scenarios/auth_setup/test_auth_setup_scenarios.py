@@ -6513,7 +6513,7 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
     first = desktop_host.post("/api/remote-access/vibe-cloud/pair",
                               json=_pair_body(prepared), headers=csrf_headers(desktop_host))
     assert first.get_json()["pairing"]["recoverable"] is True
-    assert first.status_code == (409 if first_outcome == 'pending' else 400)
+    assert first.status_code == 400  # Legacy enrollment envelope, including upstream pending.
     if first_outcome == "pending":
         assert first.get_json() == {
             "ok": False, "error": "pairing_redeem_pending", "status": 409,

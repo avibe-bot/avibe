@@ -275,6 +275,7 @@ def test_http_failure_reload_and_keyless_recovery_keep_redeemed_credentials(
     projection = fresh.get("/api/remote-access/status").get_json()["pending_pairing"]
     assert projection == {
         "phase": "redeemed" if failure_point == "save" else "applied", "can_resume": True,
+        "replay_state": "local_archive",
     }
     second = fresh.post(
         "/api/remote-access/vibe-cloud/pair",
@@ -324,6 +325,7 @@ def test_pending_status_projects_only_phase_and_action(pairing_host, phase):
     remote_access._write_pending_pairing_record(claim)
     assert remote_access.pending_pairing_status(V2Config.load()) == {
         "phase": phase, "can_resume": phase == "retirement_pending",
+        **({"replay_state": "local_archive"} if phase == "retirement_pending" else {}),
     }
     remote_access._pending_pairing_path().write_text("{invalid")
     assert remote_access.pending_pairing_status(V2Config.load()) == {
@@ -420,6 +422,7 @@ def test_owner_status_advertises_only_identity_valid_recovery(
     assert response.status_code == 200
     assert response.get_json()["pending_pairing"] == {
         "phase": phase, "can_resume": can_resume,
+        **({"replay_state": "local_archive"} if can_resume else {}),
     }
     assert journal.read_bytes() == original_record
     assert len(calls) == 1
@@ -866,15 +869,16 @@ def test_cli_resumes_without_asking_for_another_key(pairing_host, monkeypatch, c
     assert len(calls) == 1
 
 
-def test_explicit_key_and_backend_supersede_pending(pairing_host, monkeypatch):
+def test_explicit_new_authorization_must_not_replace_sealed_receipt(pairing_host, monkeypatch):
     _, calls = pairing_host
     _fail_config_publication_once(monkeypatch)
     assert not remote_access.pair("key_A", "https://backend.test")["ok"]
-    assert remote_access.pair("key_B", "https://other-backend.test")["ok"]
-    saved = V2Config.load().remote_access.vibe_cloud
-    assert saved.instance_id == "inst_B"
-    assert saved.backend_url == "https://other-backend.test"
-    assert [key for _, key in calls] == ["key_A", "key_B"]
+    before = remote_access._pending_pairing_path().read_bytes()
+    assert remote_access.pair('key_B', 'https://other-backend.test')['error'] == 'pairing_local_archive_required'
+    assert remote_access._pending_pairing_path().read_bytes() == before
+    assert remote_access.pair('', '')['ok']
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    assert [key for _, key in calls] == ['key_A']
 
 
 def test_new_backend_is_validated_before_pending_selection(pairing_host, monkeypatch):
@@ -911,7 +915,7 @@ def test_duplicate_key_preserves_the_inflight_owner_across_processes(pairing_hos
         journal = root / "state/pending-pairing.json"
         claimed = journal.read_bytes()
         duplicate = remote_access.pair(" key_A ", "https://backend.test", device_name="another tab")
-        assert duplicate["error"] == "pairing_redeem_pending"
+        assert duplicate == {"ok": False, "error": "pairing_local_busy", "accepted": False, "status": 409}
         assert journal.read_bytes() == claimed
         assert "key_A" not in claimed.decode()
     finally:
@@ -944,13 +948,16 @@ def test_duplicate_key_recovers_the_same_durable_response(pairing_host, monkeypa
     assert len(calls) == 1
 
 
-def test_same_key_at_different_backend_is_a_new_operation(pairing_host, monkeypatch):
+def test_same_key_at_different_backend_cannot_replace_a_receipt(pairing_host, monkeypatch):
     _, calls = pairing_host
     _fail_config_publication_once(monkeypatch)
     assert not remote_access.pair("key_A", "https://backend.test")["ok"]
-    assert remote_access.pair("key_A", "https://other-backend.test")["ok"]
-    assert len(calls) == 2
-    assert V2Config.load().remote_access.vibe_cloud.backend_url == "https://other-backend.test"
+    before = remote_access._pending_pairing_path().read_bytes()
+    result = remote_access.pair("key_A", "https://other-backend.test")
+    assert result['error'] == 'pairing_local_archive_required'
+    assert before == remote_access._pending_pairing_path().read_bytes()
+    assert remote_access.pair('', '')['ok'] and len(calls) == 1
+    assert V2Config.load().remote_access.vibe_cloud.backend_url == 'https://backend.test'
 
 
 def test_uncertain_duplicate_does_not_redeem_or_discard_prepared_evidence(pairing_host, monkeypatch):
@@ -978,10 +985,11 @@ def test_malformed_request_fingerprint_fails_closed(pairing_host, monkeypatch, f
     record = json.loads(journal.read_text())
     record["request_fingerprint"] = fingerprint
     journal.write_text(json.dumps(record))
-    assert remote_access.pair("", "")["error"] == "pairing_recovery_invalid"
-    assert remote_access.pair("key_B", "https://backend.test")["ok"]
-    assert len(calls) == 2
-    assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_B"
+    before = journal.read_bytes()
+    assert remote_access.pair('', '')['error'] == 'pairing_recovery_invalid'
+    assert remote_access.pair('key_B', 'https://backend.test')['error'] == 'pairing_needs_reconciliation'
+    assert journal.read_bytes() == before and len(calls) == 1
+    assert not V2Config.load().remote_access.vibe_cloud.instance_id
 
 
 def test_duplicate_selection_cannot_resume_a_superseding_operation(pairing_host, monkeypatch):
@@ -993,8 +1001,10 @@ def test_duplicate_selection_cannot_resume_a_superseding_operation(pairing_host,
 
     def supersede_before_duplicate_resume(result, *, device_name, operation_id=None, expected_claim=None):
         if result is None and operation_id:
-            _fail_config_publication_once(monkeypatch)
-            assert not remote_access.pair("key_B", "https://backend.test")["ok"]
+            # Model a different generation already published by an older writer;
+            # the current admission path must not be used to manufacture that race.
+            other = remote_access._new_pairing_claim(V2Config.load(), 'https://backend.test', 'fixture', pairing_key='key_B')
+            remote_access._write_pending_pairing_record(other)
             later_record.append((root / "state/pending-pairing.json").read_bytes())
         return persist(result, device_name=device_name, operation_id=operation_id, expected_claim=expected_claim)
 
@@ -1003,7 +1013,7 @@ def test_duplicate_selection_cannot_resume_a_superseding_operation(pairing_host,
     assert result["error"] == "pairing_superseded_after_redeem"
     assert (root / "state/pending-pairing.json").read_bytes() == later_record[0]
     assert V2Config.load().remote_access.vibe_cloud.instance_id == ""
-    assert [key for _, key in calls] == ["key_A", "key_B"]
+    assert [key for _, key in calls] == ['key_A']  # Stale local recovery made no second POST.
 
 
 @pytest.mark.parametrize("instance_id", ["../../unrelated", "absolute", "实例/测试"])
@@ -1076,15 +1086,16 @@ def test_malformed_response_is_not_replayable_and_explicit_key_recovers(pairing_
     assert [key for _, key in calls] == ["key_A", "key_B"]
 
 
-def test_malformed_record_fails_closed_but_new_operation_replaces_it(pairing_host):
+def test_malformed_record_cannot_be_replaced_by_new_input(pairing_host):
     root, calls = pairing_host
     record = root / "state/pending-pairing.json"
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text('{"schema_version": 1, "phase": "redeemed"}', encoding="utf-8")
 
-    assert remote_access.pair("", "")["error"] == "pairing_recovery_invalid"
-    assert remote_access.pair("key_A", "https://backend.test")["ok"]
-    assert len(calls) == 1
+    before = record.read_bytes()
+    assert remote_access.pair('', '')['error'] == 'pairing_recovery_invalid'
+    assert remote_access.pair('key_A', 'https://backend.test')['error'] == 'pairing_needs_reconciliation'
+    assert calls == [] and record.read_bytes() == before
 
 
 def test_record_backend_url_must_be_typed_before_recovery(pairing_host, monkeypatch):
@@ -1458,6 +1469,17 @@ def test_unrelated_save_during_redeem_does_not_revoke_claim(pairing_host, monkey
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
 
 
+def _publish_fixture_successor():
+    """A mixed-version writer published a different operation while the old call was out."""
+    backend = 'https://other-backend.test'
+    claim = remote_access._new_pairing_claim(V2Config.load(), backend, 'fixture', pairing_key='key_B')
+    remote_access._write_pending_pairing_record(claim)
+    return remote_access._persist_pairing(
+        {**_response('inst_B'), 'backend_url': backend}, device_name='fixture',
+        operation_id=claim['operation_id'], expected_claim=claim,
+    )
+
+
 def test_late_response_cannot_override_new_claim(pairing_host, monkeypatch):
     _, calls = pairing_host
     gate = _ThreadRedeemGate()
@@ -1474,7 +1496,9 @@ def test_late_response_cannot_override_new_claim(pairing_host, monkeypatch):
     gate.start("key_A", "https://backend.test", legacy=True)
     try:
         gate.wait_entered()
-        result_b = remote_access.pair("key_B", "https://other-backend.test")
+        refused = remote_access.pair('key_B', 'https://other-backend.test')
+        assert refused['error'] == 'pairing_needs_reconciliation'
+        result_b = _publish_fixture_successor()
     finally:
         result_a = gate.finish()
     assert result_b["ok"]
@@ -1502,7 +1526,9 @@ def test_definitive_failure_cannot_retire_superseding_claim(pairing_host, monkey
     gate.start("key_A", "https://backend.test", legacy=True)
     try:
         gate.wait_entered()
-        result_b = remote_access.pair("key_B", "https://other-backend.test")
+        refused = remote_access.pair('key_B', 'https://other-backend.test')
+        assert refused['error'] == 'pairing_needs_reconciliation'
+        result_b = _publish_fixture_successor()
     finally:
         result_a = gate.finish()
 
@@ -1591,7 +1617,9 @@ def test_old_response_in_process_cannot_override_new_claim(pairing_host, monkeyp
     gate.start(_child_pair, "key_A", "https://backend.test", result_path, True)
     try:
         gate.wait_entered()
-        result_b = remote_access.pair("key_B", "https://other-backend.test")
+        refused = remote_access.pair('key_B', 'https://other-backend.test')
+        assert refused['error'] == 'pairing_needs_reconciliation'
+        result_b = _publish_fixture_successor()
     finally:
         worker = gate.finish()
     assert worker.exitcode == 0

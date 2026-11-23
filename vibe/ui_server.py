@@ -9140,7 +9140,9 @@ def remote_access_vibe_cloud_pair():
         _ensure_remote_access_monitoring()
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
-    conflict = result.get("error") in {"local_binding_changed", "local_instance_conflict", "pairing_redeem_pending"}
+    # The native enrollment client reads the pending delay only in the legacy
+    # HTTP 400 envelope. Local contention is not an upstream pending response.
+    conflict = result.get("error") in {"local_binding_changed", "local_instance_conflict"}
     return response, 200 if result.get("ok") else (409 if conflict else 400)
 
 

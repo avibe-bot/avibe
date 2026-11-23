@@ -50,7 +50,7 @@ This retains the Runtime's existing wire spelling and policy.
 
 An exact in-flight redemption can return backend HTTP 409 with
 `{"error":"pairing_redeem_pending","retry_after_seconds":1}`. The local pair
-route returns HTTP 409 and exposes that specific error, backend `status:409`,
+route keeps its legacy HTTP 400 envelope and exposes the specific error, backend `status:409`,
 the bounded integer delay (1–60 seconds), and
 `pairing:{ok:false,recoverable:true,cause:"pairing_redeem_pending"}`.
 Other status/error combinations are not pending advice. Retry retains the
@@ -61,17 +61,14 @@ Pending is a minimum wait even for `POST /api/remote-access/vibe-cloud/pair {}`.
 HTTP 429 also backs off; valid server retry advice is a floor. A bound redeem
 may try another validated address only after a preconnect failure, before the
 POST. A lost reply after dispatch is one spent attempt. A received success
-that cannot be archived locally does not schedule another automatic POST.
-Explicit replacements share the send lock before changing the journal.
-If the process loses the outcome before recording it, the next lock holder
-waits the maximum 60-second pending interval from discovering the abandoned
-reservation and leaves further replay manual. Missing or mismatched schedule
-state after budget enrollment cannot create a second automatic budget.
-Automatic replay ends after 15 minutes or 20 automatic sends; neither service
-restart nor manual Continue restarts the budget. The owner-facing
-`pending_pairing.replay_state` for a saved prepared request is `scheduled` (with
-`next_retry_at` in Unix seconds), `manual`, or `terminated`. An absent journal
-has no pending operation. Unkeyed legacy requests cannot be replayed.
+that cannot be archived locally can **never** authorize another redemption, automatic or manual.
+A matching protected receipt (`redeemed`/`applied`) permits local archiving only, even if the scheduler still has a send reservation. A receipt for another request, installation, account, or binding does not qualify.
+
+Every replacement must check the old evidence before changing the journal. Personal claim observation and confirmation need no send lock. Before accepting, take the send lock and revalidate the authorized ticket, cancellation, deadline and source binding under a short configuration lock. Hold the send lock through acceptance and journal handoff. Count observation, decline, acceptance, issuance and pairing redemption separately. Local contention is not upstream pending: `pairing_local_busy`, `accepted:false` (no delay, no implicit queue, no decline). Resubmit the original input later; an empty request cannot recover an input that was never accepted. Both pending and local busy keep the legacy HTTP 400 envelope: the current native client reads pending advice only on that path. A change to outer HTTP 409 requires coordinated Runtime/native testing after #4178; no Rust change is part of this work.
+
+A crash between dispatch and durable settlement, a failed receipt write, or a legacy `prepared`/unqualified `manual` record with indistinguishable histories can leave delivery unknown. Elapsed time, restart, deletion of local files and a different key are **not** evidence that the old grant is safe. Report `needs_reconciliation`: do not redeem; the owner should contact Avibe support. There is no guaranteed self-service exit. With owner authorization, support needs an independently attributable control-plane terminal result for the original installation, account, request and binding: either late issuance is impossible, or the issued binding and credentials were verified and handled according to the owner's intent. Recheck the same generation under send lock then config lock and durably retire it as non-replayable. This disposition issues no accept or redeem and does not clear a live binding. A new authorization is a separate owner action, still subject to applicable rate limits. Without that evidence keep the operation quarantined; abandonment is not cloud revocation. This is the support contract, not a new cloud lookup API or a shipped support tool.
+
+A settled retryable request may retry automatically for up to 15 minutes or 20 automatic sends. Neither service restart nor manual Continue restarts the budget. A scheduled or exhausted-but-retryable request supports network Continue; `local_archive` means no network request, and `needs_reconciliation` provides no Continue. Unkeyed legacy requests cannot be replayed.
 
 Only backend HTTP 400 `pairing_key_expired` on the request-bound path proves
 safe grant renewal: the producer must establish expired, unconsumed and no

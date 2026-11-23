@@ -23,14 +23,43 @@ def test_off_binding_is_not_repaired_or_replaced(claim_peer):
     assert len(claim_peer.calls) == before
 
 
-def test_legacy_prepared_survives_refusal_then_can_be_superseded_by_matching_accept(claim_peer):
+def test_legacy_prepared_without_a_receipt_blocks_new_accept(claim_peer):
     record = remote_access._new_pairing_claim(V2Config.load(), "https://avibe.bot", "original", pairing_key="fixture-old")
     remote_access._write_pending_pairing_record(record)
-    assert _claim("different")["state"] == "declined"
+    for subject in ('different', 'owner-id'):
+        assert _claim(subject)['code'] == 'pairing_needs_reconciliation'
+    assert not claim_peer.calls
     assert remote_access._read_pending_pairing_record() == (record, None)
-    assert _claim()["state"] == "bound"
-    assert remote_access._read_pending_pairing_record() == (None, None)
-    assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
+    assert not V2Config.load().remote_access.vibe_cloud.instance_id
+
+
+def test_busy_after_consent_does_not_accept_decline_or_change_the_journal(claim_peer, monkeypatch):
+    import threading
+    from vibe import pairing_replay
+
+    holding, release = threading.Event(), threading.Event()
+    def hold():
+        with pairing_replay._send_lock():
+            holding.set()
+            assert release.wait(10)
+    worker = threading.Thread(target=hold)
+    def confirm(*_):
+        worker.start()
+        assert holding.wait(5)
+        return True
+    def no_pairing(*args, **kwargs):
+        pytest.fail('busy input must not reach the pairing endpoint')
+    monkeypatch.setattr(remote_access, '_json_request', no_pairing)
+    try:
+        result = claims.run_link(confirm=confirm, show_link=lambda _: None)
+        assert result['code'] == 'pairing_local_busy' and result['accepted'] is False
+        assert claim_peer.calls[-1][0] == '/api/v1/claims/redeem'  # observation only
+        assert claim_peer.decisions == [] and not claims._marker().exists()
+        assert remote_access._read_pending_pairing_record() == (None, None)
+    finally:
+        release.set()
+        if worker.ident is not None:
+            worker.join(10)
 
 
 @pytest.mark.parametrize("status,replace", [(422, True), (400, True), (429, False), (408, False), (503, False)])
@@ -206,7 +235,7 @@ def test_resume_does_not_forward_credential_bearing_errors(claim_peer, monkeypat
 def test_pairing_cannot_publish_a_target_different_from_the_approved_claim(claim_peer, monkeypatch):
     monkeypatch.setattr(remote_access, "_json_request", lambda *_a, **_kw: _response("other-instance"))
     result = _claim()
-    assert result["code"] == "fresh_claim_required"
+    assert result["code"] == "pairing_needs_reconciliation"
     assert not V2Config.load().remote_access.vibe_cloud.instance_id
 
 

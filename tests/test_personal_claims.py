@@ -150,25 +150,21 @@ def test_observable_error_is_not_a_reason_to_replace_installation(claim_peer, st
     assert claim_peer.key not in json.dumps(result)
 
 
-def test_backoff_and_lost_accept_reply_require_fresh_claim(claim_peer, caplog):
+def test_lost_accept_reconciles_only_the_original_ticket(claim_peer, caplog):
     claim_peer.outcomes.extend([(202, {"status": "pending"}, "17"), (429, {"error": "rate_limited"}, "31"),
         (503, {"error": "unavailable"}, "9"), (200, {"status": "granted", "account": claim_peer.account,
         "hostname": claim_peer.hostname}, None), OSError(claim_peer.key), (410, {"error": "already_redeemed"}, None)])
     result = claims.run_link(show_link=lambda _: None, expected_subject="owner-id")
-    assert result["code"] == "fresh_claim_required" and claim_peer.decisions == ["owner-id", "owner-id"]
+    assert result['code'] == 'pairing_needs_reconciliation' and claim_peer.decisions == ['owner-id', 'owner-id']
     assert claim_peer.delays[:3] == [5, 17, 31] and claim_peer.delays[3] >= 9
-    assert claims.RedirectClaims().state(claim_peer.id)["code"] == "fresh_claim_required"
+    assert claims.RedirectClaims().state(claim_peer.id)['code'] == 'pairing_needs_reconciliation'
     assert claim_peer.key not in caplog.text and claim_peer.key not in json.dumps(result)
     assert remote_access._read_pending_pairing_record() == (None, None)
     client = ui_server.app.test_client()
-    previous_id = claim_peer.id
+    before = list(claim_peer.calls)
     next_start = _start(client).get_json()
-    assert next_start["claim_id"] != previous_id and next_start["previous_claim_expires_at"] == claim_peer.expiry
-    path = "/api/remote-access/claims/" + next_start["claim_id"]
-    client.post(path + "/cancel", json={}, headers=csrf_headers(client))
-    flow = claims.redirect_claims._get(next_start["claim_id"])
-    with flow.lock:
-        assert flow.lock.wait_for(lambda: flow.view["state"] == "declined", timeout=3)
+    assert next_start['code'] == 'pairing_needs_reconciliation'
+    assert claim_peer.calls == before  # neither a fresh ticket nor another accept
 
 
 def test_pinned_connect_fails_over_without_reposting_an_ambiguous_start(claim_peer, monkeypatch):

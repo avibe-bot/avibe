@@ -58,6 +58,8 @@ def _assert_members_and_metadata(members, metadata):
                for item in parsed.get_all("Requires-Dist", []))
     for required in (
         "vibe/cli.py",
+        "vibe/support_contact.py",
+        "vibe/support-email.txt",
         "core/controller.py",
         "vibe/show_runtime_manifest.json",
         "vibe/show_router.tsx",
