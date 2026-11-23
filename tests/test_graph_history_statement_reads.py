@@ -129,7 +129,11 @@ def test_missing_session_created_index_preserves_long_history(isolated_state, hi
             conn.exec_driver_sql('DROP INDEX ix_agent_runs_session_created')
             conn.exec_driver_sql("UPDATE alembic_version SET version_num='20990101_9999'")
         assert migrations.preflight_database(Path(engine.url.database)).compatible_open
-        graph = agent_graph.build_graph(now=NOW, live_agents=LIVE, engine=engine, include_ended=history)
+        spans = agent_graph.HistoryStatementSpans()
+        graph = agent_graph.build_graph(now=NOW, live_agents=LIVE, engine=engine, include_ended=history, history_spans=spans)
+        fields = spans.log_fields()
+        assert fields['history_index_probe']['statements'] == fields['history_index_probe']['rows'] == 1
+        assert 'trigger_runs' not in fields and fields['trigger_runs_fallback']['rows'] == 2
         assert hashlib.sha256(json.dumps(graph, separators=(',', ':')).encode()).hexdigest() == GOLDENS[8, history]
     finally:
         engine.dispose()
@@ -138,9 +142,15 @@ def test_missing_session_created_index_preserves_long_history(isolated_state, hi
 @pytest.mark.parametrize('hit', [False, True])
 def test_read_budget_uses_actual_index_ranges(isolated_state, hit):  # noqa: F811
     engine = create_sqlite_engine()
+    sessions = {'hot', 'parent', *(f'busy-{i}' for i in range(6))}
     try:
         with engine.begin() as conn:
             seed(conn, 8)
+            # SQLite can prefer the global run-type index with a multi-ID IN
+            # even though the single-ID plan uses the desired time range.
+            for sid in sorted(sessions - {'hot', 'parent'}):
+                for i in range(11):
+                    _insert_run(conn, f'{sid}-{i}', session_id=sid)
             if not hit:
                 conn.exec_driver_sql("UPDATE agent_runs SET source_actor='invisible', callback_session_id='invisible', "
                                      "run_type='agent', definition_id=NULL WHERE session_id='hot'")
@@ -160,7 +170,6 @@ def test_read_budget_uses_actual_index_ranges(isolated_state, hit):  # noqa: F81
                     yield from super().rows(stmt, mappings=mappings, name=name)
 
             reader = Reader(conn, {'execute': 0., 'fetch': 0.})
-            sessions = {'hot', 'parent'}
             totals = agent_graph._run_totals(reader, sessions)
             agent_graph._load_runs(reader, sessions, sessions, NOW-timedelta(days=1), totals)
             expected = {
@@ -177,7 +186,7 @@ def test_read_budget_uses_actual_index_ranges(isolated_state, hit):  # noqa: F81
             if hit:
                 expected.update(dict.fromkeys(('callback_tie_ids', 'callback_modes', 'callback_delivery_ids'),
                                               'INTEGER PRIMARY KEY (rowid=?)'))
-            assert 'SCAN sqlite_schema' in plans['timeline_index_probe']
+            assert plans['history_index_probe'] == ['SCAN sqlite_schema']
             assert ('callback_modes' in plans) == hit
             # The all-short wave uses a different timestamp shape.
             agent_graph._load_runs(reader, {'parent'}, sessions, NOW-timedelta(days=1), totals)

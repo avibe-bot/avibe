@@ -219,8 +219,8 @@ class HistoryStatementSpans:
 
     def __init__(self):
         self._spans = {name: _StatementSpan() for name in (
-            "run_totals", "timeline_bounds", "all_timeline_times", "time_candidates", "trigger_runs", "trigger_exceptions",
-            "spawn_endpoints", "callback_endpoints", "run_headers", "timeline_index_probe",
+            "run_totals", "timeline_bounds", "all_timeline_times", "time_candidates", "trigger_runs", "trigger_runs_fallback", "trigger_exceptions",
+            "spawn_endpoints", "callback_endpoints", "run_headers", "history_index_probe",
             "timeline_timestamps_covered", "timeline_timestamps_fallback", "callback_tie_ids", "callback_modes", "callback_delivery_ids",
         )}
 
@@ -241,13 +241,18 @@ class _GraphReader:
         self.bind_limit = raw.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(raw, "getlimit") else 999
 
     @cached_property
+    def history_indexes(self):
+        # One presence check in the pinned snapshot for both optional hints.
+        # Compatible newer layouts can omit either index. Never repair or
+        # optimistically try a hint and retry on a GET.
+        return {name for name, in self.rows(text(
+            "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='agent_runs' "
+            "AND name IN ('ix_agent_runs_timeline_times','ix_agent_runs_session_created')"
+        ), name="history_index_probe")}
+
+    @cached_property
     def timeline_query(self):
-        # A reader can overlap an upgrade. Detect the optional performance
-        # index once in the graph's pinned snapshot; never create or repair it
-        # on a GET. An older snapshot falls back to the same exact projection.
-        exists = next(iter(self.rows(text(
-            "SELECT 1 FROM sqlite_schema WHERE type='index' AND tbl_name='agent_runs' AND name='ix_agent_runs_timeline_times'"
-        ), name="timeline_index_probe")), None)
+        exists = "ix_agent_runs_timeline_times" in self.history_indexes
         index = "INDEXED BY ix_agent_runs_timeline_times" if exists else ""
         stmt = text(f"SELECT id, started_at, completed_at FROM agent_runs {index} WHERE id IN :ids").bindparams(
             bindparam("ids", expanding=True)
@@ -770,13 +775,18 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime,
         # Only timestamps in the raw window need a type check on the run
         # record. Non-standard times below the raw floor can be inside the
         # window too; the time index pass retained those.
-        stmt = text("""
-            SELECT rowid, session_id, created_at, definition_id FROM agent_runs
+        # With several session IDs the unhinted planner can seek the global
+        # run_type prefix instead of the visible sessions' time ranges.
+        has_range_index = "ix_agent_runs_session_created" in conn.history_indexes
+        hint = "INDEXED BY ix_agent_runs_session_created" if has_range_index else ""
+        label = "trigger_runs" if has_range_index else "trigger_runs_fallback"
+        stmt = text(f"""
+            SELECT rowid, session_id, created_at, definition_id FROM agent_runs {hint}
             WHERE session_id IN :ids AND created_at >= :floor AND run_type IN ('scheduled','watch')
               AND definition_id IS NOT NULL AND definition_id != ''
         """).bindparams(bindparam("ids", expanding=True), floor=floor)
         for batch in conn.batches(long_ids, reserved=1):
-            for k, sid, raw, definition in conn.rows(stmt.params(ids=batch), name="trigger_runs"):
+            for k, sid, raw, definition in conn.rows(stmt.params(ids=batch), name=label):
                 instant = _parse_iso(raw)
                 if instant is not None and instant >= cutoff:
                     times[k] = (sid, raw, instant)

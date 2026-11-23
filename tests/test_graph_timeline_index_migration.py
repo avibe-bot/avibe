@@ -36,7 +36,7 @@ def test_graph_timeline_index_upgrade_rollback_and_old_writes(tmp_path, caplog):
     try:
         old_spans = agent_graph.HistoryStatementSpans()
         before = agent_graph.build_graph(engine=engine, now=NOW, history_spans=old_spans)
-        assert old_spans.log_fields()['timeline_index_probe']['rows'] == 0
+        assert old_spans.log_fields()['history_index_probe']['rows'] == 1  # session/created only
         assert old_spans.log_fields()['timeline_timestamps_fallback']['rows'] == 3
         caplog.set_level(logging.INFO, logger="storage.migrations")
         notice = f"Building SQLite index {INDEX}"

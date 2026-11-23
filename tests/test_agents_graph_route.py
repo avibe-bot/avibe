@@ -135,10 +135,11 @@ def test_slow_graph_log_reports_only_fixed_server_side_stage_times(monkeypatch, 
     entry = next(r.getMessage() for r in caplog.records if "slow api request path=/api/agents-graph" in r.getMessage())
     fields = json.loads(entry.split(" history_statements=")[1])
     assert set(fields) == {"run_totals", "all_timeline_times", "spawn_endpoints", "callback_endpoints",
-                           "run_headers", "timeline_index_probe", "timeline_timestamps_covered"}
+                           "run_headers", "history_index_probe", "timeline_timestamps_covered"}
     for name, span in fields.items():
         assert set(span) == {"statements", "batches", "rows", "execute_ms", "fetch_ms"}
-        assert span["statements"] == 1 and span["rows"] == span["batches"] == int(not name.endswith("endpoints"))
+        assert span["statements"] == 1 and span["batches"] == int(not name.endswith("endpoints"))
+        assert span["rows"] == (2 if name == "history_index_probe" else span["batches"])
         assert span["execute_ms"] >= 0 and span["fetch_ms"] >= 0
     assert "ses_ended" not in entry and "run_e1" not in entry and "SELECT" not in entry
     assert "history_statements" not in history.headers["Server-Timing"] and "history_statements" not in history.json()
