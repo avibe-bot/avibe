@@ -460,3 +460,25 @@ describe('apiFetch remote auth recovery', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });
+
+describe('message terminal hint at the HTTP boundary', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    ['browser', {}],
+    ['mac_app', { __AVIBE_DESKTOP_SHELL__: true }],
+    ['iphone_app', { avibeNative: { contract: 1, platform: 'ios', capabilities: {}, call() {}, on() {} } }],
+  ])('sends %s with an unchanged message body', async (terminal, bridge) => {
+    vi.stubGlobal('window', { ...bridge, location: { pathname: '/inbox' } });
+    vi.stubGlobal('document', { cookie: 'vibe_csrf_token=test' });
+    const fetch = vi.fn(async () => Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+    const body = JSON.stringify({ text: '看看发布', metadata: { input: 'voice' } });
+    await apiFetch('/api/sessions/ses_a/messages', { method: 'POST', body });
+    const init = (fetch.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(new Headers(init.headers).get('X-Avibe-Input-Source')).toBe(terminal);
+    expect(init.body).toBe(body);
+    await apiFetch('/api/settings', { method: 'POST', body: '{}' });
+    expect(new Headers((fetch.mock.calls[1] as unknown as [string, RequestInit])[1].headers).has('X-Avibe-Input-Source')).toBe(false);
+  });
+});

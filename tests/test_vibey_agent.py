@@ -1449,10 +1449,10 @@ async def test_a_dictated_input_reaches_vibey_with_its_line_live_and_recovered(e
         prepare_input_metadata=MethodType(MessageHandler.prepare_input_metadata, handler)
     )
     first = harness.request("check the release")
-    first.input_metadata = AgentInputMetadata(user_id="U1", user_name="Alex", voice=True)
+    first.input_metadata = AgentInputMetadata(user_id="U1", user_name="Alex", voice=True, source="iphone_app; surface=main")
     await harness.agent.handle_message(first)
     [live] = [entry for entry in await harness.context_rows() if entry.row_id == first.context.platform_specific["delivery_id"]]
-    assert f"{VOICE_INPUT_LINE}\ncheck the release" in live.message.content[-1].text
+    assert f"{VOICE_INPUT_LINE}\n[Source: iphone_app; surface=main]\ncheck the release" in live.message.content[-1].text
 
     second = harness.request("watch the deploy")
     turn_id = _turn(second.context)
@@ -1471,7 +1471,7 @@ async def test_a_dictated_input_reaches_vibey_with_its_line_live_and_recovered(e
             snapshot=message_deliveries.message_snapshot(
                 scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="user",
                 source="user", message_type="user", text="also the smoke test", author_id="U1",
-                metadata={"input": "voice"},
+                metadata={"input": "voice", "terminal_source": {"type": "mac_app", "surface": "mini", "hint": True}},
             ),
             dispatch_text="also the smoke test",
             now=NOW,
@@ -1488,7 +1488,7 @@ async def test_a_dictated_input_reaches_vibey_with_its_line_live_and_recovered(e
     await harness.agent.handle_message(harness.request("anything new?"))
 
     [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_dictated_steer"]
-    assert recovered.message.content[-1].text.endswith(f"{VOICE_INPUT_LINE}\nalso the smoke test")
+    assert recovered.message.content[-1].text.endswith(f"{VOICE_INPUT_LINE}\n[Source: mac_app; surface=mini; evidence=hint]\nalso the smoke test")
 
 
 async def _blocked_second_turn(engine, tmp_path, *, finished_step: bool):

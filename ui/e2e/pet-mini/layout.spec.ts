@@ -334,7 +334,7 @@ test('attention leads the list and referencing sends only through the main compo
   await expect(page.locator('.pet-mini-reference-chip')).toHaveCount(1);
   await page.getByRole('textbox').press('Enter');
   await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{
-    sessionId: 'ses_main', payload: { text: '#<ses_fixture_0> 请总结进展', content: { references: [{ kind: 'session', session_id: 'ses_fixture_0', title: '修复桌宠语音输入' }] } },
+    sessionId: 'ses_main', payload: { text: '#<ses_fixture_0> 请总结进展', metadata: { input_surface: 'mini' }, content: { references: [{ kind: 'session', session_id: 'ses_fixture_0', title: '修复桌宠语音输入' }] } },
   }]);
   await expect(page.locator('.pet-mini-reply-bubble')).toBeVisible();
 });
@@ -481,7 +481,7 @@ for (const trigger of ['reconnect', 'reactivation']) {
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-summon', { detail: { intent: 'listen' } })));
     await page.getByRole('textbox').fill('recovered');
     await page.getByRole('textbox').press('Enter');
-    await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{ sessionId: 'ses_main', payload: { text: 'recovered' } }]);
+    await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{ sessionId: 'ses_main', payload: { text: 'recovered', metadata: { input_surface: 'mini' } } }]);
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('avibe.pet.devBinding')!).binding)).toBe('ses_main');
   });
 }
@@ -2159,7 +2159,7 @@ for (const read of [false, true]) {
     await expect(history.getByRole('button', { name: '需要授权，在 Avibe 中打开', exact: true })).toBeVisible();
     await history.getByRole('button', { name: '继续', exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.petFixtureSends)).toEqual([{
-      sessionId: 'ses_main', payload: { text: '继续', metadata: { quick_reply_for: 'live_reply' } },
+      sessionId: 'ses_main', payload: { text: '继续', metadata: { quick_reply_for: 'live_reply', input_surface: 'mini' } },
     }]);
   });
 }
