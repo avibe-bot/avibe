@@ -133,7 +133,7 @@ describe('AgentCard origin help ownership', () => {
     const view = render(collection());
     const badge = (backend: string, model = 'shared-model') => within(
       document.querySelector<HTMLElement>(`[data-route-backend="${backend}"][data-route-model="${model}"]`)!,
-    ).getByRole('button', { name: 'Automatic' });
+    ).getByRole('button', { name: 'Default' });
     return { ...view, collection, badge, onOpenRoute };
   };
   const onlyHelpFor = (trigger: HTMLElement) => {
@@ -484,7 +484,7 @@ describe('AgentCard', () => {
     expect(row).not.toBeNull();
     expect(row?.contains(mapping)).toBe(true);
     expect(mapping.closest('.model-hub-model-current')).toBe(mapping);
-    expect(row?.querySelector('.model-hub-route-origin')?.textContent).toContain(lng === 'zh' ? '手动' : 'Manual');
+    expect(row?.querySelector('.model-hub-route-origin')?.textContent).toContain(lng === 'zh' ? '单独设置' : 'Own route');
     expect(modeCopy).toBeTruthy();
     expect(mapping.textContent).toBe(mappingCopy);
   });
@@ -504,7 +504,7 @@ describe('AgentCard', () => {
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByRole('button', { name: 'Manual' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Own route' })).toBeTruthy();
   });
 
   it('hides gateway-owned catalog and supply actions in direct mode', () => {

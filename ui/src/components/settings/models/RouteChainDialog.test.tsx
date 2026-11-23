@@ -124,7 +124,7 @@ const stocked = () => ({
     },
   ] satisfies Source[],
 });
-const mode = (name: 'Follow defaults' | 'Custom') => screen.getByRole('radio', { name });
+const mode = (name: 'Follow default routing' | 'Set separately') => screen.getByRole('radio', { name });
 const pendingUndo = () => within(document.querySelector<HTMLElement>('.model-hub-route-pending')!).getByRole('button', { name: 'Undo' });
 const observation = <T,>(value: T) => ({ value, install: vi.fn() });
 const deferred = <T,>() => {
@@ -231,7 +231,7 @@ describe("RouteChainDialog", () => {
       /></I18nextProvider>);
       await waitFor(() => expect(document.querySelectorAll('.model-hub-route-hop-name')).toHaveLength(2));
       if (state === 'preview') {
-        await user.click(mode('Follow defaults'));
+        await user.click(mode('Follow default routing'));
         await waitFor(() => expect(document.querySelector('.model-hub-route-pending')?.getAttribute('data-origin')).toBe('automatic'));
       }
       const names = [...document.querySelectorAll('.model-hub-route-hop-name')];
@@ -262,14 +262,37 @@ describe("RouteChainDialog", () => {
       sources={sources} onClose={vi.fn()} onManageModel={manage} readAgents={vi.fn()} readSources={vi.fn()}
     /></I18nextProvider>);
     const head = within(document.querySelector<HTMLElement>('.model-hub-route-head')!);
-    await user.click(await head.findByRole('button', { name: 'Model actions' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Edit model' }));
-    await user.click(head.getByRole('button', { name: 'Model actions' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Remove model' }));
+    // Both actions sit in the head itself, one press each: no menu to open first.
+    await user.click(await head.findByRole('button', { name: 'Edit model' }));
+    await user.click(head.getByRole('button', { name: 'Remove model' }));
     expect(manage.mock.calls).toEqual([['edit'], ['remove']]);
     // An unsaved draft would be dropped by leaving, so the handoff steps aside.
     await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
-    expect(head.queryByRole('button', { name: 'Model actions' })).toBeNull();
+    expect(head.queryByRole('button', { name: 'Edit model' })).toBeNull();
+    expect(head.queryByRole('button', { name: 'Remove model' })).toBeNull();
+  });
+
+  // ui/design: models/routing/route-advanced. The cache duration is a setting
+  // few routes need, so it waits under 「Advanced」; a route that already carries
+  // one opens with it showing, because a saved value must not be hidden.
+  it.each([
+    [null, false],
+    ['30m', true],
+  ] as const)('folds the cache duration under Advanced unless the route already sets it (%s)', async (saved, shown) => {
+    const user = userEvent.setup();
+    const vibey: AgentSupply = { ...agent, backend: 'vibey' };
+    const own: AgentChain = { ...chain, backend: 'vibey', manual_override: { ...chain.manual_override!, cache_ttl: saved } };
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(own);
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog
+      selection={{ agent: vibey, modelId: 'opus-5', read: readyRegion(own) }}
+      sources={sources} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()}
+    /></I18nextProvider>);
+    const toggle = await screen.findByRole('button', { name: 'Advanced' });
+    expect(toggle.getAttribute('aria-expanded')).toBe(String(shown));
+    expect(screen.queryByRole('combobox', { name: 'Cache duration' }) !== null).toBe(shown);
+    await user.click(toggle);
+    expect(screen.queryByRole('combobox', { name: 'Cache duration' }) !== null).toBe(!shown);
+    if (!shown) expect((screen.getByRole('combobox', { name: 'Cache duration' }) as HTMLSelectElement).value).toBe('');
   });
 
   it('offers no catalog handoff for a locked row', async () => {
@@ -280,7 +303,8 @@ describe("RouteChainDialog", () => {
       sources={sources} onClose={vi.fn()} onManageModel={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()}
     /></I18nextProvider>);
     await screen.findAllByRole('button', { name: 'Remove hop' });
-    expect(screen.queryByRole('button', { name: 'Model actions' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit model' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove model' })).toBeNull();
   });
 
   it('closes an unchanged inherited editor without creating manual intent', async () => {
@@ -326,20 +350,20 @@ describe("RouteChainDialog", () => {
     /></I18nextProvider>);
 
     await screen.findAllByText('opus-5');
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
     expect(footer.getByRole('button', { name: 'Cancel changes' })).toHaveProperty('disabled', false);
     expect(footer.queryByRole('button', { name: 'Close' })).toBeNull();
     expect(screen.getAllByRole('button', { name: 'Remove hop' })).toHaveLength(2);
 
-    await user.click(mode('Follow defaults'));
+    await user.click(mode('Follow default routing'));
     expect(preview).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Remove hop' })).toBeNull();
     expect(footer.getByRole('button', { name: 'Cancel changes' })).toHaveProperty('disabled', true);
 
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     await user.click(footer.getByRole('button', { name: 'Cancel changes' }));
-    await waitFor(() => expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true'));
+    await waitFor(() => expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true'));
     expect(close).not.toHaveBeenCalled();
     expect(put).not.toHaveBeenCalled();
     expect(restore).not.toHaveBeenCalled();
@@ -380,7 +404,7 @@ describe("RouteChainDialog", () => {
         order: [alternateSubscription.id], eligibility: [{ source_id: alternateSubscription.id, eligible: true }],
       } }, [alternateSubscription]);
 
-      await user.click(await screen.findByRole('radio', { name: 'Custom' }));
+      await user.click(await screen.findByRole('radio', { name: 'Set separately' }));
       await user.click(screen.getByRole('button', { name: 'Add a hop' }));
       await user.click(screen.getByRole('option', { name: /sonnet-5/ }));
       await user.click(screen.getByRole('button', { name: 'Add' }));
@@ -400,7 +424,7 @@ describe("RouteChainDialog", () => {
         order: [], eligibility: [{ source_id: sources[0].id, eligible: true }],
       } }, [sources[0]]);
 
-      await user.click(await screen.findByRole('radio', { name: 'Custom' }));
+      await user.click(await screen.findByRole('radio', { name: 'Set separately' }));
       await user.click(screen.getByRole('button', { name: 'Add a hop' }));
       await user.click(screen.getByRole('button', { name: 'Enter a model ID manually' }));
       await user.type(screen.getByLabelText('Exact model ID'), hop.model_id);
@@ -431,7 +455,7 @@ describe("RouteChainDialog", () => {
     it('reads legacy empty storage only as server-normalized inheritance with no admissible targets', async () => {
       renderEmptyRoute({ ...agent, sources: { order: [], eligibility: [] } }, []);
       await screen.findByRole('button', { name: 'Configure default routing' });
-      expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
+      expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true');
       expect(screen.getByText(/No provider in default routing lists this model/)).toBeTruthy();
       expect(screen.queryByRole('button', { name: 'Restore automatic' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
@@ -442,7 +466,7 @@ describe("RouteChainDialog", () => {
       renderEmptyRoute({ ...agent, sources: {
         order: [], eligibility: [{ source_id: sources[0].id, eligible: true }],
       } }, [sources[0]]);
-      await userEvent.setup().click(await screen.findByRole('radio', { name: 'Custom' }));
+      await userEvent.setup().click(await screen.findByRole('radio', { name: 'Set separately' }));
       await screen.findByRole('button', { name: 'Add a hop' });
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
       expect(screen.queryByText(/saved route is empty/)).toBeNull();
@@ -468,7 +492,7 @@ describe("RouteChainDialog", () => {
       await clear(user);
       await screen.findByText('After restore: automatic matching');
       expect(preview).toHaveBeenCalledWith('claude', 'opus-5', { manual_override: null });
-      expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
+      expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true');
       expect(document.querySelectorAll('.model-hub-route-hop-model')).toHaveLength(2);
       expect(screen.queryByRole('button', { name: 'Remove hop' })).toBeNull();
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
@@ -491,10 +515,10 @@ describe("RouteChainDialog", () => {
       vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(inherited);
       render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: readyRegion(inherited) }} sources={sources} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()} /></I18nextProvider>);
       await screen.findAllByText('opus-5');
-      await user.click(mode('Custom'));
+      await user.click(mode('Set separately'));
       await clear(user);
       expect(preview).not.toHaveBeenCalled();
-      expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
+      expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true');
       expect(document.querySelectorAll('.model-hub-route-hop-model')).toHaveLength(2);
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
     });
@@ -542,7 +566,7 @@ describe("RouteChainDialog", () => {
       await screen.findByRole('alert');
       expect(pendingUndo()).toBeTruthy();
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
-      expect(screen.queryByText('Manual', { exact: true })).toBeNull();
+      expect(screen.queryByText('Own route', { exact: true })).toBeNull();
       await user.click(screen.getByRole('button', { name: 'Retry' }));
       expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
       await act(async () => pending.resolve({ ...inherited, route_origin: 'passthrough' }));
@@ -653,7 +677,7 @@ describe("RouteChainDialog", () => {
     const props = { selection: { agent, modelId: 'opus-5', read: readyRegion(inherited) }, sources, onClose: vi.fn(), readAgents: vi.fn(), readSources: vi.fn() };
     const view = (covered: boolean) => <I18nextProvider i18n={i18n}><RouteChainDialog {...props} covered={covered} /></I18nextProvider>;
     const { rerender } = render(view(false));
-    await screen.findByRole('radio', { name: 'Follow defaults' });
+    await screen.findByRole('radio', { name: 'Follow default routing' });
     rerender(view(true));
     rerender(view(false));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
@@ -671,7 +695,7 @@ describe("RouteChainDialog", () => {
     const { rerender } = render(view(false));
     await screen.findAllByRole('button', { name: 'Remove hop' });
     await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
-    await user.click(mode('Follow defaults'));
+    await user.click(mode('Follow default routing'));
     await screen.findByText('After restore: automatic matching');
     rerender(view(true));
     rerender(view(false));
@@ -692,7 +716,7 @@ describe("RouteChainDialog", () => {
     renderDialog(vi.fn(), close);
     await screen.findAllByRole('button', { name: 'Remove hop' });
     await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
-    await user.click(mode('Follow defaults'));
+    await user.click(mode('Follow default routing'));
     await screen.findByText('After restore: forwarded as is');
     expect(preview).toHaveBeenCalledWith('claude', 'opus-5', { manual_override: null });
     expect(document.querySelectorAll('.model-hub-route-hop-model')).toHaveLength(2);
@@ -713,7 +737,7 @@ describe("RouteChainDialog", () => {
     const restore = vi.spyOn(modelsApi, 'restoreAgentChain').mockResolvedValue(mutation(inherited));
     const put = vi.spyOn(modelsApi, 'putAgentChain');
     renderDialog();
-    await user.click(await screen.findByRole('radio', { name: 'Follow defaults' }));
+    await user.click(await screen.findByRole('radio', { name: 'Follow default routing' }));
     await screen.findByText('After restore: automatic matching');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(restore).toHaveBeenCalledWith('claude', 'opus-5', undefined));
@@ -729,7 +753,7 @@ describe("RouteChainDialog", () => {
     cleanup();
     const put = vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue(mutation(chain));
     render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: readyRegion(inherited) }} sources={[]} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()} /></I18nextProvider>);
-    await user.click(await screen.findByRole('radio', { name: 'Custom' }));
+    await user.click(await screen.findByRole('radio', { name: 'Set separately' }));
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(put).toHaveBeenCalledWith('claude', 'opus-5', { hops: chain.manual_override!.hops }));
   });

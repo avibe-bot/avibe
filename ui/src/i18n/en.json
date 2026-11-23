@@ -1427,7 +1427,7 @@
       "gateway": {
         "heading": "Routes",
         "infoLabel": "What routes are",
-        "info": "Models follow default routing unless they have a saved manual route. A model goes to the providers that list it; a model no provider lists needs a manual route.",
+        "info": "Models follow default routing unless they have their own route. A model goes to the providers that list it; a model no provider lists needs its own route.",
         "address": "Local address: {{address}} (for connecting other tools to the gateway)",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
@@ -1756,29 +1756,28 @@
           "stalled": "The model request timed out waiting for data"
         },
         "origin": {
-          "automatic": "Automatic",
-          "manual": "Manual",
+          "automatic": "Default",
+          "manual": "Own route",
           "passthrough": "Forwarded as is",
           "unconfigured": "Unconfigured"
         },
         "help": {
-          "automatic": "Matched by model name.\nProvider order follows {{backend}} default routing.",
-          "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
+          "automatic": "Follows {{backend}}'s default routing and its provider order.",
+          "manual": "This model has its own route. Default routing does not affect it.",
           "passthrough": "No provider lists this model.\nIts name is forwarded as is to eligible API-key providers, which try it in default order.",
-          "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
+          "unconfigured": "This model has no route yet. Open its route to adjust default routing or set one separately."
         },
-        "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
-        "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
         "cacheTtl": {
-          "label": "Conversation cache lifetime",
-          "default": "Use built-in estimate",
+          "label": "Cache duration",
+          "default": "Automatic",
           "5m": "5 minutes",
           "30m": "30 minutes",
           "1h": "1 hour",
           "12h": "12 hours",
-          "help": "This route-wide estimate controls when old tool results are cleared. Official OpenAI Responses GPT-5.6+ uses a 30-minute cache by default; selecting 30 minutes or 12 hours explicitly sends that provider option. The 12-hour mode costs 2.5x the model input rate for writes versus 1.25x for 30 minutes; cached reads keep the model-specific read price. Earlier OpenAI models' policy-dependent prompt_cache_retention is not inferred. Relays do not receive OpenAI-specific cache options."
+          "help": "Providers keep the repeated start of a conversation cached for a while; sending it again in that time is cheaper and faster. Avibe uses this duration to judge whether the cache is still there. Leave it on Automatic unless you know how long your provider keeps its cache. On a direct official connection, a longer duration is billed at a higher cache-write price.",
+          "infoLabel": "What cache duration is"
         },
-        "undoDone": "Previous manual draft restored.",
+        "undoDone": "Previous separate draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
           "automatic": "After restore: automatic matching",
@@ -1788,28 +1787,28 @@
         "previewLoading": "Reading inherited routing...",
         "previewFailed": "Could not preview inherited routing. Nothing has been saved. Retry or undo the restore.",
         "draftEmpty": "No route entries in this draft.",
-        "noDefaults": "No provider in default routing lists this model. Add one that lists it or put an existing one in default routing; if your provider does serve it, choose it under Custom.",
+        "noDefaults": "No provider in default routing lists this model. Add one that lists it or put an existing one in default routing; if your provider does serve it, choose it under Set separately.",
         "inventoryNotProvided": "Model list not provided",
         "configureDefaults": "Configure default routing",
         "close": "Close",
         "cancelChanges": "Cancel changes",
-        "manualPending": "After saving, this model will use a manual route and no longer follow default routing.",
+        "manualPending": "After saving, this model uses its own route and no longer follows default routing.",
         "exactModel": "Exact model ID",
         "moveUp": "Move provider up",
         "moveDown": "Move provider down",
-        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes",
+        "counts": "{{inherited}} models follow default routing · {{manual}} set separately",
         "errorShort": "Error"
       },
       "order": {
         "title": "{{backend}} · Default routing",
-        "subtitle": "Applies to automatic routes. Saved manual routes stay unchanged.",
+        "subtitle": "Affects only models that follow default routing. Models with their own route stay unchanged.",
         "infoLabel": "About default routing",
         "reorder": "Reorder provider",
         "section": {
           "ordered": "Provider priority",
-          "ordered.note": "A model goes to the providers that list it, in this order. A model no provider lists needs a manual route.",
+          "ordered.note": "A model goes to the providers that list it, in this order. A model no provider lists needs its own route.",
           "heldOut": "Not in default routing",
-          "heldOut.note": "Available for manual routes."
+          "heldOut.note": "Available when you set a model's route separately."
         },
         "action": {
           "include": "Add to order",
@@ -2357,17 +2356,19 @@
         "impact": {
           "refreshFail": "The route chain was saved, but the display could not be refreshed."
         },
-        "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it.",
         "mode": {
           "label": "Routing mode",
-          "follow": "Follow defaults",
-          "custom": "Custom",
+          "follow": "Follow default routing",
+          "custom": "Set separately",
           "undo": "Undo",
           "viewDefaults": "View default routing",
-          "adjustDefaults": "Adjust default routing"
+          "adjustDefaults": "Adjust default routing",
+          "infoLabel": "How the two differ",
+          "followInfo": ": uses the provider order in {{backend}}'s default routing. When default routing changes, this changes with it.",
+          "customInfo": ": this model uses its own providers and order. Default routing does not affect it."
         },
         "hopActions": "Hop actions",
-        "modelActions": "Model actions"
+        "advanced": "Advanced"
       },
       "recent": {
         "title": "Recent switches",

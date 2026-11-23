@@ -1427,7 +1427,7 @@
       "gateway": {
         "heading": "路由",
         "infoLabel": "什么是路由",
-        "info": "模型跟随默认路由，已保存手动路由的模型除外。模型交给列出它的供应商；没有供应商列出的模型，需要设置手动路由。",
+        "info": "模型跟随默认路由，单独设置了路由的除外。模型交给列出它的供应商；没有供应商列出的模型，需要单独设置路由。",
         "address": "本机地址：{{address}}（把其他工具接到网关时使用）",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
@@ -1756,29 +1756,28 @@
           "stalled": "模型请求等待数据超时"
         },
         "origin": {
-          "automatic": "自动",
-          "manual": "手动",
+          "automatic": "跟随默认",
+          "manual": "单独设置",
           "passthrough": "原样转发",
           "unconfigured": "未配置"
         },
         "help": {
-          "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
-          "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
+          "automatic": "跟随 {{backend}} 的默认路由，按其中的供应商顺序走。",
+          "manual": "这个模型单独设置了路由，不受默认路由影响。",
           "passthrough": "供应商的模型列表里都没有这个模型。\n会按默认顺序，把这个模型名原样转发给符合条件的 API Key 供应商试试。",
-          "unconfigured": "此模型暂无路由。可在路由设置中配置默认路由或恢复自动。"
+          "unconfigured": "这个模型还没有路由。打开它的路由，调整默认路由或单独设置。"
         },
-        "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
-        "manualHint": "仅此模型。默认路由的调整不会覆盖这些路由项。",
         "cacheTtl": {
-          "label": "对话缓存时长",
-          "default": "使用内置估计",
+          "label": "缓存时长",
+          "default": "自动",
           "5m": "5 分钟",
           "30m": "30 分钟",
           "1h": "1 小时",
           "12h": "12 小时",
-          "help": "这个路由级估计决定何时清理旧工具结果。官方 OpenAI Responses GPT-5.6+ 默认使用 30 分钟缓存；选择 30 分钟或 12 小时会显式发送对应的提供商选项。12 小时写入按模型输入价格的 2.5 倍计费，30 分钟写入为 1.25 倍；缓存读取仍使用模型专属读取价格。较早 OpenAI 模型依赖组织策略的 prompt_cache_retention 不会被自动推断。中继不会收到 OpenAI 专用缓存参数。"
+          "help": "供应商会把对话里重复的开头缓存一段时间，这段时间内再发送更便宜、更快。Avibe 按这里的时长判断缓存还在不在。一般保持「自动」；只有确切知道供应商缓存多久时才改。直连官方时，选更长的时长会按更高的缓存写入价计费。",
+          "infoLabel": "缓存时长是什么"
         },
-        "undoDone": "已恢复之前的手动草稿。",
+        "undoDone": "已恢复之前单独设置的草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "preview": {
           "automatic": "恢复后：自动匹配",
@@ -1788,28 +1787,28 @@
         "previewLoading": "正在读取继承路由…",
         "previewFailed": "无法预览继承路由，尚未保存任何更改。请重试或撤销恢复。",
         "draftEmpty": "草稿中暂无路由条目。",
-        "noDefaults": "默认路由里没有列出这个模型的供应商。可以添加一个列出它的供应商，或把已有的加入默认路由；如果你的供应商其实提供它，在「自定义」里为它指定。",
+        "noDefaults": "默认路由里没有列出这个模型的供应商。可以添加一个列出它的供应商，或把已有的加入默认路由；如果你的供应商其实提供它，在「单独设置」里为它指定。",
         "inventoryNotProvided": "模型列表未提供",
         "configureDefaults": "设置默认路由",
         "close": "关闭",
         "cancelChanges": "取消修改",
-        "manualPending": "保存后，此模型将使用手动路由，不再跟随默认路由。",
+        "manualPending": "保存后，这个模型使用单独设置的路由，不再跟随默认路由。",
         "exactModel": "准确模型 ID",
         "moveUp": "上移供应商",
         "moveDown": "下移供应商",
-        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由",
+        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个单独设置",
         "errorShort": "错误"
       },
       "order": {
         "title": "{{backend}} · 默认路由",
-        "subtitle": "作用于自动路由，已保存的手动路由保持不变。",
+        "subtitle": "只影响跟随默认路由的模型；单独设置了路由的模型不变。",
         "infoLabel": "关于默认路由",
         "reorder": "调整供应商顺序",
         "section": {
           "ordered": "供应商优先级",
-          "ordered.note": "模型按这个顺序交给列出它的供应商；没有供应商列出的模型，需要设置手动路由。",
+          "ordered.note": "模型按这个顺序交给列出它的供应商；没有供应商列出的模型，需要单独设置路由。",
           "heldOut": "未加入默认路由",
-          "heldOut.note": "可用于手动路由。"
+          "heldOut.note": "单独设置路由时可以选用。"
         },
         "action": {
           "include": "排进来",
@@ -2357,17 +2356,19 @@
         "impact": {
           "refreshFail": "路由已保存，但暂时无法刷新显示。"
         },
-        "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。",
         "mode": {
           "label": "路由方式",
-          "follow": "跟随默认",
-          "custom": "自定义",
+          "follow": "跟随默认路由",
+          "custom": "单独设置",
           "undo": "撤销",
           "viewDefaults": "查看默认路由",
-          "adjustDefaults": "调整默认路由"
+          "adjustDefaults": "调整默认路由",
+          "infoLabel": "两种路由方式的区别",
+          "followInfo": "：按 {{backend}} 默认路由里的供应商顺序走。默认路由改了，这里跟着变。",
+          "customInfo": "：这个模型用它自己的供应商和顺序，不受默认路由影响。"
         },
         "hopActions": "路由项操作",
-        "modelActions": "模型操作"
+        "advanced": "高级"
       },
       "recent": {
         "title": "最近切换",

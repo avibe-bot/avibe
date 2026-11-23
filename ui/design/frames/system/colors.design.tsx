@@ -111,8 +111,8 @@ const accentsSheet = () => (
           </div>
         </Specimen>
       ))}
-      <Specimen name="--route-manual" use="手动路由">
-        <Chip className="border border-border bg-card text-[var(--route-manual)]">手动</Chip>
+      <Specimen name="--route-manual" use="单独设置的路由">
+        <Chip className="border border-border bg-card text-[var(--route-manual)]">单独设置</Chip>
       </Specimen>
     </Section>
   </Sheet>
